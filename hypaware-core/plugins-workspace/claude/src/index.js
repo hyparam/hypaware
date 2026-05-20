@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { createClaudeTranscriptEnricher } from './enricher.js'
@@ -46,6 +46,8 @@ export async function activate(ctx) {
     provider: 'anthropic',
   })
 
+  const logger = getLogger('plugin.claude')
+
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
@@ -60,14 +62,23 @@ export async function activate(ctx) {
           [Attr.PLUGIN]: PLUGIN_NAME,
           [Attr.OPERATION]: 'client.attach',
           client_name: CLIENT_NAME,
+          hyp_client: CLIENT_NAME,
           dry_run: attachCtx.dryRun === true,
         },
         async (span) => {
           if (attachCtx.dryRun) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            attachCtx.stdout.write(`(dry-run) Would attach Claude Code via ${settingsPath}\n`)
-            attachCtx.stdout.write(`  Would set ANTHROPIC_BASE_URL to the local gateway endpoint\n`)
+            const port = safeEndpointPort(attachCtx.endpoint)
+            writeAttachOutput(attachCtx, {
+              status: 'ok',
+              client: CLIENT_NAME,
+              dryRun: true,
+              settingsPath,
+              port,
+              changed: false,
+              prevValue: undefined,
+            })
             return
           }
           const port = endpointPort(attachCtx.endpoint)
@@ -79,11 +90,24 @@ export async function activate(ctx) {
             })
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            attachCtx.stdout.write(`✓ Claude Code attached (${settingsPath})\n`)
-            attachCtx.stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${port}\n`)
-            if (result.changed && result.prevValue !== undefined) {
-              attachCtx.stdout.write(`  (previous ANTHROPIC_BASE_URL was ${result.prevValue})\n`)
-            }
+            logger.info('client.attach.write', {
+              hyp_plugin: PLUGIN_NAME,
+              hyp_client: CLIENT_NAME,
+              settings_path: settingsPath,
+              port,
+              changed: result.changed === true,
+            })
+            writeAttachOutput(attachCtx, {
+              status: 'ok',
+              client: CLIENT_NAME,
+              dryRun: false,
+              settingsPath,
+              port,
+              changed: result.changed === true,
+              prevValue: result.changed && result.prevValue !== undefined
+                ? result.prevValue
+                : undefined,
+            })
           } catch (err) {
             span.setAttribute('status', 'failed')
             span.setAttribute('restored', false)
@@ -104,13 +128,20 @@ export async function activate(ctx) {
           [Attr.PLUGIN]: PLUGIN_NAME,
           [Attr.OPERATION]: 'client.detach',
           client_name: CLIENT_NAME,
+          hyp_client: CLIENT_NAME,
           dry_run: detachCtx.dryRun === true,
         },
         async (span) => {
           if (detachCtx.dryRun) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
-            detachCtx.stdout.write(`(dry-run) Would detach Claude Code from ${settingsPath}\n`)
+            writeDetachOutput(detachCtx, {
+              status: 'ok',
+              client: CLIENT_NAME,
+              dryRun: true,
+              settingsPath,
+              changed: false,
+            })
             return
           }
           try {
@@ -119,16 +150,26 @@ export async function activate(ctx) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', restored)
             if (restored) {
-              detachCtx.stdout.write(`✓ Claude Code reverted (${settingsPath})\n`)
-              if (result.changed && result.removed !== undefined) {
-                detachCtx.stdout.write(`  Removed ANTHROPIC_BASE_URL=${result.removed}\n`)
-              }
-              if (result.changed && result.warning !== undefined) {
-                detachCtx.stdout.write(`  warning: ${result.warning}\n`)
-              }
-            } else {
-              detachCtx.stdout.write(`No HypAware marker found in ${settingsPath}; nothing to do.\n`)
+              logger.info('client.detach.write', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                settings_path: settingsPath,
+                changed: true,
+              })
             }
+            writeDetachOutput(detachCtx, {
+              status: 'ok',
+              client: CLIENT_NAME,
+              dryRun: false,
+              settingsPath,
+              changed: restored,
+              removed: result.changed && result.removed !== undefined
+                ? result.removed
+                : undefined,
+              warning: result.changed && result.warning !== undefined
+                ? result.warning
+                : undefined,
+            })
           } catch (err) {
             span.setAttribute('status', 'failed')
             span.setAttribute('restored', false)
@@ -279,4 +320,119 @@ function endpointPort(endpoint) {
     throw new Error(`@hypaware/claude: cannot derive port from endpoint '${endpoint}'`)
   }
   return port
+}
+
+/**
+ * Like `endpointPort`, but tolerates the placeholder dry-run endpoint
+ * (`http://127.0.0.1:0`) the dispatcher uses when the gateway source
+ * is not yet started. Returns `undefined` when no usable port is
+ * present so the caller can still report a coherent dry-run plan.
+ *
+ * @param {string} endpoint
+ * @returns {number | undefined}
+ */
+function safeEndpointPort(endpoint) {
+  try {
+    const url = new URL(endpoint)
+    const port = Number.parseInt(url.port, 10)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+    return port
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Render attach output: machine-readable JSON when `json` is set on
+ * the attach context, otherwise the human prose the V0 adapter
+ * emitted. Keeps the JSON shape stable so callers can grep it.
+ *
+ * @param {AiGatewayClientAttachContext} attachCtx
+ * @param {{
+ *   status: 'ok' | 'failed',
+ *   client: string,
+ *   dryRun: boolean,
+ *   settingsPath: string,
+ *   port: number | undefined,
+ *   changed: boolean,
+ *   prevValue?: string,
+ * }} fields
+ */
+function writeAttachOutput(attachCtx, fields) {
+  if (attachCtx.json) {
+    /** @type {Record<string, unknown>} */
+    const payload = {
+      status: fields.status,
+      action: 'attach',
+      client: fields.client,
+      dry_run: fields.dryRun,
+      settings_path: fields.settingsPath,
+      changed: fields.changed,
+    }
+    if (fields.port !== undefined) payload.port = fields.port
+    if (fields.prevValue !== undefined) payload.prev_value = fields.prevValue
+    attachCtx.stdout.write(JSON.stringify(payload) + '\n')
+    return
+  }
+  if (fields.dryRun) {
+    attachCtx.stdout.write(`(dry-run) Would attach Claude Code via ${fields.settingsPath}\n`)
+    attachCtx.stdout.write(`  Would set ANTHROPIC_BASE_URL to the local gateway endpoint\n`)
+    return
+  }
+  attachCtx.stdout.write(`✓ Claude Code attached (${fields.settingsPath})\n`)
+  if (fields.port !== undefined) {
+    attachCtx.stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${fields.port}\n`)
+  }
+  if (fields.prevValue !== undefined) {
+    attachCtx.stdout.write(`  (previous ANTHROPIC_BASE_URL was ${fields.prevValue})\n`)
+  }
+}
+
+/**
+ * Render detach output: machine-readable JSON when `json` is set,
+ * otherwise the human prose. Keeps the JSON shape stable so callers
+ * can grep it.
+ *
+ * @param {AiGatewayClientDetachContext} detachCtx
+ * @param {{
+ *   status: 'ok' | 'failed',
+ *   client: string,
+ *   dryRun: boolean,
+ *   settingsPath: string,
+ *   changed: boolean,
+ *   removed?: string,
+ *   warning?: string,
+ * }} fields
+ */
+function writeDetachOutput(detachCtx, fields) {
+  if (detachCtx.json) {
+    /** @type {Record<string, unknown>} */
+    const payload = {
+      status: fields.status,
+      action: 'detach',
+      client: fields.client,
+      dry_run: fields.dryRun,
+      settings_path: fields.settingsPath,
+      changed: fields.changed,
+    }
+    if (fields.removed !== undefined) payload.removed = fields.removed
+    if (fields.warning !== undefined) payload.warning = fields.warning
+    detachCtx.stdout.write(JSON.stringify(payload) + '\n')
+    return
+  }
+  if (fields.dryRun) {
+    detachCtx.stdout.write(`(dry-run) Would detach Claude Code from ${fields.settingsPath}\n`)
+    return
+  }
+  if (fields.changed) {
+    detachCtx.stdout.write(`✓ Claude Code reverted (${fields.settingsPath})\n`)
+    if (fields.removed !== undefined) {
+      detachCtx.stdout.write(`  Removed ANTHROPIC_BASE_URL=${fields.removed}\n`)
+    }
+    if (fields.warning !== undefined) {
+      detachCtx.stdout.write(`  warning: ${fields.warning}\n`)
+    }
+  } else {
+    detachCtx.stdout.write(`No HypAware marker found in ${fields.settingsPath}; nothing to do.\n`)
+  }
 }

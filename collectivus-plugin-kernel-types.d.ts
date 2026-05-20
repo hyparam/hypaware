@@ -830,6 +830,14 @@ export interface AiGatewayClientAttachContext {
    * dispatcher reaches the right adapter under `hyp attach --dry-run`.
    */
   dryRun?: boolean
+  /**
+   * When true the adapter must emit machine-readable JSON on stdout
+   * instead of human prose. One JSON object per attach call,
+   * containing at minimum `status`, `action`, `client`, `dry_run`,
+   * and any adapter-specific fields (e.g. `settings_path`, `port`,
+   * `changed`, `prev_value`).
+   */
+  json?: boolean
 }
 
 export interface AiGatewayClientDetachContext {
@@ -837,6 +845,11 @@ export interface AiGatewayClientDetachContext {
   stdout: WriteStream
   stderr: WriteStream
   dryRun?: boolean
+  /**
+   * When true the adapter must emit machine-readable JSON on stdout
+   * instead of human prose. One JSON object per detach call.
+   */
+  json?: boolean
 }
 
 export interface AiGatewayClientStatusContext {

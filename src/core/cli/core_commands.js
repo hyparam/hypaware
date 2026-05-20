@@ -159,13 +159,13 @@ function buildCoreCommands() {
     {
       name: 'attach',
       summary: 'Attach an AI client to the local gateway',
-      usage: 'hyp attach --client <name>',
+      usage: 'hyp attach --client <name> [--dry-run] [--json] [--yes]',
       run: runAttach,
     },
     {
       name: 'detach',
       summary: 'Detach an AI client from the local gateway',
-      usage: 'hyp detach --client <name>',
+      usage: 'hyp detach --client <name> [--dry-run] [--json]',
       run: runDetach,
     },
     {
@@ -1799,8 +1799,36 @@ async function runClientLifecycle(action, argv, ctx) {
   }
 
   if (!ctx.capabilities.has('hypaware.ai-gateway')) {
-    ctx.stderr.write(
-      `error: ${action} requires the @hypaware/ai-gateway plugin to be installed and activated\n`
+    await withSpan(
+      `client.${action}`,
+      {
+        [Attr.COMPONENT]: `cmd-${action}`,
+        [Attr.OPERATION]: `client.${action}`,
+        client_name: parsed.client,
+        hyp_client: parsed.client,
+        dry_run: parsed.dryRun === true,
+        status: 'failed',
+        error_kind: 'cap_missing',
+      },
+      async () => {
+        const message =
+          `${action} requires the @hypaware/ai-gateway plugin to be installed and activated`
+        if (parsed.json) {
+          ctx.stdout.write(
+            JSON.stringify({
+              status: 'failed',
+              action,
+              client: parsed.client,
+              dry_run: parsed.dryRun === true,
+              error_kind: 'cap_missing',
+              error: message,
+            }) + '\n'
+          )
+        } else {
+          ctx.stderr.write(`error: ${message}\n`)
+        }
+      },
+      { component: `cmd-${action}` }
     )
     return 1
   }
@@ -1847,6 +1875,7 @@ async function runClientLifecycle(action, argv, ctx) {
           stdout: ctx.stdout,
           stderr: ctx.stderr,
           dryRun: parsed.dryRun,
+          json: parsed.json,
         })
       } else {
         await client.detach({
@@ -1854,6 +1883,7 @@ async function runClientLifecycle(action, argv, ctx) {
           stdout: ctx.stdout,
           stderr: ctx.stderr,
           dryRun: parsed.dryRun,
+          json: parsed.json,
         })
       }
     } catch (err) {
@@ -1866,12 +1896,13 @@ async function runClientLifecycle(action, argv, ctx) {
 }
 
 /**
- * Parse `--client <name>`, `--yes` / `-y`, and `--dry-run` from argv.
+ * Parse `--client <name>`, `--yes` / `-y`, `--dry-run`, and `--json`
+ * from argv.
  * @param {string[]} argv
  */
 function parseClientArgs(argv) {
-  /** @type {{ client: string, yes: boolean, dryRun: boolean, error?: string }} */
-  const r = { client: 'claude', yes: false, dryRun: false }
+  /** @type {{ client: string, yes: boolean, dryRun: boolean, json: boolean, error?: string }} */
+  const r = { client: 'claude', yes: false, dryRun: false, json: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--yes' || arg === '-y') {
@@ -1880,6 +1911,10 @@ function parseClientArgs(argv) {
     }
     if (arg === '--dry-run') {
       r.dryRun = true
+      continue
+    }
+    if (arg === '--json') {
+      r.json = true
       continue
     }
     if (arg === '--client' || arg.startsWith('--client=')) {
