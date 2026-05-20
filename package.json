@@ -1,11 +1,11 @@
 {
   "name": "hypaware",
   "version": "0.1.0-pre",
-  "private": true,
   "type": "module",
   "description": "HypAware: modular logs and telemetry collector with a plugin kernel. Pre-V1 cutover from collectivus.",
   "bin": {
-    "hyp": "./bin/hyp.js"
+    "hypaware": "./bin/hypaware.js",
+    "hyp": "./bin/hypaware.js"
   },
   "exports": {
     ".": "./src/core/index.js",
@@ -15,6 +15,15 @@
   },
   "imports": {
     "#core/observability": "./src/core/observability/index.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "hypaware-core/",
+    "collectivus-plugin-kernel-types.d.ts"
+  ],
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "smoke": "node ./hypaware-core/smoke/index.js"

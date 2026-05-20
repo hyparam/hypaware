@@ -5,13 +5,17 @@ import process from 'node:process'
 
 const argv = process.argv.slice(2)
 
-// `hyp smoke <flow>` runs the smoke harness directly. It bypasses the
-// command dispatcher because each smoke owns its own observability
-// lifecycle (DEV_RUN_ID, HYP_HOME, and exporters set up by the harness
-// against a fresh tmpdir). Routing it through the dispatcher would lock
-// the tracer to the parent process's HYP_HOME before the harness can
-// change it.
-if (argv[0] === 'smoke') {
+// `__smoke_internal <flow>` is the in-process entry the registered
+// `smoke` command re-execs us with. It bypasses the dispatcher because
+// each smoke owns its own observability lifecycle (DEV_RUN_ID,
+// HYP_HOME, and exporters set up by the harness against a fresh
+// tmpdir). Routing it through the dispatcher would lock the tracer to
+// the parent process's HYP_HOME before the harness can change it.
+//
+// Users never type `__smoke_internal` directly — they run
+// `hyp smoke <flow>`, which goes through the dispatcher and spawns us
+// here with a clean process state.
+if (argv[0] === '__smoke_internal') {
   const flow = argv[1]
   if (!flow) {
     process.stderr.write('usage: hyp smoke <flow-name>\n')

@@ -64,9 +64,9 @@ export async function run({ harness, expect }) {
 
   const commandRuns = traces.filter((t) => t.name === 'command.run')
   expect.that(
-    'traces: exactly three command.run spans (status, query schema, plugin list)',
+    'traces: exactly four command.run spans (status, query schema, plugin list, help)',
     commandRuns,
-    (rows) => rows.length === 3
+    (rows) => rows.length === 4
   )
 
   /** @type {Map<string, any>} */
@@ -76,7 +76,7 @@ export async function run({ harness, expect }) {
     if (typeof cmd === 'string') byCmd.set(cmd, span)
   }
 
-  for (const cmd of ['status', 'query schema', 'plugin list']) {
+  for (const cmd of ['status', 'query schema', 'plugin list', 'help']) {
     const span = byCmd.get(cmd)
     expect.that(`traces: command.run span exists for '${cmd}'`, !!span, (v) => v === true)
     expect.that(

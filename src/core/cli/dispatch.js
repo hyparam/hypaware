@@ -52,12 +52,16 @@ const HELP_FLAGS = new Set(['--help', '-h', 'help'])
  *    (`hypaware-core/plugins-workspace/<plugin>/hypaware.plugin.json`).
  *    The Phase 3 set is empty by design; the loader tolerates a missing
  *    directory so the dispatcher works against a fresh checkout.
- * 4. Render help and emit `cli.help_rendered` when argv is empty or
- *    begins with a help flag.
+ * 4. Render help under a synthetic `command.run` span (with
+ *    `hyp_command=help`) when argv is empty on a non-TTY stdout or
+ *    begins with a help flag. Emits `cli.help_rendered` inside the
+ *    span. On a TTY, an empty argv re-enters with `init` so the
+ *    walkthrough is the no-arg behavior.
  * 5. Otherwise match the longest registered prefix and run the command
  *    inside a root `command.run` span. Records `command_name`,
- *    `argv_count`, `exit_code`, `status`. Ticks `hyp_command_runs_total`
- *    and records the histogram `hyp_command_duration_ms`.
+ *    `hyp_command`, `argv_count`, `exit_code`, `status`, and
+ *    `error_kind` on failure. Ticks `hyp_command_runs_total` and
+ *    records the histogram `hyp_command_duration_ms`.
  *
  * @param {string[]} argv
  * @param {DispatchOptions} [opts]
@@ -87,23 +91,14 @@ export async function dispatch(argv, opts = {}) {
       // Phase 9: `hyp` with no args on a TTY launches the interactive
       // walkthrough. The dispatcher reroutes to the `init` command
       // (with no preset) so the same code path covers `hyp` and
-      // `hyp init` on a TTY.
+      // `hyp init` on a TTY. The inner dispatch emits its own
+      // `command.run` for `init` — we do not double-wrap here.
       return runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
     }
-    getLogger('cli').info('cli.help_rendered', {
-      [Attr.COMPONENT]: 'cmd-dispatch',
-      command_count: registry.size(),
-    })
-    renderHelp({ stdout, registry })
-    return 0
+    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0 })
   }
   if (HELP_FLAGS.has(argv[0])) {
-    getLogger('cli').info('cli.help_rendered', {
-      [Attr.COMPONENT]: 'cmd-dispatch',
-      command_count: registry.size(),
-    })
-    renderHelp({ stdout, registry })
-    return 0
+    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length })
   }
 
   const matched = registry.match(argv)
@@ -118,6 +113,7 @@ export async function dispatch(argv, opts = {}) {
     [Attr.COMPONENT]: 'cmd-dispatch',
     [Attr.OPERATION]: 'command.run',
     command_name: matched.command.name,
+    hyp_command: matched.command.name,
     argv_count: argv.length,
     ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
   })
@@ -240,6 +236,78 @@ async function loadWorkspacePlugins({ workspaceDir }) {
   }
   if (entries.length === 0) return { loaded: [], failed: [] }
   return loadManifests(entries)
+}
+
+/**
+ * Render help under a synthetic `command.run` span so help shows up in
+ * the same analytics view as real commands. Emits the same shape as
+ * the matched-command path: a root span carrying `hyp_command=help`,
+ * `hyp_component=cmd-dispatch`, `argv_count`, `status`, and `exit_code`,
+ * plus the `cli.help_rendered` log and the `hyp_command_runs_total`
+ * counter / `hyp_command_duration_ms` histogram observation.
+ *
+ * @param {{
+ *   stdout: { write(chunk: string): unknown },
+ *   registry: ReturnType<typeof createCommandRegistry>,
+ *   devRunId: string | undefined,
+ *   argvCount: number,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runHelp({ stdout, registry, devRunId, argvCount }) {
+  const attrs = buildAttrs({
+    [Attr.COMPONENT]: 'cmd-dispatch',
+    [Attr.OPERATION]: 'command.run',
+    command_name: 'help',
+    hyp_command: 'help',
+    argv_count: argvCount,
+    ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
+  })
+
+  const tracer = getTracer('cmd-dispatch')
+  const instruments = getKernelInstruments()
+
+  return context.with(ROOT_CONTEXT, () =>
+    tracer.startActiveSpan(
+      'command.run',
+      { attributes: attrs, root: true },
+      async (span) => {
+        const start = performance.now()
+        let exitCode = 0
+        try {
+          getLogger('cli').info('cli.help_rendered', {
+            [Attr.COMPONENT]: 'cmd-dispatch',
+            command_count: registry.size(),
+          })
+          renderHelp({ stdout, registry })
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error))
+          span.recordException(err)
+          span.setAttribute('error_kind', 'unhandled_exception')
+          exitCode = 1
+        } finally {
+          const duration = performance.now() - start
+          const finalStatus = exitCode === 0 ? 'ok' : 'failed'
+          span.setAttribute('status', finalStatus)
+          span.setAttribute('exit_code', exitCode)
+          span.setStatus(
+            finalStatus === 'ok'
+              ? { code: SpanStatusCode.OK }
+              : { code: SpanStatusCode.ERROR, message: `exit ${exitCode}` }
+          )
+          span.end()
+          instruments.commandRunsTotal.add(1, {
+            command: 'help',
+            exit_code: String(exitCode),
+          })
+          instruments.commandDurationMs.record(duration, {
+            command: 'help',
+          })
+        }
+        return exitCode
+      }
+    )
+  )
 }
 
 /**

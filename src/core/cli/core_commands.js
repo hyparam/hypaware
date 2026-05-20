@@ -180,6 +180,13 @@ function buildCoreCommands() {
       usage: 'hyp skills install [--client <name>]',
       run: runSkillsInstall,
     },
+    {
+      name: 'smoke',
+      summary: 'Run a smoke flow under a fresh tmp HYP_HOME (internal)',
+      usage: 'hyp smoke <flow-name>',
+      hidden: true,
+      run: runSmoke,
+    },
   ]
 }
 
@@ -817,6 +824,48 @@ function parseConfigValidateArgv(argv, env) {
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
   const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
   return { configPath: defaultConfigPath(hypHome) }
+}
+
+/* ---------- smoke ---------- */
+
+/**
+ * `hyp smoke <flow>` — internal developer command.
+ *
+ * The smoke harness owns a fresh tmp `HYP_HOME` and installs its own
+ * observability against that tmpdir. Installing observability in the
+ * parent dispatch (which is required to emit `command.run` for this
+ * invocation) would lock the tracer to the parent's `HYP_HOME` before
+ * the harness can swap it. We resolve that by spawning a subprocess
+ * dedicated to the flow: the parent emits its `command.run` span, the
+ * child boots a clean observability instance against the harness
+ * tmpdir, and the child's exit code is propagated back.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runSmoke(argv, ctx) {
+  const flow = argv[0]
+  if (!flow) {
+    ctx.stderr.write('usage: hyp smoke <flow-name>\n')
+    return 2
+  }
+  const { spawnSync } = await import('node:child_process')
+  const { fileURLToPath } = await import('node:url')
+  const binPath = fileURLToPath(new URL('../../../bin/hypaware.js', import.meta.url))
+  const result = spawnSync(
+    process.execPath,
+    [binPath, '__smoke_internal', flow],
+    {
+      stdio: ['inherit', 'inherit', 'inherit'],
+      env: ctx.env,
+      cwd: ctx.cwd,
+    }
+  )
+  if (result.error) {
+    ctx.stderr.write(`hyp smoke: ${result.error.message}\n`)
+    return 1
+  }
+  return result.status ?? 1
 }
 
 /* ---------- misc ---------- */
