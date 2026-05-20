@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { Attr, getLogger } from '../observability/index.js'
+import { createConfigRegistry } from '../config/schema.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createQueryRegistry } from '../registry/datasets.js'
@@ -80,7 +81,7 @@ export function createKernelRuntime(opts = {}) {
   return {
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
     commands: opts.commandRegistry ?? createCommandRegistry(),
-    configRegistry: createPhase2ConfigRegistry(),
+    configRegistry: createConfigRegistry(),
     sources: opts.sourceRegistry ?? createSourceRegistry(),
     sinks: opts.sinkRegistry ?? createSinkRegistry(),
     query: opts.queryRegistry ?? createQueryRegistry(),
@@ -235,15 +236,8 @@ function createCapabilitiesFacade(pluginName, registry) {
 /* ----- Phase 2 placeholder registries ----- */
 /* Each registry below is a no-op shell that conforms to the kernel
  * type contract. Later phases swap in real implementations without
- * touching the activation surface. */
-
-/** @returns {ConfigRegistry} */
-function createPhase2ConfigRegistry() {
-  return {
-    registerSection() {},
-    validatePluginConfig() { return { ok: true } },
-  }
-}
+ * touching the activation surface. The config registry was promoted to
+ * a real implementation in Phase 6 (`src/core/config/schema.js`). */
 
 /** @returns {SkillRegistry} */
 function createPhase2SkillRegistry() {

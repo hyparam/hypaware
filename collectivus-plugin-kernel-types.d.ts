@@ -314,6 +314,15 @@ export interface HypAwareV2Config {
   plugins?: PluginConfigInstance[]
   sinks?: Record<string, SinkConfigInstance>
   query?: QueryConfig
+  /**
+   * Explicit capability-provider pins. When two installed plugins
+   * provide the same capability at a compatible version, the kernel
+   * refuses to choose and requires the user to disambiguate by mapping
+   * the capability name to the chosen provider plugin name. The kernel
+   * walks this map during cross-plugin validation; any capability not
+   * listed must be unambiguously provided.
+   */
+  disambiguate?: Record<CapabilityName, PluginName>
 }
 
 /** Legacy alias retained only while the project rename completes. */
