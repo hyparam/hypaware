@@ -2,3 +2,7 @@
 .beads/*
 !.beads/config.yaml
 !.beads/metadata.json
+.gc/
+
+# Node
+node_modules/

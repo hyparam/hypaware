@@ -2,11 +2,34 @@
   "name": "hypaware",
   "version": "0.1.0-pre",
   "private": true,
+  "type": "module",
   "description": "HypAware: modular logs and telemetry collector with a plugin kernel. Pre-V1 cutover from collectivus.",
   "bin": {
     "hyp": "./bin/hyp.js"
   },
+  "exports": {
+    ".": "./src/core/index.js",
+    "./core": "./src/core/index.js",
+    "./core/observability": "./src/core/observability/index.js"
+  },
+  "imports": {
+    "#core/observability": "./src/core/observability/index.js"
+  },
   "scripts": {
     "smoke": "node ./hypaware-core/smoke/index.js"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.218.0",
+    "@opentelemetry/core": "^2.7.1",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.218.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-logs": "^0.218.0",
+    "@opentelemetry/sdk-metrics": "^2.7.1",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@opentelemetry/sdk-trace-node": "^2.7.1",
+    "@opentelemetry/semantic-conventions": "^1.41.1"
   }
 }

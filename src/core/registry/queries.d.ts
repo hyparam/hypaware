@@ -1,0 +1,16 @@
+export type {
+  QueryRegistry,
+  DatasetRegistration,
+  DatasetSchema,
+  ColumnSpec,
+  DatasetDiscoveryContext,
+  QueryPartition,
+  DatasetRefreshContext,
+  DatasetRefreshResult,
+  DatasetDataSourceContext,
+  QueryScope,
+  QueryDataSource,
+  QueryScanOptions,
+  QueryScanResult,
+  QueryStorageService,
+} from '../../../collectivus-plugin-kernel-types'
