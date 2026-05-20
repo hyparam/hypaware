@@ -1,0 +1,116 @@
+import crypto from 'node:crypto'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import process from 'node:process'
+import { CodexSettingsError } from './errors.js'
+
+/**
+ * @import { FileHandle } from 'node:fs/promises'
+ */
+
+/**
+ * Default Codex config location: `$CODEX_HOME/config.toml` when CODEX_HOME
+ * is set, otherwise `~/.codex/config.toml`.
+ *
+ * @returns {string}
+ */
+export function defaultConfigPath() {
+  if (typeof process.env.CODEX_HOME === 'string' && process.env.CODEX_HOME.length > 0) {
+    return path.join(process.env.CODEX_HOME, 'config.toml')
+  }
+  return path.join(os.homedir(), '.codex', 'config.toml')
+}
+
+/**
+ * @param {string} configPath
+ * @returns {Promise<{ content: string, existed: boolean, mtimeMs: number | undefined }>}
+ */
+export async function readConfig(configPath) {
+  /** @type {string} */
+  let content
+  try {
+    content = await fs.readFile(configPath, 'utf8')
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') {
+      return { content: '', existed: false, mtimeMs: undefined }
+    }
+    throw new CodexSettingsError(`failed to read ${configPath}: ${errMsg(err)}`, { cause: err })
+  }
+
+  let stat
+  try {
+    stat = await fs.stat(configPath)
+  } catch (err) {
+    throw new CodexSettingsError(`failed to stat ${configPath}: ${errMsg(err)}`, { cause: err })
+  }
+  return { content, existed: true, mtimeMs: stat.mtimeMs }
+}
+
+/**
+ * @param {string} filePath
+ * @param {string} body
+ * @param {number | undefined} expectedMtimeMs
+ * @returns {Promise<void>}
+ */
+export async function writeAtomic(filePath, body, expectedMtimeMs) {
+  if (expectedMtimeMs !== undefined) {
+    let current
+    try {
+      current = await fs.stat(filePath)
+    } catch (err) {
+      if (errCode(err) === 'ENOENT') {
+        throw new CodexSettingsError(
+          `${filePath} disappeared between read and write; retry`,
+          { code: 'CONCURRENT_EDIT', cause: err }
+        )
+      }
+      throw err
+    }
+    if (current.mtimeMs !== expectedMtimeMs) {
+      throw new CodexSettingsError(
+        `${filePath} changed on disk between read and write; retry`,
+        { code: 'CONCURRENT_EDIT' }
+      )
+    }
+  }
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+
+  const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+
+  /** @type {FileHandle | undefined} */
+  let handle
+  try {
+    handle = await fs.open(tmpPath, 'w', 0o600)
+    await handle.writeFile(body, 'utf8')
+    await handle.sync()
+  } finally {
+    if (handle) await handle.close()
+  }
+
+  try {
+    await fs.rename(tmpPath, filePath)
+  } catch (err) {
+    await fs.rm(tmpPath, { force: true })
+    throw err
+  }
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string | undefined}
+ */
+function errCode(err) {
+  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
+  const code = Reflect.get(err, 'code')
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string}
+ */
+function errMsg(err) {
+  return err instanceof Error ? err.message : String(err)
+}

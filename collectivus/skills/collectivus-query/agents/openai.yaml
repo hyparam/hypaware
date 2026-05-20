@@ -1,0 +1,6 @@
+interface:
+  display_name: "Collectivus Query"
+  short_description: "Query local Collectivus recordings"
+  default_prompt: "Use $collectivus-query to inspect local Collectivus logs, traces, metrics, LLM proxy messages, gascity messages, or collected JSONL tables."
+policy:
+  allow_implicit_invocation: true

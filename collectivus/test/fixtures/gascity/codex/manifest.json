@@ -1,0 +1,97 @@
+[
+  {
+    "category": "session_meta",
+    "file": "session_meta.jsonl",
+    "count": 1
+  },
+  {
+    "category": "turn_context",
+    "file": "turn_context.jsonl",
+    "count": 2
+  },
+  {
+    "category": "message_assistant",
+    "file": "message_assistant.jsonl",
+    "count": 3
+  },
+  {
+    "category": "message_user",
+    "file": "message_user.jsonl",
+    "count": 2
+  },
+  {
+    "category": "message_developer",
+    "file": "message_developer.jsonl",
+    "count": 2
+  },
+  {
+    "category": "function_call",
+    "file": "function_call.jsonl",
+    "count": 4
+  },
+  {
+    "category": "function_call_output",
+    "file": "function_call_output.jsonl",
+    "count": 4
+  },
+  {
+    "category": "custom_tool_call",
+    "file": "custom_tool_call.jsonl",
+    "count": 2
+  },
+  {
+    "category": "custom_tool_call_output",
+    "file": "custom_tool_call_output.jsonl",
+    "count": 2
+  },
+  {
+    "category": "reasoning",
+    "file": "reasoning.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_agent_message",
+    "file": "event_agent_message.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_user_message",
+    "file": "event_user_message.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_task_started",
+    "file": "event_task_started.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_task_complete",
+    "file": "event_task_complete.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_token_count",
+    "file": "event_token_count.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_patch_apply_end",
+    "file": "event_patch_apply_end.jsonl",
+    "count": 2
+  },
+  {
+    "category": "event_context_compacted",
+    "file": "event_context_compacted.jsonl",
+    "count": 1
+  },
+  {
+    "category": "event_item_completed",
+    "file": "event_item_completed.jsonl",
+    "count": 1
+  },
+  {
+    "category": "compacted",
+    "file": "compacted.jsonl",
+    "count": 1
+  }
+]

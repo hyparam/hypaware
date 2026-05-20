@@ -1,0 +1,58 @@
+{
+  "name": "collectivus",
+  "version": "3.1.0",
+  "description": "OTLP collector and pass-through LLM proxy",
+  "author": "Hyperparam",
+  "homepage": "https://hyperparam.app",
+  "keywords": [
+    "opentelemetry",
+    "otlp",
+    "collector",
+    "traces",
+    "metrics",
+    "logs",
+    "anthropic",
+    "claude",
+    "llm-proxy",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "ctvs": "bin/cli.js",
+    "collectivus": "bin/cli.js"
+  },
+  "files": [
+    "src",
+    "types",
+    "skills"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "start": "node bin/cli.js",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "test": "vitest run",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "4.0.9",
+    "@types/node": "25.9.1",
+    "eslint": "9.39.4",
+    "eslint-plugin-jsdoc": "62.9.0",
+    "globals": "17.6.0",
+    "js-yaml": "4.1.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.6"
+  },
+  "optionalDependencies": {
+    "hyparquet-writer": "0.15.1"
+  },
+  "dependencies": {
+    "hyparquet": "1.25.8",
+    "hyparquet-compressors": "1.1.1",
+    "icebird": "0.7.0",
+    "squirreling": "0.12.19"
+  }
+}
