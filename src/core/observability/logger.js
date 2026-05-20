@@ -6,7 +6,7 @@ import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-http'
 
 import { JsonlLogRecordExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
-import { buildAttrs } from './attrs.js'
+import { Attr, buildAttrs } from './attrs.js'
 
 const SEVERITY_MAP = Object.freeze({
   debug: SeverityNumber.DEBUG,
@@ -84,7 +84,12 @@ export function getLogger(component, opts = {}) {
    */
   function emit(level, message, fields) {
     const severityNumber = SEVERITY_MAP[level]
-    const attributes = buildAttrs({ hyp_component: component, ...fields })
+    const devRunId = process.env.DEV_RUN_ID
+    const attributes = buildAttrs({
+      hyp_component: component,
+      ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
+      ...fields,
+    })
     otelLogger.emit({
       severityNumber,
       severityText: SEVERITY_TEXT[severityNumber],

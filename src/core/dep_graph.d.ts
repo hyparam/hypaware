@@ -1,30 +1,44 @@
 import type {
   PluginManifest,
   PluginName,
-  CapabilityName,
-  SemverRange,
 } from '../../collectivus-plugin-kernel-types'
+import type { CapabilityRegistryHandle } from './registry/capabilities'
 
-/**
- * Phase 1 contract: resolve a topological activation order over the
- * supplied manifests, taking `requires.plugins` and
- * `requires.capabilities` into account. Errors on cycles and missing
- * providers. Concrete implementation in dep_graph.js (Phase 1).
- */
-export interface DepGraphResolver {
-  resolve(manifests: PluginManifest[]): DepGraphResolution
+export type DepGraphErrorKind =
+  | 'cycle'
+  | 'plugin_missing'
+  | 'cap_missing'
+  | 'cap_version_clash'
+
+export interface UnsatisfiedRequirement {
+  plugin: PluginName
+  errorKind: DepGraphErrorKind
+  detail?: string
 }
 
 export interface DepGraphResolution {
+  /** Topo-sorted activation order; eliminated plugins are not included. */
   order: PluginName[]
-  resolveOrderHash: string
   unsatisfied: UnsatisfiedRequirement[]
+  /** Short stable hash of `order.join('\n')` for boot-to-boot drift checks. */
+  resolveOrderHash: string
+  pluginCount: number
+  capabilityCount: number
+  registry: CapabilityRegistryHandle
 }
 
-export interface UnsatisfiedRequirement {
-  requester: PluginName
-  kind: 'plugin' | 'capability'
-  name: PluginName | CapabilityName
-  range?: SemverRange
-  errorKind: 'cycle' | 'cap_missing' | 'cap_version_clash' | 'manifest_invalid'
+export interface ResolveDependenciesOptions {
+  registry?: CapabilityRegistryHandle
 }
+
+/**
+ * Resolve a topological activation order over manifests' `requires.plugins`
+ * and `requires.capabilities`. Emits `dep_graph.resolve` (span) and
+ * `dep_graph.reject` (log) per rejection. Capability requires drain
+ * through the registry, which is what emits `cap.require_satisfied`
+ * and `cap.require_missing`.
+ */
+export function resolveDependencies(
+  manifests: PluginManifest[],
+  opts?: ResolveDependenciesOptions,
+): Promise<DepGraphResolution>
