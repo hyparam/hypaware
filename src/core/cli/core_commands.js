@@ -50,8 +50,8 @@ function buildCoreCommands() {
   return [
     {
       name: 'status',
-      summary: 'Show kernel status (sources, sinks, cache)',
-      usage: 'hyp status',
+      summary: 'Show kernel status (active plugins, sources, sinks, cache)',
+      usage: 'hyp status [--json]',
       run: runStatus,
     },
     {
@@ -110,7 +110,7 @@ function buildCoreCommands() {
     },
     {
       name: 'plugin list',
-      summary: 'List installed plugins',
+      summary: 'List active (bundled) and installed plugins',
       usage: 'hyp plugin list [--json]',
       run: runPluginList,
     },
@@ -197,7 +197,9 @@ function buildCoreCommands() {
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
-async function runStatus(_argv, ctx) {
+async function runStatus(argv, ctx) {
+  const json = argv.includes('--json')
+
   /** @type {import('../registry/sources.js').ExtendedSourceRegistry} */
   const sources = /** @type {any} */ (ctx.sources)
   /** @type {import('../registry/sinks.js').ExtendedSinkRegistry} */
@@ -208,8 +210,8 @@ async function runStatus(_argv, ctx) {
   const clientNames = listClientNames(ctx.capabilities)
   const datasets = ctx.query.listDatasets()
   const cacheStats = await measureCacheRoot(ctx.storage.cacheRoot)
-
   const retention = await loadRetentionDays(ctx.env)
+  const activePlugins = ctx.plugins ?? []
 
   return withSpan(
     'status.render',
@@ -223,10 +225,46 @@ async function runStatus(_argv, ctx) {
       cache_size_bytes: cacheStats.totalBytes,
       oldest_partition_date: cacheStats.oldestDate ?? '',
       retention_days: retention.days,
+      active_plugin_count: activePlugins.length,
+      format: json ? 'json' : 'text',
       status: 'ok',
     },
     async () => {
+      if (json) {
+        const payload = {
+          config_path: retention.configPath,
+          active_plugins: activePlugins.map((p) => ({ name: p.name, version: p.version })),
+          sources: sourceContributions.map((s) => ({
+            name: s.name,
+            plugin: s.plugin,
+            ...(s.summary ? { summary: s.summary } : {}),
+          })),
+          sinks: sinkContributions.map((s) => ({ name: s.name, plugin: s.plugin })),
+          clients: clientNames,
+          datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
+          cache: {
+            dir: ctx.storage.cacheRoot,
+            retention_days: retention.days,
+            size_bytes: cacheStats.totalBytes,
+            oldest_partition_date: cacheStats.oldestDate,
+          },
+          // Phase 3 will populate this with launchd/systemd state; Phase 2
+          // returns a deterministic shape so consumers can rely on the
+          // key existing without dispatching on platform.
+          daemon: { installed: false, running: false, state: 'unknown' },
+        }
+        ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
+        return 0
+      }
       ctx.stdout.write('hypaware\n')
+      ctx.stdout.write('  active plugins:\n')
+      if (activePlugins.length === 0) {
+        ctx.stdout.write('    (none — no config or no plugins selected)\n')
+      } else {
+        for (const p of activePlugins) {
+          ctx.stdout.write(`    - ${p.name}@${p.version}\n`)
+        }
+      }
       ctx.stdout.write('  sources:\n')
       if (sourceContributions.length === 0) {
         ctx.stdout.write('    (none)\n')
@@ -325,12 +363,12 @@ async function loadRetentionDays(env) {
   const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
   const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(hypHome)
   const loaded = await loadConfigFile(configPath)
-  if (!loaded.ok) return { days: 30, source: 'default' }
+  if (!loaded.ok) return { days: 30, source: /** @type {'default'} */ ('default'), configPath }
   const days = loaded.config?.query?.cache?.retention?.default_days
   if (typeof days === 'number' && Number.isFinite(days) && days >= 0) {
-    return { days, source: 'config' }
+    return { days, source: /** @type {'config'} */ ('config'), configPath }
   }
-  return { days: 30, source: 'default' }
+  return { days: 30, source: /** @type {'default'} */ ('default'), configPath }
 }
 
 /* ---------- query ---------- */
@@ -586,25 +624,51 @@ async function runPluginInstall(argv, ctx) {
 async function runPluginList(argv, ctx) {
   const json = argv.includes('--json')
   const stateDir = pluginStateDir(ctx)
-  const entries = await listInstalledPlugins(stateDir)
+  const installed = await listInstalledPlugins(stateDir)
+  const active = ctx.plugins ?? []
+
   if (json) {
-    const plugins = entries.map((e) => ({
-      name: e.name,
-      version: e.version,
-      source: e.source,
-      installed_at: e.installed_at,
-      update: e.update,
-    }))
+    const installedByName = new Map(installed.map((e) => [e.name, e]))
+    const activeByName = new Map(active.map((p) => [p.name, p]))
+    const allNames = new Set([
+      ...installedByName.keys(),
+      ...activeByName.keys(),
+    ])
+    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, installed_at?: string, update?: unknown}>} */
+    const plugins = []
+    for (const name of Array.from(allNames).sort()) {
+      const inst = installedByName.get(name)
+      const act = activeByName.get(name)
+      const version = act?.version ?? inst?.version ?? ''
+      plugins.push({
+        name,
+        version,
+        source: inst ? 'installed' : 'bundled',
+        active: !!act,
+        ...(inst ? { installed_at: inst.installed_at } : {}),
+        ...(inst?.update !== undefined ? { update: inst.update } : {}),
+      })
+    }
     ctx.stdout.write(JSON.stringify({ plugins }, null, 2) + '\n')
     return 0
   }
-  if (entries.length === 0) {
-    ctx.stdout.write('No plugins installed.\n')
+
+  if (active.length === 0 && installed.length === 0) {
+    ctx.stdout.write('No plugins active or installed.\n')
     return 0
   }
-  for (const entry of entries) {
-    const available = entry.update?.available ? '  (update available)' : ''
-    ctx.stdout.write(`  ${entry.name}@${entry.version}${available}\n`)
+  if (active.length > 0) {
+    ctx.stdout.write('Active plugins (from current boot):\n')
+    for (const p of active) {
+      ctx.stdout.write(`  ${p.name}@${p.version}  (bundled)\n`)
+    }
+  }
+  if (installed.length > 0) {
+    ctx.stdout.write('Installed plugins:\n')
+    for (const entry of installed) {
+      const available = entry.update?.available ? '  (update available)' : ''
+      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}\n`)
+    }
   }
   return 0
 }
@@ -1007,18 +1071,33 @@ async function runClientLifecycle(action, argv, ctx) {
     }
     try {
       if (action === 'attach') {
-        const endpoint = gateway.localEndpoint()
+        // In dry-run mode the gateway source may not be started yet,
+        // so `localEndpoint()` could throw. Fall back to a placeholder
+        // endpoint — adapters are expected to short-circuit before
+        // touching it.
+        let endpoint
+        if (parsed.dryRun) {
+          try {
+            endpoint = gateway.localEndpoint()
+          } catch {
+            endpoint = 'http://127.0.0.1:0'
+          }
+        } else {
+          endpoint = gateway.localEndpoint()
+        }
         await client.attach({
           endpoint,
           config: {},
           stdout: ctx.stdout,
           stderr: ctx.stderr,
+          dryRun: parsed.dryRun,
         })
       } else {
         await client.detach({
           config: {},
           stdout: ctx.stdout,
           stderr: ctx.stderr,
+          dryRun: parsed.dryRun,
         })
       }
     } catch (err) {
@@ -1031,16 +1110,20 @@ async function runClientLifecycle(action, argv, ctx) {
 }
 
 /**
- * Parse `--client <name>` and `--yes` / `-y` from argv.
+ * Parse `--client <name>`, `--yes` / `-y`, and `--dry-run` from argv.
  * @param {string[]} argv
  */
 function parseClientArgs(argv) {
-  /** @type {{ client: string, yes: boolean, error?: string }} */
-  const r = { client: 'claude', yes: false }
+  /** @type {{ client: string, yes: boolean, dryRun: boolean, error?: string }} */
+  const r = { client: 'claude', yes: false, dryRun: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--yes' || arg === '-y') {
       r.yes = true
+      continue
+    }
+    if (arg === '--dry-run') {
+      r.dryRun = true
       continue
     }
     if (arg === '--client' || arg.startsWith('--client=')) {

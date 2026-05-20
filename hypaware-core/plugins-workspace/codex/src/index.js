@@ -47,7 +47,6 @@ export async function activate(ctx) {
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const configPath = resolveConfigPath(ctx)
-      const port = endpointPort(attachCtx.endpoint)
 
       return withSpan(
         'client.attach',
@@ -55,8 +54,18 @@ export async function activate(ctx) {
           [Attr.PLUGIN]: PLUGIN_NAME,
           [Attr.OPERATION]: 'client.attach',
           client_name: CLIENT_NAME,
+          dry_run: attachCtx.dryRun === true,
         },
         async (span) => {
+          if (attachCtx.dryRun) {
+            span.setAttribute('status', 'ok')
+            span.setAttribute('restored', false)
+            attachCtx.stdout.write(`(dry-run) Would attach Codex via ${configPath}\n`)
+            attachCtx.stdout.write('  Would set model_provider = hypaware\n')
+            attachCtx.stdout.write('  Would set base_url to the local gateway endpoint /v1\n')
+            return
+          }
+          const port = endpointPort(attachCtx.endpoint)
           try {
             const result = await attach({
               port,
@@ -90,8 +99,15 @@ export async function activate(ctx) {
           [Attr.PLUGIN]: PLUGIN_NAME,
           [Attr.OPERATION]: 'client.detach',
           client_name: CLIENT_NAME,
+          dry_run: detachCtx.dryRun === true,
         },
         async (span) => {
+          if (detachCtx.dryRun) {
+            span.setAttribute('status', 'ok')
+            span.setAttribute('restored', false)
+            detachCtx.stdout.write(`(dry-run) Would detach Codex from ${configPath}\n`)
+            return
+          }
           try {
             const result = await detach({ configPath })
             const restored = result.changed === true

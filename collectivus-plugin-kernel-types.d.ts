@@ -823,12 +823,20 @@ export interface AiGatewayClientAttachContext {
   config: JsonObject
   stdout: WriteStream
   stderr: WriteStream
+  /**
+   * When true the adapter must report what it *would* write without
+   * touching the user's filesystem or external state. Phase 6 will
+   * harden adapters around this flag; Phase 2 uses it to verify the
+   * dispatcher reaches the right adapter under `hyp attach --dry-run`.
+   */
+  dryRun?: boolean
 }
 
 export interface AiGatewayClientDetachContext {
   config: JsonObject
   stdout: WriteStream
   stderr: WriteStream
+  dryRun?: boolean
 }
 
 export interface AiGatewayClientStatusContext {

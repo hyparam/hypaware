@@ -2,7 +2,6 @@
 
 import process from 'node:process'
 import path from 'node:path'
-import fs from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import { context, ROOT_CONTEXT, SpanStatusCode } from '@opentelemetry/api'
 
@@ -16,7 +15,7 @@ import {
 } from '../observability/index.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
-import { loadManifests } from '../manifest.js'
+import { bootKernel } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 
@@ -25,6 +24,7 @@ import { registerCoreCommands } from './core_commands.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
+/** @typedef {import('../runtime/boot.js').BootProfile} BootProfile */
 
 /**
  * @typedef {Object} DispatchOptions
@@ -47,21 +47,27 @@ const HELP_FLAGS = new Set(['--help', '-h', 'help'])
  * 1. `installObservability()` (idempotent — shares state with smoke
  *    harnesses and prior dispatch calls within the same process).
  * 2. Assemble a `CommandRegistry`. Core commands register directly;
- *    plugin contributions land later (Phase 4+).
- * 3. Discover plugin manifests in the local workspace
- *    (`hypaware-core/plugins-workspace/<plugin>/hypaware.plugin.json`).
- *    The Phase 3 set is empty by design; the loader tolerates a missing
- *    directory so the dispatcher works against a fresh checkout.
- * 4. Render help under a synthetic `command.run` span (with
- *    `hyp_command=help`) when argv is empty on a non-TTY stdout or
- *    begins with a help flag. Emits `cli.help_rendered` inside the
- *    span. On a TTY, an empty argv re-enters with `init` so the
- *    walkthrough is the no-arg behavior.
- * 5. Otherwise match the longest registered prefix and run the command
- *    inside a root `command.run` span. Records `command_name`,
- *    `hyp_command`, `argv_count`, `exit_code`, `status`, and
- *    `error_kind` on failure. Ticks `hyp_command_runs_total` and
- *    records the histogram `hyp_command_duration_ms`.
+ *    plugin-contributed commands land during `bootKernel` below.
+ * 3. Render help and exit when argv is empty on a non-TTY stdout or
+ *    begins with a help flag (no kernel boot required).
+ * 4. Otherwise call `bootKernel({ ... })` — the single shared boot
+ *    path that loads the config, discovers bundled plugin manifests,
+ *    resolves dependencies, and activates the selected plugins
+ *    *before* command dispatch. Active plugins land on
+ *    `CommandRunContext.plugins` and their registry contributions
+ *    (sources, sinks, capabilities, skills, init-presets) are
+ *    available to the command body. `bootProfile=all-bundled` for
+ *    `hyp init` (so the walkthrough picker sees every option);
+ *    `config` for every other command.
+ * 5. Match the longest registered prefix (now including plugin-
+ *    contributed commands) and run the command inside a root
+ *    `command.run` span. Records `command_name`, `hyp_command`,
+ *    `argv_count`, `exit_code`, `status`, and `error_kind` on
+ *    failure. Ticks `hyp_command_runs_total` and records the
+ *    histogram `hyp_command_duration_ms`.
+ *
+ * Callers may inject `opts.kernel` to skip the boot step entirely;
+ * existing smokes that pre-build a kernel rely on this contract.
  *
  * @param {string[]} argv
  * @param {DispatchOptions} [opts]
@@ -80,25 +86,48 @@ export async function dispatch(argv, opts = {}) {
 
   const obsEnv = readObservabilityEnv(env)
   const cacheRoot = path.join(obsEnv.stateDir, 'cache')
-  const kernel = opts.kernel ?? createKernelRuntime({ commandRegistry: registry, cacheRoot })
 
-  await loadWorkspacePlugins({
-    workspaceDir: opts.workspaceDir ?? path.resolve(process.cwd(), 'hypaware-core', 'plugins-workspace'),
-  })
-
-  if (argv.length === 0) {
-    if (isInteractiveStream(stdout)) {
-      // Phase 9: `hyp` with no args on a TTY launches the interactive
-      // walkthrough. The dispatcher reroutes to the `init` command
-      // (with no preset) so the same code path covers `hyp` and
-      // `hyp init` on a TTY. The inner dispatch emits its own
-      // `command.run` for `init` — we do not double-wrap here.
-      return runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
-    }
+  if (argv.length === 0 && !isInteractiveStream(stdout)) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0 })
   }
-  if (HELP_FLAGS.has(argv[0])) {
+  if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length })
+  }
+
+  // Boot the kernel so plugin-contributed commands, sources, sinks,
+  // capabilities, skills, and init presets are visible to dispatch.
+  // Callers that already built a kernel (test flows pre-activating a
+  // specific plugin set) pass `opts.kernel` and we skip boot.
+  /** @type {ReturnType<typeof createKernelRuntime>} */
+  let kernel
+  /** @type {ActivePlugin[]} */
+  let activePlugins = []
+  /** @type {HypAwareV2Config} */
+  let activeConfig = { version: 2 }
+  if (opts.kernel) {
+    kernel = opts.kernel
+  } else {
+    const bootProfile = decideBootProfile(argv)
+    const boot = await bootKernel({
+      hypHome: obsEnv.hypHome,
+      mode: 'cli',
+      runId: env.DEV_RUN_ID,
+      bootProfile,
+      commandRegistry: registry,
+      cacheRoot,
+      workspaceDir: opts.workspaceDir,
+      env,
+    })
+    kernel = boot.runtime
+    activePlugins = boot.activePlugins
+    if (boot.config) activeConfig = boot.config
+  }
+
+  if (argv.length === 0) {
+    // TTY + empty argv → re-enter as `init` so the walkthrough is the
+    // no-arg behavior. Pass the booted kernel + registry through so
+    // we don't pay the boot cost twice.
+    return runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
   }
 
   const matched = registry.match(argv)
@@ -126,8 +155,8 @@ export async function dispatch(argv, opts = {}) {
     stderr,
     env,
     cwd,
-    config: { version: 2 },
-    plugins: /** @type {ActivePlugin[]} */ ([]),
+    config: activeConfig,
+    plugins: activePlugins,
     capabilities: kernel.capabilities,
     query: kernel.query,
     storage: kernel.storage,
@@ -215,27 +244,20 @@ function isInteractiveStream(stream) {
 }
 
 /**
- * Discover plugin manifests under `workspaceDir`. Returns the manifest
- * load results. Missing directory is treated as an empty workspace.
+ * Pick the boot profile based on the requested command. `hyp init`
+ * (interactive walkthrough or preset) needs every bundled plugin
+ * loaded so the picker can list options before the user has written
+ * a config; every other command activates only the plugins listed in
+ * the config (so `hyp status --json` doesn't show `@hypaware/central`
+ * or `@hypaware/gascity` when they weren't selected).
  *
- * Phase 3 ships an empty workspace; the dispatcher still calls into the
- * manifest loader so Phase 4+ inherits the same spans without changing
- * the dispatch contract.
- *
- * @param {{ workspaceDir: string }} args
+ * @param {string[]} argv
+ * @returns {BootProfile}
  */
-async function loadWorkspacePlugins({ workspaceDir }) {
-  /** @type {string[]} */
-  let entries
-  try {
-    entries = await fs.readdir(workspaceDir, { withFileTypes: true })
-      .then((items) => items.filter((d) => d.isDirectory()).map((d) => path.join(workspaceDir, d.name)))
-  } catch (err) {
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return { loaded: [], failed: [] }
-    throw err
-  }
-  if (entries.length === 0) return { loaded: [], failed: [] }
-  return loadManifests(entries)
+function decideBootProfile(argv) {
+  if (argv.length === 0) return 'all-bundled'
+  if (argv[0] === 'init') return 'all-bundled'
+  return 'config'
 }
 
 /**

@@ -53,7 +53,6 @@ export async function activate(ctx) {
     async attach(attachCtx) {
       const homeDir = ctx.env.HOME ?? os.homedir()
       const settingsPath = defaultSettingsPath(homeDir)
-      const port = endpointPort(attachCtx.endpoint)
 
       return withSpan(
         'client.attach',
@@ -61,8 +60,17 @@ export async function activate(ctx) {
           [Attr.PLUGIN]: PLUGIN_NAME,
           [Attr.OPERATION]: 'client.attach',
           client_name: CLIENT_NAME,
+          dry_run: attachCtx.dryRun === true,
         },
         async (span) => {
+          if (attachCtx.dryRun) {
+            span.setAttribute('status', 'ok')
+            span.setAttribute('restored', false)
+            attachCtx.stdout.write(`(dry-run) Would attach Claude Code via ${settingsPath}\n`)
+            attachCtx.stdout.write(`  Would set ANTHROPIC_BASE_URL to the local gateway endpoint\n`)
+            return
+          }
+          const port = endpointPort(attachCtx.endpoint)
           try {
             const result = await attach({
               port,
@@ -96,8 +104,15 @@ export async function activate(ctx) {
           [Attr.PLUGIN]: PLUGIN_NAME,
           [Attr.OPERATION]: 'client.detach',
           client_name: CLIENT_NAME,
+          dry_run: detachCtx.dryRun === true,
         },
         async (span) => {
+          if (detachCtx.dryRun) {
+            span.setAttribute('status', 'ok')
+            span.setAttribute('restored', false)
+            detachCtx.stdout.write(`(dry-run) Would detach Claude Code from ${settingsPath}\n`)
+            return
+          }
           try {
             const result = await detach({ settingsPath })
             const restored = result.changed === true
