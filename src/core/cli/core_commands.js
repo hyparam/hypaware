@@ -3,11 +3,20 @@
 import path from 'node:path'
 
 import { Attr, withSpan } from '../observability/index.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { validateConfig } from '../config/validate.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { executeQuerySql } from '../query/sql.js'
+import {
+  installPlugin,
+  listInstalledPlugins,
+  loadLock,
+  removePlugin,
+} from '../plugin_install/install.js'
+import { checkForPluginUpdate } from '../plugin_install/update_check.js'
+import { upsertEntry, writeLock } from '../plugin_install/lock.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
@@ -108,6 +117,12 @@ function buildCoreCommands() {
       summary: 'Show details for an installed plugin',
       usage: 'hyp plugin info <plugin>',
       run: runPluginInfo,
+    },
+    {
+      name: 'plugin outdated',
+      summary: 'List plugins with updates available',
+      usage: 'hyp plugin outdated [--json]',
+      run: runPluginOutdated,
     },
     {
       name: 'plugin update',
@@ -398,6 +413,17 @@ async function runCollectRemove(argv, ctx) {
 /* ---------- plugin ---------- */
 
 /**
+ * Resolve the kernel state directory the plugin install commands
+ * write into. Mirrors `readObservabilityEnv` so `HYP_HOME` flows
+ * through to plugin install just like it does for the cache.
+ *
+ * @param {CommandRunContext} ctx
+ */
+function pluginStateDir(ctx) {
+  return readObservabilityEnv(ctx.env).stateDir
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -406,7 +432,17 @@ async function runPluginInstall(argv, ctx) {
     ctx.stderr.write('usage: hyp plugin install <source>\n')
     return 2
   }
-  ctx.stdout.write(`(plugin install lands in Phase 7; would install '${argv[0]}')\n`)
+  const rawSource = argv[0]
+  const stateDir = pluginStateDir(ctx)
+  const result = await installPlugin({ rawSource, stateDir, cwd: ctx.cwd })
+  if (!result.ok) {
+    ctx.stderr.write(`hyp plugin install: ${result.message}\n`)
+    return 1
+  }
+  ctx.stdout.write(
+    `installed ${result.entry.name}@${result.entry.version} from ${result.entry.source.kind}\n`
+  )
+  ctx.stdout.write(`  install_dir: ${result.entry.install_dir}\n`)
   return 0
 }
 
@@ -416,13 +452,26 @@ async function runPluginInstall(argv, ctx) {
  */
 async function runPluginList(argv, ctx) {
   const json = argv.includes('--json')
-  const plugins = ctx.plugins.map((p) => ({ name: p.name, version: p.version }))
+  const stateDir = pluginStateDir(ctx)
+  const entries = await listInstalledPlugins(stateDir)
   if (json) {
+    const plugins = entries.map((e) => ({
+      name: e.name,
+      version: e.version,
+      source: e.source,
+      installed_at: e.installed_at,
+      update: e.update,
+    }))
     ctx.stdout.write(JSON.stringify({ plugins }, null, 2) + '\n')
-  } else if (plugins.length === 0) {
+    return 0
+  }
+  if (entries.length === 0) {
     ctx.stdout.write('No plugins installed.\n')
-  } else {
-    for (const p of plugins) ctx.stdout.write(`  ${p.name}@${p.version}\n`)
+    return 0
+  }
+  for (const entry of entries) {
+    const available = entry.update?.available ? '  (update available)' : ''
+    ctx.stdout.write(`  ${entry.name}@${entry.version}${available}\n`)
   }
   return 0
 }
@@ -436,16 +485,101 @@ async function runPluginInfo(argv, ctx) {
     ctx.stderr.write('usage: hyp plugin info <plugin>\n')
     return 2
   }
-  ctx.stdout.write(`(plugin info lands in Phase 7; '${argv[0]}' not installed)\n`)
+  const name = argv[0]
+  const stateDir = pluginStateDir(ctx)
+  const lock = await loadLock(stateDir)
+  const entry = lock.plugins[name]
+  if (!entry) {
+    ctx.stderr.write(`hyp plugin info: '${name}' is not installed\n`)
+    return 1
+  }
+  ctx.stdout.write(`${entry.name}@${entry.version}\n`)
+  ctx.stdout.write(`  source:        ${entry.source.kind} (${entry.source.raw})\n`)
+  ctx.stdout.write(`  install_dir:   ${entry.install_dir}\n`)
+  ctx.stdout.write(`  content_hash:  ${entry.content_hash}\n`)
+  ctx.stdout.write(`  manifest_hash: ${entry.manifest_hash}\n`)
+  ctx.stdout.write(`  installed_at:  ${entry.installed_at}\n`)
+  if (entry.update) {
+    ctx.stdout.write(`  update_check:  ${entry.update.checked_at}\n`)
+    ctx.stdout.write(`  available:     ${entry.update.available}\n`)
+    if (entry.update.latest_version) {
+      ctx.stdout.write(`  latest:        ${entry.update.latest_version}\n`)
+    }
+  }
   return 0
 }
 
 /**
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runPluginUpdate(_argv, ctx) {
-  ctx.stdout.write('(plugin update lands in Phase 7)\n')
+async function runPluginOutdated(argv, ctx) {
+  const json = argv.includes('--json')
+  const stateDir = pluginStateDir(ctx)
+  const entries = await listInstalledPlugins(stateDir)
+  const outdated = entries.filter((e) => e.update?.available === true)
+  if (json) {
+    ctx.stdout.write(
+      JSON.stringify(
+        {
+          plugins: outdated.map((e) => ({
+            name: e.name,
+            version: e.version,
+            latest_version: e.update?.latest_version,
+            checked_at: e.update?.checked_at,
+          })),
+        },
+        null,
+        2
+      ) + '\n'
+    )
+    return 0
+  }
+  if (outdated.length === 0) {
+    ctx.stdout.write('All plugins up to date.\n')
+    return 0
+  }
+  for (const entry of outdated) {
+    const latest = entry.update?.latest_version ?? '?'
+    ctx.stdout.write(`  ${entry.name}: ${entry.version} -> ${latest}\n`)
+  }
+  return 0
+}
+
+/**
+ * Re-probe one (or every) installed plugin's upstream and write the
+ * fresh `update` state back to the lock. Phase 7 does not yet pull
+ * down a new artifact — that comes when fetch.js learns the non-local
+ * source kinds in Phase 8. For now `hyp plugin update` is "refresh the
+ * update_check state."
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runPluginUpdate(argv, ctx) {
+  const stateDir = pluginStateDir(ctx)
+  const lock = await loadLock(stateDir)
+  const entries = Object.values(lock.plugins)
+  const target = argv[0]
+  const subjects = target ? entries.filter((e) => e.name === target) : entries
+  if (target && subjects.length === 0) {
+    ctx.stderr.write(`hyp plugin update: '${target}' is not installed\n`)
+    return 1
+  }
+  let next = lock
+  for (const entry of subjects) {
+    // Force a probe by clearing the last checked_at; rate-limit logic
+    // is keyed off `entry.update.checked_at`.
+    const probeInput = { ...entry, update: undefined }
+    const state = await checkForPluginUpdate({ entry: probeInput })
+    next = upsertEntry(next, { ...entry, update: state })
+  }
+  await writeLock(stateDir, next)
+  if (target) {
+    ctx.stdout.write(`refreshed update state for ${target}\n`)
+  } else {
+    ctx.stdout.write(`refreshed update state for ${subjects.length} plugin(s)\n`)
+  }
   return 0
 }
 
@@ -458,7 +592,14 @@ async function runPluginRemove(argv, ctx) {
     ctx.stderr.write('usage: hyp plugin remove <plugin>\n')
     return 2
   }
-  ctx.stdout.write(`(plugin remove lands in Phase 7; would remove '${argv[0]}')\n`)
+  const name = argv[0]
+  const stateDir = pluginStateDir(ctx)
+  const result = await removePlugin({ name, stateDir })
+  if (!result.ok) {
+    ctx.stderr.write(`hyp plugin remove: ${result.message}\n`)
+    return 1
+  }
+  ctx.stdout.write(`removed ${name}\n`)
   return 0
 }
 

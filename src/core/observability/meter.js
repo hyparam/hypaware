@@ -107,6 +107,12 @@ function buildKernelInstruments(meter) {
     queryCacheMissesTotal: meter.createCounter('hyp_query_cache_misses_total', {
       description: 'Query cache misses',
     }),
+    pluginInstallsTotal: meter.createCounter('hyp_plugin_installs_total', {
+      description: 'Plugin install attempts, by status',
+    }),
+    pluginUpdatesAvailable: meter.createGauge('hyp_plugin_updates_available', {
+      description: 'Whether an update is available for each installed plugin (0 or 1, keyed by hyp_plugin)',
+    }),
   }
 }
 
