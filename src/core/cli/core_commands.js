@@ -8,6 +8,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { validateConfig } from '../config/validate.js'
+import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { executeQuerySql } from '../query/sql.js'
@@ -253,7 +254,20 @@ function buildCoreCommands() {
 /* ---------- status ---------- */
 
 /**
- * @param {string[]} _argv
+ * `hyp status [--json]`
+ *
+ * Renders the V1 install state — config path, daemon install/run
+ * state, active plugins, source/sink/client status, cache + retention
+ * window, recent error count — and any diagnostics + repair
+ * suggestions surfaced by the Phase 8 collector.
+ *
+ * Span: `status.render`. Attributes match the bead contract
+ * (`source_count`, `sink_count`, `cache_size_bytes`,
+ * `oldest_partition_date`, `daemon_state`, `diagnostics_count`) and
+ * also carry the legacy attributes (`client_count`, `retention_days`)
+ * that earlier smokes assert on.
+ *
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
@@ -265,97 +279,262 @@ async function runStatus(argv, ctx) {
   /** @type {import('../registry/sinks.js').ExtendedSinkRegistry} */
   const sinks = /** @type {any} */ (ctx.sinks)
 
-  const sourceContributions = sources.list()
-  const sinkContributions = sinks.listContributions().map((c) => c.contribution)
   const clientNames = listClientNames(ctx.capabilities)
+
+  const report = await collectHypAwareStatus({
+    env: ctx.env,
+    runtime: {
+      sources,
+      sinks,
+      capabilities: ctx.capabilities,
+      query: ctx.query,
+      storage: ctx.storage,
+    },
+  })
+
+  // Source/sink lists from the report are the canonical set. The
+  // walkthrough smoke checks for plugin names in stdout, so we lean
+  // on the report's `sources`/`sinks` arrays which include both
+  // contributions and running state.
+  const sourceRows = report.sources
+  const sinkRows = report.sinks
   const datasets = ctx.query.listDatasets()
-  const cacheStats = await measureCacheRoot(ctx.storage.cacheRoot)
-  const retention = await loadRetentionDays(ctx.env)
-  const activePlugins = ctx.plugins ?? []
 
   return withSpan(
     'status.render',
     {
       [Attr.COMPONENT]: 'status',
       [Attr.OPERATION]: 'status.render',
-      source_count: sourceContributions.length,
-      sink_count: sinkContributions.length,
+      source_count: sourceRows.length,
+      sink_count: sinkRows.length,
       client_count: clientNames.length,
       dataset_count: datasets.length,
-      cache_size_bytes: cacheStats.totalBytes,
-      oldest_partition_date: cacheStats.oldestDate ?? '',
-      retention_days: retention.days,
-      active_plugin_count: activePlugins.length,
+      cache_size_bytes: report.cache.totalBytes,
+      oldest_partition_date: report.cache.oldestDate ?? '',
+      retention_days: report.retention.days,
+      active_plugin_count: report.activePlugins.length,
+      daemon_state: report.daemon.state ?? (report.daemon.running ? 'running' : 'stopped'),
+      diagnostics_count: report.diagnostics.length,
+      overall: report.overall,
       format: json ? 'json' : 'text',
       status: 'ok',
     },
     async () => {
       if (json) {
-        const payload = {
-          config_path: retention.configPath,
-          active_plugins: activePlugins.map((p) => ({ name: p.name, version: p.version })),
-          sources: sourceContributions.map((s) => ({
-            name: s.name,
-            plugin: s.plugin,
-            ...(s.summary ? { summary: s.summary } : {}),
-          })),
-          sinks: sinkContributions.map((s) => ({ name: s.name, plugin: s.plugin })),
-          clients: clientNames,
-          datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
-          cache: {
-            dir: ctx.storage.cacheRoot,
-            retention_days: retention.days,
-            size_bytes: cacheStats.totalBytes,
-            oldest_partition_date: cacheStats.oldestDate,
-          },
-          // Phase 3 will populate this with launchd/systemd state; Phase 2
-          // returns a deterministic shape so consumers can rely on the
-          // key existing without dispatching on platform.
-          daemon: { installed: false, running: false, state: 'unknown' },
-        }
+        const payload = renderStatusJson({
+          report,
+          clientNames,
+          datasets,
+          cacheRoot: ctx.storage.cacheRoot,
+        })
         ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
         return 0
       }
-      ctx.stdout.write('hypaware\n')
-      ctx.stdout.write('  active plugins:\n')
-      if (activePlugins.length === 0) {
-        ctx.stdout.write('    (none — no config or no plugins selected)\n')
-      } else {
-        for (const p of activePlugins) {
-          ctx.stdout.write(`    - ${p.name}@${p.version}\n`)
-        }
-      }
-      ctx.stdout.write('  sources:\n')
-      if (sourceContributions.length === 0) {
-        ctx.stdout.write('    (none)\n')
-      } else {
-        for (const s of sourceContributions) {
-          ctx.stdout.write(`    - ${s.name}  (${s.plugin})${s.summary ? `  — ${s.summary}` : ''}\n`)
-        }
-      }
-      ctx.stdout.write('  sinks:\n')
-      if (sinkContributions.length === 0) {
-        ctx.stdout.write('    (none — keeping captured data local only)\n')
-      } else {
-        for (const s of sinkContributions) {
-          ctx.stdout.write(`    - ${s.name}  (${s.plugin})\n`)
-        }
-      }
-      ctx.stdout.write('  clients:\n')
-      if (clientNames.length === 0) {
-        ctx.stdout.write('    (none)\n')
-      } else {
-        for (const name of clientNames) {
-          ctx.stdout.write(`    - ${name}\n`)
-        }
-      }
-      ctx.stdout.write(`  cache:           ${ctx.storage.cacheRoot}\n`)
-      ctx.stdout.write(`  cache retention: ${retention.days} days${retention.source === 'default' ? ' (default)' : ''}\n`)
-      ctx.stdout.write(`  datasets:        ${datasets.length}\n`)
+      renderStatusText({
+        report,
+        clientNames,
+        datasets,
+        cacheRoot: ctx.storage.cacheRoot,
+        stdout: ctx.stdout,
+      })
       return 0
     },
     { component: 'status' }
   )
+}
+
+/**
+ * Render the V1 status report as a stable JSON shape. Consumers may
+ * pin keys without dispatching on platform; missing values surface as
+ * `null` rather than being omitted, so smoke assertions can probe
+ * specific fields directly.
+ *
+ * Excludes any `@hypaware/central` and `@hypaware/gascity` keys per
+ * V1 contract (Phase 8 bead): the V1 surface must not require either.
+ *
+ * @param {{
+ *   report: import('../daemon/status.js').HypAwareStatusReport,
+ *   clientNames: string[],
+ *   datasets: { name: string, plugin: string }[],
+ *   cacheRoot: string,
+ * }} args
+ */
+function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
+  return {
+    overall: report.overall,
+    config: {
+      path: report.configPath,
+      exists: report.configExists,
+      valid: report.configValid,
+    },
+    // V1 stable shape — array of `{name}` so consumers can pin keys
+    // without needing to know the version. The collector currently
+    // does not track per-plugin version (Phase 2 set version on each
+    // entry but it was always 'unknown'); keeping the field reserved
+    // lets later phases populate it without breaking smokes.
+    active_plugins: report.activePlugins.map((name) => ({ name })),
+    daemon: {
+      installed: report.daemon.installed,
+      loaded: report.daemon.loaded,
+      running: report.daemon.running,
+      state: report.daemon.state ?? 'unknown',
+      pid: report.daemon.pid ?? null,
+      mode: report.daemon.mode ?? null,
+      run_id: report.daemon.runId ?? null,
+      platform: report.daemon.platform,
+      ...(report.daemon.error ? { error: report.daemon.error } : {}),
+    },
+    sources: report.sources.map((s) => ({
+      name: s.name,
+      plugin: s.plugin,
+      state: s.state,
+      ...(s.error ? { error: s.error } : {}),
+    })),
+    sinks: report.sinks.map((s) => ({
+      instance: s.instance,
+      plugin: s.plugin,
+      kind: s.kind,
+      ...(s.lastTickAt ? { last_tick_at: s.lastTickAt } : {}),
+      ...(s.lastSuccessAt ? { last_success_at: s.lastSuccessAt } : {}),
+    })),
+    // Backwards-compatible shape: array of registered client names.
+    // Phase 8 attach detail lives under `client_attach`.
+    clients: clientNames,
+    client_attach: report.clients.map((c) => ({
+      name: c.name,
+      configured: c.configured,
+      attached: c.attached,
+      ...(c.settingsPath ? { settings_path: c.settingsPath } : {}),
+      ...(c.version ? { version: c.version } : {}),
+      ...(c.port ? { port: c.port } : {}),
+      ...(c.error ? { error: c.error } : {}),
+    })),
+    datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
+    cache: {
+      dir: cacheRoot,
+      retention_days: report.retention.days,
+      retention_source: report.retention.source,
+      size_bytes: report.cache.totalBytes,
+      oldest_partition_date: report.cache.oldestDate,
+    },
+    recent_error_count: report.recentErrorCount,
+    diagnostics: report.diagnostics.map((d) => ({
+      severity: d.severity,
+      kind: d.kind,
+      message: d.message,
+      repair: d.repair,
+      ...(d.pointer ? { pointer: d.pointer } : {}),
+    })),
+  }
+}
+
+/**
+ * Render the V1 status report as human-friendly text. Mirrors the
+ * JSON shape but groups sections and surfaces diagnostics + repair
+ * suggestions at the bottom.
+ *
+ * @param {{
+ *   report: import('../daemon/status.js').HypAwareStatusReport,
+ *   clientNames: string[],
+ *   datasets: { name: string, plugin: string }[],
+ *   cacheRoot: string,
+ *   stdout: { write(chunk: string): unknown },
+ * }} args
+ */
+function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
+  stdout.write('hypaware\n')
+  stdout.write(`  overall:  ${report.overall}\n`)
+  const configState = report.configExists
+    ? (report.configValid ? 'ok' : 'invalid')
+    : 'missing'
+  stdout.write(`  config:   ${report.configPath} (${configState})\n`)
+
+  const daemonLine = describeDaemon(report.daemon)
+  stdout.write(`  daemon:   ${daemonLine}\n`)
+
+  stdout.write('  active plugins:\n')
+  if (report.activePlugins.length === 0) {
+    stdout.write('    (none — no config or no plugins selected)\n')
+  } else {
+    for (const name of report.activePlugins) {
+      stdout.write(`    - ${name}\n`)
+    }
+  }
+
+  stdout.write('  sources:\n')
+  if (report.sources.length === 0) {
+    stdout.write('    (none)\n')
+  } else {
+    for (const s of report.sources) {
+      stdout.write(`    - ${s.name}  (${s.plugin})  [${s.state}]\n`)
+    }
+  }
+
+  stdout.write('  sinks:\n')
+  if (report.sinks.length === 0) {
+    stdout.write('    (none — keeping captured data local only)\n')
+  } else {
+    for (const s of report.sinks) {
+      stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})\n`)
+    }
+  }
+
+  stdout.write('  clients:\n')
+  if (clientNames.length === 0 && report.clients.every((c) => !c.configured)) {
+    stdout.write('    (none)\n')
+  } else {
+    // Surface the union of registered clients (from the gateway) and
+    // configured/attached clients (from the report). Each line shows
+    // configured + attached state so a missing attach jumps out.
+    const seen = new Set()
+    for (const c of report.clients) {
+      seen.add(c.name)
+      const state = []
+      state.push(c.configured ? 'configured' : 'not in config')
+      state.push(c.attached ? 'attached' : 'not attached')
+      stdout.write(`    - ${c.name}  [${state.join(', ')}]\n`)
+    }
+    for (const name of clientNames) {
+      if (seen.has(name)) continue
+      stdout.write(`    - ${name}  [registered]\n`)
+    }
+  }
+
+  stdout.write(`  cache:           ${cacheRoot}\n`)
+  stdout.write(
+    `  cache retention: ${report.retention.days} days${
+      report.retention.source === 'default' ? ' (default)' : ''
+    }\n`
+  )
+  stdout.write(`  cache size:      ${report.cache.totalBytes} bytes\n`)
+  stdout.write(`  datasets:        ${datasets.length}\n`)
+  stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
+
+  if (report.diagnostics.length > 0) {
+    stdout.write('  diagnostics:\n')
+    for (const d of report.diagnostics) {
+      const tag = d.severity === 'error' ? 'ERROR' : 'WARN '
+      stdout.write(`    [${tag}] ${d.kind}: ${d.message}\n`)
+      for (const repair of d.repair) {
+        stdout.write(`        repair: ${repair}\n`)
+      }
+    }
+  }
+}
+
+/**
+ * @param {import('../daemon/status.js').ServiceState} daemon
+ */
+function describeDaemon(daemon) {
+  const parts = []
+  parts.push(daemon.installed ? 'installed' : 'not installed')
+  if (daemon.installed) parts.push(daemon.loaded ? 'loaded' : 'not loaded')
+  parts.push(daemon.running ? 'running' : 'not running')
+  if (daemon.state) parts.push(`state=${daemon.state}`)
+  if (daemon.pid) parts.push(`pid=${daemon.pid}`)
+  if (daemon.mode) parts.push(`mode=${daemon.mode}`)
+  if (daemon.error) parts.push(`error=${daemon.error}`)
+  return parts.join(', ')
 }
 
 /**
@@ -369,67 +548,10 @@ function listClientNames(capabilities) {
   return gateway.listClients().map((c) => c.name).sort()
 }
 
-/**
- * Walk the cache root and return a best-effort size + oldest-partition
- * date. Both values land on the `status.render` span; the smoke checks
- * the structured attribute, not the printed line.
- *
- * @param {string} cacheRoot
- * @returns {Promise<{ totalBytes: number, oldestDate: string|null }>}
- */
-async function measureCacheRoot(cacheRoot) {
-  /** @type {{ totalBytes: number, oldestMs: number|null }} */
-  const acc = { totalBytes: 0, oldestMs: null }
-  await walkCacheRoot(cacheRoot, acc)
-  const oldestDate = acc.oldestMs === null ? null : new Date(acc.oldestMs).toISOString().slice(0, 10)
-  return { totalBytes: acc.totalBytes, oldestDate }
-}
-
-/**
- * @param {string} dir
- * @param {{ totalBytes: number, oldestMs: number|null }} acc
- */
-async function walkCacheRoot(dir, acc) {
-  /** @type {import('node:fs').Dirent[]} */
-  let entries
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true })
-  } catch (err) {
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return
-    throw err
-  }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) {
-      await walkCacheRoot(full, acc)
-    } else if (entry.isFile()) {
-      const stat = await fs.stat(full)
-      acc.totalBytes += stat.size
-      if (acc.oldestMs === null || stat.mtimeMs < acc.oldestMs) acc.oldestMs = stat.mtimeMs
-    }
-  }
-}
-
-/**
- * Load `query.cache.retention.default_days` from the config file when
- * present. Falls back to 30 days. Used by `hyp status` to print the
- * retention window the user will actually see; reading the config here
- * avoids forcing every dispatcher caller to pre-load it.
- *
- * @param {NodeJS.ProcessEnv} env
- * @returns {Promise<{ days: number, source: 'config'|'default' }>}
- */
-async function loadRetentionDays(env) {
-  const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
-  const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(hypHome)
-  const loaded = await loadConfigFile(configPath)
-  if (!loaded.ok) return { days: 30, source: /** @type {'default'} */ ('default'), configPath }
-  const days = loaded.config?.query?.cache?.retention?.default_days
-  if (typeof days === 'number' && Number.isFinite(days) && days >= 0) {
-    return { days, source: /** @type {'config'} */ ('config'), configPath }
-  }
-  return { days: 30, source: /** @type {'default'} */ ('default'), configPath }
-}
+// `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into
+// `src/core/daemon/status.js` as part of the Phase 8 status collector
+// (`collectHypAwareStatus`). Callers route through that helper now so
+// disk probes happen once per `hyp status` invocation.
 
 /* ---------- query ---------- */
 

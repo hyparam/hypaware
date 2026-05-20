@@ -27,6 +27,37 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
  */
 
 /**
+ * Phase 8 diagnostic kinds — internally inconsistent configurations
+ * that are not catastrophic enough to fail `hyp config validate` but
+ * which `hyp status` surfaces with concrete repair suggestions.
+ *
+ * - `client_without_gateway`: a client plugin (`@hypaware/claude` or
+ *   `@hypaware/codex`) is enabled but `@hypaware/ai-gateway` is not.
+ * - `gateway_missing_anthropic_upstream`: `@hypaware/claude` is enabled
+ *   but no Anthropic upstream is registered with the gateway config.
+ * - `gateway_missing_openai_upstream`: `@hypaware/codex` is enabled
+ *   but no OpenAI upstream is registered.
+ * - `sink_missing_encoder`: a local-fs sink is configured but no
+ *   encoder plugin (`@hypaware/format-parquet` /
+ *   `@hypaware/format-jsonl`) is enabled.
+ *
+ * @typedef {(
+ *   |'client_without_gateway'
+ *   |'gateway_missing_anthropic_upstream'
+ *   |'gateway_missing_openai_upstream'
+ *   |'sink_missing_encoder'
+ * )} V1DiagnosticKind
+ */
+
+/**
+ * @typedef {Object} V1Diagnostic
+ * @property {V1DiagnosticKind} kind
+ * @property {string} pointer
+ * @property {string} message
+ * @property {string[]} repair    Suggested repair commands.
+ */
+
+/**
  * @typedef {Object} PluginMetadata
  * @property {Partial<Record<CapabilityName, string>>} [provides]
  * @property {Partial<Record<CapabilityName, string>>} [requires]
@@ -483,6 +514,159 @@ function runPerPluginSectionValidators(config, registry, errors) {
       }
     }
   }
+}
+
+/* ---------- Phase 8 V1 diagnostics ---------- */
+
+const CLIENT_PLUGINS = /** @type {ReadonlySet<PluginName>} */ (
+  new Set(/** @type {PluginName[]} */ (['@hypaware/claude', '@hypaware/codex']))
+)
+const ENCODER_PLUGINS = /** @type {ReadonlySet<PluginName>} */ (
+  new Set(/** @type {PluginName[]} */ (['@hypaware/format-parquet', '@hypaware/format-jsonl']))
+)
+const LOCAL_FS_PLUGIN = /** @type {PluginName} */ ('@hypaware/local-fs')
+const AI_GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
+
+/**
+ * Walk a v2 config and report Phase 8 V1 diagnostic findings. The
+ * checks are advisory: they do not fail `hyp config validate` (so a
+ * partially configured walkthrough output still passes), but they
+ * give `hyp status` a concrete list of "what's wrong and how to fix
+ * it" lines.
+ *
+ * Each diagnostic carries one or more `repair` strings — concrete
+ * commands the operator can run. The status renderer surfaces them
+ * verbatim under each diagnostic line.
+ *
+ * @param {HypAwareV2Config | null | undefined} config
+ * @returns {V1Diagnostic[]}
+ */
+export function diagnoseV1Config(config) {
+  /** @type {V1Diagnostic[]} */
+  const out = []
+  if (!config) return out
+
+  const enabledByName = enabledPluginIndex(config)
+  const gatewayConfig = enabledByName.get(AI_GATEWAY_PLUGIN)
+
+  for (const clientName of CLIENT_PLUGINS) {
+    if (!enabledByName.has(clientName)) continue
+    if (gatewayConfig === undefined) {
+      out.push({
+        kind: 'client_without_gateway',
+        pointer: pluginPointer(config, clientName),
+        message:
+          `client plugin '${clientName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not — ` +
+          `attach commands will fail until the gateway is enabled.`,
+        repair: [
+          `hyp init --from-file <config.json>  # re-run picker to add the gateway`,
+          `hyp attach --client ${clientName === '@hypaware/claude' ? 'claude' : 'codex'}`,
+        ],
+      })
+    }
+  }
+
+  if (enabledByName.has(/** @type {PluginName} */ ('@hypaware/claude'))) {
+    if (gatewayConfig !== undefined && !gatewayHasUpstreamProvider(gatewayConfig, 'anthropic')) {
+      out.push({
+        kind: 'gateway_missing_anthropic_upstream',
+        pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
+        message:
+          `'@hypaware/claude' is enabled but the gateway has no Anthropic upstream — ` +
+          `Claude requests will have nowhere to forward.`,
+        repair: [
+          `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
+          `hyp attach --client claude`,
+        ],
+      })
+    }
+  }
+
+  if (enabledByName.has(/** @type {PluginName} */ ('@hypaware/codex'))) {
+    if (gatewayConfig !== undefined && !gatewayHasUpstreamProvider(gatewayConfig, 'openai')) {
+      out.push({
+        kind: 'gateway_missing_openai_upstream',
+        pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
+        message:
+          `'@hypaware/codex' is enabled but the gateway has no OpenAI upstream — ` +
+          `Codex requests will have nowhere to forward.`,
+        repair: [
+          `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
+          `hyp attach --client codex`,
+        ],
+      })
+    }
+  }
+
+  if (config.sinks) {
+    for (const [name, raw] of Object.entries(config.sinks)) {
+      const entry = /** @type {Record<string, unknown>} */ (raw)
+      if (!('writer' in entry) && !('destination' in entry)) continue
+      const writer = typeof entry.writer === 'string' ? /** @type {PluginName} */ (entry.writer) : null
+      const destination = typeof entry.destination === 'string' ? /** @type {PluginName} */ (entry.destination) : null
+      if (destination !== LOCAL_FS_PLUGIN) continue
+      if (writer !== null && enabledByName.has(writer) && ENCODER_PLUGINS.has(writer)) continue
+      out.push({
+        kind: 'sink_missing_encoder',
+        pointer: `/sinks/${name}`,
+        message:
+          `sink '${name}' targets '${LOCAL_FS_PLUGIN}' but no encoder plugin ` +
+          `(${[...ENCODER_PLUGINS].join(' or ')}) is enabled — local export will produce no files.`,
+        repair: [
+          `hyp init --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
+        ],
+      })
+    }
+  }
+
+  return out
+}
+
+/**
+ * @param {HypAwareV2Config} config
+ * @returns {Map<PluginName, import('../../../collectivus-plugin-kernel-types').JsonObject>}
+ */
+function enabledPluginIndex(config) {
+  /** @type {Map<PluginName, import('../../../collectivus-plugin-kernel-types').JsonObject>} */
+  const out = new Map()
+  for (const entry of config.plugins ?? []) {
+    if (entry.enabled === false) continue
+    out.set(/** @type {PluginName} */ (entry.name), entry.config ?? {})
+  }
+  return out
+}
+
+/**
+ * @param {HypAwareV2Config} config
+ * @param {PluginName} name
+ */
+function pluginPointer(config, name) {
+  const idx = (config.plugins ?? []).findIndex((p) => p.name === name)
+  if (idx < 0) return '/plugins'
+  return `/plugins/${idx}`
+}
+
+/**
+ * Inspect an ai-gateway config block for an upstream that targets a
+ * given provider. Matches by explicit `provider` field, by the
+ * `name` (`anthropic` / `openai`), or by `base_url` host. The gateway
+ * config shape is intentionally loose, so check all three.
+ *
+ * @param {import('../../../collectivus-plugin-kernel-types').JsonObject} gatewayConfig
+ * @param {'anthropic'|'openai'} provider
+ */
+function gatewayHasUpstreamProvider(gatewayConfig, provider) {
+  const upstreams = gatewayConfig?.upstreams
+  if (!Array.isArray(upstreams)) return false
+  const hostHint = provider === 'anthropic' ? 'anthropic.com' : 'openai.com'
+  for (const raw of upstreams) {
+    if (!raw || typeof raw !== 'object') continue
+    const u = /** @type {Record<string, unknown>} */ (raw)
+    if (typeof u.provider === 'string' && u.provider === provider) return true
+    if (typeof u.name === 'string' && u.name === provider) return true
+    if (typeof u.base_url === 'string' && u.base_url.includes(hostHint)) return true
+  }
+  return false
 }
 
 /* ---------- cron grammar ---------- */
