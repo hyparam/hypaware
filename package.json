@@ -30,6 +30,13 @@
     "@opentelemetry/sdk-metrics": "^2.7.1",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/sdk-trace-node": "^2.7.1",
-    "@opentelemetry/semantic-conventions": "^1.41.1"
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "hyparquet": "^1.25.8",
+    "hyparquet-compressors": "^1.1.1",
+    "icebird": "^0.7.0",
+    "squirreling": "^0.12.19"
+  },
+  "optionalDependencies": {
+    "hyparquet-writer": "^0.15.1"
   }
 }

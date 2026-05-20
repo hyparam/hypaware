@@ -17,6 +17,7 @@ import {
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
 import { loadManifests } from '../manifest.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistry} CommandRegistry */
@@ -73,7 +74,9 @@ export async function dispatch(argv, opts = {}) {
   const registry = opts.registry ?? createCommandRegistry()
   if (!opts.registry) registerCoreCommands(registry)
 
-  const kernel = opts.kernel ?? createKernelRuntime({ commandRegistry: registry })
+  const obsEnv = readObservabilityEnv(env)
+  const cacheRoot = path.join(obsEnv.stateDir, 'cache')
+  const kernel = opts.kernel ?? createKernelRuntime({ commandRegistry: registry, cacheRoot })
 
   await loadWorkspacePlugins({
     workspaceDir: opts.workspaceDir ?? path.resolve(process.cwd(), 'hypaware-core', 'plugins-workspace'),
@@ -115,6 +118,8 @@ export async function dispatch(argv, opts = {}) {
     config: { version: 2 },
     plugins: /** @type {ActivePlugin[]} */ ([]),
     capabilities: kernel.capabilities,
+    query: kernel.query,
+    storage: kernel.storage,
   }
 
   return context.with(ROOT_CONTEXT, () =>

@@ -1,8 +1,13 @@
 // @ts-check
 
+import os from 'node:os'
+import path from 'node:path'
+
 import { Attr, getLogger } from '../observability/index.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
 import { createCommandRegistry } from '../registry/commands.js'
+import { createQueryRegistry } from '../registry/datasets.js'
+import { createQueryStorageService } from '../cache/storage.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
@@ -19,6 +24,7 @@ import { createCommandRegistry } from '../registry/commands.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPaths} PluginPaths */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPermission} PluginPermission */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
+/** @typedef {import('../cache/storage.js').ExtendedQueryStorageService} ExtendedQueryStorageService */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SemverRange} SemverRange */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SemverVersion} SemverVersion */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SinkRegistry} SinkRegistry */
@@ -27,9 +33,9 @@ import { createCommandRegistry } from '../registry/commands.js'
 
 /**
  * The kernel-side aggregate that activation contexts facade over.
- * Registries beyond `capabilities` are stub placeholders in Phase 2;
- * later phases promote each one in place without touching the
- * activation surface.
+ * Registries beyond `capabilities`, `commands`, `query`, and
+ * `storage` are still Phase-2 placeholders; later phases promote
+ * each one in place without touching this surface.
  *
  * @typedef {Object} KernelRuntime
  * @property {ReturnType<typeof createCapabilityRegistry>} capabilities
@@ -38,6 +44,8 @@ import { createCommandRegistry } from '../registry/commands.js'
  * @property {SourceRegistry} sources
  * @property {SinkRegistry} sinks
  * @property {QueryRegistry} query
+ * @property {ExtendedQueryStorageService} storage
+ * @property {string} cacheRoot
  * @property {SkillRegistry} skills
  * @property {InitPresetRegistry} initPresets
  */
@@ -45,27 +53,48 @@ import { createCommandRegistry } from '../registry/commands.js'
 /**
  * Build the kernel-global registries shared across an activation pass.
  * Each kernel boot creates a fresh runtime so smoke flows are
- * independent. Capabilities and commands are wired to real
- * implementations; the remaining registries land in their respective
- * phases without touching this surface.
+ * independent. Capabilities, commands, query, and storage are wired
+ * to real implementations; the remaining registries land in their
+ * respective phases without touching this surface.
+ *
+ * `cacheRoot` is the on-disk location of the intrinsic Iceberg cache
+ * (the kernel-owned `<HYP_HOME>/hypaware/cache` by default; the
+ * dispatcher passes the resolved path).
  *
  * @param {{
  *   capabilityRegistry?: ReturnType<typeof createCapabilityRegistry>,
  *   commandRegistry?: ReturnType<typeof createCommandRegistry>,
+ *   queryRegistry?: QueryRegistry,
+ *   storage?: ExtendedQueryStorageService,
+ *   cacheRoot?: string,
  * }} [opts]
  * @returns {KernelRuntime}
  */
 export function createKernelRuntime(opts = {}) {
+  const cacheRoot = opts.cacheRoot ?? opts.storage?.cacheRoot ?? defaultCacheRoot()
+  const storage = opts.storage ?? createQueryStorageService({ cacheRoot })
   return {
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
     commands: opts.commandRegistry ?? createCommandRegistry(),
     configRegistry: createPhase2ConfigRegistry(),
     sources: createPhase2SourceRegistry(),
     sinks: createPhase2SinkRegistry(),
-    query: createPhase2QueryRegistry(),
+    query: opts.queryRegistry ?? createQueryRegistry(),
+    storage,
+    cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
     initPresets: createPhase2InitPresetRegistry(),
   }
+}
+
+/**
+ * Fallback cache root when the dispatcher hasn't computed one yet.
+ * Activation pathways that build their own runtime in tests can
+ * still override it through `opts.cacheRoot`.
+ */
+function defaultCacheRoot() {
+  const hypHome = process.env.HYP_HOME || path.join(os.homedir(), '.hyp')
+  return path.join(hypHome, 'hypaware', 'cache')
 }
 
 /**
@@ -102,6 +131,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     sources: runtime.sources,
     sinks: runtime.sinks,
     query: runtime.query,
+    storage: runtime.storage,
     skills: runtime.skills,
     initPresets: runtime.initPresets,
     /**
@@ -226,15 +256,6 @@ function createPhase2SinkRegistry() {
     register() {},
     get() { return undefined },
     list() { return [] },
-  }
-}
-
-/** @returns {QueryRegistry} */
-function createPhase2QueryRegistry() {
-  return {
-    registerDataset() {},
-    getDataset() { return undefined },
-    listDatasets() { return [] },
   }
 }
 

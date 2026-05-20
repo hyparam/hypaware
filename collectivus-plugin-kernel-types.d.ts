@@ -241,6 +241,14 @@ export interface PluginActivationContext {
   sources: SourceRegistry
   sinks: SinkRegistry
   query: QueryRegistry
+  /**
+   * Intrinsic storage handle for the kernel-managed query cache.
+   * Plugins reach the local Iceberg-backed cache through this — they
+   * never construct paths or open files themselves. The kernel owns
+   * `cacheDir`; plugins ask the storage for a `tablePath` and call
+   * `appendRows` / `readRows`.
+   */
+  storage: QueryStorageService
   skills: SkillRegistry
   initPresets: InitPresetRegistry
   requireCapability<T = unknown>(name: CapabilityName, range?: SemverRange): T
@@ -427,6 +435,10 @@ export interface CommandRunContext {
   config: HypAwareV2Config
   plugins: ActivePlugin[]
   capabilities: CapabilityRegistry
+  /** Dataset registry (kernel-owned). Populated by the dispatcher. */
+  query: QueryRegistry
+  /** Intrinsic query cache storage. Populated by the dispatcher. */
+  storage: QueryStorageService
 }
 
 // =============================================================================
@@ -691,8 +703,15 @@ export interface QueryScanResult {
  * Intrinsic storage service exposed by core to plugins that materialize
  * rows into the local Iceberg-backed cache. Plugins do not configure
  * storage — the cache root is HypAware-managed.
+ *
+ * `cacheRoot` and `cacheTablePath` let plugins discover the layout
+ * convention without baking the `datasets/<name>` segment into
+ * dataset code; the kernel is free to evolve the on-disk layout as
+ * long as those helpers keep their contract.
  */
 export interface QueryStorageService {
+  cacheRoot: string
+  cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string

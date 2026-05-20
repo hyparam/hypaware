@@ -1,10 +1,15 @@
 // @ts-check
 
 import { Attr, withSpan } from '../observability/index.js'
+import { renderResult } from '../query/format.js'
+import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { executeQuerySql } from '../query/sql.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
 /** @typedef {ReturnType<typeof import('../registry/commands.js').createCommandRegistry>} CommandRegistryExtended */
+/** @typedef {import('../query/sql.js').RefreshMode} RefreshMode */
+/** @typedef {import('../query/format.js').QueryFormat} QueryFormat */
 
 /**
  * Register the V1 core command set onto the supplied registry. These
@@ -153,12 +158,14 @@ function buildCoreCommands() {
  * @returns {Promise<number>}
  */
 async function runStatus(_argv, ctx) {
+  const datasetCount = ctx.query.listDatasets().length
   ctx.stdout.write('hypaware (kernel)\n')
   ctx.stdout.write(`  plugins:       ${ctx.plugins.length}\n`)
   ctx.stdout.write(`  capabilities:  ${ctx.capabilities.list().length}\n`)
   ctx.stdout.write(`  sources:       0  (Phase 5)\n`)
   ctx.stdout.write(`  sinks:         0  (Phase 5)\n`)
-  ctx.stdout.write(`  cache:         intrinsic local (Phase 4)\n`)
+  ctx.stdout.write(`  cache:         ${ctx.storage.cacheRoot}\n`)
+  ctx.stdout.write(`  datasets:      ${datasetCount}\n`)
   return 0
 }
 
@@ -198,8 +205,13 @@ async function runQuerySchema(argv, ctx) {
       status: 'ok',
     },
     async () => {
-      ctx.stdout.write(`dataset: ${dataset}\n`)
-      ctx.stdout.write('  (dataset registry lands in Phase 4 — no schema registered yet)\n')
+      const schema = schemaForDataset(ctx.query, dataset)
+      if (!schema) {
+        ctx.stdout.write(`dataset: ${dataset}\n`)
+        ctx.stdout.write('  (no dataset registered — install a plugin that contributes it)\n')
+        return 0
+      }
+      ctx.stdout.write(renderSchema(dataset, schema))
       return 0
     },
     { component: 'query' }
@@ -211,8 +223,12 @@ async function runQuerySchema(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runQueryStatus(_argv, ctx) {
-  ctx.stdout.write('cache:    not yet implemented (Phase 4)\n')
-  ctx.stdout.write('datasets: 0 registered\n')
+  const datasets = ctx.query.listDatasets()
+  ctx.stdout.write(`cache:    ${ctx.storage.cacheRoot}\n`)
+  ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
+  for (const dataset of datasets) {
+    ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  }
   return 0
 }
 
@@ -221,21 +237,108 @@ async function runQueryStatus(_argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runQuerySql(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]\n')
+  const parsed = parseQuerySqlArgv(argv)
+  if (parsed.error) {
+    ctx.stderr.write(parsed.error + '\n')
     return 2
   }
-  ctx.stdout.write('(query execution lands in Phase 4)\n')
+  try {
+    const result = await executeQuerySql({
+      query: parsed.sql,
+      registry: ctx.query,
+      storage: ctx.storage,
+      refresh: parsed.refresh,
+      config: ctx.config,
+    })
+    ctx.stdout.write(renderResult({ columns: result.columns, rows: result.rows }, parsed.format))
+    return 0
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp query sql: ${message}\n`)
+    return 1
+  }
+}
+
+/**
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runQueryRefresh(argv, ctx) {
+  const target = argv[0]
+  const datasets = ctx.query.listDatasets()
+  const filtered = target ? datasets.filter((d) => d.name === target) : datasets
+  if (target && filtered.length === 0) {
+    ctx.stderr.write(`hyp query refresh: unknown dataset '${target}'\n`)
+    return 1
+  }
+  let total = 0
+  for (const dataset of filtered) {
+    if (typeof dataset.refreshPartition !== 'function') continue
+    const partitions = await dataset.discoverPartitions({
+      config: ctx.config,
+      scope: { limit: 1_000_000 },
+      cacheDir: ctx.storage.cacheRoot,
+    })
+    for (const partition of partitions) {
+      const result = await dataset.refreshPartition(partition, {
+        cacheDir: ctx.storage.cacheRoot,
+        force: true,
+        log: {
+          debug() {},
+          info() {},
+          warn() {},
+          error() {},
+        },
+        storage: ctx.storage,
+      })
+      if (result.status === 'written') total += result.rows
+    }
+  }
+  ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s)\n`)
   return 0
 }
 
 /**
- * @param {string[]} _argv
- * @param {CommandRunContext} ctx
+ * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
+ * `--refresh` / `--format` flags in any order. Returns `{ sql, refresh,
+ * format }` on success or `{ error }` on failure.
+ *
+ * @param {string[]} argv
  */
-async function runQueryRefresh(_argv, ctx) {
-  ctx.stdout.write('(query refresh lands in Phase 4)\n')
-  return 0
+function parseQuerySqlArgv(argv) {
+  /** @type {string[]} */
+  const positional = []
+  /** @type {RefreshMode} */
+  let refresh = 'auto'
+  /** @type {QueryFormat} */
+  let format = 'table'
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--refresh') {
+      const value = argv[i + 1]
+      if (value !== 'never' && value !== 'auto' && value !== 'always') {
+        return { error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
+      }
+      refresh = value
+      i += 1
+    } else if (token === '--format') {
+      const value = argv[i + 1]
+      if (value !== 'table' && value !== 'json' && value !== 'jsonl' && value !== 'markdown') {
+        return { error: `hyp query sql: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
+      }
+      format = value
+      i += 1
+    } else {
+      positional.push(token)
+    }
+  }
+
+  if (positional.length === 0) {
+    return { error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]' }
+  }
+  const sql = positional.join(' ')
+  return { sql, refresh, format }
 }
 
 /* ---------- collect ---------- */
