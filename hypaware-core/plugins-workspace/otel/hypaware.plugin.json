@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/otel",
+  "version": "1.0.0",
+  "description": "OTLP HTTP receiver source for HypAware. Registers logs/traces/metrics datasets and writes flattened OTLP rows straight into the kernel cache.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": ["network", "read_state", "write_state"],
+  "contributes": {
+    "sources": [{ "name": "otlp" }],
+    "datasets": [
+      { "name": "logs",    "source": "otlp" },
+      { "name": "traces",  "source": "otlp" },
+      { "name": "metrics", "source": "otlp" }
+    ],
+    "config_sections": [{ "section": "otel" }]
+  }
+}

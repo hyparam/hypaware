@@ -1,0 +1,39 @@
+// @ts-check
+
+import { otelDatasetRegistration, PLUGIN_NAME } from './datasets.js'
+import { startOtelSource } from './source.js'
+
+/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
+/** @typedef {import('../../../../src/core/registry/sources.js').ExtendedSourceRegistry} ExtendedSourceRegistry */
+
+/**
+ * Activate `@hypaware/otel`.
+ *
+ * Registers:
+ *  - source `otlp` (configSection: `otel`) — owns the HTTP listener
+ *  - dataset `logs`, dataset `traces`, dataset `metrics` — fronted
+ *    by the kernel-managed Iceberg cache
+ *
+ * Activation auto-starts the source so the listener is ready as soon
+ * as the kernel finishes booting; the smoke flow boots a temp install
+ * with `listen_port: 0` and reads the bound port out of the
+ * `source.start` span (or via `kernel.sources.status('otlp')`).
+ *
+ * @param {PluginActivationContext} ctx
+ */
+export async function activate(ctx) {
+  ctx.sources.register({
+    name: 'otlp',
+    plugin: PLUGIN_NAME,
+    summary: 'OTLP HTTP receiver (logs, traces, metrics)',
+    configSection: 'otel',
+    start: startOtelSource,
+  })
+
+  ctx.query.registerDataset(otelDatasetRegistration('logs'))
+  ctx.query.registerDataset(otelDatasetRegistration('traces'))
+  ctx.query.registerDataset(otelDatasetRegistration('metrics'))
+
+  const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
+  await sources.start('otlp', ctx)
+}
