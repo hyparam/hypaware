@@ -548,6 +548,19 @@ export interface SinkEncoder {
 export interface SinkEncodeContext {
   log: PluginLogger
   tempDir: string
+  /**
+   * Column schema for the partition's dataset. Provided by the blob
+   * destination so encoders that need typed coercion (Parquet, future
+   * Iceberg) do not have to reach back into the query registry. JSONL-
+   * style encoders may ignore it.
+   */
+  columns?: ColumnSpec[]
+  /**
+   * Async stream of rows materialized from the partition's cache table.
+   * Encoders consume rows once; re-iteration is not supported. The
+   * destination opens this stream from the kernel storage service.
+   */
+  rows?: AsyncIterable<Record<string, unknown>>
 }
 
 export interface SinkEncodedBlob {

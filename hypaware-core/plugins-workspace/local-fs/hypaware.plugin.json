@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/local-fs",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "entrypoint": "./src/index.js",
+  "description": "Local filesystem blob destination. Pairs with @hypaware/format-parquet (default, queryable) or @hypaware/format-jsonl (archive) to land cache partitions on disk.",
+  "provides": {
+    "capabilities": {
+      "hypaware.blob-store": "1.0.0"
+    }
+  },
+  "contributes": {
+    "sinks": [
+      {
+        "name": "local-fs",
+        "supports": ["queryable"]
+      }
+    ]
+  }
+}

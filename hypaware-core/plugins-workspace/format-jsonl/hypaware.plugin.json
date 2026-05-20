@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/format-jsonl",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "entrypoint": "./src/index.js",
+  "description": "Gzipped JSONL encoder for HypAware blob sinks. Useful for grep-friendly archives. Not queryable; the local-fs+jsonl pairing intentionally drops the queryable support tag.",
+  "provides": {
+    "capabilities": {
+      "hypaware.encoder": "1.0.0"
+    }
+  },
+  "requires": {
+    "capabilities": {
+      "hypaware.blob-store": "^1.0.0"
+    }
+  }
+}

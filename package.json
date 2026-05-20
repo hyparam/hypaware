@@ -10,7 +10,8 @@
   "exports": {
     ".": "./src/core/index.js",
     "./core": "./src/core/index.js",
-    "./core/observability": "./src/core/observability/index.js"
+    "./core/observability": "./src/core/observability/index.js",
+    "./core/sinks": "./src/core/sinks/index.js"
   },
   "imports": {
     "#core/observability": "./src/core/observability/index.js"

@@ -162,6 +162,19 @@ export function createSinkRegistry() {
       throw new Error(`SinkRegistry.instantiate: contribution required for '${instanceName}'`)
     }
     const supports = resolveSupports(contribution, args.kind === 'blob' ? args.encoder : undefined)
+    // Emit `sink.resolved` ahead of the destination's `create()` so the
+    // resolved writer+destination+supports tuple lands in logs even when
+    // `create` is slow or fails. Status code (`hyp_status`) and `hyp_sink_*`
+    // attributes mirror the post-create `sink.register` log so consumers
+    // can correlate the two by instance name.
+    log.info('sink.resolved', {
+      [Attr.PLUGIN]: contribution.plugin,
+      [Attr.SINK_INSTANCE]: instanceName,
+      hyp_sink_kind: args.kind,
+      hyp_sink_writer: args.kind === 'blob' ? args.writerPlugin : '',
+      hyp_sink_destination: contribution.plugin,
+      hyp_sink_supports: supports.join(','),
+    })
 
     return withSpan(
       'sink.register',

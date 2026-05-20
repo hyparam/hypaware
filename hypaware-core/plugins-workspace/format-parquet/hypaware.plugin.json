@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/format-parquet",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "entrypoint": "./src/index.js",
+  "description": "Parquet encoder for HypAware blob sinks. Pairs with @hypaware/local-fs (and future @hypaware/s3) to write queryable Parquet files from cache partitions.",
+  "provides": {
+    "capabilities": {
+      "hypaware.encoder": "1.0.0"
+    }
+  },
+  "requires": {
+    "capabilities": {
+      "hypaware.blob-store": "^1.0.0"
+    }
+  }
+}

@@ -2,6 +2,7 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 
+/** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncodeContext} SinkEncodeContext */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncodedBlob} SinkEncodedBlob */
@@ -18,6 +19,12 @@ import { Attr, withSpan } from '../observability/index.js'
  * declared `bytesWritten` (preferred) or the in-memory `bytes` byteLength
  * is available, so plugins that stream chunks via `AsyncIterable` only
  * need to set `bytesWritten` once after the stream drains.
+ *
+ * `columns` and `rows`, when supplied, are forwarded onto the encoder's
+ * `SinkEncodeContext`. The destination passes them after reading the
+ * partition's schema (from `ctx.query`) and streaming rows (from
+ * `ctx.storage.readRows`); encoders that don't need typed schema or row
+ * access (e.g. trivial fixtures) leave them undefined.
  *
  * @param {SinkEncoder} encoder
  * @param {QueryPartition} partition
@@ -41,6 +48,8 @@ export async function encodePartition(encoder, partition, ctx) {
       const blob = await encoder.encodePartition(partition, {
         log: ctx.log,
         tempDir: ctx.tempDir,
+        columns: ctx.columns,
+        rows: ctx.rows,
       })
       const rowCount = blob.rowCount ?? 0
       const bytesWritten = blob.bytesWritten ?? bytesLengthOf(blob.bytes)
