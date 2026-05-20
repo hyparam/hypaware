@@ -75,11 +75,17 @@ function buildKernelInstruments(meter) {
     rowsWritten: meter.createCounter('hyp_rows_written', {
       description: 'Rows materialized into the cache, by dataset/plugin',
     }),
+    sinksRegistered: meter.createCounter('hyp_sinks_registered', {
+      description: 'Sink instances registered with the kernel, by sink_instance/sink_kind',
+    }),
     sinkExportsTotal: meter.createCounter('hyp_sink_exports_total', {
       description: 'Sink export attempts, by sink_instance/status',
     }),
     sinkExportBytes: meter.createCounter('hyp_sink_export_bytes', {
       description: 'Bytes written by sink exports, by sink_instance',
+    }),
+    sinkExportFailuresTotal: meter.createCounter('hyp_sink_export_failures_total', {
+      description: 'Sink export batches that landed in the outbox, by sink_instance',
     }),
     commandRunsTotal: meter.createCounter('hyp_command_runs_total', {
       description: 'Command invocations, by command/exit_code',

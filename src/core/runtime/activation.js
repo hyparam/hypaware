@@ -7,6 +7,8 @@ import { Attr, getLogger } from '../observability/index.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createQueryRegistry } from '../registry/datasets.js'
+import { createSinkRegistry } from '../registry/sinks.js'
+import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
@@ -33,16 +35,16 @@ import { createQueryStorageService } from '../cache/storage.js'
 
 /**
  * The kernel-side aggregate that activation contexts facade over.
- * Registries beyond `capabilities`, `commands`, `query`, and
- * `storage` are still Phase-2 placeholders; later phases promote
- * each one in place without touching this surface.
+ * Registries beyond `capabilities`, `commands`, `sources`, `sinks`,
+ * `query`, and `storage` are still Phase-2 placeholders; later phases
+ * promote each one in place without touching this surface.
  *
  * @typedef {Object} KernelRuntime
  * @property {ReturnType<typeof createCapabilityRegistry>} capabilities
  * @property {ReturnType<typeof createCommandRegistry>} commands
  * @property {ConfigRegistry} configRegistry
- * @property {SourceRegistry} sources
- * @property {SinkRegistry} sinks
+ * @property {ReturnType<typeof createSourceRegistry>} sources
+ * @property {ReturnType<typeof createSinkRegistry>} sinks
  * @property {QueryRegistry} query
  * @property {ExtendedQueryStorageService} storage
  * @property {string} cacheRoot
@@ -53,9 +55,9 @@ import { createQueryStorageService } from '../cache/storage.js'
 /**
  * Build the kernel-global registries shared across an activation pass.
  * Each kernel boot creates a fresh runtime so smoke flows are
- * independent. Capabilities, commands, query, and storage are wired
- * to real implementations; the remaining registries land in their
- * respective phases without touching this surface.
+ * independent. Capabilities, commands, sources, sinks, query, and
+ * storage are wired to real implementations; the remaining registries
+ * land in their respective phases without touching this surface.
  *
  * `cacheRoot` is the on-disk location of the intrinsic Iceberg cache
  * (the kernel-owned `<HYP_HOME>/hypaware/cache` by default; the
@@ -65,6 +67,8 @@ import { createQueryStorageService } from '../cache/storage.js'
  *   capabilityRegistry?: ReturnType<typeof createCapabilityRegistry>,
  *   commandRegistry?: ReturnType<typeof createCommandRegistry>,
  *   queryRegistry?: QueryRegistry,
+ *   sourceRegistry?: ReturnType<typeof createSourceRegistry>,
+ *   sinkRegistry?: ReturnType<typeof createSinkRegistry>,
  *   storage?: ExtendedQueryStorageService,
  *   cacheRoot?: string,
  * }} [opts]
@@ -77,8 +81,8 @@ export function createKernelRuntime(opts = {}) {
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
     commands: opts.commandRegistry ?? createCommandRegistry(),
     configRegistry: createPhase2ConfigRegistry(),
-    sources: createPhase2SourceRegistry(),
-    sinks: createPhase2SinkRegistry(),
+    sources: opts.sourceRegistry ?? createSourceRegistry(),
+    sinks: opts.sinkRegistry ?? createSinkRegistry(),
     query: opts.queryRegistry ?? createQueryRegistry(),
     storage,
     cacheRoot: storage.cacheRoot,
@@ -238,24 +242,6 @@ function createPhase2ConfigRegistry() {
   return {
     registerSection() {},
     validatePluginConfig() { return { ok: true } },
-  }
-}
-
-/** @returns {SourceRegistry} */
-function createPhase2SourceRegistry() {
-  return {
-    register() {},
-    get() { return undefined },
-    list() { return [] },
-  }
-}
-
-/** @returns {SinkRegistry} */
-function createPhase2SinkRegistry() {
-  return {
-    register() {},
-    get() { return undefined },
-    list() { return [] },
   }
 }
 
