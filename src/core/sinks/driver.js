@@ -27,6 +27,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  * @property {Date} [now]
  * @property {string} [sinkInstance]            Only fire one sink (test/manual use).
  * @property {boolean} [force]                  Ignore cron-due check and fire every sink (test use).
+ * @property {'daemon'|'manual'} [source]       Tag the tick metric so daemon vs. manual ticks split cleanly. Default `manual`.
  */
 
 /**
@@ -64,6 +65,8 @@ export function createSinkDriver(opts) {
    */
   async function tick(tickOpts = {}) {
     const now = tickOpts.now ?? new Date()
+    const source = tickOpts.source ?? 'manual'
+    instruments.sinkTicksTotal.add(1, { source })
     const handles = sinkRegistry.listHandles()
     /** @type {TickReport['sinks']} */
     const sinks = []

@@ -87,6 +87,13 @@ function buildKernelInstruments(meter) {
     sinkExportFailuresTotal: meter.createCounter('hyp_sink_export_failures_total', {
       description: 'Sink export batches that landed in the outbox, by sink_instance',
     }),
+    sinkTicksTotal: meter.createCounter('hyp_sink_ticks_total', {
+      description: 'Sink driver tick invocations, by source (daemon/manual)',
+    }),
+    daemonUptimeMs: meter.createGauge('hyp_daemon_uptime_ms', {
+      description: 'Milliseconds since the running daemon reached `healthy` (0 when not running)',
+      unit: 'ms',
+    }),
     commandRunsTotal: meter.createCounter('hyp_command_runs_total', {
       description: 'Command invocations, by command/exit_code',
     }),

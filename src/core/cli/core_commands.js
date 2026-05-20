@@ -181,6 +181,36 @@ function buildCoreCommands() {
       run: runSkillsInstall,
     },
     {
+      name: 'daemon',
+      summary: 'Manage the HypAware daemon (subcommands: run, status, stop, restart)',
+      usage: 'hyp daemon <subcommand> [args...]',
+      run: runDaemonHelp,
+    },
+    {
+      name: 'daemon run',
+      summary: 'Run the HypAware daemon in the foreground',
+      usage: 'hyp daemon run --foreground',
+      run: runDaemonRun,
+    },
+    {
+      name: 'daemon status',
+      summary: 'Print the running daemon’s health snapshot',
+      usage: 'hyp daemon status [--json]',
+      run: runDaemonStatus,
+    },
+    {
+      name: 'daemon stop',
+      summary: 'Signal the running daemon to shut down',
+      usage: 'hyp daemon stop',
+      run: runDaemonStop,
+    },
+    {
+      name: 'daemon restart',
+      summary: 'Stop the daemon (and direct the operator to relaunch)',
+      usage: 'hyp daemon restart',
+      run: runDaemonRestart,
+    },
+    {
       name: 'smoke',
       summary: 'Run a smoke flow under a fresh tmp HYP_HOME (internal)',
       usage: 'hyp smoke <flow-name>',
@@ -888,6 +918,172 @@ function parseConfigValidateArgv(argv, env) {
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
   const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
   return { configPath: defaultConfigPath(hypHome) }
+}
+
+/* ---------- daemon ---------- */
+
+/**
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonHelp(argv, ctx) {
+  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
+    ctx.stdout.write('usage: hyp daemon <subcommand> [args...]\n')
+    ctx.stdout.write('  subcommands: run, status, stop, restart\n')
+    return 0
+  }
+  ctx.stderr.write(`hyp daemon: unknown subcommand '${argv[0]}'\n`)
+  ctx.stderr.write('  expected one of: run, status, stop, restart\n')
+  return 2
+}
+
+/**
+ * `hyp daemon run --foreground` — boot the kernel as a daemon and
+ * tend it in the current process until SIGTERM/SIGINT. Phase 3
+ * intentionally only supports `--foreground`; the detached run path
+ * lands with the Phase 4 launchd/systemd installers, so a no-flag
+ * call surfaces a deterministic error instead of attempting to
+ * background ourselves and silently failing.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonRun(argv, ctx) {
+  const parsed = parseDaemonRunArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`hyp daemon run: ${parsed.error}\n`)
+    return 2
+  }
+  if (!parsed.foreground) {
+    ctx.stderr.write(
+      'hyp daemon run: --foreground is required in Phase 3 (detached run lands with the Phase 4 installer)\n'
+    )
+    return 2
+  }
+  const { runDaemon } = await import('../daemon/runtime.js')
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || '', '.hyp')
+  try {
+    const handle = await runDaemon({
+      hypHome,
+      env: ctx.env,
+      runId: ctx.env.DEV_RUN_ID,
+    })
+    ctx.stdout.write(`daemon: running (pid=${process.pid})\n`)
+    const exitCode = await handle.done
+    ctx.stdout.write('daemon: stopped\n')
+    return exitCode
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon run: ${message}\n`)
+    return 1
+  }
+}
+
+/**
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonStatus(argv, ctx) {
+  const json = argv.includes('--json')
+  const { readStatusFile } = await import('../daemon/status.js')
+  const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const status = readStatusFile(stateDir)
+  const pidEntry = readPidFile(stateDir)
+  const running = !!(pidEntry && processIsAlive(pidEntry.pid))
+  if (!status) {
+    if (json) {
+      ctx.stdout.write(JSON.stringify({ running: false, state: 'unknown' }, null, 2) + '\n')
+      return 0
+    }
+    ctx.stdout.write('daemon: not started (no status file)\n')
+    return 0
+  }
+  const liveUptimeMs = running && status.healthyAt
+    ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
+    : status.uptimeMs
+  if (json) {
+    const payload = { running, ...status, uptimeMs: liveUptimeMs }
+    ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
+    return 0
+  }
+  ctx.stdout.write(`daemon: ${status.state}${running ? '' : ' (no live process)'}\n`)
+  ctx.stdout.write(`  pid:        ${status.pid}\n`)
+  ctx.stdout.write(`  startedAt:  ${status.startedAt}\n`)
+  if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${status.healthyAt}\n`)
+  if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${status.stoppedAt}\n`)
+  ctx.stdout.write(`  uptime_ms:  ${liveUptimeMs}\n`)
+  ctx.stdout.write('  sources:\n')
+  if (status.sources.length === 0) {
+    ctx.stdout.write('    (none)\n')
+  } else {
+    for (const source of status.sources) {
+      ctx.stdout.write(`    - ${source.name} (${source.plugin}): ${source.state}${source.error ? ' — ' + source.error : ''}\n`)
+    }
+  }
+  ctx.stdout.write('  sinks:\n')
+  if (status.sinks.length === 0) {
+    ctx.stdout.write('    (none)\n')
+  } else {
+    for (const sink of status.sinks) {
+      ctx.stdout.write(`    - ${sink.instance} (${sink.plugin}, ${sink.kind})\n`)
+    }
+  }
+  return 0
+}
+
+/**
+ * @param {string[]} _argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonStop(_argv, ctx) {
+  const { requestDaemonStop } = await import('../daemon/runtime.js')
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const outcome = await requestDaemonStop({ stateRoot: stateDir })
+  if (outcome === 'not_running') {
+    ctx.stdout.write('daemon: not running\n')
+    return 0
+  }
+  if (outcome === 'timed_out') {
+    ctx.stderr.write('daemon: stop signal sent but daemon did not exit within 5s\n')
+    return 1
+  }
+  ctx.stdout.write('daemon: stopped\n')
+  return 0
+}
+
+/**
+ * @param {string[]} _argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonRestart(_argv, ctx) {
+  const code = await runDaemonStop([], ctx)
+  if (code !== 0) return code
+  ctx.stdout.write('daemon restart: stopped. Phase 4 installers will relaunch automatically;\n')
+  ctx.stdout.write('  in Phase 3 foreground mode, re-run `hyp daemon run --foreground` to bring it back up.\n')
+  return 0
+}
+
+/**
+ * @param {string[]} argv
+ */
+function parseDaemonRunArgs(argv) {
+  /** @type {{ foreground: boolean, error?: string }} */
+  const r = { foreground: false }
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--foreground' || token === '-f') {
+      r.foreground = true
+      continue
+    }
+    if (token === '--help' || token === '-h') {
+      r.error = 'usage: hyp daemon run --foreground'
+      return r
+    }
+    r.error = `unexpected argument '${token}'`
+    return r
+  }
+  return r
 }
 
 /* ---------- smoke ---------- */

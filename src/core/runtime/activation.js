@@ -40,6 +40,11 @@ import { createQueryStorageService } from '../cache/storage.js'
  * `query`, and `storage` are still Phase-2 placeholders; later phases
  * promote each one in place without touching this surface.
  *
+ * `activationContexts` is the per-plugin `PluginActivationContext`
+ * map populated by `createActivationContext`. The daemon reads from
+ * it to drive `sources.start(name, ctx)` and `sources.reload(name,
+ * ctx)` for plugins that don't auto-start in their `activate()`.
+ *
  * @typedef {Object} KernelRuntime
  * @property {ReturnType<typeof createCapabilityRegistry>} capabilities
  * @property {ReturnType<typeof createCommandRegistry>} commands
@@ -51,6 +56,7 @@ import { createQueryStorageService } from '../cache/storage.js'
  * @property {string} cacheRoot
  * @property {SkillRegistry} skills
  * @property {InitPresetRegistry} initPresets
+ * @property {Map<PluginName, PluginActivationContext>} activationContexts
  */
 
 /**
@@ -89,6 +95,7 @@ export function createKernelRuntime(opts = {}) {
     cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
     initPresets: createInitPresetRegistry(),
+    activationContexts: new Map(),
   }
 }
 
@@ -158,6 +165,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
       runtime.capabilities.provide(pluginName, name, version, value)
     },
   }
+  runtime.activationContexts.set(pluginName, ctx)
   return ctx
 }
 
