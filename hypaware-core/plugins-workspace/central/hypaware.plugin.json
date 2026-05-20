@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/central",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "entrypoint": "./index.js",
+  "description": "Request sink that forwards cache partitions to a central HypAware server.",
+  "contributes": {
+    "sinks": [
+      { "name": "forward", "supports": [] }
+    ]
+  }
+}
