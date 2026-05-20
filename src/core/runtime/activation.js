@@ -2,6 +2,7 @@
 
 import { Attr, getLogger } from '../observability/index.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
+import { createCommandRegistry } from '../registry/commands.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
@@ -32,7 +33,7 @@ import { createCapabilityRegistry } from '../registry/capabilities.js'
  *
  * @typedef {Object} KernelRuntime
  * @property {ReturnType<typeof createCapabilityRegistry>} capabilities
- * @property {CommandRegistry} commands
+ * @property {ReturnType<typeof createCommandRegistry>} commands
  * @property {ConfigRegistry} configRegistry
  * @property {SourceRegistry} sources
  * @property {SinkRegistry} sinks
@@ -44,17 +45,20 @@ import { createCapabilityRegistry } from '../registry/capabilities.js'
 /**
  * Build the kernel-global registries shared across an activation pass.
  * Each kernel boot creates a fresh runtime so smoke flows are
- * independent. The capability registry is the only one wired through
- * to a real implementation in Phase 2; the rest are minimal stubs that
- * conform to the contract surface.
+ * independent. Capabilities and commands are wired to real
+ * implementations; the remaining registries land in their respective
+ * phases without touching this surface.
  *
- * @param {{ capabilityRegistry?: ReturnType<typeof createCapabilityRegistry> }} [opts]
+ * @param {{
+ *   capabilityRegistry?: ReturnType<typeof createCapabilityRegistry>,
+ *   commandRegistry?: ReturnType<typeof createCommandRegistry>,
+ * }} [opts]
  * @returns {KernelRuntime}
  */
 export function createKernelRuntime(opts = {}) {
   return {
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
-    commands: createPhase2CommandRegistry(),
+    commands: opts.commandRegistry ?? createCommandRegistry(),
     configRegistry: createPhase2ConfigRegistry(),
     sources: createPhase2SourceRegistry(),
     sinks: createPhase2SinkRegistry(),
@@ -198,15 +202,6 @@ function createCapabilitiesFacade(pluginName, registry) {
 /* Each registry below is a no-op shell that conforms to the kernel
  * type contract. Later phases swap in real implementations without
  * touching the activation surface. */
-
-/** @returns {CommandRegistry} */
-function createPhase2CommandRegistry() {
-  return {
-    register() {},
-    get() { return undefined },
-    list() { return [] },
-  }
-}
 
 /** @returns {ConfigRegistry} */
 function createPhase2ConfigRegistry() {
