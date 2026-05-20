@@ -1,10 +1,12 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { createClaudeTranscriptEnricher } from './enricher.js'
 
@@ -12,6 +14,8 @@ import { createClaudeTranscriptEnricher } from './enricher.js'
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientAttachContext} AiGatewayClientAttachContext */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientDetachContext} AiGatewayClientDetachContext */
+/** @typedef {import('../../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
+/** @typedef {import('../../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
 
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
@@ -140,6 +144,102 @@ export async function activate(ctx) {
       sourceDir: path.join(skillsRoot, skillName),
     })
   }
+
+  ctx.initPresets.register({
+    name: 'claude-and-otel-local',
+    plugin: PLUGIN_NAME,
+    summary:
+      'Capture Claude Code + OTLP locally, export to Parquet under HYP_HOME/exports',
+    run: runClaudeAndOtelLocalPreset,
+  })
+}
+
+/**
+ * `hyp init claude-and-otel-local`
+ *
+ * Writes a v2 config that picks: `@hypaware/ai-gateway`,
+ * `@hypaware/otel`, `@hypaware/local-fs`+`@hypaware/format-parquet`,
+ * and `@hypaware/claude`. This is the Phase 9 V1 milestone preset and
+ * exercises every first-party shipping plugin end-to-end.
+ *
+ * The preset never overwrites an existing config file silently —
+ * passing `--force` opts into overwrite; otherwise the existing file
+ * stays and the command returns 1.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runClaudeAndOtelLocalPreset(argv, ctx) {
+  const force = argv.includes('--force')
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || '', '.hyp')
+  const configPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(hypHome)
+
+  if (!force) {
+    try {
+      await fs.access(configPath)
+      ctx.stderr.write(
+        `hyp init: config already exists at ${configPath} (pass --force to overwrite)\n`
+      )
+      return 1
+    } catch (err) {
+      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+      if (code !== 'ENOENT') throw err
+    }
+  }
+
+  /** @type {HypAwareV2Config} */
+  const config = {
+    version: 2,
+    plugins: [
+      {
+        name: '@hypaware/ai-gateway',
+        config: {
+          listen: '127.0.0.1:8787',
+          upstreams: [
+            {
+              name: 'anthropic',
+              base_url: 'https://api.anthropic.com',
+              path_prefix: '/',
+            },
+          ],
+        },
+      },
+      {
+        name: '@hypaware/otel',
+        config: { listen_host: '127.0.0.1', listen_port: 4318 },
+      },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      {
+        name: '@hypaware/claude',
+        config: { proxy: '@hypaware/ai-gateway' },
+      },
+    ],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: {
+          dir: path.join(hypHome, 'exports'),
+          schedule: '*/5 * * * *',
+        },
+      },
+    },
+    query: {
+      cache: {
+        retention: { default_days: 30 },
+      },
+    },
+  }
+
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  ctx.stdout.write(`✓ Wrote ${configPath}\n`)
+  ctx.stdout.write('  plugins: @hypaware/ai-gateway, @hypaware/otel, @hypaware/local-fs, @hypaware/format-parquet, @hypaware/claude\n')
+  ctx.stdout.write('  next: hyp attach --client claude\n')
+  return 0
 }
 
 /**

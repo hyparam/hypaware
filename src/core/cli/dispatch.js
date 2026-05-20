@@ -82,7 +82,22 @@ export async function dispatch(argv, opts = {}) {
     workspaceDir: opts.workspaceDir ?? path.resolve(process.cwd(), 'hypaware-core', 'plugins-workspace'),
   })
 
-  if (argv.length === 0 || HELP_FLAGS.has(argv[0])) {
+  if (argv.length === 0) {
+    if (isInteractiveStream(stdout)) {
+      // Phase 9: `hyp` with no args on a TTY launches the interactive
+      // walkthrough. The dispatcher reroutes to the `init` command
+      // (with no preset) so the same code path covers `hyp` and
+      // `hyp init` on a TTY.
+      return runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
+    }
+    getLogger('cli').info('cli.help_rendered', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      command_count: registry.size(),
+    })
+    renderHelp({ stdout, registry })
+    return 0
+  }
+  if (HELP_FLAGS.has(argv[0])) {
     getLogger('cli').info('cli.help_rendered', {
       [Attr.COMPONENT]: 'cmd-dispatch',
       command_count: registry.size(),
@@ -121,6 +136,9 @@ export async function dispatch(argv, opts = {}) {
     query: kernel.query,
     storage: kernel.storage,
     skills: kernel.skills,
+    sources: kernel.sources,
+    sinks: kernel.sinks,
+    initPresets: kernel.initPresets,
   }
 
   return context.with(ROOT_CONTEXT, () =>
@@ -164,6 +182,40 @@ export async function dispatch(argv, opts = {}) {
       }
     )
   )
+}
+
+/**
+ * Re-enter the dispatcher with a synthetic argv. Used to handle the
+ * walkthrough as a normal command (`hyp init`) when `hyp` is invoked
+ * with no args on a TTY. Keeps the `command.run` span around the
+ * walkthrough exactly like every other command.
+ *
+ * @param {string} name
+ * @param {string[]} rest
+ * @param {{
+ *   stdout: NodeJS.WriteStream | { write(chunk: string): unknown },
+ *   stderr: NodeJS.WriteStream | { write(chunk: string): unknown },
+ *   env: NodeJS.ProcessEnv,
+ *   cwd: string,
+ *   registry: ReturnType<typeof createCommandRegistry>,
+ *   kernel: ReturnType<typeof createKernelRuntime>,
+ * }} ctx
+ * @returns {Promise<number>}
+ */
+async function runCommandByName(name, rest, ctx) {
+  return dispatch([name, ...rest], {
+    stdout: ctx.stdout,
+    stderr: ctx.stderr,
+    env: ctx.env,
+    cwd: ctx.cwd,
+    registry: ctx.registry,
+    kernel: ctx.kernel,
+  })
+}
+
+/** @param {unknown} stream */
+function isInteractiveStream(stream) {
+  return !!stream && typeof stream === 'object' && /** @type {{ isTTY?: boolean }} */ (stream).isTTY === true
 }
 
 /**

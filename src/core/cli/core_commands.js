@@ -6,6 +6,7 @@ import path from 'node:path'
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { runWalkthrough } from './walkthrough.js'
 import { validateConfig } from '../config/validate.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -190,15 +191,139 @@ function buildCoreCommands() {
  * @returns {Promise<number>}
  */
 async function runStatus(_argv, ctx) {
-  const datasetCount = ctx.query.listDatasets().length
-  ctx.stdout.write('hypaware (kernel)\n')
-  ctx.stdout.write(`  plugins:       ${ctx.plugins.length}\n`)
-  ctx.stdout.write(`  capabilities:  ${ctx.capabilities.list().length}\n`)
-  ctx.stdout.write(`  sources:       0  (Phase 5)\n`)
-  ctx.stdout.write(`  sinks:         0  (Phase 5)\n`)
-  ctx.stdout.write(`  cache:         ${ctx.storage.cacheRoot}\n`)
-  ctx.stdout.write(`  datasets:      ${datasetCount}\n`)
-  return 0
+  /** @type {import('../registry/sources.js').ExtendedSourceRegistry} */
+  const sources = /** @type {any} */ (ctx.sources)
+  /** @type {import('../registry/sinks.js').ExtendedSinkRegistry} */
+  const sinks = /** @type {any} */ (ctx.sinks)
+
+  const sourceContributions = sources.list()
+  const sinkContributions = sinks.listContributions().map((c) => c.contribution)
+  const clientNames = listClientNames(ctx.capabilities)
+  const datasets = ctx.query.listDatasets()
+  const cacheStats = await measureCacheRoot(ctx.storage.cacheRoot)
+
+  const retention = await loadRetentionDays(ctx.env)
+
+  return withSpan(
+    'status.render',
+    {
+      [Attr.COMPONENT]: 'status',
+      [Attr.OPERATION]: 'status.render',
+      source_count: sourceContributions.length,
+      sink_count: sinkContributions.length,
+      client_count: clientNames.length,
+      dataset_count: datasets.length,
+      cache_size_bytes: cacheStats.totalBytes,
+      oldest_partition_date: cacheStats.oldestDate ?? '',
+      retention_days: retention.days,
+      status: 'ok',
+    },
+    async () => {
+      ctx.stdout.write('hypaware\n')
+      ctx.stdout.write('  sources:\n')
+      if (sourceContributions.length === 0) {
+        ctx.stdout.write('    (none)\n')
+      } else {
+        for (const s of sourceContributions) {
+          ctx.stdout.write(`    - ${s.name}  (${s.plugin})${s.summary ? `  — ${s.summary}` : ''}\n`)
+        }
+      }
+      ctx.stdout.write('  sinks:\n')
+      if (sinkContributions.length === 0) {
+        ctx.stdout.write('    (none — keeping captured data local only)\n')
+      } else {
+        for (const s of sinkContributions) {
+          ctx.stdout.write(`    - ${s.name}  (${s.plugin})\n`)
+        }
+      }
+      ctx.stdout.write('  clients:\n')
+      if (clientNames.length === 0) {
+        ctx.stdout.write('    (none)\n')
+      } else {
+        for (const name of clientNames) {
+          ctx.stdout.write(`    - ${name}\n`)
+        }
+      }
+      ctx.stdout.write(`  cache:           ${ctx.storage.cacheRoot}\n`)
+      ctx.stdout.write(`  cache retention: ${retention.days} days${retention.source === 'default' ? ' (default)' : ''}\n`)
+      ctx.stdout.write(`  datasets:        ${datasets.length}\n`)
+      return 0
+    },
+    { component: 'status' }
+  )
+}
+
+/**
+ * @param {CommandRunContext['capabilities']} capabilities
+ * @returns {string[]}
+ */
+function listClientNames(capabilities) {
+  if (!capabilities.has('hypaware.ai-gateway')) return []
+  /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^1.0.0')
+  return gateway.listClients().map((c) => c.name).sort()
+}
+
+/**
+ * Walk the cache root and return a best-effort size + oldest-partition
+ * date. Both values land on the `status.render` span; the smoke checks
+ * the structured attribute, not the printed line.
+ *
+ * @param {string} cacheRoot
+ * @returns {Promise<{ totalBytes: number, oldestDate: string|null }>}
+ */
+async function measureCacheRoot(cacheRoot) {
+  /** @type {{ totalBytes: number, oldestMs: number|null }} */
+  const acc = { totalBytes: 0, oldestMs: null }
+  await walkCacheRoot(cacheRoot, acc)
+  const oldestDate = acc.oldestMs === null ? null : new Date(acc.oldestMs).toISOString().slice(0, 10)
+  return { totalBytes: acc.totalBytes, oldestDate }
+}
+
+/**
+ * @param {string} dir
+ * @param {{ totalBytes: number, oldestMs: number|null }} acc
+ */
+async function walkCacheRoot(dir, acc) {
+  /** @type {import('node:fs').Dirent[]} */
+  let entries
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true })
+  } catch (err) {
+    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return
+    throw err
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      await walkCacheRoot(full, acc)
+    } else if (entry.isFile()) {
+      const stat = await fs.stat(full)
+      acc.totalBytes += stat.size
+      if (acc.oldestMs === null || stat.mtimeMs < acc.oldestMs) acc.oldestMs = stat.mtimeMs
+    }
+  }
+}
+
+/**
+ * Load `query.cache.retention.default_days` from the config file when
+ * present. Falls back to 30 days. Used by `hyp status` to print the
+ * retention window the user will actually see; reading the config here
+ * avoids forcing every dispatcher caller to pre-load it.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<{ days: number, source: 'config'|'default' }>}
+ */
+async function loadRetentionDays(env) {
+  const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
+  const configPath = env.HYP_CONFIG ? path.resolve(env.HYP_CONFIG) : defaultConfigPath(hypHome)
+  const loaded = await loadConfigFile(configPath)
+  if (!loaded.ok) return { days: 30, source: 'default' }
+  const days = loaded.config?.query?.cache?.retention?.default_days
+  if (typeof days === 'number' && Number.isFinite(days) && days >= 0) {
+    return { days, source: 'config' }
+  }
+  return { days: 30, source: 'default' }
 }
 
 /* ---------- query ---------- */
@@ -697,12 +822,67 @@ function parseConfigValidateArgv(argv, env) {
 /* ---------- misc ---------- */
 
 /**
- * @param {string[]} _argv
+ * `hyp init [preset]`
+ *
+ * Without arguments runs the interactive walkthrough (TTY only — when
+ * stdout is not a TTY the command prints the available presets and
+ * exits non-zero so scripts get a deterministic failure instead of
+ * blocking on stdin).
+ *
+ * With a `<preset>` argument resolves the preset through the kernel
+ * `InitPresetRegistry` and invokes its `run(argv, ctx)`. Unknown
+ * presets land on stderr with the list of available names.
+ *
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runInit(_argv, ctx) {
-  ctx.stdout.write('(init walkthrough lands in Phase 9)\n')
-  return 0
+async function runInit(argv, ctx) {
+  if (argv.length === 0) {
+    if (isTty(ctx.stdout)) {
+      const result = await runWalkthrough({
+        sources: /** @type {any} */ (ctx.sources),
+        sinks: /** @type {any} */ (ctx.sinks),
+        capabilities: ctx.capabilities,
+        stdout: ctx.stdout,
+        stderr: ctx.stderr,
+        env: ctx.env,
+      })
+      return result.exitCode
+    }
+    const available = ctx.initPresets.list()
+    ctx.stderr.write('hyp init: stdin is not a TTY — pass a preset name.\n')
+    if (available.length === 0) {
+      ctx.stderr.write('  no presets registered\n')
+    } else {
+      ctx.stderr.write('  presets:\n')
+      for (const p of available) {
+        ctx.stderr.write(`    ${p.name}  (${p.plugin})  — ${p.summary}\n`)
+      }
+    }
+    return 2
+  }
+
+  const presetName = argv[0]
+  const preset = ctx.initPresets.get(presetName)
+  if (!preset) {
+    const available = ctx.initPresets.list()
+    ctx.stderr.write(`hyp init: unknown preset '${presetName}'\n`)
+    if (available.length === 0) {
+      ctx.stderr.write('  no presets registered — install a plugin that contributes one\n')
+    } else {
+      ctx.stderr.write('  available:\n')
+      for (const p of available) {
+        ctx.stderr.write(`    ${p.name}  (${p.plugin})  — ${p.summary}\n`)
+      }
+    }
+    return 1
+  }
+  return preset.run(argv.slice(1), ctx)
+}
+
+/** @param {unknown} stream */
+function isTty(stream) {
+  return !!stream && typeof stream === 'object' && /** @type {{ isTTY?: boolean }} */ (stream).isTTY === true
 }
 
 /**

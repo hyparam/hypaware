@@ -88,7 +88,7 @@ export function createKernelRuntime(opts = {}) {
     storage,
     cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
-    initPresets: createPhase2InitPresetRegistry(),
+    initPresets: createInitPresetRegistry(),
   }
 }
 
@@ -277,11 +277,55 @@ function createPhase2SkillRegistry() {
   }
 }
 
-/** @returns {InitPresetRegistry} */
-function createPhase2InitPresetRegistry() {
+/**
+ * Init-preset registry. Plugins contribute presets via
+ * `ctx.initPresets.register({ name, plugin, summary, run })` during
+ * activation. `hyp init <preset>` looks up the preset by name and
+ * invokes its `run(argv, ctx)` with the command run context.
+ *
+ * Promoted from a Phase 2 placeholder in Phase 9 (hy-imw). The
+ * registry is intentionally non-validating beyond the basic shape
+ * checks — preset authors own their argv parsing and config writing
+ * in `run()`.
+ *
+ * @returns {InitPresetRegistry}
+ */
+function createInitPresetRegistry() {
+  /** @type {Map<string, import('../../../collectivus-plugin-kernel-types').InitPresetContribution>} */
+  const presets = new Map()
+  const log = getLogger('init-presets')
+
   return {
-    register() {},
-    get() { return undefined },
-    list() { return [] },
+    register(preset) {
+      if (!preset || typeof preset !== 'object') {
+        throw new TypeError('initPresets.register: preset must be an object')
+      }
+      if (typeof preset.name !== 'string' || preset.name.length === 0) {
+        throw new TypeError('initPresets.register: name is required')
+      }
+      if (typeof preset.plugin !== 'string' || preset.plugin.length === 0) {
+        throw new TypeError(`initPresets.register '${preset.name}': plugin is required`)
+      }
+      if (typeof preset.summary !== 'string') {
+        throw new TypeError(`initPresets.register '${preset.name}': summary is required`)
+      }
+      if (typeof preset.run !== 'function') {
+        throw new TypeError(`initPresets.register '${preset.name}': run() is required`)
+      }
+      if (presets.has(preset.name)) {
+        throw new Error(`initPresets.register: duplicate preset '${preset.name}'`)
+      }
+      presets.set(preset.name, preset)
+      log.info('init.preset.register', {
+        [Attr.PLUGIN]: preset.plugin,
+        preset_name: preset.name,
+      })
+    },
+    get(name) {
+      return presets.get(name)
+    },
+    list() {
+      return Array.from(presets.values()).sort((a, b) => a.name.localeCompare(b.name))
+    },
   }
 }

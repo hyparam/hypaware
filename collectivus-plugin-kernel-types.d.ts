@@ -454,6 +454,23 @@ export interface CommandRunContext {
    * to materialize plugin-contributed skills under per-client paths.
    */
   skills: SkillRegistry
+  /**
+   * Source registry (kernel-owned). Populated by the dispatcher.
+   * `hyp status` and the Phase 9 walkthrough enumerate this to render
+   * the per-source breakdown and harvest source picks.
+   */
+  sources: SourceRegistry
+  /**
+   * Sink registry (kernel-owned). Populated by the dispatcher.
+   * `hyp status` and the Phase 9 walkthrough enumerate this to render
+   * the per-sink breakdown and harvest sink picks.
+   */
+  sinks: SinkRegistry
+  /**
+   * Init-preset registry (kernel-owned). Populated by the dispatcher.
+   * `hyp init <preset>` resolves preset names through this registry.
+   */
+  initPresets: InitPresetRegistry
 }
 
 // =============================================================================

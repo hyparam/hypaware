@@ -24,6 +24,12 @@
       { "name": "hypaware-query", "clients": ["claude"] },
       { "name": "hypaware-ignore", "clients": ["claude"] },
       { "name": "hypaware-unignore", "clients": ["claude"] }
+    ],
+    "init_presets": [
+      {
+        "name": "claude-and-otel-local",
+        "summary": "Capture Claude Code + OTLP locally, export to Parquet under HYP_HOME/exports"
+      }
     ]
   }
 }
