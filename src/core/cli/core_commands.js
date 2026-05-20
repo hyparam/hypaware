@@ -182,15 +182,33 @@ function buildCoreCommands() {
     },
     {
       name: 'daemon',
-      summary: 'Manage the HypAware daemon (subcommands: run, status, stop, restart)',
+      summary: 'Manage the HypAware daemon (subcommands: install, uninstall, run, start, stop, restart, status)',
       usage: 'hyp daemon <subcommand> [args...]',
       run: runDaemonHelp,
+    },
+    {
+      name: 'daemon install',
+      summary: 'Install the persistent user service (launchd / systemd)',
+      usage: 'hyp daemon install [--config <path>] [--dry-run [--json]]',
+      run: runDaemonInstall,
+    },
+    {
+      name: 'daemon uninstall',
+      summary: 'Uninstall the persistent user service (keeps config, recordings, logs)',
+      usage: 'hyp daemon uninstall',
+      run: runDaemonUninstall,
     },
     {
       name: 'daemon run',
       summary: 'Run the HypAware daemon in the foreground',
       usage: 'hyp daemon run --foreground',
       run: runDaemonRun,
+    },
+    {
+      name: 'daemon start',
+      summary: 'Start the installed daemon service',
+      usage: 'hyp daemon start',
+      run: runDaemonStart,
     },
     {
       name: 'daemon status',
@@ -929,11 +947,11 @@ function parseConfigValidateArgv(argv, env) {
 async function runDaemonHelp(argv, ctx) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write('usage: hyp daemon <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: run, status, stop, restart\n')
+    ctx.stdout.write('  subcommands: install, uninstall, run, start, stop, restart, status\n')
     return 0
   }
   ctx.stderr.write(`hyp daemon: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: run, status, stop, restart\n')
+  ctx.stderr.write('  expected one of: install, uninstall, run, start, stop, restart, status\n')
   return 2
 }
 
@@ -1053,15 +1071,205 @@ async function runDaemonStop(_argv, ctx) {
 }
 
 /**
+ * `hyp daemon restart` — restart the installed service if present,
+ * otherwise fall back to a stop + operator-relaunch hint for the
+ * foreground path.
+ *
  * @param {string[]} _argv
  * @param {CommandRunContext} ctx
  */
 async function runDaemonRestart(_argv, ctx) {
+  const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
+  const homeDir = ctx.env.HOME
+  const status = await serviceDaemonStatus({ homeDir })
+  if (status.installed) {
+    try {
+      await restartServiceDaemon({ homeDir })
+      ctx.stdout.write('daemon: restarted\n')
+      return 0
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp daemon restart: ${message}\n`)
+      return 1
+    }
+  }
   const code = await runDaemonStop([], ctx)
   if (code !== 0) return code
-  ctx.stdout.write('daemon restart: stopped. Phase 4 installers will relaunch automatically;\n')
-  ctx.stdout.write('  in Phase 3 foreground mode, re-run `hyp daemon run --foreground` to bring it back up.\n')
+  ctx.stdout.write('daemon restart: stopped. No installed service found;\n')
+  ctx.stdout.write('  re-run `hyp daemon run --foreground` to bring it back up,\n')
+  ctx.stdout.write('  or `hyp daemon install` to set up the persistent service first.\n')
   return 0
+}
+
+/**
+ * `hyp daemon install` — install the persistent platform service.
+ * Supports `--dry-run [--json]` to render the planned plist / unit
+ * file without touching disk.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonInstall(argv, ctx) {
+  const parsed = parseDaemonInstallArgs(argv)
+  if (parsed.help) {
+    ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]\n')
+    return 0
+  }
+  if (parsed.error) {
+    ctx.stderr.write(`hyp daemon install: ${parsed.error}\n`)
+    return 2
+  }
+
+  const { renderDaemonInstall, installDaemon, daemonKindLabel } = await import('../daemon/install.js')
+  const homeDir = ctx.env.HOME
+  const binPath = parsed.binPath ?? (process.argv[1] ?? '')
+  if (!binPath) {
+    ctx.stderr.write('hyp daemon install: cannot determine binPath; pass --bin <path>\n')
+    return 2
+  }
+
+  /** @type {import('../daemon/install.js').DaemonInstallOptions} */
+  const options = {
+    binPath,
+    ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
+    ...(homeDir !== undefined ? { homeDir } : {}),
+    ...(parsed.platform !== undefined ? { platform: parsed.platform } : {}),
+  }
+
+  if (parsed.dryRun) {
+    const plan = renderDaemonInstall(options)
+    if (parsed.json) {
+      ctx.stdout.write(JSON.stringify(plan, null, 2) + '\n')
+      return 0
+    }
+    ctx.stdout.write(`platform:    ${plan.platform}\n`)
+    ctx.stdout.write(`service:     ${plan.serviceKind}\n`)
+    ctx.stdout.write(`target:      ${plan.targetPath}\n`)
+    ctx.stdout.write(`bin:         ${plan.binPath}\n`)
+    ctx.stdout.write(`config:      ${plan.configPath}\n`)
+    ctx.stdout.write(`log dir:     ${plan.logDir}\n`)
+    ctx.stdout.write('--- content ---\n')
+    ctx.stdout.write(plan.content)
+    if (!plan.content.endsWith('\n')) ctx.stdout.write('\n')
+    return 0
+  }
+
+  try {
+    const plan = await installDaemon(options)
+    ctx.stdout.write(`✓ Daemon installed (${daemonKindLabel(plan.platform)})\n`)
+    ctx.stdout.write(`  target:  ${plan.targetPath}\n`)
+    ctx.stdout.write(`  config:  ${plan.configPath}\n`)
+    ctx.stdout.write(`  logs:    ${plan.logDir}/daemon.out.log\n`)
+    return 0
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon install: ${message}\n`)
+    return 1
+  }
+}
+
+/**
+ * `hyp daemon uninstall` — remove the persistent service while
+ * leaving config, recordings, and logs in place.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonUninstall(argv, ctx) {
+  for (const token of argv) {
+    if (token === '--help' || token === '-h') {
+      ctx.stdout.write('usage: hyp daemon uninstall\n')
+      return 0
+    }
+    ctx.stderr.write(`hyp daemon uninstall: unexpected argument '${token}'\n`)
+    return 2
+  }
+  const { uninstallDaemon, daemonKindLabel } = await import('../daemon/install.js')
+  const homeDir = ctx.env.HOME
+  try {
+    await uninstallDaemon({ ...(homeDir !== undefined ? { homeDir } : {}) })
+    ctx.stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
+    return 0
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon uninstall: ${message}\n`)
+    return 1
+  }
+}
+
+/**
+ * `hyp daemon start` — start (kickstart) the installed service.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runDaemonStart(argv, ctx) {
+  for (const token of argv) {
+    if (token === '--help' || token === '-h') {
+      ctx.stdout.write('usage: hyp daemon start\n')
+      return 0
+    }
+    ctx.stderr.write(`hyp daemon start: unexpected argument '${token}'\n`)
+    return 2
+  }
+  const { startServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
+  const homeDir = ctx.env.HOME
+  const status = await serviceDaemonStatus({ ...(homeDir !== undefined ? { homeDir } : {}) })
+  if (!status.installed) {
+    ctx.stderr.write('hyp daemon start: service not installed (run `hyp daemon install` first)\n')
+    return 1
+  }
+  try {
+    await startServiceDaemon({ ...(homeDir !== undefined ? { homeDir } : {}) })
+    ctx.stdout.write('daemon: started\n')
+    return 0
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon start: ${message}\n`)
+    return 1
+  }
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }}
+ */
+function parseDaemonInstallArgs(argv) {
+  /** @type {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }} */
+  const r = {}
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--help' || token === '-h') { r.help = true; return r }
+    if (token === '--dry-run') { r.dryRun = true; continue }
+    if (token === '--json') { r.json = true; continue }
+    if (token === '--config' || token.startsWith('--config=')) {
+      const value = token === '--config' ? argv[++i] : token.slice('--config='.length)
+      if (!value) { r.error = '--config requires a path'; return r }
+      r.configPath = value
+      continue
+    }
+    if (token === '--bin' || token.startsWith('--bin=')) {
+      const value = token === '--bin' ? argv[++i] : token.slice('--bin='.length)
+      if (!value) { r.error = '--bin requires a path'; return r }
+      r.binPath = value
+      continue
+    }
+    if (token === '--platform' || token.startsWith('--platform=')) {
+      const value = token === '--platform' ? argv[++i] : token.slice('--platform='.length)
+      if (value !== 'darwin' && value !== 'linux') {
+        r.error = `--platform must be 'darwin' or 'linux' (got '${value}')`
+        return r
+      }
+      r.platform = value
+      continue
+    }
+    r.error = `unexpected argument '${token}'`
+    return r
+  }
+  if (r.json && !r.dryRun) {
+    r.error = '--json requires --dry-run'
+  }
+  return r
 }
 
 /**
