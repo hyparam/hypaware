@@ -6,7 +6,7 @@ import path from 'node:path'
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
-import { runWalkthrough } from './walkthrough.js'
+import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { validateConfig } from '../config/validate.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -1428,20 +1428,33 @@ async function runSinkForce(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runInit(argv, ctx) {
+  // Phase 5: non-interactive flags. Detected by the presence of any
+  // recognized init flag in argv. When absent, fall through to the
+  // legacy preset/walkthrough dispatcher below.
+  if (hasInitFlags(argv)) {
+    const parsed = parseInitFlags(argv)
+    if (parsed.error) {
+      ctx.stderr.write(`hyp init: ${parsed.error}\n`)
+      return 2
+    }
+    return runPickerInit(parsed.flags, ctx)
+  }
+
   if (argv.length === 0) {
     if (isTty(ctx.stdout)) {
-      const result = await runWalkthrough({
-        sources: /** @type {any} */ (ctx.sources),
-        sinks: /** @type {any} */ (ctx.sinks),
+      const result = await runPickerWalkthrough({
         capabilities: ctx.capabilities,
+        skills: /** @type {any} */ (ctx.skills),
         stdout: ctx.stdout,
         stderr: ctx.stderr,
         env: ctx.env,
+        finale: {},
       })
       return result.exitCode
     }
     const available = ctx.initPresets.list()
-    ctx.stderr.write('hyp init: stdin is not a TTY — pass a preset name.\n')
+    ctx.stderr.write('hyp init: stdin is not a TTY — pass a preset name or non-interactive flags.\n')
+    ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] ...\n')
     if (available.length === 0) {
       ctx.stderr.write('  no presets registered\n')
     } else {
@@ -1469,6 +1482,271 @@ async function runInit(argv, ctx) {
     return 1
   }
   return preset.run(argv.slice(1), ctx)
+}
+
+/**
+ * Recognized init flag names (Phase 5). Used as a fast-path detector
+ * so legacy preset-name invocations still flow through the existing
+ * dispatcher.
+ *
+ * @type {Set<string>}
+ */
+const INIT_FLAG_NAMES = new Set([
+  '--yes', '-y',
+  '--no-daemon',
+  '--dry-run',
+  '--client', '--source', '--export',
+  '--retention-days', '--from-file',
+  '--bin',
+])
+
+/**
+ * @param {string[]} argv
+ */
+function hasInitFlags(argv) {
+  return argv.some((t) => {
+    if (INIT_FLAG_NAMES.has(t)) return true
+    for (const name of INIT_FLAG_NAMES) {
+      if (t.startsWith(`${name}=`)) return true
+    }
+    return false
+  })
+}
+
+/**
+ * @typedef {Object} InitFlags
+ * @property {boolean} yes
+ * @property {boolean} noDaemon
+ * @property {boolean} dryRun
+ * @property {('claude'|'codex')[]} clients
+ * @property {('claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel')[]} sources
+ * @property {('keep-local'|'local-parquet'|'configure-later') | undefined} exportChoice
+ * @property {number} retentionDays
+ * @property {string} [fromFile]
+ * @property {string} [binPath]
+ */
+
+/**
+ * @param {string[]} argv
+ * @returns {{ flags: InitFlags, error?: string }}
+ */
+function parseInitFlags(argv) {
+  /** @type {InitFlags} */
+  const flags = {
+    yes: false,
+    noDaemon: false,
+    dryRun: false,
+    clients: [],
+    sources: [],
+    exportChoice: undefined,
+    retentionDays: 30,
+  }
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--yes' || arg === '-y') { flags.yes = true; continue }
+    if (arg === '--no-daemon') { flags.noDaemon = true; continue }
+    if (arg === '--dry-run') { flags.dryRun = true; continue }
+    if (arg === '--client' || arg.startsWith('--client=')) {
+      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
+      if (value !== 'claude' && value !== 'codex') {
+        return { flags, error: `--client: expected claude or codex (got "${value ?? ''}")` }
+      }
+      if (!flags.clients.includes(value)) flags.clients.push(value)
+      continue
+    }
+    if (arg === '--source' || arg.startsWith('--source=')) {
+      const value = arg === '--source' ? argv[++i] : arg.slice('--source='.length)
+      const allowed = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
+      if (!allowed.includes(value ?? '')) {
+        return { flags, error: `--source: expected one of ${allowed.join(', ')} (got "${value ?? ''}")` }
+      }
+      const typed = /** @type {'claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel'} */ (value)
+      if (!flags.sources.includes(typed)) flags.sources.push(typed)
+      continue
+    }
+    if (arg === '--export' || arg.startsWith('--export=')) {
+      const value = arg === '--export' ? argv[++i] : arg.slice('--export='.length)
+      const allowed = ['keep-local', 'local-parquet', 'configure-later']
+      if (!allowed.includes(value ?? '')) {
+        return { flags, error: `--export: expected one of ${allowed.join(', ')} (got "${value ?? ''}")` }
+      }
+      flags.exportChoice = /** @type {'keep-local'|'local-parquet'|'configure-later'} */ (value)
+      continue
+    }
+    if (arg === '--retention-days' || arg.startsWith('--retention-days=')) {
+      const value = arg === '--retention-days' ? argv[++i] : arg.slice('--retention-days='.length)
+      const parsed = Number.parseInt(value ?? '', 10)
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        return { flags, error: `--retention-days: expected non-negative integer (got "${value ?? ''}")` }
+      }
+      flags.retentionDays = parsed
+      continue
+    }
+    if (arg === '--from-file' || arg.startsWith('--from-file=')) {
+      const value = arg === '--from-file' ? argv[++i] : arg.slice('--from-file='.length)
+      if (!value) return { flags, error: '--from-file: requires a path' }
+      flags.fromFile = value
+      continue
+    }
+    if (arg === '--bin' || arg.startsWith('--bin=')) {
+      const value = arg === '--bin' ? argv[++i] : arg.slice('--bin='.length)
+      if (!value) return { flags, error: '--bin: requires a path' }
+      flags.binPath = value
+      continue
+    }
+    return { flags, error: `unknown argument: ${arg}` }
+  }
+  return { flags }
+}
+
+/**
+ * Non-interactive Phase 5 init. Composes picks from CLI flags,
+ * optionally seeds the config from a file (`--from-file`), and
+ * delegates to {@link runPickerWalkthrough}.
+ *
+ * @param {InitFlags} flags
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runPickerInit(flags, ctx) {
+  // --from-file short-circuits the picker entirely. The supplied
+  // config is validated and written to the canonical location;
+  // walkthrough.start / walkthrough.write_config / walkthrough.finish
+  // spans are still emitted so the smoke contract holds.
+  if (flags.fromFile) {
+    return runInitFromFile(flags, ctx)
+  }
+
+  // Default picks when `--yes` is the only signal: capture Claude +
+  // OTEL, export to local Parquet. Matches the default V1 install
+  // documented in finish-v1.md §V1 Acceptance Criteria.
+  const sources = flags.sources.slice()
+  if (sources.length === 0) {
+    if (flags.yes) {
+      sources.push('claude', 'otel')
+    } else {
+      ctx.stderr.write('hyp init: no sources selected — pass --source <kind> or --yes\n')
+      return 2
+    }
+  }
+  // Folding clients into sources, so `--client claude` alone is
+  // sufficient even without an explicit `--source claude`.
+  for (const c of flags.clients) {
+    if (!sources.includes(c)) sources.push(c)
+  }
+
+  const exportChoice = flags.exportChoice ?? (flags.yes ? 'local-parquet' : 'keep-local')
+
+  const result = await runPickerWalkthrough({
+    capabilities: ctx.capabilities,
+    skills: /** @type {any} */ (ctx.skills),
+    stdout: ctx.stdout,
+    stderr: ctx.stderr,
+    env: ctx.env,
+    picks: {
+      sources,
+      exportChoice,
+      retentionDays: flags.retentionDays,
+    },
+    finale: {
+      skipDaemon: flags.noDaemon,
+      dryRun: flags.dryRun,
+      ...(flags.binPath ? { binPath: flags.binPath } : {}),
+    },
+  })
+  return result.exitCode
+}
+
+/**
+ * `hyp init --from-file <path>` — read a v2 config from disk, validate
+ * it, and write it to the canonical location. Still emits the
+ * walkthrough spans so the smoke pipeline observes a consistent
+ * lifecycle.
+ *
+ * @param {InitFlags} flags
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runInitFromFile(flags, ctx) {
+  const { withSpan, Attr } = await import('../observability/index.js')
+  const { readObservabilityEnv } = await import('../observability/env.js')
+  let raw
+  try {
+    raw = await fs.readFile(/** @type {string} */ (flags.fromFile), 'utf8')
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp init: --from-file: ${message}\n`)
+    return 1
+  }
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp init: --from-file: invalid JSON: ${message}\n`)
+    return 1
+  }
+  const validation = await validateConfig(/** @type {any} */ (parsed))
+  if (!validation.ok) {
+    for (const err of validation.errors) {
+      ctx.stderr.write(
+        `hyp init: --from-file: [${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}\n`
+      )
+    }
+    return 1
+  }
+
+  await withSpan(
+    'walkthrough.start',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.start',
+      sources_available: 0,
+      exports_available: 0,
+      from_file: true,
+      status: 'ok',
+    },
+    async () => {},
+    { component: 'walkthrough' }
+  )
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const targetPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+
+  await withSpan(
+    'walkthrough.write_config',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.write_config',
+      config_path: targetPath,
+      from_file: true,
+      status: 'ok',
+    },
+    async () => {
+      await fs.mkdir(path.dirname(targetPath), { recursive: true })
+      await fs.writeFile(targetPath, JSON.stringify(parsed, null, 2) + '\n', 'utf8')
+    },
+    { component: 'walkthrough' }
+  )
+
+  await withSpan(
+    'walkthrough.finish',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.finish',
+      from_file: true,
+      config_path: targetPath,
+      status: 'ok',
+    },
+    async () => {},
+    { component: 'walkthrough' }
+  )
+
+  ctx.stdout.write(`✓ Wrote ${targetPath}\n`)
+  return 0
 }
 
 /** @param {unknown} stream */

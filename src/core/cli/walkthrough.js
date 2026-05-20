@@ -420,3 +420,553 @@ function defaultRetentionPromptFactory(opts) {
     }
   }
 }
+
+/**
+ * Phase 5 picker source contributions. These are the user-facing
+ * inputs for the V1 npx first-run flow. Each value maps to a plugin
+ * composition rule in `composePickerConfig` — they are NOT tied to
+ * the source registry (which carries lower-level source contributions
+ * like `ai-gateway` and `otlp`).
+ *
+ * @type {{ value: PickerSource, label: string }[]}
+ */
+const PICKER_SOURCES = [
+  { value: 'claude', label: 'capture Claude Code conversations' },
+  { value: 'codex', label: 'capture Codex conversations' },
+  { value: 'raw-anthropic', label: 'capture raw Anthropic API traffic' },
+  { value: 'raw-openai', label: 'capture raw OpenAI API traffic' },
+  { value: 'otel', label: 'receive OTEL logs/traces/metrics' },
+]
+
+/**
+ * Phase 5 export options.
+ *
+ * @type {{ value: PickerExport, label: string }[]}
+ */
+const PICKER_EXPORTS = [
+  { value: 'keep-local', label: 'keep local query cache only' },
+  { value: 'local-parquet', label: 'export local Parquet files' },
+  { value: 'configure-later', label: 'configure later' },
+]
+
+/**
+ * @typedef {'claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel'} PickerSource
+ * @typedef {'keep-local'|'local-parquet'|'configure-later'} PickerExport
+ */
+
+/**
+ * @typedef {Object} PickerPicks
+ * @property {PickerSource[]} sources
+ * @property {PickerExport}   exportChoice
+ * @property {number}         retentionDays
+ */
+
+/**
+ * @typedef {Object} PickerFinaleActions
+ * @property {boolean} [skipDaemon]    When true, skip the daemon install + restart steps (mirrors `--no-daemon`).
+ * @property {boolean} [dryRun]        Pass-through to daemon install / attach / skills install.
+ * @property {string}  [binPath]       Override the resolved binPath the daemon install plan should point at.
+ * @property {boolean} [skipDaemonRestart] When true, run daemon install but skip the restart step.
+ */
+
+/**
+ * @typedef {Object} RunPickerWalkthroughOptions
+ * @property {CapabilityRegistry}                   capabilities
+ * @property {{ list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] }} [skills]
+ * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stdout
+ * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
+ * @property {NodeJS.ReadableStream}                [stdin]
+ * @property {NodeJS.ProcessEnv}                    env
+ * @property {PickerPicks}                          [picks]      Pre-baked picks; bypass prompts when set.
+ * @property {AsyncPickPrompt}                      [prompt]
+ * @property {AsyncRetentionPrompt}                 [retentionPrompt]
+ * @property {PickerFinaleActions}                  [finale]     When set, run daemon install / attach / skills / restart after writing config.
+ */
+
+/**
+ * @typedef {Object} PickerWalkthroughResult
+ * @property {number}             exitCode
+ * @property {string}             configPath
+ * @property {HypAwareV2Config}   config
+ * @property {PickerSource[]}     sourcesPicked
+ * @property {PickerExport}       exportPicked
+ * @property {('claude'|'codex')[]} clientsPicked
+ * @property {number}             retentionDays
+ * @property {FinaleSummary}      [finale]
+ */
+
+/**
+ * @typedef {Object} FinaleSummary
+ * @property {{ skipped: boolean, dryRun: boolean, plan?: Record<string, unknown>, targetPath?: string }} daemonInstall
+ * @property {{ client: 'claude'|'codex', dryRun: boolean, ok: boolean }[]}                                attach
+ * @property {{ name: string, client: 'claude'|'codex', dest: string, dryRun: boolean }[]}                 skillsInstalled
+ * @property {{ skipped: boolean, dryRun: boolean, ok: boolean }}                                          daemonRestart
+ */
+
+/**
+ * Drive the Phase 5 first-run picker walkthrough.
+ *
+ * Unlike the original {@link runWalkthrough}, the picker offers a
+ * fixed set of user-facing source labels (Claude Code / Codex / raw
+ * Anthropic / raw OpenAI / OTEL) and a fixed set of export labels
+ * (`keep-local` / `local-parquet` / `configure-later`). These are
+ * translated into a v2 config via {@link composePickerConfig}.
+ *
+ * When `opts.finale` is provided, the walkthrough also runs the
+ * post-write actions described by the bead:
+ *   - daemon install (dry-run or real)
+ *   - attach for each picked client
+ *   - skill install for each picked client
+ *   - daemon restart (skipped in dry-run)
+ *
+ * Spans: `walkthrough.start`, `walkthrough.pick` (logs),
+ * `walkthrough.write_config`, `daemon.install`, `client.attach`,
+ * `skills.install`, `walkthrough.finish`.
+ *
+ * @param {RunPickerWalkthroughOptions} opts
+ * @returns {Promise<PickerWalkthroughResult>}
+ */
+export async function runPickerWalkthrough(opts) {
+  const { capabilities, stdout, env } = opts
+  const log = getLogger('walkthrough')
+
+  await withSpan(
+    'walkthrough.start',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.start',
+      sources_available: PICKER_SOURCES.length,
+      exports_available: PICKER_EXPORTS.length,
+      status: 'ok',
+    },
+    async () => {},
+    { component: 'walkthrough' }
+  )
+
+  /** @type {PickerPicks} */
+  let picks
+  if (opts.picks) {
+    picks = opts.picks
+  } else {
+    const ask = opts.prompt ?? defaultPromptFactory(opts)
+    const retentionAsk = opts.retentionPrompt ?? defaultRetentionPromptFactory(opts)
+
+    stdout.write('Welcome to HypAware — the local logs+telemetry collector.\n\n')
+
+    const sourceRaw = await ask({
+      pickType: 'sources',
+      title: 'What do you want to collect? (space to toggle, enter to confirm)',
+      options: PICKER_SOURCES.map((s) => ({ value: s.value, label: s.label })),
+    })
+    const sources = /** @type {PickerSource[]} */ (
+      sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
+    )
+
+    const exportRaw = await ask({
+      pickType: 'sinks',
+      title: 'Where should HypAware export captured data?',
+      options: PICKER_EXPORTS.map((e) => ({ value: e.value, label: e.label })),
+    })
+    const exportChoice = /** @type {PickerExport} */ (
+      PICKER_EXPORTS.find((e) => exportRaw.includes(e.value))?.value ?? 'keep-local'
+    )
+
+    const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
+    picks = { sources, exportChoice, retentionDays }
+  }
+
+  for (const value of picks.sources) {
+    log.info('walkthrough.pick', {
+      [Attr.COMPONENT]: 'walkthrough',
+      pick_type: 'sources',
+      pick_value: value,
+    })
+  }
+  log.info('walkthrough.pick', {
+    [Attr.COMPONENT]: 'walkthrough',
+    pick_type: 'exports',
+    pick_value: picks.exportChoice,
+  })
+
+  const hypHome = resolveHypHome(env)
+  const config = composePickerConfig({
+    sources: picks.sources,
+    exportChoice: picks.exportChoice,
+    retentionDays: picks.retentionDays,
+    hypHome,
+  })
+
+  const obsEnv = readObservabilityEnv(env)
+  const configPath = env.HYP_CONFIG
+    ? path.resolve(env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+
+  await withSpan(
+    'walkthrough.write_config',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.write_config',
+      config_path: configPath,
+      plugin_count: config.plugins.length,
+      status: 'ok',
+    },
+    async () => {
+      await fs.mkdir(path.dirname(configPath), { recursive: true })
+      await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+    },
+    { component: 'walkthrough' }
+  )
+
+  /** @type {('claude'|'codex')[]} */
+  const clientsPicked = []
+  if (picks.sources.includes('claude')) clientsPicked.push('claude')
+  if (picks.sources.includes('codex')) clientsPicked.push('codex')
+
+  /** @type {FinaleSummary | undefined} */
+  let finaleSummary
+  if (opts.finale) {
+    finaleSummary = await runPickerFinale({
+      finale: opts.finale,
+      clientsPicked,
+      capabilities,
+      skills: opts.skills,
+      configPath,
+      env,
+      stdout,
+      stderr: opts.stderr,
+    })
+  }
+
+  await withSpan(
+    'walkthrough.finish',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.finish',
+      sources_picked: picks.sources.length,
+      export_picked: picks.exportChoice,
+      clients_picked: clientsPicked.length,
+      retention_days: picks.retentionDays,
+      config_path: configPath,
+      status: 'ok',
+    },
+    async () => {},
+    { component: 'walkthrough' }
+  )
+
+  stdout.write('\n')
+  stdout.write(`✓ Wrote ${configPath}\n`)
+  if (finaleSummary?.daemonInstall && !finaleSummary.daemonInstall.skipped) {
+    const tag = finaleSummary.daemonInstall.dryRun ? '(dry-run) ' : ''
+    if (finaleSummary.daemonInstall.targetPath) {
+      stdout.write(`${tag}daemon target: ${finaleSummary.daemonInstall.targetPath}\n`)
+    }
+    const plan = finaleSummary.daemonInstall.plan
+    const planBin = plan && typeof plan === 'object' ? /** @type {Record<string, unknown>} */ (plan).binPath : undefined
+    if (typeof planBin === 'string' && planBin.length > 0) {
+      stdout.write(`${tag}daemon bin: ${planBin}\n`)
+    }
+  }
+  for (const a of finaleSummary?.attach ?? []) {
+    const tag = a.dryRun ? '(dry-run) ' : ''
+    stdout.write(`${tag}attach: ${a.client} ${a.ok ? 'ok' : 'failed'}\n`)
+  }
+  if (finaleSummary?.skillsInstalled && finaleSummary.skillsInstalled.length > 0) {
+    const tag = finaleSummary.skillsInstalled[0].dryRun ? '(dry-run) ' : ''
+    stdout.write(`${tag}skills: ${finaleSummary.skillsInstalled.length} copied\n`)
+  }
+  stdout.write(`next: hyp query sql 'select count(*) from logs'\n`)
+
+  return {
+    exitCode: 0,
+    configPath,
+    config,
+    sourcesPicked: picks.sources,
+    exportPicked: picks.exportChoice,
+    clientsPicked,
+    retentionDays: picks.retentionDays,
+    ...(finaleSummary ? { finale: finaleSummary } : {}),
+  }
+}
+
+/**
+ * Compose a v2 config from Phase 5 picker selections.
+ *
+ * Composition rules (per bead hy-5oz4 §Compose explicit config):
+ *   - `@hypaware/ai-gateway` is included when any AI-traffic source is
+ *     picked (claude, codex, raw-anthropic, raw-openai).
+ *   - The Anthropic upstream is included when claude or raw-anthropic
+ *     is picked. The OpenAI upstream is included when codex or
+ *     raw-openai is picked. Both are appended when both kinds appear.
+ *   - `@hypaware/otel` is included when `otel` is picked.
+ *   - `@hypaware/claude` and `@hypaware/codex` adapter plugins are
+ *     included for their respective high-level sources.
+ *   - `@hypaware/local-fs` + `@hypaware/format-parquet` are included
+ *     when `exportChoice === 'local-parquet'`, along with a `local`
+ *     sink wired to write parquet files under `<HYP_HOME>/exports`.
+ *
+ * @param {{
+ *   sources: PickerSource[],
+ *   exportChoice: PickerExport,
+ *   retentionDays: number,
+ *   hypHome: string,
+ * }} args
+ * @returns {HypAwareV2Config}
+ */
+export function composePickerConfig(args) {
+  const wantsAnthropic = args.sources.includes('claude') || args.sources.includes('raw-anthropic')
+  const wantsOpenai = args.sources.includes('codex') || args.sources.includes('raw-openai')
+  const wantsGateway = wantsAnthropic || wantsOpenai
+  const wantsOtel = args.sources.includes('otel')
+
+  /** @type {PluginConfigInstance[]} */
+  const plugins = []
+
+  if (wantsGateway) {
+    /** @type {{ name: string, base_url: string, path_prefix: string }[]} */
+    const upstreams = []
+    if (wantsAnthropic) {
+      upstreams.push({ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' })
+    }
+    if (wantsOpenai) {
+      upstreams.push({ name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/' })
+    }
+    plugins.push({
+      name: '@hypaware/ai-gateway',
+      config: { listen: '127.0.0.1:8787', upstreams },
+    })
+  }
+
+  if (wantsOtel) {
+    plugins.push({
+      name: '@hypaware/otel',
+      config: { listen_host: '127.0.0.1', listen_port: 4318 },
+    })
+  }
+
+  /** @type {Record<string, import('../../../collectivus-plugin-kernel-types').SinkConfigInstance>} */
+  const sinks = {}
+  if (args.exportChoice === 'local-parquet') {
+    plugins.push({ name: '@hypaware/local-fs' })
+    plugins.push({ name: '@hypaware/format-parquet' })
+    sinks['local'] = {
+      writer: '@hypaware/format-parquet',
+      destination: '@hypaware/local-fs',
+      config: {
+        dir: path.join(args.hypHome, 'exports'),
+        schedule: '*/5 * * * *',
+      },
+    }
+  }
+
+  if (args.sources.includes('claude')) {
+    plugins.push({
+      name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ ('@hypaware/claude'),
+      config: { proxy: '@hypaware/ai-gateway' },
+    })
+  }
+  if (args.sources.includes('codex')) {
+    plugins.push({
+      name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ ('@hypaware/codex'),
+      config: { proxy: '@hypaware/ai-gateway' },
+    })
+  }
+
+  /** @type {HypAwareV2Config} */
+  const config = {
+    version: 2,
+    plugins,
+    query: {
+      cache: {
+        retention: { default_days: args.retentionDays },
+      },
+    },
+  }
+  if (Object.keys(sinks).length > 0) config.sinks = sinks
+  return config
+}
+
+/**
+ * Run the picker finale: daemon install, attach, skills install,
+ * daemon restart. Each step emits its own span (`daemon.install`,
+ * `client.attach` (via the adapter), `skills.install`).
+ *
+ * @param {{
+ *   finale: PickerFinaleActions,
+ *   clientsPicked: ('claude'|'codex')[],
+ *   capabilities: CapabilityRegistry,
+ *   skills?: { list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] },
+ *   configPath: string,
+ *   env: NodeJS.ProcessEnv,
+ *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ * }} args
+ * @returns {Promise<FinaleSummary>}
+ */
+async function runPickerFinale(args) {
+  const { finale, clientsPicked, capabilities, skills, configPath, env, stdout, stderr } = args
+  const dryRun = finale.dryRun === true
+  const homeDir = env.HOME ?? ''
+
+  /** @type {FinaleSummary} */
+  const summary = {
+    daemonInstall: { skipped: !!finale.skipDaemon, dryRun },
+    attach: [],
+    skillsInstalled: [],
+    daemonRestart: { skipped: true, dryRun, ok: false },
+  }
+
+  if (!finale.skipDaemon) {
+    await withSpan(
+      'daemon.install',
+      {
+        [Attr.COMPONENT]: 'walkthrough',
+        [Attr.OPERATION]: 'daemon.install',
+        dry_run: dryRun,
+        config_path: configPath,
+        status: 'ok',
+      },
+      async (span) => {
+        const installMod = await import('../daemon/install.js')
+        const binPath = finale.binPath ?? (process.argv[1] ?? '')
+        /** @type {import('../daemon/install.js').DaemonInstallOptions} */
+        const options = {
+          binPath,
+          configPath,
+          ...(homeDir ? { homeDir } : {}),
+        }
+        if (dryRun) {
+          const plan = installMod.renderDaemonInstall(options)
+          summary.daemonInstall = {
+            skipped: false,
+            dryRun: true,
+            targetPath: plan.targetPath,
+            plan: /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (plan)),
+          }
+          if (span && typeof span.setAttribute === 'function') {
+            span.setAttribute('target_path', plan.targetPath)
+            span.setAttribute('bin_path', plan.binPath)
+            span.setAttribute('platform', plan.platform)
+          }
+        } else {
+          const plan = await installMod.installDaemon(options)
+          summary.daemonInstall = {
+            skipped: false,
+            dryRun: false,
+            targetPath: plan.targetPath,
+          }
+          if (span && typeof span.setAttribute === 'function') {
+            span.setAttribute('target_path', plan.targetPath)
+            span.setAttribute('bin_path', plan.binPath)
+            span.setAttribute('platform', plan.platform)
+          }
+        }
+      },
+      { component: 'walkthrough' }
+    )
+  }
+
+  if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
+    /** @type {AiGatewayCapability} */
+    const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^1.0.0')
+    for (const client of clientsPicked) {
+      const adapter = gateway.getClient(client)
+      if (!adapter) {
+        summary.attach.push({ client, dryRun, ok: false })
+        continue
+      }
+      let endpoint = 'http://127.0.0.1:0'
+      try {
+        endpoint = gateway.localEndpoint()
+      } catch {}
+      try {
+        await adapter.attach({
+          endpoint,
+          config: {},
+          stdout,
+          stderr,
+          dryRun,
+        })
+        summary.attach.push({ client, dryRun, ok: true })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        stderr.write(`attach ${client} failed: ${message}\n`)
+        summary.attach.push({ client, dryRun, ok: false })
+      }
+    }
+  }
+
+  if (clientsPicked.length > 0 && skills) {
+    await withSpan(
+      'skills.install',
+      {
+        [Attr.COMPONENT]: 'walkthrough',
+        [Attr.OPERATION]: 'skills.install',
+        dry_run: dryRun,
+        client_count: clientsPicked.length,
+        status: 'ok',
+      },
+      async (span) => {
+        for (const skill of skills.list()) {
+          for (const targetClient of skill.clients) {
+            if (!clientsPicked.includes(targetClient)) continue
+            const dest = path.join(homeDir, clientSkillDir(targetClient), skill.name)
+            if (dryRun) {
+              stdout.write(`(dry-run) Would install skill '${skill.name}' → ${dest}\n`)
+            } else {
+              await fs.rm(dest, { recursive: true, force: true })
+              await copyDir(skill.sourceDir, dest)
+              stdout.write(`installed skill '${skill.name}' → ${dest}\n`)
+            }
+            summary.skillsInstalled.push({ name: skill.name, client: targetClient, dest, dryRun })
+          }
+        }
+        if (span && typeof span.setAttribute === 'function') {
+          span.setAttribute('installed_count', summary.skillsInstalled.length)
+        }
+      },
+      { component: 'walkthrough' }
+    )
+  }
+
+  if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
+    try {
+      const { restartServiceDaemon } = await import('../daemon/install.js')
+      await restartServiceDaemon({ ...(homeDir ? { homeDir } : {}) })
+      summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      stderr.write(`daemon restart failed: ${message}\n`)
+      summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
+    }
+  } else if (dryRun && !finale.skipDaemon) {
+    summary.daemonRestart = { skipped: false, dryRun: true, ok: true }
+    stdout.write(`(dry-run) Would restart the daemon\n`)
+  }
+
+  return summary
+}
+
+/** @param {'claude'|'codex'} client */
+function clientSkillDir(client) {
+  if (client === 'claude') return '.claude/skills'
+  return '.codex/skills'
+}
+
+/**
+ * @param {string} src
+ * @param {string} dest
+ * @returns {Promise<void>}
+ */
+async function copyDir(src, dest) {
+  await fs.mkdir(dest, { recursive: true })
+  const entries = await fs.readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    const from = path.join(src, entry.name)
+    const to = path.join(dest, entry.name)
+    if (entry.isDirectory()) {
+      await copyDir(from, to)
+    } else if (entry.isFile()) {
+      await fs.copyFile(from, to)
+    }
+  }
+}
