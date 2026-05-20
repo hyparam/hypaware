@@ -120,6 +120,7 @@ export async function dispatch(argv, opts = {}) {
     capabilities: kernel.capabilities,
     query: kernel.query,
     storage: kernel.storage,
+    skills: kernel.skills,
   }
 
   return context.with(ROOT_CONTEXT, () =>

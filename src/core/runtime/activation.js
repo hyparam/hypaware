@@ -239,11 +239,41 @@ function createCapabilitiesFacade(pluginName, registry) {
  * touching the activation surface. The config registry was promoted to
  * a real implementation in Phase 6 (`src/core/config/schema.js`). */
 
-/** @returns {SkillRegistry} */
+/**
+ * Skill registry. Stores contributions from client-adapter plugins so
+ * `hyp skills install` (and the Phase 9 walkthrough) can enumerate
+ * what each plugin wants materialized into the per-client skill
+ * directories. Promoted to a real registry in Phase 8.4 alongside the
+ * client-adapter plugins.
+ *
+ * @returns {SkillRegistry}
+ */
 function createPhase2SkillRegistry() {
+  /** @type {import('../../../collectivus-plugin-kernel-types').SkillContribution[]} */
+  const items = []
   return {
-    register() {},
-    list() { return [] },
+    register(skill) {
+      if (!skill || typeof skill.name !== 'string' || skill.name.length === 0) {
+        throw new TypeError('skills.register: name is required')
+      }
+      if (typeof skill.plugin !== 'string' || skill.plugin.length === 0) {
+        throw new TypeError(`skills.register '${skill.name}': plugin is required`)
+      }
+      if (!Array.isArray(skill.clients) || skill.clients.length === 0) {
+        throw new TypeError(`skills.register '${skill.name}': clients must be a non-empty array`)
+      }
+      if (typeof skill.sourceDir !== 'string' || skill.sourceDir.length === 0) {
+        throw new TypeError(`skills.register '${skill.name}': sourceDir is required`)
+      }
+      items.push({
+        name: skill.name,
+        plugin: skill.plugin,
+        clients: [...skill.clients],
+        sourceDir: skill.sourceDir,
+        ...(skill.projectLocal !== undefined ? { projectLocal: skill.projectLocal } : {}),
+      })
+    },
+    list() { return items.slice() },
   }
 }
 

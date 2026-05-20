@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/codex",
+  "version": "1.0.0",
+  "description": "OpenAI Codex client adapter for HypAware. Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query helper skill.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_codex_settings"
+  ],
+  "requires": {
+    "capabilities": {
+      "hypaware.ai-gateway": "^1.0.0"
+    }
+  },
+  "contributes": {
+    "skills": [
+      { "name": "hypaware-query", "clients": ["codex"] }
+    ]
+  }
+}

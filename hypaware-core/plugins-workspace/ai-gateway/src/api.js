@@ -104,6 +104,15 @@ export function createAiGatewayApi(state) {
       }
       return base
     },
+
+    /** @param {string} name */
+    getClient(name) {
+      return state.clients.get(name)
+    },
+
+    listClients() {
+      return Array.from(state.clients.values())
+    },
   }
 }
 

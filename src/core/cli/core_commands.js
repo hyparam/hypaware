@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../observability/index.js'
@@ -705,21 +706,138 @@ async function runInit(_argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * `hyp attach --client <name> [--yes]`
+ *
+ * Resolves the `hypaware.ai-gateway` capability, looks up the named
+ * client adapter, and dispatches to the adapter's `attach()`. Each
+ * adapter emits its own `client.attach` span; this router only
+ * threads stdout/stderr and the gateway's `localEndpoint()` into the
+ * adapter context.
+ *
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runAttach(_argv, ctx) {
-  ctx.stdout.write('(client attach is contributed by client adapter plugins, Phase 8.4)\n')
-  return 0
+async function runAttach(argv, ctx) {
+  return runClientLifecycle('attach', argv, ctx)
 }
 
 /**
- * @param {string[]} _argv
+ * `hyp detach --client <name>`
+ *
+ * Resolves the gateway capability, looks up the named client, and
+ * dispatches to its `detach()`. `detach()` is invoked with the
+ * adapter's config slice (currently empty until per-adapter config
+ * lands) plus stdout/stderr.
+ *
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runDetach(_argv, ctx) {
-  ctx.stdout.write('(client detach is contributed by client adapter plugins, Phase 8.4)\n')
-  return 0
+async function runDetach(argv, ctx) {
+  return runClientLifecycle('detach', argv, ctx)
+}
+
+/**
+ * @param {'attach'|'detach'} action
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runClientLifecycle(action, argv, ctx) {
+  const parsed = parseClientArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+
+  if (!ctx.capabilities.has('hypaware.ai-gateway')) {
+    ctx.stderr.write(
+      `error: ${action} requires the @hypaware/ai-gateway plugin to be installed and activated\n`
+    )
+    return 1
+  }
+  /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+  const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^1.0.0')
+
+  const clientNames = expandClientName(parsed.client, gateway)
+  if (clientNames.length === 0) {
+    ctx.stderr.write(
+      `error: unknown client '${parsed.client}'. Registered clients: ${
+        gateway.listClients().map((c) => c.name).join(', ') || '(none)'
+      }\n`
+    )
+    return 1
+  }
+
+  let exitCode = 0
+  for (const name of clientNames) {
+    const client = gateway.getClient(name)
+    if (!client) {
+      ctx.stderr.write(`error: unknown client '${name}'\n`)
+      exitCode = 1
+      continue
+    }
+    try {
+      if (action === 'attach') {
+        const endpoint = gateway.localEndpoint()
+        await client.attach({
+          endpoint,
+          config: {},
+          stdout: ctx.stdout,
+          stderr: ctx.stderr,
+        })
+      } else {
+        await client.detach({
+          config: {},
+          stdout: ctx.stdout,
+          stderr: ctx.stderr,
+        })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`error: ${action} client '${name}' failed: ${message}\n`)
+      exitCode = 1
+    }
+  }
+  return exitCode
+}
+
+/**
+ * Parse `--client <name>` and `--yes` / `-y` from argv.
+ * @param {string[]} argv
+ */
+function parseClientArgs(argv) {
+  /** @type {{ client: string, yes: boolean, error?: string }} */
+  const r = { client: 'claude', yes: false }
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--yes' || arg === '-y') {
+      r.yes = true
+      continue
+    }
+    if (arg === '--client' || arg.startsWith('--client=')) {
+      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
+      if (!value) { r.error = '--client requires a name'; return r }
+      r.client = value
+      continue
+    }
+    r.error = `unknown argument: ${arg}`
+    return r
+  }
+  return r
+}
+
+/**
+ * Resolve `--client all` to every registered client name; otherwise
+ * return the requested name verbatim.
+ *
+ * @param {string} requested
+ * @param {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} gateway
+ */
+function expandClientName(requested, gateway) {
+  if (requested === 'all') {
+    return gateway.listClients().map((c) => c.name)
+  }
+  return [requested]
 }
 
 /**
@@ -732,10 +850,99 @@ async function runIgnore(_argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * `hyp skills install [--client <name>]`
+ *
+ * Walks the kernel skill registry and materializes each contribution
+ * into the right per-client skill directory. The skill source tree
+ * (a directory with `SKILL.md`) is copied recursively; existing
+ * installations are replaced (idempotent).
+ *
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runSkillsInstall(_argv, ctx) {
-  ctx.stdout.write('(skill install lands when client adapter plugins ship skills, Phase 8.4)\n')
+async function runSkillsInstall(argv, ctx) {
+  const parsed = parseSkillsArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+
+  const skills = ctx.skills.list()
+  if (skills.length === 0) {
+    ctx.stdout.write('(no skills registered)\n')
+    return 0
+  }
+
+  const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
+  if (!homeDir) {
+    ctx.stderr.write('error: HOME is not set; cannot resolve skill install paths\n')
+    return 1
+  }
+
+  let count = 0
+  for (const skill of skills) {
+    for (const targetClient of skill.clients) {
+      if (parsed.client !== 'all' && parsed.client !== targetClient) continue
+      const dest = path.join(homeDir, clientSkillDir(targetClient), skill.name)
+      try {
+        await fs.rm(dest, { recursive: true, force: true })
+        await copyDir(skill.sourceDir, dest)
+        ctx.stdout.write(`installed skill '${skill.name}' → ${dest}\n`)
+        count += 1
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`warning: skill '${skill.name}' for ${targetClient} failed: ${message}\n`)
+      }
+    }
+  }
+  ctx.stdout.write(`installed ${count} skill copy(ies)\n`)
   return 0
+}
+
+/** @param {string[]} argv */
+function parseSkillsArgs(argv) {
+  /** @type {{ client: 'all' | 'claude' | 'codex', error?: string }} */
+  const r = { client: 'all' }
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--client' || arg.startsWith('--client=')) {
+      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
+      if (!value) { r.error = '--client requires a name'; return r }
+      if (value !== 'all' && value !== 'claude' && value !== 'codex') {
+        r.error = `--client: expected all, claude, or codex (got "${value}")`
+        return r
+      }
+      r.client = value
+      continue
+    }
+    r.error = `unknown argument: ${arg}`
+    return r
+  }
+  return r
+}
+
+/** @param {'claude'|'codex'|'all'} client */
+function clientSkillDir(client) {
+  if (client === 'claude') return '.claude/skills'
+  if (client === 'codex') return '.codex/skills'
+  throw new Error(`clientSkillDir: '${client}' has no per-client directory`)
+}
+
+/**
+ * @param {string} src
+ * @param {string} dest
+ * @returns {Promise<void>}
+ */
+async function copyDir(src, dest) {
+  await fs.mkdir(dest, { recursive: true })
+  const entries = await fs.readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    const from = path.join(src, entry.name)
+    const to = path.join(dest, entry.name)
+    if (entry.isDirectory()) {
+      await copyDir(from, to)
+    } else if (entry.isFile()) {
+      await fs.copyFile(from, to)
+    }
+  }
 }

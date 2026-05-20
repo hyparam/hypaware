@@ -448,6 +448,12 @@ export interface CommandRunContext {
   query: QueryRegistry
   /** Intrinsic query cache storage. Populated by the dispatcher. */
   storage: QueryStorageService
+  /**
+   * Skill registry (kernel-owned). Populated by the dispatcher.
+   * `hyp skills install` and the Phase 9 walkthrough enumerate this
+   * to materialize plugin-contributed skills under per-client paths.
+   */
+  skills: SkillRegistry
 }
 
 // =============================================================================
@@ -761,6 +767,18 @@ export interface AiGatewayCapability {
   registerClient(client: AiGatewayClientRegistration): void
   registerMessageEnricher(enricher: AiGatewayMessageEnricher): void
   localEndpoint(opts?: AiGatewayEndpointOptions): string
+  /**
+   * Look up a registered client by name. Returns `undefined` when no
+   * adapter plugin has registered under that name. Used by the shared
+   * `hyp attach`/`hyp detach` command router to dispatch to the right
+   * adapter without coupling core to plugin-specific code.
+   */
+  getClient(name: string): AiGatewayClientRegistration | undefined
+  /**
+   * Enumerate every registered client. Used by `hyp attach --help`
+   * and the Phase 9 walkthrough to list available adapters.
+   */
+  listClients(): AiGatewayClientRegistration[]
 }
 
 export interface AiGatewayUpstreamPreset {
