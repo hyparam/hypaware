@@ -36,6 +36,7 @@ import { statusFilePath, writeStatusFile } from './status.js'
  * @property {() => Promise<number>} stop      Trigger an orderly shutdown (SIGTERM-equivalent).
  * @property {() => DaemonStatus} snapshot     Read the current in-memory status.
  * @property {() => Promise<void>} reload      Trigger a config reload (SIGHUP-equivalent).
+ * @property {KernelRuntime} runtime           Phase 3 test affordance. The runtime the daemon activated — exposed so smoke flows can drive sink instantiation, dispatch, and per-test setup until config-driven sink setup lands.
  */
 
 /**
@@ -384,6 +385,7 @@ export async function runDaemon(opts = {}) {
     stop: () => shutdown('manual'),
     snapshot: () => ({ ...status, sources: status.sources.slice(), sinks: status.sinks.slice() }),
     reload: () => triggerReload ? triggerReload() : Promise.resolve(),
+    runtime: boot.runtime,
   }
 }
 

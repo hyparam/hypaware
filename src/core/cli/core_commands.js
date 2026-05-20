@@ -229,6 +229,18 @@ function buildCoreCommands() {
       run: runDaemonRestart,
     },
     {
+      name: 'sink',
+      summary: 'Manage sink instances (subcommand: force)',
+      usage: 'hyp sink <subcommand> [args...]',
+      run: runSinkHelp,
+    },
+    {
+      name: 'sink force',
+      summary: 'Force the sink driver to fire a tick now (optionally for one instance)',
+      usage: 'hyp sink force [instance]',
+      run: runSinkForce,
+    },
+    {
       name: 'smoke',
       summary: 'Run a smoke flow under a fresh tmp HYP_HOME (internal)',
       usage: 'hyp smoke <flow-name>',
@@ -1334,6 +1346,68 @@ async function runSmoke(argv, ctx) {
     return 1
   }
   return result.status ?? 1
+}
+
+/* ---------- sink ---------- */
+
+/**
+ * `hyp sink` group landing — no default behavior, just usage.
+ *
+ * @param {string[]} _argv
+ * @param {CommandRunContext} ctx
+ */
+async function runSinkHelp(_argv, ctx) {
+  ctx.stdout.write('usage: hyp sink <subcommand> [args...]\n')
+  ctx.stdout.write('  subcommands:\n')
+  ctx.stdout.write('    force [instance]   Run a sink tick now, ignoring schedules\n')
+  return 0
+}
+
+/**
+ * `hyp sink force [instance]`
+ *
+ * Drives one tick of the sink driver immediately, bypassing each
+ * sink's cron schedule. The optional `instance` argument restricts
+ * the tick to a single sink — useful when an operator just wants to
+ * flush one configured destination without waking the others.
+ *
+ * The driver writes the same `sink.export_batch` span and outbox
+ * artifacts it does on a scheduled tick — the only difference is the
+ * trigger.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runSinkForce(argv, ctx) {
+  const instance = argv[0]
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const { createSinkDriver } = await import('../sinks/driver.js')
+  const driver = createSinkDriver({
+    sinkRegistry: /** @type {any} */ (ctx.sinks),
+    queryRegistry: ctx.query,
+    storage: ctx.storage,
+    stateRoot: obsEnv.stateDir,
+    config: ctx.config,
+  })
+  const tickOpts = { now: new Date(), force: true, source: /** @type {'manual'} */ ('manual') }
+  if (instance) /** @type {any} */ (tickOpts).sinkInstance = instance
+  const report = await driver.tick(tickOpts)
+  if (report.sinks.length === 0) {
+    if (instance) {
+      ctx.stderr.write(`hyp sink force: no sink named '${instance}' was instantiated\n`)
+      return 1
+    }
+    ctx.stdout.write('no sinks instantiated; nothing to do\n')
+    return 0
+  }
+  for (const r of report.sinks) {
+    ctx.stdout.write(
+      `${r.instance}: ${r.status} (partitions=${r.partitionsExported}, bytes=${r.bytesWritten}${
+        r.error ? `, error=${r.error}` : ''
+      })\n`
+    )
+  }
+  return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
 }
 
 /* ---------- misc ---------- */
