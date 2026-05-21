@@ -176,6 +176,13 @@ function buildCoreCommands() {
       run: runIgnore,
     },
     {
+      name: 'claude-hook session-context',
+      summary: 'Internal Claude Code hook compatibility shim',
+      usage: 'hyp claude-hook session-context [--port <port>]',
+      hidden: true,
+      run: runClaudeSessionContextHook,
+    },
+    {
       name: 'skills install',
       summary: 'Install registered skills into AI client directories',
       usage: 'hyp skills install [--client <name>]',
@@ -2172,6 +2179,25 @@ function expandClientName(requested, gateway) {
  */
 async function runIgnore(_argv, ctx) {
   ctx.stdout.write('(session ignore is contributed by recording-source plugins)\n')
+  return 0
+}
+
+/**
+ * `hyp claude-hook session-context [--port <port>]`
+ *
+ * Compatibility shim for Claude Code settings written by the Claude
+ * adapter. The richer session-context capture endpoint is not wired in
+ * V1 yet, but Claude treats a nonzero hook exit as a blocked user
+ * prompt. Keep this command quiet and successful so stale or current
+ * managed hook entries never interrupt Claude.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runClaudeSessionContextHook(argv, ctx) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    ctx.stdout.write('usage: hyp claude-hook session-context [--port <port>]\n')
+  }
   return 0
 }
 
