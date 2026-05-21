@@ -6,3 +6,6 @@
 
 # Node
 node_modules/
+
+# Donor/reference codebase kept out of the active HypAware repo
+collectivus/

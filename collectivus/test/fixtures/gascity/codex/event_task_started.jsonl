@@ -1,2 +1,0 @@
-{"timestamp":"2026-05-14T20:31:20.757Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-0001","started_at":1778790680,"model_context_window":258400,"collaboration_mode_kind":"default"}}
-{"timestamp":"2026-05-14T20:33:08.517Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-0002","started_at":1778790788,"model_context_window":258400,"collaboration_mode_kind":"default"}}

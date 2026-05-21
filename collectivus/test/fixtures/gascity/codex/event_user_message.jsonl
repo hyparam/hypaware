@@ -1,2 +1,0 @@
-{"timestamp":"2026-05-14T20:31:20.758Z","type":"event_msg","payload":{"type":"user_message","message":"what could we use instead of dolt for beads","images":[],"local_images":[],"text_elements":[]}}
-{"timestamp":"2026-05-14T20:33:08.518Z","type":"event_msg","payload":{"type":"user_message","message":"what are the commands that use the history, push/pull, conflict\n     detection, merge, backup, and multi-agent\n     concurrency.","images":[],"local_images":[],"text_elements":[]}}
