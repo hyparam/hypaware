@@ -188,6 +188,8 @@ export interface PluginSourceSpec {
   ref?: string
   /** Local directory source for development installs. */
   path?: string
+  /** Optional subdirectory inside a git source. Reserved; rejected until subdir support lands. */
+  subdir?: string
 }
 
 export interface PluginLockFile {

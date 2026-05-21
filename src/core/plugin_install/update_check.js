@@ -1,5 +1,7 @@
 // @ts-check
 
+import { spawn } from 'node:child_process'
+
 import { Attr, getKernelInstruments, SpanStatusCode, withSpan } from '../observability/index.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
@@ -101,8 +103,100 @@ async function runProbe(entry, now) {
   if (entry.source.kind === 'local-dir') {
     return { checked_at: checkedAt, available: false }
   }
+  if (entry.source.kind === 'git') {
+    return runGitProbe(entry, checkedAt)
+  }
   return {
     checked_at: checkedAt,
     available: false,
   }
+}
+
+/**
+ * Probe a git source's upstream by running `git ls-remote`. The probe
+ * compares the resolved upstream commit for the locked `source.ref`
+ * (or the remote's default `HEAD`) against the entry's `resolved_ref`
+ * and sets `available=true` when they differ.
+ *
+ * The probe is best-effort: a non-zero exit or unparseable output
+ * records an error on the returned state but never throws.
+ *
+ * @param {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} entry
+ * @param {string} checkedAt
+ * @returns {Promise<import('../../../collectivus-plugin-kernel-types').PluginUpdateState>}
+ */
+async function runGitProbe(entry, checkedAt) {
+  const gitUrl = entry.source.gitUrl
+  if (!gitUrl) {
+    return { checked_at: checkedAt, available: false, error: 'missing gitUrl' }
+  }
+  const ref = entry.source.ref || 'HEAD'
+  const probe = await execGit(['ls-remote', '--quiet', gitUrl, ref])
+  if (probe.code !== 0) {
+    return {
+      checked_at: checkedAt,
+      available: false,
+      error: 'git_ls_remote_failed',
+    }
+  }
+  const latestRef = parseLsRemoteOutput(probe.stdout)
+  if (!latestRef) {
+    return {
+      checked_at: checkedAt,
+      available: false,
+      error: 'no_ref_resolved',
+    }
+  }
+  const available = !!entry.resolved_ref && latestRef !== entry.resolved_ref
+  return {
+    checked_at: checkedAt,
+    latest_ref: latestRef,
+    available,
+  }
+}
+
+/**
+ * Extract the first commit SHA from `git ls-remote` output. Each line
+ * is `<sha>\t<refname>`; we take the first SHA so behavior is stable
+ * regardless of whether the caller asked for `HEAD`, a branch, or a
+ * tag.
+ *
+ * @param {string} stdout
+ */
+function parseLsRemoteOutput(stdout) {
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const sha = trimmed.split(/\s+/)[0]
+    if (/^[0-9a-f]{40}$/i.test(sha)) return sha
+  }
+  return undefined
+}
+
+/**
+ * @param {string[]} args
+ * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
+ */
+function execGit(args) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    const child = spawn('git', args, {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    /** @type {Buffer[]} */
+    const stdoutChunks = []
+    /** @type {Buffer[]} */
+    const stderrChunks = []
+    child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)))
+    child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)))
+    child.on('error', () => resolve({ code: -1, stdout: '', stderr: 'git binary unavailable' }))
+    child.on('close', (code) => {
+      resolve({
+        code: code ?? -1,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+      })
+    })
+  })
 }
