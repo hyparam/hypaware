@@ -71,7 +71,7 @@ export async function run({ harness, expect }) {
       status: 'ok',
     },
     async () =>
-      dispatch(['plugin', 'install', sourceUrl], {
+      dispatch(['plugin', 'install', sourceUrl, '--yes'], {
         stdout: installStdout,
         stderr: installStderr,
         env: { ...process.env, HYP_HOME: harness.hypHome },
@@ -81,10 +81,18 @@ export async function run({ harness, expect }) {
       })
   )
   expect.that('dispatch: plugin install exited 0', installCode, (v) => v === 0)
+  // The confirmation summary lands on stderr by design (stdout stays
+  // clean for the install success line). Smoke just asserts that the
+  // summary mentions the plugin name and resolved commit.
   expect.that(
-    'stderr: plugin install had no errors',
+    'stderr: confirmation summary names the plugin',
     installStderr.text(),
-    (v) => typeof v === 'string' && v.length === 0
+    (v) => typeof v === 'string' && v.includes('@hypaware/git-url-fixture')
+  )
+  expect.that(
+    'stderr: confirmation summary lists the resolved ref',
+    installStderr.text(),
+    (v) => typeof v === 'string' && v.includes(commitSha)
   )
   expect.that(
     'stdout: install summary lists the plugin name',
@@ -219,6 +227,11 @@ export async function run({ harness, expect }) {
     'traces: plugin.install records content_hash on the parent span',
     installSpan?.attributes?.content_hash,
     (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)
+  )
+  expect.that(
+    'traces: plugin.install stamps confirmation=auto_yes for --yes installs',
+    installSpan?.attributes?.confirmation,
+    (v) => v === 'auto_yes'
   )
 
   const expectedChildSpans = [
