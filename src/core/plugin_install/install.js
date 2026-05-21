@@ -11,6 +11,7 @@ import {
 } from '../observability/index.js'
 
 import { fetchPlugin } from './fetch.js'
+import { provenanceFromUrl } from './git_source.js'
 import {
   emptyLock,
   getEntry,
@@ -67,9 +68,10 @@ import { checkForPluginUpdate } from './update_check.js'
  * @param {string} args.stateDir     — kernel state root
  * @param {string} [args.cwd]        — for resolving relative paths
  * @param {() => Date} [args.now]    — injectable for tests
+ * @param {{ ref?: string, subdir?: string }} [args.opts] — CLI flag overrides
  * @returns {Promise<InstallResult>}
  */
-export async function installPlugin({ rawSource, stateDir, cwd, now }) {
+export async function installPlugin({ rawSource, stateDir, cwd, now, opts }) {
   const instruments = getKernelInstruments()
   const log = getLogger('plugin-install')
   const nowFn = now ?? (() => new Date())
@@ -85,26 +87,41 @@ export async function installPlugin({ rawSource, stateDir, cwd, now }) {
       /** @type {PluginSourceSpec} */
       let source
       try {
-        source = resolveSource(rawSource, { cwd })
+        source = resolveSource(rawSource, { cwd, ref: opts?.ref, subdir: opts?.subdir })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        span.setStatus({ code: SpanStatusCode.ERROR, message: 'resolver_error' })
+        const errorKind =
+          /** @type {Error & { hypErrorKind?: string }} */ (err)?.hypErrorKind || 'resolver_error'
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorKind })
         span.setAttribute('status', 'failed')
-        span.setAttribute('error_kind', 'resolver_error')
+        span.setAttribute('error_kind', errorKind)
         instruments.pluginInstallsTotal.add(1, { status: 'failed' })
         log.warn('plugin.install.failed', {
           [Attr.COMPONENT]: 'plugin-install',
-          error_kind: 'resolver_error',
+          error_kind: errorKind,
           message,
         })
         return /** @type {InstallFailure} */ ({
           ok: false,
-          errorKind: 'resolver_error',
+          errorKind,
           message,
         })
       }
       span.setAttribute('hyp_source_kind', source.kind)
       if (source.name) span.setAttribute(Attr.PLUGIN, source.name)
+      if (source.kind === 'git') {
+        const prov = provenanceFromUrl(source.gitUrl ?? '')
+        if (prov.host) span.setAttribute('git_url_host', prov.host)
+        if (prov.owner) span.setAttribute('git_owner', prov.owner)
+        if (prov.repo) span.setAttribute('git_repo', prov.repo)
+        if (source.ref) span.setAttribute('git_ref', source.ref)
+        if (/** @type {PluginSourceSpec & { subdir?: string }} */ (source).subdir) {
+          span.setAttribute(
+            'artifact_subdir',
+            /** @type {PluginSourceSpec & { subdir?: string }} */ (source).subdir ?? ''
+          )
+        }
+      }
 
       const fetchResult = await fetchPlugin({ source, stateDir })
       if (!fetchResult.ok) {
@@ -135,6 +152,12 @@ export async function installPlugin({ rawSource, stateDir, cwd, now }) {
         manifest_hash: fetchResult.manifestHash,
         installed_at: installedAt,
       }
+      if (fetchResult.resolvedRef) {
+        entry.resolved_ref = fetchResult.resolvedRef
+        span.setAttribute('git_resolved_ref', fetchResult.resolvedRef)
+      }
+      span.setAttribute('content_hash', fetchResult.contentHash)
+      span.setAttribute('manifest_hash', fetchResult.manifestHash)
       span.setAttribute(Attr.PLUGIN, entry.name)
 
       const initialLock = await safeReadLock(stateDir)

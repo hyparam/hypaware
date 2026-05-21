@@ -106,7 +106,7 @@ function buildCoreCommands() {
     {
       name: 'plugin install',
       summary: 'Install a plugin from name, git URL, or local directory',
-      usage: 'hyp plugin install <source>',
+      usage: 'hyp plugin install <source> [--ref <ref>] [--path <subdir>]',
       run: runPluginInstall,
     },
     {
@@ -830,13 +830,18 @@ function pluginStateDir(ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runPluginInstall(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp plugin install <source>\n')
-    return 2
+  const parsed = parsePluginInstallArgs(argv)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp plugin install: ${parsed.message}\n`)
+    return parsed.code
   }
-  const rawSource = argv[0]
   const stateDir = pluginStateDir(ctx)
-  const result = await installPlugin({ rawSource, stateDir, cwd: ctx.cwd })
+  const result = await installPlugin({
+    rawSource: parsed.rawSource,
+    stateDir,
+    cwd: ctx.cwd,
+    opts: { ref: parsed.ref, subdir: parsed.subdir },
+  })
   if (!result.ok) {
     ctx.stderr.write(`hyp plugin install: ${result.message}\n`)
     return 1
@@ -845,7 +850,62 @@ async function runPluginInstall(argv, ctx) {
     `installed ${result.entry.name}@${result.entry.version} from ${result.entry.source.kind}\n`
   )
   ctx.stdout.write(`  install_dir: ${result.entry.install_dir}\n`)
+  if (result.entry.resolved_ref) {
+    ctx.stdout.write(`  resolved_ref: ${result.entry.resolved_ref}\n`)
+  }
   return 0
+}
+
+/**
+ * Parse `hyp plugin install <source> [--ref <ref>] [--path <subdir>]`.
+ * Flags accept both `--flag value` and `--flag=value` forms. The
+ * function does NOT verify mutual exclusion of `--ref` with a URL
+ * fragment — that lives in the resolver so the same rule applies to
+ * programmatic callers.
+ *
+ * @param {string[]} argv
+ * @returns {(
+ *   { ok: true, rawSource: string, ref?: string, subdir?: string }
+ *   | { ok: false, code: number, message: string }
+ * )}
+ */
+function parsePluginInstallArgs(argv) {
+  /** @type {string | undefined} */
+  let rawSource
+  /** @type {string | undefined} */
+  let ref
+  /** @type {string | undefined} */
+  let subdir
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--ref' || arg === '--path') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) {
+        return { ok: false, code: 2, message: `flag ${arg} requires a value` }
+      }
+      if (arg === '--ref') ref = value
+      else subdir = value
+      i += 1
+      continue
+    }
+    if (arg.startsWith('--ref=')) {
+      ref = arg.slice('--ref='.length)
+      continue
+    }
+    if (arg.startsWith('--path=')) {
+      subdir = arg.slice('--path='.length)
+      continue
+    }
+    if (rawSource === undefined) {
+      rawSource = arg
+      continue
+    }
+    return { ok: false, code: 2, message: `unexpected argument '${arg}'` }
+  }
+  if (!rawSource) {
+    return { ok: false, code: 2, message: 'usage: hyp plugin install <source> [--ref <ref>] [--path <subdir>]' }
+  }
+  return { ok: true, rawSource, ref, subdir }
 }
 
 /**
