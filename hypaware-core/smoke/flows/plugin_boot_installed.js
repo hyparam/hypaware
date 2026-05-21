@@ -69,7 +69,7 @@ export async function run({ harness, expect }) {
       status: 'ok',
     },
     async () =>
-      dispatch(['plugin', 'install', sourceUrl], {
+      dispatch(['plugin', 'install', sourceUrl, '--yes'], {
         stdout: installStdout,
         stderr: installStderr,
         env: baseEnv,
@@ -77,10 +77,13 @@ export async function run({ harness, expect }) {
       })
   )
   expect.that('dispatch: plugin install exited 0', installCode, (v) => v === 0)
+  // The confirmation summary lands on stderr by design; the smoke only
+  // cares that we got the success exit code and nothing surprising
+  // bled through. Match the install-git-url smoke contract.
   expect.that(
-    'stderr: plugin install had no errors',
+    'stderr: confirmation summary names the plugin',
     installStderr.text(),
-    (v) => typeof v === 'string' && v.length === 0
+    (v) => typeof v === 'string' && v.includes(pluginName)
   )
 
   // ----- 3. Write a config that activates the installed plugin -----

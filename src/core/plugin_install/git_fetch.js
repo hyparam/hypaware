@@ -57,8 +57,32 @@ const SKIPPED_DIR_NAMES = new Set([
  *   'entrypoint_invalid'|
  *   'artifact_symlink_unsupported'|
  *   'artifact_copy_failed'|
- *   'lock_write_error'
+ *   'lock_write_error'|
+ *   'remote_install_confirmation_required'|
+ *   'remote_install_rejected'
  * )} GitFetchErrorKind
+ */
+
+/**
+ * Snapshot of a fetched-but-not-yet-installed artifact. Passed to the
+ * `beforeCommit` callback so a CLI front-end can prompt the user (or
+ * enforce `--yes`) immediately before the rename swap that places the
+ * artifact into the kernel install root. Mirrors the public
+ * `StagedArtifact` shape in `confirm.js` but kept structurally typed
+ * to avoid the cross-module import for callers that just want hashes.
+ *
+ * @typedef {Object} GitFetchStaged
+ * @property {PluginManifest} manifest
+ * @property {string} resolvedRef
+ * @property {string} contentHash
+ * @property {string} manifestHash
+ * @property {{ host?: string, owner?: string, repo?: string }} provenance
+ */
+
+/**
+ * @callback BeforeCommitCallback
+ * @param {GitFetchStaged} staged
+ * @returns {Promise<{ proceed: boolean, errorKind?: GitFetchErrorKind, message?: string }>}
  */
 
 /**
@@ -81,9 +105,13 @@ const SKIPPED_DIR_NAMES = new Set([
  * @param {PluginSourceSpec & { subdir?: string }} args.source
  * @param {string} args.stateDir
  * @param {string} [args.runId] — injectable for tests/smokes
+ * @param {BeforeCommitCallback} [args.beforeCommit] — fires after manifest
+ *   validate + hash computation, immediately before the artifact rename
+ *   swap. Returning `proceed=false` aborts the fetch with the supplied
+ *   `errorKind` and leaves any prior install untouched.
  * @returns {Promise<GitFetchResult>}
  */
-export async function fetchGitSource({ source, stateDir, runId }) {
+export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) {
   if (source.subdir) {
     // The resolver normally rejects this, but defensive double-check in
     // case a caller hand-builds a spec.
@@ -133,6 +161,34 @@ export async function fetchGitSource({ source, stateDir, runId }) {
     if (validateResult.ok === false) return validateResult
     const manifest = validateResult.manifest
 
+    // Compute hashes from the staged source tree (skipping `.git` and
+    // friends, same set as `copyArtifactTree`) so the `beforeCommit`
+    // callback sees the exact `content_hash` / `manifest_hash` that
+    // would land in the lock file.
+    const manifestRaw = await fs.readFile(
+      path.join(tmpRepo, 'hypaware.plugin.json'),
+      'utf8'
+    )
+    const manifestHash = hashString(manifestRaw)
+    const stagedContentHash = await hashArtifactTree(tmpRepo)
+
+    if (beforeCommit) {
+      const decision = await beforeCommit({
+        manifest,
+        resolvedRef,
+        contentHash: stagedContentHash,
+        manifestHash,
+        provenance,
+      })
+      if (!decision.proceed) {
+        return {
+          ok: false,
+          errorKind: decision.errorKind ?? 'remote_install_rejected',
+          message: decision.message ?? 'plugin install: confirmation rejected',
+        }
+      }
+    }
+
     const installDir = pluginInstallDir(stateDir, manifest.name)
     const copyResult = await runCopyArtifactSpan({
       sourceRoot: tmpRepo,
@@ -142,8 +198,13 @@ export async function fetchGitSource({ source, stateDir, runId }) {
     })
     if (copyResult.ok === false) return copyResult
 
-    const manifestRaw = await fs.readFile(path.join(installDir, 'hypaware.plugin.json'), 'utf8')
-    const manifestHash = hashString(manifestRaw)
+    // Re-read the manifest from the install dir so a TOCTOU file-system
+    // race between staging and copy is still caught.
+    const installedManifestRaw = await fs.readFile(
+      path.join(installDir, 'hypaware.plugin.json'),
+      'utf8'
+    )
+    const installedManifestHash = hashString(installedManifestRaw)
     const contentHash = await hashArtifactTree(installDir)
 
     return {
@@ -151,7 +212,7 @@ export async function fetchGitSource({ source, stateDir, runId }) {
       manifest,
       installDir,
       contentHash,
-      manifestHash,
+      manifestHash: installedManifestHash,
       resolvedRef,
       provenance,
     }

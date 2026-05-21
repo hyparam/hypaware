@@ -30,12 +30,27 @@ import { checkForPluginUpdate } from './update_check.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
 /** @typedef {import('./fetch.js').FetchResult} FetchResult */
+/** @typedef {import('./confirm.js').ConfirmOutcome} ConfirmOutcome */
+
+/**
+ * @callback ConfirmInstall
+ * @param {{
+ *   manifest: import('../../../collectivus-plugin-kernel-types').PluginManifest,
+ *   source: PluginSourceSpec,
+ *   resolvedRef: string,
+ *   contentHash: string,
+ *   manifestHash: string,
+ *   previous?: PluginLockEntry,
+ * }} staged
+ * @returns {Promise<{ proceed: boolean, outcome: ConfirmOutcome }>}
+ */
 
 /**
  * @typedef {Object} InstallSuccess
  * @property {true} ok
  * @property {PluginLockEntry} entry
  * @property {PluginLockFile} lock
+ * @property {ConfirmOutcome} [confirmation]
  */
 
 /**
@@ -43,6 +58,7 @@ import { checkForPluginUpdate } from './update_check.js'
  * @property {false} ok
  * @property {string} errorKind
  * @property {string} message
+ * @property {ConfirmOutcome} [confirmation]
  */
 
 /** @typedef {InstallSuccess | InstallFailure} InstallResult */
@@ -69,9 +85,17 @@ import { checkForPluginUpdate } from './update_check.js'
  * @param {string} [args.cwd]        — for resolving relative paths
  * @param {() => Date} [args.now]    — injectable for tests
  * @param {{ ref?: string, subdir?: string }} [args.opts] — CLI flag overrides
- * @returns {Promise<InstallResult>}
+ * @param {ConfirmInstall} [args.confirm] — optional trust gate. Called
+ *   after fetch+manifest validation and immediately before the artifact
+ *   swap. Returning `proceed=false` aborts the install with the
+ *   appropriate `remote_install_*` error kind and the outcome is
+ *   stamped onto the `plugin.install` span.
+ * @param {PluginLockEntry} [args.previous] — prior lock entry (only set
+ *   on update flows). Forwarded to `confirm` so the prompt can render a
+ *   diff against the installed version/commit.
+ * @returns {Promise<InstallResult & { confirmation?: ConfirmOutcome }>}
  */
-export async function installPlugin({ rawSource, stateDir, cwd, now, opts }) {
+export async function installPlugin({ rawSource, stateDir, cwd, now, opts, confirm, previous }) {
   const instruments = getKernelInstruments()
   const log = getLogger('plugin-install')
   const nowFn = now ?? (() => new Date())
@@ -123,21 +147,51 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts }) {
         }
       }
 
-      const fetchResult = await fetchPlugin({ source, stateDir })
+      /** @type {ConfirmOutcome | undefined} */
+      let confirmation
+      const fetchResult = await fetchPlugin({
+        source,
+        stateDir,
+        ...(confirm ? { beforeCommit: async (staged) => {
+          const decision = await confirm({
+            manifest: staged.manifest,
+            source,
+            resolvedRef: staged.resolvedRef,
+            contentHash: staged.contentHash,
+            manifestHash: staged.manifestHash,
+            ...(previous ? { previous } : {}),
+          })
+          confirmation = decision.outcome
+          if (decision.proceed) return { proceed: true }
+          const errorKind = decision.outcome === 'rejected'
+            ? 'remote_install_rejected'
+            : 'remote_install_confirmation_required'
+          return {
+            proceed: false,
+            errorKind,
+            message: errorKind === 'remote_install_rejected'
+              ? `plugin install: confirmation rejected for ${staged.manifest.name}`
+              : `plugin install: remote install requires --yes on non-interactive shells (${staged.manifest.name})`,
+          }
+        } } : {}),
+      })
       if (!fetchResult.ok) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: fetchResult.errorKind })
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', fetchResult.errorKind)
+        if (confirmation) span.setAttribute('confirmation', confirmation)
         instruments.pluginInstallsTotal.add(1, { status: 'failed' })
         log.warn('plugin.install.failed', {
           [Attr.COMPONENT]: 'plugin-install',
           error_kind: fetchResult.errorKind,
           message: fetchResult.message,
+          ...(confirmation ? { confirmation } : {}),
         })
         return {
           ok: false,
           errorKind: fetchResult.errorKind,
           message: fetchResult.message,
+          ...(confirmation ? { confirmation } : {}),
         }
       }
 
@@ -184,6 +238,7 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts }) {
       await writeLock(stateDir, nextLock)
 
       span.setAttribute('status', 'ok')
+      if (confirmation) span.setAttribute('confirmation', confirmation)
       instruments.pluginInstallsTotal.add(1, { status: 'ok' })
       log.info('plugin.installed', {
         [Attr.COMPONENT]: 'plugin-install',
@@ -191,12 +246,118 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts }) {
         version: entry.version,
         hyp_source_kind: source.kind,
         install_dir: entry.install_dir,
+        ...(confirmation ? { confirmation } : {}),
       })
 
-      return { ok: true, entry: entryWithUpdate, lock: nextLock }
+      return {
+        ok: true,
+        entry: entryWithUpdate,
+        lock: nextLock,
+        ...(confirmation ? { confirmation } : {}),
+      }
     },
     { component: 'plugin-install' }
   )
+}
+
+/**
+ * Update an installed plugin to its latest matching ref. Wraps the work
+ * in a `plugin.update` span and delegates the actual fetch + lock-write
+ * to `installPlugin` so the install pipeline (resolver, fetch, validate,
+ * artifact swap, lock write) is shared between first install and update.
+ *
+ * The update span carries:
+ *
+ *   - `hyp_plugin`, `hyp_source_kind`
+ *   - `previous_resolved_ref`, `previous_content_hash`
+ *   - `git_resolved_ref`, `content_hash` (on success)
+ *   - `confirmation` (matches the inner `plugin.install` span)
+ *   - `status` (`ok`/`failed`), `error_kind` (on failure)
+ *
+ * If the user rejects the confirmation prompt the prior install is
+ * left intact — the artifact swap inside `fetchGitSource` only fires
+ * once the `beforeCommit` callback returns `proceed=true`.
+ *
+ * @param {object} args
+ * @param {PluginName} args.name
+ * @param {string}     args.stateDir
+ * @param {ConfirmInstall} [args.confirm]
+ * @param {() => Date}    [args.now]
+ * @returns {Promise<InstallResult>}
+ */
+export async function updatePlugin({ name, stateDir, confirm, now }) {
+  return withSpan(
+    'plugin.update',
+    {
+      [Attr.COMPONENT]: 'plugin-install',
+      [Attr.OPERATION]: 'plugin.update',
+      [Attr.PLUGIN]: name,
+    },
+    async (span) => {
+      const lock = await safeReadLock(stateDir)
+      const previous = getEntry(lock, name)
+      if (!previous) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: 'plugin_not_installed' })
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', 'plugin_not_installed')
+        return {
+          ok: false,
+          errorKind: 'plugin_not_installed',
+          message: `plugin not installed: ${name}`,
+        }
+      }
+      span.setAttribute('hyp_source_kind', previous.source.kind)
+      span.setAttribute('previous_content_hash', previous.content_hash)
+      if (previous.resolved_ref) {
+        span.setAttribute('previous_resolved_ref', previous.resolved_ref)
+      }
+
+      const reinstallRef = refForReinstall(previous)
+      const result = await installPlugin({
+        rawSource: previous.source.raw,
+        stateDir,
+        ...(now ? { now } : {}),
+        ...(reinstallRef !== undefined ? { opts: { ref: reinstallRef } } : {}),
+        ...(confirm ? { confirm } : {}),
+        previous,
+      })
+
+      if (result.confirmation) span.setAttribute('confirmation', result.confirmation)
+
+      if (!result.ok) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: result.errorKind })
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', result.errorKind)
+        return result
+      }
+
+      span.setAttribute('status', 'ok')
+      span.setAttribute('content_hash', result.entry.content_hash)
+      if (result.entry.resolved_ref) {
+        span.setAttribute('git_resolved_ref', result.entry.resolved_ref)
+      }
+      return result
+    },
+    { component: 'plugin-install' }
+  )
+}
+
+/**
+ * Recover the ref to pass back into `resolveSource` when re-installing
+ * an existing entry. Returning `undefined` lets the resolver re-parse
+ * whatever ref is encoded in `source.raw` (URL fragment) so we never
+ * double-up and trip `source_ambiguous`.
+ *
+ * @param {PluginLockEntry} entry
+ * @returns {string | undefined}
+ */
+function refForReinstall(entry) {
+  if (entry.source.kind !== 'git') return undefined
+  if (!entry.source.ref) return undefined
+  if (typeof entry.source.raw === 'string' && entry.source.raw.includes('#')) {
+    return undefined
+  }
+  return entry.source.ref
 }
 
 /**
