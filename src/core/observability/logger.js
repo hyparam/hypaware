@@ -1,12 +1,10 @@
 // @ts-check
 
-import { logs, SeverityNumber } from '@opentelemetry/api-logs'
-import { LoggerProvider, SimpleLogRecordProcessor } from '@opentelemetry/sdk-logs'
-import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-http'
-
 import { JsonlLogRecordExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 import { Attr, buildAttrs } from './attrs.js'
+import { logs, LoggerProvider, SeverityNumber } from './runtime.js'
+import { OtlpLogExporter } from './otlp_exporters.js'
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
@@ -31,38 +29,34 @@ const SEVERITY_TEXT = Object.freeze({
  *
  * @param {object} args
  * @param {import('./env.js').ObservabilityEnv} args.env
- * @param {import('@opentelemetry/resources').Resource} args.resource
+ * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
  * @returns {{ provider: LoggerProvider|null, exporters: object[] }}
  */
 export function installLoggerProvider({ env, resource }) {
   /** @type {object[]} */
   const exporters = []
-  /** @type {import('@opentelemetry/sdk-logs').LogRecordProcessor[]} */
-  const processors = []
 
   if (env.devTelemetry) {
     const dir = devTelemetryDir(env.stateDir)
     const jsonlExporter = new JsonlLogRecordExporter({ dir })
-    processors.push(new SimpleLogRecordProcessor(jsonlExporter))
     exporters.push(jsonlExporter)
   }
 
   if (!env.devTelemetry && env.otlpEndpoint) {
-    const otlpExporter = new OTLPLogExporter({
+    const otlpExporter = new OtlpLogExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/logs',
       timeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     })
-    processors.push(new SimpleLogRecordProcessor(otlpExporter))
     exporters.push(otlpExporter)
   }
 
-  if (processors.length === 0) {
+  if (exporters.length === 0) {
     return { provider: null, exporters: [] }
   }
 
   const provider = new LoggerProvider({
     resource,
-    processors,
+    exporters,
   })
   logs.setGlobalLoggerProvider(provider)
   return { provider, exporters }

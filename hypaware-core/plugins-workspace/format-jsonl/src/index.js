@@ -3,7 +3,7 @@
 import { Buffer } from 'node:buffer'
 import zlib from 'node:zlib'
 
-import { SpanStatusCode, trace } from '@opentelemetry/api'
+import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
@@ -48,7 +48,7 @@ export async function activate(ctx) {
  * @returns {Promise<SinkEncodedBlob>}
  */
 async function encodePartition(partition, ctx) {
-  const tracer = trace.getTracer(PLUGIN_NAME, PLUGIN_VERSION)
+  const tracer = getTracer('plugin.format-jsonl')
   return tracer.startActiveSpan(
     'encoder.encode_jsonl',
     {

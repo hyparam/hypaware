@@ -1,11 +1,9 @@
 // @ts-check
 
-import { metrics } from '@opentelemetry/api'
-import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics'
-import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http'
-
 import { JsonlMetricExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
+import { MeterProvider, metrics } from './runtime.js'
+import { OtlpMetricExporter } from './otlp_exporters.js'
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
@@ -17,45 +15,34 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  *
  * @param {object} args
  * @param {import('./env.js').ObservabilityEnv} args.env
- * @param {import('@opentelemetry/resources').Resource} args.resource
- * @returns {{ provider: MeterProvider|null, exporters: object[], readers: import('@opentelemetry/sdk-metrics').MetricReader[] }}
+ * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
+ * @returns {{ provider: MeterProvider|null, exporters: object[], readers: object[] }}
  */
 export function installMeterProvider({ env, resource }) {
   /** @type {object[]} */
   const exporters = []
-  /** @type {import('@opentelemetry/sdk-metrics').MetricReader[]} */
-  const readers = []
 
   if (env.devTelemetry) {
     const dir = devTelemetryDir(env.stateDir)
     const jsonlExporter = new JsonlMetricExporter({ dir })
-    readers.push(new PeriodicExportingMetricReader({
-      exporter: jsonlExporter,
-      exportIntervalMillis: 250,
-    }))
     exporters.push(jsonlExporter)
   }
 
   if (!env.devTelemetry && env.otlpEndpoint) {
-    const otlpExporter = new OTLPMetricExporter({
+    const otlpExporter = new OtlpMetricExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/metrics',
       timeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     })
-    readers.push(new PeriodicExportingMetricReader({
-      exporter: otlpExporter,
-      exportIntervalMillis: 30_000,
-      exportTimeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
-    }))
     exporters.push(otlpExporter)
   }
 
-  if (readers.length === 0) {
+  if (exporters.length === 0) {
     return { provider: null, exporters: [], readers: [] }
   }
 
-  const provider = new MeterProvider({ resource, readers })
+  const provider = new MeterProvider({ resource, exporters })
   metrics.setGlobalMeterProvider(provider)
-  return { provider, exporters, readers }
+  return { provider, exporters, readers: [] }
 }
 
 /**
@@ -63,7 +50,7 @@ export function installMeterProvider({ env, resource }) {
  * contract. Plugins declare their own meters; this set is reserved
  * for things the kernel itself emits.
  *
- * @param {import('@opentelemetry/api').Meter} meter
+ * @param {{ createCounter(name: string, opts?: object): object, createUpDownCounter(name: string, opts?: object): object, createGauge(name: string, opts?: object): object, createHistogram(name: string, opts?: object): object }} meter
  */
 function buildKernelInstruments(meter) {
   return {

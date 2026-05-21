@@ -3,15 +3,17 @@
 import process from 'node:process'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { context, ROOT_CONTEXT, SpanStatusCode } from '@opentelemetry/api'
 
 import {
   Attr,
   buildAttrs,
+  context,
   getKernelInstruments,
   getLogger,
   getTracer,
   installObservability,
+  ROOT_CONTEXT,
+  SpanStatusCode,
 } from '../observability/index.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'

@@ -3,7 +3,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { ExportResultCode } from '@opentelemetry/core'
+import { hrTimeToIso } from './runtime.js'
+
+const ExportResultCode = Object.freeze({
+  SUCCESS: 0,
+  FAILED: 1,
+})
 
 /**
  * Append-only JSONL writer. One file per signal per pid; the file is
@@ -75,12 +80,12 @@ class JsonlWriter {
 }
 
 /**
- * @param {import('@opentelemetry/sdk-trace-base').ReadableSpan} span
+ * @param {import('./runtime.js').Span} span
  */
 function spanToJsonl(span) {
   const ctx = span.spanContext()
-  const startMs = span.startTime[0] * 1000 + span.startTime[1] / 1_000_000
-  const endMs = span.endTime[0] * 1000 + span.endTime[1] / 1_000_000
+  const startMs = hrtimeToMs(span.startTime)
+  const endMs = hrtimeToMs(span.endTime)
   return {
     serviceName: span.resource.attributes['service.name'] ?? 'unknown',
     name: span.name,
@@ -88,15 +93,15 @@ function spanToJsonl(span) {
     spanId: ctx.spanId,
     parentSpanId: span.parentSpanContext?.spanId ?? null,
     kind: span.kind,
-    startTimestamp: hrtimeToIso(span.startTime),
-    endTimestamp: hrtimeToIso(span.endTime),
+    startTimestamp: hrTimeToIso(span.startTime),
+    endTimestamp: hrTimeToIso(span.endTime),
     durationMs: endMs - startMs,
     status: spanStatusName(span.status.code),
     statusMessage: span.status.message,
     attributes: span.attributes,
     events: span.events.map((e) => ({
       name: e.name,
-      time: hrtimeToIso(e.time),
+      time: hrTimeToIso(e.time),
       attributes: e.attributes,
     })),
     resource: span.resource.attributes,
@@ -115,17 +120,7 @@ function spanStatusName(code) {
 }
 
 /**
- * @param {[number, number]} hrtime
- */
-function hrtimeToIso(hrtime) {
-  const ms = hrtime[0] * 1000 + hrtime[1] / 1_000_000
-  return new Date(ms).toISOString()
-}
-
-/**
  * SpanExporter implementation that writes each batch as JSONL.
- *
- * @implements {import('@opentelemetry/sdk-trace-base').SpanExporter}
  */
 export class JsonlSpanExporter {
   /**
@@ -138,7 +133,7 @@ export class JsonlSpanExporter {
   }
 
   /**
-   * @param {import('@opentelemetry/sdk-trace-base').ReadableSpan[]} spans
+   * @param {import('./runtime.js').Span[]} spans
    * @param {(result: { code: number, error?: Error }) => void} resultCallback
    */
   export(spans, resultCallback) {
@@ -153,6 +148,11 @@ export class JsonlSpanExporter {
     }
   }
 
+  /** @param {import('./runtime.js').Span[]} spans */
+  exportBatch(spans) {
+    this.export(spans, () => {})
+  }
+
   async shutdown() {
     await this.writer.close()
   }
@@ -163,14 +163,14 @@ export class JsonlSpanExporter {
 }
 
 /**
- * @param {import('@opentelemetry/sdk-logs').ReadableLogRecord} record
+ * @param {import('./runtime.js').LogRecord} record
  */
 function logRecordToJsonl(record) {
   const hr = record.hrTime || record.hrTimeObserved || [0, 0]
   return {
     serviceName: record.resource.attributes['service.name'] ?? 'unknown',
-    timestamp: hrtimeToIso(hr),
-    observedTimestamp: hrtimeToIso(record.hrTimeObserved || hr),
+    timestamp: hrTimeToIso(hr),
+    observedTimestamp: hrTimeToIso(record.hrTimeObserved || hr),
     severityNumber: record.severityNumber ?? 0,
     severityText: record.severityText ?? '',
     body: serializeBody(record.body),
@@ -194,8 +194,6 @@ function serializeBody(body) {
 
 /**
  * LogRecordExporter that writes JSONL.
- *
- * @implements {import('@opentelemetry/sdk-logs').LogRecordExporter}
  */
 export class JsonlLogRecordExporter {
   /**
@@ -208,7 +206,7 @@ export class JsonlLogRecordExporter {
   }
 
   /**
-   * @param {import('@opentelemetry/sdk-logs').ReadableLogRecord[]} records
+   * @param {import('./runtime.js').LogRecord[]} records
    * @param {(result: { code: number, error?: Error }) => void} resultCallback
    */
   export(records, resultCallback) {
@@ -221,6 +219,11 @@ export class JsonlLogRecordExporter {
         error: error instanceof Error ? error : new Error(String(error)),
       })
     }
+  }
+
+  /** @param {import('./runtime.js').LogRecord[]} records */
+  exportBatch(records) {
+    this.export(records, () => {})
   }
 
   async shutdown() {
@@ -236,50 +239,24 @@ export class JsonlLogRecordExporter {
  * PushMetricExporter that writes JSONL. Each export call emits one
  * record per data point, flattened so smoke assertions can query a
  * single named metric without unpacking the OTel resource metrics tree.
- *
- * @implements {import('@opentelemetry/sdk-metrics').PushMetricExporter}
  */
 export class JsonlMetricExporter {
   /**
    * @param {object} opts
    * @param {string} opts.dir
    * @param {number} [opts.pid]
-   * @param {import('@opentelemetry/sdk-metrics').AggregationTemporality} [opts.temporality]
    */
-  constructor({ dir, pid = process.pid, temporality }) {
+  constructor({ dir, pid = process.pid }) {
     this.writer = new JsonlWriter(dir, `metrics-${pid}.jsonl`)
-    this._temporality = temporality
   }
 
   /**
-   * @param {import('@opentelemetry/sdk-metrics').ResourceMetrics} metrics
+   * @param {import('./runtime.js').MetricRecord[]} records
    * @param {(result: { code: number, error?: Error }) => void} resultCallback
    */
-  export(metrics, resultCallback) {
+  export(records, resultCallback) {
     try {
-      /** @type {object[]} */
-      const records = []
-      const resourceAttrs = metrics.resource.attributes
-      const serviceName = resourceAttrs['service.name'] ?? 'unknown'
-      for (const scopeMetrics of metrics.scopeMetrics) {
-        for (const metric of scopeMetrics.metrics) {
-          for (const dataPoint of metric.dataPoints) {
-            records.push({
-              serviceName,
-              name: metric.descriptor.name,
-              description: metric.descriptor.description,
-              unit: metric.descriptor.unit,
-              type: metric.dataPointType,
-              attributes: dataPoint.attributes,
-              value: serializeMetricValue(metric.dataPointType, dataPoint.value),
-              startTimestamp: hrtimeToIso(dataPoint.startTime),
-              endTimestamp: hrtimeToIso(dataPoint.endTime),
-              resource: resourceAttrs,
-            })
-          }
-        }
-      }
-      this.writer.writeBatch(records)
+      this.writer.writeBatch(records.map(metricRecordToJsonl))
       resultCallback({ code: ExportResultCode.SUCCESS })
     } catch (error) {
       resultCallback({
@@ -289,12 +266,9 @@ export class JsonlMetricExporter {
     }
   }
 
-  selectAggregationTemporality() {
-    // Cumulative matches the default for Sum/Histogram aggregations and
-    // keeps Sum data points monotonic across exports.
-    return /** @type {import('@opentelemetry/sdk-metrics').AggregationTemporality} */ (
-      this._temporality ?? 1
-    )
+  /** @param {import('./runtime.js').MetricRecord[]} records */
+  exportBatch(records) {
+    this.export(records, () => {})
   }
 
   async shutdown() {
@@ -307,23 +281,27 @@ export class JsonlMetricExporter {
 }
 
 /**
- * @param {number} type
- * @param {unknown} value
+ * @param {import('./runtime.js').MetricRecord} record
  */
-function serializeMetricValue(type, value) {
-  if (value && typeof value === 'object' && 'buckets' in value) {
-    const v = /** @type {{count:number,sum:number,min?:number,max?:number,buckets:{boundaries:number[],counts:number[]}}} */ (value)
-    return {
-      count: v.count,
-      sum: v.sum,
-      min: v.min,
-      max: v.max,
-      boundaries: v.buckets.boundaries,
-      counts: v.buckets.counts,
-    }
+function metricRecordToJsonl(record) {
+  const resourceAttrs = record.resource.attributes
+  return {
+    serviceName: resourceAttrs['service.name'] ?? 'unknown',
+    name: record.name,
+    description: record.description,
+    unit: record.unit,
+    type: record.kind,
+    attributes: record.attributes,
+    value: record.value,
+    startTimestamp: hrTimeToIso(record.startTime),
+    endTimestamp: hrTimeToIso(record.endTime),
+    resource: resourceAttrs,
   }
-  if (typeof value === 'number' || typeof value === 'bigint') {
-    return Number(value)
-  }
-  return value
+}
+
+/**
+ * @param {[number, number]} hrtime
+ */
+function hrtimeToMs(hrtime) {
+  return hrtime[0] * 1000 + hrtime[1] / 1_000_000
 }

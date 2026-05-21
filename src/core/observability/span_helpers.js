@@ -1,9 +1,8 @@
 // @ts-check
 
-import { context, SpanStatusCode, ROOT_CONTEXT } from '@opentelemetry/api'
-
 import { buildAttrs } from './attrs.js'
 import { getTracer } from './tracer.js'
+import { context, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
 
 /**
  * Run `fn` inside a span. Records the result on the span (status + any
@@ -16,7 +15,7 @@ import { getTracer } from './tracer.js'
  * @template T
  * @param {string} name
  * @param {Record<string, unknown>} attrs
- * @param {(span: import('@opentelemetry/api').Span) => T|Promise<T>} fn
+ * @param {(span: import('./runtime.js').Span) => T|Promise<T>} fn
  * @param {{ component?: string }} [opts]
  * @returns {Promise<T>}
  */
@@ -53,7 +52,7 @@ export async function withSpan(name, attrs, fn, opts = {}) {
  * @template T
  * @param {string} name
  * @param {Record<string, unknown>} attrs
- * @param {(span: import('@opentelemetry/api').Span) => T|Promise<T>} fn
+ * @param {(span: import('./runtime.js').Span) => T|Promise<T>} fn
  * @param {{ component?: string }} [opts]
  * @returns {Promise<T>}
  */

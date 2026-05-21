@@ -2,12 +2,11 @@
 
 import fs from 'node:fs/promises'
 
-import { SpanStatusCode } from '@opentelemetry/api'
-
 import {
   Attr,
   getKernelInstruments,
   getLogger,
+  SpanStatusCode,
   withSpan,
 } from '../observability/index.js'
 

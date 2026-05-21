@@ -29,18 +29,6 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/api-logs": "^0.218.0",
-    "@opentelemetry/core": "^2.7.1",
-    "@opentelemetry/exporter-logs-otlp-http": "^0.218.0",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
-    "@opentelemetry/resources": "^2.7.1",
-    "@opentelemetry/sdk-logs": "^0.218.0",
-    "@opentelemetry/sdk-metrics": "^2.7.1",
-    "@opentelemetry/sdk-trace-base": "^2.7.1",
-    "@opentelemetry/sdk-trace-node": "^2.7.1",
-    "@opentelemetry/semantic-conventions": "^1.41.1",
     "hyparquet": "^1.25.8",
     "hyparquet-compressors": "^1.1.1",
     "icebird": "^0.7.0",

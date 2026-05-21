@@ -1,8 +1,6 @@
 // @ts-check
 
-import { SpanStatusCode } from '@opentelemetry/api'
-
-import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
+import { Attr, getKernelInstruments, SpanStatusCode, withSpan } from '../observability/index.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginUpdateState} PluginUpdateState */

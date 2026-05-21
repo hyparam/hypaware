@@ -228,7 +228,7 @@ export function createSinkDriver(opts) {
    * @param {string} batchId
    * @param {number} partitionsCount
    * @param {string} message
-   * @param {import('@opentelemetry/api').Span} span
+   * @param {import('../observability/runtime.js').Span} span
    */
   function recordFailure(handle, batchId, partitionsCount, message, span) {
     instruments.sinkExportFailuresTotal.add(1, {

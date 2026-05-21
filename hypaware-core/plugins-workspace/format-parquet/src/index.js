@@ -1,8 +1,7 @@
 // @ts-check
 
-import { SpanStatusCode, trace } from '@opentelemetry/api'
-
 import { rowsToColumnSources } from './columns.js'
+import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
@@ -48,7 +47,7 @@ export async function activate(ctx) {
  * @returns {Promise<SinkEncodedBlob>}
  */
 async function encodePartition(partition, ctx) {
-  const tracer = trace.getTracer(PLUGIN_NAME, PLUGIN_VERSION)
+  const tracer = getTracer('plugin.format-parquet')
   return tracer.startActiveSpan(
     'encoder.encode_parquet',
     {
