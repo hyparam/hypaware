@@ -7,7 +7,8 @@ import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
-import { validateConfig } from '../config/validate.js'
+import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
+import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -826,6 +827,30 @@ function pluginStateDir(ctx) {
 }
 
 /**
+ * Build the `knownPlugins` map used by `validateConfig`. Merges the
+ * built-in first-party metadata with whatever third-party plugins are
+ * recorded in `plugin-lock.json` so installed plugin names are not
+ * flagged `plugin_unknown` and their capability provides/requires
+ * participate in sink-pair and ambiguity checks.
+ *
+ * Installed-plugin discovery failures are absorbed silently — `hyp
+ * config validate` keeps working when the lock is missing or any
+ * installed manifest is corrupt; the underlying discovery layer logs
+ * its own diagnostics.
+ *
+ * @param {CommandRunContext} ctx
+ */
+async function buildKnownPluginsForCtx(ctx) {
+  try {
+    const stateDir = pluginStateDir(ctx)
+    const installed = await discoverInstalledPlugins({ stateDir })
+    return mergeInstalledManifestsIntoKnown(installed.loaded)
+  } catch {
+    return mergeInstalledManifestsIntoKnown([])
+  }
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -1131,7 +1156,8 @@ async function runConfigValidate(argv, ctx) {
     return 1
   }
 
-  const result = await validateConfig(loadResult.config)
+  const knownPlugins = await buildKnownPluginsForCtx(ctx)
+  const result = await validateConfig(loadResult.config, { knownPlugins })
   if (!result.ok) {
     ctx.stderr.write(
       `hyp config validate: ${result.errors.length} error(s) in ${loadResult.configPath}\n`
@@ -1932,7 +1958,8 @@ async function runInitFromFile(flags, ctx) {
     ctx.stderr.write(`hyp init: --from-file: invalid JSON: ${message}\n`)
     return 1
   }
-  const validation = await validateConfig(/** @type {any} */ (parsed))
+  const knownPluginsFromFile = await buildKnownPluginsForCtx(ctx)
+  const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: knownPluginsFromFile })
   if (!validation.ok) {
     for (const err of validation.errors) {
       ctx.stderr.write(
