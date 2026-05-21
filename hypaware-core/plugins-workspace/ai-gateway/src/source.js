@@ -9,6 +9,7 @@ import {
 
 import { compileConfig } from './config.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
+import { createAiGatewayMessageProjector } from './message_projector.js'
 import { startProxy } from './proxy.js'
 import { createRecorder } from './recorder.js'
 
@@ -88,6 +89,16 @@ export function createStartSource(state) {
 async function launchListener(ctx, state, liveState) {
   const config = compileConfig(ctx.config)
   const recorder = createRecorder({ redactHeaders: config.redactHeaders })
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: config.gatewayId,
+    enrichers: state.enrichers,
+    enricherContext: {
+      homeDir: ctx.env.HOME ?? '',
+      cacheDir: ctx.paths.cacheDir,
+      log: ctx.log,
+    },
+    log: ctx.log,
+  })
   const sourcesLog = getLogger('sources')
   const meter = getMeter('plugin.ai-gateway')
   const exchangeBytesCounter = meter.createCounter('aigw.exchange_bytes', {
@@ -103,13 +114,18 @@ async function launchListener(ctx, state, liveState) {
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
     try {
-      await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], [row])
-      liveState.rowsWritten += 1
+      const messageRows = await projector.projectExchange(/** @type {Record<string, unknown>} */ (row))
+      if (messageRows.length > 0) {
+        await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+      }
+      liveState.rowsWritten += messageRows.length
       liveState.exchangeBytes += totalBytes
-      kernelInstruments.rowsWritten.add(1, {
-        [Attr.DATASET]: DATASET_NAME,
-        [Attr.PLUGIN]: PLUGIN_NAME,
-      })
+      if (messageRows.length > 0) {
+        kernelInstruments.rowsWritten.add(messageRows.length, {
+          [Attr.DATASET]: DATASET_NAME,
+          [Attr.PLUGIN]: PLUGIN_NAME,
+        })
+      }
       exchangeBytesCounter.add(totalBytes, {
         [Attr.PLUGIN]: PLUGIN_NAME,
         hyp_upstream: row.upstream,

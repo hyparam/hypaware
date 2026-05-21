@@ -27,11 +27,10 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *
  * Bead `hy-bbyi` assertions:
  *
- *   - Each exchange writes one row to `ai_gateway_messages`, all
- *     queryable by `dev_run_id` via `hyp query sql`.
- *   - The 500 row carries `status_code=500`.
- *   - The dead-upstream row carries `status_code=502` and a non-null
- *     `error` column.
+ *   - Each exchange writes one normalized request message row to
+ *     `ai_gateway_messages`, all queryable by `dev_run_id` via
+ *     `hyp query sql`.
+ *   - Gateway diagnostics survive under `attributes.gateway`.
  *   - Daemon self-telemetry (JSONL exporter, under `HYP_DEV_TELEMETRY=1`)
  *     contains `source.start` (ai-gateway), at least one `sink.tick`,
  *     `cache.append` for `ai_gateway_messages`, and `daemon.shutdown`.
@@ -103,7 +102,10 @@ export async function run({ harness, expect }) {
   const gatewayUrl = `http://${gatewayDetails.host}:${gatewayDetails.port}`
 
   // ----- Issue three exchanges through the daemon's gateway -----
-  const okBody = JSON.stringify({ model: 'claude-3-opus', input: 'hello' })
+  const okBody = JSON.stringify({
+    model: 'claude-3-opus',
+    messages: [{ role: 'user', content: `ok ${harness.devRunId}` }],
+  })
   const okResp = await postJson(`${gatewayUrl}/v1/messages`, harness.devRunId, okBody)
   expect.that(
     'gateway: anthropic_ok upstream returned 200',
@@ -111,14 +113,22 @@ export async function run({ harness, expect }) {
     (v) => v === 200,
   )
 
-  const failResp = await postJson(`${gatewayUrl}/v1/error`, harness.devRunId, '{"x":1}')
+  const failBody = JSON.stringify({
+    model: 'claude-3-opus',
+    messages: [{ role: 'user', content: `fail ${harness.devRunId}` }],
+  })
+  const failResp = await postJson(`${gatewayUrl}/v1/error`, harness.devRunId, failBody)
   expect.that(
     'gateway: anthropic_fail upstream returned 500',
     failResp.statusCode,
     (v) => v === 500,
   )
 
-  const deadResp = await postJson(`${gatewayUrl}/v1/dead`, harness.devRunId, '{"x":1}')
+  const deadBody = JSON.stringify({
+    model: 'claude-3-opus',
+    messages: [{ role: 'user', content: `dead ${harness.devRunId}` }],
+  })
+  const deadResp = await postJson(`${gatewayUrl}/v1/dead`, harness.devRunId, deadBody)
   expect.that(
     'gateway: anthropic_dead returned 502 (upstream connection failed)',
     deadResp.statusCode,
@@ -142,7 +152,17 @@ export async function run({ harness, expect }) {
   await errorUpstream.close()
 
   // ----- Query ai_gateway_messages with a fresh dispatch boot -----
-  const sql = `select status_code, error, upstream, path from ai_gateway_messages where JSON_VALUE(metadata, '$.dev_run_id') = '${harness.devRunId}' order by ts_start`
+  const sql = `
+    select
+      content_text,
+      JSON_VALUE(attributes, '$.gateway.status_code') as status_code,
+      JSON_VALUE(attributes, '$.gateway.error') as error,
+      JSON_VALUE(attributes, '$.gateway.upstream') as upstream,
+      JSON_VALUE(attributes, '$.gateway.path') as path
+    from ai_gateway_messages
+    where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
+    order by message_created_at
+  `.trim().replace(/\s+/g, ' ')
   const stdoutBuf = makeBuf()
   const stderrBuf = makeBuf()
   const code = await dispatch(
@@ -169,12 +189,12 @@ export async function run({ harness, expect }) {
     return
   }
   expect.that(
-    'query: ai_gateway_messages has exactly three rows for the dev_run_id',
+    'query: ai_gateway_messages has exactly three normalized request rows for the dev_run_id',
     rows,
     (v) => Array.isArray(v) && v.length === 3,
   )
 
-  // Rows are ordered by ts_start so they match the request sequence.
+  // The diagnostic fields live under attributes.gateway on each part row.
   const byUpstream = new Map(rows.map((r) => [r.upstream, r]))
   expect.that(
     'query: anthropic_ok row has status_code=200 and no error',
@@ -228,9 +248,8 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
 
-  // The contract header travels through to the recorder's metadata
-  // column — confirm the daemon-routed exchange carried `dev_run_id`
-  // through the `aigw.exchange` log event.
+  // The contract header still tags the per-exchange log event even
+  // though query rows now expose it via attributes.dev_run_id.
   const logs = await expect.logs()
   const exchanges = logs.filter(
     (/** @type {any} */ l) =>

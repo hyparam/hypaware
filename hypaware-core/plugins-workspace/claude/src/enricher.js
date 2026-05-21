@@ -42,6 +42,8 @@ import readline from 'node:readline'
  * @property {string} [attachment_type]
  * @property {string} [hook_event]
  * @property {boolean} [is_compact_summary]
+ * @property {unknown} [compact_metadata]
+ * @property {unknown} [raw_frame]
  */
 
 /**
@@ -186,6 +188,8 @@ function transcriptEntryFromRow(row) {
     attachment_type: stringValue(readKey(attachment, 'type')),
     hook_event: stringValue(readKey(attachment, 'hookEvent')) ?? stringValue(obj.hookEvent),
     is_compact_summary: typeof obj.isCompactSummary === 'boolean' ? obj.isCompactSummary : undefined,
+    compact_metadata: readKey(obj, 'compactMetadata') ?? readKey(obj, 'compact_metadata'),
+    raw_frame: obj,
   }
   if (!entry.messageId && !entry.contentKey && !entry.provider_uuid) return undefined
   return entry
@@ -231,6 +235,8 @@ function projectMatch(row, entry) {
   setIf(merged, 'hook_event', entry.hook_event)
   if (entry.is_sidechain !== undefined) merged.is_sidechain = entry.is_sidechain
   if (entry.is_compact_summary !== undefined) merged.is_compact_summary = entry.is_compact_summary
+  if (entry.compact_metadata !== undefined && merged.compact_metadata === undefined) merged.compact_metadata = entry.compact_metadata
+  if (entry.raw_frame !== undefined && merged.raw_frame === undefined) merged.raw_frame = entry.raw_frame
   return merged
 }
 

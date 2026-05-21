@@ -304,7 +304,10 @@ export async function run({ harness, expect }) {
     expect.that('otlp POST: server returned 200', otlpResponse.status, (v) => v === 200)
     await otlpResponse.text()
 
-    const gatewayBody = JSON.stringify({ hello: 'picker', run: harness.devRunId })
+    const gatewayBody = JSON.stringify({
+      model: 'claude-picker',
+      messages: [{ role: 'user', content: `picker ${harness.devRunId}` }],
+    })
     const gatewayResponse = await postThroughGateway({
       url: `${gatewayUrl}/v1/echo`,
       headers: {
@@ -327,7 +330,7 @@ export async function run({ harness, expect }) {
         where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
       union all
       select 'ai_gateway_messages' as dataset, count(*) as n from ai_gateway_messages
-        where JSON_VALUE(metadata, '$.dev_run_id') = '${harness.devRunId}'
+        where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
     `.trim().replace(/\s+/g, ' ')
 
     const sqlStdout = makeBuf()

@@ -645,7 +645,7 @@ Smoke `ai_gateway_passthrough`:
 - Asserts a row landed in `ai_gateway_messages` with the same
   `dev_run_id` after running
   `hyp query sql "select * from ai_gateway_messages where
-  JSON_VALUE(metadata,'$.dev_run_id')='<run-id>'"`.
+  JSON_VALUE(attributes,'$.dev_run_id')='<run-id>'"`.
 - Asserts an `aigw.exchange` log row exists.
 
 ### 8.3 `@hypaware/local-fs` + `@hypaware/format-parquet` + `@hypaware/format-jsonl`

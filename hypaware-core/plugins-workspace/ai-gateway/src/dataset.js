@@ -2,6 +2,8 @@
 
 import path from 'node:path'
 
+import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
+
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDiscoveryContext} DatasetDiscoveryContext */
@@ -11,41 +13,16 @@ import path from 'node:path'
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult} DatasetRefreshResult */
 
 export const DATASET_NAME = 'ai_gateway_messages'
-export const PARTITION_LABEL = 'all'
+export const PARTITION_LABEL = 'proxy_messages_v3'
 
 /**
- * Column shape for `ai_gateway_messages`. Captures the request/response
- * envelope of one exchange plus enough provenance for queries to
- * filter by upstream, dev_run_id (in `metadata`), and SSE-ness.
- *
- * Headers and metadata land in JSON (Iceberg variant) so callers can
- * use `JSON_VALUE(metadata, '$.dev_run_id')` and friends at query time.
- * `request_body` and `response_body` are strings — providers send UTF-8
- * JSON in practice, and storing as STRING keeps the cache schema
- * simple while preserving the exact bytes the gateway saw.
+ * Column shape for `ai_gateway_messages`. This intentionally matches
+ * Collectivus `proxy_messages` exactly while keeping HypAware's producer
+ * owned table name.
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */
-export const AI_GATEWAY_SCHEMA_COLUMNS = Object.freeze([
-  { name: 'exchange_id',      type: 'STRING',    nullable: false },
-  { name: 'ts_start',         type: 'TIMESTAMP', nullable: false },
-  { name: 'ts_end',           type: 'TIMESTAMP', nullable: true  },
-  { name: 'duration_ms',      type: 'INT64',     nullable: true  },
-  { name: 'upstream',         type: 'STRING',    nullable: false },
-  { name: 'method',           type: 'STRING',    nullable: true  },
-  { name: 'path',             type: 'STRING',    nullable: true  },
-  { name: 'status_code',      type: 'INT32',     nullable: true  },
-  { name: 'request_bytes',    type: 'INT64',     nullable: true  },
-  { name: 'response_bytes',   type: 'INT64',     nullable: true  },
-  { name: 'is_sse',           type: 'BOOLEAN',   nullable: true  },
-  { name: 'stream_event_count', type: 'INT64',   nullable: true  },
-  { name: 'request_headers',  type: 'JSON',      nullable: true  },
-  { name: 'request_body',     type: 'STRING',    nullable: true  },
-  { name: 'response_headers', type: 'JSON',      nullable: true  },
-  { name: 'response_body',    type: 'STRING',    nullable: true  },
-  { name: 'error',            type: 'STRING',    nullable: true  },
-  { name: 'metadata',         type: 'JSON',      nullable: true  },
-])
+export const AI_GATEWAY_SCHEMA_COLUMNS = AI_GATEWAY_MESSAGE_COLUMNS
 
 /** @type {{ columns: ColumnSpec[] }} */
 export const AI_GATEWAY_SCHEMA = { columns: [...AI_GATEWAY_SCHEMA_COLUMNS] }
@@ -136,7 +113,7 @@ export function aiGatewayDatasetRegistration() {
     name: DATASET_NAME,
     plugin: '@hypaware/ai-gateway',
     schema: AI_GATEWAY_SCHEMA,
-    primaryTimestampColumn: 'ts_start',
+    primaryTimestampColumn: 'message_created_at',
     discoverPartitions: discoverParts,
     refreshPartition,
     createDataSource,
