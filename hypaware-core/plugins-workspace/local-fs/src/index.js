@@ -6,6 +6,8 @@ import path from 'node:path'
 
 import { encodePartition } from 'hypaware/core/sinks'
 
+import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
+
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportOptions} ExportOptions */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
@@ -22,8 +24,16 @@ const PLUGIN_VERSION = '1.0.0'
 
 /**
  * Activate `@hypaware/local-fs`. Provides the `hypaware.blob-store@1`
- * capability and contributes a single `local-fs` sink that writes
- * encoded partition bytes under `<config.dir>/<dataset>/<partition>/`.
+ * capability as a full `BlobStore` (put/get/list/delete) AND contributes
+ * a `local-fs` sink that writes encoded partition bytes under
+ * `<config.dir>/<dataset>/<partition>/`. The sink contribution is
+ * untouched by the BlobStore migration — existing
+ * encoder-writer + local-fs sinks keep working unchanged.
+ *
+ * BlobStore base directory resolution:
+ *  1. `ctx.config.exports_dir` (plugin section pin)
+ *  2. `<HYP_HOME>/exports`
+ *  3. `<homedir()>/.hyp/exports`
  *
  * The sink closes over the activation context so its `exportBatch` can
  * (a) look up dataset schemas through `ctx.query.getDataset` and
@@ -34,7 +44,10 @@ const PLUGIN_VERSION = '1.0.0'
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {
-  ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, { kind: 'local-fs' })
+  const baseDir = resolveExportsBaseDir({ pluginConfig: ctx.config, env: ctx.env })
+  await fs.mkdir(baseDir, { recursive: true })
+  const blobStore = createLocalFsBlobStore({ baseDir })
+  ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, blobStore)
 
   ctx.sinks.register({
     name: 'local-fs',

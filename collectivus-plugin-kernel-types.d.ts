@@ -26,14 +26,16 @@ export type PluginName = string
  * Versioned capability identifier. Well-known capabilities at V1:
  * - `hypaware.ai-gateway` — local HTTP/SSE AI gateway, provided by
  *   `@hypaware/ai-gateway`. Consumed by client adapter plugins.
- * - `hypaware.blob-store` — "put these bytes at this path" destination,
- *   provided by blob sink plugins (`@hypaware/local-fs`, future
- *   `@hypaware/s3`). Consumed by writer plugins.
+ * - `hypaware.blob-store` — object-store API (put/get/list/delete),
+ *   provided by blob destination plugins (`@hypaware/local-fs`,
+ *   `@hypaware/s3`). The capability VALUE is a `BlobStore`; consumers
+ *   call its methods directly. Consumed by table-format plugins.
  * - `hypaware.encoder` — per-batch byte encoder, provided by writer
  *   plugins (`@hypaware/format-parquet`, `@hypaware/format-jsonl`).
- *   Consumed by table-format plugins.
+ *   Consumed by table-format plugins and blob destinations.
  * - `hypaware.table-format` — directory layout + manifests on top of a
- *   blob store and encoder. Provided by post-V1 `@hypaware/format-iceberg`.
+ *   blob store and encoder. Provided by `@hypaware/format-iceberg`.
+ *   The capability VALUE is a `TableFormatProvider`.
  * - `hypaware.http-endpoint` — request destination capability, provided
  *   by request sinks (`@hypaware/central`, future `@hypaware/webhook`).
  *
@@ -339,11 +341,12 @@ export interface PluginConfigInstance {
  * the instance name (shown in status and logs). Sinks come in two
  * shapes:
  *
- * - **Blob sinks** compose a `writer` (encoder) and a `destination`
- *   (blob store). The writer plugin requires `hypaware.blob-store` and
- *   provides `hypaware.encoder`; the destination plugin provides
- *   `hypaware.blob-store`. The kernel rejects incompatible
- *   writer/destination pairs at config-load time.
+ * - **Blob sinks** compose a `writer` and a `destination` (blob store).
+ *   The writer plugin must require `hypaware.blob-store` and provide
+ *   either `hypaware.encoder` (encoder writer) or
+ *   `hypaware.table-format` (table-format writer); the destination
+ *   plugin provides `hypaware.blob-store`. The kernel rejects
+ *   incompatible writer/destination pairs at config-load time.
  * - **Request sinks** are one-piece: a single `plugin` whose wire
  *   format is intrinsic (`@hypaware/central`, future
  *   `@hypaware/webhook`).
@@ -356,7 +359,12 @@ export interface PluginConfigInstance {
 export type SinkConfigInstance = BlobSinkConfigInstance | RequestSinkConfigInstance
 
 export interface BlobSinkConfigInstance {
-  /** Writer plugin: requires `hypaware.blob-store`, provides `hypaware.encoder`. */
+  /**
+   * Writer plugin. Must require `hypaware.blob-store` and provide
+   * either `hypaware.encoder` (per-batch byte encoder) or
+   * `hypaware.table-format` (directory layout + manifests on top of an
+   * encoder).
+   */
   writer: PluginName
   /** Destination plugin: provides `hypaware.blob-store`. */
   destination: PluginName
@@ -372,6 +380,13 @@ export interface RequestSinkConfigInstance {
 export interface SinkInstanceConfig extends JsonObject {
   /** Export cadence — standard 5-field cron expression (e.g. "0 * * * *"). */
   schedule?: string
+  /**
+   * For table-format writers (writer provides `hypaware.table-format`),
+   * the inner encoder plugin used to encode data files. Defaults to
+   * `@hypaware/format-parquet` when omitted. Ignored by encoder
+   * writers (their format is intrinsic).
+   */
+  encoder?: PluginName
 }
 
 export interface QueryConfig {
@@ -592,6 +607,130 @@ export interface SinkEncodedBlob {
   bytes: Uint8Array | AsyncIterable<Uint8Array>
   bytesWritten?: number
   rowCount?: number
+}
+
+/**
+ * Object-store API exported by plugins that provide
+ * `hypaware.blob-store`. The capability VALUE used to be a metadata-only
+ * marker (`{ kind: "local-fs" }`); from V1 onwards plugins export the
+ * full `BlobStore` object so table-format providers (Iceberg) and other
+ * consumers can put/get/list/delete bytes without reaching for plugin
+ * internals.
+ *
+ * `kind` is the stable identifier the destination plugin advertises
+ * (e.g. `"local-fs"`, `"s3"`). Consumers may branch on it for
+ * implementation-specific niceties (e.g. presigned URLs from S3) but the
+ * core BlobStore methods are the lowest common denominator.
+ *
+ * Object keys are bytes-equivalent strings; the BlobStore implementation
+ * resolves them against its configured base location. Implementations
+ * MUST reject keys that escape their configured root (e.g. via `..`).
+ */
+export interface BlobStore {
+  kind: string
+  putObject(input: PutObjectInput): Promise<PutObjectResult>
+  getObject(input: GetObjectInput): Promise<GetObjectResult | null>
+  listObjects(input: ListObjectsInput): AsyncIterable<ListObjectResult>
+  deleteObject?(input: DeleteObjectInput): Promise<void>
+}
+
+export interface PutObjectInput {
+  key: string
+  body: Uint8Array | NodeJS.ReadableStream
+  contentType?: string
+  contentLength?: number
+  metadata?: Record<string, string>
+  /**
+   * Conditional write: only put when no object exists at `key`. Iceberg
+   * needs this for metadata-file commits; S3 implements it via the
+   * `If-None-Match` request header. Local-fs implements it via the
+   * `O_EXCL` open flag. Implementations that cannot honour the
+   * condition MUST throw with `error_kind=blob_precondition_failed`
+   * rather than silently overwrite.
+   */
+  ifNoneMatch?: string
+}
+
+export interface PutObjectResult {
+  key: string
+  etag?: string
+  versionId?: string
+}
+
+export interface GetObjectInput {
+  key: string
+}
+
+export interface GetObjectResult {
+  body: NodeJS.ReadableStream
+  contentLength?: number
+  etag?: string
+}
+
+export interface ListObjectsInput {
+  prefix: string
+  /**
+   * Continuation token for paginated listings. The first call passes
+   * undefined; subsequent calls pass the token from the previous page.
+   * Local-fs ignores it (listings are not paginated); S3 forwards it.
+   */
+  continuationToken?: string
+}
+
+export interface ListObjectResult {
+  key: string
+  size: number
+  lastModified: Date
+}
+
+export interface DeleteObjectInput {
+  key: string
+}
+
+/**
+ * Table-format providers expose `hypaware.table-format` and contribute a
+ * sink whose `writer` config provides a directory layout + manifests on
+ * top of a blob store and inner encoder. The kernel resolves the
+ * `BlobStore` from the destination plugin and the inner `SinkEncoder`
+ * (defaulting to `@hypaware/format-parquet`) and hands both to
+ * `createSink`.
+ *
+ * Unlike encoder writers (which run via the destination's sink
+ * contribution), a table-format writer is the sink itself — the
+ * destination's contribution is bypassed. The destination still has to
+ * provide `hypaware.blob-store` so the table-format sink can write
+ * bytes.
+ */
+export interface TableFormatProvider {
+  /** Stable identifier (e.g. `"iceberg"`). */
+  format: string
+  /** Tags this provider contributes to the resolved sink's `supports` set. */
+  supports: SinkSupportTag[]
+  createSink(ctx: TableFormatCreateContext): Promise<Sink>
+}
+
+export interface TableFormatCreateContext {
+  /** User-chosen instance name from `HypAwareV2Config.sinks`. */
+  name: string
+  /** The table-format writer plugin's `ActivePlugin` record. */
+  plugin: ActivePlugin
+  /**
+   * BlobStore resolved from the destination plugin
+   * (`BlobSinkConfigInstance.destination`). The table-format sink writes
+   * all bytes (data files + manifests) through this.
+   */
+  blobStore: BlobStore
+  /**
+   * Inner encoder resolved from `config.encoder`. Defaults to the
+   * `@hypaware/format-parquet` capability value when the user does not
+   * pin a specific encoder.
+   */
+  encoder: SinkEncoder
+  query: QueryRegistry
+  storage: QueryStorageService
+  sinkInstanceConfig: SinkInstanceConfig
+  paths: PluginPaths
+  log: PluginLogger
 }
 
 export interface SinkHandle {
