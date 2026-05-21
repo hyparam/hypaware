@@ -92,6 +92,9 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage }) {
       for (const partition of batch.partitions) {
         try {
           const columns = lookupColumns(query, partition.dataset)
+          if (partition.tablePath) {
+            await flushPartition(storage, partition.tablePath, 'sink_export')
+          }
           const rows = openRows(storage, partition)
           const blob = await encodePartition(encoder, partition, {
             log: sinkCtx.log,
@@ -131,6 +134,18 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage }) {
       }
     },
     async close() {},
+  }
+}
+
+/**
+ * @param {QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string} reason
+ */
+async function flushPartition(storage, tablePath, reason) {
+  const extended = /** @type {QueryStorageService & { flushTable?: (tablePath: string, opts?: { reason?: string, force?: boolean }) => Promise<unknown> }} */ (storage)
+  if (typeof extended.flushTable === 'function') {
+    await extended.flushTable(tablePath, { force: true, reason })
   }
 }
 

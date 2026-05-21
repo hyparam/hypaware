@@ -3,6 +3,7 @@
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
 import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
+import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').QueryScope} QueryScope */
@@ -29,6 +30,7 @@ import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
  * @property {string[]} columns
  * @property {Record<string, unknown>[]} rows
  * @property {string[]} datasets
+ * @property {string[]} freshnessMessages
  */
 
 /**
@@ -82,6 +84,8 @@ export async function executeQuerySql(args) {
         const tables = {}
         /** @type {string[]} */
         const datasetsUsed = []
+        /** @type {string[]} */
+        const freshnessMessages = []
 
         for (const name of tableNames) {
           const dataset = registry.getDataset(name)
@@ -106,6 +110,13 @@ export async function executeQuerySql(args) {
               })
             }
           }
+
+          await settlePendingCacheForQuery({
+            partitions,
+            storage,
+            refresh,
+            messages: freshnessMessages,
+          })
 
           const source = await withSpan(
             'query.scan_dataset',
@@ -132,7 +143,7 @@ export async function executeQuerySql(args) {
         instruments.queryRunsTotal.add(1, { status: 'ok' })
         instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
 
-        return { columns, rows, datasets: datasetsUsed }
+        return { columns, rows, datasets: datasetsUsed, freshnessMessages }
       } catch (err) {
         span.setAttribute('status', 'failed')
         instruments.queryRunsTotal.add(1, { status: 'failed' })
@@ -142,6 +153,41 @@ export async function executeQuerySql(args) {
     },
     { component: 'query' }
   )
+}
+
+/**
+ * @param {{
+ *   partitions: Array<{ tablePath?: string }>,
+ *   storage: ExtendedQueryStorageService,
+ *   refresh: RefreshMode,
+ *   messages: string[],
+ * }} args
+ */
+async function settlePendingCacheForQuery(args) {
+  const now = Date.now()
+  for (const partition of args.partitions) {
+    if (!partition.tablePath) continue
+    const info = await args.storage.pendingInfo(partition.tablePath)
+    if (!info.pending) continue
+    if (args.refresh === 'always') {
+      await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
+      continue
+    }
+    if (args.refresh === 'never') continue
+    if (info.lastFlushAtMs === null || now - info.lastFlushAtMs >= QUERY_FLUSH_DEBOUNCE_MS) {
+      await args.storage.flushTable(partition.tablePath, { reason: 'query_auto' })
+      continue
+    }
+    args.messages.push(
+      `cache: last write to query cache was ${formatAgeMinutes(now - info.lastFlushAtMs)} ago`
+    )
+  }
+}
+
+/** @param {number} ageMs */
+function formatAgeMinutes(ageMs) {
+  const minutes = Math.max(0, Math.floor(ageMs / 60_000))
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
 }
 
 /**

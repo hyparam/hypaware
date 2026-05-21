@@ -41,9 +41,8 @@ export const GASCITY_SCHEMA = { columns: [...GASCITY_SCHEMA_COLUMNS] }
 
 /**
  * Compute the on-disk table path for `gascity_messages`. The plugin
- * writes Parquet directly into the kernel-managed cache via
- * `ctx.storage.appendRows(tablePath, GASCITY_SCHEMA_COLUMNS, rows)` —
- * there is no JSONL stage.
+ * writes through the kernel cache service; the service owns durable
+ * spool and Iceberg flush details.
  *
  * @param {QueryStorageService} storage
  */
@@ -71,11 +70,11 @@ export function discoverParts(ctx) {
 }
 
 /**
- * Parquet-direct refresh path — gascity writes rows straight into the
- * cache from the supervisor subscriber, so there is no JSONL → Parquet
- * transform to drive here. The contract still wants a result, so
- * report `skipped` with zero rows (a sentinel the query layer
- * tolerates per `dataset.refreshPartition` semantics).
+ * Live-ingest refresh path — gascity writes rows through the kernel
+ * cache service from the supervisor subscriber, so there is no external
+ * source file to refresh here. The contract still wants a result, so
+ * report `skipped` with zero rows (a sentinel the query layer tolerates
+ * per `dataset.refreshPartition` semantics).
  *
  * @param {QueryPartition} _partition
  * @returns {Promise<import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult>}

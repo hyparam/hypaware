@@ -174,7 +174,7 @@ export async function run({ harness, expect }) {
       'sql',
       `select count(*) as n from ai_gateway_messages where JSON_VALUE(metadata, '$.dev_run_id') = '${harness.devRunId}'`,
       '--refresh',
-      'never',
+      'always',
       '--format',
       'json',
     ],

@@ -52,8 +52,8 @@ export const AI_GATEWAY_SCHEMA = { columns: [...AI_GATEWAY_SCHEMA_COLUMNS] }
 
 /**
  * On-disk table path under the kernel-managed cache. The plugin writes
- * Parquet directly through `ctx.storage.appendRows`, so there is no
- * JSONL intermediate stage to refresh from.
+ * through `ctx.storage.appendRows`; the storage service owns durable
+ * spool and Iceberg flush details.
  *
  * @param {QueryStorageService} storage
  * @returns {string}
@@ -82,9 +82,9 @@ export function discoverParts(ctx) {
 }
 
 /**
- * Parquet-direct refresh path. Rows are written straight into the
- * cache from `recorder.writeRow`, so there is no JSONL → Parquet
- * transform to drive here.
+ * Live-ingest refresh path. Rows are written through the kernel cache
+ * service from the gateway recorder, so there is no external source
+ * file to refresh here.
  *
  * @returns {Promise<DatasetRefreshResult>}
  */

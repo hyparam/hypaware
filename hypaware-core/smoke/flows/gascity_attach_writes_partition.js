@@ -110,7 +110,7 @@ export async function run({ harness, expect }) {
       'sql',
       'select count(*) as n from gascity_messages',
       '--refresh',
-      'never',
+      'always',
       '--format',
       'json',
     ],

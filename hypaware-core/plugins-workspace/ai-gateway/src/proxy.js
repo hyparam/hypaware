@@ -67,9 +67,11 @@ export async function startProxy(opts) {
   if (upstreams.length === 0) {
     throw new Error('ai-gateway: at least one upstream must be configured before start')
   }
+  /** @type {Set<Promise<void>>} */
+  const pendingFinalizers = new Set()
 
   const server = http.createServer((req, res) => {
-    handleRequest(upstreams, opts, req, res)
+    handleRequest(upstreams, opts, pendingFinalizers, req, res)
   })
 
   /** @type {(value: void) => void} */
@@ -105,6 +107,7 @@ export async function startProxy(opts) {
       await new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve(undefined)))
       })
+      await Promise.allSettled(Array.from(pendingFinalizers))
     },
   }
 }
@@ -112,10 +115,11 @@ export async function startProxy(opts) {
 /**
  * @param {CompiledUpstream[]} upstreams
  * @param {ProxyOptions} opts
+ * @param {Set<Promise<void>>} pendingFinalizers
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, opts, req, res) {
+function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
   const upstream = matchUpstream(upstreams, parsedUrl.pathname, req.headers)
@@ -146,7 +150,12 @@ function handleRequest(upstreams, opts, req, res) {
   function finalizeOnce() {
     if (finalized) return
     finalized = true
-    Promise.resolve(opts.onExchangeFinished(exchange)).catch(() => undefined)
+    const pending = Promise.resolve(opts.onExchangeFinished(exchange))
+      .catch(() => undefined)
+      .finally(() => {
+        pendingFinalizers.delete(pending)
+      })
+    pendingFinalizers.add(pending)
   }
 
   const upstreamReq = lib.request({

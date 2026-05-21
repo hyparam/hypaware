@@ -138,6 +138,7 @@ async function groupBySignal(partitions, query, storage, log) {
       })
       continue
     }
+    await flushPartition(storage, partition.tablePath, 'sink_export')
     for await (const row of storage.readRows(partition.tablePath)) {
       bucket.rows.push(serializeRow(row))
     }
@@ -148,6 +149,18 @@ async function groupBySignal(partitions, query, storage, log) {
     partitions: bucket.partitions,
     rows: bucket.rows,
   }))
+}
+
+/**
+ * @param {QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string} reason
+ */
+async function flushPartition(storage, tablePath, reason) {
+  const extended = /** @type {QueryStorageService & { flushTable?: (tablePath: string, opts?: { reason?: string, force?: boolean }) => Promise<unknown> }} */ (storage)
+  if (typeof extended.flushTable === 'function') {
+    await extended.flushTable(tablePath, { force: true, reason })
+  }
 }
 
 /**
