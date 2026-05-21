@@ -7,7 +7,8 @@ import process from 'node:process'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
-import { diagnoseV1Config, validateConfig } from '../config/validate.js'
+import { diagnoseV1Config, mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
+import { discoverInstalledPlugins } from '../runtime/installed.js'
 import {
   defaultLogDir,
   platformIsSupported,
@@ -256,7 +257,15 @@ export async function collectHypAwareStatus(opts = {}) {
   let validationErrors = []
   if (loaded.ok) {
     try {
-      const result = await validateConfig(loaded.config)
+      /** @type {Awaited<ReturnType<typeof discoverInstalledPlugins>>} */
+      let installed
+      try {
+        installed = await discoverInstalledPlugins({ stateDir: stateRoot })
+      } catch {
+        installed = { loaded: [], failed: [], lockEntries: [] }
+      }
+      const knownPlugins = mergeInstalledManifestsIntoKnown(installed.loaded)
+      const result = await validateConfig(loaded.config, { knownPlugins })
       validationErrors = result.errors
     } catch (err) {
       validationErrors = [{

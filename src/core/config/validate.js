@@ -3,10 +3,12 @@
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
+/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationError} ValidationError */
+/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
 
 /**
  * @typedef {(
@@ -104,8 +106,10 @@ export const CAP_HTTP_ENDPOINT = 'hypaware.http-endpoint'
  * cross-plugin validator runs before any plugin install path exists
  * (Phase 7), so the only way to validate a sink's writer/destination
  * pair is to ship the known first-party requires/provides matrix here.
- * Once Phase 7 lands, this table is augmented with loaded manifests
- * rather than replaced.
+ * From Phase 7 forward, callers augment this table with the
+ * `mergeInstalledManifestsIntoKnown` helper so installed third-party
+ * plugins are not flagged `plugin_unknown` and so their provides/requires
+ * participate in sink-pair and capability-ambiguity checks.
  *
  * @returns {Map<PluginName, PluginMetadata>}
  */
@@ -147,6 +151,55 @@ export function firstPartyPluginMetadata() {
       provides: { 'hypaware.http-endpoint': '1.0.0' },
     }],
   ]))
+}
+
+/**
+ * Build a known-plugins map for `validateConfig` that includes both
+ * first-party metadata and any installed third-party manifests
+ * (`plugin-lock.json` entries). Each installed plugin contributes its
+ * manifest `provides.capabilities` and `requires.capabilities` to the
+ * cross-plugin validator so sink-pair and capability-ambiguity checks
+ * work the same way they do for bundled plugins.
+ *
+ * First-party metadata always wins on collision — the boot path already
+ * rejects installed plugins that shadow first-party names, but the
+ * helper is defensive in case it is called outside the boot path (e.g.
+ * `hyp config validate` from a host that has not booted).
+ *
+ * @param {LoadedManifest[]} installedManifests
+ * @param {Map<PluginName, PluginMetadata>} [base]
+ * @returns {Map<PluginName, PluginMetadata>}
+ */
+export function mergeInstalledManifestsIntoKnown(installedManifests, base) {
+  const out = new Map(base ?? firstPartyPluginMetadata())
+  for (const entry of installedManifests) {
+    const name = /** @type {PluginName} */ (entry.manifest.name)
+    if (out.has(name)) continue
+    out.set(name, pluginMetadataFromManifest(entry.manifest))
+  }
+  return out
+}
+
+/**
+ * Derive a `PluginMetadata` snapshot from a plugin manifest. Picks up
+ * capability `provides` / `requires` only — schema-validated upstream
+ * by `validateManifest` so the casts here are safe.
+ *
+ * @param {PluginManifest} manifest
+ * @returns {PluginMetadata}
+ */
+function pluginMetadataFromManifest(manifest) {
+  /** @type {PluginMetadata} */
+  const meta = {}
+  const provides = manifest.provides?.capabilities
+  if (provides && Object.keys(provides).length > 0) {
+    meta.provides = /** @type {Partial<Record<CapabilityName, string>>} */ ({ ...provides })
+  }
+  const requires = manifest.requires?.capabilities
+  if (requires && Object.keys(requires).length > 0) {
+    meta.requires = /** @type {Partial<Record<CapabilityName, string>>} */ ({ ...requires })
+  }
+  return meta
 }
 
 /**

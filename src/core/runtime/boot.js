@@ -19,6 +19,7 @@ import {
   defaultBundledWorkspaceDir,
   discoverBundledPlugins,
 } from './bundled.js'
+import { discoverInstalledPlugins } from './installed.js'
 
 /** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
@@ -129,16 +130,63 @@ export async function bootKernel(opts = {}) {
         span.setAttribute('bundled_excluded_from_default', discovered.excluded.length)
       }
 
+      const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
+      span.setAttribute('installed_available', installed.loaded.length)
+      if (installed.failed.length > 0) {
+        span.setAttribute('installed_failed', installed.failed.length)
+      }
+
+      // An installed plugin must not shadow a bundled first-party
+      // plugin by name. The override policy is intentionally deferred
+      // (see hy-gh-2 design): reject boot with a clear, telemetry-tagged
+      // error so the operator removes the installed copy before booting.
+      const bundledNames = new Set([
+        ...discovered.loaded.map((m) => m.manifest.name),
+        ...discovered.excluded.map((m) => m.manifest.name),
+      ])
+      /** @type {PluginName[]} */
+      const shadowing = []
+      for (const m of installed.loaded) {
+        if (bundledNames.has(m.manifest.name)) {
+          shadowing.push(/** @type {PluginName} */ (m.manifest.name))
+        }
+      }
+      if (shadowing.length > 0) {
+        span.setAttribute('installed_shadow_collisions', shadowing.length)
+        span.setAttribute('error_kind', 'installed_shadows_bundled')
+        const log = getLogger('kernel')
+        for (const name of shadowing) {
+          log.error('plugin.shadow_collision', {
+            [Attr.PLUGIN]: name,
+            [Attr.ERROR_KIND]: 'installed_shadows_bundled',
+            hyp_reason: 'installed_plugin_name_collides_with_bundled',
+          })
+        }
+        const message =
+          `installed plugin(s) shadow bundled first-party plugin(s): ${shadowing.sort().join(', ')}. ` +
+          `Remove the installed copy with 'hyp plugin remove <name>' before booting.`
+        const shadowErr = /** @type {Error & { hypErrorKind?: string }} */ (new Error(message))
+        shadowErr.hypErrorKind = 'installed_shadows_bundled'
+        throw shadowErr
+      }
+
       const loadedConfig = configPath ? await loadConfigFile(configPath) : null
       const config = loadedConfig?.ok ? loadedConfig.config : null
 
-      // The full bundled-plugin pool the kernel knows about: V1 allowlist
-      // plus the excluded-from-default set (so developers can still
-      // activate `@hypaware/central` or `@hypaware/gascity` by naming
-      // them in config). `all-bundled` boots intentionally skip the
-      // excluded set so the picker only sees V1 surface.
-      const available = [...discovered.loaded, ...discovered.excluded]
-      const selected = computeSelectedPlugins({ bootProfile, config, discovered: available })
+      // The full plugin pool the kernel knows about: V1 allowlist plus
+      // the excluded-from-default set (so developers can still activate
+      // `@hypaware/central` or `@hypaware/gascity` by naming them in
+      // config), plus every plugin in `plugin-lock.json` whose manifest
+      // loaded. `all-bundled` boots intentionally skip the excluded and
+      // installed sets so the picker only sees the V1 default surface.
+      const available = [...discovered.loaded, ...discovered.excluded, ...installed.loaded]
+      const installedNames = new Set(installed.loaded.map((m) => m.manifest.name))
+      const selected = computeSelectedPlugins({
+        bootProfile,
+        config,
+        discovered: available,
+        installedNames,
+      })
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -155,9 +203,23 @@ export async function bootKernel(opts = {}) {
           })
         }
       }
+      for (const name of installedNames) {
+        if (selected.has(name)) {
+          log.info('plugin.installed_active', {
+            [Attr.PLUGIN]: name,
+            [Attr.COMPONENT]: 'kernel',
+            status: 'selected',
+            hyp_source: 'installed',
+          })
+        }
+      }
 
       span.setAttribute('plugins_selected', selected.size)
       span.setAttribute('plugins_skipped', skipped.length)
+      const installedSelectedCount = [...installedNames].filter((n) => selected.has(n)).length
+      if (installedSelectedCount > 0) {
+        span.setAttribute('installed_selected', installedSelectedCount)
+      }
       span.setAttribute('boot_profile', describeBootProfile(bootProfile))
 
       if (selected.size === 0) {
@@ -245,33 +307,45 @@ function resolveConfigPath({ explicit, env, hypHome }) {
  * Resolve the active plugin set from the boot profile.
  *
  * - `all-bundled`: only the V1 default surface. Excluded plugins
- *   (`@hypaware/central`, `@hypaware/gascity`) are intentionally
- *   dropped here so the walkthrough picker doesn't surface them.
+ *   (`@hypaware/central`, `@hypaware/gascity`) and installed third-party
+ *   plugins are intentionally dropped so the walkthrough picker
+ *   doesn't surface them — naming an installed plugin in the config is
+ *   the only way to activate one.
  *
  * - `{ activate: [...] }`: explicit plugin set, intersected with what
  *   the workspace can resolve. Excluded plugins MAY appear here when
  *   a developer-built profile names them; this is the documented
- *   "loadable for developers" escape hatch.
+ *   "loadable for developers" escape hatch. Installed plugins may
+ *   appear here too — the daemon path uses this profile and shares
+ *   the merged pool.
  *
  * - `config` (default): activate the plugins listed in the user's
- *   config (`enabled !== false`). Excluded plugins are honoured when
- *   they appear in the config — typing the name is the explicit
- *   opt-in.
+ *   config (`enabled !== false`). Excluded and installed plugins are
+ *   honoured when they appear in the config — typing the name is the
+ *   explicit opt-in. The installed plugin is never preferred over a
+ *   bundled one (shadow collisions are rejected before this point).
  *
  * Plugins in the config that aren't bundled (or aren't installed)
  * are skipped silently here — the cross-plugin validator surfaces
  * `plugin_unknown` diagnostics for those, separate from boot.
  *
- * @param {{ bootProfile: BootProfile, config: HypAwareV2Config|null, discovered: LoadedManifest[] }} args
+ * @param {{
+ *   bootProfile: BootProfile,
+ *   config: HypAwareV2Config|null,
+ *   discovered: LoadedManifest[],
+ *   installedNames: Set<PluginName>,
+ * }} args
  * @returns {Set<PluginName>}
  */
-function computeSelectedPlugins({ bootProfile, config, discovered }) {
+function computeSelectedPlugins({ bootProfile, config, discovered, installedNames }) {
   const available = new Set(discovered.map((m) => /** @type {PluginName} */ (m.manifest.name)))
 
   if (bootProfile === 'all-bundled') {
     return new Set(
       [...available].filter((name) =>
-        V1_BUNDLED_PLUGIN_ALLOWLIST.has(name) && !V1_EXCLUDED_FROM_DEFAULT.has(name)
+        V1_BUNDLED_PLUGIN_ALLOWLIST.has(name) &&
+        !V1_EXCLUDED_FROM_DEFAULT.has(name) &&
+        !installedNames.has(name)
       )
     )
   }
