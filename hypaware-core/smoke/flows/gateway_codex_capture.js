@@ -26,10 +26,11 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *
  * Bead `hy-bbyi` assertions:
  *
- *   - Two rows land in `ai_gateway_messages` filterable by
- *     `dev_run_id`, with `upstream='openai'` and the original paths.
- *   - The `/v1/responses` row has `is_sse=true` and a positive
- *     `stream_event_count`.
+ *   - Four normalized rows land in `ai_gateway_messages` filterable by
+ *     `dev_run_id`: user+assistant for chat completions and user+assistant
+ *     for Responses.
+ *   - The `/v1/responses` rows carry `is_sse=true` and a positive
+ *     `stream_event_count` under `attributes.gateway`.
  *   - Daemon self-telemetry (`source.start`, `sink.tick`,
  *     `cache.append`, `daemon.shutdown`) is present in JSONL.
  *
@@ -115,7 +116,20 @@ export async function run({ harness, expect }) {
   await openai.close()
 
   // ----- Query the captured rows -----
-  const sql = `select upstream, path, status_code, is_sse, stream_event_count from ai_gateway_messages where JSON_VALUE(metadata, '$.dev_run_id') = '${harness.devRunId}' order by ts_start`
+  const sql = `
+    select
+      provider,
+      model,
+      role,
+      content_text,
+      JSON_VALUE(attributes, '$.gateway.path') as path,
+      JSON_VALUE(attributes, '$.gateway.status_code') as status_code,
+      JSON_VALUE(attributes, '$.gateway.is_sse') as is_sse,
+      JSON_VALUE(attributes, '$.gateway.stream_event_count') as stream_event_count
+    from ai_gateway_messages
+    where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
+    order by message_created_at, message_index, part_index
+  `.trim().replace(/\s+/g, ' ')
   const stdoutBuf = makeBuf()
   const stderrBuf = makeBuf()
   const code = await dispatch(
@@ -128,38 +142,42 @@ export async function run({ harness, expect }) {
   /** @type {any[]} */
   const rows = JSON.parse(stdoutBuf.text())
   expect.that(
-    'query: ai_gateway_messages has exactly two rows for the dev_run_id',
+    'query: ai_gateway_messages has exactly four normalized rows for the dev_run_id',
     rows,
-    (v) => Array.isArray(v) && v.length === 2,
+    (v) => Array.isArray(v) && v.length === 4,
   )
 
-  const byPath = new Map(rows.map((r) => [r.path, r]))
-  const chat = byPath.get('/v1/chat/completions')
-  const responses = byPath.get('/v1/responses')
+  const chatRows = rows.filter((r) => r.path === '/v1/chat/completions')
+  const responseRows = rows.filter((r) => r.path === '/v1/responses')
   expect.that(
-    'query: both rows carry upstream=openai',
-    [chat?.upstream, responses?.upstream],
-    ([a, b]) => a === 'openai' && b === 'openai',
+    'query: all rows carry provider=openai',
+    rows.map((r) => r.provider),
+    (v) => Array.isArray(v) && v.length === 4 && v.every((provider) => provider === 'openai'),
   )
   expect.that(
-    'query: /v1/chat/completions row has status_code=200 and is_sse=false',
-    [chat?.status_code, chat?.is_sse],
-    ([s, sse]) => Number(s) === 200 && (sse === false || sse === 0 || sse === 'false'),
+    'query: /v1/chat/completions has user and assistant rows',
+    chatRows.map((r) => r.role).sort(),
+    (v) => Array.isArray(v) && v.join(',') === 'assistant,user',
   )
   expect.that(
-    'query: /v1/responses row has status_code=200',
-    responses?.status_code,
-    (v) => Number(v) === 200,
+    'query: /v1/chat/completions rows have status_code=200 and is_sse=false',
+    chatRows,
+    (v) => v.length === 2 && v.every((r) => Number(r.status_code) === 200 && (r.is_sse === false || r.is_sse === 0 || r.is_sse === 'false')),
   )
   expect.that(
-    'query: /v1/responses row has is_sse=true',
-    responses?.is_sse,
-    (v) => v === true || v === 1 || v === 'true',
+    'query: /v1/responses has user and assistant rows',
+    responseRows.map((r) => r.role).sort(),
+    (v) => Array.isArray(v) && v.join(',') === 'assistant,user',
   )
   expect.that(
-    'query: /v1/responses row has stream_event_count > 0',
-    Number(responses?.stream_event_count),
-    (v) => typeof v === 'number' && v > 0,
+    'query: /v1/responses rows have is_sse=true',
+    responseRows,
+    (v) => v.length === 2 && v.every((r) => r.is_sse === true || r.is_sse === 1 || r.is_sse === 'true'),
+  )
+  expect.that(
+    'query: /v1/responses rows have stream_event_count > 0',
+    responseRows,
+    (v) => v.length === 2 && v.every((r) => Number(r.stream_event_count) > 0),
   )
 
   // ----- Daemon-self-telemetry assertions -----

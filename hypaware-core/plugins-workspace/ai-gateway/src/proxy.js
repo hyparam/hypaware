@@ -38,7 +38,7 @@ const HOP_BY_HOP_HEADERS = new Set([
  * @property {string} listen
  * @property {UpstreamConfig[]} upstreams
  * @property {(exchange: Exchange) => void | Promise<void>} onExchangeFinished
- * @property {(init: { upstream: string, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders }) => Exchange} startExchange
+ * @property {(init: { upstream: string, provider: string | undefined, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders }) => Exchange} startExchange
  *
  * @typedef {Object} StartedProxy
  * @property {string} host
@@ -139,6 +139,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const forwardedHeaders = forwardHeaders(req.headers, upstreamHost)
   const exchange = opts.startExchange({
     upstream: upstream.name,
+    provider: upstream.provider,
     method: req.method,
     path: requestUrl,
     requestHeaders: req.headers,

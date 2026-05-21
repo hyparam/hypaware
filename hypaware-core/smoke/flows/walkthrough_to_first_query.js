@@ -235,7 +235,10 @@ export async function run({ harness, expect }) {
     await otlpResponse.text()
 
     // Issue one request through the gateway with the contract header.
-    const gatewayBody = JSON.stringify({ hello: 'gateway', run: harness.devRunId })
+    const gatewayBody = JSON.stringify({
+      model: 'claude-walkthrough',
+      messages: [{ role: 'user', content: `gateway ${harness.devRunId}` }],
+    })
     const gatewayResponse = await postThroughGateway({
       url: `${gatewayUrl}/v1/echo`,
       headers: {
@@ -258,7 +261,7 @@ export async function run({ harness, expect }) {
         where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
       union all
       select 'ai_gateway_messages' as dataset, count(*) as n from ai_gateway_messages
-        where JSON_VALUE(metadata, '$.dev_run_id') = '${harness.devRunId}'
+        where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
     `.trim().replace(/\s+/g, ' ')
 
     const sqlStdout = makeBuf()

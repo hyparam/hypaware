@@ -14,11 +14,13 @@
  *
  * @typedef {Object} AiGatewayConfig
  * @property {string} listen           Address as "host:port" (defaults to 127.0.0.1:0).
+ * @property {string} gatewayId        Value for the proxy-compatible `gateway_id` column.
  * @property {UpstreamConfig[]} upstreams
  * @property {string[]} redactHeaders  Extra headers to redact in stored rows.
  */
 
 const DEFAULT_LISTEN = '127.0.0.1:0'
+const DEFAULT_GATEWAY_ID = 'hypaware-local'
 
 /**
  * @param {unknown} raw
@@ -29,9 +31,12 @@ export function compileConfig(raw) {
   const listen = typeof cfg.listen === 'string' && cfg.listen.length > 0
     ? cfg.listen
     : DEFAULT_LISTEN
+  const gatewayId = typeof cfg.gateway_id === 'string' && cfg.gateway_id.length > 0
+    ? cfg.gateway_id
+    : DEFAULT_GATEWAY_ID
   const upstreams = compileUpstreams(cfg.upstreams)
   const redactHeaders = compileStringArray(cfg.redact_headers)
-  return { listen, upstreams, redactHeaders }
+  return { listen, gatewayId, upstreams, redactHeaders }
 }
 
 /**

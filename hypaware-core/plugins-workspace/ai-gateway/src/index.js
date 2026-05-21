@@ -39,7 +39,7 @@ export async function activate(ctx) {
   ctx.sources.register({
     name: 'ai-gateway',
     plugin: PLUGIN_NAME,
-    summary: 'HTTP/SSE AI gateway: forwards LLM client traffic to upstreams and records ai_gateway_messages',
+    summary: 'HTTP/SSE AI gateway: forwards LLM client traffic to upstreams and records normalized ai_gateway_messages',
     configSection: 'ai-gateway',
     start: createStartSource(state),
   })

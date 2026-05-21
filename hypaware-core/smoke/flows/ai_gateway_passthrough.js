@@ -26,8 +26,8 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *
  * - The echo upstream saw the request (header round-tripped, body
  *   echoed in the response).
- * - A row landed in `ai_gateway_messages` with `dev_run_id` in
- *   `metadata` matching the run.
+ * - A normalized message row landed in `ai_gateway_messages` with
+ *   `dev_run_id` in `attributes` matching the run.
  * - An `aigw.exchange` log row exists carrying `upstream`, `path`,
  *   `status_code`, `request_bytes`, `response_bytes`, `is_sse`.
  * - The `cache.append` span and `hyp_rows_written` counter both fire
@@ -127,7 +127,10 @@ export async function run({ harness, expect }) {
   )
 
   // Drive one request through the gateway with the contract header.
-  const requestBody = JSON.stringify({ hello: 'gateway', run: harness.devRunId })
+  const requestBody = JSON.stringify({
+    model: 'claude-smoke',
+    messages: [{ role: 'user', content: `gateway ${harness.devRunId}` }],
+  })
   const requestPath = '/v1/echo'
   const proxiedResponse = await postThroughGateway({
     url: `${localUrl}${requestPath}`,
@@ -172,7 +175,7 @@ export async function run({ harness, expect }) {
     [
       'query',
       'sql',
-      `select count(*) as n from ai_gateway_messages where JSON_VALUE(metadata, '$.dev_run_id') = '${harness.devRunId}'`,
+      `select count(*) as n from ai_gateway_messages where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'`,
       '--refresh',
       'always',
       '--format',
@@ -207,7 +210,7 @@ export async function run({ harness, expect }) {
   )
   const count = parsed?.[0]?.n
   expect.that(
-    'stdout: count is 1 (exactly one exchange for the dev_run_id)',
+    'stdout: count is 1 (exactly one normalized message row for the dev_run_id)',
     count,
     (v) => v === 1 || v === '1' || (typeof v === 'bigint' && Number(v) === 1)
   )

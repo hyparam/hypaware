@@ -38,13 +38,14 @@ hyp collect --glob '<pattern>' --name <name>
 
 ## AI gateway message model
 
-Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages`. Each row is a single exchange with the upstream provider.
+Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages`. Each row is a normalized message content part, matching the Collectivus `proxy_messages` schema exactly.
 
 Key columns:
 
-- `upstream` — name of the upstream preset that handled the request.
-- `path`, `status_code`, `request_bytes`, `response_bytes`, `is_sse` — wire-level facts about the exchange.
-- `metadata` (JSON) — request settings, propagated `dev_run_id`, and adapter-supplied enrichment columns.
+- `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable conversation, message, and part identity.
+- `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields.
+- `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
+- `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
 
 Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
 

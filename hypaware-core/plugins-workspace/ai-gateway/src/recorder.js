@@ -22,6 +22,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
 /**
  * @typedef {Object} ExchangeInit
  * @property {string} upstream
+ * @property {string | undefined} provider
  * @property {string | undefined} method
  * @property {string | undefined} path
  * @property {Record<string, string | string[] | undefined>} requestHeaders
@@ -39,6 +40,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
  * @property {string | null} ts_end
  * @property {number | null} duration_ms
  * @property {string} upstream
+ * @property {string | null} provider
  * @property {string | null} method
  * @property {string | null} path
  * @property {number | null} status_code
@@ -52,6 +54,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
  * @property {string | null} response_body
  * @property {string | null} error
  * @property {string | null} metadata             JSON-stringified metadata (incl. dev_run_id)
+ * @property {Array<{ kind: 'stream_event', exchange_id: string, t_ms: number, event: string, data: string, id?: string }>} stream_events
  */
 
 /**
@@ -131,6 +134,8 @@ export class Exchange {
     /** @type {string} */
     this.upstream = init.upstream
     /** @type {string | undefined} */
+    this.provider = init.provider
+    /** @type {string | undefined} */
     this.method = init.method
     /** @type {string | undefined} */
     this.path = init.path
@@ -152,6 +157,8 @@ export class Exchange {
     this.isSse = false
     /** @type {number} */
     this.streamEventCount = 0
+    /** @type {Array<{ kind: 'stream_event', exchange_id: string, t_ms: number, event: string, data: string, id?: string }>} */
+    this.streamEvents = []
     /** @type {string | undefined} */
     this.error = undefined
     /** @type {boolean} */
@@ -232,6 +239,16 @@ export class Exchange {
     this.responseBytes += buf.byteLength
     const events = this.sseParser.feed(buf)
     this.streamEventCount += events.length
+    for (const event of events) {
+      this.streamEvents.push({
+        kind: 'stream_event',
+        exchange_id: this.id,
+        t_ms: Date.now() - this.tsStartMs,
+        event: event.event,
+        data: event.data,
+        ...(event.id !== undefined ? { id: event.id } : {}),
+      })
+    }
   }
 
   /**
@@ -261,9 +278,8 @@ export class Exchange {
    *
    * The schema's JSON-typed columns (`request_headers`,
    * `response_headers`, `metadata`) are pre-stringified here. The
-   * storage layer treats STRING vs JSON the same on append; the
-   * difference shows up at query time when callers use
-   * `JSON_VALUE(metadata, '$.dev_run_id')`.
+   * projector turns this raw exchange envelope into proxy-compatible
+   * message rows before anything is appended to `ai_gateway_messages`.
    *
    * @returns {FinishedRow}
    */
@@ -288,6 +304,7 @@ export class Exchange {
       ts_end: new Date(tsEndMs).toISOString(),
       duration_ms: tsEndMs - this.tsStartMs,
       upstream: this.upstream,
+      provider: this.provider ?? null,
       method: this.method ?? null,
       path: this.path ?? null,
       status_code: this.response?.status ?? null,
@@ -301,6 +318,7 @@ export class Exchange {
       response_body: responseBody && responseBody.length > 0 ? responseBody : null,
       error: this.error ?? null,
       metadata: JSON.stringify(metadata),
+      stream_events: this.streamEvents,
     }
     this._cachedRow = row
     this._resolveFinished()
