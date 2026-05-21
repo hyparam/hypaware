@@ -1,9 +1,8 @@
 // @ts-check
 
-import { trace } from '@opentelemetry/api'
-
 import {
   Attr,
+  getActiveSpan,
   withSpan,
 } from '../../../../src/core/observability/index.js'
 import { columnsFor, otelTablePath, PLUGIN_NAME } from './datasets.js'
@@ -162,7 +161,7 @@ function asObject(value) {
  * @param {number} port
  */
 export function stampBoundAddress(host, port) {
-  const span = trace.getActiveSpan()
+  const span = getActiveSpan()
   if (!span) return
   span.setAttribute('listen_host', host)
   span.setAttribute('listen_port', port)

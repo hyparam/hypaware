@@ -1,16 +1,14 @@
 // @ts-check
 
-import { resourceFromAttributes } from '@opentelemetry/resources'
-
 /**
- * Build the OTel Resource that the tracer, logger, and meter providers
+ * Build the resource metadata that the tracer, logger, and meter providers
  * share. `service.name` comes from env; `dev_run_id` is mirrored onto
  * the resource so every signal carries it even when a caller forgets
  * to set it as a span attribute. Any `OTEL_RESOURCE_ATTRIBUTES` value
  * (a=b,c=d shape) is merged last so user-supplied keys win.
  *
  * @param {import('./env.js').ObservabilityEnv} env
- * @returns {import('@opentelemetry/resources').Resource}
+ * @returns {{ attributes: Record<string, string|number|boolean> }}
  */
 export function buildResource(env) {
   /** @type {Record<string, string|number|boolean>} */
@@ -30,5 +28,5 @@ export function buildResource(env) {
       if (key) attrs[key] = value
     }
   }
-  return resourceFromAttributes(attrs)
+  return { attributes: attrs }
 }

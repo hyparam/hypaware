@@ -33,10 +33,10 @@ export function installObservability(opts = {}) {
 /**
  * @param {{
  *   env: import('./env.js').ObservabilityEnv,
- *   resource: import('@opentelemetry/resources').Resource,
- *   tracer: { provider: import('@opentelemetry/sdk-trace-node').NodeTracerProvider|null },
- *   logger: { provider: import('@opentelemetry/sdk-logs').LoggerProvider|null },
- *   meter: { provider: import('@opentelemetry/sdk-metrics').MeterProvider|null, readers: import('@opentelemetry/sdk-metrics').MetricReader[] }
+ *   resource: { attributes: Record<string, string|number|boolean> },
+ *   tracer: { provider: import('./runtime.js').TracerProvider|null },
+ *   logger: { provider: import('./runtime.js').LoggerProvider|null },
+ *   meter: { provider: import('./runtime.js').MeterProvider|null, readers: object[] }
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter }) {
@@ -91,3 +91,4 @@ export { getLogger } from './logger.js'
 export { getMeter, getKernelInstruments } from './meter.js'
 export { withSpan, runRoot } from './span_helpers.js'
 export { buildAttrs, normalizeKey, Attr } from './attrs.js'
+export { context, ROOT_CONTEXT, SpanStatusCode, getActiveSpan } from './runtime.js'

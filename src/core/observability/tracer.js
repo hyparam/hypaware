@@ -1,12 +1,9 @@
 // @ts-check
 
-import { trace, ProxyTracerProvider } from '@opentelemetry/api'
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node'
-import { SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base'
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
-
 import { JsonlSpanExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
+import { OtlpSpanExporter } from './otlp_exporters.js'
+import { trace, TracerProvider } from './runtime.js'
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
@@ -24,38 +21,34 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  *
  * @param {object} args
  * @param {import('./env.js').ObservabilityEnv} args.env
- * @param {import('@opentelemetry/resources').Resource} args.resource
- * @returns {{ provider: NodeTracerProvider|null, exporters: object[] }}
+ * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
+ * @returns {{ provider: TracerProvider|null, exporters: object[] }}
  */
 export function installTracerProvider({ env, resource }) {
   /** @type {object[]} */
   const exporters = []
-  /** @type {import('@opentelemetry/sdk-trace-base').SpanProcessor[]} */
-  const processors = []
 
   if (env.devTelemetry) {
     const dir = devTelemetryDir(env.stateDir)
     const jsonlExporter = new JsonlSpanExporter({ dir })
-    processors.push(new SimpleSpanProcessor(jsonlExporter))
     exporters.push(jsonlExporter)
   }
 
   if (!env.devTelemetry && env.otlpEndpoint) {
-    const otlpExporter = new OTLPTraceExporter({
+    const otlpExporter = new OtlpSpanExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/traces',
       timeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     })
-    processors.push(new SimpleSpanProcessor(otlpExporter))
     exporters.push(otlpExporter)
   }
 
-  if (processors.length === 0) {
+  if (exporters.length === 0) {
     return { provider: null, exporters: [] }
   }
 
-  const provider = new NodeTracerProvider({
+  const provider = new TracerProvider({
     resource,
-    spanProcessors: processors,
+    exporters,
   })
   provider.register()
   return { provider, exporters }
@@ -70,8 +63,7 @@ export function getTracer(component) {
   return trace.getTracer(`hypaware.${component}`)
 }
 
-/** @returns {ProxyTracerProvider} */
+/** @returns {object} */
 export function getActiveProvider() {
-  const provider = trace.getTracerProvider()
-  return /** @type {ProxyTracerProvider} */ (provider)
+  return trace.getTracerProvider()
 }
