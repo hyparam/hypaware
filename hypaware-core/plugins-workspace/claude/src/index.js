@@ -20,6 +20,7 @@ import { createClaudeTranscriptEnricher } from './enricher.js'
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
 const UPSTREAM_NAME = 'anthropic'
+const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
  * Activate the `@hypaware/claude` adapter plugin.
@@ -87,6 +88,7 @@ export async function activate(ctx) {
               port,
               version: ctx.plugin.version,
               settingsPath,
+              binPath: resolveHookBinPath(ctx.env),
             })
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
@@ -208,6 +210,29 @@ export async function activate(ctx) {
       'Capture Claude Code + OTLP locally, export to Parquet under HYP_HOME/exports',
     run: runClaudeAndOtelLocalPreset,
   })
+}
+
+/**
+ * Claude runs hooks from arbitrary working directories, so the managed hook
+ * must use a concrete CLI entrypoint instead of assuming `hyp` is on PATH.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ */
+function resolveHookBinPath(env) {
+  const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
+  if (explicit) return path.resolve(explicit)
+  if (process.argv[1]) return path.resolve(process.argv[1])
+  return FALLBACK_BIN_PATH
+}
+
+/**
+ * @param {Array<string|undefined>} values
+ */
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value
+  }
+  return undefined
 }
 
 /**

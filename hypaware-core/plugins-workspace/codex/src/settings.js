@@ -12,6 +12,8 @@ export { CodexSettingsError } from './errors.js'
  * @property {number} port
  * @property {string} version
  * @property {string} [configPath]
+ * @property {string} [baseUrl]
+ * @property {string} [providerName]
  *
  * @typedef {{ changed: true, prevValue?: string }} CodexAttachResult
  *
@@ -30,12 +32,20 @@ export { CodexSettingsError } from './errors.js'
  * @returns {Promise<CodexAttachResult>}
  */
 export async function attach(opts) {
-  const { port, version, configPath = defaultConfigPath() } = opts
+  const {
+    port,
+    version,
+    configPath = defaultConfigPath(),
+    baseUrl = `http://127.0.0.1:${port}/v1`,
+    providerName = 'HypAware OpenAI Gateway',
+  } = opts
   validatePort(port)
   validateVersion(version)
+  validateBaseUrl(baseUrl)
+  validateProviderName(providerName)
 
   const { content, mtimeMs } = await readConfig(configPath)
-  const prepared = prepareAttach(content, port, version)
+  const prepared = prepareAttach(content, port, version, { baseUrl, providerName })
   await writeAtomic(configPath, prepared.content, mtimeMs)
 
   /** @type {CodexAttachResult} */
@@ -94,6 +104,35 @@ function validateVersion(version) {
   if (typeof version !== 'string' || version.length === 0) {
     throw new CodexSettingsError('version must be a non-empty string', {
       code: 'INVALID_VERSION',
+    })
+  }
+}
+
+/** @param {unknown} baseUrl */
+function validateBaseUrl(baseUrl) {
+  if (typeof baseUrl !== 'string' || baseUrl.length === 0) {
+    throw new CodexSettingsError('baseUrl must be a non-empty string', {
+      code: 'INVALID_BASE_URL',
+    })
+  }
+  try {
+    const parsed = new URL(baseUrl)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`unsupported protocol ${parsed.protocol}`)
+    }
+  } catch (err) {
+    throw new CodexSettingsError(
+      `invalid baseUrl: ${err instanceof Error ? err.message : String(err)}`,
+      { code: 'INVALID_BASE_URL', cause: err }
+    )
+  }
+}
+
+/** @param {unknown} providerName */
+function validateProviderName(providerName) {
+  if (typeof providerName !== 'string' || providerName.length === 0) {
+    throw new CodexSettingsError('providerName must be a non-empty string', {
+      code: 'INVALID_PROVIDER_NAME',
     })
   }
 }

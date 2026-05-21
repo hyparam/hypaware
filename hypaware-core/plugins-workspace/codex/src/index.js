@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,6 +16,7 @@ import { attach, defaultConfigPath, detach } from './settings.js'
 const PLUGIN_NAME = '@hypaware/codex'
 const CLIENT_NAME = 'codex'
 const UPSTREAM_NAME = 'openai'
+const CHATGPT_UPSTREAM_NAME = 'chatgpt'
 
 /**
  * Activate the `@hypaware/codex` adapter plugin.
@@ -40,6 +42,12 @@ export async function activate(ctx) {
     path_prefix: '/v1',
     provider: 'openai',
   })
+  gateway.registerUpstreamPreset({
+    name: CHATGPT_UPSTREAM_NAME,
+    base_url: 'https://chatgpt.com',
+    path_prefix: '/backend-api/codex',
+    provider: 'chatgpt',
+  })
 
   const logger = getLogger('plugin.codex')
 
@@ -64,22 +72,30 @@ export async function activate(ctx) {
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
             const port = safeEndpointPort(attachCtx.endpoint)
+            const route = port === undefined
+              ? undefined
+              : providerRouteForAuthMode(await readCodexAuthMode(resolveAuthPath(ctx)), port)
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
               dryRun: true,
               configPath,
               port,
+              baseUrl: route?.baseUrl,
               changed: false,
             })
             return
           }
           const port = endpointPort(attachCtx.endpoint)
           try {
+            const authMode = await readCodexAuthMode(resolveAuthPath(ctx))
+            const route = providerRouteForAuthMode(authMode, port)
             const result = await attach({
               port,
               version: ctx.plugin.version,
               configPath,
+              baseUrl: route.baseUrl,
+              providerName: route.providerName,
             })
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
@@ -96,6 +112,7 @@ export async function activate(ctx) {
               dryRun: false,
               configPath,
               port,
+              baseUrl: route.baseUrl,
               changed: result.changed === true,
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
@@ -193,9 +210,60 @@ function resolveConfigPath(ctx) {
   return defaultConfigPath(ctx.env, homeDir)
 }
 
+/**
+ * @param {string | undefined} authMode
+ * @param {number} port
+ */
+function providerRouteForAuthMode(authMode, port) {
+  if (authMode === 'chatgpt') {
+    return {
+      baseUrl: `http://127.0.0.1:${port}/backend-api/codex`,
+      providerName: 'HypAware ChatGPT Gateway',
+    }
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    providerName: 'HypAware OpenAI Gateway',
+  }
+}
+
+/**
+ * @param {PluginActivationContext} ctx
+ */
+function resolveAuthPath(ctx) {
+  const codexHome = ctx.env.CODEX_HOME
+  if (typeof codexHome === 'string' && codexHome.length > 0) {
+    return path.join(codexHome, 'auth.json')
+  }
+  return path.join(ctx.env.HOME ?? os.homedir(), '.codex', 'auth.json')
+}
+
+/**
+ * @param {string} authPath
+ * @returns {Promise<string | undefined>}
+ */
+async function readCodexAuthMode(authPath) {
+  try {
+    const parsed = JSON.parse(await fs.readFile(authPath, 'utf8'))
+    if (!parsed || typeof parsed !== 'object') return undefined
+    const mode = Reflect.get(parsed, 'auth_mode')
+    return typeof mode === 'string' ? mode : undefined
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return undefined
+    return undefined
+  }
+}
+
 function skillsRootDir() {
   const here = fileURLToPath(import.meta.url)
   return path.resolve(path.dirname(here), '..')
+}
+
+/** @param {unknown} err */
+function errCode(err) {
+  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
+  const code = Reflect.get(err, 'code')
+  return typeof code === 'string' ? code : undefined
 }
 
 /**
@@ -241,6 +309,7 @@ function safeEndpointPort(endpoint) {
  *   dryRun: boolean,
  *   configPath: string,
  *   port: number | undefined,
+ *   baseUrl?: string,
  *   changed: boolean,
  *   prevValue?: string,
  * }} fields
@@ -258,7 +327,7 @@ function writeAttachOutput(attachCtx, fields) {
     }
     if (fields.port !== undefined) {
       payload.port = fields.port
-      payload.base_url = `http://127.0.0.1:${fields.port}/v1`
+      payload.base_url = fields.baseUrl ?? `http://127.0.0.1:${fields.port}/v1`
     }
     if (fields.prevValue !== undefined) payload.prev_value = fields.prevValue
     attachCtx.stdout.write(JSON.stringify(payload) + '\n')
@@ -267,12 +336,18 @@ function writeAttachOutput(attachCtx, fields) {
   if (fields.dryRun) {
     attachCtx.stdout.write(`(dry-run) Would attach Codex via ${fields.configPath}\n`)
     attachCtx.stdout.write('  Would set model_provider = hypaware\n')
-    attachCtx.stdout.write('  Would set base_url to the local gateway endpoint /v1\n')
+    if (fields.baseUrl !== undefined) {
+      attachCtx.stdout.write(`  Would set base_url = ${fields.baseUrl}\n`)
+    } else {
+      attachCtx.stdout.write('  Would set base_url to the local gateway endpoint /v1\n')
+    }
     return
   }
   attachCtx.stdout.write(`✓ Codex attached (${fields.configPath})\n`)
   attachCtx.stdout.write('  model_provider = hypaware\n')
-  if (fields.port !== undefined) {
+  if (fields.baseUrl !== undefined) {
+    attachCtx.stdout.write(`  base_url = ${fields.baseUrl}\n`)
+  } else if (fields.port !== undefined) {
     attachCtx.stdout.write(`  base_url = http://127.0.0.1:${fields.port}/v1\n`)
   }
   if (fields.prevValue !== undefined) {

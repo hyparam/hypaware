@@ -202,7 +202,7 @@ function buildCoreCommands() {
     {
       name: 'daemon run',
       summary: 'Run the HypAware daemon in the foreground',
-      usage: 'hyp daemon run --foreground',
+      usage: 'hyp daemon run --foreground [--config <path>]',
       run: runDaemonRun,
     },
     {
@@ -279,7 +279,7 @@ async function runStatus(argv, ctx) {
   /** @type {import('../registry/sinks.js').ExtendedSinkRegistry} */
   const sinks = /** @type {any} */ (ctx.sinks)
 
-  const clientNames = listClientNames(ctx.capabilities)
+  const runtimeClientNames = listClientNames(ctx.capabilities)
 
   const report = await collectHypAwareStatus({
     env: ctx.env,
@@ -298,7 +298,16 @@ async function runStatus(argv, ctx) {
   // contributions and running state.
   const sourceRows = report.sources
   const sinkRows = report.sinks
-  const datasets = ctx.query.listDatasets()
+  const clientNames = runtimeClientNames.length > 0
+    ? runtimeClientNames
+    : report.clients
+      .filter((c) => c.configured)
+      .map((c) => c.name)
+      .sort()
+  const registeredDatasets = ctx.query.listDatasets()
+  const datasets = registeredDatasets.length > 0
+    ? registeredDatasets
+    : inferDatasetsFromPlugins(report.activePlugins)
 
   return withSpan(
     'status.render',
@@ -546,6 +555,32 @@ function listClientNames(capabilities) {
   /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
   const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^1.0.0')
   return gateway.listClients().map((c) => c.name).sort()
+}
+
+/**
+ * `hyp status` intentionally avoids activating configured plugins so
+ * the command does not bind local listeners just to render a report.
+ * When no live query registry exists, infer the V1 bundled datasets
+ * from the config-backed active plugin set.
+ *
+ * @param {string[]} activePlugins
+ * @returns {{ name: string, plugin: string }[]}
+ */
+function inferDatasetsFromPlugins(activePlugins) {
+  const active = new Set(activePlugins)
+  /** @type {{ name: string, plugin: string }[]} */
+  const datasets = []
+  if (active.has('@hypaware/ai-gateway')) {
+    datasets.push({ name: 'ai_gateway_messages', plugin: '@hypaware/ai-gateway' })
+  }
+  if (active.has('@hypaware/otel')) {
+    datasets.push(
+      { name: 'logs', plugin: '@hypaware/otel' },
+      { name: 'metrics', plugin: '@hypaware/otel' },
+      { name: 'traces', plugin: '@hypaware/otel' }
+    )
+  }
+  return datasets.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 // `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into
@@ -1090,7 +1125,7 @@ async function runDaemonHelp(argv, ctx) {
 }
 
 /**
- * `hyp daemon run --foreground` — boot the kernel as a daemon and
+ * `hyp daemon run --foreground [--config <path>]` — boot the kernel as a daemon and
  * tend it in the current process until SIGTERM/SIGINT. Phase 3
  * intentionally only supports `--foreground`; the detached run path
  * lands with the Phase 4 launchd/systemd installers, so a no-flag
@@ -1117,8 +1152,10 @@ async function runDaemonRun(argv, ctx) {
   try {
     const handle = await runDaemon({
       hypHome,
+      ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
       env: ctx.env,
       runId: ctx.env.DEV_RUN_ID,
+      foreground: parsed.foreground,
     })
     ctx.stdout.write(`daemon: running (pid=${process.pid})\n`)
     const exitCode = await handle.done
@@ -1408,9 +1445,10 @@ function parseDaemonInstallArgs(argv) {
 
 /**
  * @param {string[]} argv
+ * @returns {{ foreground: boolean, configPath?: string, error?: string }}
  */
 function parseDaemonRunArgs(argv) {
-  /** @type {{ foreground: boolean, error?: string }} */
+  /** @type {{ foreground: boolean, configPath?: string, error?: string }} */
   const r = { foreground: false }
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
@@ -1418,8 +1456,17 @@ function parseDaemonRunArgs(argv) {
       r.foreground = true
       continue
     }
+    if (token === '--config' || token.startsWith('--config=')) {
+      const value = token === '--config' ? argv[++i] : token.slice('--config='.length)
+      if (!value) {
+        r.error = '--config requires a path'
+        return r
+      }
+      r.configPath = value
+      continue
+    }
     if (token === '--help' || token === '-h') {
-      r.error = 'usage: hyp daemon run --foreground'
+      r.error = 'usage: hyp daemon run --foreground [--config <path>]'
       return r
     }
     r.error = `unexpected argument '${token}'`
@@ -1566,6 +1613,7 @@ async function runInit(argv, ctx) {
     if (isTty(ctx.stdout)) {
       const result = await runPickerWalkthrough({
         capabilities: ctx.capabilities,
+        sources: /** @type {any} */ (ctx.sources),
         skills: /** @type {any} */ (ctx.skills),
         stdout: ctx.stdout,
         stderr: ctx.stderr,
@@ -1761,6 +1809,7 @@ async function runPickerInit(flags, ctx) {
 
   const result = await runPickerWalkthrough({
     capabilities: ctx.capabilities,
+    sources: /** @type {any} */ (ctx.sources),
     skills: /** @type {any} */ (ctx.skills),
     stdout: ctx.stdout,
     stderr: ctx.stderr,
@@ -1986,10 +2035,16 @@ async function runClientLifecycle(action, argv, ctx) {
           try {
             endpoint = gateway.localEndpoint()
           } catch {
-            endpoint = 'http://127.0.0.1:0'
+            endpoint = configuredGatewayEndpoint(ctx.config) ?? 'http://127.0.0.1:0'
           }
         } else {
-          endpoint = gateway.localEndpoint()
+          try {
+            endpoint = gateway.localEndpoint()
+          } catch (err) {
+            const configured = configuredGatewayEndpoint(ctx.config)
+            if (!configured) throw err
+            endpoint = configured
+          }
         }
         await client.attach({
           endpoint,
@@ -2015,6 +2070,45 @@ async function runClientLifecycle(action, argv, ctx) {
     }
   }
   return exitCode
+}
+
+/**
+ * Resolve the gateway endpoint from the active config when the gateway
+ * source is not live in this process yet. This is the normal shape for
+ * commands like `hyp attach`, which only need to write client settings
+ * to the same fixed port the daemon will bind later.
+ *
+ * @param {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} config
+ * @returns {string | undefined}
+ */
+function configuredGatewayEndpoint(config) {
+  const entry = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
+  const cfg = entry?.config
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return undefined
+  const listen = /** @type {Record<string, unknown>} */ (cfg).listen
+  if (typeof listen !== 'string') return undefined
+  return endpointFromListen(listen)
+}
+
+/**
+ * @param {string} listen
+ * @returns {string | undefined}
+ */
+function endpointFromListen(listen) {
+  const idx = listen.lastIndexOf(':')
+  if (idx === -1) return undefined
+  const rawHost = listen.slice(0, idx)
+  const rawPort = listen.slice(idx + 1)
+  const port = Number.parseInt(rawPort, 10)
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== rawPort) {
+    return undefined
+  }
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']')
+    ? rawHost.slice(1, -1)
+    : rawHost
+  if (host.length === 0) return undefined
+  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return `http://${formattedHost}:${port}`
 }
 
 /**

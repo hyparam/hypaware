@@ -472,6 +472,7 @@ const PICKER_EXPORTS = [
 /**
  * @typedef {Object} RunPickerWalkthroughOptions
  * @property {CapabilityRegistry}                   capabilities
+ * @property {{ stopAll?: () => Promise<void> }}    [sources]
  * @property {{ list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] }} [skills]
  * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stdout
  * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
@@ -629,7 +630,9 @@ export async function runPickerWalkthrough(opts) {
       finale: opts.finale,
       clientsPicked,
       capabilities,
+      sources: opts.sources,
       skills: opts.skills,
+      config,
       configPath,
       env,
       stdout,
@@ -695,8 +698,10 @@ export async function runPickerWalkthrough(opts) {
  *   - `@hypaware/ai-gateway` is included when any AI-traffic source is
  *     picked (claude, codex, raw-anthropic, raw-openai).
  *   - The Anthropic upstream is included when claude or raw-anthropic
- *     is picked. The OpenAI upstream is included when codex or
- *     raw-openai is picked. Both are appended when both kinds appear.
+ *     is picked. OpenAI API and ChatGPT subscription upstreams are
+ *     included when codex is picked; raw-openai only adds the OpenAI
+ *     API upstream. Provider-specific prefixes let the gateway route
+ *     both Codex auth modes.
  *   - `@hypaware/otel` is included when `otel` is picked.
  *   - `@hypaware/claude` and `@hypaware/codex` adapter plugins are
  *     included for their respective high-level sources.
@@ -714,7 +719,8 @@ export async function runPickerWalkthrough(opts) {
  */
 export function composePickerConfig(args) {
   const wantsAnthropic = args.sources.includes('claude') || args.sources.includes('raw-anthropic')
-  const wantsOpenai = args.sources.includes('codex') || args.sources.includes('raw-openai')
+  const wantsCodex = args.sources.includes('codex')
+  const wantsOpenai = wantsCodex || args.sources.includes('raw-openai')
   const wantsGateway = wantsAnthropic || wantsOpenai
   const wantsOtel = args.sources.includes('otel')
 
@@ -722,13 +728,16 @@ export function composePickerConfig(args) {
   const plugins = []
 
   if (wantsGateway) {
-    /** @type {{ name: string, base_url: string, path_prefix: string }[]} */
+    /** @type {{ name: string, base_url: string, path_prefix: string, provider?: string }[]} */
     const upstreams = []
     if (wantsAnthropic) {
-      upstreams.push({ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' })
+      upstreams.push({ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' })
     }
     if (wantsOpenai) {
-      upstreams.push({ name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/' })
+      upstreams.push({ name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' })
+    }
+    if (wantsCodex) {
+      upstreams.push({ name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' })
     }
     plugins.push({
       name: '@hypaware/ai-gateway',
@@ -794,7 +803,9 @@ export function composePickerConfig(args) {
  *   finale: PickerFinaleActions,
  *   clientsPicked: ('claude'|'codex')[],
  *   capabilities: CapabilityRegistry,
+ *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] },
+ *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
  *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
@@ -803,7 +814,7 @@ export function composePickerConfig(args) {
  * @returns {Promise<FinaleSummary>}
  */
 async function runPickerFinale(args) {
-  const { finale, clientsPicked, capabilities, skills, configPath, env, stdout, stderr } = args
+  const { finale, clientsPicked, capabilities, sources, skills, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
   const homeDir = env.HOME ?? ''
 
@@ -816,6 +827,7 @@ async function runPickerFinale(args) {
   }
 
   if (!finale.skipDaemon) {
+    if (!dryRun) await stopFinaleStartedSources(sources)
     await withSpan(
       'daemon.install',
       {
@@ -874,7 +886,7 @@ async function runPickerFinale(args) {
         summary.attach.push({ client, dryRun, ok: false })
         continue
       }
-      let endpoint = 'http://127.0.0.1:0'
+      let endpoint = configuredGatewayEndpoint(config) ?? 'http://127.0.0.1:0'
       try {
         endpoint = gateway.localEndpoint()
       } catch {}
@@ -944,6 +956,62 @@ async function runPickerFinale(args) {
   }
 
   return summary
+}
+
+/**
+ * Init boots bundled plugins so it can discover clients and presets.
+ * Some plugins bind listeners during activation; release those before
+ * launchd starts the freshly installed daemon or the daemon can race
+ * the init process for the same configured ports.
+ *
+ * @param {{ stopAll?: () => Promise<void> } | undefined} sources
+ */
+async function stopFinaleStartedSources(sources) {
+  if (typeof sources?.stopAll !== 'function') return
+  try {
+    await sources.stopAll()
+  } catch {
+    // Best-effort. The dispatcher cleanup will make the same call on
+    // command exit; this early stop is only to avoid daemon port races.
+  }
+}
+
+/**
+ * Resolve the gateway endpoint from the just-written config. Init
+ * attaches clients before the daemon's gateway source is live in this
+ * process, so `localEndpoint()` cannot be the only source of truth.
+ *
+ * @param {HypAwareV2Config} config
+ * @returns {string | undefined}
+ */
+function configuredGatewayEndpoint(config) {
+  const entry = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
+  const cfg = entry?.config
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return undefined
+  const listen = /** @type {Record<string, unknown>} */ (cfg).listen
+  if (typeof listen !== 'string') return undefined
+  return endpointFromListen(listen)
+}
+
+/**
+ * @param {string} listen
+ * @returns {string | undefined}
+ */
+function endpointFromListen(listen) {
+  const idx = listen.lastIndexOf(':')
+  if (idx === -1) return undefined
+  const rawHost = listen.slice(0, idx)
+  const rawPort = listen.slice(idx + 1)
+  const port = Number.parseInt(rawPort, 10)
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== rawPort) {
+    return undefined
+  }
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']')
+    ? rawHost.slice(1, -1)
+    : rawHost
+  if (host.length === 0) return undefined
+  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return `http://${formattedHost}:${port}`
 }
 
 /** @param {'claude'|'codex'} client */

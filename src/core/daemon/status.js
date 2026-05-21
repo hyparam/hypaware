@@ -429,8 +429,9 @@ export async function collectHypAwareStatus(opts = {}) {
   const sources = []
   /** @type {SinkSnapshot[]} */
   const sinks = []
-  if (opts.runtime?.sources) {
-    for (const contribution of opts.runtime.sources.list()) {
+  const runtimeSources = opts.runtime?.sources?.list?.() ?? []
+  if (runtimeSources.length > 0) {
+    for (const contribution of runtimeSources) {
       const started = opts.runtime.sources.started?.(contribution.name)
       sources.push({
         name: contribution.name,
@@ -438,8 +439,10 @@ export async function collectHypAwareStatus(opts = {}) {
         state: started ? 'started' : 'stopped',
       })
     }
-  } else if (daemonStatusFile) {
+  } else if (daemonStatusFile && (daemonStatusFile.sources?.length ?? 0) > 0) {
     sources.push(...(daemonStatusFile.sources ?? []))
+  } else {
+    sources.push(...inferConfiguredSources(activePlugins))
   }
 
   // Sinks are derived from the loaded config (so the count reflects
@@ -482,7 +485,7 @@ export async function collectHypAwareStatus(opts = {}) {
   for (const clientName of /** @type {const} */ (['claude', 'codex'])) {
     const pluginName = clientName === 'claude' ? '@hypaware/claude' : '@hypaware/codex'
     const configured = activePlugins.includes(pluginName)
-    const probe = await probeClientAttach({ clientName, homeDir })
+    const probe = await probeClientAttach({ clientName, homeDir, env })
     clients.push({
       name: clientName,
       configured,
@@ -548,6 +551,35 @@ export async function collectHypAwareStatus(opts = {}) {
 }
 
 /**
+ * Infer configured V1 source rows without activating plugins. `hyp
+ * status` uses this path so rendering the report cannot bind the
+ * user's gateway or OTLP ports.
+ *
+ * @param {string[]} activePlugins
+ * @returns {SourceSnapshot[]}
+ */
+function inferConfiguredSources(activePlugins) {
+  const active = new Set(activePlugins)
+  /** @type {SourceSnapshot[]} */
+  const sources = []
+  if (active.has('@hypaware/ai-gateway')) {
+    sources.push({
+      name: 'ai-gateway',
+      plugin: '@hypaware/ai-gateway',
+      state: 'stopped',
+    })
+  }
+  if (active.has('@hypaware/otel')) {
+    sources.push({
+      name: 'otlp',
+      plugin: '@hypaware/otel',
+      state: 'stopped',
+    })
+  }
+  return sources.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
  * @param {string} cacheRoot
  * @returns {Promise<{ totalBytes: number, oldestDate: string|null }>}
  */
@@ -610,10 +642,10 @@ const CODEX_PROVIDER_HEADER = '[model_providers.hypaware]'
  * - codex: reads `~/.codex/config.toml`, looks for the
  *   `[model_providers.hypaware]` header the adapter writes.
  *
- * @param {{ clientName: 'claude'|'codex', homeDir: string }} args
+ * @param {{ clientName: 'claude'|'codex', homeDir: string, env?: NodeJS.ProcessEnv }} args
  * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
  */
-async function probeClientAttach({ clientName, homeDir }) {
+async function probeClientAttach({ clientName, homeDir, env }) {
   if (!homeDir) return { attached: false }
   if (clientName === 'claude') {
     const settingsPath = path.join(homeDir, '.claude', 'settings.json')
@@ -644,7 +676,7 @@ async function probeClientAttach({ clientName, homeDir }) {
     }
   }
   // codex
-  const settingsPath = path.join(homeDir, '.codex', 'config.toml')
+  const settingsPath = path.join(codexHomeDir(env, homeDir), 'config.toml')
   try {
     const raw = await fsp.readFile(settingsPath, 'utf8')
     return { attached: raw.includes(CODEX_PROVIDER_HEADER), settingsPath }
@@ -657,6 +689,16 @@ async function probeClientAttach({ clientName, homeDir }) {
       error: err instanceof Error ? err.message : String(err),
     }
   }
+}
+
+/**
+ * @param {NodeJS.ProcessEnv | undefined} env
+ * @param {string} homeDir
+ */
+function codexHomeDir(env, homeDir) {
+  const codexHome = env?.CODEX_HOME
+  if (typeof codexHome === 'string' && codexHome.length > 0) return codexHome
+  return path.join(homeDir, '.codex')
 }
 
 /**

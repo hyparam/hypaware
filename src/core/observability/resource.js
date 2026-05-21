@@ -16,6 +16,7 @@ export function buildResource(env) {
   /** @type {Record<string, string|number|boolean>} */
   const attrs = {
     'service.name': env.serviceName,
+    'hypaware.self': true,
   }
   if (env.devRunId) attrs.dev_run_id = env.devRunId
   if (env.resourceAttributes) {

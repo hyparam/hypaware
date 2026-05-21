@@ -583,12 +583,16 @@ export function diagnoseV1Config(config) {
   }
 
   if (enabledByName.has(/** @type {PluginName} */ ('@hypaware/codex'))) {
-    if (gatewayConfig !== undefined && !gatewayHasUpstreamProvider(gatewayConfig, 'openai')) {
+    if (
+      gatewayConfig !== undefined &&
+      !gatewayHasUpstreamProvider(gatewayConfig, 'openai') &&
+      !gatewayHasUpstreamProvider(gatewayConfig, 'chatgpt')
+    ) {
       out.push({
         kind: 'gateway_missing_openai_upstream',
         pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
         message:
-          `'@hypaware/codex' is enabled but the gateway has no OpenAI upstream — ` +
+          `'@hypaware/codex' is enabled but the gateway has no OpenAI or ChatGPT upstream — ` +
           `Codex requests will have nowhere to forward.`,
         repair: [
           `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
@@ -649,16 +653,19 @@ function pluginPointer(config, name) {
 /**
  * Inspect an ai-gateway config block for an upstream that targets a
  * given provider. Matches by explicit `provider` field, by the
- * `name` (`anthropic` / `openai`), or by `base_url` host. The gateway
+ * `name` (`anthropic` / `openai` / `chatgpt`), or by `base_url` host. The gateway
  * config shape is intentionally loose, so check all three.
  *
  * @param {import('../../../collectivus-plugin-kernel-types').JsonObject} gatewayConfig
- * @param {'anthropic'|'openai'} provider
+ * @param {'anthropic'|'openai'|'chatgpt'} provider
  */
 function gatewayHasUpstreamProvider(gatewayConfig, provider) {
   const upstreams = gatewayConfig?.upstreams
   if (!Array.isArray(upstreams)) return false
-  const hostHint = provider === 'anthropic' ? 'anthropic.com' : 'openai.com'
+  const hostHint =
+    provider === 'anthropic' ? 'anthropic.com'
+    : provider === 'chatgpt' ? 'chatgpt.com'
+    : 'openai.com'
   for (const raw of upstreams) {
     if (!raw || typeof raw !== 'object') continue
     const u = /** @type {Record<string, unknown>} */ (raw)

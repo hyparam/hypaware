@@ -118,7 +118,7 @@ export async function startProxy(opts) {
 function handleRequest(upstreams, opts, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
-  const upstream = matchUpstream(upstreams, parsedUrl.pathname)
+  const upstream = matchUpstream(upstreams, parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
     sendJson(res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })
@@ -156,6 +156,7 @@ function handleRequest(upstreams, opts, req, res) {
     port: upstreamPort,
     path: parsedUrl.pathname + parsedUrl.search,
     headers: forwardedHeaders,
+    family: 4,
   }, (upstreamRes) => {
     const responseHeaders = sanitizeResponseHeaders(upstreamRes.headers)
     res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.statusMessage, responseHeaders)
@@ -178,7 +179,7 @@ function handleRequest(upstreams, opts, req, res) {
   upstreamReq.on('error', (err) => {
     failed = true
     if (!res.headersSent) {
-      sendJson(res, 502, { error: 'upstream connection failed', detail: err.message })
+      sendJson(res, 502, { error: 'upstream connection failed', detail: errorDetail(err) })
     } else {
       res.destroy(err)
     }
@@ -215,10 +216,56 @@ function handleRequest(upstreams, opts, req, res) {
  *
  * @param {CompiledUpstream[]} upstreams
  * @param {string} pathname
+ * @param {IncomingHttpHeaders} headers
  */
-function matchUpstream(upstreams, pathname) {
+function matchUpstream(upstreams, pathname, headers) {
+  const hintedProvider = detectProvider(pathname, headers)
+  if (hintedProvider) {
+    const hinted = upstreams.find((u) => u.provider === hintedProvider || u.name === hintedProvider)
+    if (hinted) return hinted
+  }
   for (const u of upstreams) {
     if (pathMatchesPrefix(pathname, u.prefix)) return u
+  }
+  return undefined
+}
+
+/**
+ * Anthropic and OpenAI both use `/v1/...` paths. Prefer explicit
+ * request-shape hints before falling back to path-prefix routing so a
+ * mixed Claude+Codex gateway does not send one client's traffic to the
+ * other provider.
+ *
+ * @param {string} pathname
+ * @param {IncomingHttpHeaders} headers
+ * @returns {string | undefined}
+ */
+function detectProvider(pathname, headers) {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase().startsWith('anthropic-')) return 'anthropic'
+  }
+  if (pathname === '/v1/messages' || pathname.startsWith('/v1/messages/')) return 'anthropic'
+  if (
+    pathname === '/backend-api/codex/responses' ||
+    pathname.startsWith('/backend-api/codex/responses/') ||
+    pathname === '/backend-api/codex/models' ||
+    pathname.startsWith('/backend-api/codex/models/') ||
+    pathname === '/backend-api/responses' ||
+    pathname.startsWith('/backend-api/responses/') ||
+    pathname === '/backend-api/models' ||
+    pathname.startsWith('/backend-api/models/')
+  ) {
+    return 'chatgpt'
+  }
+  if (
+    pathname === '/v1/responses' ||
+    pathname.startsWith('/v1/responses/') ||
+    pathname === '/v1/chat/completions' ||
+    pathname.startsWith('/v1/chat/completions/') ||
+    pathname === '/v1/models' ||
+    pathname.startsWith('/v1/models/')
+  ) {
+    return 'openai'
   }
   return undefined
 }
@@ -258,7 +305,27 @@ function compileUpstreams(upstreams) {
     if (u.provider) compiled.provider = u.provider
     out.push(compiled)
   }
-  return out
+  return out.sort((a, b) => prefixRank(b.prefix) - prefixRank(a.prefix))
+}
+
+/** @param {string} prefix */
+function prefixRank(prefix) {
+  return prefix === '/' ? 0 : prefix.length
+}
+
+/** @param {unknown} err */
+function errorDetail(err) {
+  if (err && typeof err === 'object' && Array.isArray(/** @type {{ errors?: unknown[] }} */ (err).errors)) {
+    return /** @type {{ errors: unknown[] }} */ (err).errors
+      .map((e) => {
+        if (e instanceof Error) return e.message || e.name
+        return String(e)
+      })
+      .filter((message) => message.length > 0)
+      .join('; ')
+  }
+  if (err instanceof Error) return err.message || err.name
+  return String(err)
 }
 
 /**

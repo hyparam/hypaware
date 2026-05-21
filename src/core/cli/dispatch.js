@@ -58,7 +58,8 @@ const HELP_FLAGS = new Set(['--help', '-h', 'help'])
  *    (sources, sinks, capabilities, skills, init-presets) are
  *    available to the command body. `bootProfile=all-bundled` for
  *    `hyp init` (so the walkthrough picker sees every option);
- *    `config` for every other command.
+ *    lifecycle/status commands boot an empty runtime, and ordinary
+ *    plugin-aware commands use the config.
  * 5. Match the longest registered prefix (now including plugin-
  *    contributed commands) and run the command inside a root
  *    `command.run` span. Records `command_name`, `hyp_command`,
@@ -104,6 +105,7 @@ export async function dispatch(argv, opts = {}) {
   let activePlugins = []
   /** @type {HypAwareV2Config} */
   let activeConfig = { version: 2 }
+  const ownsKernel = !opts.kernel
   if (opts.kernel) {
     kernel = opts.kernel
   } else {
@@ -127,13 +129,22 @@ export async function dispatch(argv, opts = {}) {
     // TTY + empty argv → re-enter as `init` so the walkthrough is the
     // no-arg behavior. Pass the booted kernel + registry through so
     // we don't pay the boot cost twice.
-    return runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
+    try {
+      return await runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
+    } finally {
+      if (ownsKernel) {
+        await stopBootStartedSources(kernel)
+      }
+    }
   }
 
   const matched = registry.match(argv)
   if (!matched) {
     stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
     stderr.write(`run 'hyp --help' for the list of available commands\n`)
+    if (ownsKernel) {
+      await stopBootStartedSources(kernel)
+    }
     return 2
   }
 
@@ -185,6 +196,9 @@ export async function dispatch(argv, opts = {}) {
           stderr.write(`hyp ${matched.command.name}: ${err.message}\n`)
           exitCode = 1
         } finally {
+          if (ownsKernel) {
+            await stopBootStartedSources(kernel)
+          }
           const duration = performance.now() - start
           const finalStatus = exitCode === 0 ? 'ok' : 'failed'
           span.setAttribute('status', finalStatus)
@@ -247,9 +261,9 @@ function isInteractiveStream(stream) {
  * Pick the boot profile based on the requested command. `hyp init`
  * (interactive walkthrough or preset) needs every bundled plugin
  * loaded so the picker can list options before the user has written
- * a config; every other command activates only the plugins listed in
- * the config (so `hyp status --json` doesn't show `@hypaware/central`
- * or `@hypaware/gascity` when they weren't selected).
+ * a config. Lifecycle and diagnostics commands avoid activation so
+ * they do not bind gateway/OTLP listeners while checking or managing
+ * state. Ordinary commands activate only the plugins listed in config.
  *
  * @param {string[]} argv
  * @returns {BootProfile}
@@ -257,7 +271,30 @@ function isInteractiveStream(stream) {
 function decideBootProfile(argv) {
   if (argv.length === 0) return 'all-bundled'
   if (argv[0] === 'init') return 'all-bundled'
+  if (argv[0] === 'daemon' || argv[0] === 'status' || argv[0] === 'smoke') return { activate: [] }
   return 'config'
+}
+
+/**
+ * Some plugins currently start listeners during activation. For a
+ * one-shot CLI command, any source that was started only because this
+ * dispatch booted the kernel must be closed before returning or the
+ * Node process will stay alive after printing its result.
+ *
+ * Injected kernels belong to callers and are intentionally not cleaned
+ * up here; smokes and daemon internals manage their own source
+ * lifecycles.
+ *
+ * @param {ReturnType<typeof createKernelRuntime>} kernel
+ */
+async function stopBootStartedSources(kernel) {
+  try {
+    await kernel.sources.stopAll()
+  } catch {
+    // Source cleanup is best-effort; command result rendering has
+    // already completed, and individual source stop failures are not
+    // actionable from the dispatcher layer.
+  }
 }
 
 /**

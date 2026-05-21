@@ -16,6 +16,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
   'anthropic-api-key',
   'cookie',
   'set-cookie',
+  'chatgpt-account-id',
 ])
 
 /**
@@ -240,7 +241,12 @@ export class Exchange {
    * @param {unknown} err
    */
   setError(err) {
-    if (err instanceof Error) {
+    if (err && typeof err === 'object' && Array.isArray(/** @type {{ errors?: unknown[] }} */ (err).errors)) {
+      this.error = /** @type {{ errors: unknown[] }} */ (err).errors
+        .map((e) => e instanceof Error ? (e.message || e.name) : String(e))
+        .filter((message) => message.length > 0)
+        .join('; ') || 'AggregateError'
+    } else if (err instanceof Error) {
       this.error = err.message || err.name || 'unknown error'
     } else if (typeof err === 'string') {
       this.error = err

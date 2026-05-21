@@ -228,6 +228,45 @@ export async function run({ harness, expect }) {
       (v) => v === codexBaseline
     )
 
+    // ----- 3b. Real attach during init uses the configured gateway port -----
+    const realInitStdout = makeBuf()
+    const realInitStderr = makeBuf()
+    const realInitCode = await dispatch(
+      [
+        'init',
+        '--yes',
+        '--source', 'claude',
+        '--export', 'keep-local',
+        '--retention-days', '30',
+        '--no-daemon',
+        '--bin', stableBinPath,
+      ],
+      {
+        stdout: realInitStdout,
+        stderr: realInitStderr,
+        kernel,
+        registry,
+        env: smokeEnv(harness),
+      }
+    )
+    expect.that('dispatch: real hyp init attach exited 0', realInitCode, (v) => v === 0)
+    expect.that(
+      'stderr: real hyp init attach had no errors',
+      realInitStderr.text(),
+      (v) => typeof v === 'string' && v.length === 0
+    )
+    const realClaudeSettings = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
+    expect.that(
+      'real init attach: claude marker uses configured gateway port',
+      realClaudeSettings?._hypaware?.port,
+      (v) => v === 8787
+    )
+    expect.that(
+      'real init attach: claude base URL uses configured gateway endpoint',
+      realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
+      (v) => v === 'http://127.0.0.1:8787'
+    )
+
     // ----- 4. Start the sources and exercise both ingest paths -----
     const otelStarted = kernel.sources.started('otlp')
     if (!otelStarted) {
@@ -400,8 +439,11 @@ export async function run({ harness, expect }) {
     const attachSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'client.attach'
     )
+    const dryRunAttachSpans = attachSpans.filter(
+      (/** @type {any} */ s) => s.attributes?.dry_run === true
+    )
     const attachClients = new Set(
-      attachSpans.map((/** @type {any} */ s) => s.attributes?.client_name).filter(Boolean)
+      dryRunAttachSpans.map((/** @type {any} */ s) => s.attributes?.client_name).filter(Boolean)
     )
     expect.that(
       'traces: client.attach span emitted for claude AND codex (dry-run)',
@@ -410,7 +452,16 @@ export async function run({ harness, expect }) {
     )
     expect.that(
       'traces: client.attach dry_run=true for both clients',
-      attachSpans.every((/** @type {any} */ s) => s.attributes?.dry_run === true),
+      dryRunAttachSpans.length >= 2 &&
+        dryRunAttachSpans.every((/** @type {any} */ s) => s.attributes?.dry_run === true),
+      (v) => v === true
+    )
+    expect.that(
+      'traces: real init emitted non-dry-run claude attach span',
+      attachSpans.some(
+        (/** @type {any} */ s) =>
+          s.attributes?.client_name === 'claude' && s.attributes?.dry_run === false
+      ),
       (v) => v === true
     )
 
@@ -456,8 +507,9 @@ function goldenPickerConfig(hypHome) {
         config: {
           listen: '127.0.0.1:8787',
           upstreams: [
-            { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' },
-            { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/' },
+            { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
+            { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
+            { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
           ],
         },
       },

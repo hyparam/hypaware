@@ -8,6 +8,8 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
 import { JsonlSpanExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 
+const OTLP_EXPORT_TIMEOUT_MS = 1_000
+
 /**
  * Install a NodeTracerProvider with the exporter strategy described in
  * the Phase 0 contract:
@@ -15,7 +17,7 @@ import { devTelemetryDir } from './env.js'
  * - With `HYP_DEV_TELEMETRY=1`: install a JSONL exporter under
  *   `<state>/dev-telemetry/traces-<pid>.jsonl` so smoke flows can
  *   assert against on-disk artifacts without a live OTLP receiver.
- * - With a configured `OTEL_EXPORTER_OTLP_ENDPOINT` (and dev telemetry
+ * - With an explicitly configured `OTEL_EXPORTER_OTLP_ENDPOINT` (and dev telemetry
  *   off): install the OTLP HTTP exporter pointed at the endpoint.
  * - When neither is configured: no exporter is registered; the global
  *   tracer remains a no-op.
@@ -41,6 +43,7 @@ export function installTracerProvider({ env, resource }) {
   if (!env.devTelemetry && env.otlpEndpoint) {
     const otlpExporter = new OTLPTraceExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/traces',
+      timeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     })
     processors.push(new SimpleSpanProcessor(otlpExporter))
     exporters.push(otlpExporter)

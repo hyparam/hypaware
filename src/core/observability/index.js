@@ -41,22 +41,42 @@ export function installObservability(opts = {}) {
  */
 function buildHandle({ env, resource, tracer, logger, meter }) {
   async function shutdown() {
+    const timeoutMs = env.devTelemetry ? 5_000 : 500
     for (const reader of meter.readers ?? []) {
-      await safe(() => reader.forceFlush())
-      await safe(() => reader.shutdown())
+      if (env.devTelemetry) await safe(() => withTimeout(reader.forceFlush(), timeoutMs))
+      await safe(() => withTimeout(reader.shutdown(), timeoutMs))
     }
     if (logger.provider) {
-      await safe(() => logger.provider.forceFlush())
-      await safe(() => logger.provider.shutdown())
+      if (env.devTelemetry) await safe(() => withTimeout(logger.provider.forceFlush(), timeoutMs))
+      await safe(() => withTimeout(logger.provider.shutdown(), timeoutMs))
     }
     if (tracer.provider) {
-      await safe(() => tracer.provider.forceFlush())
-      await safe(() => tracer.provider.shutdown())
+      if (env.devTelemetry) await safe(() => withTimeout(tracer.provider.forceFlush(), timeoutMs))
+      await safe(() => withTimeout(tracer.provider.shutdown(), timeoutMs))
     }
     resetKernelInstruments()
     installed = null
   }
   return { env, resource, tracer, logger, meter, shutdown }
+}
+
+/**
+ * @param {Promise<unknown>|unknown} operation
+ * @param {number} timeoutMs
+ * @returns {Promise<unknown>}
+ */
+function withTimeout(operation, timeoutMs) {
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer
+  return Promise.race([
+    Promise.resolve(operation),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, timeoutMs)
+      if (typeof timer.unref === 'function') timer.unref()
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
 }
 
 /** @param {() => Promise<unknown>|unknown} fn */

@@ -7,6 +7,8 @@ import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http'
 import { JsonlMetricExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 
+const OTLP_EXPORT_TIMEOUT_MS = 1_000
+
 /**
  * Install a MeterProvider with the same JSONL/OTLP strategy as the
  * tracer. Metric exports are pushed on a 250ms interval in dev mode
@@ -37,10 +39,12 @@ export function installMeterProvider({ env, resource }) {
   if (!env.devTelemetry && env.otlpEndpoint) {
     const otlpExporter = new OTLPMetricExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/metrics',
+      timeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     })
     readers.push(new PeriodicExportingMetricReader({
       exporter: otlpExporter,
       exportIntervalMillis: 30_000,
+      exportTimeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     }))
     exporters.push(otlpExporter)
   }

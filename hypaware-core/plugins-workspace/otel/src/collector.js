@@ -35,6 +35,8 @@ const FLATTENERS = {
  */
 export function makeReceiveHandler(ctx, state, log) {
   return async function handle(req) {
+    if (shouldDropHypAwareSelfTelemetry(ctx, req)) return
+
     await withSpan(
       'otel.receive',
       {
@@ -89,6 +91,66 @@ export function makeReceiveHandler(ctx, state, log) {
       { component: 'plugin' }
     )
   }
+}
+
+/**
+ * Avoid a feedback loop when the HypAware daemon's own OTel exporter is
+ * pointed at the bundled OTLP listener. The self resource marker is
+ * added by `src/core/observability/resource.js`; external telemetry is
+ * unaffected unless the operator opts into self capture.
+ *
+ * @param {PluginActivationContext} ctx
+ * @param {OtlpRequest} req
+ * @returns {boolean}
+ */
+function shouldDropHypAwareSelfTelemetry(ctx, req) {
+  if (ctx.config && typeof ctx.config === 'object') {
+    const captureSelf = Reflect.get(/** @type {object} */ (ctx.config), 'capture_self_telemetry')
+    if (captureSelf === true) return false
+  }
+  return requestContainsOnlySelfResources(req.signal, req.data)
+}
+
+/**
+ * @param {'logs' | 'traces' | 'metrics'} signal
+ * @param {unknown} payload
+ * @returns {boolean}
+ */
+function requestContainsOnlySelfResources(signal, payload) {
+  const root = asObject(payload)
+  if (!root) return false
+  const key =
+    signal === 'logs' ? 'resourceLogs'
+    : signal === 'traces' ? 'resourceSpans'
+    : 'resourceMetrics'
+  const groups = Reflect.get(root, key)
+  if (!Array.isArray(groups) || groups.length === 0) return false
+  return groups.every((group) => resourceHasSelfMarker(asObject(group)?.resource))
+}
+
+/**
+ * @param {unknown} resource
+ * @returns {boolean}
+ */
+function resourceHasSelfMarker(resource) {
+  const attrs = asObject(resource)?.attributes
+  if (!Array.isArray(attrs)) return false
+  for (const entry of attrs) {
+    const pair = asObject(entry)
+    if (pair?.key !== 'hypaware.self') continue
+    const value = asObject(pair.value)
+    return value?.boolValue === true || value?.stringValue === 'true'
+  }
+  return false
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | null}
+ */
+function asObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return /** @type {Record<string, unknown>} */ (value)
 }
 
 /**

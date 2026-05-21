@@ -8,6 +8,8 @@ import { JsonlLogRecordExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 import { Attr, buildAttrs } from './attrs.js'
 
+const OTLP_EXPORT_TIMEOUT_MS = 1_000
+
 const SEVERITY_MAP = Object.freeze({
   debug: SeverityNumber.DEBUG,
   info: SeverityNumber.INFO,
@@ -48,6 +50,7 @@ export function installLoggerProvider({ env, resource }) {
   if (!env.devTelemetry && env.otlpEndpoint) {
     const otlpExporter = new OTLPLogExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/logs',
+      timeoutMillis: OTLP_EXPORT_TIMEOUT_MS,
     })
     processors.push(new SimpleLogRecordProcessor(otlpExporter))
     exporters.push(otlpExporter)

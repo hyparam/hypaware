@@ -9,7 +9,7 @@ import { CodexSettingsError } from './errors.js'
  * with `# BEGIN hypaware codex …`.
  *
  * Public API:
- *  - `prepareAttach(content, port, version)` → `{ content, prevValue? }`
+ *  - `prepareAttach(content, port, version, opts?)` → `{ content, prevValue? }`
  *  - `prepareDetach(content)` → `{ changed, content?, removed?, restoredValue?, warning? }`
  *  - `isManagedAttached(content)` → boolean
  */
@@ -40,9 +40,10 @@ const TOML_ROOT_MODEL_PROVIDER_RE = new RegExp(String.raw`^\s*${TOML_MODEL_PROVI
  * @param {string} content
  * @param {number} port
  * @param {string} version
+ * @param {{ baseUrl?: string, providerName?: string }} [opts]
  * @returns {{ content: string, prevValue?: string }}
  */
-export function prepareAttach(content, port, version) {
+export function prepareAttach(content, port, version, opts = {}) {
   let lines = splitLines(content)
   const previousFromMarker = readPreviousModelProvider(lines)
   lines = removeMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
@@ -70,8 +71,8 @@ export function prepareAttach(content, port, version) {
   const providerBlock = [
     PROVIDER_BEGIN,
     `[model_providers.${PROVIDER_ID}]`,
-    `name = ${tomlString('HypAware OpenAI Gateway')}`,
-    `base_url = ${tomlString(`http://127.0.0.1:${port}/v1`)}`,
+    `name = ${tomlString(opts.providerName ?? 'HypAware OpenAI Gateway')}`,
+    `base_url = ${tomlString(opts.baseUrl ?? `http://127.0.0.1:${port}/v1`)}`,
     'requires_openai_auth = true',
     'wire_api = "responses"',
     'supports_websockets = false',

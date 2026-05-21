@@ -52,6 +52,8 @@ export async function startOtelSource(ctx) {
     async stop() {
       await new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve(undefined)))
+        server.closeIdleConnections?.()
+        server.closeAllConnections?.()
       })
     },
   }
