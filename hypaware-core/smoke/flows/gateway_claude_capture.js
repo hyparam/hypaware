@@ -146,7 +146,7 @@ export async function run({ harness, expect }) {
   const stdoutBuf = makeBuf()
   const stderrBuf = makeBuf()
   const code = await dispatch(
-    ['query', 'sql', sql, '--refresh', 'never', '--format', 'json'],
+    ['query', 'sql', sql, '--refresh', 'always', '--format', 'json'],
     { stdout: stdoutBuf, stderr: stderrBuf, env: { ...process.env, HYP_HOME: harness.hypHome, HYP_CONFIG: configPath } },
   )
   expect.that('dispatch: query sql exited 0', code, (v) => v === 0)

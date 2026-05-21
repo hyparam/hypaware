@@ -157,6 +157,29 @@ export async function run({ harness, expect }) {
     dummyAppend?.status,
     (v) => v === 'ok'
   )
+  expect.that(
+    'traces: cache.append recorded spooled=true',
+    dummyAppend?.attributes?.spooled,
+    (v) => v === true
+  )
+
+  const cacheFlushes = traces.filter((t) => t.name === 'cache.flush')
+  const dummyFlush = cacheFlushes.find((s) => s.attributes?.hyp_dataset === 'dummy_rows')
+  expect.that(
+    'traces: cache.flush for dummy_rows exists',
+    dummyFlush,
+    (v) => v !== undefined
+  )
+  expect.that(
+    'traces: cache.flush for dummy_rows has row_count=100',
+    dummyFlush?.attributes?.row_count,
+    (v) => v === 100
+  )
+  expect.that(
+    'traces: cache.flush for dummy_rows has bytes_written > 0',
+    dummyFlush?.attributes?.bytes_written,
+    (v) => typeof v === 'number' && v > 0
+  )
 
   const execSpans = traces.filter((t) => t.name === 'query.execute_sql')
   expect.that(

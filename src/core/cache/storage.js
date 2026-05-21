@@ -9,13 +9,17 @@ import {
   tableUrl as icebergTableUrl,
 } from './iceberg/store.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
+import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
 
 /**
  * @typedef {QueryStorageService & {
- *   dataSourceForTable(tablePath: string): Promise<import('squirreling').AsyncDataSource | null>
+ *   dataSourceForTable(tablePath: string): Promise<import('squirreling').AsyncDataSource | null>,
+ *   flushTable(tablePath: string, opts?: { reason?: string, force?: boolean }): Promise<{ flushed: boolean, rowCount: number, chunkCount: number, bytesWritten: number, pendingBytes: number, reason: string }>,
+ *   flushAll(opts?: { reason?: string, force?: boolean }): Promise<{ flushed: boolean, rowCount: number, chunkCount: number, bytesWritten: number, pendingBytes: number, reason: string }>,
+ *   pendingInfo(tablePath: string): Promise<{ pending: boolean, pendingBytes: number, lastFlushAtMs: number | null }>
  * }} ExtendedQueryStorageService
  */
 
@@ -34,8 +38,15 @@ import { cacheTablePath, datasetForTablePath } from './paths.js'
  */
 export function createQueryStorageService({ cacheRoot }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
+  const spool = createCacheSpool({
+    cacheRoot,
+    appendChunk(tablePath, columns, rows) {
+      return appendRowsToTable(tablePath, columns, rows)
+    },
+  })
 
-  return {
+  /** @type {ExtendedQueryStorageService} */
+  const service = {
     cacheRoot,
 
     cacheTablePath(dataset, partitionSegments) {
@@ -54,15 +65,20 @@ export function createQueryStorageService({ cacheRoot }) {
           status: 'ok',
         },
         async (span) => {
-          const { bytesWritten } = await appendRowsToTable(tablePath, columns, rows)
+          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, rows)
           span.setAttribute('bytes_written', bytesWritten)
+          span.setAttribute('pending_bytes', pendingBytes)
+          span.setAttribute('spooled', true)
+          if (pendingBytes >= DEFAULT_SPOOL_BYTES_THRESHOLD) {
+            void service.flushTable(tablePath, { reason: 'size_threshold' }).catch(() => undefined)
+          }
         },
         { component: 'cache' }
       )
     },
 
     tableExists(tablePath) {
-      return icebergTableExists(tablePath)
+      return icebergTableExists(tablePath) || spool.hasPendingSync(tablePath)
     },
 
     tableUrl(tablePath) {
@@ -76,5 +92,58 @@ export function createQueryStorageService({ cacheRoot }) {
     dataSourceForTable(tablePath) {
       return dataSourceForTable(tablePath)
     },
+
+    async flushTable(tablePath, opts = {}) {
+      const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      return withSpan(
+        'cache.flush',
+        {
+          [Attr.COMPONENT]: 'cache',
+          [Attr.OPERATION]: 'cache.flush',
+          [Attr.DATASET]: dataset,
+          flush_reason: opts.reason ?? 'manual',
+          force: opts.force === true,
+          status: 'ok',
+        },
+        async (span) => {
+          const result = await spool.flushTable(tablePath, opts)
+          span.setAttribute('row_count', result.rowCount)
+          span.setAttribute('chunk_count', result.chunkCount)
+          span.setAttribute('bytes_written', result.bytesWritten)
+          span.setAttribute('pending_bytes', result.pendingBytes)
+          span.setAttribute('flushed', result.flushed)
+          return result
+        },
+        { component: 'cache' }
+      )
+    },
+
+    async flushAll(opts = {}) {
+      return withSpan(
+        'cache.flush_all',
+        {
+          [Attr.COMPONENT]: 'cache',
+          [Attr.OPERATION]: 'cache.flush_all',
+          flush_reason: opts.reason ?? 'manual',
+          force: opts.force === true,
+          status: 'ok',
+        },
+        async (span) => {
+          const result = await spool.flushAll(opts)
+          span.setAttribute('row_count', result.rowCount)
+          span.setAttribute('chunk_count', result.chunkCount)
+          span.setAttribute('bytes_written', result.bytesWritten)
+          span.setAttribute('pending_bytes', result.pendingBytes)
+          span.setAttribute('flushed', result.flushed)
+          return result
+        },
+        { component: 'cache' }
+      )
+    },
+
+    pendingInfo(tablePath) {
+      return spool.pendingInfo(tablePath)
+    },
   }
+  return service
 }

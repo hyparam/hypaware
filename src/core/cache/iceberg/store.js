@@ -85,16 +85,16 @@ export async function appendRowsToTable(tablePath, columns, rows) {
       formatVersion: 3,
     })
   }
-  const dataDirBefore = listDataFileSizes(tablePath)
+  /** @type {import('icebird/src/types.js').TableMetadata | null} */
+  let metadata = null
   if (rows.length > 0) {
-    await icebergAppend({
+    metadata = await icebergAppend({
       catalog,
       tableUrl: url,
       records: rowsToIcebergRecords(columns, rows),
     })
   }
-  const dataDirAfter = listDataFileSizes(tablePath)
-  const bytesWritten = sumNewBytes(dataDirBefore, dataDirAfter)
+  const bytesWritten = metadata ? addedFilesSize(metadata) : 0
   return { tableUrl: url, appended: rows.length > 0, bytesWritten }
 }
 
@@ -172,44 +172,12 @@ async function resolveAsyncRow(row, columns) {
 }
 
 /**
- * Snapshot of `<tablePath>/data/` file sizes — used by
- * `appendRowsToTable` to compute the bytes the most recent commit
- * actually wrote. Missing data dir → empty map.
- *
- * @param {string} tablePath
- * @returns {Map<string, number>}
+ * @param {import('icebird/src/types.js').TableMetadata} metadata
  */
-function listDataFileSizes(tablePath) {
-  /** @type {Map<string, number>} */
-  const sizes = new Map()
-  const dataDir = path.join(tablePath, 'data')
-  let entries
-  try {
-    entries = fs.readdirSync(dataDir, { withFileTypes: true })
-  } catch {
-    return sizes
-  }
-  for (const entry of entries) {
-    if (!entry.isFile()) continue
-    try {
-      sizes.set(entry.name, fs.statSync(path.join(dataDir, entry.name)).size)
-    } catch {
-      /* race or symlink — skip */
-    }
-  }
-  return sizes
-}
-
-/**
- * @param {Map<string, number>} before
- * @param {Map<string, number>} after
- */
-function sumNewBytes(before, after) {
-  let total = 0
-  for (const [name, size] of after) {
-    const prev = before.get(name)
-    if (prev === undefined) total += size
-    else if (size > prev) total += size - prev
-  }
-  return total
+function addedFilesSize(metadata) {
+  const current = metadata['current-snapshot-id']
+  const snapshot = metadata.snapshots?.find((entry) => String(entry['snapshot-id']) === String(current))
+  const raw = snapshot?.summary?.['added-files-size']
+  const value = raw === undefined ? 0 : Number(raw)
+  return Number.isFinite(value) ? value : 0
 }

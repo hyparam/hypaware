@@ -17,7 +17,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  *  - capability `hypaware.ai-gateway@1.0.0` so adapter plugins (e.g.
  *    `@hypaware/claude`, `@hypaware/codex`) can contribute upstream
  *    presets, client wiring, and message enrichers
- *  - dataset `ai_gateway_messages` (Parquet-direct, no JSONL stage)
+ *  - dataset `ai_gateway_messages`
  *  - source `ai-gateway` (configSection: `ai-gateway`)
  *
  * The source listener is NOT bound at activation. The first call to

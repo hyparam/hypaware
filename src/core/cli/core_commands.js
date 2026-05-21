@@ -669,6 +669,9 @@ async function runQuerySql(argv, ctx) {
       refresh: parsed.refresh,
       config: ctx.config,
     })
+    for (const message of result.freshnessMessages ?? []) {
+      ctx.stderr.write(`${message}\n`)
+    }
     ctx.stdout.write(renderResult({ columns: result.columns, rows: result.rows }, parsed.format))
     return 0
   } catch (err) {
@@ -710,6 +713,10 @@ async function runQueryRefresh(argv, ctx) {
         },
         storage: ctx.storage,
       })
+      const storage = /** @type {typeof ctx.storage & { flushTable?: (tablePath: string, opts?: { force?: boolean, reason?: string }) => Promise<unknown> }} */ (ctx.storage)
+      if (partition.tablePath && typeof storage.flushTable === 'function') {
+        await storage.flushTable(partition.tablePath, { force: true, reason: 'query_refresh' })
+      }
       if (result.status === 'written') total += result.rows
     }
   }

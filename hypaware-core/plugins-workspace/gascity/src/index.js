@@ -17,7 +17,7 @@ import { setGascityRuntime } from './runtime.js'
  *
  * Registers:
  *  - source `gascity` (configSection: `gascity`)
- *  - dataset `gascity_messages` (Parquet-direct, no JSONL stage)
+ *  - dataset `gascity_messages`
  *  - commands `gascity attach|detach|list`
  *  - init preset `gascity`
  *  - skill `hypaware-gascity`
