@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import { unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Buffer } from 'node:buffer'
@@ -116,12 +117,39 @@ test('local-fs BlobStore deleteObject removes the key and is idempotent', async 
   try {
     const store = createLocalFsBlobStore({ baseDir: base })
     await store.putObject({ key: 'a/one.bin', body: new Uint8Array([1]) })
-    assert.ok(await store.getObject({ key: 'a/one.bin' }))
+    const got = await store.getObject({ key: 'a/one.bin' })
+    assert.ok(got)
+    // Drain the body so the held FileHandle is released; tests that
+    // discard the body would leak a handle into the next iteration.
+    await collectStream(got.body)
     assert.ok(store.deleteObject)
     await store.deleteObject({ key: 'a/one.bin' })
     assert.equal(await store.getObject({ key: 'a/one.bin' }), null)
     // Idempotent — deleting a missing key is not an error.
     await store.deleteObject({ key: 'a/one.bin' })
+  } finally {
+    await fs.rm(base, { recursive: true, force: true })
+  }
+})
+
+test('local-fs BlobStore getObject body survives a concurrent unlink', async () => {
+  // Regression: the pre-fix impl used createReadStream(path), which
+  // opens the underlying file asynchronously. A consumer that called
+  // getObject and then deleted the file before consuming the body
+  // raced the lazy open and produced an unhandled ENOENT in the
+  // stream's error event. Holding a FileHandle inside getObject means
+  // the open is settled before getObject returns and the unlink is
+  // benign. Use a sync unlink so the race window is forced on every
+  // platform (Linux exposed it under CI but macOS scheduling hid it).
+  const base = await makeTempBase()
+  try {
+    const store = createLocalFsBlobStore({ baseDir: base })
+    await store.putObject({ key: 'race/key.bin', body: new Uint8Array([1, 2, 3]) })
+    const got = await store.getObject({ key: 'race/key.bin' })
+    assert.ok(got, 'getObject must return a result for an existing key')
+    unlinkSync(path.join(base, 'race', 'key.bin'))
+    const bytes = await collectStream(got.body)
+    assert.deepEqual(Array.from(bytes), [1, 2, 3])
   } finally {
     await fs.rm(base, { recursive: true, force: true })
   }

@@ -1,7 +1,6 @@
 // @ts-check
 
 import { Buffer } from 'node:buffer'
-import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -148,16 +147,32 @@ export function createLocalFsBlobStore({ baseDir }) {
      */
     async getObject(input) {
       const src = resolveSafePath(input.key)
+      let handle
       try {
-        const stat = await fs.stat(src)
-        if (!stat.isFile()) return null
-        const stream = createReadStream(src)
+        handle = await fs.open(src, 'r')
+      } catch (err) {
+        if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return null
+        throw err
+      }
+      try {
+        const stat = await handle.stat()
+        if (!stat.isFile()) {
+          await handle.close()
+          return null
+        }
+        // Stream off the held FileHandle so the read uses an already-open
+        // fd. The lazy `createReadStream(src)` form races a concurrent
+        // unlink: the stream's async open can fire after the file is
+        // gone, raising an unhandled ENOENT on consumers that discard the
+        // body. With a handle the open is settled at await time and the
+        // unlink-after-open is benign on POSIX.
+        const stream = handle.createReadStream({ autoClose: true })
         return {
           body: stream,
           contentLength: stat.size,
         }
       } catch (err) {
-        if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return null
+        await handle.close().catch(() => {})
         throw err
       }
     },
