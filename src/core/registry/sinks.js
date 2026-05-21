@@ -13,6 +13,10 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPaths} PluginPaths */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
+/** @typedef {import('../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
+/** @typedef {import('../../../collectivus-plugin-kernel-types').TableFormatProvider} TableFormatProvider */
+/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
+/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
 
 /**
  * @typedef {Object} InstantiateBlobArgs
@@ -28,6 +32,23 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  */
 
 /**
+ * @typedef {Object} InstantiateTableFormatArgs
+ * @property {'table-format'} kind
+ * @property {string} instanceName
+ * @property {TableFormatProvider} tableFormat Capability value from the writer plugin's `hypaware.table-format`.
+ * @property {string} writerPlugin            Writer plugin name (e.g. `@hypaware/format-iceberg`).
+ * @property {string} destinationPlugin       Destination plugin name (e.g. `@hypaware/local-fs`).
+ * @property {BlobStore} blobStore            BlobStore from the destination plugin's `hypaware.blob-store`.
+ * @property {SinkEncoder} encoder            Inner encoder; defaults to format-parquet when no `config.encoder` pin.
+ * @property {SinkInstanceConfig} config      Validated instance config (with `schedule`).
+ * @property {ActivePlugin} plugin            The writer plugin's active plugin record.
+ * @property {PluginPaths} paths              Per-plugin paths for the writer.
+ * @property {PluginLogger} log               Per-plugin logger for the writer.
+ * @property {QueryRegistry} query            Kernel query registry.
+ * @property {QueryStorageService} storage    Kernel storage service.
+ */
+
+/**
  * @typedef {Object} InstantiateRequestArgs
  * @property {'request'} kind
  * @property {string} instanceName
@@ -38,16 +59,17 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  * @property {PluginLogger} log
  */
 
-/** @typedef {InstantiateBlobArgs | InstantiateRequestArgs} InstantiateArgs */
+/** @typedef {InstantiateBlobArgs | InstantiateTableFormatArgs | InstantiateRequestArgs} InstantiateArgs */
 
 /**
  * @typedef {SinkHandle & {
- *   kind: 'blob' | 'request',
+ *   kind: 'blob' | 'request' | 'table-format',
  *   instanceName: string,
  *   writer?: string,
  *   destination?: string,
  *   config: SinkInstanceConfig,
  *   encoder?: SinkEncoder,
+ *   tableFormat?: string,
  * }} ExtendedSinkHandle
  */
 
@@ -142,9 +164,19 @@ export function createSinkRegistry() {
   }
 
   /**
-   * Materialize a sink instance from a validated config row. Blob sinks
-   * carry a `writer`/`destination` pair (and the kernel resolves the
-   * encoder); request sinks carry a single `plugin`.
+   * Materialize a sink instance from a validated config row. Three
+   * shapes:
+   *
+   * - `blob`           encoder writer + blob-store destination; the
+   *                    destination's sink contribution does the
+   *                    encode+write.
+   * - `table-format`   table-format writer + blob-store destination;
+   *                    the writer's `TableFormatProvider.createSink`
+   *                    builds the sink and the destination's
+   *                    contribution is bypassed (its bytes flow
+   *                    through the BlobStore the table-format sink
+   *                    received).
+   * - `request`        one-piece request destination.
    *
    * @param {InstantiateArgs} args
    * @returns {Promise<ExtendedSinkHandle>}
@@ -157,6 +189,11 @@ export function createSinkRegistry() {
     if (handles.has(instanceName)) {
       throw new Error(`SinkRegistry.instantiate: sink instance '${instanceName}' already registered`)
     }
+
+    if (args.kind === 'table-format') {
+      return instantiateTableFormat(args)
+    }
+
     const contribution = args.kind === 'blob' ? args.destination : args.contribution
     if (!contribution) {
       throw new Error(`SinkRegistry.instantiate: contribution required for '${instanceName}'`)
@@ -233,6 +270,104 @@ export function createSinkRegistry() {
     )
   }
 
+  /**
+   * @param {InstantiateTableFormatArgs} args
+   * @returns {Promise<ExtendedSinkHandle>}
+   */
+  async function instantiateTableFormat(args) {
+    const { instanceName, config, tableFormat, encoder, blobStore } = args
+    if (!tableFormat || typeof tableFormat.createSink !== 'function') {
+      throw new TypeError(
+        `SinkRegistry.instantiate: table-format provider for '${instanceName}' missing createSink()`
+      )
+    }
+    if (!encoder) {
+      throw new TypeError(
+        `SinkRegistry.instantiate: table-format sink '${instanceName}' requires an inner encoder`
+      )
+    }
+    if (!blobStore || typeof blobStore.putObject !== 'function') {
+      throw new TypeError(
+        `SinkRegistry.instantiate: table-format sink '${instanceName}' requires a BlobStore destination`
+      )
+    }
+    // `resolveSupports` intersects the table-format provider's tags
+    // with the encoder's tags, mirroring the encoder-writer rule
+    // (queryable only when both sides claim it).
+    const supports = resolveTableFormatSupports(tableFormat, encoder)
+
+    log.info('sink.resolved', {
+      [Attr.PLUGIN]: args.writerPlugin,
+      [Attr.SINK_INSTANCE]: instanceName,
+      hyp_sink_kind: 'table-format',
+      hyp_sink_writer: args.writerPlugin,
+      hyp_sink_destination: args.destinationPlugin,
+      hyp_sink_table_format: tableFormat.format,
+      hyp_sink_supports: supports.join(','),
+    })
+
+    return withSpan(
+      'sink.register',
+      {
+        [Attr.COMPONENT]: 'sinks',
+        [Attr.OPERATION]: 'sink.register',
+        [Attr.PLUGIN]: args.writerPlugin,
+        [Attr.SINK_INSTANCE]: instanceName,
+        hyp_sink_kind: 'table-format',
+        status: 'ok',
+      },
+      async () => {
+        const sink = await tableFormat.createSink({
+          name: instanceName,
+          plugin: args.plugin,
+          blobStore,
+          encoder,
+          query: args.query,
+          storage: args.storage,
+          sinkInstanceConfig: config,
+          paths: args.paths,
+          log: args.log,
+        })
+        if (!sink || typeof sink.exportBatch !== 'function' || typeof sink.close !== 'function') {
+          throw new Error(
+            `SinkRegistry.instantiate: table-format provider '${tableFormat.format}' did not return a Sink with exportBatch/close`
+          )
+        }
+        /** @type {ExtendedSinkHandle} */
+        const handle = {
+          name: instanceName,
+          instanceName,
+          plugin: args.writerPlugin,
+          supports,
+          sink,
+          kind: 'table-format',
+          config,
+          writer: args.writerPlugin,
+          destination: args.destinationPlugin,
+          encoder,
+          tableFormat: tableFormat.format,
+        }
+        handles.set(instanceName, handle)
+        instruments.sinksRegistered.add(1, {
+          [Attr.SINK_INSTANCE]: instanceName,
+          hyp_sink_kind: 'table-format',
+          [Attr.PLUGIN]: args.writerPlugin,
+        })
+        log.info('sink.register', {
+          [Attr.PLUGIN]: args.writerPlugin,
+          [Attr.SINK_INSTANCE]: instanceName,
+          hyp_sink_kind: 'table-format',
+          hyp_sink_writer: args.writerPlugin,
+          hyp_sink_destination: args.destinationPlugin,
+          hyp_sink_table_format: tableFormat.format,
+          hyp_sink_supports: supports.join(','),
+        })
+        return handle
+      },
+      { component: 'sinks' }
+    )
+  }
+
   async function closeAll() {
     const names = Array.from(handles.keys())
     for (const name of names) {
@@ -265,6 +400,29 @@ export function createSinkRegistry() {
  */
 function contributionKey(plugin, name) {
   return `${plugin}::${name}`
+}
+
+/**
+ * Compose the resolved `supports` set for a table-format sink. The
+ * provider's tags are the base; the inner encoder's tags intersect in,
+ * so `queryable` lights up only when both the table-format provider
+ * and the inner encoder agree.
+ *
+ * @param {TableFormatProvider} provider
+ * @param {SinkEncoder} encoder
+ * @returns {SinkSupportTag[]}
+ */
+function resolveTableFormatSupports(provider, encoder) {
+  /** @type {Set<SinkSupportTag>} */
+  const set = new Set()
+  for (const tag of provider.supports ?? []) set.add(tag)
+  if (Array.isArray(encoder.supports)) {
+    const encoderTags = new Set(encoder.supports)
+    for (const tag of Array.from(set)) {
+      if (!encoderTags.has(tag)) set.delete(tag)
+    }
+  }
+  return Array.from(set).sort()
 }
 
 /**
