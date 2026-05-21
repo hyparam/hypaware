@@ -103,9 +103,12 @@ test('validateConfig catches cross-plugin and schedule errors', async () => {
   assert.equal(result.ok, false)
   assert.equal(result.pluginCount, 2)
   assert.equal(result.sinkCount, 1)
+  // `@hypaware/central` is a request-sink plugin (provides
+  // hypaware.http-endpoint, not hypaware.encoder or hypaware.table-format)
+  // so using it as a blob-sink writer trips `sink_writer_invalid`.
   assert.deepEqual(
     result.errors.map((error) => error.errorKind).sort(),
-    ['duplicate_plugin', 'sink_pair_incompatible', 'sink_schedule_invalid']
+    ['duplicate_plugin', 'sink_schedule_invalid', 'sink_writer_invalid']
   )
 })
 
