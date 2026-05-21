@@ -7,6 +7,7 @@ import readline from 'node:readline/promises'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { ensureDurableBinForNpx } from './global_install.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
@@ -383,6 +384,9 @@ function defaultPromptFactory(opts) {
       output.write(`\n${question.title}\n`)
       question.options.forEach((opt, idx) => {
         output.write(`  ${idx + 1}) ${opt.label}\n`)
+        if (opt.summary && opt.summary !== opt.label) {
+          output.write(`     ${opt.summary}\n`)
+        }
       })
       const answer = await rl.question('select (e.g. 1,3 or "all"): ')
       const trimmed = answer.trim().toLowerCase()
@@ -428,25 +432,57 @@ function defaultRetentionPromptFactory(opts) {
  * the source registry (which carries lower-level source contributions
  * like `ai-gateway` and `otlp`).
  *
- * @type {{ value: PickerSource, label: string }[]}
+ * @type {{ value: PickerSource, label: string, summary: string }[]}
  */
 const PICKER_SOURCES = [
-  { value: 'claude', label: 'capture Claude Code conversations' },
-  { value: 'codex', label: 'capture Codex conversations' },
-  { value: 'raw-anthropic', label: 'capture raw Anthropic API traffic' },
-  { value: 'raw-openai', label: 'capture raw OpenAI API traffic' },
-  { value: 'otel', label: 'receive OTEL logs/traces/metrics' },
+  {
+    value: 'claude',
+    label: 'capture Claude Code conversations',
+    summary: 'Configures Claude Code, installs Claude helper skills, and enriches rows from local Claude transcripts.',
+  },
+  {
+    value: 'codex',
+    label: 'capture Codex conversations',
+    summary: 'Configures Codex to use the local gateway and records Codex request/response traffic.',
+  },
+  {
+    value: 'raw-anthropic',
+    label: 'capture raw Anthropic API traffic',
+    summary: 'Advanced API proxy mode for scripts, SDK apps, or other tools you manually point at HypAware.',
+  },
+  {
+    value: 'raw-openai',
+    label: 'capture raw OpenAI API traffic',
+    summary: 'Advanced API proxy mode for OpenAI-compatible clients you manually point at HypAware.',
+  },
+  {
+    value: 'otel',
+    label: 'receive OTEL logs/traces/metrics',
+    summary: 'Starts a local OTLP HTTP receiver for apps that export OpenTelemetry signals.',
+  },
 ]
 
 /**
  * Phase 5 export options.
  *
- * @type {{ value: PickerExport, label: string }[]}
+ * @type {{ value: PickerExport, label: string, summary: string }[]}
  */
 const PICKER_EXPORTS = [
-  { value: 'keep-local', label: 'keep local query cache only' },
-  { value: 'local-parquet', label: 'export local Parquet files' },
-  { value: 'configure-later', label: 'configure later' },
+  {
+    value: 'keep-local',
+    label: 'keep local query cache only',
+    summary: 'Stores recent rows locally for hyp query; nothing is exported elsewhere.',
+  },
+  {
+    value: 'local-parquet',
+    label: 'export local Parquet files',
+    summary: 'Writes scheduled Parquet exports under HYP_HOME/exports for external tools.',
+  },
+  {
+    value: 'configure-later',
+    label: 'configure later',
+    summary: 'Writes capture config now and leaves export sinks for a later config edit.',
+  },
 ]
 
 /**
@@ -499,6 +535,7 @@ const PICKER_EXPORTS = [
 /**
  * @typedef {Object} FinaleSummary
  * @property {{ skipped: boolean, dryRun: boolean, plan?: Record<string, unknown>, targetPath?: string }} daemonInstall
+ * @property {{ skipped: boolean, installed: boolean, binPath?: string, packageSpec?: string }}                 globalInstall
  * @property {{ client: 'claude'|'codex', dryRun: boolean, ok: boolean }[]}                                attach
  * @property {{ name: string, client: 'claude'|'codex', dest: string, dryRun: boolean }[]}                 skillsInstalled
  * @property {{ skipped: boolean, dryRun: boolean, ok: boolean }}                                          daemonRestart
@@ -557,7 +594,7 @@ export async function runPickerWalkthrough(opts) {
     const sourceRaw = await ask({
       pickType: 'sources',
       title: 'What do you want to collect? (space to toggle, enter to confirm)',
-      options: PICKER_SOURCES.map((s) => ({ value: s.value, label: s.label })),
+      options: PICKER_SOURCES.map((s) => ({ value: s.value, label: s.label, summary: s.summary })),
     })
     const sources = /** @type {PickerSource[]} */ (
       sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
@@ -566,7 +603,7 @@ export async function runPickerWalkthrough(opts) {
     const exportRaw = await ask({
       pickType: 'sinks',
       title: 'Where should HypAware export captured data?',
-      options: PICKER_EXPORTS.map((e) => ({ value: e.value, label: e.label })),
+      options: PICKER_EXPORTS.map((e) => ({ value: e.value, label: e.label, summary: e.summary })),
     })
     const exportChoice = /** @type {PickerExport} */ (
       PICKER_EXPORTS.find((e) => exportRaw.includes(e.value))?.value ?? 'keep-local'
@@ -821,6 +858,7 @@ async function runPickerFinale(args) {
   /** @type {FinaleSummary} */
   const summary = {
     daemonInstall: { skipped: !!finale.skipDaemon, dryRun },
+    globalInstall: { skipped: true, installed: false },
     attach: [],
     skillsInstalled: [],
     daemonRestart: { skipped: true, dryRun, ok: false },
@@ -839,7 +877,21 @@ async function runPickerFinale(args) {
       },
       async (span) => {
         const installMod = await import('../daemon/install.js')
-        const binPath = finale.binPath ?? (process.argv[1] ?? '')
+        let binPath = finale.binPath ?? (process.argv[1] ?? '')
+        if (!dryRun && !finale.binPath && binPath) {
+          const durable = await ensureDurableBinForNpx({ binPath, env, stdout, stderr })
+          binPath = durable.binPath
+          summary.globalInstall = {
+            skipped: durable.skipped,
+            installed: durable.installed,
+            binPath: durable.binPath,
+            ...(durable.packageSpec ? { packageSpec: durable.packageSpec } : {}),
+          }
+          if (span && typeof span.setAttribute === 'function') {
+            span.setAttribute('global_install_skipped', durable.skipped)
+            span.setAttribute('global_install_installed', durable.installed)
+          }
+        }
         /** @type {import('../daemon/install.js').DaemonInstallOptions} */
         const options = {
           binPath,
