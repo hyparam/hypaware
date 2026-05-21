@@ -26,6 +26,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "test": "node --test 'test/**/*.test.js'",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {

@@ -143,9 +143,7 @@ V1 ships with:
 - The central / enterprise sink.
 - Gascity (multi-tenant aggregation).
 - Extracting the kernel or bundled plugins into separate repos.
-- Migrating an existing Collectivus install. The `collectivus/` directory
-  in this repo remains as the behavior reference only — it is not a
-  V1 surface and will be removed in a later release.
+- Migrating an existing Collectivus install.
 - An external first-party plugin registry. Only bundled plugins are
   required for the default V1 path.
 
@@ -260,7 +258,6 @@ hypaware-core/
     gascity/            # @hypaware/gascity (out of scope for V1)
 bin/
   hypaware.js           # CLI entrypoint (bound to both `hypaware` and `hyp`)
-collectivus/            # REFERENCE ONLY — donor behavior, do not import
 ```
 
 ## Project documents
