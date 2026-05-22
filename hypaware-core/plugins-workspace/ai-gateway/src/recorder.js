@@ -26,7 +26,6 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
  * @property {string | undefined} method
  * @property {string | undefined} path
  * @property {Record<string, string | string[] | undefined>} requestHeaders
- * @property {(requestBody: string) => ({ cwd?: string, git_branch?: string } | undefined)} [localContextForRequest]
  *
  * @typedef {Object} ResponseStart
  * @property {number | undefined} status
@@ -55,8 +54,6 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
  * @property {string | null} response_body
  * @property {string | null} error
  * @property {string | null} metadata             JSON-stringified metadata (incl. dev_run_id)
- * @property {string} [cwd]
- * @property {string} [git_branch]
  * @property {Array<{ kind: 'stream_event', exchange_id: string, t_ms: number, event: string, data: string, id?: string }>} stream_events
  */
 
@@ -120,7 +117,8 @@ export function createRecorder(options = {}) {
 /**
  * Per-exchange state. The caller (proxy listener) feeds in request and
  * response chunks and calls `finalize()` exactly once. The exchange
- * yields a `FinishedRow` ready for `ctx.storage.appendRows`.
+ * yields a `FinishedRow` ready to be handed to a registered exchange
+ * projector.
  */
 export class Exchange {
   /**
@@ -142,8 +140,6 @@ export class Exchange {
     this.method = init.method
     /** @type {string | undefined} */
     this.path = init.path
-    /** @type {((requestBody: string) => ({ cwd?: string, git_branch?: string } | undefined)) | undefined} */
-    this.localContextForRequest = init.localContextForRequest
     /** @type {Record<string, string | string[] | undefined>} */
     this.requestHeaders = redactHeaders(init.requestHeaders, redactSet)
     /** @type {Record<string, string | string[] | undefined>} */
@@ -278,13 +274,14 @@ export class Exchange {
   }
 
   /**
-   * Build the row to be written into `ai_gateway_messages`. Idempotent
-   * — once `finished` is true subsequent calls return the cached row.
+   * Build the row to be handed to the exchange-projector dispatcher.
+   * Idempotent — once `finished` is true subsequent calls return the
+   * cached row.
    *
-   * The schema's JSON-typed columns (`request_headers`,
-   * `response_headers`, `metadata`) are pre-stringified here. The
-   * projector turns this raw exchange envelope into proxy-compatible
-   * message rows before anything is appended to `ai_gateway_messages`.
+   * The JSON-shaped fields (`request_headers`, `response_headers`,
+   * `metadata`) are pre-stringified here so any downstream consumer
+   * can drop them into a JSON column unchanged. The dispatcher will
+   * parse them back as needed.
    *
    * @returns {FinishedRow}
    */
@@ -297,7 +294,6 @@ export class Exchange {
     const responseBody = this.isSse
       ? null
       : Buffer.concat(this.responseChunks).toString('utf8')
-    const localContext = this.localContextForRequest?.(requestBody)
     const devRunId = this.devRunIdFromHeaders()
     /** @type {Record<string, unknown>} */
     const metadata = {}
@@ -324,8 +320,6 @@ export class Exchange {
       response_body: responseBody && responseBody.length > 0 ? responseBody : null,
       error: this.error ?? null,
       metadata: JSON.stringify(metadata),
-      ...(localContext?.cwd ? { cwd: localContext.cwd } : {}),
-      ...(localContext?.git_branch ? { git_branch: localContext.git_branch } : {}),
       stream_events: this.streamEvents,
     }
     this._cachedRow = row

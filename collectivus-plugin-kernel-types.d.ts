@@ -906,25 +906,41 @@ export interface QueryStorageService {
 }
 
 // =============================================================================
-// AI gateway capability (`hypaware.ai-gateway`)
+// AI gateway capability (`hypaware.ai-gateway@2.0.0`)
 // =============================================================================
 
 /**
  * Provided by `@hypaware/ai-gateway` (the HTTP/SSE AI gateway source).
- * Client-adapter plugins (`@hypaware/claude`, `@hypaware/codex`) reach
- * the gateway through `ctx.requireCapability('hypaware.ai-gateway', ...)`
- * and use these hooks to register upstream presets, attach/detach
- * client settings, and contribute row enrichers for the
- * `ai_gateway_messages` dataset.
  *
- * The gateway plugin owns the `ai_gateway_messages` dataset and its
- * schema; adapter enrichers compile against that single-owner table
- * (see the "one source, one table" naming rule in the design).
+ * As of `hypaware.ai-gateway@2.0.0`, the gateway is a generic HTTP/SSE
+ * capture and row-storage owner: all client/protocol semantics live in
+ * adapter plugins. Adapter plugins (`@hypaware/claude`,
+ * `@hypaware/codex`, future custom integrations) reach the gateway
+ * through `ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')` and
+ * use these hooks to:
+ *
+ * - register upstream presets (`registerUpstreamPreset`) that own
+ *   routing — the gateway no longer has any hardcoded provider routing
+ *   such as Anthropic-header or `/v1/messages` matching;
+ * - register client attach/detach helpers (`registerClient`) so the
+ *   shared `hyp attach`/`hyp detach` CLI can dispatch without coupling
+ *   core to client-specific code;
+ * - register exchange projectors (`registerExchangeProjector`) that
+ *   turn a captured HTTP/SSE exchange into a normalized list of
+ *   conversation messages. The gateway expands the projector's output
+ *   into part rows in the `ai_gateway_messages` dataset, applies a
+ *   fallback hash identity when the projector omits `message_id`, and
+ *   stamps `attributes.gateway.*` provenance.
+ *
+ * The gateway owns the `ai_gateway_messages` dataset and its schema.
+ * Removed in 2.0.0: `registerExchangeContextProjector` and
+ * `registerMessageEnricher` — both are subsumed by the full exchange
+ * projector hook.
  */
 export interface AiGatewayCapability {
   registerUpstreamPreset(preset: AiGatewayUpstreamPreset): void
   registerClient(client: AiGatewayClientRegistration): void
-  registerMessageEnricher(enricher: AiGatewayMessageEnricher): void
+  registerExchangeProjector(projector: AiGatewayExchangeProjector): void
   localEndpoint(opts?: AiGatewayEndpointOptions): string
   /**
    * Look up a registered client by name. Returns `undefined` when no
@@ -935,16 +951,45 @@ export interface AiGatewayCapability {
   getClient(name: string): AiGatewayClientRegistration | undefined
   /**
    * Enumerate every registered client. Used by `hyp attach --help`
-   * and the Phase 9 walkthrough to list available adapters.
+   * and the walkthrough to list available adapters.
    */
   listClients(): AiGatewayClientRegistration[]
 }
 
+/**
+ * Routing entry registered by an adapter plugin. The gateway compiles
+ * registered presets together with TOML-config upstreams into a single
+ * routing table, sorted by descending `priority` then registration
+ * order.
+ *
+ * Matching strategy per request, in order:
+ *  - If `match()` is supplied, use its boolean result.
+ *  - Otherwise fall back to a `path_prefix` segment match.
+ *
+ * `path_prefix` is optional only because adapters may prefer the more
+ * expressive `match()`. Presets with neither a `match()` nor a
+ * `path_prefix` never match.
+ */
 export interface AiGatewayUpstreamPreset {
   name: string
   base_url: string
-  path_prefix: string
   provider?: string
+  path_prefix?: string
+  priority?: number
+  match?(input: AiGatewayRouteInput): boolean
+}
+
+/**
+ * Read-only view of the inbound request handed to a preset's
+ * `match()`. Header names are lowercased; values are arrays so callers
+ * never have to special-case the `IncomingHttpHeaders` string-or-array
+ * union. The body is intentionally not exposed here — matching is
+ * supposed to be cheap and head-only.
+ */
+export interface AiGatewayRouteInput {
+  method: string
+  path: string
+  headers: Record<string, string[]>
 }
 
 export interface AiGatewayEndpointOptions {
@@ -967,9 +1012,7 @@ export interface AiGatewayClientAttachContext {
   stderr: WriteStream
   /**
    * When true the adapter must report what it *would* write without
-   * touching the user's filesystem or external state. Phase 6 will
-   * harden adapters around this flag; Phase 2 uses it to verify the
-   * dispatcher reaches the right adapter under `hyp attach --dry-run`.
+   * touching the user's filesystem or external state.
    */
   dryRun?: boolean
   /**
@@ -998,15 +1041,145 @@ export interface AiGatewayClientStatusContext {
   config: JsonObject
 }
 
-export interface AiGatewayMessageEnricher {
+/**
+ * Exchange projector contributed by an adapter plugin. The gateway
+ * dispatches each finalized exchange through every projector whose
+ * `match()` returns true (sorted by descending priority, then
+ * registration order); the first projector that returns a non-empty
+ * `AiGatewayProjectedExchange` wins. Projectors that throw, return
+ * `undefined`, or return an invalid shape are warned and skipped. If
+ * no projector succeeds the gateway still emits pass-through
+ * telemetry (the `aigw.exchange` log and `aigw.exchange_bytes` meter)
+ * but writes zero rows into `ai_gateway_messages`.
+ */
+export interface AiGatewayExchangeProjector {
   name: string
-  enrich(row: Record<string, unknown>, ctx: AiGatewayMessageEnricherContext): Promise<Record<string, unknown>> | Record<string, unknown>
+  priority?: number
+  match(input: AiGatewayExchangeInput): boolean
+  project(
+    input: AiGatewayExchangeInput,
+    ctx: AiGatewayExchangeProjectorContext
+  ): AiGatewayProjectedExchange | Promise<AiGatewayProjectedExchange | undefined> | undefined
 }
 
-export interface AiGatewayMessageEnricherContext {
-  homeDir: string
-  cacheDir: string
+export interface AiGatewayExchangeProjectorContext {
   log: PluginLogger
+}
+
+/**
+ * Captured exchange envelope handed to projectors. Mirrors the
+ * recorder's finalized row shape; bodies are post-redaction strings,
+ * headers are JSON-stringified, and the gateway has not yet computed
+ * fallback identity. `stream_events` is the parsed SSE event stream
+ * (oldest-first) when `is_sse` is true.
+ */
+export interface AiGatewayExchangeInput {
+  exchange_id: string
+  ts_start: string
+  ts_end: string | null
+  duration_ms: number | null
+  upstream: string
+  provider: string | null
+  method: string | null
+  path: string | null
+  status_code: number | null
+  request_bytes: number | null
+  response_bytes: number | null
+  is_sse: boolean | null
+  stream_event_count: number | null
+  request_headers: string | null
+  request_body: string | null
+  response_headers: string | null
+  response_body: string | null
+  error: string | null
+  metadata: string | null
+  stream_events: Array<{
+    kind: 'stream_event'
+    exchange_id: string
+    t_ms: number
+    event: string
+    data: string
+    id?: string
+  }>
+}
+
+/**
+ * Normalized projection result returned by an exchange projector. The
+ * gateway treats this as the canonical exchange shape: it copies the
+ * conversation-level fields onto every emitted row, applies any
+ * fallback identity for messages lacking `message_id`, and expands
+ * each `messages[]` entry into part rows in `ai_gateway_messages`.
+ *
+ * Provider-defined fields (`provider`, `conversation_id`, identity)
+ * are authoritative — the gateway never overrides them when present.
+ */
+export interface AiGatewayProjectedExchange {
+  provider: string
+  conversation_id: string
+  conversation_started_at?: string
+  conversation_source?: string
+  user_id?: string
+  cwd?: string
+  git_branch?: string
+  client_name?: string
+  client_version?: string
+  entrypoint?: string
+  user_type?: string
+  permission_mode?: string
+  is_sidechain?: boolean
+  model?: string
+  system_text?: string
+  tools?: JsonValue
+  request_id?: string
+  prompt_id?: string
+  /**
+   * Conversation-level attributes merged into every emitted row's
+   * `attributes` column. The gateway adds `attributes.gateway.*`
+   * provenance on top.
+   */
+  attributes?: JsonObject
+  messages: AiGatewayProjectedMessage[]
+}
+
+/**
+ * A normalized message inside an `AiGatewayProjectedExchange`.
+ *
+ * Identity rules:
+ *  - If the projector supplies `message_id`, the gateway uses it
+ *    verbatim and never overwrites it.
+ *  - If `message_id` is omitted, the gateway computes a hash id from
+ *    `(conversation_id, role, content)` and stamps
+ *    `attributes.gateway.identity_source = "gateway_fallback"`.
+ *  - `previous_message_id` is preserved when the projector supplies
+ *    it (an empty array marks a conversation root). When the
+ *    projector omits it AND fallback identity was applied, the
+ *    gateway fills a linear chain of prior message ids in this
+ *    exchange.
+ */
+export interface AiGatewayProjectedMessage {
+  role: string
+  content: string | JsonObject[]
+  message_id?: string
+  previous_message_id?: string[]
+  message_created_at?: string
+  provider_uuid?: string
+  parent_uuid?: string
+  logical_parent_uuid?: string
+  source_tool_assistant_uuid?: string
+  request_id?: string
+  prompt_id?: string
+  provider_type?: string
+  provider_subtype?: string
+  entrypoint?: string
+  user_type?: string
+  permission_mode?: string
+  is_sidechain?: boolean
+  attachment_type?: string
+  hook_event?: string
+  is_compact_summary?: boolean
+  compact_metadata?: JsonValue
+  raw_frame?: JsonObject
+  attributes?: JsonObject
 }
 
 // =============================================================================

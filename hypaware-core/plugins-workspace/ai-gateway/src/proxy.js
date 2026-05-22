@@ -11,7 +11,7 @@ import { parseListen } from './config.js'
 /** @typedef {import('node:http').ServerResponse} ServerResponse */
 /** @typedef {import('node:http').IncomingHttpHeaders} IncomingHttpHeaders */
 /** @typedef {import('node:http').OutgoingHttpHeaders} OutgoingHttpHeaders */
-/** @typedef {{ cwd?: string, git_branch?: string }} ClaudeSessionContext */
+/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput */
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to one
@@ -28,21 +28,21 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ])
 
-const SESSION_CONTEXT_PATH = '/_hypaware/session-context'
-const SESSION_CONTEXT_MAX_BYTES = 64 * 1024
-
 /**
  * @typedef {Object} CompiledUpstream
  * @property {string} name
  * @property {string} [provider]
  * @property {URL} baseUrl
- * @property {string} prefix
+ * @property {string | undefined} prefix
+ * @property {number} priority
+ * @property {number} seq
+ * @property {((input: AiGatewayRouteInput) => boolean) | undefined} match
  *
  * @typedef {Object} ProxyOptions
  * @property {string} listen
  * @property {UpstreamConfig[]} upstreams
  * @property {(exchange: Exchange) => void | Promise<void>} onExchangeFinished
- * @property {(init: { upstream: string, provider: string | undefined, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders, localContextForRequest?: (body: string) => (ClaudeSessionContext | undefined) }) => Exchange} startExchange
+ * @property {(init: { upstream: string, provider: string | undefined, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders }) => Exchange} startExchange
  *
  * @typedef {Object} StartedProxy
  * @property {string} host
@@ -62,6 +62,12 @@ const SESSION_CONTEXT_MAX_BYTES = 64 * 1024
  * port when `listen: "127.0.0.1:0"`); rejects with the bind error
  * (e.g. EADDRINUSE) instead of emitting an unhandled `error` event.
  *
+ * Routing is preset-driven: each compiled upstream is matched via
+ * `match()` when supplied, otherwise via path-segment prefix. There
+ * is no hardcoded Anthropic / OpenAI / Codex routing — adapter
+ * plugins own provider matching by registering presets with their
+ * own `match()`.
+ *
  * @param {ProxyOptions} opts
  * @returns {Promise<StartedProxy>}
  */
@@ -73,11 +79,9 @@ export async function startProxy(opts) {
   }
   /** @type {Set<Promise<void>>} */
   const pendingFinalizers = new Set()
-  /** @type {Map<string, ClaudeSessionContext>} */
-  const sessionContexts = new Map()
 
   const server = http.createServer((req, res) => {
-    handleRequest(upstreams, opts, pendingFinalizers, sessionContexts, req, res)
+    handleRequest(upstreams, opts, pendingFinalizers, req, res)
   })
 
   /** @type {(value: void) => void} */
@@ -122,18 +126,13 @@ export async function startProxy(opts) {
  * @param {CompiledUpstream[]} upstreams
  * @param {ProxyOptions} opts
  * @param {Set<Promise<void>>} pendingFinalizers
- * @param {Map<string, ClaudeSessionContext>} sessionContexts
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, opts, pendingFinalizers, sessionContexts, req, res) {
+function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
-  if (parsedUrl.pathname === SESSION_CONTEXT_PATH) {
-    handleSessionContext(sessionContexts, req, res)
-    return
-  }
-  const upstream = matchUpstream(upstreams, parsedUrl.pathname, req.headers)
+  const upstream = matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
     sendJson(res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })
@@ -154,7 +153,6 @@ function handleRequest(upstreams, opts, pendingFinalizers, sessionContexts, req,
     method: req.method,
     path: requestUrl,
     requestHeaders: req.headers,
-    localContextForRequest: (body) => localContextForRequest(req.headers, body, sessionContexts),
   })
 
   let upstreamEnded = false
@@ -231,102 +229,54 @@ function handleRequest(upstreams, opts, pendingFinalizers, sessionContexts, req,
 }
 
 /**
- * Local-only endpoint used by Claude Code hooks installed by
- * `hyp attach --client claude`. The hook posts `{ session_id, cwd,
- * git_branch }`; later Messages API exchanges with the same Claude
- * session id are enriched before row projection.
+ * Pick the upstream for an inbound request. Upstreams are pre-sorted
+ * by descending priority then registration order; the first one
+ * whose `match()` returns true wins. Upstreams without a `match()`
+ * fall back to path-segment prefix matching.
  *
- * @param {Map<string, ClaudeSessionContext>} sessionContexts
- * @param {IncomingMessage} req
- * @param {ServerResponse} res
- */
-function handleSessionContext(sessionContexts, req, res) {
-  if (!isLoopback(req.socket.remoteAddress)) {
-    req.resume()
-    sendJson(res, 403, { error: 'session context endpoint is local-only' })
-    return
-  }
-  if (req.method !== 'POST') {
-    req.resume()
-    res.writeHead(405, { 'content-type': 'application/json', 'allow': 'POST' })
-    res.end(JSON.stringify({ error: 'method not allowed' }))
-    return
-  }
-
-  /** @type {Buffer[]} */
-  const chunks = []
-  let bytes = 0
-  let tooLarge = false
-  req.on('data', (chunk) => {
-    bytes += chunk.byteLength
-    if (bytes > SESSION_CONTEXT_MAX_BYTES) {
-      tooLarge = true
-      req.destroy()
-      return
-    }
-    chunks.push(Buffer.from(chunk))
-  })
-  req.on('end', () => {
-    if (tooLarge) return
-    let payload
-    try {
-      payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-    } catch {
-      sendJson(res, 400, { error: 'invalid JSON body' })
-      return
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      sendJson(res, 400, { error: 'body must be an object' })
-      return
-    }
-    const obj = /** @type {Record<string, unknown>} */ (payload)
-    const sessionId = stringValue(obj.session_id)
-    if (!sessionId) {
-      sendJson(res, 400, { error: 'session_id is required' })
-      return
-    }
-    const cwd = stringValue(obj.cwd) ?? stringValue(obj.new_cwd)
-    const gitBranch = stringValue(obj.git_branch) ?? stringValue(obj.gitBranch)
-    sessionContexts.set(sessionId, {
-      ...(cwd ? { cwd } : {}),
-      ...(gitBranch ? { git_branch: gitBranch } : {}),
-    })
-    sendJson(res, 200, { ok: true })
-  })
-  req.on('error', () => {
-    if (!res.headersSent) sendJson(res, 400, { error: 'failed to read request body' })
-  })
-}
-
-/**
+ * @param {CompiledUpstream[]} upstreams
+ * @param {string} method
+ * @param {string} pathname
  * @param {IncomingHttpHeaders} headers
- * @param {string} body
- * @param {Map<string, ClaudeSessionContext>} sessionContexts
- * @returns {ClaudeSessionContext | undefined}
  */
-function localContextForRequest(headers, body, sessionContexts) {
-  const sessionId = sessionIdFromBody(body) ?? headerValue(headers, 'x-claude-code-session-id')
-  if (!sessionId) return undefined
-  return sessionContexts.get(sessionId)
+function matchUpstream(upstreams, method, pathname, headers) {
+  const routeInput = buildRouteInput(method, pathname, headers)
+  for (const u of upstreams) {
+    if (typeof u.match === 'function') {
+      let matched
+      try {
+        matched = u.match(routeInput) === true
+      } catch {
+        matched = false
+      }
+      if (matched) return u
+      continue
+    }
+    if (u.prefix && pathMatchesPrefix(pathname, u.prefix)) return u
+  }
+  return undefined
 }
 
 /**
- * @param {string} body
- * @returns {string | undefined}
+ * @param {string} method
+ * @param {string} pathname
+ * @param {IncomingHttpHeaders} headers
+ * @returns {AiGatewayRouteInput}
  */
-function sessionIdFromBody(body) {
-  let parsed
-  try {
-    parsed = JSON.parse(body)
-  } catch {
-    return undefined
+function buildRouteInput(method, pathname, headers) {
+  /** @type {Record<string, string[]>} */
+  const flatHeaders = {}
+  for (const key of Object.keys(headers)) {
+    const value = headers[key]
+    if (value === undefined) continue
+    const lower = key.toLowerCase()
+    if (Array.isArray(value)) {
+      flatHeaders[lower] = value.filter((entry) => typeof entry === 'string')
+    } else {
+      flatHeaders[lower] = [value]
+    }
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-  const meta = /** @type {Record<string, unknown>} */ (parsed).metadata
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined
-  const decoded = parseMaybeJson(/** @type {Record<string, unknown>} */ (meta).user_id)
-  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return undefined
-  return stringValue(/** @type {Record<string, unknown>} */ (decoded).session_id)
+  return { method, path: pathname, headers: flatHeaders }
 }
 
 /**
@@ -335,63 +285,6 @@ function sessionIdFromBody(body) {
  * a catch-all so the simplest valid config (one upstream at `/`)
  * routes every request.
  *
- * @param {CompiledUpstream[]} upstreams
- * @param {string} pathname
- * @param {IncomingHttpHeaders} headers
- */
-function matchUpstream(upstreams, pathname, headers) {
-  const hintedProvider = detectProvider(pathname, headers)
-  if (hintedProvider) {
-    const hinted = upstreams.find((u) => u.provider === hintedProvider || u.name === hintedProvider)
-    if (hinted) return hinted
-  }
-  for (const u of upstreams) {
-    if (pathMatchesPrefix(pathname, u.prefix)) return u
-  }
-  return undefined
-}
-
-/**
- * Anthropic and OpenAI both use `/v1/...` paths. Prefer explicit
- * request-shape hints before falling back to path-prefix routing so a
- * mixed Claude+Codex gateway does not send one client's traffic to the
- * other provider.
- *
- * @param {string} pathname
- * @param {IncomingHttpHeaders} headers
- * @returns {string | undefined}
- */
-function detectProvider(pathname, headers) {
-  for (const key of Object.keys(headers)) {
-    if (key.toLowerCase().startsWith('anthropic-')) return 'anthropic'
-  }
-  if (pathname === '/v1/messages' || pathname.startsWith('/v1/messages/')) return 'anthropic'
-  if (
-    pathname === '/backend-api/codex/responses' ||
-    pathname.startsWith('/backend-api/codex/responses/') ||
-    pathname === '/backend-api/codex/models' ||
-    pathname.startsWith('/backend-api/codex/models/') ||
-    pathname === '/backend-api/responses' ||
-    pathname.startsWith('/backend-api/responses/') ||
-    pathname === '/backend-api/models' ||
-    pathname.startsWith('/backend-api/models/')
-  ) {
-    return 'chatgpt'
-  }
-  if (
-    pathname === '/v1/responses' ||
-    pathname.startsWith('/v1/responses/') ||
-    pathname === '/v1/chat/completions' ||
-    pathname.startsWith('/v1/chat/completions/') ||
-    pathname === '/v1/models' ||
-    pathname.startsWith('/v1/models/')
-  ) {
-    return 'openai'
-  }
-  return undefined
-}
-
-/**
  * @param {string} pathname
  * @param {string} prefix
  */
@@ -407,6 +300,7 @@ export function pathMatchesPrefix(pathname, prefix) {
 function compileUpstreams(upstreams) {
   /** @type {CompiledUpstream[]} */
   const out = []
+  let seq = 0
   for (const u of upstreams) {
     /** @type {URL} */
     let baseUrl
@@ -422,15 +316,29 @@ function compileUpstreams(upstreams) {
       )
     }
     /** @type {CompiledUpstream} */
-    const compiled = { name: u.name, baseUrl, prefix: u.path_prefix }
+    const compiled = {
+      name: u.name,
+      baseUrl,
+      prefix: u.path_prefix,
+      priority: typeof u.priority === 'number' ? u.priority : 0,
+      seq: seq++,
+      match: typeof u.match === 'function' ? u.match : undefined,
+    }
     if (u.provider) compiled.provider = u.provider
     out.push(compiled)
   }
-  return out.sort((a, b) => prefixRank(b.prefix) - prefixRank(a.prefix))
+  return out.sort((a, b) => {
+    if (a.priority !== b.priority) return b.priority - a.priority
+    const aRank = prefixRank(a.prefix)
+    const bRank = prefixRank(b.prefix)
+    if (aRank !== bRank) return bRank - aRank
+    return a.seq - b.seq
+  })
 }
 
-/** @param {string} prefix */
+/** @param {string | undefined} prefix */
 function prefixRank(prefix) {
+  if (!prefix) return -1
   return prefix === '/' ? 0 : prefix.length
 }
 
@@ -483,50 +391,6 @@ function sanitizeResponseHeaders(headers) {
     out[key] = value
   }
   return out
-}
-
-/**
- * @param {IncomingHttpHeaders} headers
- * @param {string} name
- * @returns {string | undefined}
- */
-function headerValue(headers, name) {
-  const wanted = name.toLowerCase()
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() !== wanted) continue
-    if (typeof value === 'string' && value.length > 0) return value
-    if (Array.isArray(value)) {
-      const found = value.find((entry) => typeof entry === 'string' && entry.length > 0)
-      if (typeof found === 'string') return found
-    }
-  }
-  return undefined
-}
-
-/** @param {unknown} value */
-function parseMaybeJson(value) {
-  if (typeof value !== 'string') return value
-  try { return JSON.parse(value) } catch { return value }
-}
-
-/**
- * @param {unknown} value
- * @returns {string | undefined}
- */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
-/**
- * @param {string | undefined} address
- * @returns {boolean}
- */
-function isLoopback(address) {
-  if (!address) return false
-  return address === '::1' ||
-    address === '127.0.0.1' ||
-    address.startsWith('127.') ||
-    address.startsWith('::ffff:127.')
 }
 
 /**

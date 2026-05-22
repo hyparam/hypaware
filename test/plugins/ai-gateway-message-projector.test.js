@@ -1,3 +1,5 @@
+// @ts-check
+
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
@@ -63,311 +65,215 @@ test('ai_gateway_messages schema exposes the gateway message columns', () => {
   )
 })
 
-test('projects Anthropic exchanges into proxy-compatible message part rows', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const rows = await projector.projectExchange(exchange({
-    provider: 'anthropic',
-    path: '/v1/messages',
-    request_body: {
-      model: 'claude-test',
-      metadata: { user_id: JSON.stringify({ session_id: 'sess-1', account_uuid: 'acct-1' }) },
-      messages: [{ role: 'user', content: 'hello' }],
-    },
-    response_body: {
-      role: 'assistant',
-      content: [{ type: 'text', text: 'hi there' }],
-      stop_reason: 'end_turn',
-      usage: { input_tokens: 4, output_tokens: 2 },
-    },
-  }))
-
-  assert.equal(rows.length, 2)
-  assert.equal(rows[0].gateway_id, 'gw-test')
-  assert.equal(rows[0].conversation_id, 'sess-1')
-  assert.equal(rows[0].user_id, 'acct-1')
-  assert.equal(rows[0].role, 'user')
-  assert.equal(rows[0].part_type, 'text')
-  assert.equal(rows[0].content_text, 'hello')
-  assert.deepEqual(rows[0].previous_message_id, [])
-  assert.equal(rows[1].role, 'assistant')
-  assert.equal(rows[1].content_text, 'hi there')
-  assert.deepEqual(rows[1].previous_message_id, [rows[0].message_id])
-  assert.deepEqual(rows[1].status, { finish_reason: 'stop' })
-  assert.equal(rows[1].attributes.usage.input_tokens, 4)
-  assert.equal(rows[1].attributes.dev_run_id, 'run-1')
-  assert.equal(rows[1].attributes.gateway.status_code, 200)
-  assert.equal(rows[1].date, '2026-05-20')
-  assert.equal(Object.hasOwn(rows[0], 'metadata'), false)
+test('projectExchange returns zero rows when no projector is registered', async () => {
+  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [] })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 0)
 })
 
-test('previous_message_id is an ordered array of all prior message ids', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const rows = await projector.projectExchange(exchange({
-    provider: 'anthropic',
-    path: '/v1/messages',
-    request_body: {
-      model: 'claude-test',
-      metadata: { user_id: JSON.stringify({ session_id: 'sess-previous' }) },
-      messages: [
-        { role: 'user', content: 'first' },
-        { role: 'assistant', content: 'second' },
-        { role: 'user', content: 'third' },
-      ],
-    },
-    response_body: {
-      role: 'assistant',
-      content: [{ type: 'text', text: 'fourth' }],
-      stop_reason: 'end_turn',
-    },
-  }))
-
-  assert.equal(rows.length, 4)
-  assert.deepEqual(rows.map((row) => row.previous_message_id), [
-    [],
-    [rows[0].message_id],
-    [rows[0].message_id, rows[1].message_id],
-    [rows[0].message_id, rows[1].message_id, rows[2].message_id],
-  ])
-})
-
-test('previous_message_id carries conversation history across exchanges', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const firstRows = await projector.projectExchange(exchange({
-    provider: 'anthropic',
-    path: '/v1/messages',
-    request_body: {
-      model: 'claude-test',
-      metadata: { user_id: JSON.stringify({ session_id: 'sess-history' }) },
-      messages: [{ role: 'user', content: 'first' }],
-    },
-    response_body: {
-      role: 'assistant',
-      content: [{ type: 'text', text: 'second' }],
-      stop_reason: 'end_turn',
-    },
-  }))
-  const nextRows = await projector.projectExchange(exchange({
-    provider: 'anthropic',
-    path: '/v1/messages',
-    request_body: {
-      model: 'claude-test',
-      metadata: { user_id: JSON.stringify({ session_id: 'sess-history' }) },
-      messages: [{ role: 'user', content: 'third' }],
-    },
-    response_body: {
-      role: 'assistant',
-      content: [{ type: 'text', text: 'fourth' }],
-      stop_reason: 'end_turn',
-    },
-  }))
-
-  assert.equal(firstRows.length, 2)
-  assert.equal(nextRows.length, 2)
-  assert.deepEqual(nextRows.map((row) => row.previous_message_id), [
-    [firstRows[0].message_id, firstRows[1].message_id],
-    [firstRows[0].message_id, firstRows[1].message_id, nextRows[0].message_id],
-  ])
-})
-
-test('projects OpenAI chat completions into the same role and part columns', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const rows = await projector.projectExchange(exchange({
-    provider: 'openai',
-    path: '/v1/chat/completions',
-    request_body: {
-      model: 'gpt-test',
-      messages: [{ role: 'user', content: 'hello' }],
-    },
-    response_body: {
-      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
-    },
-  }))
-
-  assert.equal(rows.length, 2)
-  assert.equal(rows[0].provider, 'openai')
-  assert.equal(rows[0].model, 'gpt-test')
-  assert.equal(rows[0].role, 'user')
-  assert.equal(rows[1].role, 'assistant')
-  assert.equal(rows[1].content_text, 'ok')
-  assert.deepEqual(rows[1].status, { finish_reason: 'stop' })
-})
-
-test('reconstructs OpenAI Responses SSE text into an assistant part row', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const rows = await projector.projectExchange(exchange({
-    provider: 'openai',
-    path: '/v1/responses',
-    is_sse: true,
-    request_body: {
-      model: 'gpt-5-codex',
-      input: [{ role: 'user', content: [{ type: 'input_text', text: 'help' }] }],
-      stream: true,
-    },
-    response_body: null,
-    stream_events: [
-      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 1, event: 'response.output_text.delta', data: '{"type":"response.output_text.delta","delta":"o"}' },
-      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 2, event: 'response.output_text.delta', data: '{"type":"response.output_text.delta","delta":"k"}' },
-      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 3, event: 'response.completed', data: '{"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":1}}}' },
-    ],
-  }))
-
-  assert.equal(rows.length, 2)
-  assert.equal(rows[0].content_text, 'help')
-  assert.equal(rows[1].role, 'assistant')
-  assert.equal(rows[1].content_text, 'ok')
-  assert.equal(rows[1].attributes.usage.input_tokens, 3)
-  assert.equal(rows[1].attributes.gateway.is_sse, true)
-})
-
-test('projects Codex turn metadata from ChatGPT gateway headers', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const turnMetadata = {
-    session_id: 'codex-session-1',
-    thread_id: 'codex-thread-1',
-    thread_source: 'user',
-    turn_id: 'codex-turn-1',
-    workspaces: {
-      '/Users/phil/workspace/hypaware': {
-        associated_remote_urls: { origin: 'https://github.com/hyparam/hypaware.git' },
-        latest_git_commit_hash: '072b240f2c82e15de26022a8b9bb29e13be826a9',
-        has_changes: true,
-      },
-    },
-    sandbox: 'seatbelt',
-    turn_started_at_unix_ms: 1779476507669,
-  }
-  const rows = await projector.projectExchange(exchange({
-    provider: 'chatgpt',
-    path: '/backend-api/codex/responses',
-    request_headers: {
-      'thread-id': 'codex-thread-header',
-      'session-id': 'codex-session-header',
-      'x-client-request-id': 'client-request-1',
-      originator: 'Codex Desktop',
-      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
-      'x-codex-window-id': 'window-1',
-      'x-codex-turn-metadata': JSON.stringify(turnMetadata),
-    },
-    request_body: {
-      model: 'gpt-5-codex',
-      input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
-      stream: false,
-    },
-    response_headers: {
-      'x-oai-request-id': 'oai-request-1',
-    },
-    response_body: {
-      output_text: 'ok',
-      usage: { input_tokens: 8, output_tokens: 1 },
-    },
-  }))
-
-  assert.equal(rows.length, 2)
-  assert.ok(rows.every((row) => row.provider === 'chatgpt'))
-  assert.ok(rows.every((row) => row.conversation_id === 'codex-thread-1'))
-  assert.ok(rows.every((row) => row.cwd === '/Users/phil/workspace/hypaware'))
-  assert.ok(rows.every((row) => row.git_branch === undefined))
-  assert.ok(rows.every((row) => row.client_version === '0.133.0-alpha.1'))
-  assert.ok(rows.every((row) => row.entrypoint === 'Codex Desktop'))
-  assert.ok(rows.every((row) => row.user_type === 'user'))
-  assert.ok(rows.every((row) => row.permission_mode === 'seatbelt'))
-  assert.ok(rows.every((row) => row.is_sidechain === false))
-  assert.ok(rows.every((row) => row.request_id === 'oai-request-1'))
-  assert.ok(rows.every((row) => row.prompt_id === 'codex-turn-1'))
-  assert.equal(rows[0].attributes.codex.thread_id, 'codex-thread-1')
-  assert.equal(rows[0].attributes.codex.session_id, 'codex-session-1')
-  assert.equal(rows[0].attributes.codex.turn_id, 'codex-turn-1')
-  assert.equal(rows[0].attributes.codex.thread_source, 'user')
-  assert.equal(rows[0].attributes.codex.originator, 'Codex Desktop')
-  assert.equal(rows[0].attributes.codex.window_id, 'window-1')
-  assert.equal(rows[0].attributes.codex.sandbox, 'seatbelt')
-  assert.equal(rows[0].attributes.codex.turn_started_at_unix_ms, 1779476507669)
-  assert.equal(rows[0].attributes.codex.workspace, '/Users/phil/workspace/hypaware')
-  assert.equal(rows[0].attributes.codex.git_origin_url, 'https://github.com/hyparam/hypaware.git')
-  assert.equal(rows[0].attributes.codex.git_commit, '072b240f2c82e15de26022a8b9bb29e13be826a9')
-  assert.equal(rows[0].attributes.codex.has_changes, true)
-})
-
-test('marks Codex subagent turns as sidechain rows without workspace metadata', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const rows = await projector.projectExchange(exchange({
-    provider: 'chatgpt',
-    path: '/backend-api/codex/responses',
-    request_headers: {
-      'thread-id': 'subagent-thread-header',
-      'session-id': 'subagent-session-header',
-      originator: 'Codex Desktop',
-      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
-      'x-codex-turn-metadata': JSON.stringify({
-        session_id: 'subagent-session-1',
-        thread_id: 'subagent-thread-1',
-        thread_source: 'subagent',
-        turn_id: 'subagent-turn-1',
-        sandbox: 'seatbelt',
-      }),
-    },
-    request_body: {
-      model: 'gpt-5-codex',
-      input: [{ role: 'user', content: 'check status' }],
-    },
-    response_body: { output_text: 'ok' },
-  }))
-
-  assert.equal(rows.length, 2)
-  assert.ok(rows.every((row) => row.conversation_id === 'subagent-thread-1'))
-  assert.ok(rows.every((row) => row.cwd === undefined))
-  assert.ok(rows.every((row) => row.is_sidechain === true))
-  assert.ok(rows.every((row) => row.prompt_id === 'subagent-turn-1'))
-})
-
-test('falls back to Codex header identifiers when turn metadata is invalid', async () => {
-  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
-  const rows = await projector.projectExchange(exchange({
-    provider: 'chatgpt',
-    path: '/backend-api/codex/responses',
-    request_headers: {
-      'thread-id': 'fallback-thread',
-      'session-id': 'fallback-session',
-      'x-client-request-id': 'client-request-fallback',
-      originator: 'Codex Desktop',
-      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
-      'x-codex-turn-metadata': '{',
-    },
-    request_body: {
-      model: 'gpt-5-codex',
-      input: [{ role: 'user', content: 'hello' }],
-    },
-    response_body: { output_text: 'ok' },
-  }))
-
-  assert.equal(rows.length, 2)
-  assert.ok(rows.every((row) => row.conversation_id === 'fallback-thread'))
-  assert.ok(rows.every((row) => row.request_id === 'client-request-fallback'))
-  assert.ok(rows.every((row) => row.prompt_id === undefined))
-  assert.equal(rows[0].attributes.codex.thread_id, 'fallback-thread')
-  assert.equal(rows[0].attributes.codex.session_id, 'fallback-session')
-})
-
-test('applies enrichers before stripping non-schema draft fields', async () => {
+test('projectExchange returns zero rows when no projector matches', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
-    enrichers: [{
-      name: 'test',
-      enrich(row) {
-        return { ...row, provider_uuid: 'uuid-1', internal_only: 'drop-me' }
-      },
-    }],
+    projectors: [registered('never', { match: () => false })],
   })
-  const rows = await projector.projectExchange(exchange({
-    request_body: { messages: [{ role: 'user', content: 'hello' }] },
-    response_body: null,
-  }))
-
-  assert.equal(rows[0].provider_uuid, 'uuid-1')
-  assert.equal(Object.hasOwn(rows[0], 'internal_only'), false)
-  assert.equal(Object.hasOwn(rows[0], 'content'), false)
-  assert.equal(Object.hasOwn(rows[0], 'session_id'), false)
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 0)
 })
+
+test('first successful projector wins, sorted by descending priority then registration order', async () => {
+  /** @type {string[]} */
+  const calls = []
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('low', {
+        priority: 0,
+        project: () => {
+          calls.push('low')
+          return projection('low')
+        },
+      }),
+      registered('high', {
+        priority: 5,
+        project: () => {
+          calls.push('high')
+          return projection('high')
+        },
+      }),
+      registered('higher-but-late', {
+        priority: 5,
+        project: () => {
+          calls.push('higher-but-late')
+          return projection('higher-but-late')
+        },
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.deepEqual(calls, ['high'])
+  assert.ok(rows.length > 0)
+  assert.equal(rows[0].provider, 'high')
+})
+
+test('throwing projectors are skipped and the next matching projector wins', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('boom', {
+        priority: 10,
+        project: () => { throw new Error('boom') },
+      }),
+      registered('ok', {
+        priority: 5,
+        project: () => projection('ok'),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.ok(rows.length > 0)
+  assert.equal(rows[0].provider, 'ok')
+})
+
+test('projector returning undefined or an empty messages array is skipped', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('undefined', { priority: 20, project: () => undefined }),
+      registered('empty', { priority: 10, project: () => ({ provider: 'empty', conversation_id: 'c', messages: [] }) }),
+      registered('ok', { priority: 5, project: () => projection('ok') }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.ok(rows.length > 0)
+  assert.equal(rows[0].provider, 'ok')
+})
+
+test('projector-supplied message_id and previous_message_id are preserved', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: () => ({
+          provider: 'native',
+          conversation_id: 'conv-1',
+          messages: [
+            { role: 'user', content: 'hi', message_id: 'msg-root', previous_message_id: [] },
+            { role: 'assistant', content: 'ok', message_id: 'msg-2', previous_message_id: ['msg-root'] },
+          ],
+        }),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].message_id, 'msg-root')
+  assert.deepEqual(rows[0].previous_message_id, [])
+  assert.equal(rows[1].message_id, 'msg-2')
+  assert.deepEqual(rows[1].previous_message_id, ['msg-root'])
+  assert.equal(
+    isPlainObject(rows[0].attributes) && isPlainObject(rows[0].attributes.gateway)
+      ? rows[0].attributes.gateway.identity_source
+      : undefined,
+    undefined,
+    'identity_source must NOT be stamped when the projector supplied a message_id'
+  )
+})
+
+test('fallback identity stamps gateway.identity_source and a linear previous_message_id chain', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('partial', {
+        project: () => ({
+          provider: 'partial',
+          conversation_id: 'conv-fallback',
+          messages: [
+            { role: 'user', content: 'first' },
+            { role: 'assistant', content: 'second' },
+          ],
+        }),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 2)
+  assert.ok(rows.every((row) => typeof row.message_id === 'string' && row.message_id.length > 0))
+  assert.deepEqual(rows[0].previous_message_id, [])
+  assert.deepEqual(rows[1].previous_message_id, [rows[0].message_id])
+  for (const row of rows) {
+    assert.equal(
+      isPlainObject(row.attributes) && isPlainObject(row.attributes.gateway)
+        ? row.attributes.gateway.identity_source
+        : undefined,
+      'gateway_fallback',
+      'fallback rows must mark attributes.gateway.identity_source'
+    )
+  }
+})
+
+test('attributes.gateway carries exchange provenance and dev_run_id', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-fixed',
+    projectors: [registered('any', { project: () => projection('any') })],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.ok(rows.length > 0)
+  const attrs = rows[0].attributes
+  assert.ok(isPlainObject(attrs))
+  assert.equal(attrs.dev_run_id, 'run-1')
+  const gateway = isPlainObject(attrs.gateway) ? attrs.gateway : undefined
+  assert.ok(gateway)
+  assert.equal(gateway.exchange_id, 'ex-1')
+  assert.equal(gateway.upstream, 'echo')
+  assert.equal(gateway.path, '/v1/echo')
+  assert.equal(gateway.status_code, 200)
+  assert.equal(gateway.is_sse, false)
+  assert.equal(rows[0].gateway_id, 'gw-fixed')
+})
+
+test('row output is stripped to the schema (no extra fields leak)', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('any', { project: () => projection('any') })],
+  })
+  const rows = await projector.projectExchange(exchange())
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      assert.ok(
+        AI_GATEWAY_SCHEMA_COLUMNS.some((col) => col.name === key),
+        `unexpected row key not in schema: ${key}`
+      )
+    }
+  }
+})
+
+/**
+ * @param {string} provider
+ */
+function projection(provider) {
+  return {
+    provider,
+    conversation_id: `${provider}-conv`,
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'ok' },
+    ],
+  }
+}
+
+/**
+ * @param {string} name
+ * @param {{ priority?: number, match?: (input: unknown) => boolean, project: (input: unknown, ctx: unknown) => unknown }} body
+ */
+function registered(name, body) {
+  return {
+    name,
+    priority: body.priority,
+    match: body.match ?? (() => true),
+    project: body.project,
+    _seq: 0,
+  }
+}
 
 function exchange(overrides = {}) {
   return {
@@ -375,21 +281,27 @@ function exchange(overrides = {}) {
     ts_start: '2026-05-20T10:00:00.000Z',
     ts_end: '2026-05-20T10:00:00.250Z',
     duration_ms: 250,
-    upstream: overrides.provider ?? 'anthropic',
-    provider: overrides.provider ?? 'anthropic',
+    upstream: 'echo',
+    provider: null,
     method: 'POST',
-    path: overrides.path ?? '/v1/messages',
+    path: '/v1/echo',
     status_code: 200,
     request_bytes: 10,
     response_bytes: 20,
-    is_sse: overrides.is_sse ?? false,
-    stream_event_count: overrides.stream_events?.length ?? 0,
-    request_headers: JSON.stringify({ 'x-hyp-dev-run-id': 'run-1', ...(overrides.request_headers ?? {}) }),
-    request_body: JSON.stringify(overrides.request_body),
-    response_headers: JSON.stringify({ 'content-type': 'application/json', ...(overrides.response_headers ?? {}) }),
-    response_body: overrides.response_body === null ? null : JSON.stringify(overrides.response_body),
+    is_sse: false,
+    stream_event_count: 0,
+    request_headers: JSON.stringify({ 'x-hyp-dev-run-id': 'run-1' }),
+    request_body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }] }),
+    response_headers: JSON.stringify({ 'content-type': 'application/json' }),
+    response_body: JSON.stringify({ role: 'assistant', content: 'ok' }),
     error: null,
     metadata: JSON.stringify({ dev_run_id: 'run-1' }),
-    stream_events: overrides.stream_events ?? [],
+    stream_events: [],
+    ...overrides,
   }
+}
+
+/** @param {unknown} value */
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }

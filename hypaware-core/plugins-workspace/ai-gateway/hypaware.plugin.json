@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "name": "@hypaware/ai-gateway",
-  "version": "1.0.0",
-  "description": "HTTP/SSE AI gateway plugin: terminates local LLM client traffic, forwards to configured upstreams, captures normalized message parts into the ai_gateway_messages dataset, and exposes the hypaware.ai-gateway capability for client adapter plugins.",
+  "version": "2.0.0",
+  "description": "HTTP/SSE AI gateway plugin: terminates local LLM client traffic, forwards to upstreams matched by adapter-owned presets, and dispatches captured exchanges to adapter-owned projectors that fill the ai_gateway_messages dataset. The gateway itself carries no client/protocol semantics — adapter plugins (@hypaware/claude, @hypaware/codex, ...) own routing and projection through the hypaware.ai-gateway capability.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -10,7 +10,7 @@
   "permissions": ["network", "read_state", "write_state"],
   "provides": {
     "capabilities": {
-      "hypaware.ai-gateway": "1.0.0"
+      "hypaware.ai-gateway": "2.0.0"
     }
   },
   "contributes": {
