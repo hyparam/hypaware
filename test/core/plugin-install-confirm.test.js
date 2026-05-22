@@ -7,7 +7,10 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 
+import { PassThrough } from 'node:stream'
+
 import {
+  buildTtyPrompt,
   buildWarnings,
   decideConfirmation,
   renderConfirmationSummary,
@@ -64,6 +67,36 @@ test('decideConfirmation: tty + ask returning false => rejected/abort', async ()
   })
   assert.equal(decision.proceed, false)
   assert.equal(decision.outcome, 'rejected')
+})
+
+test('buildTtyPrompt: real readline returns the trimmed answer (yes)', async () => {
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  const ask = buildTtyPrompt({ stdin, stdout, promptText: 'Proceed? ' })
+  const pending = ask()
+  stdin.write('Y\n')
+  const answer = await pending
+  assert.equal(answer, true)
+})
+
+test('buildTtyPrompt: real readline returns false when the user types anything else', async () => {
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  const ask = buildTtyPrompt({ stdin, stdout, promptText: 'Proceed? ' })
+  const pending = ask()
+  stdin.write('no thanks\n')
+  const answer = await pending
+  assert.equal(answer, false)
+})
+
+test('buildTtyPrompt: real readline trims whitespace before deciding', async () => {
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  const ask = buildTtyPrompt({ stdin, stdout })
+  const pending = ask()
+  stdin.write('   yes   \n')
+  const answer = await pending
+  assert.equal(answer, true)
 })
 
 test('sourceIsUnpinnedBranch: missing ref counts as unpinned', () => {

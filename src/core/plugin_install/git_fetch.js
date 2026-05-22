@@ -238,7 +238,12 @@ async function runGitCloneSpan(gitUrl, tmpRepo, provenance) {
       git_repo: provenance.repo ?? '',
     },
     async (span) => {
-      const cloned = await execGit(['clone', '--filter=blob:none', '--no-checkout', gitUrl, tmpRepo])
+      // `--` separates options from positional args so a hostile
+      // gitUrl like `--upload-pack=<cmd>` cannot be interpreted by
+      // git as an option (CVE-2018-17456 family). `parseGitSource`
+      // already rejects leading-dash inputs but the separator is the
+      // standard belt-and-braces defense at the spawn boundary.
+      const cloned = await execGit(['clone', '--filter=blob:none', '--no-checkout', '--', gitUrl, tmpRepo])
       if (cloned.code !== 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'git_clone_failed')
@@ -283,7 +288,11 @@ async function runGitCheckoutSpan(tmpRepo, ref, provenance) {
           message: 'plugin install: could not determine default branch on cloned repo',
         })
       }
-      const checked = await execGit(['-C', tmpRepo, 'checkout', target])
+      // `--` here disambiguates the ref from any same-named pathspec
+      // and blocks an injected `--upload-pack=`-style argument from
+      // being parsed as an option. The clone path already vetted the
+      // URL; this protects the user-supplied `ref`.
+      const checked = await execGit(['-C', tmpRepo, 'checkout', target, '--'])
       if (checked.code !== 0) {
         const isRefError = /pathspec|did not match|unknown revision|not a tree/i.test(checked.stderr)
         const errorKind = isRefError ? 'git_ref_not_found' : 'git_checkout_failed'

@@ -1,6 +1,6 @@
 // @ts-check
 
-import readline from 'node:readline'
+import readline from 'node:readline/promises'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */

@@ -2,7 +2,7 @@
 
 import path from 'node:path'
 
-import { applyGitSourceFlags, parseGitSource } from './git_source.js'
+import { applyGitSourceFlags, parseGitSource, redactRawSource } from './git_source.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceKind} PluginSourceKind */
@@ -55,14 +55,16 @@ export function resolveSource(rawSource, opts = {}) {
   if (GIT_PREFIX_RE.test(trimmed)) {
     const parts = parseGitSource(trimmed)
     const enriched = applyGitSourceFlags(parts, { ref: opts.ref, subdir: opts.subdir })
+    // `raw` and `gitUrl` are persisted on the lock entry and surfaced
+    // in confirmation prompts; never let `user:pass@` userinfo from a
+    // private clone URL ride along into either.
     /** @type {PluginSourceSpec} */
     const spec = {
       kind: 'git',
-      raw: rawSource,
+      raw: redactRawSource(rawSource),
       gitUrl: enriched.gitUrl,
     }
     if (enriched.ref) spec.ref = enriched.ref
-    if (enriched.subdir) /** @type {PluginSourceSpec & { subdir?: string }} */ (spec).subdir = enriched.subdir
     return spec
   }
 

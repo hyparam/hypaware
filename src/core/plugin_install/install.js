@@ -11,7 +11,7 @@ import {
 } from '../observability/index.js'
 
 import { fetchPlugin } from './fetch.js'
-import { provenanceFromUrl } from './git_source.js'
+import { provenanceFromUrl, redactRawSource } from './git_source.js'
 import {
   emptyLock,
   getEntry,
@@ -105,7 +105,7 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts, confi
     {
       [Attr.COMPONENT]: 'plugin-install',
       [Attr.OPERATION]: 'plugin.install',
-      hyp_source_raw: rawSource,
+      hyp_source_raw: redactRawSource(rawSource),
     },
     async (span) => {
       /** @type {PluginSourceSpec} */
@@ -232,7 +232,15 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts, confi
         return { ok: false, errorKind: 'lock_write_error', message }
       }
 
-      const updateState = await checkForPluginUpdate({ entry, now: nowFn })
+      // The fetch already resolved the upstream ref, so the post-
+      // install probe would just confirm what we already know — and
+      // would block on a slow or hung remote inside the same span.
+      // Synthesize the "no update available" state directly.
+      const updateState = await checkForPluginUpdate({
+        entry,
+        now: nowFn,
+        freshlyResolved: source.kind === 'git' && !!entry.resolved_ref,
+      })
       const entryWithUpdate = { ...entry, update: updateState }
       nextLock = upsertEntry(nextLock, entryWithUpdate)
       await writeLock(stateDir, nextLock)
