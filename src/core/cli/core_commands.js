@@ -1832,6 +1832,25 @@ async function runSinkForce(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runInit(argv, ctx) {
+  if (argv.length > 0 && !argv[0].startsWith('-')) {
+    const presetName = argv[0]
+    const preset = ctx.initPresets.get(presetName)
+    if (!preset) {
+      const available = ctx.initPresets.list()
+      ctx.stderr.write(`hyp init: unknown preset '${presetName}'\n`)
+      if (available.length === 0) {
+        ctx.stderr.write('  no presets registered — install a plugin that contributes one\n')
+      } else {
+        ctx.stderr.write('  available:\n')
+        for (const p of available) {
+          ctx.stderr.write(`    ${p.name}  (${p.plugin})  — ${p.summary}\n`)
+        }
+      }
+      return 1
+    }
+    return preset.run(argv.slice(1), ctx)
+  }
+
   // Phase 5: non-interactive flags. Detected by the presence of any
   // recognized init flag in argv. When absent, fall through to the
   // legacy preset/walkthrough dispatcher below.
