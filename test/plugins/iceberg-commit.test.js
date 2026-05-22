@@ -15,6 +15,7 @@ import {
   createBlobStoreIO,
   tableUrlForBlobPrefix,
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
+import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
@@ -306,6 +307,110 @@ test('probeTable discovers latest snapshot when version-hint.text is missing', a
   } finally {
     await fixture.cleanup()
   }
+})
+
+test('markerSubsumedBySnapshot recognises a marker whose snapshot is an ancestor of the current snapshot (no duplicate rows on retry)', async () => {
+  // End-to-end shape of the codex finding: commit batch A, advance the
+  // snapshot with batch B, then re-load the marker for A against the
+  // post-B probe state. The supersedence check must report true so the
+  // sink skips re-staging A and the table never accumulates duplicate
+  // rows from a retried-after-success batch.
+  const fixture = await freshLocalFsStore()
+  try {
+    const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
+    const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/supersede')
+    const columns = /** @type {const} */ ([
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'value', type: 'STRING', nullable: false },
+    ])
+
+    const initial = await probeTable(tableUrl, resolver, lister)
+    const aCommit = await commitBatch(
+      { tableUrl, columns, rows: [{ id: 1n, value: 'a' }], resolver, lister },
+      { exists: initial.exists, metadata: initial.metadata }
+    )
+    const markerA = {
+      dataset: 'supersede',
+      batchId: 'batch-A',
+      partition: {},
+      rowCount: aCommit.rowCount,
+      bytesWritten: aCommit.bytesWritten,
+      dataFiles: aCommit.dataFiles,
+      snapshotId: aCommit.snapshotId,
+      metadataVersion: aCommit.metadataVersion,
+      committedAt: '2026-05-22T00:00:00Z',
+    }
+
+    // Advance the table snapshot with batch B.
+    const afterA = await probeTable(tableUrl, resolver, lister)
+    await commitBatch(
+      { tableUrl, columns, rows: [{ id: 2n, value: 'b' }], resolver, lister },
+      { exists: afterA.exists, metadata: afterA.metadata }
+    )
+
+    // Probe again after B lands; metadata.snapshots now lists both
+    // snapshots and the current snapshot's parent is A's snapshot.
+    const afterB = await probeTable(tableUrl, resolver, lister)
+    assert.notEqual(afterB.currentSnapshotId, aCommit.snapshotId,
+      'snapshot must have advanced past batch A')
+    assert.equal(
+      markerSubsumedBySnapshot(markerA, afterB),
+      true,
+      'a marker pointing at an ancestor snapshot must be recognised as subsumed so retries are no-ops'
+    )
+
+    // Equivalence guard: the marker for the latest snapshot should
+    // still self-match. Catches a regression that breaks the equality
+    // path while wiring up ancestry.
+    const markerCurrent = { ...markerA, snapshotId: afterB.currentSnapshotId ?? '' }
+    assert.equal(markerSubsumedBySnapshot(markerCurrent, afterB), true)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('probeTable propagates transient metadata read failures instead of masking them as miss', async () => {
+  // Regression guard for the codex finding: when the blob-store
+  // reader raises iceberg_metadata_read_failed for a *transient*
+  // failure (no `code` field, kind is the same as a true miss),
+  // probeTable used to swallow it and return `exists=false`. That
+  // would drive the sink into a fresh `create` path against an
+  // existing table. The reader must surface the real error so the
+  // sink driver can retry.
+  /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+  const blobStore = {
+    kind: 'transient-fail',
+    async putObject() {
+      throw new Error('unused in test')
+    },
+    async getObject(input) {
+      // listObjects returned a metadata file, so the reader is asked
+      // to fetch it. Raise a non-fatal transient error: not in the
+      // FATAL_KINDS set, no `code='ENOENT'`. The reader will wrap
+      // this as iceberg_metadata_read_failed without an ENOENT
+      // marker — exactly the shape the previous probeTable masked.
+      const err = /** @type {Error & { errorKind?: string }} */ (
+        new Error(`simulated transient read failure for ${input.key}`)
+      )
+      err.errorKind = 's3_put_failed'
+      throw err
+    },
+    listObjects(input) {
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (!input.prefix?.endsWith('/metadata/')) return
+          yield { key: `${input.prefix}v1.metadata.json`, size: 0, lastModified: new Date(0) }
+        },
+      }
+    },
+    async deleteObject() {},
+  }
+  const { resolver, lister } = await createBlobStoreIO(blobStore)
+  await assert.rejects(
+    () => probeTable(tableUrlForBlobPrefix('iceberg/datasets/transient'), resolver, lister),
+    (err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code !== 'ENOENT',
+    'transient read must surface, not be masked as a probe miss'
+  )
 })
 
 test('commitBatch normalises blob_precondition_failed into iceberg_commit_conflict', async () => {

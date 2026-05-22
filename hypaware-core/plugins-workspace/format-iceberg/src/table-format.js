@@ -266,7 +266,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
   )
 
   const existingMarker = await loadMarker(ctx.blobStore, markerPath)
-  if (markerSubsumedBySnapshot(existingMarker, priorState.currentSnapshotId)) {
+  if (markerSubsumedBySnapshot(existingMarker, priorState)) {
     log.info('iceberg.marker.skip', {
       hyp_plugin: PLUGIN_NAME,
       hyp_sink_instance: ctx.name,

@@ -146,9 +146,28 @@ export function createS3BlobStore({ bucket, prefix, client }) {
      * @param {ListObjectsInput} input
      */
     listObjects(input) {
-      const prefixComposed = input.prefix && input.prefix.length > 0
-        ? composeKey(input.prefix)
-        : (normalized.length > 0 ? normalized : '')
+      // When the caller asks for "everything under the configured
+      // prefix" (input.prefix === ''), force a trailing slash on the
+      // S3 Prefix. S3 treats Prefix as a bare string match, so
+      // `Prefix: 'hyp/exports'` would list keys under the sibling
+      // `hyp/exports2/...` namespace and surface them as in-scope.
+      // The trailing slash narrows the match to the directory.
+      let prefixComposed
+      if (input.prefix && input.prefix.length > 0) {
+        prefixComposed = composeKey(input.prefix)
+      } else if (normalized.length > 0) {
+        prefixComposed = `${normalized}/`
+      } else {
+        prefixComposed = ''
+      }
+      // Defense in depth: even if the eventual S3 Prefix expanded
+      // wider than intended (e.g. caller-supplied prefix without a
+      // trailing slash), refuse to yield keys that fall outside the
+      // configured `normalized/` namespace. Callers iterate
+      // listObjects() to delete or read objects; an out-of-scope key
+      // that slipped through would be acted on as if it belonged to
+      // this BlobStore.
+      const scopeGuard = normalized.length > 0 ? `${normalized}/` : ''
       const initialToken = input.continuationToken
       return {
         async *[Symbol.asyncIterator]() {
@@ -169,6 +188,7 @@ export function createS3BlobStore({ bucket, prefix, client }) {
             }
             for (const entry of page?.Contents ?? []) {
               if (typeof entry?.Key !== 'string') continue
+              if (scopeGuard.length > 0 && !entry.Key.startsWith(scopeGuard)) continue
               const lastModified = entry.LastModified instanceof Date ? entry.LastModified : new Date(0)
               yield /** @type {ListObjectResult} */ ({
                 key: relativeFromFullKey(entry.Key),

@@ -106,34 +106,94 @@ test('loadMarker surfaces malformed JSON as iceberg_metadata_read_failed', async
   )
 })
 
-test('markerSubsumedBySnapshot returns true only when marker snapshot matches current snapshot', () => {
+/**
+ * @param {string} snapshotId
+ */
+function markerWithSnapshot(snapshotId) {
+  return {
+    dataset: 'ds',
+    batchId: 'b',
+    partition: {},
+    rowCount: 0,
+    bytesWritten: 0,
+    dataFiles: [],
+    snapshotId,
+    metadataVersion: '',
+    committedAt: '',
+  }
+}
+
+test('markerSubsumedBySnapshot returns true when current snapshot matches the marker exactly', () => {
   assert.equal(markerSubsumedBySnapshot(null, '100'), false)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot(''), '100'), false)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), '100'), true)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), '200'), false)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), undefined), false)
+})
+
+test('markerSubsumedBySnapshot accepts a probe-state object and resolves equality without metadata', () => {
   assert.equal(
-    markerSubsumedBySnapshot(
-      { dataset: 'ds', batchId: 'b', partition: {}, rowCount: 0, bytesWritten: 0, dataFiles: [], snapshotId: '', metadataVersion: '', committedAt: '' },
-      '100'
-    ),
-    false
-  )
-  assert.equal(
-    markerSubsumedBySnapshot(
-      { dataset: 'ds', batchId: 'b', partition: {}, rowCount: 0, bytesWritten: 0, dataFiles: [], snapshotId: '100', metadataVersion: '', committedAt: '' },
-      '100'
-    ),
+    markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '100', metadata: null }),
     true
   )
   assert.equal(
-    markerSubsumedBySnapshot(
-      { dataset: 'ds', batchId: 'b', partition: {}, rowCount: 0, bytesWritten: 0, dataFiles: [], snapshotId: '100', metadataVersion: '', committedAt: '' },
-      '200'
-    ),
-    false
+    markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '200', metadata: null }),
+    false,
+    'without metadata, only equality counts — ancestry cannot be proven'
+  )
+})
+
+test('markerSubsumedBySnapshot walks parent-snapshot-id to recognise a superseded ancestor', () => {
+  // Linear history S1 -> S2 -> S3. A marker for S1 must be considered
+  // subsumed when current is S2 OR S3, because the rows the marker
+  // recorded are already on the table via the ancestor chain.
+  const metadata = /** @type {any} */ ({
+    snapshots: [
+      { 'snapshot-id': 100, 'parent-snapshot-id': undefined },
+      { 'snapshot-id': 200, 'parent-snapshot-id': 100 },
+      { 'snapshot-id': 300, 'parent-snapshot-id': 200 },
+    ],
+  })
+  const marker = markerWithSnapshot('100')
+  assert.equal(
+    markerSubsumedBySnapshot(marker, { currentSnapshotId: '200', metadata }),
+    true,
+    'ancestor one step back must be recognised'
   )
   assert.equal(
-    markerSubsumedBySnapshot(
-      { dataset: 'ds', batchId: 'b', partition: {}, rowCount: 0, bytesWritten: 0, dataFiles: [], snapshotId: '100', metadataVersion: '', committedAt: '' },
-      undefined
-    ),
+    markerSubsumedBySnapshot(marker, { currentSnapshotId: '300', metadata }),
+    true,
+    'ancestor multiple steps back must be recognised'
+  )
+})
+
+test('markerSubsumedBySnapshot returns false when the marker snapshot is no longer in the snapshot graph (expired)', () => {
+  // Expired snapshots get pruned from `metadata.snapshots`. Without the
+  // marker's snapshot in the graph we cannot prove ancestry, and
+  // re-staging is the safe default.
+  const metadata = /** @type {any} */ ({
+    snapshots: [
+      { 'snapshot-id': 300, 'parent-snapshot-id': 200 },
+    ],
+  })
+  assert.equal(
+    markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '300', metadata }),
+    false
+  )
+})
+
+test('markerSubsumedBySnapshot tolerates a malformed cyclic parent chain without spinning', () => {
+  // Defensive: a corrupted metadata that loops S1 -> S2 -> S1 should
+  // not hang the supersedence walk. The walk is bounded by the
+  // snapshots-array length and returns false on a cycle.
+  const metadata = /** @type {any} */ ({
+    snapshots: [
+      { 'snapshot-id': 100, 'parent-snapshot-id': 200 },
+      { 'snapshot-id': 200, 'parent-snapshot-id': 100 },
+    ],
+  })
+  assert.equal(
+    markerSubsumedBySnapshot(markerWithSnapshot('999'), { currentSnapshotId: '200', metadata }),
     false
   )
 })
