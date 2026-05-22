@@ -15,6 +15,7 @@ import {
   createBlobStoreIO,
   tableUrlForBlobPrefix,
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
+import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
@@ -303,6 +304,66 @@ test('probeTable discovers latest snapshot when version-hint.text is missing', a
     const reread = await probeTable(tableUrl, resolver, lister)
     assert.equal(reread.currentSnapshotId, create.snapshotId,
       'reader must still resolve metadata without version-hint.text')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('markerSubsumedBySnapshot recognises a marker whose snapshot is an ancestor of the current snapshot (no duplicate rows on retry)', async () => {
+  // End-to-end shape of the codex finding: commit batch A, advance the
+  // snapshot with batch B, then re-load the marker for A against the
+  // post-B probe state. The supersedence check must report true so the
+  // sink skips re-staging A and the table never accumulates duplicate
+  // rows from a retried-after-success batch.
+  const fixture = await freshLocalFsStore()
+  try {
+    const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
+    const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/supersede')
+    const columns = /** @type {const} */ ([
+      { name: 'id', type: 'INT64', nullable: false },
+      { name: 'value', type: 'STRING', nullable: false },
+    ])
+
+    const initial = await probeTable(tableUrl, resolver, lister)
+    const aCommit = await commitBatch(
+      { tableUrl, columns, rows: [{ id: 1n, value: 'a' }], resolver, lister },
+      { exists: initial.exists, metadata: initial.metadata }
+    )
+    const markerA = {
+      dataset: 'supersede',
+      batchId: 'batch-A',
+      partition: {},
+      rowCount: aCommit.rowCount,
+      bytesWritten: aCommit.bytesWritten,
+      dataFiles: aCommit.dataFiles,
+      snapshotId: aCommit.snapshotId,
+      metadataVersion: aCommit.metadataVersion,
+      committedAt: '2026-05-22T00:00:00Z',
+    }
+
+    // Advance the table snapshot with batch B.
+    const afterA = await probeTable(tableUrl, resolver, lister)
+    await commitBatch(
+      { tableUrl, columns, rows: [{ id: 2n, value: 'b' }], resolver, lister },
+      { exists: afterA.exists, metadata: afterA.metadata }
+    )
+
+    // Probe again after B lands; metadata.snapshots now lists both
+    // snapshots and the current snapshot's parent is A's snapshot.
+    const afterB = await probeTable(tableUrl, resolver, lister)
+    assert.notEqual(afterB.currentSnapshotId, aCommit.snapshotId,
+      'snapshot must have advanced past batch A')
+    assert.equal(
+      markerSubsumedBySnapshot(markerA, afterB),
+      true,
+      'a marker pointing at an ancestor snapshot must be recognised as subsumed so retries are no-ops'
+    )
+
+    // Equivalence guard: the marker for the latest snapshot should
+    // still self-match. Catches a regression that breaks the equality
+    // path while wiring up ancestry.
+    const markerCurrent = { ...markerA, snapshotId: afterB.currentSnapshotId ?? '' }
+    assert.equal(markerSubsumedBySnapshot(markerCurrent, afterB), true)
   } finally {
     await fixture.cleanup()
   }

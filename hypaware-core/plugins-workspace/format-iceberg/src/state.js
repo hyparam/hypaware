@@ -106,45 +106,101 @@ export async function writeMarker(blobStore, key, marker) {
   }
 }
 
+/** @typedef {import('icebird/src/types.js').TableMetadata} TableMetadata */
+
+/**
+ * @typedef {Object} ProbeStateLike
+ * @property {string | undefined} currentSnapshotId
+ * @property {TableMetadata | null} [metadata]
+ */
+
 /**
  * Decide whether the marker proves the current batch has already
  * committed cleanly. A marker is considered "complete" when:
  *  - The marker exists.
  *  - It carries a non-empty `snapshotId`.
- *  - The current table snapshot id equals (or supersedes) the marker's
- *    snapshot id.
+ *  - The current table snapshot id either equals the marker's snapshot
+ *    or descends from it (an ancestor walk over the table metadata).
  *
- * The third clause is best-effort — `currentSnapshotId` may be
- * undefined when the table has been emptied or recreated. In that case
- * we treat the marker as STALE and the sink will re-stage.
+ * The third clause is best-effort: when `currentSnapshotId` is
+ * undefined (empty / recreated table) or the marker's snapshot is no
+ * longer in `metadata.snapshots` (expired), we cannot prove ancestry
+ * and conservatively treat the marker as STALE. The sink will re-stage
+ * in that case rather than risk silently swallowing rows that never
+ * actually committed.
  *
  * @param {ExportMarker | null} marker
- * @param {string | undefined} currentSnapshotId
+ * @param {ProbeStateLike | string | undefined} state
+ *   The current probe state. A bare snapshot id string is accepted for
+ *   backward compatibility — without metadata ancestry can only be
+ *   proven via equality.
  * @returns {boolean}
  */
-export function markerSubsumedBySnapshot(marker, currentSnapshotId) {
+export function markerSubsumedBySnapshot(marker, state) {
   if (!marker) return false
   if (!marker.snapshotId) return false
+  const { currentSnapshotId, metadata } = normalizeProbeState(state)
   if (!currentSnapshotId) return false
-  return String(currentSnapshotId) === String(marker.snapshotId) ||
-    isSupersededBy(marker.snapshotId, currentSnapshotId)
+  if (String(currentSnapshotId) === String(marker.snapshotId)) return true
+  return isAncestorSnapshot(marker.snapshotId, currentSnapshotId, metadata)
 }
 
 /**
- * Heuristic for "this snapshot id is a strict ancestor of `current`".
- * Iceberg snapshot ids are non-monotonic in general (they're random
- * longs), but within a single-writer table the manifest's lineage walk
- * is what proves ancestry. The plugin caches that walk through the
- * marker itself: when the marker's snapshot equals current, we know
- * we're safe. When current is different we DON'T assume ancestry — we
- * re-stage. The function exists as a hook for a future ancestry
- * check; for now it always returns false.
+ * @param {ProbeStateLike | string | undefined} state
+ * @returns {{ currentSnapshotId: string | undefined, metadata: TableMetadata | null }}
+ */
+function normalizeProbeState(state) {
+  if (typeof state === 'string') return { currentSnapshotId: state, metadata: null }
+  if (!state) return { currentSnapshotId: undefined, metadata: null }
+  return {
+    currentSnapshotId: state.currentSnapshotId,
+    metadata: state.metadata ?? null,
+  }
+}
+
+/**
+ * Walk `parent-snapshot-id` from `currentSnapshotId` looking for
+ * `markerSnapshotId`. Returns true iff the marker's snapshot is a
+ * strict ancestor of current — i.e. a commit landed on top of the
+ * marker's snapshot via the usual single-writer linear history.
  *
- * @param {string} _markerSnapshotId
- * @param {string} _currentSnapshotId
+ * Iceberg snapshot ids are random 64-bit longs, so a numeric compare
+ * cannot order them. The only authoritative ancestry signal is the
+ * snapshot graph carried by `metadata.snapshots`. When that graph is
+ * unavailable (no metadata, snapshots array missing, marker's snapshot
+ * expired out of the array), we return false and the caller re-stages.
+ *
+ * The walk is bounded by the array length to defend against any
+ * malformed `parent-snapshot-id` cycle.
+ *
+ * @param {string} markerSnapshotId
+ * @param {string} currentSnapshotId
+ * @param {TableMetadata | null} metadata
  * @returns {boolean}
  */
-function isSupersededBy(_markerSnapshotId, _currentSnapshotId) {
+function isAncestorSnapshot(markerSnapshotId, currentSnapshotId, metadata) {
+  if (!metadata) return false
+  const snapshots = metadata.snapshots
+  if (!Array.isArray(snapshots) || snapshots.length === 0) return false
+  /** @type {Map<string, string | undefined>} */
+  const parents = new Map()
+  for (const snap of snapshots) {
+    const id = snap && /** @type {Record<string, unknown>} */ (snap)['snapshot-id']
+    if (id === undefined || id === null) continue
+    const parentRaw = /** @type {Record<string, unknown>} */ (snap)['parent-snapshot-id']
+    const parent = parentRaw === undefined || parentRaw === null
+      ? undefined
+      : String(parentRaw)
+    parents.set(String(id), parent)
+  }
+  const target = String(markerSnapshotId)
+  let cursor = parents.get(String(currentSnapshotId))
+  const maxSteps = parents.size
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (cursor === undefined) return false
+    if (cursor === target) return true
+    cursor = parents.get(cursor)
+  }
   return false
 }
 
