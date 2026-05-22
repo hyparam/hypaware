@@ -219,6 +219,135 @@ test('reconstructs OpenAI Responses SSE text into an assistant part row', async 
   assert.equal(rows[1].attributes.gateway.is_sse, true)
 })
 
+test('projects Codex turn metadata from ChatGPT gateway headers', async () => {
+  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
+  const turnMetadata = {
+    session_id: 'codex-session-1',
+    thread_id: 'codex-thread-1',
+    thread_source: 'user',
+    turn_id: 'codex-turn-1',
+    workspaces: {
+      '/Users/phil/workspace/hypaware': {
+        associated_remote_urls: { origin: 'https://github.com/hyparam/hypaware.git' },
+        latest_git_commit_hash: '072b240f2c82e15de26022a8b9bb29e13be826a9',
+        has_changes: true,
+      },
+    },
+    sandbox: 'seatbelt',
+    turn_started_at_unix_ms: 1779476507669,
+  }
+  const rows = await projector.projectExchange(exchange({
+    provider: 'chatgpt',
+    path: '/backend-api/codex/responses',
+    request_headers: {
+      'thread-id': 'codex-thread-header',
+      'session-id': 'codex-session-header',
+      'x-client-request-id': 'client-request-1',
+      originator: 'Codex Desktop',
+      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
+      'x-codex-window-id': 'window-1',
+      'x-codex-turn-metadata': JSON.stringify(turnMetadata),
+    },
+    request_body: {
+      model: 'gpt-5-codex',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
+      stream: false,
+    },
+    response_headers: {
+      'x-oai-request-id': 'oai-request-1',
+    },
+    response_body: {
+      output_text: 'ok',
+      usage: { input_tokens: 8, output_tokens: 1 },
+    },
+  }))
+
+  assert.equal(rows.length, 2)
+  assert.ok(rows.every((row) => row.provider === 'chatgpt'))
+  assert.ok(rows.every((row) => row.conversation_id === 'codex-thread-1'))
+  assert.ok(rows.every((row) => row.cwd === '/Users/phil/workspace/hypaware'))
+  assert.ok(rows.every((row) => row.git_branch === undefined))
+  assert.ok(rows.every((row) => row.client_version === '0.133.0-alpha.1'))
+  assert.ok(rows.every((row) => row.entrypoint === 'Codex Desktop'))
+  assert.ok(rows.every((row) => row.user_type === 'user'))
+  assert.ok(rows.every((row) => row.permission_mode === 'seatbelt'))
+  assert.ok(rows.every((row) => row.is_sidechain === false))
+  assert.ok(rows.every((row) => row.request_id === 'oai-request-1'))
+  assert.ok(rows.every((row) => row.prompt_id === 'codex-turn-1'))
+  assert.equal(rows[0].attributes.codex.thread_id, 'codex-thread-1')
+  assert.equal(rows[0].attributes.codex.session_id, 'codex-session-1')
+  assert.equal(rows[0].attributes.codex.turn_id, 'codex-turn-1')
+  assert.equal(rows[0].attributes.codex.thread_source, 'user')
+  assert.equal(rows[0].attributes.codex.originator, 'Codex Desktop')
+  assert.equal(rows[0].attributes.codex.window_id, 'window-1')
+  assert.equal(rows[0].attributes.codex.sandbox, 'seatbelt')
+  assert.equal(rows[0].attributes.codex.turn_started_at_unix_ms, 1779476507669)
+  assert.equal(rows[0].attributes.codex.workspace, '/Users/phil/workspace/hypaware')
+  assert.equal(rows[0].attributes.codex.git_origin_url, 'https://github.com/hyparam/hypaware.git')
+  assert.equal(rows[0].attributes.codex.git_commit, '072b240f2c82e15de26022a8b9bb29e13be826a9')
+  assert.equal(rows[0].attributes.codex.has_changes, true)
+})
+
+test('marks Codex subagent turns as sidechain rows without workspace metadata', async () => {
+  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
+  const rows = await projector.projectExchange(exchange({
+    provider: 'chatgpt',
+    path: '/backend-api/codex/responses',
+    request_headers: {
+      'thread-id': 'subagent-thread-header',
+      'session-id': 'subagent-session-header',
+      originator: 'Codex Desktop',
+      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'subagent-session-1',
+        thread_id: 'subagent-thread-1',
+        thread_source: 'subagent',
+        turn_id: 'subagent-turn-1',
+        sandbox: 'seatbelt',
+      }),
+    },
+    request_body: {
+      model: 'gpt-5-codex',
+      input: [{ role: 'user', content: 'check status' }],
+    },
+    response_body: { output_text: 'ok' },
+  }))
+
+  assert.equal(rows.length, 2)
+  assert.ok(rows.every((row) => row.conversation_id === 'subagent-thread-1'))
+  assert.ok(rows.every((row) => row.cwd === undefined))
+  assert.ok(rows.every((row) => row.is_sidechain === true))
+  assert.ok(rows.every((row) => row.prompt_id === 'subagent-turn-1'))
+})
+
+test('falls back to Codex header identifiers when turn metadata is invalid', async () => {
+  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
+  const rows = await projector.projectExchange(exchange({
+    provider: 'chatgpt',
+    path: '/backend-api/codex/responses',
+    request_headers: {
+      'thread-id': 'fallback-thread',
+      'session-id': 'fallback-session',
+      'x-client-request-id': 'client-request-fallback',
+      originator: 'Codex Desktop',
+      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
+      'x-codex-turn-metadata': '{',
+    },
+    request_body: {
+      model: 'gpt-5-codex',
+      input: [{ role: 'user', content: 'hello' }],
+    },
+    response_body: { output_text: 'ok' },
+  }))
+
+  assert.equal(rows.length, 2)
+  assert.ok(rows.every((row) => row.conversation_id === 'fallback-thread'))
+  assert.ok(rows.every((row) => row.request_id === 'client-request-fallback'))
+  assert.ok(rows.every((row) => row.prompt_id === undefined))
+  assert.equal(rows[0].attributes.codex.thread_id, 'fallback-thread')
+  assert.equal(rows[0].attributes.codex.session_id, 'fallback-session')
+})
+
 test('applies enrichers before stripping non-schema draft fields', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -255,9 +384,9 @@ function exchange(overrides = {}) {
     response_bytes: 20,
     is_sse: overrides.is_sse ?? false,
     stream_event_count: overrides.stream_events?.length ?? 0,
-    request_headers: JSON.stringify({ 'x-hyp-dev-run-id': 'run-1' }),
+    request_headers: JSON.stringify({ 'x-hyp-dev-run-id': 'run-1', ...(overrides.request_headers ?? {}) }),
     request_body: JSON.stringify(overrides.request_body),
-    response_headers: JSON.stringify({ 'content-type': 'application/json' }),
+    response_headers: JSON.stringify({ 'content-type': 'application/json', ...(overrides.response_headers ?? {}) }),
     response_body: overrides.response_body === null ? null : JSON.stringify(overrides.response_body),
     error: null,
     metadata: JSON.stringify({ dev_run_id: 'run-1' }),
