@@ -224,10 +224,15 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
         }
       }
       if (lastConfigFailure !== undefined) {
+        // Only the partitions that actually failed should be retried.
+        // Without this, the driver's fallback in src/core/sinks/driver.js
+        // outboxes every partition in the batch — including ones already
+        // PUT to S3 — when a terminal error trips mid-batch.
         return {
           status: 'failed',
           partitionsExported: exported,
           bytesWritten,
+          retryPartitions: failures,
           error: describeS3ErrorKind(lastConfigFailure),
         }
       }
