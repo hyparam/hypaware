@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/format-iceberg",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "Iceberg table-format writer for HypAware blob exports. Wraps a BlobStore destination and inner SinkEncoder (default @hypaware/format-parquet) to land Apache Iceberg tables on disk or in object storage.",
+  "requires": {
+    "capabilities": {
+      "hypaware.blob-store": "^1.0.0",
+      "hypaware.encoder": "^1.0.0"
+    }
+  },
+  "provides": {
+    "capabilities": {
+      "hypaware.table-format": "1.0.0"
+    }
+  },
+  "contributes": {
+    "config_sections": [
+      {
+        "section": "format_iceberg",
+        "summary": "Iceberg writer settings (prefix, snapshot strategy). Most options live on the sink instance config."
+      }
+    ]
+  }
+}
