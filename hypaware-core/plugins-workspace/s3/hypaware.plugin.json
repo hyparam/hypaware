@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/s3",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "S3-compatible blob destination for HypAware exports. Pairs with @hypaware/format-parquet (queryable) or @hypaware/format-jsonl (archive) to land cache partitions in AWS S3, MinIO, or other S3-compatible object stores.",
+  "permissions": ["network", "read_env"],
+  "provides": {
+    "capabilities": {
+      "hypaware.blob-store": "1.0.0"
+    }
+  },
+  "contributes": {
+    "sinks": [
+      {
+        "name": "s3",
+        "supports": ["queryable"]
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "s3",
+        "summary": "S3-compatible destination configuration (bucket, prefix, credentials)."
+      }
+    ]
+  }
+}

@@ -31,8 +31,9 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *  - One `plugin.activate` child span per active plugin per boot.
  *  - One `plugin.skipped` log row per bundled-but-not-selected plugin
  *    with `status=skipped` and `hyp_reason=not_configured`. The
- *    selected set here covers six of the seven V1-bundled plugins so
- *    `@hypaware/format-jsonl` lands on the skipped path.
+ *    selected set here covers six of the eight V1-bundled plugins so
+ *    both `@hypaware/format-jsonl` and `@hypaware/s3` land on the
+ *    skipped path.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -44,11 +45,11 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // Stage a v2 config that selects six of the seven V1-bundled
-  // plugins. `@hypaware/format-jsonl` is intentionally omitted so the
-  // smoke can assert the "skipped" log surface, and we exclude
-  // `@hypaware/central` / `@hypaware/gascity` because they are not on
-  // the V1 default surface in the first place.
+  // Stage a v2 config that selects six of the eight V1-bundled
+  // plugins. `@hypaware/format-jsonl` and `@hypaware/s3` are
+  // intentionally omitted so the smoke can assert the "skipped" log
+  // surface, and we exclude `@hypaware/central` / `@hypaware/gascity`
+  // because they are not on the V1 default surface in the first place.
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify({
@@ -258,9 +259,9 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.some((n) => n === 6)
   )
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=1',
+    'traces: at least one config-profile boot reports plugins_skipped=2',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 1)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 2)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
@@ -298,6 +299,11 @@ export async function run({ harness, expect }) {
   expect.that(
     'logs: format-jsonl emitted a plugin.skipped log with hyp_reason=not_configured',
     skippedPlugins.has('@hypaware/format-jsonl'),
+    (v) => v === true
+  )
+  expect.that(
+    'logs: s3 emitted a plugin.skipped log with hyp_reason=not_configured',
+    skippedPlugins.has('@hypaware/s3'),
     (v) => v === true
   )
 }
