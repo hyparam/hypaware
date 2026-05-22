@@ -976,17 +976,31 @@ function parsePluginInstallArgs(argv) {
       if (value === undefined || value.startsWith('--')) {
         return { ok: false, code: 2, message: `flag ${arg} requires a value` }
       }
+      // Block `-X` style values too — `applyGitSourceFlags` enforces
+      // the same rule but rejecting at the CLI layer gives a friendlier
+      // error before the install span opens.
+      if (value.startsWith('-')) {
+        return { ok: false, code: 2, message: `flag ${arg} value must not start with '-'` }
+      }
       if (arg === '--ref') ref = value
       else subdir = value
       i += 1
       continue
     }
     if (arg.startsWith('--ref=')) {
-      ref = arg.slice('--ref='.length)
+      const value = arg.slice('--ref='.length)
+      if (value.startsWith('-')) {
+        return { ok: false, code: 2, message: `flag --ref value must not start with '-'` }
+      }
+      ref = value
       continue
     }
     if (arg.startsWith('--path=')) {
-      subdir = arg.slice('--path='.length)
+      const value = arg.slice('--path='.length)
+      if (value.startsWith('-')) {
+        return { ok: false, code: 2, message: `flag --path value must not start with '-'` }
+      }
+      subdir = value
       continue
     }
     if (rawSource === undefined) {
