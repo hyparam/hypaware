@@ -167,8 +167,31 @@ test('local-fs BlobStore putObject honours ifNoneMatch="*" by failing on existin
           body: new Uint8Array([0xfb]),
           ifNoneMatch: '*',
         }),
-      /precondition failed/i,
+      (err) => {
+        // Stable errorKind keeps the iceberg adapter's translation from
+        // depending on the local-fs error MESSAGE.
+        assert.equal(/** @type {any} */ (err).errorKind, 'blob_precondition_failed')
+        assert.match(err.message, /precondition failed/i)
+        return true
+      },
     )
+  } finally {
+    await fs.rm(base, { recursive: true, force: true })
+  }
+})
+
+test('local-fs BlobStore ifNoneMatch="*" succeeds when the key is new', async () => {
+  const base = await makeTempBase()
+  try {
+    const store = createLocalFsBlobStore({ baseDir: base })
+    const result = await store.putObject({
+      key: 'iceberg/metadata/v3.json',
+      body: new Uint8Array([1, 2, 3]),
+      ifNoneMatch: '*',
+    })
+    assert.equal(result.key, 'iceberg/metadata/v3.json')
+    const got = await store.getObject({ key: 'iceberg/metadata/v3.json' })
+    assert.ok(got)
   } finally {
     await fs.rm(base, { recursive: true, force: true })
   }

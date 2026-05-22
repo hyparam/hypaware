@@ -153,6 +153,85 @@ test('s3 BlobStore rejects keys that try to escape the configured prefix', async
   )
 })
 
+test('s3 BlobStore exposes bucket and prefix for downstream telemetry', () => {
+  const client = makeFakeS3Client()
+  const store = /** @type {import('../../collectivus-plugin-kernel-types').BlobStore & { bucket?: string, prefix?: string }} */ (
+    createS3BlobStore({ bucket: 'my-bucket', prefix: 'hyp/exports/', client })
+  )
+  assert.equal(store.kind, 's3')
+  assert.equal(store.bucket, 'my-bucket')
+  // Prefix is normalized (trailing slash stripped) at construction.
+  assert.equal(store.prefix, 'hyp/exports')
+})
+
+test('s3 BlobStore tags AccessDenied with errorKind=s3_access_denied', async () => {
+  const client = makeFakeS3Client()
+  // Override putObject to simulate an AWS AccessDenied response.
+  client.putObject = async () => {
+    const err = /** @type {Error & { name: string, $metadata: { httpStatusCode: number } }} */ (
+      new Error('Access Denied')
+    )
+    err.name = 'AccessDenied'
+    err.$metadata = { httpStatusCode: 403 }
+    throw err
+  }
+  const store = createS3BlobStore({ bucket: 'my-bucket', client })
+  await assert.rejects(
+    () => store.putObject({ key: 'iceberg/metadata/v1.json', body: new Uint8Array([1]) }),
+    (err) => /** @type {any} */ (err).errorKind === 's3_access_denied'
+  )
+})
+
+test('s3 BlobStore tags NoSuchBucket on listObjects with errorKind=s3_bucket_missing', async () => {
+  const client = makeFakeS3Client()
+  client.listObjects = async () => {
+    const err = /** @type {Error & { name: string, $metadata: { httpStatusCode: number } }} */ (
+      new Error('bucket does not exist')
+    )
+    err.name = 'NoSuchBucket'
+    err.$metadata = { httpStatusCode: 404 }
+    throw err
+  }
+  const store = createS3BlobStore({ bucket: 'my-bucket', client })
+  await assert.rejects(
+    async () => {
+      for await (const _ of store.listObjects({ prefix: '' })) { /* drain */ }
+    },
+    (err) => /** @type {any} */ (err).errorKind === 's3_bucket_missing'
+  )
+})
+
+test('s3 BlobStore tags getObject errors that are not NotFound', async () => {
+  const client = makeFakeS3Client()
+  client.getObject = async () => {
+    const err = /** @type {Error & { name: string, $metadata: { httpStatusCode: number } }} */ (
+      new Error('Throttled')
+    )
+    err.name = 'SlowDown'
+    err.$metadata = { httpStatusCode: 503 }
+    throw err
+  }
+  const store = createS3BlobStore({ bucket: 'my-bucket', client })
+  await assert.rejects(
+    () => store.getObject({ key: 'iceberg/metadata/v1.json' }),
+    (err) => /** @type {any} */ (err).errorKind === 's3_throttled'
+  )
+})
+
+test('s3 BlobStore deleteObject treats NotFound as benign and returns', async () => {
+  const client = makeFakeS3Client()
+  client.deleteObject = async () => {
+    const err = /** @type {Error & { name: string, $metadata: { httpStatusCode: number } }} */ (
+      new Error('No such key')
+    )
+    err.name = 'NoSuchKey'
+    err.$metadata = { httpStatusCode: 404 }
+    throw err
+  }
+  const store = createS3BlobStore({ bucket: 'my-bucket', client })
+  await store.deleteObject({ key: 'missing/file.bin' })
+})
+
 test('createUnconfiguredS3BlobStore throws actionable s3_blob_store_unconfigured on use', async () => {
   const store = createUnconfiguredS3BlobStore()
   assert.equal(store.kind, 's3')

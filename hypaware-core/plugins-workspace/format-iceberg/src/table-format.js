@@ -78,6 +78,7 @@ function buildSink(ctx) {
   const prefix = resolvePrefix(config)
   const log = ctx.log
 
+  const exportSpanAttrs = blobStoreDestinationAttrs(ctx.blobStore)
   return {
     /**
      * @param {ExportBatch} batch
@@ -96,6 +97,7 @@ function buildSink(ctx) {
             hyp_sink_format: FORMAT,
             hyp_batch_id: batch.batchId,
             status: 'ok',
+            ...exportSpanAttrs,
           },
         },
         async (span) => {
@@ -198,7 +200,20 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
 
   const blobPrefix = joinKeys(pathToKey(prefix), sanitizeDataset(dataset))
   const tableUrl = tableUrlForBlobPrefix(blobPrefix)
-  const { resolver, lister } = await createBlobStoreIO(ctx.blobStore)
+  // Track the most recent metadata.json write so the commit span can
+  // surface the S3 ETag for that specific commit. Data-file writes set
+  // `lastWrite` too but the commit span's ETag attribute should reflect
+  // the metadata.json commit (the actual transaction boundary).
+  /** @type {{ key: string, etag: string | undefined } | undefined} */
+  let lastMetadataWrite
+  const { resolver, lister } = await createBlobStoreIO(ctx.blobStore, {
+    onWrite(event) {
+      if (event.key.endsWith('.metadata.json')) {
+        lastMetadataWrite = { key: event.key, etag: event.etag }
+      }
+    },
+  })
+  const destinationAttrs = blobStoreDestinationAttrs(ctx.blobStore)
   const markerPath = markerKey(prefix, ctx.name, dataset, batch.batchId)
   const tracer = getTracer('plugin.format-iceberg')
 
@@ -229,6 +244,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
         hyp_dataset: dataset,
         hyp_batch_id: batch.batchId,
         status: 'ok',
+        ...destinationAttrs,
       },
     },
     async (span) => {
@@ -298,6 +314,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
         encoder_format: ctx.encoder.format,
         row_count: rowsLoaded,
         status: 'ok',
+        ...destinationAttrs,
       },
     },
     async (span) => {
@@ -310,6 +327,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
         span.setAttribute('metadata_version', result.metadataVersion)
         span.setAttribute('data_file_count', result.dataFiles.length)
         span.setAttribute('bytes_written', result.bytesWritten)
+        if (lastMetadataWrite?.etag) span.setAttribute('etag', lastMetadataWrite.etag)
         return result
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -326,6 +344,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
           hyp_batch_id: batch.batchId,
           error_kind: errorKind,
           message,
+          ...destinationAttrs,
         })
         throw err
       } finally {
@@ -496,4 +515,28 @@ function newError(kind, message) {
   const err = /** @type {Error & { hypErrorKind: string }} */ (new Error(message))
   err.hypErrorKind = kind
   return err
+}
+
+/**
+ * Extract destination-shape attributes from a BlobStore for telemetry.
+ * The s3 BlobStore surfaces `bucket` and `prefix` as advisory fields;
+ * for any other destination kind the returned object is empty so spans
+ * remain unchanged.
+ *
+ * @param {BlobStore} blobStore
+ * @returns {Record<string, string>}
+ */
+function blobStoreDestinationAttrs(blobStore) {
+  /** @type {Record<string, string>} */
+  const attrs = {}
+  if (!blobStore || typeof blobStore.kind !== 'string') return attrs
+  attrs.hyp_blob_store_kind = blobStore.kind
+  const descriptor = /** @type {{ bucket?: unknown, prefix?: unknown }} */ (blobStore)
+  if (typeof descriptor.bucket === 'string' && descriptor.bucket.length > 0) {
+    attrs.bucket = descriptor.bucket
+  }
+  if (typeof descriptor.prefix === 'string' && descriptor.prefix.length > 0) {
+    attrs.prefix = descriptor.prefix
+  }
+  return attrs
 }
