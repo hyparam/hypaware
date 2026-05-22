@@ -4,6 +4,11 @@ import { Buffer } from 'node:buffer'
 
 import { encodePartition } from 'hypaware/core/sinks'
 
+import {
+  createS3BlobStore,
+  createUnconfiguredS3BlobStore,
+  defaultS3BlobStoreClientFactory,
+} from './blob-store.js'
 import { validateS3SinkConfig } from './config.js'
 import { defaultClientFactory } from './client.js'
 import { classifyAwsError, describeS3ErrorKind } from './errors.js'
@@ -27,12 +32,23 @@ const PLUGIN_NAME = '@hypaware/s3'
 const PLUGIN_VERSION = '1.0.0'
 
 /**
- * Activate `@hypaware/s3`. Provides `hypaware.blob-store@1` and
- * contributes a single `s3` sink. The activation context is captured by
- * each sink instance so its `exportBatch` can reach `ctx.query` for
- * schema lookups and `ctx.storage` for cache-row streams.
+ * Activate `@hypaware/s3`. Provides `hypaware.blob-store@1` as a full
+ * `BlobStore` (put/get/list/delete; put supports `ifNoneMatch` via
+ * S3's `If-None-Match` header) AND contributes a single `s3` sink. The
+ * sink contribution is untouched by the BlobStore migration — existing
+ * encoder-writer + s3 sinks keep working unchanged.
  *
- * Test/smoke wiring can override the client factory by passing
+ * BlobStore resolution:
+ *  - If `plugins[].config` for `@hypaware/s3` carries a `bucket`, the
+ *    activation builds a real BlobStore against it using the validated
+ *    config shape. Test wiring may inject a fake client factory by
+ *    setting `ctx.config.__blobStoreClientFactory`.
+ *  - If no `bucket` is configured at plugin level, activation provides
+ *    a sentinel BlobStore that throws an actionable error on any call
+ *    — the capability is still discoverable but its use without
+ *    configuration is a programming error, not a silent fallback.
+ *
+ * Test/smoke wiring can override the sink's client factory by passing
  * `clientFactory` on `SinkCreateContext.config` (under the
  * intentionally-prefixed key `__clientFactory`). Production configs
  * never carry this key — it lives outside the validated config shape
@@ -41,7 +57,8 @@ const PLUGIN_VERSION = '1.0.0'
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {
-  ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, { kind: 's3' })
+  const blobStore = await resolveBlobStore(ctx)
+  ctx.provideCapability('hypaware.blob-store', PLUGIN_VERSION, blobStore)
 
   ctx.sinks.register({
     name: 's3',
@@ -350,4 +367,48 @@ async function materializeBytes(bytes) {
   if (chunks.length === 0) return new Uint8Array(0)
   if (chunks.length === 1) return chunks[0]
   return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)))
+}
+
+/**
+ * Build the s3 plugin's BlobStore from plugin-level config. When no
+ * `bucket` is configured the activation provides a sentinel BlobStore
+ * — callers see a clear `s3_blob_store_unconfigured` error instead of
+ * the capability silently no-op-ing.
+ *
+ * @param {PluginActivationContext} ctx
+ */
+async function resolveBlobStore(ctx) {
+  const config = /** @type {Record<string, unknown> | undefined} */ (ctx.config)
+  if (!config || typeof config.bucket !== 'string' || config.bucket.length === 0) {
+    return createUnconfiguredS3BlobStore()
+  }
+  // Reuse the sink-config validator so plugin-level config goes through
+  // the same shape checks (storage class, endpoint url, etc.).
+  const validation = validateS3SinkConfig(config)
+  if (!validation.ok) {
+    const first = validation.errors[0]
+    ctx.log.error('s3.blob_store.config_invalid', {
+      hyp_plugin: PLUGIN_NAME,
+      error_kind: first.errorKind,
+      pointer: first.pointer,
+      message: first.message,
+    })
+    return createUnconfiguredS3BlobStore()
+  }
+  const validated = validation.config
+  const factory = /** @type {{ __blobStoreClientFactory?: import('./blob-store.js').S3BlobStoreClientFactory }} */ (
+    /** @type {unknown} */ (config)
+  ).__blobStoreClientFactory ?? defaultS3BlobStoreClientFactory
+  const client = await factory({
+    region: validated.region,
+    profile: validated.profile,
+    endpoint_url: validated.endpoint_url,
+    force_path_style: validated.force_path_style,
+    env: ctx.env,
+  })
+  return createS3BlobStore({
+    bucket: validated.bucket,
+    prefix: validated.prefix,
+    client,
+  })
 }

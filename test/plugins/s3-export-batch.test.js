@@ -8,9 +8,11 @@ import { activate } from '../../hypaware-core/plugins-workspace/s3/src/index.js'
 /**
  * Drive the s3 plugin's `activate` against a captured kernel context and
  * return the sink-registration descriptor it registers. Each test gets a
- * fresh activation so the captured `create` is independent.
+ * fresh activation so the captured `create` is independent. `activate`
+ * is async (it resolves the plugin-level BlobStore before registering
+ * the sink), so this helper must await it before reading `registered`.
  */
-function activatePlugin() {
+async function activatePlugin() {
   /** @type {any} */
   let registered
   /** @type {any} */
@@ -21,13 +23,14 @@ function activatePlugin() {
         registered = descriptor
       },
     },
+    log: { debug() {}, info() {}, warn() {}, error() {} },
     query: { getDataset: () => undefined, listDatasets: () => [] },
     storage: {
       tableExists: () => false,
       readRows: () => ({ async *[Symbol.asyncIterator]() {} }),
     },
   }
-  activate(ctx)
+  await activate(ctx)
   if (!registered) throw new Error('plugin did not register a sink')
   return registered
 }
@@ -64,7 +67,7 @@ function makeSinkCtx({ clientFactory }) {
 }
 
 test('exportBatch terminal failure: retryPartitions excludes already-uploaded partitions', async () => {
-  const registration = activatePlugin()
+  const registration = await activatePlugin()
   /** @type {Array<{ Key: string }>} */
   const putCalls = []
   const fakeClient = {
@@ -99,7 +102,7 @@ test('exportBatch terminal failure: retryPartitions excludes already-uploaded pa
 })
 
 test('exportBatch partial failure: retryPartitions has only the failed partition', async () => {
-  const registration = activatePlugin()
+  const registration = await activatePlugin()
   let call = 0
   const fakeClient = {
     async putObject() {
@@ -129,7 +132,7 @@ test('exportBatch partial failure: retryPartitions has only the failed partition
 })
 
 test('exportBatch all-success: no retryPartitions field', async () => {
-  const registration = activatePlugin()
+  const registration = await activatePlugin()
   const fakeClient = {
     async putObject() { return {} },
     destroy() {},

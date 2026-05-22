@@ -13,9 +13,12 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 /**
  * @typedef {(
  *   |'sink_pair_incompatible'
+ *   |'sink_writer_invalid'
+ *   |'sink_destination_invalid'
  *   |'request_sink_invalid_keys'
  *   |'sink_schedule_invalid'
  *   |'sink_plugin_unknown'
+ *   |'sink_encoder_invalid'
  *   |'dataset_unknown'
  *   |'capability_ambiguous'
  *   |'config_section_invalid'
@@ -89,9 +92,19 @@ export const CAP_ENCODER = 'hypaware.encoder'
 
 /**
  * Capability that a destination plugin must provide for a blob sink.
- * Local-fs, S3, and any future object store satisfy this.
+ * Local-fs, S3, and any future object store satisfy this. The
+ * capability VALUE is a `BlobStore` object that consumers (table-format
+ * plugins and the blob sink contribution) call into directly.
  */
 export const CAP_BLOB_STORE = 'hypaware.blob-store'
+
+/**
+ * Capability a table-format writer provides. Table-format writers
+ * (`@hypaware/format-iceberg`) layer directory layout + manifests on
+ * top of an inner encoder and a blob store. Their capability VALUE is
+ * a `TableFormatProvider`.
+ */
+export const CAP_TABLE_FORMAT = 'hypaware.table-format'
 
 /**
  * Capability that a request destination provides. Request sinks
@@ -205,12 +218,21 @@ function pluginMetadataFromManifest(manifest) {
 /**
  * Run kernel-level cross-plugin validation over a parsed v2 config.
  *
- * Rules (per Phase 6 bead):
+ * Rules:
  *
  *  1. Blob sink `writer` must require `hypaware.blob-store` and provide
- *     `hypaware.encoder`. The `destination` must provide
- *     `hypaware.blob-store`. Incompatible pairs surface as
- *     `error_kind=sink_pair_incompatible`.
+ *     either `hypaware.encoder` (encoder writer) or
+ *     `hypaware.table-format` (table-format writer). A writer that
+ *     provides neither surfaces as
+ *     `error_kind=sink_writer_invalid`. The `destination` must
+ *     provide `hypaware.blob-store`; missing destination caps surface
+ *     as `error_kind=sink_destination_invalid` for table-format writers
+ *     (the new flow) and `error_kind=sink_pair_incompatible` for
+ *     encoder writers (the legacy flow that existing configs depend on).
+ *     For table-format writers, the optional inner encoder pin
+ *     (`config.encoder`) must itself be a known plugin that provides
+ *     `hypaware.encoder`; mismatches surface as
+ *     `error_kind=sink_encoder_invalid`.
  *  2. Request sinks (`plugin` shape) cannot carry `writer` or
  *     `destination` keys. Caught by the schema parser but re-emitted
  *     here as `error_kind=request_sink_invalid_keys` for consistency.
@@ -388,17 +410,65 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
 
   const writerRequiresBlob = !!writerMeta.requires?.[CAP_BLOB_STORE]
   const writerProvidesEncoder = !!writerMeta.provides?.[CAP_ENCODER]
-  if (!writerRequiresBlob || !writerProvidesEncoder) {
+  const writerProvidesTableFormat = !!writerMeta.provides?.[CAP_TABLE_FORMAT]
+
+  // Determine writer shape. A writer providing neither encoder nor
+  // table-format is unusable as a blob-sink writer and earns the
+  // dedicated `sink_writer_invalid` kind so callers can branch on it
+  // separately from the generic encoder-shape mismatch covered by
+  // `sink_pair_incompatible`.
+  if (!writerProvidesEncoder && !writerProvidesTableFormat) {
     errors.push({
       pointer: `${pointer}/writer`,
-      errorKind: 'sink_pair_incompatible',
+      errorKind: 'sink_writer_invalid',
       message:
-        `sink '${name}': writer '${sink.writer}' must require ${CAP_BLOB_STORE} and provide ${CAP_ENCODER}` +
-        (writerRequiresBlob ? '' : ` (missing requires ${CAP_BLOB_STORE})`) +
-        (writerProvidesEncoder ? '' : ` (missing provides ${CAP_ENCODER})`),
+        `sink '${name}': writer '${sink.writer}' provides neither ${CAP_ENCODER} nor ${CAP_TABLE_FORMAT}` +
+        ` — blob sinks need an encoder or table-format writer`,
     })
+    return
   }
 
+  if (writerProvidesEncoder) {
+    // Legacy encoder-writer flow. Keep the existing error_kind so
+    // callers that already grep for `sink_pair_incompatible` on bad
+    // encoder pairings keep working.
+    if (!writerRequiresBlob) {
+      errors.push({
+        pointer: `${pointer}/writer`,
+        errorKind: 'sink_pair_incompatible',
+        message:
+          `sink '${name}': writer '${sink.writer}' must require ${CAP_BLOB_STORE} and provide ${CAP_ENCODER}` +
+          ` (missing requires ${CAP_BLOB_STORE})`,
+      })
+    }
+    const destProvidesBlob = !!destMeta.provides?.[CAP_BLOB_STORE]
+    if (!destProvidesBlob) {
+      const destProvidesHttp = !!destMeta.provides?.[CAP_HTTP_ENDPOINT]
+      const hint = destProvidesHttp
+        ? ` (provides ${CAP_HTTP_ENDPOINT} instead — only request sinks accept it)`
+        : ''
+      errors.push({
+        pointer: `${pointer}/destination`,
+        errorKind: 'sink_pair_incompatible',
+        message: `sink '${name}': destination '${sink.destination}' does not provide ${CAP_BLOB_STORE}${hint}`,
+      })
+    }
+    return
+  }
+
+  // Table-format writer flow. The destination still has to provide
+  // `hypaware.blob-store` so the table-format sink can write bytes;
+  // missing it earns `sink_destination_invalid` to distinguish the
+  // table-format setup error from the legacy encoder-shape error.
+  if (!writerRequiresBlob) {
+    errors.push({
+      pointer: `${pointer}/writer`,
+      errorKind: 'sink_writer_invalid',
+      message:
+        `sink '${name}': writer '${sink.writer}' provides ${CAP_TABLE_FORMAT} but does not require ${CAP_BLOB_STORE}` +
+        ` (table-format writers must declare a blob-store dependency)`,
+    })
+  }
   const destProvidesBlob = !!destMeta.provides?.[CAP_BLOB_STORE]
   if (!destProvidesBlob) {
     const destProvidesHttp = !!destMeta.provides?.[CAP_HTTP_ENDPOINT]
@@ -407,9 +477,33 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
       : ''
     errors.push({
       pointer: `${pointer}/destination`,
-      errorKind: 'sink_pair_incompatible',
-      message: `sink '${name}': destination '${sink.destination}' does not provide ${CAP_BLOB_STORE}${hint}`,
+      errorKind: 'sink_destination_invalid',
+      message:
+        `sink '${name}': destination '${sink.destination}' does not provide ${CAP_BLOB_STORE}${hint}` +
+        ` (table-format writer '${sink.writer}' needs a blob-store destination)`,
     })
+  }
+
+  // Optional inner-encoder pin. When set, the named plugin must be
+  // known and itself provide `hypaware.encoder`. Unknown plugins land
+  // in `sink_plugin_unknown` for consistency with /writer and
+  // /destination; missing-encoder lands in the dedicated kind.
+  const encoderPin = typeof sink.config?.encoder === 'string' ? sink.config.encoder : undefined
+  if (encoderPin) {
+    const encoderMeta = knownPlugins.get(/** @type {PluginName} */ (encoderPin))
+    if (!encoderMeta) {
+      errors.push({
+        pointer: `${pointer}/config/encoder`,
+        errorKind: 'sink_plugin_unknown',
+        message: `sink '${name}': encoder plugin '${encoderPin}' is unknown`,
+      })
+    } else if (!encoderMeta.provides?.[CAP_ENCODER]) {
+      errors.push({
+        pointer: `${pointer}/config/encoder`,
+        errorKind: 'sink_encoder_invalid',
+        message: `sink '${name}': encoder plugin '${encoderPin}' does not provide ${CAP_ENCODER}`,
+      })
+    }
   }
 }
 
