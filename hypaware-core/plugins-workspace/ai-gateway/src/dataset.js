@@ -13,12 +13,11 @@ import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult} DatasetRefreshResult */
 
 export const DATASET_NAME = 'ai_gateway_messages'
-export const PARTITION_LABEL = 'proxy_messages_v3'
+export const PARTITION_LABEL = 'proxy_messages_v4'
 
 /**
- * Column shape for `ai_gateway_messages`. This intentionally matches
- * Collectivus `proxy_messages` exactly while keeping HypAware's producer
- * owned table name.
+ * Column shape for `ai_gateway_messages`. The shape is owned by the
+ * AI gateway plugin and versioned through the partition label.
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */

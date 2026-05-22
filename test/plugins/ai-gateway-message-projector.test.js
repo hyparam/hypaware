@@ -23,7 +23,7 @@ const EXPECTED_COLUMNS = [
   ['permission_mode', 'STRING', true],
   ['is_sidechain', 'BOOLEAN', true],
   ['message_id', 'STRING', false],
-  ['previous_message_id', 'STRING', true],
+  ['previous_message_id', 'JSON', true],
   ['provider_uuid', 'STRING', true],
   ['parent_uuid', 'STRING', true],
   ['logical_parent_uuid', 'STRING', true],
@@ -56,7 +56,7 @@ const EXPECTED_COLUMNS = [
   ['date', 'STRING', false],
 ]
 
-test('ai_gateway_messages schema exactly matches proxy_messages columns', () => {
+test('ai_gateway_messages schema exposes the gateway message columns', () => {
   assert.deepEqual(
     AI_GATEWAY_SCHEMA_COLUMNS.map((column) => [column.name, column.type, column.nullable]),
     EXPECTED_COLUMNS,
@@ -88,14 +88,85 @@ test('projects Anthropic exchanges into proxy-compatible message part rows', asy
   assert.equal(rows[0].role, 'user')
   assert.equal(rows[0].part_type, 'text')
   assert.equal(rows[0].content_text, 'hello')
+  assert.deepEqual(rows[0].previous_message_id, [])
   assert.equal(rows[1].role, 'assistant')
   assert.equal(rows[1].content_text, 'hi there')
+  assert.deepEqual(rows[1].previous_message_id, [rows[0].message_id])
   assert.deepEqual(rows[1].status, { finish_reason: 'stop' })
   assert.equal(rows[1].attributes.usage.input_tokens, 4)
   assert.equal(rows[1].attributes.dev_run_id, 'run-1')
   assert.equal(rows[1].attributes.gateway.status_code, 200)
   assert.equal(rows[1].date, '2026-05-20')
   assert.equal(Object.hasOwn(rows[0], 'metadata'), false)
+})
+
+test('previous_message_id is an ordered array of all prior message ids', async () => {
+  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
+  const rows = await projector.projectExchange(exchange({
+    provider: 'anthropic',
+    path: '/v1/messages',
+    request_body: {
+      model: 'claude-test',
+      metadata: { user_id: JSON.stringify({ session_id: 'sess-previous' }) },
+      messages: [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'second' },
+        { role: 'user', content: 'third' },
+      ],
+    },
+    response_body: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'fourth' }],
+      stop_reason: 'end_turn',
+    },
+  }))
+
+  assert.equal(rows.length, 4)
+  assert.deepEqual(rows.map((row) => row.previous_message_id), [
+    [],
+    [rows[0].message_id],
+    [rows[0].message_id, rows[1].message_id],
+    [rows[0].message_id, rows[1].message_id, rows[2].message_id],
+  ])
+})
+
+test('previous_message_id carries conversation history across exchanges', async () => {
+  const projector = createAiGatewayMessageProjector({ gatewayId: 'gw-test' })
+  const firstRows = await projector.projectExchange(exchange({
+    provider: 'anthropic',
+    path: '/v1/messages',
+    request_body: {
+      model: 'claude-test',
+      metadata: { user_id: JSON.stringify({ session_id: 'sess-history' }) },
+      messages: [{ role: 'user', content: 'first' }],
+    },
+    response_body: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'second' }],
+      stop_reason: 'end_turn',
+    },
+  }))
+  const nextRows = await projector.projectExchange(exchange({
+    provider: 'anthropic',
+    path: '/v1/messages',
+    request_body: {
+      model: 'claude-test',
+      metadata: { user_id: JSON.stringify({ session_id: 'sess-history' }) },
+      messages: [{ role: 'user', content: 'third' }],
+    },
+    response_body: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'fourth' }],
+      stop_reason: 'end_turn',
+    },
+  }))
+
+  assert.equal(firstRows.length, 2)
+  assert.equal(nextRows.length, 2)
+  assert.deepEqual(nextRows.map((row) => row.previous_message_id), [
+    [firstRows[0].message_id, firstRows[1].message_id],
+    [firstRows[0].message_id, firstRows[1].message_id, nextRows[0].message_id],
+  ])
 })
 
 test('projects OpenAI chat completions into the same role and part columns', async () => {

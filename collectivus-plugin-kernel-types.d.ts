@@ -456,6 +456,7 @@ export interface CommandRegistration {
 export interface CommandRunContext {
   stdout: WriteStream
   stderr: WriteStream
+  stdin?: NodeJS.ReadStream
   env: NodeJS.ProcessEnv
   cwd: string
   config: HypAwareV2Config
@@ -1042,4 +1043,3 @@ export interface InitPresetContribution {
   summary: string
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
-

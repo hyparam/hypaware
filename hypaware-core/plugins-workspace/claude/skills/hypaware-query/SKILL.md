@@ -38,7 +38,7 @@ hyp collect --glob '<pattern>' --name <name>
 
 ## AI gateway message model
 
-Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages`. Each row is a normalized message content part, matching the Collectivus `proxy_messages` schema exactly.
+Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages`. Each row is a normalized message content part owned by the HypAware AI gateway schema.
 
 Key columns:
 

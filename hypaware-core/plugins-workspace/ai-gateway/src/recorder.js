@@ -26,6 +26,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
  * @property {string | undefined} method
  * @property {string | undefined} path
  * @property {Record<string, string | string[] | undefined>} requestHeaders
+ * @property {(requestBody: string) => ({ cwd?: string, git_branch?: string } | undefined)} [localContextForRequest]
  *
  * @typedef {Object} ResponseStart
  * @property {number | undefined} status
@@ -54,6 +55,8 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
  * @property {string | null} response_body
  * @property {string | null} error
  * @property {string | null} metadata             JSON-stringified metadata (incl. dev_run_id)
+ * @property {string} [cwd]
+ * @property {string} [git_branch]
  * @property {Array<{ kind: 'stream_event', exchange_id: string, t_ms: number, event: string, data: string, id?: string }>} stream_events
  */
 
@@ -139,6 +142,8 @@ export class Exchange {
     this.method = init.method
     /** @type {string | undefined} */
     this.path = init.path
+    /** @type {((requestBody: string) => ({ cwd?: string, git_branch?: string } | undefined)) | undefined} */
+    this.localContextForRequest = init.localContextForRequest
     /** @type {Record<string, string | string[] | undefined>} */
     this.requestHeaders = redactHeaders(init.requestHeaders, redactSet)
     /** @type {Record<string, string | string[] | undefined>} */
@@ -292,6 +297,7 @@ export class Exchange {
     const responseBody = this.isSse
       ? null
       : Buffer.concat(this.responseChunks).toString('utf8')
+    const localContext = this.localContextForRequest?.(requestBody)
     const devRunId = this.devRunIdFromHeaders()
     /** @type {Record<string, unknown>} */
     const metadata = {}
@@ -318,6 +324,8 @@ export class Exchange {
       response_body: responseBody && responseBody.length > 0 ? responseBody : null,
       error: this.error ?? null,
       metadata: JSON.stringify(metadata),
+      ...(localContext?.cwd ? { cwd: localContext.cwd } : {}),
+      ...(localContext?.git_branch ? { git_branch: localContext.git_branch } : {}),
       stream_events: this.streamEvents,
     }
     this._cachedRow = row
