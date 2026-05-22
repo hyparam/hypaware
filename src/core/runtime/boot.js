@@ -30,7 +30,7 @@ import { discoverInstalledPlugins } from './installed.js'
 /** @typedef {import('./loader.js').ActivationResult} ActivationResult */
 
 /**
- * @typedef {'config' | 'all-bundled' | { activate: PluginName[] }} BootProfile
+ * @typedef {'config' | 'all-bundled' | 'all-available' | { activate: PluginName[] }} BootProfile
  *
  * - `config` (default): activate only plugins listed in the loaded
  *   config file (intersected with the V1 allowlist). When no config is
@@ -140,10 +140,7 @@ export async function bootKernel(opts = {}) {
       // plugin by name. The override policy is intentionally deferred
       // (see hy-gh-2 design): reject boot with a clear, telemetry-tagged
       // error so the operator removes the installed copy before booting.
-      const bundledNames = new Set([
-        ...discovered.loaded.map((m) => m.manifest.name),
-        ...discovered.excluded.map((m) => m.manifest.name),
-      ])
+      const bundledNames = new Set(discovered.loaded.map((m) => m.manifest.name))
       /** @type {PluginName[]} */
       const shadowing = []
       for (const m of installed.loaded) {
@@ -179,8 +176,11 @@ export async function bootKernel(opts = {}) {
       // config), plus every plugin in `plugin-lock.json` whose manifest
       // loaded. `all-bundled` boots intentionally skip the excluded and
       // installed sets so the picker only sees the V1 default surface.
-      const available = [...discovered.loaded, ...discovered.excluded, ...installed.loaded]
       const installedNames = new Set(installed.loaded.map((m) => m.manifest.name))
+      const excludedAvailable = discovered.excluded.filter(
+        (m) => !installedNames.has(/** @type {PluginName} */ (m.manifest.name))
+      )
+      const available = [...discovered.loaded, ...excludedAvailable, ...installed.loaded]
       const selected = computeSelectedPlugins({
         bootProfile,
         config,
@@ -312,6 +312,11 @@ function resolveConfigPath({ explicit, env, hypHome }) {
  *   doesn't surface them — naming an installed plugin in the config is
  *   the only way to activate one.
  *
+ * - `all-available`: the default bundled surface plus every installed
+ *   plugin. Excluded bundled developer fixtures stay out of this profile
+ *   unless they are installed externally, which lets `hyp init <preset>`
+ *   see installed plugin presets without surfacing V1-excluded skeletons.
+ *
  * - `{ activate: [...] }`: explicit plugin set, intersected with what
  *   the workspace can resolve. Excluded plugins MAY appear here when
  *   a developer-built profile names them; this is the documented
@@ -350,6 +355,19 @@ function computeSelectedPlugins({ bootProfile, config, discovered, installedName
     )
   }
 
+  if (bootProfile === 'all-available') {
+    return new Set(
+      [...available].filter((name) =>
+        (
+          V1_BUNDLED_PLUGIN_ALLOWLIST.has(name) &&
+          !V1_EXCLUDED_FROM_DEFAULT.has(name) &&
+          !installedNames.has(name)
+        ) ||
+        installedNames.has(name)
+      )
+    )
+  }
+
   if (typeof bootProfile === 'object' && bootProfile !== null && Array.isArray(bootProfile.activate)) {
     /** @type {Set<PluginName>} */
     const out = new Set()
@@ -378,6 +396,7 @@ function computeSelectedPlugins({ bootProfile, config, discovered, installedName
 function describeBootProfile(profile) {
   if (profile === 'config') return 'config'
   if (profile === 'all-bundled') return 'all-bundled'
+  if (profile === 'all-available') return 'all-available'
   if (typeof profile === 'object' && profile !== null) return `explicit:${profile.activate.length}`
   return String(profile)
 }

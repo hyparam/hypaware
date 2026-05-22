@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { bootKernel } from '../../src/core/runtime/boot.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
 import { resolveDependencies } from '../../src/core/dep_graph.js'
 import { discoverInstalledPlugins } from '../../src/core/runtime/installed.js'
 import {
@@ -81,6 +82,18 @@ async function writeFixtureLock(hypHome, entries) {
     }
   }
   await writeLock(stateDir, { schema_version: 1, plugins })
+}
+
+function bufferWriter() {
+  let out = ''
+  return {
+    write(chunk) {
+      out += String(chunk)
+    },
+    text() {
+      return out
+    },
+  }
 }
 
 test('discoverInstalledPlugins returns loaded manifests from the lock', async () => {
@@ -246,6 +259,93 @@ test('bootKernel rejects installed plugins that shadow bundled first-party names
         return true
       }
     )
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('bootKernel lets installed plugins replace excluded bundled skeletons and exposes their init presets', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-installed-excluded-shadow-'))
+  try {
+    const workspaceDir = path.join(hypHome, 'bundled-workspace')
+    const bundledDir = path.join(workspaceDir, 'gascity')
+    await fs.mkdir(bundledDir, { recursive: true })
+    await fs.writeFile(
+      path.join(bundledDir, 'hypaware.plugin.json'),
+      JSON.stringify({
+        schema_version: 1,
+        name: '@hypaware/gascity',
+        version: '0.0.1',
+        hypaware_api: '^1.0.0',
+        runtime: 'node',
+        entrypoint: './index.js',
+      })
+    )
+    await fs.writeFile(
+      path.join(bundledDir, 'index.js'),
+      'export async function activate() { throw new Error("excluded bundled skeleton should not activate") }\n'
+    )
+
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@hypaware/gascity',
+      version: '1.0.0',
+      entrypointBody:
+        "export async function activate(ctx) {\n" +
+        "  ctx.initPresets.register({ name: 'gascity', plugin: '@hypaware/gascity', summary: 'fixture preset', async run() { return 0 } })\n" +
+        "}\n",
+    })
+    await writeFixtureLock(hypHome, [
+      { name: '@hypaware/gascity', version: '1.0.0', installDir },
+    ])
+
+    const boot = await bootKernel({
+      hypHome,
+      mode: 'init',
+      runId: 'test-excluded-shadow',
+      bootProfile: 'all-available',
+      workspaceDir,
+      env: { ...process.env, HYP_HOME: hypHome },
+    })
+
+    assert.equal(boot.activePlugins.length, 1)
+    assert.equal(boot.activePlugins[0].name, '@hypaware/gascity')
+    assert.equal(boot.activePlugins[0].rootDir, installDir)
+    assert.equal(boot.runtime.initPresets.get('gascity')?.plugin, '@hypaware/gascity')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('dispatch routes hyp init <installed-preset> even when preset args include --yes', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-init-installed-preset-'))
+  try {
+    const { installDir } = await stageInstalledPlugin({
+      hypHome,
+      name: '@third-party/init-fixture',
+      version: '0.1.0',
+      entrypointBody:
+        "export async function activate(ctx) {\n" +
+        "  ctx.initPresets.register({ name: 'fixture', plugin: '@third-party/init-fixture', summary: 'fixture preset', async run(argv, runCtx) { runCtx.stdout.write(`preset:${argv.join(',')}\\n`); return 0 } })\n" +
+        "}\n",
+    })
+    await writeFixtureLock(hypHome, [
+      { name: '@third-party/init-fixture', version: '0.1.0', installDir },
+    ])
+    const stdout = bufferWriter()
+    const stderr = bufferWriter()
+
+    const exitCode = await dispatch(['init', 'fixture', 'target', '--yes'], {
+      env: { ...process.env, HYP_HOME: hypHome },
+      stdout,
+      stderr,
+      cwd: hypHome,
+      workspaceDir: path.join(hypHome, 'no-bundled'),
+    })
+
+    assert.equal(exitCode, 0)
+    assert.equal(stdout.text(), 'preset:target,--yes\n')
+    assert.equal(stderr.text(), '')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

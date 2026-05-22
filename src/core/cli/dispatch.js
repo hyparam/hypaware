@@ -59,8 +59,9 @@ const HELP_FLAGS = new Set(['--help', '-h', 'help'])
  *    *before* command dispatch. Active plugins land on
  *    `CommandRunContext.plugins` and their registry contributions
  *    (sources, sinks, capabilities, skills, init-presets) are
- *    available to the command body. `bootProfile=all-bundled` for
- *    `hyp init` (so the walkthrough picker sees every option);
+ *    available to the command body. `bootProfile=all-available` for
+ *    `hyp init` (so the walkthrough picker sees bundled defaults plus
+ *    installed plugin presets);
  *    lifecycle/status commands boot an empty runtime, and ordinary
  *    plugin-aware commands use the config.
  * 5. Match the longest registered prefix (now including plugin-
@@ -265,18 +266,19 @@ function isInteractiveStream(stream) {
 
 /**
  * Pick the boot profile based on the requested command. `hyp init`
- * (interactive walkthrough or preset) needs every bundled plugin
- * loaded so the picker can list options before the user has written
- * a config. Lifecycle and diagnostics commands avoid activation so
- * they do not bind gateway/OTLP listeners while checking or managing
- * state. Ordinary commands activate only the plugins listed in config.
+ * (interactive walkthrough or preset) needs bundled defaults plus
+ * installed plugins loaded so the picker can list plugin presets before
+ * the user has written a config. Lifecycle and diagnostics commands
+ * avoid activation so they do not bind gateway/OTLP listeners while
+ * checking or managing state. Ordinary commands activate only the
+ * plugins listed in config.
  *
  * @param {string[]} argv
  * @returns {BootProfile}
  */
 function decideBootProfile(argv) {
-  if (argv.length === 0) return 'all-bundled'
-  if (argv[0] === 'init') return 'all-bundled'
+  if (argv.length === 0) return 'all-available'
+  if (argv[0] === 'init') return 'all-available'
   if (argv[0] === 'daemon' || argv[0] === 'status' || argv[0] === 'smoke') return { activate: [] }
   return 'config'
 }

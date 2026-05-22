@@ -11,6 +11,7 @@ import {
   withSpan,
 } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { loadConfigFile } from '../config/schema.js'
 import { bootKernel } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import {
@@ -340,14 +341,34 @@ export async function runDaemon(opts = {}) {
         status: 'ok',
       },
       async () => {
-        // Phase 3 reload is config re-read + per-source `reload()` if
-        // the source exposes one. Source add/remove based on a diff
-        // of the loaded config lands when Phase 4 wires the
-        // installer-driven reload signal end-to-end.
+        let freshConfig = boot.config ?? null
+        if (boot.configPath) {
+          const loaded = await loadConfigFile(boot.configPath)
+          if (!loaded.ok) {
+            fileLog.warn('daemon.reload_config_failed', {
+              config_path: boot.configPath,
+              error_kind: loaded.errorKind,
+              message: loaded.message,
+            })
+            return
+          }
+          freshConfig = loaded.config
+          boot.config = loaded.config
+        }
+        const configByName = new Map(
+          (freshConfig?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
+        )
+
+        // Reload re-reads config and refreshes each active plugin
+        // context before invoking source.reload(ctx). Source add/remove
+        // based on a diff of loaded config is still deferred.
         for (const snap of status.sources) {
           if (snap.state !== 'started') continue
           const ctx = boot.runtime.activationContexts.get(snap.plugin)
           if (!ctx) continue
+          ctx.config = /** @type {import('../../../collectivus-plugin-kernel-types').JsonObject} */ (
+            configByName.get(snap.plugin) ?? {}
+          )
           try {
             await boot.runtime.sources.reload(snap.name, ctx)
           } catch (err) {
