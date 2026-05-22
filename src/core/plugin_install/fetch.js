@@ -5,6 +5,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { loadManifest } from '../manifest.js'
+import { fetchGitSource } from './git_fetch.js'
 import { pluginInstallDir } from './paths.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
@@ -17,6 +18,8 @@ import { pluginInstallDir } from './paths.js'
  * @property {string} installDir
  * @property {string} contentHash
  * @property {string} manifestHash
+ * @property {string} [resolvedRef]
+ * @property {{ host?: string, owner?: string, repo?: string }} [provenance]
  */
 
 /**
@@ -29,8 +32,27 @@ import { pluginInstallDir } from './paths.js'
 /** @typedef {FetchSuccess | FetchFailure} FetchResult */
 
 /**
- * @typedef {'local_dir_missing'|'local_dir_invalid'|'manifest_invalid'|'manifest_name_mismatch'|'fetch_unsupported'} FetchErrorKind
+ * @typedef {(
+ *   'local_dir_missing'|
+ *   'local_dir_invalid'|
+ *   'manifest_invalid'|
+ *   'manifest_name_mismatch'|
+ *   'fetch_unsupported'|
+ *   'git_unavailable'|
+ *   'git_clone_failed'|
+ *   'git_checkout_failed'|
+ *   'git_ref_not_found'|
+ *   'git_subdir_missing'|
+ *   'git_subdir_unsupported'|
+ *   'entrypoint_invalid'|
+ *   'artifact_symlink_unsupported'|
+ *   'artifact_copy_failed'|
+ *   'remote_install_confirmation_required'|
+ *   'remote_install_rejected'
+ * )} FetchErrorKind
  */
+
+/** @typedef {import('./git_fetch.js').BeforeCommitCallback} BeforeCommitCallback */
 
 const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])
 
@@ -46,20 +68,25 @@ const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])
  * @param {object} args
  * @param {PluginSourceSpec} args.source
  * @param {string} args.stateDir
+ * @param {BeforeCommitCallback} [args.beforeCommit] — forwarded to the
+ *   git fetcher so the CLI can prompt for confirmation immediately
+ *   before the artifact rename swap. Ignored for local-dir sources,
+ *   which keep their non-interactive behavior by design.
  * @returns {Promise<FetchResult>}
  */
-export async function fetchPlugin({ source, stateDir }) {
+export async function fetchPlugin({ source, stateDir, beforeCommit }) {
   switch (source.kind) {
     case 'local-dir':
       return fetchLocalDir({ source, stateDir })
     case 'git':
+      return fetchGitSource({ source, stateDir, beforeCommit })
     case 'first-party':
     case 'scoped-third-party':
     case 'unscoped-third-party':
       return {
         ok: false,
         errorKind: 'fetch_unsupported',
-        message: `plugin install: source kind '${source.kind}' lands in a follow-up phase (only local-dir is wired in Phase 7)`,
+        message: `plugin install: source kind '${source.kind}' lands in a follow-up phase (git URL is wired in hy-gh-1)`,
       }
     default:
       return {

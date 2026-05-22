@@ -2,12 +2,14 @@
 
 import path from 'node:path'
 
+import { applyGitSourceFlags, parseGitSource, redactRawSource } from './git_source.js'
+
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceKind} PluginSourceKind */
 
 const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i
 const UNSCOPED_NAME_RE = /^([a-z0-9][a-z0-9._-]*)$/i
-const GIT_PREFIX_RE = /^(github:|gitlab:|bitbucket:|git\+|git:|ssh:|https?:\/\/)/i
+const GIT_PREFIX_RE = /^(github:|gitlab:|bitbucket:|git\+|git:|ssh:|https?:\/\/|file:\/\/)/i
 const FIRST_PARTY_SCOPE = '@hypaware/'
 const THIRD_PARTY_SCOPED_PREFIX = 'hypaware-plugin-'
 const THIRD_PARTY_UNSCOPED_PREFIX = 'hypaware-plugin-'
@@ -38,7 +40,7 @@ const THIRD_PARTY_UNSCOPED_PREFIX = 'hypaware-plugin-'
  * `plugin.install` span without surprises.
  *
  * @param {string} rawSource
- * @param {{ cwd?: string }} [opts]
+ * @param {{ cwd?: string, ref?: string, subdir?: string }} [opts]
  * @returns {PluginSourceSpec}
  */
 export function resolveSource(rawSource, opts = {}) {
@@ -51,11 +53,19 @@ export function resolveSource(rawSource, opts = {}) {
   // Git URLs win over the local-path heuristic so a `github:org/repo`
   // doesn't accidentally land on `looksLikeLocalPath`'s slash test.
   if (GIT_PREFIX_RE.test(trimmed)) {
-    return {
+    const parts = parseGitSource(trimmed)
+    const enriched = applyGitSourceFlags(parts, { ref: opts.ref, subdir: opts.subdir })
+    // `raw` and `gitUrl` are persisted on the lock entry and surfaced
+    // in confirmation prompts; never let `user:pass@` userinfo from a
+    // private clone URL ride along into either.
+    /** @type {PluginSourceSpec} */
+    const spec = {
       kind: 'git',
-      raw: rawSource,
-      gitUrl: trimmed,
+      raw: redactRawSource(rawSource),
+      gitUrl: enriched.gitUrl,
     }
+    if (enriched.ref) spec.ref = enriched.ref
+    return spec
   }
 
   if (looksLikeLocalPath(trimmed)) {

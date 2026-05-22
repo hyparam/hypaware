@@ -7,7 +7,8 @@ import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
-import { validateConfig } from '../config/validate.js'
+import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
+import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -17,9 +18,14 @@ import {
   listInstalledPlugins,
   loadLock,
   removePlugin,
+  updatePlugin,
 } from '../plugin_install/install.js'
-import { checkForPluginUpdate } from '../plugin_install/update_check.js'
-import { upsertEntry, writeLock } from '../plugin_install/lock.js'
+import {
+  buildTtyPrompt,
+  buildWarnings,
+  decideConfirmation,
+  renderConfirmationSummary,
+} from '../plugin_install/confirm.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
@@ -106,7 +112,7 @@ function buildCoreCommands() {
     {
       name: 'plugin install',
       summary: 'Install a plugin from name, git URL, or local directory',
-      usage: 'hyp plugin install <source>',
+      usage: 'hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]',
       run: runPluginInstall,
     },
     {
@@ -130,7 +136,7 @@ function buildCoreCommands() {
     {
       name: 'plugin update',
       summary: 'Update an installed plugin',
-      usage: 'hyp plugin update [plugin]',
+      usage: 'hyp plugin update [plugin] [--yes]',
       run: runPluginUpdate,
     },
     {
@@ -826,26 +832,187 @@ function pluginStateDir(ctx) {
 }
 
 /**
+ * Build the `knownPlugins` map used by `validateConfig`. Merges the
+ * built-in first-party metadata with whatever third-party plugins are
+ * recorded in `plugin-lock.json` so installed plugin names are not
+ * flagged `plugin_unknown` and their capability provides/requires
+ * participate in sink-pair and ambiguity checks.
+ *
+ * Installed-plugin discovery failures are absorbed silently — `hyp
+ * config validate` keeps working when the lock is missing or any
+ * installed manifest is corrupt; the underlying discovery layer logs
+ * its own diagnostics.
+ *
+ * @param {CommandRunContext} ctx
+ */
+async function buildKnownPluginsForCtx(ctx) {
+  try {
+    const stateDir = pluginStateDir(ctx)
+    const installed = await discoverInstalledPlugins({ stateDir })
+    return mergeInstalledManifestsIntoKnown(installed.loaded)
+  } catch {
+    return mergeInstalledManifestsIntoKnown([])
+  }
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runPluginInstall(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp plugin install <source>\n')
-    return 2
+  const parsed = parsePluginInstallArgs(argv)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp plugin install: ${parsed.message}\n`)
+    return parsed.code
   }
-  const rawSource = argv[0]
   const stateDir = pluginStateDir(ctx)
-  const result = await installPlugin({ rawSource, stateDir, cwd: ctx.cwd })
+  const confirm = buildPluginInstallConfirm({
+    yes: parsed.yes,
+    ctx,
+    headerKind: 'install',
+  })
+  const result = await installPlugin({
+    rawSource: parsed.rawSource,
+    stateDir,
+    cwd: ctx.cwd,
+    opts: { ref: parsed.ref, subdir: parsed.subdir },
+    confirm,
+  })
   if (!result.ok) {
     ctx.stderr.write(`hyp plugin install: ${result.message}\n`)
-    return 1
+    return result.errorKind === 'remote_install_confirmation_required' ? 2 : 1
   }
   ctx.stdout.write(
     `installed ${result.entry.name}@${result.entry.version} from ${result.entry.source.kind}\n`
   )
   ctx.stdout.write(`  install_dir: ${result.entry.install_dir}\n`)
+  if (result.entry.resolved_ref) {
+    ctx.stdout.write(`  resolved_ref: ${result.entry.resolved_ref}\n`)
+  }
   return 0
+}
+
+/**
+ * Build the install-time trust gate. The factory is shared between the
+ * install and update CLI commands so both produce the same prompt and
+ * the same telemetry outcomes.
+ *
+ * @param {{
+ *   yes: boolean,
+ *   ctx: CommandRunContext,
+ *   headerKind: 'install' | 'update',
+ * }} args
+ * @returns {import('../plugin_install/install.js').ConfirmInstall}
+ */
+function buildPluginInstallConfirm({ yes, ctx, headerKind }) {
+  const stderr = ctx.stderr
+  return async function confirm(staged) {
+    const summary = renderConfirmationSummary(
+      {
+        manifest: staged.manifest,
+        source: staged.source,
+        resolvedRef: staged.resolvedRef,
+        contentHash: staged.contentHash,
+        manifestHash: staged.manifestHash,
+      },
+      {
+        ...(staged.previous ? { previous: staged.previous } : {}),
+        headerKind,
+      }
+    )
+    const warnings = buildWarnings({
+      manifest: staged.manifest,
+      source: staged.source,
+      resolvedRef: staged.resolvedRef,
+      contentHash: staged.contentHash,
+      manifestHash: staged.manifestHash,
+    })
+    for (const w of warnings) stderr.write(`${w}\n`)
+    stderr.write(summary)
+    // Prompt on stderr so stdout stays parseable. We require both
+    // stderr and stdin to be a TTY before asking — piping either
+    // direction means "no human watching, prompt is useless."
+    const tty = isTty(stderr) && isTty(process.stdin)
+    const ask = tty
+      ? buildTtyPrompt({
+        stdin: process.stdin,
+        stdout: /** @type {NodeJS.WritableStream} */ (stderr),
+      })
+      : undefined
+    const decision = await decideConfirmation({ yes, tty, ...(ask ? { ask } : {}) })
+    return decision
+  }
+}
+
+/**
+ * Parse `hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]`.
+ * Flags accept both `--flag value` and `--flag=value` forms. The
+ * function does NOT verify mutual exclusion of `--ref` with a URL
+ * fragment — that lives in the resolver so the same rule applies to
+ * programmatic callers.
+ *
+ * @param {string[]} argv
+ * @returns {(
+ *   { ok: true, rawSource: string, ref?: string, subdir?: string, yes: boolean }
+ *   | { ok: false, code: number, message: string }
+ * )}
+ */
+function parsePluginInstallArgs(argv) {
+  /** @type {string | undefined} */
+  let rawSource
+  /** @type {string | undefined} */
+  let ref
+  /** @type {string | undefined} */
+  let subdir
+  let yes = false
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--yes' || arg === '-y') {
+      yes = true
+      continue
+    }
+    if (arg === '--ref' || arg === '--path') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) {
+        return { ok: false, code: 2, message: `flag ${arg} requires a value` }
+      }
+      // Block `-X` style values too — `applyGitSourceFlags` enforces
+      // the same rule but rejecting at the CLI layer gives a friendlier
+      // error before the install span opens.
+      if (value.startsWith('-')) {
+        return { ok: false, code: 2, message: `flag ${arg} value must not start with '-'` }
+      }
+      if (arg === '--ref') ref = value
+      else subdir = value
+      i += 1
+      continue
+    }
+    if (arg.startsWith('--ref=')) {
+      const value = arg.slice('--ref='.length)
+      if (value.startsWith('-')) {
+        return { ok: false, code: 2, message: `flag --ref value must not start with '-'` }
+      }
+      ref = value
+      continue
+    }
+    if (arg.startsWith('--path=')) {
+      const value = arg.slice('--path='.length)
+      if (value.startsWith('-')) {
+        return { ok: false, code: 2, message: `flag --path value must not start with '-'` }
+      }
+      subdir = value
+      continue
+    }
+    if (rawSource === undefined) {
+      rawSource = arg
+      continue
+    }
+    return { ok: false, code: 2, message: `unexpected argument '${arg}'` }
+  }
+  if (!rawSource) {
+    return { ok: false, code: 2, message: 'usage: hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]' }
+  }
+  return { ok: true, rawSource, ref, subdir, yes }
 }
 
 /**
@@ -975,40 +1142,88 @@ async function runPluginOutdated(argv, ctx) {
 }
 
 /**
- * Re-probe one (or every) installed plugin's upstream and write the
- * fresh `update` state back to the lock. Phase 7 does not yet pull
- * down a new artifact — that comes when fetch.js learns the non-local
- * source kinds in Phase 8. For now `hyp plugin update` is "refresh the
- * update_check state."
+ * `hyp plugin update <plugin>` runs the full fetch → validate → diff →
+ * confirm → swap pipeline for an installed plugin. The bare form
+ * `hyp plugin update` (no plugin name) keeps the legacy "refresh
+ * update_check state for every plugin" behavior so users have a way
+ * to refresh the `outdated` view without committing to a re-install.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runPluginUpdate(argv, ctx) {
+  const parsed = parsePluginUpdateArgs(argv)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp plugin update: ${parsed.message}\n`)
+    return parsed.code
+  }
   const stateDir = pluginStateDir(ctx)
+  if (parsed.target) {
+    const confirm = buildPluginInstallConfirm({
+      yes: parsed.yes,
+      ctx,
+      headerKind: 'update',
+    })
+    const result = await updatePlugin({ name: parsed.target, stateDir, confirm })
+    if (!result.ok) {
+      ctx.stderr.write(`hyp plugin update: ${result.message}\n`)
+      return result.errorKind === 'remote_install_confirmation_required' ? 2 : 1
+    }
+    ctx.stdout.write(
+      `updated ${result.entry.name}@${result.entry.version}\n`
+    )
+    if (result.entry.resolved_ref) {
+      ctx.stdout.write(`  resolved_ref: ${result.entry.resolved_ref}\n`)
+    }
+    ctx.stdout.write(`  content_hash: ${result.entry.content_hash}\n`)
+    return 0
+  }
+
+  // No target: keep the "refresh update-check state for all" behavior so
+  // users still have a way to recompute `outdated` without re-installing.
+  const { checkForPluginUpdate } = await import('../plugin_install/update_check.js')
+  const { upsertEntry, writeLock } = await import('../plugin_install/lock.js')
   const lock = await loadLock(stateDir)
   const entries = Object.values(lock.plugins)
-  const target = argv[0]
-  const subjects = target ? entries.filter((e) => e.name === target) : entries
-  if (target && subjects.length === 0) {
-    ctx.stderr.write(`hyp plugin update: '${target}' is not installed\n`)
-    return 1
-  }
   let next = lock
-  for (const entry of subjects) {
-    // Force a probe by clearing the last checked_at; rate-limit logic
-    // is keyed off `entry.update.checked_at`.
+  for (const entry of entries) {
     const probeInput = { ...entry, update: undefined }
     const state = await checkForPluginUpdate({ entry: probeInput })
     next = upsertEntry(next, { ...entry, update: state })
   }
   await writeLock(stateDir, next)
-  if (target) {
-    ctx.stdout.write(`refreshed update state for ${target}\n`)
-  } else {
-    ctx.stdout.write(`refreshed update state for ${subjects.length} plugin(s)\n`)
-  }
+  ctx.stdout.write(`refreshed update state for ${entries.length} plugin(s)\n`)
   return 0
+}
+
+/**
+ * Parse `hyp plugin update [plugin] [--yes]`.
+ *
+ * @param {string[]} argv
+ * @returns {(
+ *   { ok: true, target?: string, yes: boolean }
+ *   | { ok: false, code: number, message: string }
+ * )}
+ */
+function parsePluginUpdateArgs(argv) {
+  /** @type {string | undefined} */
+  let target
+  let yes = false
+  for (const arg of argv) {
+    if (arg === '--yes' || arg === '-y') {
+      yes = true
+      continue
+    }
+    if (arg.startsWith('--')) {
+      return { ok: false, code: 2, message: `unknown flag '${arg}'` }
+    }
+    if (target === undefined) {
+      target = arg
+      continue
+    }
+    return { ok: false, code: 2, message: `unexpected argument '${arg}'` }
+  }
+  return target ? { ok: true, target, yes } : { ok: true, yes }
 }
 
 /**
@@ -1071,7 +1286,8 @@ async function runConfigValidate(argv, ctx) {
     return 1
   }
 
-  const result = await validateConfig(loadResult.config)
+  const knownPlugins = await buildKnownPluginsForCtx(ctx)
+  const result = await validateConfig(loadResult.config, { knownPlugins })
   if (!result.ok) {
     ctx.stderr.write(
       `hyp config validate: ${result.errors.length} error(s) in ${loadResult.configPath}\n`
@@ -1872,7 +2088,8 @@ async function runInitFromFile(flags, ctx) {
     ctx.stderr.write(`hyp init: --from-file: invalid JSON: ${message}\n`)
     return 1
   }
-  const validation = await validateConfig(/** @type {any} */ (parsed))
+  const knownPluginsFromFile = await buildKnownPluginsForCtx(ctx)
+  const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: knownPluginsFromFile })
   if (!validation.ok) {
     for (const err of validation.errors) {
       ctx.stderr.write(
