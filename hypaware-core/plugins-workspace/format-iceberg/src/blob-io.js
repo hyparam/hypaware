@@ -4,7 +4,35 @@ import { Buffer } from 'node:buffer'
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
 
+/**
+ * @typedef {Object} BlobIOWriteEvent
+ * @property {string} key       BlobStore key the write landed on.
+ * @property {string | undefined} etag  Server-returned ETag (S3) or undefined (local-fs).
+ * @property {string | undefined} ifNoneMatch  The conditional-write token that was sent, if any.
+ */
+
+/**
+ * @typedef {(event: BlobIOWriteEvent) => void} BlobIOWriteObserver
+ */
+
 const TABLE_URL_SCHEME = 'blob://'
+
+/**
+ * Stable error kinds the iceberg adapter treats as "the destination
+ * itself is unusable" rather than a transient data-write failure. These
+ * come from the s3 BlobStore's `classifyAwsError` taxonomy plus the
+ * sentinel s3_blob_store_unconfigured kind. Mapped to
+ * `iceberg_blob_store_missing` so the sink driver does not retry a
+ * permission/addressing problem partition-by-partition.
+ */
+const BLOB_STORE_FATAL_KINDS = new Set([
+  's3_access_denied',
+  's3_bucket_missing',
+  's3_credentials_missing',
+  's3_region_mismatch',
+  's3_config_invalid',
+  's3_blob_store_unconfigured',
+])
 
 /**
  * Construct the table URL the table-format sink hands to `icebird` for
@@ -74,19 +102,26 @@ export function pathToKey(url) {
  * - `lister(url)` walks `listObjects` for the directory prefix and
  *   returns the *basenames* (icebird wants bare filenames, not paths).
  *
+ * The optional `onWrite` observer is invoked after every successful
+ * metadata/data write. The caller uses it to stash S3-specific telemetry
+ * (e.g. the ETag of the most recent metadata commit) without coupling
+ * the icebird writer surface to the sink's span attributes.
+ *
  * @param {BlobStore} blobStore
+ * @param {{ onWrite?: BlobIOWriteObserver }} [options]
  * @returns {Promise<{
  *   resolver: import('icebird/src/types.js').Resolver,
  *   lister: import('icebird/src/types.js').Lister
  * }>}
  */
-export async function createBlobStoreIO(blobStore) {
+export async function createBlobStoreIO(blobStore, options) {
   if (!blobStore || typeof blobStore.putObject !== 'function') {
     throw newError(
       'iceberg_blob_store_missing',
       'iceberg-format: createBlobStoreIO requires a BlobStore with putObject()'
     )
   }
+  const onWrite = options?.onWrite
   // Reuse the same `ByteWriter` the intrinsic local-fs cache uses.
   // Mirroring the implementation here keeps the writer surface
   // (`appendUint8`/`appendVarInt`/etc.) byte-for-byte identical with the
@@ -102,6 +137,12 @@ export async function createBlobStoreIO(blobStore) {
       try {
         result = await blobStore.getObject({ key })
       } catch (err) {
+        if (BLOB_STORE_FATAL_KINDS.has(/** @type {string} */ (readErrorKind(err)))) {
+          throw newError(
+            'iceberg_blob_store_missing',
+            `iceberg-format: blob-store read rejected at '${key}' (error_kind=${readErrorKind(err)}): ${describeError(err)}`
+          )
+        }
         throw newError(
           'iceberg_metadata_read_failed',
           `iceberg-format: blob-store read failed for '${key}': ${describeError(err)}`
@@ -138,9 +179,13 @@ export async function createBlobStoreIO(blobStore) {
         const put = { key, body: bytes }
         if (options?.ifNoneMatch === '*') put.ifNoneMatch = '*'
         try {
-          await blobStore.putObject(put)
+          const result = await blobStore.putObject(put)
+          if (typeof onWrite === 'function') {
+            try { onWrite({ key, etag: result?.etag, ifNoneMatch: put.ifNoneMatch }) } catch { /* observer must not break commits */ }
+          }
         } catch (err) {
-          if (readErrorKind(err) === 'blob_precondition_failed') {
+          const inner = readErrorKind(err)
+          if (inner === 'blob_precondition_failed') {
             const wrapped = newError(
               'iceberg_commit_conflict',
               `iceberg-format: conditional write collision at '${key}'`
@@ -148,6 +193,17 @@ export async function createBlobStoreIO(blobStore) {
             wrapped.status = 412
             wrapped.statusCode = 412
             throw wrapped
+          }
+          // Map permission/bucket-shape failures to iceberg_blob_store_missing
+          // so callers see "permissions / addressing issue" instead of an
+          // iceberg-internal write error_kind. Anything else (transient,
+          // throttled, unknown SDK error) surfaces as iceberg_data_write_failed
+          // so the sink driver retries the partition.
+          if (BLOB_STORE_FATAL_KINDS.has(/** @type {string} */ (inner))) {
+            throw newError(
+              'iceberg_blob_store_missing',
+              `iceberg-format: blob-store write rejected at '${key}' (error_kind=${inner}): ${describeError(err)}`
+            )
           }
           throw newError(
             'iceberg_data_write_failed',
@@ -189,6 +245,12 @@ export async function createBlobStoreIO(blobStore) {
         names.push(rel)
       }
     } catch (err) {
+      if (BLOB_STORE_FATAL_KINDS.has(/** @type {string} */ (readErrorKind(err)))) {
+        throw newError(
+          'iceberg_blob_store_missing',
+          `iceberg-format: blob-store list rejected at '${prefix}' (error_kind=${readErrorKind(err)}): ${describeError(err)}`
+        )
+      }
       throw newError(
         'iceberg_blob_io_list_failed',
         `iceberg-format: blob-store list failed for '${prefix}': ${describeError(err)}`

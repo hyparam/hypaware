@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer'
 import { Readable } from 'node:stream'
 
 import { normalizePrefix } from './config.js'
+import { classifyAwsError } from './errors.js'
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectInput} PutObjectInput */
@@ -78,6 +79,13 @@ export function createS3BlobStore({ bucket, prefix, client }) {
 
   return {
     kind: BLOB_STORE_KIND,
+    // `bucket` and `prefix` are surfaced on the returned BlobStore so
+    // consumers that care about S3-specific telemetry (e.g. the iceberg
+    // commit span) can read them without reaching back into config.
+    // They are advisory — the BlobStore methods do not consult these
+    // properties, the original closure values are the source of truth.
+    bucket,
+    prefix: normalized,
 
     /**
      * @param {PutObjectInput} input
@@ -104,14 +112,12 @@ export function createS3BlobStore({ bucket, prefix, client }) {
         return { key: input.key, etag: result?.ETag, versionId: result?.VersionId }
       } catch (err) {
         if (isPreconditionFailed(err)) {
-          const wrapped = /** @type {Error & { errorKind?: string, key?: string }} */ (
-            new Error(`s3 blob-store: precondition failed (object already exists at '${input.key}')`)
-          )
-          wrapped.errorKind = 'blob_precondition_failed'
-          wrapped.key = input.key
-          throw wrapped
+          throw tagS3Error(err, 'blob_precondition_failed',
+            `s3 blob-store: precondition failed (object already exists at '${input.key}')`,
+            input.key)
         }
-        throw err
+        throw tagS3Error(err, classifyAwsError(err),
+          `s3 blob-store: putObject failed for '${input.key}'`, input.key)
       }
     },
 
@@ -131,7 +137,8 @@ export function createS3BlobStore({ bucket, prefix, client }) {
         }
       } catch (err) {
         if (isNotFound(err)) return null
-        throw err
+        throw tagS3Error(err, classifyAwsError(err),
+          `s3 blob-store: getObject failed for '${input.key}'`, input.key)
       }
     },
 
@@ -148,11 +155,18 @@ export function createS3BlobStore({ bucket, prefix, client }) {
           /** @type {string | undefined} */
           let token = initialToken
           while (true) {
-            const page = await client.listObjects({
-              Bucket: bucket,
-              Prefix: prefixComposed.length > 0 ? prefixComposed : undefined,
-              ContinuationToken: token,
-            })
+            let page
+            try {
+              page = await client.listObjects({
+                Bucket: bucket,
+                Prefix: prefixComposed.length > 0 ? prefixComposed : undefined,
+                ContinuationToken: token,
+              })
+            } catch (err) {
+              throw tagS3Error(err, classifyAwsError(err),
+                `s3 blob-store: listObjects failed for prefix '${prefixComposed}'`,
+                prefixComposed)
+            }
             for (const entry of page?.Contents ?? []) {
               if (typeof entry?.Key !== 'string') continue
               const lastModified = entry.LastModified instanceof Date ? entry.LastModified : new Date(0)
@@ -174,9 +188,40 @@ export function createS3BlobStore({ bucket, prefix, client }) {
      */
     async deleteObject(input) {
       const Key = composeKey(input.key)
-      await client.deleteObject({ Bucket: bucket, Key })
+      try {
+        await client.deleteObject({ Bucket: bucket, Key })
+      } catch (err) {
+        // 404 on delete is benign; AWS sometimes returns it on
+        // already-deleted keys depending on bucket configuration.
+        if (isNotFound(err)) return
+        throw tagS3Error(err, classifyAwsError(err),
+          `s3 blob-store: deleteObject failed for '${input.key}'`, input.key)
+      }
     },
   }
+}
+
+/**
+ * Wrap a thrown AWS SDK error with a stable `errorKind` token so callers
+ * (e.g. the iceberg blob-io adapter) can branch on the kind without
+ * re-classifying the SDK's error shapes themselves. Preserves the
+ * original error as `cause` so deeper debugging (e.g. request ids in
+ * `$metadata`) still has the raw object.
+ *
+ * @param {unknown} cause
+ * @param {string} errorKind
+ * @param {string} message
+ * @param {string} key
+ * @returns {Error & { errorKind: string, key: string, cause: unknown }}
+ */
+function tagS3Error(cause, errorKind, message, key) {
+  const wrapped = /** @type {Error & { errorKind: string, key: string, cause: unknown }} */ (
+    new Error(message)
+  )
+  wrapped.errorKind = errorKind
+  wrapped.key = key
+  wrapped.cause = cause
+  return wrapped
 }
 
 /**
