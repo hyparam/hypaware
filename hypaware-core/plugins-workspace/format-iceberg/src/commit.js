@@ -61,9 +61,10 @@ export async function probeTable(tableUrl, resolver, lister) {
     }
   } catch (err) {
     // `loadLatestFileCatalogMetadata` throws when the metadata
-    // directory is empty/missing. Treat any read failure carrying our
-    // own ENOENT marker as "table does not exist yet" and surface
-    // anything else as a real metadata-read failure.
+    // directory is empty/missing. Treat ONLY explicit not-found
+    // signals (ENOENT, "no metadata files" messages) as "table does
+    // not exist yet"; transient read failures must propagate so the
+    // sink driver can retry instead of silently re-driving `create`.
     if (isProbeMissError(err)) {
       return { exists: false, metadata: null, currentSnapshotId: undefined }
     }
@@ -191,13 +192,27 @@ function toNumber(value) {
 }
 
 /**
+ * Restrict probe-miss classification to *explicit* not-found signals.
+ *
+ * The blob-io adapter raises `iceberg_metadata_read_failed` for two
+ * structurally distinct conditions:
+ *  - The object is genuinely missing — adapter sets `code = 'ENOENT'`.
+ *  - The underlying read errored (timeout, throttle, 500, SDK failure)
+ *    — adapter leaves `code` unset.
+ *
+ * Treating the kind alone as a miss conflates the two and lets a
+ * flaky read drive the sink into `create` mode. Match only the
+ * explicit ENOENT marker plus the well-known "no metadata files"
+ * messages icebird raises when the metadata directory is genuinely
+ * empty. Any other error surfaces upstream so the sink driver can
+ * retry the batch.
+ *
  * @param {unknown} err
  */
 function isProbeMissError(err) {
   if (!err || typeof err !== 'object') return false
   const record = /** @type {Record<string, unknown>} */ (err)
   if (record.code === 'ENOENT') return true
-  if (record.hypErrorKind === 'iceberg_metadata_read_failed') return true
   if (typeof record.message === 'string' && /no metadata files found|failed to determine latest iceberg version/.test(record.message)) {
     return true
   }

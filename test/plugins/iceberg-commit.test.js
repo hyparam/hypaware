@@ -308,6 +308,50 @@ test('probeTable discovers latest snapshot when version-hint.text is missing', a
   }
 })
 
+test('probeTable propagates transient metadata read failures instead of masking them as miss', async () => {
+  // Regression guard for the codex finding: when the blob-store
+  // reader raises iceberg_metadata_read_failed for a *transient*
+  // failure (no `code` field, kind is the same as a true miss),
+  // probeTable used to swallow it and return `exists=false`. That
+  // would drive the sink into a fresh `create` path against an
+  // existing table. The reader must surface the real error so the
+  // sink driver can retry.
+  /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+  const blobStore = {
+    kind: 'transient-fail',
+    async putObject() {
+      throw new Error('unused in test')
+    },
+    async getObject(input) {
+      // listObjects returned a metadata file, so the reader is asked
+      // to fetch it. Raise a non-fatal transient error: not in the
+      // FATAL_KINDS set, no `code='ENOENT'`. The reader will wrap
+      // this as iceberg_metadata_read_failed without an ENOENT
+      // marker — exactly the shape the previous probeTable masked.
+      const err = /** @type {Error & { errorKind?: string }} */ (
+        new Error(`simulated transient read failure for ${input.key}`)
+      )
+      err.errorKind = 's3_put_failed'
+      throw err
+    },
+    listObjects(input) {
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (!input.prefix?.endsWith('/metadata/')) return
+          yield { key: `${input.prefix}v1.metadata.json`, size: 0, lastModified: new Date(0) }
+        },
+      }
+    },
+    async deleteObject() {},
+  }
+  const { resolver, lister } = await createBlobStoreIO(blobStore)
+  await assert.rejects(
+    () => probeTable(tableUrlForBlobPrefix('iceberg/datasets/transient'), resolver, lister),
+    (err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code !== 'ENOENT',
+    'transient read must surface, not be masked as a probe miss'
+  )
+})
+
 test('commitBatch normalises blob_precondition_failed into iceberg_commit_conflict', async () => {
   // Build a stub BlobStore whose putObject always raises a
   // precondition-failed error for the metadata write. This proves the
