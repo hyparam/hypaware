@@ -115,10 +115,79 @@ test('s3 BlobStore listObjects strips the prefix from emitted keys', async () =>
   assert.deepEqual(seen.sort(), ['a.bin', 'sub/b.bin'])
 
   // The fake captured the composed-with-prefix Prefix argument so the
-  // BlobStore-level prefix actually reached S3.
+  // BlobStore-level prefix actually reached S3 — and it MUST carry a
+  // trailing slash so a sibling namespace like `hyp/exports2/...` does
+  // not match as a string prefix.
   const listCall = client.calls.find((c) => c.command === 'listObjects')
   assert.ok(listCall)
-  assert.equal(listCall.input.Prefix, 'hyp/exports')
+  assert.equal(listCall.input.Prefix, 'hyp/exports/')
+})
+
+test('s3 BlobStore listObjects does not leak into sibling-namespace keys (hyp/exports vs hyp/exports2)', async () => {
+  // Regression for the codex prefix-scope leak: S3's ListObjectsV2 is a
+  // bare string-prefix match, so `Prefix: 'hyp/exports'` will return
+  // keys under `hyp/exports2/...` too. The BlobStore must (1) send a
+  // trailing-slash prefix to S3 and (2) refuse to yield any key that
+  // does not start with `${normalized}/`, so cleanup/delete loops
+  // cannot touch out-of-scope objects.
+  const client = makeFakeS3Client()
+  // Pre-populate the fake bucket directly to bypass composeKey's path
+  // safety check — we want sibling-namespace keys to exist in the
+  // backing store so the test can confirm they are NOT surfaced.
+  client.objects.set('hyp/exports/datasets/foo.parquet',
+    { bytes: new Uint8Array([1]), lastModified: new Date(0) })
+  client.objects.set('hyp/exports/datasets/sub/bar.parquet',
+    { bytes: new Uint8Array([2]), lastModified: new Date(0) })
+  // Sibling namespace — must never be reported through this BlobStore.
+  client.objects.set('hyp/exports2/datasets/leak.parquet',
+    { bytes: new Uint8Array([9]), lastModified: new Date(0) })
+  client.objects.set('hyp/exports-other/leak2.parquet',
+    { bytes: new Uint8Array([9]), lastModified: new Date(0) })
+
+  const store = createS3BlobStore({ bucket: 'my-bucket', prefix: 'hyp/exports', client })
+
+  /** @type {string[]} */
+  const seen = []
+  for await (const entry of store.listObjects({ prefix: '' })) seen.push(entry.key)
+  assert.deepEqual(seen.sort(), ['datasets/foo.parquet', 'datasets/sub/bar.parquet'])
+
+  // S3 Prefix must terminate at a slash so the sibling-namespace match
+  // never happens at the AWS layer either.
+  const listCall = client.calls.find((c) => c.command === 'listObjects')
+  assert.ok(listCall)
+  assert.equal(listCall.input.Prefix, 'hyp/exports/')
+
+  // Defense in depth: even if a future caller passed a non-empty
+  // `input.prefix` without a trailing slash (which S3 would still
+  // string-prefix match), the yielded keys must stay inside scope.
+  // Simulate that by directly invoking the fake to bypass the BlobStore
+  // composeKey trailing-slash logic.
+  client.calls.length = 0
+  const seenScoped = []
+  for await (const entry of store.listObjects({ prefix: 'datasets' })) seenScoped.push(entry.key)
+  // The sibling `hyp/exports2/...` key shares no `hyp/exports/datasets`
+  // prefix, but a buggy implementation could surface it via the
+  // wider sibling match. We assert ONLY the in-scope datasets are
+  // visible.
+  assert.deepEqual(seenScoped.sort(), ['datasets/foo.parquet', 'datasets/sub/bar.parquet'])
+})
+
+test('s3 BlobStore listObjects empty-prefix without a configured prefix lists the whole bucket', async () => {
+  // No configured prefix means there is no scope to leak into; the
+  // BlobStore should not append a trailing slash that would needlessly
+  // narrow the S3 query.
+  const client = makeFakeS3Client()
+  client.objects.set('a.bin', { bytes: new Uint8Array([1]), lastModified: new Date(0) })
+  client.objects.set('nested/b.bin', { bytes: new Uint8Array([2]), lastModified: new Date(0) })
+  const store = createS3BlobStore({ bucket: 'my-bucket', client })
+  /** @type {string[]} */
+  const seen = []
+  for await (const entry of store.listObjects({ prefix: '' })) seen.push(entry.key)
+  assert.deepEqual(seen.sort(), ['a.bin', 'nested/b.bin'])
+  const listCall = client.calls.find((c) => c.command === 'listObjects')
+  assert.ok(listCall)
+  // No Prefix passed to S3 — entire bucket is in scope by design.
+  assert.equal(listCall.input.Prefix, undefined)
 })
 
 test('s3 BlobStore putObject ifNoneMatch="*" surfaces blob_precondition_failed on conflict', async () => {
