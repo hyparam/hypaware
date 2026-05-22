@@ -18,20 +18,27 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
- * Phase 8.2 smoke. Brings up an in-process echo upstream, activates
- * `@hypaware/ai-gateway` in a temp HYP_HOME pointed at it, starts the
- * source, issues one request through the gateway with the
- * `x-hyp-dev-run-id` contract header, and asserts the §Phase 8.2
- * contract from the implementation plan:
+ * Gateway core 2.0 pass-through smoke. Brings up an in-process echo
+ * upstream, activates `@hypaware/ai-gateway@2.0.0` in a temp HYP_HOME
+ * pointed at it (with NO exchange projector registered), drives one
+ * request through the gateway with the `x-hyp-dev-run-id` contract
+ * header, and asserts the post-2.0 zero-projector contract:
  *
- * - The echo upstream saw the request (header round-tripped, body
- *   echoed in the response).
- * - A normalized message row landed in `ai_gateway_messages` with
- *   `dev_run_id` in `attributes` matching the run.
- * - An `aigw.exchange` log row exists carrying `upstream`, `path`,
- *   `status_code`, `request_bytes`, `response_bytes`, `is_sse`.
- * - The `cache.append` span and `hyp_rows_written` counter both fire
- *   for `hyp_dataset=ai_gateway_messages`.
+ *  - Capability `hypaware.ai-gateway` registered at `2.0.0`.
+ *  - The echo upstream saw the request verbatim (gateway is a
+ *    pass-through).
+ *  - No rows are written into `ai_gateway_messages` — phase 1
+ *    intentionally ships no built-in projector, so without an adapter
+ *    plugin the gateway records nothing into the dataset.
+ *  - Pass-through telemetry STILL fires: the `aigw.exchange` log
+ *    (carrying upstream/path/status/bytes/is_sse and dev_run_id), the
+ *    `aigw.exchange_bytes` meter, and the `source.start` span.
+ *  - `hyp_rows_written{dataset=ai_gateway_messages}` does NOT fire
+ *    because nothing was written.
+ *
+ * Phases 2 and 3 will add Claude/Codex exchange projectors and bring
+ * row writes back through their respective smokes
+ * (`gateway_claude_capture`, `gateway_codex_capture`).
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -60,7 +67,9 @@ export async function run({ harness, expect }) {
 
   // Config slice handed to the plugin's activate(). Listen on
   // 127.0.0.1:0 so the test grabs an ephemeral port; route every path
-  // ('/') to the echo upstream.
+  // ('/') to the echo upstream. No exchange projector is registered —
+  // the gateway 2.0 contract is that with no projector the dataset
+  // gets zero rows but pass-through telemetry still flows.
   const aiGatewayConfig = {
     listen: '127.0.0.1:0',
     upstreams: [
@@ -109,15 +118,15 @@ export async function run({ harness, expect }) {
   // path an adapter plugin would use to discover the gateway.
   const registered = kernel.capabilities.list().find((c) => c.name === 'hypaware.ai-gateway')
   expect.that(
-    'capability: hypaware.ai-gateway registered at 1.0.0',
+    'capability: hypaware.ai-gateway registered at 2.0.0',
     registered,
-    (v) => v !== undefined && v.version === '1.0.0'
+    (v) => v !== undefined && v.version === '2.0.0'
   )
   /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
   const aiGatewayApi = kernel.capabilities.require(
     '@smoke/ai-gateway-passthrough',
     'hypaware.ai-gateway',
-    '^1.0.0'
+    '^2.0.0'
   )
   const localUrl = aiGatewayApi.localEndpoint()
   expect.that(
@@ -167,8 +176,9 @@ export async function run({ harness, expect }) {
   // any in-flight exchange. The kernel emits a `source.stop` span here.
   await kernel.sources.stop('ai-gateway')
 
-  // Query the dataset through the dispatcher — same shape the bead's
-  // SQL assertion exercises: filter by JSON_VALUE on dev_run_id.
+  // Query the dataset through the dispatcher. With no projector
+  // registered the gateway must have written ZERO rows for this
+  // dev_run_id — the zero-projector contract.
   const sqlStdout = makeBuf()
   const sqlStderr = makeBuf()
   const sqlCode = await dispatch(
@@ -210,15 +220,16 @@ export async function run({ harness, expect }) {
   )
   const count = parsed?.[0]?.n
   expect.that(
-    'stdout: count is 1 (exactly one normalized message row for the dev_run_id)',
+    'stdout: count is 0 (no projector → zero rows in ai_gateway_messages)',
     count,
-    (v) => v === 1 || v === '1' || (typeof v === 'bigint' && Number(v) === 1)
+    (v) => v === 0 || v === '0' || (typeof v === 'bigint' && Number(v) === 0)
   )
 
   await obs.shutdown()
   await echo.close()
 
-  // Telemetry assertions.
+  // Telemetry assertions — pass-through telemetry MUST fire even
+  // without a projector.
   const traces = await expect.traces()
   const logs = await expect.logs()
   const metrics = await expect.metrics()
@@ -238,9 +249,9 @@ export async function run({ harness, expect }) {
       t.name === 'cache.append' && t.attributes?.hyp_dataset === 'ai_gateway_messages'
   )
   expect.that(
-    'traces: at least one cache.append for ai_gateway_messages',
+    'traces: no cache.append for ai_gateway_messages (zero rows means zero appends)',
     cacheAppends,
-    (rows) => rows.length >= 1
+    (rows) => rows.length === 0
   )
 
   const exchangeLogs = logs.filter(
@@ -285,6 +296,11 @@ export async function run({ harness, expect }) {
     exchangeLog?.attributes?.is_sse,
     (v) => v === false
   )
+  expect.that(
+    'logs: aigw.exchange reports rows_written=0 (no projector)',
+    exchangeLog?.attributes?.rows_written,
+    (v) => v === 0
+  )
 
   const rowsWritten = metrics.find(
     (/** @type {any} */ m) =>
@@ -293,14 +309,9 @@ export async function run({ harness, expect }) {
       m.attributes?.hyp_plugin === '@hypaware/ai-gateway'
   )
   expect.that(
-    'metrics: hyp_rows_written{dataset=ai_gateway_messages, plugin=@hypaware/ai-gateway} emitted',
+    'metrics: hyp_rows_written for ai_gateway_messages is absent — projector wrote zero rows',
     rowsWritten,
-    (v) => v !== undefined
-  )
-  expect.that(
-    'metrics: hyp_rows_written value is 1',
-    rowsWritten?.value,
-    (v) => v === 1
+    (v) => v === undefined
   )
 
   const exchangeBytes = metrics.find(
@@ -309,7 +320,7 @@ export async function run({ harness, expect }) {
       m.attributes?.hyp_upstream === 'echo'
   )
   expect.that(
-    'metrics: aigw.exchange_bytes emitted for upstream=echo',
+    'metrics: aigw.exchange_bytes still emitted for upstream=echo (pass-through telemetry)',
     exchangeBytes,
     (v) => v !== undefined
   )
