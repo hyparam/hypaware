@@ -89,6 +89,9 @@ dataset, and `hyp query status` to inspect cache freshness per dataset.
 Attach a single client (idempotent — running twice is a no-op):
 
 ```sh
+hyp attach claude
+hyp attach codex
+# Equivalent flag form:
 hyp attach --client claude
 hyp attach --client codex
 ```
@@ -96,8 +99,13 @@ hyp attach --client codex
 Detach (removes only HypAware-managed settings):
 
 ```sh
+hyp detach claude
+hyp detach codex
+# Equivalent aliases:
 hyp detach --client claude
 hyp detach --client codex
+hyp unattach claude
+hyp unattach codex
 ```
 
 Both commands support `--dry-run` and `--json` for inspection and
