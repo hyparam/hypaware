@@ -12,25 +12,26 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
  * Phase 7 smoke — OpenAI `/v1` passthrough plus the Codex-specific
- * `/v1/responses` capture under the daemon boot path.
+ * ChatGPT `/backend-api/codex/responses` capture under the daemon boot path.
  *
- * Boots `runDaemon` with `@hypaware/ai-gateway` activated and an
- * `openai`-named upstream rooted at `/v1`. Two requests run through
- * it:
+ * Boots `runDaemon` with `@hypaware/ai-gateway` activated and
+ * OpenAI plus ChatGPT Codex upstreams. Two requests run through it:
  *
  *   - `POST /v1/chat/completions` — the legacy OpenAI Chat path, a
  *     proxy of every non-streaming inference call.
- *   - `POST /v1/responses` — the OpenAI Responses API endpoint Codex
- *     uses; the response is an SSE stream so the recorder also
- *     exercises the `is_sse=true` / `stream_event_count>0` columns.
+ *   - `POST /backend-api/codex/responses` — the ChatGPT endpoint Codex
+ *     Desktop uses; the response is an SSE stream so the recorder also
+ *     exercises the `is_sse=true` / `stream_event_count>0` columns and
+ *     Codex metadata projection.
  *
  * Bead `hy-bbyi` assertions:
  *
  *   - Four normalized rows land in `ai_gateway_messages` filterable by
  *     `dev_run_id`: user+assistant for chat completions and user+assistant
- *     for Responses.
- *   - The `/v1/responses` rows carry `is_sse=true` and a positive
- *     `stream_event_count` under `attributes.gateway`.
+ *     for Codex Responses.
+ *   - The `/backend-api/codex/responses` rows carry `is_sse=true`, a
+ *     positive `stream_event_count` under `attributes.gateway`, and
+ *     Codex turn metadata projected into first-class columns.
  *   - Daemon self-telemetry (`source.start`, `sink.tick`,
  *     `cache.append`, `daemon.shutdown`) is present in JSONL.
  *
@@ -57,10 +58,11 @@ export async function run({ harness, expect }) {
           listen: '127.0.0.1:0',
           upstreams: [
             // `path_prefix: '/v1'` is the same value `@hypaware/codex`
-            // registers via `registerUpstreamPreset()` in production —
-            // matches `/v1/chat/completions`, `/v1/responses`, and any
-            // other Responses-API path Codex emits.
+            // registers for API-key mode in production.
             { name: 'openai', base_url: openai.url, path_prefix: '/v1', provider: 'openai' },
+            // `path_prefix: '/backend-api/codex'` is the same ChatGPT-auth
+            // route `@hypaware/codex` registers in production.
+            { name: 'chatgpt', base_url: openai.url, path_prefix: '/backend-api/codex', provider: 'chatgpt' },
           ],
         },
       },
@@ -95,16 +97,47 @@ export async function run({ harness, expect }) {
   const chatResp = await postJson(`${gatewayUrl}/v1/chat/completions`, harness.devRunId, chatBody)
   expect.that('gateway: /v1/chat/completions returned 200', chatResp.statusCode, (v) => v === 200)
 
-  // ----- 2. Streaming /v1/responses (the Codex contract path) -----
+  // ----- 2. Streaming /backend-api/codex/responses (the Codex contract path) -----
+  const codexWorkspace = '/Users/phil/workspace/hypaware'
+  const codexThreadId = `thread-${harness.devRunId}`
+  const codexSessionId = `session-${harness.devRunId}`
+  const codexTurnId = `turn-${harness.devRunId}`
   const responsesBody = JSON.stringify({
     model: 'gpt-5-codex',
     input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
     stream: true,
   })
-  const responsesResp = await postJson(`${gatewayUrl}/v1/responses`, harness.devRunId, responsesBody)
-  expect.that('gateway: /v1/responses returned 200', responsesResp.statusCode, (v) => v === 200)
+  const responsesResp = await postJson(
+    `${gatewayUrl}/backend-api/codex/responses`,
+    harness.devRunId,
+    responsesBody,
+    {
+      'thread-id': codexThreadId,
+      'session-id': codexSessionId,
+      'x-client-request-id': `client-request-${harness.devRunId}`,
+      originator: 'Codex Desktop',
+      'user-agent': 'Codex Desktop/0.133.0-alpha.1',
+      'x-codex-window-id': `window-${harness.devRunId}`,
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: codexSessionId,
+        thread_id: codexThreadId,
+        thread_source: 'user',
+        turn_id: codexTurnId,
+        workspaces: {
+          [codexWorkspace]: {
+            associated_remote_urls: { origin: 'https://github.com/hyparam/hypaware.git' },
+            latest_git_commit_hash: '072b240f2c82e15de26022a8b9bb29e13be826a9',
+            has_changes: true,
+          },
+        },
+        sandbox: 'seatbelt',
+        turn_started_at_unix_ms: 1779476507669,
+      }),
+    }
+  )
+  expect.that('gateway: /backend-api/codex/responses returned 200', responsesResp.statusCode, (v) => v === 200)
   expect.that(
-    'gateway: /v1/responses body looks like an SSE stream',
+    'gateway: /backend-api/codex/responses body looks like an SSE stream',
     responsesResp.body,
     (v) => typeof v === 'string' && v.includes('data: ') && v.includes('response.completed'),
   )
@@ -122,10 +155,22 @@ export async function run({ harness, expect }) {
       model,
       role,
       content_text,
+      conversation_id,
+      cwd,
+      client_version,
+      entrypoint,
+      user_type,
+      permission_mode,
+      is_sidechain,
+      request_id,
+      prompt_id,
       JSON_VALUE(attributes, '$.gateway.path') as path,
       JSON_VALUE(attributes, '$.gateway.status_code') as status_code,
       JSON_VALUE(attributes, '$.gateway.is_sse') as is_sse,
-      JSON_VALUE(attributes, '$.gateway.stream_event_count') as stream_event_count
+      JSON_VALUE(attributes, '$.gateway.stream_event_count') as stream_event_count,
+      JSON_VALUE(attributes, '$.codex.thread_id') as codex_thread_id,
+      JSON_VALUE(attributes, '$.codex.workspace') as codex_workspace,
+      JSON_VALUE(attributes, '$.codex.git_origin_url') as codex_git_origin_url
     from ai_gateway_messages
     where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
     order by message_created_at, message_index, part_index
@@ -148,11 +193,16 @@ export async function run({ harness, expect }) {
   )
 
   const chatRows = rows.filter((r) => r.path === '/v1/chat/completions')
-  const responseRows = rows.filter((r) => r.path === '/v1/responses')
+  const responseRows = rows.filter((r) => r.path === '/backend-api/codex/responses')
   expect.that(
-    'query: all rows carry provider=openai',
-    rows.map((r) => r.provider),
-    (v) => Array.isArray(v) && v.length === 4 && v.every((provider) => provider === 'openai'),
+    'query: /v1/chat/completions rows carry provider=openai',
+    chatRows.map((r) => r.provider),
+    (v) => Array.isArray(v) && v.length === 2 && v.every((provider) => provider === 'openai'),
+  )
+  expect.that(
+    'query: /backend-api/codex/responses rows carry provider=chatgpt',
+    responseRows.map((r) => r.provider),
+    (v) => Array.isArray(v) && v.length === 2 && v.every((provider) => provider === 'chatgpt'),
   )
   expect.that(
     'query: /v1/chat/completions has user and assistant rows',
@@ -165,19 +215,37 @@ export async function run({ harness, expect }) {
     (v) => v.length === 2 && v.every((r) => Number(r.status_code) === 200 && (r.is_sse === false || r.is_sse === 0 || r.is_sse === 'false')),
   )
   expect.that(
-    'query: /v1/responses has user and assistant rows',
+    'query: /backend-api/codex/responses has user and assistant rows',
     responseRows.map((r) => r.role).sort(),
     (v) => Array.isArray(v) && v.join(',') === 'assistant,user',
   )
   expect.that(
-    'query: /v1/responses rows have is_sse=true',
+    'query: /backend-api/codex/responses rows have is_sse=true',
     responseRows,
     (v) => v.length === 2 && v.every((r) => r.is_sse === true || r.is_sse === 1 || r.is_sse === 'true'),
   )
   expect.that(
-    'query: /v1/responses rows have stream_event_count > 0',
+    'query: /backend-api/codex/responses rows have stream_event_count > 0',
     responseRows,
     (v) => v.length === 2 && v.every((r) => Number(r.stream_event_count) > 0),
+  )
+  expect.that(
+    'query: /backend-api/codex/responses rows have projected Codex columns',
+    responseRows,
+    (v) => v.length === 2 && v.every((r) =>
+      r.conversation_id === codexThreadId &&
+      r.cwd === codexWorkspace &&
+      r.client_version === '0.133.0-alpha.1' &&
+      r.entrypoint === 'Codex Desktop' &&
+      r.user_type === 'user' &&
+      r.permission_mode === 'seatbelt' &&
+      (r.is_sidechain === false || r.is_sidechain === 0 || r.is_sidechain === 'false') &&
+      r.request_id === 'oai-request-codex-smoke' &&
+      r.prompt_id === codexTurnId &&
+      r.codex_thread_id === codexThreadId &&
+      r.codex_workspace === codexWorkspace &&
+      r.codex_git_origin_url === 'https://github.com/hyparam/hypaware.git'
+    ),
   )
 
   // ----- Daemon-self-telemetry assertions -----
@@ -221,8 +289,8 @@ export async function run({ harness, expect }) {
     (rows) => rows.length === 2,
   )
   expect.that(
-    'logs: aigw.exchange for /v1/responses carries is_sse=true',
-    exchangeLogs.find((/** @type {any} */ l) => l.attributes?.path === '/v1/responses')?.attributes?.is_sse,
+    'logs: aigw.exchange for /backend-api/codex/responses carries is_sse=true',
+    exchangeLogs.find((/** @type {any} */ l) => l.attributes?.path === '/backend-api/codex/responses')?.attributes?.is_sse,
     (v) => v === true,
   )
 }
@@ -236,11 +304,13 @@ export async function run({ harness, expect }) {
  * exercises:
  *
  *   - `POST /chat/completions` — non-streaming JSON response.
- *   - `POST /responses`        — SSE stream with three events ending in
+ *   - `POST /responses` and `/backend-api/codex/responses`
+ *                              — SSE stream with three events ending in
  *                                `response.completed`.
  *
- * The proxy prefix `/v1` is consumed by the gateway's path matcher;
- * the upstream sees `/chat/completions` and `/responses`.
+ * The fake upstream accepts both the OpenAI `/v1` paths and the
+ * ChatGPT Codex backend path because the gateway preserves the
+ * request path when forwarding.
  *
  * @returns {Promise<{ url: string, close: () => Promise<void> }>}
  */
@@ -253,10 +323,15 @@ async function startOpenAiUpstream() {
     }
     req.resume()
     req.on('end', () => {
-      if (req.url === '/v1/responses' || req.url === '/responses') {
+      if (
+        req.url === '/v1/responses' ||
+        req.url === '/responses' ||
+        req.url === '/backend-api/codex/responses'
+      ) {
         res.writeHead(200, {
           'content-type': 'text/event-stream',
           'cache-control': 'no-cache',
+          'x-oai-request-id': 'oai-request-codex-smoke',
         })
         res.write('event: response.created\ndata: {"id":"resp_1","status":"in_progress"}\n\n')
         res.write('event: response.output_text.delta\ndata: {"delta":"ok"}\n\n')
@@ -300,9 +375,10 @@ async function startOpenAiUpstream() {
  * @param {string} url
  * @param {string} runId
  * @param {string} body
+ * @param {Record<string, string>} [extraHeaders]
  * @returns {Promise<{ statusCode: number, body: string }>}
  */
-function postJson(url, runId, body) {
+function postJson(url, runId, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url)
     const req = http.request(
@@ -315,6 +391,7 @@ function postJson(url, runId, body) {
           'content-type': 'application/json',
           'content-length': String(Buffer.byteLength(body)),
           'x-hyp-dev-run-id': runId,
+          ...extraHeaders,
         },
       },
       (res) => {

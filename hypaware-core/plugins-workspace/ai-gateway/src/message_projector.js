@@ -146,12 +146,19 @@ export function createAiGatewayMessageProjector(opts) {
           conversation_source: projection.conversation_source,
           cwd: projection.cwd,
           git_branch: projection.git_branch,
-          claude_version: projection.claude_version,
+          client_version: projection.client_version,
+          client_name: projection.client_name,
+          entrypoint: projection.entrypoint,
+          user_type: projection.user_type,
+          permission_mode: projection.permission_mode,
+          is_sidechain: projection.is_sidechain,
           user_id: projection.user_id,
           provider: projection.provider,
           model: projection.model,
           system_text: projection.system_text,
           tools: projection.tools,
+          request_id: projection.request_id,
+          prompt_id: projection.prompt_id,
           message_index: i,
           previous_message_id: [...conversationMessageIds],
           message_created_at: projection.ts_start,
@@ -175,7 +182,10 @@ export function createAiGatewayMessageProjector(opts) {
           row.date = utcDate(row.message_created_at)
           row.session_id = projection.session_id
           row.content = content
-          row.attributes = mergeJsonObjects(row.attributes, gatewayAttributes)
+          row.attributes = mergeJsonObjects(
+            mergeJsonObjects(row.attributes, projection.attributes),
+            gatewayAttributes
+          )
 
           /** @type {Record<string, unknown>} */
           let enriched = row
@@ -212,14 +222,15 @@ function buildProjection(exchange) {
   if (!isPlainObject(reqBody)) return undefined
   const requestPath = stringValue(exchange.path) ?? stringValue(readPath(exchange, ['request', 'path'])) ?? ''
   const provider = resolveProvider(exchange, reqBody, requestPath)
+  const codexContext = resolveCodexContext(exchange, provider, requestPath, resolveRecordedCwd(reqBody, exchange))
   const responseBody = parseMaybeJson(readRawResponseBody(exchange))
   const ts_start = stringValue(exchange.ts_start) ?? new Date().toISOString()
   const messages = messagesForProvider(provider, requestPath, reqBody, responseBody, exchange)
   if (messages.length === 0) return undefined
 
-  const conversation_id = resolveConversationId(reqBody, exchange)
-  const session_id = resolveSessionId(reqBody, exchange)
-  const recordedContext = resolveRecordedContext(reqBody, exchange)
+  const conversation_id = resolveConversationId(reqBody, exchange, provider, requestPath, codexContext)
+  const session_id = resolveSessionId(reqBody, exchange, codexContext)
+  const recordedContext = resolveRecordedContext(reqBody, exchange, codexContext)
   return {
     provider,
     conversation_id,
@@ -228,7 +239,15 @@ function buildProjection(exchange) {
     conversation_source: resolveConversationSource(exchange, provider),
     cwd: recordedContext.cwd,
     git_branch: recordedContext.git_branch,
-    claude_version: recordedContext.claude_version,
+    client_version: recordedContext.client_version,
+    client_name: recordedContext.client_name,
+    entrypoint: recordedContext.entrypoint,
+    user_type: recordedContext.user_type,
+    permission_mode: recordedContext.permission_mode,
+    is_sidechain: recordedContext.is_sidechain,
+    request_id: resolveRequestId(exchange, codexContext),
+    prompt_id: codexContext?.turn_id,
+    attributes: codexContext?.attributes ? { codex: codexContext.attributes } : undefined,
     model: resolveModel(reqBody, responseBody),
     system_text: extractSystemText(reqBody.system),
     tools: reqBody.tools,
@@ -496,10 +515,21 @@ function isOpenAiResponsesPath(path) {
 /**
  * @param {Record<string, unknown>} reqBody
  * @param {Record<string, unknown>} exchange
+ * @param {string} provider
+ * @param {string} path
+ * @param {ReturnType<typeof resolveCodexContext>} codexContext
  * @returns {string}
  */
-function resolveConversationId(reqBody, exchange) {
-  const sessionId = resolveSessionId(reqBody, exchange)
+function resolveConversationId(reqBody, exchange, provider, path, codexContext) {
+  if (isCodexExchange(provider, path, exchange)) {
+    const codexConversationId = firstString(
+      codexContext?.thread_id,
+      readHeader(exchange, 'thread-id'),
+      readHeader(exchange, 'session-id')
+    )
+    if (codexConversationId) return codexConversationId
+  }
+  const sessionId = resolveSessionId(reqBody, exchange, codexContext)
   if (sessionId) return sessionId
   const messages = Array.isArray(reqBody.messages) ? reqBody.messages : responsesInputMessages(reqBody.input)
   if (messages.length > 0 && isPlainObject(messages[0])) {
@@ -512,8 +542,13 @@ function resolveConversationId(reqBody, exchange) {
 /**
  * @param {Record<string, unknown>} reqBody
  * @param {Record<string, unknown>} exchange
+ * @param {ReturnType<typeof resolveCodexContext>} [codexContext]
  */
-function resolveSessionId(reqBody, exchange) {
+function resolveSessionId(reqBody, exchange, codexContext) {
+  if (codexContext) {
+    const sessionId = firstString(codexContext.session_id, readHeader(exchange, 'session-id'))
+    if (sessionId) return sessionId
+  }
   return readMetadataSessionId(reqBody) ?? readHeader(exchange, 'x-claude-code-session-id')
 }
 
@@ -559,17 +594,25 @@ function resolveConversationSource(exchange, provider) {
 /**
  * @param {Record<string, unknown>} reqBody
  * @param {Record<string, unknown>} exchange
+ * @param {ReturnType<typeof resolveCodexContext>} [codexContext]
  */
-function resolveRecordedContext(reqBody, exchange) {
+function resolveRecordedContext(reqBody, exchange, codexContext) {
   const meta = readKey(reqBody, 'metadata')
   const userId = isPlainObject(meta) ? parseMaybeJson(meta.user_id) : undefined
+  const claudeVersion = firstString(
+    readStringKey(exchange, 'claude_version'),
+    readStringKey(exchange, 'claudeVersion'),
+    readStringKey(reqBody, 'claude_version'),
+    readStringKey(reqBody, 'claudeVersion'),
+    readStringKey(meta, 'claude_version'),
+    readStringKey(meta, 'claudeVersion'),
+    readStringKey(userId, 'claude_version'),
+    readStringKey(userId, 'claudeVersion'),
+    claudeVersionFromUserAgent(readPath(exchange, ['client', 'user_agent']))
+  )
+  const cwd = firstString(codexContext?.cwd, resolveRecordedCwd(reqBody, exchange))
   return {
-    cwd: firstString(
-      readStringKey(exchange, 'cwd'),
-      readStringKey(reqBody, 'cwd'),
-      readStringKey(meta, 'cwd'),
-      readStringKey(userId, 'cwd')
-    ),
+    cwd,
     git_branch: firstString(
       readStringKey(exchange, 'git_branch'),
       readStringKey(exchange, 'gitBranch'),
@@ -580,17 +623,142 @@ function resolveRecordedContext(reqBody, exchange) {
       readStringKey(userId, 'git_branch'),
       readStringKey(userId, 'gitBranch')
     ),
-    claude_version: firstString(
-      readStringKey(exchange, 'claude_version'),
-      readStringKey(exchange, 'claudeVersion'),
-      readStringKey(reqBody, 'claude_version'),
-      readStringKey(reqBody, 'claudeVersion'),
-      readStringKey(meta, 'claude_version'),
-      readStringKey(meta, 'claudeVersion'),
-      readStringKey(userId, 'claude_version'),
-      readStringKey(userId, 'claudeVersion'),
-      claudeVersionFromUserAgent(readPath(exchange, ['client', 'user_agent']))
-    ),
+    client_version: firstString(codexContext?.client_version, claudeVersion),
+    client_name: codexContext ? 'codex' : claudeVersion ? 'claude' : undefined,
+    entrypoint: codexContext?.entrypoint,
+    user_type: codexContext?.thread_source,
+    permission_mode: codexContext?.sandbox,
+    is_sidechain: codexContext?.thread_source ? codexContext.thread_source === 'subagent' : undefined,
+  }
+}
+
+/**
+ * @param {Record<string, unknown>} reqBody
+ * @param {Record<string, unknown>} exchange
+ */
+function resolveRecordedCwd(reqBody, exchange) {
+  const meta = readKey(reqBody, 'metadata')
+  const userId = isPlainObject(meta) ? parseMaybeJson(meta.user_id) : undefined
+  return firstString(
+    readStringKey(exchange, 'cwd'),
+    readStringKey(reqBody, 'cwd'),
+    readStringKey(meta, 'cwd'),
+    readStringKey(userId, 'cwd')
+  )
+}
+
+/**
+ * @param {Record<string, unknown>} exchange
+ * @param {ReturnType<typeof resolveCodexContext>} codexContext
+ */
+function resolveRequestId(exchange, codexContext) {
+  if (!codexContext) return undefined
+  return readResponseHeader(exchange, 'x-oai-request-id') ?? readHeader(exchange, 'x-client-request-id')
+}
+
+/**
+ * @param {Record<string, unknown>} exchange
+ * @param {string} provider
+ * @param {string} path
+ * @param {string | undefined} preferredCwd
+ */
+function resolveCodexContext(exchange, provider, path, preferredCwd) {
+  if (!isCodexExchange(provider, path, exchange)) return undefined
+  const metadata = readCodexTurnMetadata(exchange)
+  const userAgent = readHeader(exchange, 'user-agent') ?? stringValue(readPath(exchange, ['client', 'user_agent']))
+  const client = codexClientFromUserAgent(userAgent)
+  const workspace = selectCodexWorkspace(metadata, preferredCwd)
+  const workspaceInfo = workspace?.info
+  const remoteUrls = isPlainObject(workspaceInfo?.associated_remote_urls)
+    ? workspaceInfo.associated_remote_urls
+    : undefined
+  const thread_id = firstString(readStringKey(metadata, 'thread_id'), readHeader(exchange, 'thread-id'))
+  const session_id = firstString(readStringKey(metadata, 'session_id'), readHeader(exchange, 'session-id'))
+  const turn_id = readStringKey(metadata, 'turn_id')
+  const thread_source = readStringKey(metadata, 'thread_source')
+  const originator = firstString(readHeader(exchange, 'originator'), client.entrypoint)
+  const sandbox = readStringKey(metadata, 'sandbox')
+  const turn_started_at_unix_ms = numberValue(readKey(metadata, 'turn_started_at_unix_ms'))
+  const window_id = readHeader(exchange, 'x-codex-window-id')
+  const git_origin_url = readStringKey(remoteUrls, 'origin')
+  const git_commit = readStringKey(workspaceInfo, 'latest_git_commit_hash')
+  const has_changes = typeof workspaceInfo?.has_changes === 'boolean' ? workspaceInfo.has_changes : undefined
+
+  /** @type {Record<string, unknown>} */
+  const attributes = {}
+  setIfString(attributes, 'thread_id', thread_id)
+  setIfString(attributes, 'session_id', session_id)
+  setIfString(attributes, 'turn_id', turn_id)
+  setIfString(attributes, 'thread_source', thread_source)
+  setIfString(attributes, 'originator', originator)
+  setIfString(attributes, 'window_id', window_id)
+  setIfString(attributes, 'sandbox', sandbox)
+  if (turn_started_at_unix_ms !== undefined) attributes.turn_started_at_unix_ms = turn_started_at_unix_ms
+  setIfString(attributes, 'workspace', workspace?.path)
+  setIfString(attributes, 'git_origin_url', git_origin_url)
+  setIfString(attributes, 'git_commit', git_commit)
+  if (has_changes !== undefined) attributes.has_changes = has_changes
+
+  return {
+    thread_id,
+    session_id,
+    turn_id,
+    thread_source,
+    cwd: workspace?.path,
+    client_version: client.version,
+    entrypoint: originator,
+    sandbox,
+    attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
+  }
+}
+
+/**
+ * @param {string} provider
+ * @param {string} path
+ * @param {Record<string, unknown>} exchange
+ */
+function isCodexExchange(provider, path, exchange) {
+  return provider === 'chatgpt' ||
+    path === '/backend-api/codex/responses' ||
+    path.startsWith('/backend-api/codex/responses/') ||
+    readHeader(exchange, 'x-codex-turn-metadata') !== undefined
+}
+
+/** @param {Record<string, unknown>} exchange */
+function readCodexTurnMetadata(exchange) {
+  const parsed = parseMaybeJson(readHeader(exchange, 'x-codex-turn-metadata'))
+  return isPlainObject(parsed) ? parsed : undefined
+}
+
+/** @param {string | undefined} userAgent */
+function codexClientFromUserAgent(userAgent) {
+  if (typeof userAgent !== 'string') return {}
+  const match = /^([^/]+)\/([^/\s]+)/.exec(userAgent)
+  if (!match) return {}
+  const product = match[1].trim()
+  if (!/^codex(?:\b|[-_\s])/i.test(product)) return {}
+  return {
+    entrypoint: product,
+    version: match[2],
+  }
+}
+
+/**
+ * @param {Record<string, unknown> | undefined} metadata
+ * @param {string | undefined} preferredCwd
+ * @returns {{ path: string, info?: Record<string, unknown> } | undefined}
+ */
+function selectCodexWorkspace(metadata, preferredCwd) {
+  const workspaces = readKey(metadata, 'workspaces')
+  if (!isPlainObject(workspaces)) return undefined
+  const workspacePath = preferredCwd && Object.hasOwn(workspaces, preferredCwd)
+    ? preferredCwd
+    : Object.keys(workspaces).find((key) => key.length > 0)
+  if (!workspacePath) return undefined
+  const info = readKey(workspaces, workspacePath)
+  return {
+    path: workspacePath,
+    info: isPlainObject(info) ? info : undefined,
   }
 }
 
@@ -625,7 +793,11 @@ export function extractMessageParts(exchange, message, ctx) {
   if (content.length === 0) return []
 
   const message_id = computeMessageId(String(ctx.conversation_id), role, content)
-  const attributes = withClientAttributes(extractAttributes(exchange, message), stringValue(ctx.claude_version))
+  const attributes = withClientAttributes(
+    extractAttributes(exchange, message),
+    stringValue(ctx.client_version),
+    stringValue(ctx.client_name)
+  )
   const finishReason = mapFinishReason(stringValue(message.stop_reason))
 
   const base = {
@@ -640,9 +812,15 @@ export function extractMessageParts(exchange, message, ctx) {
     conversation_source: ctx.conversation_source,
     cwd: ctx.cwd,
     git_branch: ctx.git_branch,
-    client_version: ctx.claude_version,
+    client_version: ctx.client_version,
+    entrypoint: ctx.entrypoint,
+    user_type: ctx.user_type,
+    permission_mode: ctx.permission_mode,
+    is_sidechain: ctx.is_sidechain,
     message_id,
     previous_message_id: ctx.previous_message_id,
+    request_id: ctx.request_id,
+    prompt_id: ctx.prompt_id,
     message_index: ctx.message_index,
     message_created_at: ctx.message_created_at,
     role,
@@ -862,13 +1040,19 @@ function extractAttributes(exchange, message) {
 
 /**
  * @param {Record<string, unknown> | undefined} attributes
- * @param {string | undefined} claudeVersion
+ * @param {string | undefined} clientVersion
+ * @param {string | undefined} clientName
  */
-function withClientAttributes(attributes, claudeVersion) {
-  if (!claudeVersion) return attributes
+function withClientAttributes(attributes, clientVersion, clientName) {
+  if (!clientVersion) return attributes
   const out = attributes ? { ...attributes } : {}
   const client = isPlainObject(out.client) ? { ...out.client } : {}
-  client.claude_version = claudeVersion
+  if (clientName === 'claude') {
+    client.claude_version = clientVersion
+  } else {
+    client.version = clientVersion
+    if (clientName) client.name = clientName
+  }
   out.client = client
   return out
 }
@@ -962,6 +1146,17 @@ function readStreamEvents(exchange) {
 /** @param {unknown} exchange @param {string} name */
 function readHeader(exchange, name) {
   const headers = parseMaybeJson(readKey(exchange, 'request_headers')) ?? readPath(exchange, ['request', 'headers'])
+  return readHeaderValue(headers, name)
+}
+
+/** @param {unknown} exchange @param {string} name */
+function readResponseHeader(exchange, name) {
+  const headers = parseMaybeJson(readKey(exchange, 'response_headers')) ?? readPath(exchange, ['response', 'headers'])
+  return readHeaderValue(headers, name)
+}
+
+/** @param {unknown} headers @param {string} name */
+function readHeaderValue(headers, name) {
   if (!isPlainObject(headers)) return undefined
   const wanted = name.toLowerCase()
   for (const [key, value] of Object.entries(headers)) {
@@ -991,6 +1186,11 @@ function firstString(...values) {
 function readStringKey(obj, key) {
   const value = readKey(obj, key)
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** @param {Record<string, unknown>} target @param {string} key @param {string | undefined} value */
+function setIfString(target, key, value) {
+  if (value !== undefined) target[key] = value
 }
 
 /**
