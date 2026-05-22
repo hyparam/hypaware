@@ -170,13 +170,14 @@ function buildCoreCommands() {
     {
       name: 'attach',
       summary: 'Attach an AI client to the local gateway',
-      usage: 'hyp attach --client <name> [--dry-run] [--json] [--yes]',
+      usage: 'hyp attach [client] [--client <name>] [--dry-run] [--json] [--yes]',
       run: runAttach,
     },
     {
       name: 'detach',
       summary: 'Detach an AI client from the local gateway',
-      usage: 'hyp detach --client <name> [--dry-run] [--json]',
+      usage: 'hyp detach [client] [--client <name>] [--dry-run] [--json]',
+      aliases: ['unattach'],
       run: runDetach,
     },
     {
@@ -2161,7 +2162,7 @@ function isTty(stream) {
 }
 
 /**
- * `hyp attach --client <name> [--yes]`
+ * `hyp attach [client] [--client <name>] [--yes]`
  *
  * Resolves the `hypaware.ai-gateway` capability, looks up the named
  * client adapter, and dispatches to the adapter's `attach()`. Each
@@ -2177,7 +2178,7 @@ async function runAttach(argv, ctx) {
 }
 
 /**
- * `hyp detach --client <name>`
+ * `hyp detach [client] [--client <name>]`
  *
  * Resolves the gateway capability, looks up the named client, and
  * dispatches to its `detach()`. `detach()` is invoked with the
@@ -2347,13 +2348,35 @@ function endpointFromListen(listen) {
 }
 
 /**
- * Parse `--client <name>`, `--yes` / `-y`, `--dry-run`, and `--json`
- * from argv.
+ * Parse an optional positional client name plus `--client <name>`,
+ * `--yes` / `-y`, `--dry-run`, and `--json` from argv.
  * @param {string[]} argv
  */
 function parseClientArgs(argv) {
   /** @type {{ client: string, yes: boolean, dryRun: boolean, json: boolean, error?: string }} */
   const r = { client: 'claude', yes: false, dryRun: false, json: false }
+  /** @type {string | undefined} */
+  let requestedClient
+  /**
+   * @param {string | undefined} value
+   * @param {'--client'|'positional'} source
+   * @returns {boolean}
+   */
+  function setClient(value, source) {
+    if (!value || value.startsWith('-')) {
+      r.error = source === '--client'
+        ? '--client requires a name'
+        : 'client name is required'
+      return false
+    }
+    if (requestedClient && requestedClient !== value) {
+      r.error = `client specified multiple times (${requestedClient}, ${value})`
+      return false
+    }
+    requestedClient = value
+    r.client = value
+    return true
+  }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--yes' || arg === '-y') {
@@ -2370,8 +2393,11 @@ function parseClientArgs(argv) {
     }
     if (arg === '--client' || arg.startsWith('--client=')) {
       const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
-      if (!value) { r.error = '--client requires a name'; return r }
-      r.client = value
+      if (!setClient(value, '--client')) return r
+      continue
+    }
+    if (!arg.startsWith('-')) {
+      if (!setClient(arg, 'positional')) return r
       continue
     }
     r.error = `unknown argument: ${arg}`
