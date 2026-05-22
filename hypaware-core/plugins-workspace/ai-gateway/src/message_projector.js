@@ -2,15 +2,14 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayMessageEnricher} AiGatewayMessageEnricher */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayMessageEnricherContext} AiGatewayMessageEnricherContext */
 
 /**
- * Exact Collectivus `proxy_messages` query schema, exposed under
- * HypAware's `ai_gateway_messages` dataset name.
+ * HypAware's normalized AI gateway message-part query schema.
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */
@@ -33,7 +32,7 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'permission_mode', type: 'STRING', nullable: true },
   { name: 'is_sidechain', type: 'BOOLEAN', nullable: true },
   { name: 'message_id', type: 'STRING', nullable: false },
-  { name: 'previous_message_id', type: 'STRING', nullable: true },
+  { name: 'previous_message_id', type: 'JSON', nullable: true },
   { name: 'provider_uuid', type: 'STRING', nullable: true },
   { name: 'parent_uuid', type: 'STRING', nullable: true },
   { name: 'logical_parent_uuid', type: 'STRING', nullable: true },
@@ -84,6 +83,8 @@ export function createAiGatewayMessageProjector(opts) {
   const seenMessages = new Map()
   /** @type {Map<string, unknown>} */
   const conversationStartedAt = new Map()
+  /** @type {Map<string, string[]>} */
+  const messageIdsByConversation = new Map()
   /** @type {Map<string, Map<string, { tool_name?: string, conversation_id: string }>>} */
   const toolCallLookupByConversation = new Map()
 
@@ -112,11 +113,19 @@ export function createAiGatewayMessageProjector(opts) {
         conversationLookup = new Map()
         toolCallLookupByConversation.set(projection.conversation_id, conversationLookup)
       }
+      let conversationMessageIds = messageIdsByConversation.get(projection.conversation_id)
+      if (!conversationMessageIds) {
+        conversationMessageIds = []
+        messageIdsByConversation.set(projection.conversation_id, conversationMessageIds)
+      }
 
       /** @type {Record<string, unknown>[]} */
       const rows = []
-      /** @type {string | undefined} */
-      let previous_message_id
+      /** @param {string} messageId */
+      const rememberConversationMessage = (messageId) => {
+        if (conversationMessageIds.includes(messageId)) return
+        conversationMessageIds.push(messageId)
+      }
 
       for (let i = 0; i < projection.messages.length; i++) {
         const message = projection.messages[i]
@@ -127,7 +136,7 @@ export function createAiGatewayMessageProjector(opts) {
 
         const message_id = computeMessageId(projection.conversation_id, role, content)
         if (seenMessages.has(message_id)) {
-          previous_message_id = message_id
+          rememberConversationMessage(message_id)
           continue
         }
 
@@ -144,7 +153,7 @@ export function createAiGatewayMessageProjector(opts) {
           system_text: projection.system_text,
           tools: projection.tools,
           message_index: i,
-          previous_message_id,
+          previous_message_id: [...conversationMessageIds],
           message_created_at: projection.ts_start,
           tool_call_lookup: conversationLookup,
         }
@@ -187,7 +196,7 @@ export function createAiGatewayMessageProjector(opts) {
           conversation_id: projection.conversation_id,
           message_index: i,
         })
-        previous_message_id = message_id
+        rememberConversationMessage(message_id)
       }
 
       return rows

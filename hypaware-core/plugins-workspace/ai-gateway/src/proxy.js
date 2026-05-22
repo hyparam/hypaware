@@ -11,6 +11,7 @@ import { parseListen } from './config.js'
 /** @typedef {import('node:http').ServerResponse} ServerResponse */
 /** @typedef {import('node:http').IncomingHttpHeaders} IncomingHttpHeaders */
 /** @typedef {import('node:http').OutgoingHttpHeaders} OutgoingHttpHeaders */
+/** @typedef {{ cwd?: string, git_branch?: string }} ClaudeSessionContext */
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to one
@@ -27,6 +28,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ])
 
+const SESSION_CONTEXT_PATH = '/_hypaware/session-context'
+const SESSION_CONTEXT_MAX_BYTES = 64 * 1024
+
 /**
  * @typedef {Object} CompiledUpstream
  * @property {string} name
@@ -38,7 +42,7 @@ const HOP_BY_HOP_HEADERS = new Set([
  * @property {string} listen
  * @property {UpstreamConfig[]} upstreams
  * @property {(exchange: Exchange) => void | Promise<void>} onExchangeFinished
- * @property {(init: { upstream: string, provider: string | undefined, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders }) => Exchange} startExchange
+ * @property {(init: { upstream: string, provider: string | undefined, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders, localContextForRequest?: (body: string) => (ClaudeSessionContext | undefined) }) => Exchange} startExchange
  *
  * @typedef {Object} StartedProxy
  * @property {string} host
@@ -69,9 +73,11 @@ export async function startProxy(opts) {
   }
   /** @type {Set<Promise<void>>} */
   const pendingFinalizers = new Set()
+  /** @type {Map<string, ClaudeSessionContext>} */
+  const sessionContexts = new Map()
 
   const server = http.createServer((req, res) => {
-    handleRequest(upstreams, opts, pendingFinalizers, req, res)
+    handleRequest(upstreams, opts, pendingFinalizers, sessionContexts, req, res)
   })
 
   /** @type {(value: void) => void} */
@@ -116,12 +122,17 @@ export async function startProxy(opts) {
  * @param {CompiledUpstream[]} upstreams
  * @param {ProxyOptions} opts
  * @param {Set<Promise<void>>} pendingFinalizers
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
+function handleRequest(upstreams, opts, pendingFinalizers, sessionContexts, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
+  if (parsedUrl.pathname === SESSION_CONTEXT_PATH) {
+    handleSessionContext(sessionContexts, req, res)
+    return
+  }
   const upstream = matchUpstream(upstreams, parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
@@ -143,6 +154,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     method: req.method,
     path: requestUrl,
     requestHeaders: req.headers,
+    localContextForRequest: (body) => localContextForRequest(req.headers, body, sessionContexts),
   })
 
   let upstreamEnded = false
@@ -216,6 +228,105 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
 
   req.on('data', (chunk) => exchange.appendRequestChunk(chunk))
   req.pipe(upstreamReq)
+}
+
+/**
+ * Local-only endpoint used by Claude Code hooks installed by
+ * `hyp attach --client claude`. The hook posts `{ session_id, cwd,
+ * git_branch }`; later Messages API exchanges with the same Claude
+ * session id are enriched before row projection.
+ *
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
+ * @param {IncomingMessage} req
+ * @param {ServerResponse} res
+ */
+function handleSessionContext(sessionContexts, req, res) {
+  if (!isLoopback(req.socket.remoteAddress)) {
+    req.resume()
+    sendJson(res, 403, { error: 'session context endpoint is local-only' })
+    return
+  }
+  if (req.method !== 'POST') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', 'allow': 'POST' })
+    res.end(JSON.stringify({ error: 'method not allowed' }))
+    return
+  }
+
+  /** @type {Buffer[]} */
+  const chunks = []
+  let bytes = 0
+  let tooLarge = false
+  req.on('data', (chunk) => {
+    bytes += chunk.byteLength
+    if (bytes > SESSION_CONTEXT_MAX_BYTES) {
+      tooLarge = true
+      req.destroy()
+      return
+    }
+    chunks.push(Buffer.from(chunk))
+  })
+  req.on('end', () => {
+    if (tooLarge) return
+    let payload
+    try {
+      payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' })
+      return
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      sendJson(res, 400, { error: 'body must be an object' })
+      return
+    }
+    const obj = /** @type {Record<string, unknown>} */ (payload)
+    const sessionId = stringValue(obj.session_id)
+    if (!sessionId) {
+      sendJson(res, 400, { error: 'session_id is required' })
+      return
+    }
+    const cwd = stringValue(obj.cwd) ?? stringValue(obj.new_cwd)
+    const gitBranch = stringValue(obj.git_branch) ?? stringValue(obj.gitBranch)
+    sessionContexts.set(sessionId, {
+      ...(cwd ? { cwd } : {}),
+      ...(gitBranch ? { git_branch: gitBranch } : {}),
+    })
+    sendJson(res, 200, { ok: true })
+  })
+  req.on('error', () => {
+    if (!res.headersSent) sendJson(res, 400, { error: 'failed to read request body' })
+  })
+}
+
+/**
+ * @param {IncomingHttpHeaders} headers
+ * @param {string} body
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
+ * @returns {ClaudeSessionContext | undefined}
+ */
+function localContextForRequest(headers, body, sessionContexts) {
+  const sessionId = sessionIdFromBody(body) ?? headerValue(headers, 'x-claude-code-session-id')
+  if (!sessionId) return undefined
+  return sessionContexts.get(sessionId)
+}
+
+/**
+ * @param {string} body
+ * @returns {string | undefined}
+ */
+function sessionIdFromBody(body) {
+  let parsed
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return undefined
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const meta = /** @type {Record<string, unknown>} */ (parsed).metadata
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined
+  const decoded = parseMaybeJson(/** @type {Record<string, unknown>} */ (meta).user_id)
+  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return undefined
+  return stringValue(/** @type {Record<string, unknown>} */ (decoded).session_id)
 }
 
 /**
@@ -372,6 +483,50 @@ function sanitizeResponseHeaders(headers) {
     out[key] = value
   }
   return out
+}
+
+/**
+ * @param {IncomingHttpHeaders} headers
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function headerValue(headers, name) {
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue
+    if (typeof value === 'string' && value.length > 0) return value
+    if (Array.isArray(value)) {
+      const found = value.find((entry) => typeof entry === 'string' && entry.length > 0)
+      if (typeof found === 'string') return found
+    }
+  }
+  return undefined
+}
+
+/** @param {unknown} value */
+function parseMaybeJson(value) {
+  if (typeof value !== 'string') return value
+  try { return JSON.parse(value) } catch { return value }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function stringValue(value) {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * @param {string | undefined} address
+ * @returns {boolean}
+ */
+function isLoopback(address) {
+  if (!address) return false
+  return address === '::1' ||
+    address === '127.0.0.1' ||
+    address.startsWith('127.') ||
+    address.startsWith('::ffff:127.')
 }
 
 /**

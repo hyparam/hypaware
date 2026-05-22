@@ -100,10 +100,27 @@ export async function run({ harness, expect }) {
     snapshot.sources.find((s) => s.name === 'ai-gateway')?.details
   )
   const gatewayUrl = `http://${gatewayDetails.host}:${gatewayDetails.port}`
+  const claudeSessionId = `sess-${harness.devRunId}`
+
+  const contextResp = await postJson(
+    `${gatewayUrl}/_hypaware/session-context`,
+    harness.devRunId,
+    JSON.stringify({
+      session_id: claudeSessionId,
+      cwd: harness.tmpDir,
+      git_branch: 'smoke-branch',
+    })
+  )
+  expect.that(
+    'gateway: Claude session context endpoint returned 200',
+    contextResp.statusCode,
+    (v) => v === 200,
+  )
 
   // ----- Issue three exchanges through the daemon's gateway -----
   const okBody = JSON.stringify({
     model: 'claude-3-opus',
+    metadata: { user_id: JSON.stringify({ session_id: claudeSessionId }) },
     messages: [{ role: 'user', content: `ok ${harness.devRunId}` }],
   })
   const okResp = await postJson(`${gatewayUrl}/v1/messages`, harness.devRunId, okBody)
@@ -115,6 +132,7 @@ export async function run({ harness, expect }) {
 
   const failBody = JSON.stringify({
     model: 'claude-3-opus',
+    metadata: { user_id: JSON.stringify({ session_id: claudeSessionId }) },
     messages: [{ role: 'user', content: `fail ${harness.devRunId}` }],
   })
   const failResp = await postJson(`${gatewayUrl}/v1/error`, harness.devRunId, failBody)
@@ -126,6 +144,7 @@ export async function run({ harness, expect }) {
 
   const deadBody = JSON.stringify({
     model: 'claude-3-opus',
+    metadata: { user_id: JSON.stringify({ session_id: claudeSessionId }) },
     messages: [{ role: 'user', content: `dead ${harness.devRunId}` }],
   })
   const deadResp = await postJson(`${gatewayUrl}/v1/dead`, harness.devRunId, deadBody)
@@ -158,7 +177,9 @@ export async function run({ harness, expect }) {
       JSON_VALUE(attributes, '$.gateway.status_code') as status_code,
       JSON_VALUE(attributes, '$.gateway.error') as error,
       JSON_VALUE(attributes, '$.gateway.upstream') as upstream,
-      JSON_VALUE(attributes, '$.gateway.path') as path
+      JSON_VALUE(attributes, '$.gateway.path') as path,
+      cwd,
+      git_branch
     from ai_gateway_messages
     where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
     order by message_created_at
@@ -192,6 +213,13 @@ export async function run({ harness, expect }) {
     'query: ai_gateway_messages has exactly three normalized request rows for the dev_run_id',
     rows,
     (v) => Array.isArray(v) && v.length === 3,
+  )
+  expect.that(
+    'query: every Claude row carries hook-recorded cwd and git_branch',
+    rows.map((r) => [r.cwd, r.git_branch]),
+    (v) => Array.isArray(v) &&
+      v.length === 3 &&
+      v.every(([cwd, gitBranch]) => cwd === harness.tmpDir && gitBranch === 'smoke-branch'),
   )
 
   // The diagnostic fields live under attributes.gateway on each part row.

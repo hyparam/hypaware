@@ -32,6 +32,7 @@ import { registerCoreCommands } from './core_commands.js'
  * @typedef {Object} DispatchOptions
  * @property {NodeJS.WriteStream | { write(chunk: string): unknown }} [stdout]
  * @property {NodeJS.WriteStream | { write(chunk: string): unknown }} [stderr]
+ * @property {NodeJS.ReadStream} [stdin]
  * @property {NodeJS.ProcessEnv} [env]
  * @property {string} [cwd]
  * @property {string} [workspaceDir]   Override the local plugin workspace
@@ -166,6 +167,7 @@ export async function dispatch(argv, opts = {}) {
   const cmdCtx = {
     stdout,
     stderr,
+    stdin: opts.stdin,
     env,
     cwd,
     config: activeConfig,
@@ -236,6 +238,7 @@ export async function dispatch(argv, opts = {}) {
  * @param {{
  *   stdout: NodeJS.WriteStream | { write(chunk: string): unknown },
  *   stderr: NodeJS.WriteStream | { write(chunk: string): unknown },
+ *   stdin?: NodeJS.ReadStream,
  *   env: NodeJS.ProcessEnv,
  *   cwd: string,
  *   registry: ReturnType<typeof createCommandRegistry>,
@@ -247,6 +250,7 @@ async function runCommandByName(name, rest, ctx) {
   return dispatch([name, ...rest], {
     stdout: ctx.stdout,
     stderr: ctx.stderr,
+    stdin: ctx.stdin,
     env: ctx.env,
     cwd: ctx.cwd,
     registry: ctx.registry,

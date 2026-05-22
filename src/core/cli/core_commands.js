@@ -1,7 +1,9 @@
 // @ts-check
 
+import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { promisify } from 'node:util'
 
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -32,6 +34,8 @@ import {
 /** @typedef {ReturnType<typeof import('../registry/commands.js').createCommandRegistry>} CommandRegistryExtended */
 /** @typedef {import('../query/sql.js').RefreshMode} RefreshMode */
 /** @typedef {import('../query/format.js').QueryFormat} QueryFormat */
+
+const execFileAsync = promisify(execFile)
 
 /**
  * Register the V1 core command set onto the supplied registry. These
@@ -2400,13 +2404,16 @@ async function runIgnore(_argv, ctx) {
 }
 
 /**
- * `hyp claude-hook session-context [--port <port>]`
+ * `hyp claude-hook session-context --port <port>`
  *
- * Compatibility shim for Claude Code settings written by the Claude
- * adapter. The richer session-context capture endpoint is not wired in
- * V1 yet, but Claude treats a nonzero hook exit as a blocked user
- * prompt. Keep this command quiet and successful so stale or current
- * managed hook entries never interrupt Claude.
+ * Internal command installed into Claude Code's hook list by the Claude
+ * adapter. Claude sends hook events on stdin; this posts the local
+ * session context to the gateway so later Messages API exchanges can
+ * preserve the working directory in `ai_gateway_messages`.
+ *
+ * Hooks must never interrupt Claude Code. Malformed input, a stopped
+ * gateway, or a git lookup failure all degrade to "no context recorded"
+ * with exit 0.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -2414,8 +2421,122 @@ async function runIgnore(_argv, ctx) {
 async function runClaudeSessionContextHook(argv, ctx) {
   if (argv.includes('--help') || argv.includes('-h')) {
     ctx.stdout.write('usage: hyp claude-hook session-context [--port <port>]\n')
+    return 0
+  }
+  const parsed = parseClaudeSessionContextHookArgs(argv)
+  if (parsed.port === undefined) return 0
+
+  const input = await readHookStdin(ctx.stdin ?? process.stdin)
+  /** @type {Record<string, unknown>} */
+  let event
+  try {
+    const parsedEvent = JSON.parse(input || '{}')
+    event = parsedEvent && typeof parsedEvent === 'object' && !Array.isArray(parsedEvent)
+      ? /** @type {Record<string, unknown>} */ (parsedEvent)
+      : {}
+  } catch {
+    return 0
+  }
+
+  const sessionId = stringValue(event.session_id)
+  const cwd = stringValue(event.new_cwd) ?? stringValue(event.cwd)
+  if (!sessionId || !cwd) return 0
+
+  const gitBranch = await currentGitBranch(cwd)
+  try {
+    await fetch(`http://127.0.0.1:${parsed.port}/_hypaware/session-context`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        cwd,
+        ...(gitBranch ? { git_branch: gitBranch } : {}),
+      }),
+    })
+  } catch {
+    return 0
   }
   return 0
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ port?: number }}
+ */
+function parseClaudeSessionContextHookArgs(argv) {
+  /** @type {{ port?: number }} */
+  const out = {}
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--port' || arg.startsWith('--port=')) {
+      const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
+      if (!value || !/^\d+$/.test(value)) return out
+      const port = Number.parseInt(value, 10)
+      if (port < 1 || port > 65535) return out
+      out.port = port
+    }
+  }
+  return out
+}
+
+/**
+ * @param {NodeJS.ReadStream} stdin
+ * @returns {Promise<string>}
+ */
+function readHookStdin(stdin) {
+  if (stdin.isTTY) return Promise.resolve('')
+  stdin.setEncoding('utf8')
+  return new Promise((resolve) => {
+    let data = ''
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      resolve(value)
+    }
+    const timeout = setTimeout(() => finish(data), 1000)
+    stdin.on('data', (chunk) => { data += chunk })
+    stdin.on('end', () => finish(data))
+    stdin.on('error', () => finish(''))
+  })
+}
+
+/**
+ * @param {string} cwd
+ * @returns {Promise<string | undefined>}
+ */
+async function currentGitBranch(cwd) {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      { timeout: 1000 }
+    )
+    const branch = stdout.trim()
+    if (branch && branch !== 'HEAD') return branch
+  } catch {
+    return undefined
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', cwd, 'rev-parse', '--short', 'HEAD'],
+      { timeout: 1000 }
+    )
+    const commit = stdout.trim()
+    return commit || undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function stringValue(value) {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /**
