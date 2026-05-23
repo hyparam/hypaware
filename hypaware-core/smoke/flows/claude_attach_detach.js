@@ -170,17 +170,19 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/.test(v)
     )
     expect.that(
-      'settings: _hypaware marker has the recorded port and version',
+      'settings: _hypaware marker has the recorded port, version, and state file',
       attached?._hypaware,
       (v) =>
         v !== null &&
         typeof v === 'object' &&
         typeof v.port === 'number' &&
-        v.version === '1.0.0' &&
-        typeof v.attached_at === 'string'
+        v.version === '2.0.0' &&
+        typeof v.attached_at === 'string' &&
+        typeof v.state_file === 'string' &&
+        v.state_file.endsWith('session-context.jsonl')
     )
     expect.that(
-      'settings: SessionStart hook installed and points at hyp claude-hook',
+      'settings: SessionStart hook installed with --state-file pointing at the plugin state dir',
       attached?.hooks?.SessionStart,
       (v) =>
         Array.isArray(v) &&
@@ -188,7 +190,9 @@ export async function run({ harness, expect }) {
         Array.isArray(v[0].hooks) &&
         v[0].hooks[0]?.type === 'command' &&
         typeof v[0].hooks[0]?.command === 'string' &&
-        v[0].hooks[0].command.includes('claude-hook session-context')
+        v[0].hooks[0].command.includes('claude-hook session-context') &&
+        v[0].hooks[0].command.includes('--state-file ') &&
+        v[0].hooks[0].command.includes('session-context.jsonl')
     )
     expect.that(
       'settings: PostToolUse hook scoped to Bash matcher',

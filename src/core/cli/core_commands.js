@@ -189,7 +189,7 @@ function buildCoreCommands() {
     {
       name: 'claude-hook session-context',
       summary: 'Internal Claude Code hook compatibility shim',
-      usage: 'hyp claude-hook session-context [--port <port>]',
+      usage: 'hyp claude-hook session-context --state-file <absolute-path>',
       hidden: true,
       run: runClaudeSessionContextHook,
     },
@@ -571,7 +571,7 @@ function describeDaemon(daemon) {
 function listClientNames(capabilities) {
   if (!capabilities.has('hypaware.ai-gateway')) return []
   /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
-  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^1.0.0')
+  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
   return gateway.listClients().map((c) => c.name).sort()
 }
 
@@ -2259,7 +2259,7 @@ async function runClientLifecycle(action, argv, ctx) {
     return 1
   }
   /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
-  const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^1.0.0')
+  const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
   const clientNames = expandClientName(parsed.client, gateway)
   if (clientNames.length === 0) {
@@ -2449,27 +2449,34 @@ async function runIgnore(_argv, ctx) {
 }
 
 /**
- * `hyp claude-hook session-context --port <port>`
+ * `hyp claude-hook session-context --state-file <absolute-path>`
  *
- * Internal command installed into Claude Code's hook list by the Claude
- * adapter. Claude sends hook events on stdin; this posts the local
- * session context to the gateway so later Messages API exchanges can
- * preserve the working directory in `ai_gateway_messages`.
+ * Internal command installed into Claude Code's hook list by the
+ * `@hypaware/claude` adapter. Claude sends hook events on stdin; this
+ * appends one JSONL record per event to the plugin's session-context
+ * state file. The Claude exchange projector reads the same file when
+ * it projects an Anthropic exchange and recovers `cwd` / `git_branch`
+ * for the row.
  *
- * Hooks must never interrupt Claude Code. Malformed input, a stopped
- * gateway, or a git lookup failure all degrade to "no context recorded"
- * with exit 0.
+ * Phase 2 removed the HTTP `/_hypaware/session-context` channel —
+ * sending session context now lives entirely on disk, so the daemon
+ * does not have to be running for the hook to do its job (the file
+ * is read at projection time, not at hook-fire time).
+ *
+ * Hooks must never interrupt Claude Code. Malformed input, a missing
+ * `--state-file`, a git lookup failure, or a write error all degrade
+ * to "no context recorded" with exit 0.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeSessionContextHook(argv, ctx) {
   if (argv.includes('--help') || argv.includes('-h')) {
-    ctx.stdout.write('usage: hyp claude-hook session-context [--port <port>]\n')
+    ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
     return 0
   }
   const parsed = parseClaudeSessionContextHookArgs(argv)
-  if (parsed.port === undefined) return 0
+  if (!parsed.stateFile) return 0
 
   const input = await readHookStdin(ctx.stdin ?? process.stdin)
   /** @type {Record<string, unknown>} */
@@ -2486,39 +2493,41 @@ async function runClaudeSessionContextHook(argv, ctx) {
   const sessionId = stringValue(event.session_id)
   const cwd = stringValue(event.new_cwd) ?? stringValue(event.cwd)
   if (!sessionId || !cwd) return 0
-
+  const transcriptPath = stringValue(event.transcript_path)
   const gitBranch = await currentGitBranch(cwd)
+
+  /** @type {Record<string, unknown>} */
+  const record = {
+    session_id: sessionId,
+    cwd,
+    ts: new Date().toISOString(),
+  }
+  if (transcriptPath) record.transcript_path = transcriptPath
+  if (gitBranch) record.git_branch = gitBranch
+
   try {
-    await fetch(`http://127.0.0.1:${parsed.port}/_hypaware/session-context`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        cwd,
-        ...(gitBranch ? { git_branch: gitBranch } : {}),
-      }),
-    })
+    await fs.mkdir(path.dirname(parsed.stateFile), { recursive: true })
+    await fs.appendFile(parsed.stateFile, JSON.stringify(record) + '\n', 'utf8')
   } catch {
-    return 0
+    /* hook MUST never throw back into Claude — exit 0 even on write failure */
   }
   return 0
 }
 
 /**
  * @param {string[]} argv
- * @returns {{ port?: number }}
+ * @returns {{ stateFile?: string }}
  */
 function parseClaudeSessionContextHookArgs(argv) {
-  /** @type {{ port?: number }} */
+  /** @type {{ stateFile?: string }} */
   const out = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--port' || arg.startsWith('--port=')) {
-      const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      if (!value || !/^\d+$/.test(value)) return out
-      const port = Number.parseInt(value, 10)
-      if (port < 1 || port > 65535) return out
-      out.port = port
+    if (arg === '--state-file' || arg.startsWith('--state-file=')) {
+      const value = arg === '--state-file' ? argv[++i] : arg.slice('--state-file='.length)
+      if (typeof value === 'string' && value.length > 0 && path.isAbsolute(value)) {
+        out.stateFile = value
+      }
     }
   }
   return out
