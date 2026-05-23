@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "name": "@hypaware/claude",
-  "version": "1.0.0",
-  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset on the local AI gateway, configures Claude Code's settings.json to route through the gateway, enriches ai_gateway_messages with transcript-derived columns, and ships helper skills.",
+  "version": "2.0.0",
+  "description": "Anthropic Claude Code client adapter for HypAware. Registers the Anthropic upstream preset and exchange projector on the local AI gateway, configures Claude Code's settings.json to route through the gateway, writes session-context records into the plugin state directory for the projector to read, and ships helper skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -16,7 +16,7 @@
   ],
   "requires": {
     "capabilities": {
-      "hypaware.ai-gateway": "^1.0.0"
+      "hypaware.ai-gateway": "^2.0.0"
     }
   },
   "contributes": {

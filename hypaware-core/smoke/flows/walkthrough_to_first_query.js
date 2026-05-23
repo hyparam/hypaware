@@ -216,7 +216,7 @@ export async function run({ harness, expect }) {
     const gatewayApi = kernel.capabilities.require(
       '@smoke/walkthrough',
       'hypaware.ai-gateway',
-      '^1.0.0'
+      '^2.0.0'
     )
     const gatewayUrl = gatewayApi.localEndpoint()
 

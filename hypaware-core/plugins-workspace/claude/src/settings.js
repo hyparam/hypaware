@@ -17,8 +17,14 @@ import path from 'node:path'
  * it inserted and is safe to remove.
  *
  * @typedef {Object} ClaudeAttachOptions
- * @property {number} port
+ * @property {number} port           — gateway listener port; written into
+ *                                     `env.ANTHROPIC_BASE_URL`.
  * @property {string} version
+ * @property {string} stateFile      — absolute path to the session-context
+ *                                     JSONL file the managed hook appends to.
+ *                                     Replaces the v1 `--port` argument:
+ *                                     phase 2 moved the session-context
+ *                                     channel from HTTP to a file on disk.
  * @property {string} [settingsPath]
  * @property {string} [binPath]
  * @typedef {{ changed: true, prevValue?: string } | { changed: false }} ClaudeAttachResult
@@ -72,9 +78,10 @@ export function defaultSettingsPath(homeDir) {
  * @returns {Promise<ClaudeAttachResult>}
  */
 export async function attach(opts) {
-  const { port, version, settingsPath = defaultSettingsPath(), binPath = 'hyp' } = opts
+  const { port, version, stateFile, settingsPath = defaultSettingsPath(), binPath = 'hyp' } = opts
   validatePort(port)
   validateVersion(version)
+  validateStateFile(stateFile)
 
   const { value, mtimeMs } = await readSettings(settingsPath)
 
@@ -83,11 +90,12 @@ export async function attach(opts) {
   const prevValue = typeof previous === 'string' ? previous : undefined
 
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`
-  installSessionContextHooks(value, managedHookCommand(binPath, port))
+  installSessionContextHooks(value, managedHookCommand(binPath, stateFile))
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,
     port,
+    state_file: stateFile,
   }
 
   await writeAtomic(settingsPath, value, mtimeMs)
@@ -341,10 +349,10 @@ function isManagedHookHandler(handler) {
 
 /**
  * @param {string} binPath
- * @param {number} port
+ * @param {string} stateFile
  */
-function managedHookCommand(binPath, port) {
-  return `${shellQuote(binPath)} claude-hook session-context --port ${port}`
+function managedHookCommand(binPath, stateFile) {
+  return `${shellQuote(binPath)} claude-hook session-context --state-file ${shellQuote(stateFile)}`
 }
 
 /** @param {string} value */
@@ -397,6 +405,21 @@ function validateVersion(version) {
     throw new ClaudeSettingsError('version must be a non-empty string', {
       code: 'INVALID_VERSION',
     })
+  }
+}
+
+/** @param {unknown} stateFile */
+function validateStateFile(stateFile) {
+  if (typeof stateFile !== 'string' || stateFile.length === 0) {
+    throw new ClaudeSettingsError('stateFile must be a non-empty path', {
+      code: 'INVALID_STATE_FILE',
+    })
+  }
+  if (!path.isAbsolute(stateFile)) {
+    throw new ClaudeSettingsError(
+      `stateFile must be an absolute path, got '${stateFile}'`,
+      { code: 'INVALID_STATE_FILE' }
+    )
   }
 }
 
