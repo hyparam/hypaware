@@ -1,9 +1,11 @@
 // @ts-check
 
-import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import readline from 'node:readline'
+
+export const SESSION_CONTEXT_MAX_BYTES = 1024 * 1024
+export const SESSION_CONTEXT_MAX_RECORDS = 4096
+export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
 
 /**
  * Session-context channel. Phase 2 swapped the HTTP endpoint
@@ -41,38 +43,37 @@ export function defaultSessionContextFile(stateDir) {
  *
  * @param {string} filePath
  * @param {SessionContextRecord} record
+ * @param {{ maxBytes?: number, maxRecords?: number }} [opts]
  * @returns {Promise<void>}
  */
-export async function appendSessionContext(filePath, record) {
+export async function appendSessionContext(filePath, record, opts = {}) {
   if (!record || typeof record.session_id !== 'string' || record.session_id.length === 0) {
     throw new Error('appendSessionContext: session_id is required')
   }
   await fsp.mkdir(path.dirname(filePath), { recursive: true })
   const payload = JSON.stringify(record) + '\n'
   await fsp.appendFile(filePath, payload, 'utf8')
+  await compactSessionContextIfNeeded(filePath, opts)
 }
 
 /**
- * Read every record from the state file. Returns `[]` on missing
- * file. Malformed lines are skipped (best-effort).
+ * Read recent records from the state file. Returns `[]` on missing
+ * file. Malformed lines are skipped (best-effort). Large files are
+ * read from the tail so projection latency stays bounded even when a
+ * long-lived Claude install has accumulated older hook events.
  *
  * @param {string} filePath
+ * @param {{ maxBytes?: number }} [opts]
  * @returns {Promise<SessionContextRecord[]>}
  */
-export async function readSessionContext(filePath) {
+export async function readSessionContext(filePath, opts = {}) {
   /** @type {SessionContextRecord[]} */
   const out = []
-  /** @type {fs.ReadStream} */
-  let stream
+  const raw = await readTail(filePath, positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_READ_TAIL_BYTES)
+  if (!raw) return out
+  const lines = raw.split('\n')
   try {
-    stream = fs.createReadStream(filePath, { encoding: 'utf8' })
-  } catch {
-    return out
-  }
-  stream.on('error', () => {})
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-  try {
-    for await (const line of rl) {
+    for (const line of lines) {
       if (!line) continue
       let parsed
       try { parsed = JSON.parse(line) } catch { continue }
@@ -127,6 +128,76 @@ function recordFrom(value) {
     ts: stringValue(value.ts),
   }
   return record
+}
+
+/**
+ * Keep the append-only session context file bounded. Compaction is
+ * best-effort because the hook must never interrupt Claude Code; the
+ * projector also tail-reads, so a missed compaction does not put
+ * projection back on an unbounded path.
+ *
+ * @param {string} filePath
+ * @param {{ maxBytes?: number, maxRecords?: number }} opts
+ */
+async function compactSessionContextIfNeeded(filePath, opts) {
+  const maxBytes = positiveInt(opts.maxBytes) ?? SESSION_CONTEXT_MAX_BYTES
+  const maxRecords = positiveInt(opts.maxRecords) ?? SESSION_CONTEXT_MAX_RECORDS
+  let stat
+  try {
+    stat = await fsp.stat(filePath)
+  } catch {
+    return
+  }
+  if (stat.size <= maxBytes) return
+
+  const records = await readSessionContext(filePath, {
+    maxBytes: Math.max(maxBytes * 2, SESSION_CONTEXT_READ_TAIL_BYTES),
+  })
+  const keep = records.slice(-maxRecords)
+  let body = keep.map((record) => JSON.stringify(record)).join('\n')
+  if (body.length > 0) body += '\n'
+  while (Buffer.byteLength(body, 'utf8') > maxBytes && keep.length > 1) {
+    keep.shift()
+    body = keep.map((record) => JSON.stringify(record)).join('\n')
+    if (body.length > 0) body += '\n'
+  }
+
+  const tmpPath = `${filePath}.${process.pid}.compact.tmp`
+  await fsp.writeFile(tmpPath, body, 'utf8')
+  await fsp.rename(tmpPath, filePath)
+}
+
+/**
+ * @param {string} filePath
+ * @param {number} maxBytes
+ */
+async function readTail(filePath, maxBytes) {
+  let handle
+  try {
+    handle = await fsp.open(filePath, 'r')
+    const stat = await handle.stat()
+    const length = Math.min(stat.size, maxBytes)
+    const start = Math.max(0, stat.size - length)
+    const buffer = Buffer.alloc(length)
+    await handle.read(buffer, 0, length, start)
+    let text = buffer.toString('utf8')
+    if (start > 0) {
+      const newline = text.indexOf('\n')
+      text = newline === -1 ? '' : text.slice(newline + 1)
+    }
+    return text
+  } catch {
+    return ''
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+/** @param {unknown} value */
+function positiveInt(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined
 }
 
 /** @param {unknown} value */

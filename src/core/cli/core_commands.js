@@ -28,6 +28,9 @@ import {
   decideConfirmation,
   renderConfirmationSummary,
 } from '../plugin_install/confirm.js'
+import {
+  appendSessionContext,
+} from '../../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
@@ -2476,7 +2479,8 @@ async function runClaudeSessionContextHook(argv, ctx) {
     return 0
   }
   const parsed = parseClaudeSessionContextHookArgs(argv)
-  if (!parsed.stateFile) return 0
+  const stateFile = parsed.stateFile ?? (parsed.legacyPort ? legacyClaudeSessionContextFile(ctx.env) : undefined)
+  if (!stateFile) return 0
 
   const input = await readHookStdin(ctx.stdin ?? process.stdin)
   /** @type {Record<string, unknown>} */
@@ -2506,8 +2510,7 @@ async function runClaudeSessionContextHook(argv, ctx) {
   if (gitBranch) record.git_branch = gitBranch
 
   try {
-    await fs.mkdir(path.dirname(parsed.stateFile), { recursive: true })
-    await fs.appendFile(parsed.stateFile, JSON.stringify(record) + '\n', 'utf8')
+    await appendSessionContext(stateFile, /** @type {any} */ (record))
   } catch {
     /* hook MUST never throw back into Claude — exit 0 even on write failure */
   }
@@ -2516,10 +2519,10 @@ async function runClaudeSessionContextHook(argv, ctx) {
 
 /**
  * @param {string[]} argv
- * @returns {{ stateFile?: string }}
+ * @returns {{ stateFile?: string, legacyPort?: number }}
  */
 function parseClaudeSessionContextHookArgs(argv) {
-  /** @type {{ stateFile?: string }} */
+  /** @type {{ stateFile?: string, legacyPort?: number }} */
   const out = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -2528,9 +2531,21 @@ function parseClaudeSessionContextHookArgs(argv) {
       if (typeof value === 'string' && value.length > 0 && path.isAbsolute(value)) {
         out.stateFile = value
       }
+    } else if (arg === '--port' || arg.startsWith('--port=')) {
+      const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
+      const port = typeof value === 'string' ? Number.parseInt(value, 10) : NaN
+      if (Number.isInteger(port) && port > 0 && port <= 65535) out.legacyPort = port
     }
   }
   return out
+}
+
+/** @param {NodeJS.ProcessEnv} env */
+function legacyClaudeSessionContextFile(env) {
+  const home = env.HOME
+  const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
+  if (!hypHome) return undefined
+  return path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'claude', 'session-context.jsonl')
 }
 
 /**

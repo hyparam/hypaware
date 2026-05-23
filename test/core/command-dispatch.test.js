@@ -89,6 +89,46 @@ test('Claude session-context hook ignores events without session context', async
   await assert.rejects(fs.stat(stateFile), { code: 'ENOENT' })
 })
 
+test('legacy Claude session-context hook --port writes the default plugin state file', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-legacy-'))
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(
+    ['claude-hook', 'session-context', '--port', '4388'],
+    {
+      stdout,
+      stderr,
+      stdin: stdinFor({
+        session_id: 'sess-legacy',
+        cwd: '/tmp/not-a-git-repo',
+        transcript_path: '/tmp/sess-legacy.jsonl',
+      }),
+      env: { ...process.env, HYP_HOME: hypHome },
+    }
+  )
+
+  assert.equal(code, 0)
+  assert.equal(stdout.text(), '')
+  assert.equal(stderr.text(), '')
+
+  const stateFile = path.join(
+    hypHome,
+    'hypaware',
+    'plugins',
+    '@hypaware',
+    'claude',
+    'session-context.jsonl'
+  )
+  const contents = await fs.readFile(stateFile, 'utf8')
+  const lines = contents.split('\n').filter((line) => line.length > 0)
+  assert.equal(lines.length, 1)
+  const record = JSON.parse(lines[0])
+  assert.equal(record.session_id, 'sess-legacy')
+  assert.equal(record.cwd, '/tmp/not-a-git-repo')
+  assert.equal(record.transcript_path, '/tmp/sess-legacy.jsonl')
+})
+
 test('hidden Claude hook command is omitted from top-level help', async () => {
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -234,4 +274,3 @@ function stdinFor(value) {
   const body = typeof value === 'string' ? value : JSON.stringify(value)
   return /** @type {NodeJS.ReadStream} */ (Readable.from([body]))
 }
-

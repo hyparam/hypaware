@@ -59,6 +59,10 @@ test('native DAG identity: uuid from JSONL transcript becomes message_id and pro
     assert.equal(userRows[0].provider_uuid, 'u-user-1')
     assert.equal(assistantRows[0].message_id, 'u-assistant-1')
     assert.equal(assistantRows[0].provider_uuid, 'u-assistant-1')
+    assert.equal(userRows[0].part_type, 'text')
+    assert.equal(userRows[0].provider_type, 'user')
+    assert.equal(assistantRows[0].part_type, 'text')
+    assert.equal(assistantRows[0].provider_type, 'assistant')
 
     // Native DAG: assistant.previous_message_id is the parent's uuid.
     assert.deepEqual(assistantRows[0].previous_message_id, ['u-user-1'])

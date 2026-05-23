@@ -170,9 +170,9 @@ async function launchListener(ctx, state, liveState) {
 
 /**
  * Compile the routing table the proxy uses. TOML-config upstreams
- * (operator-set) come first; adapter-registered presets layer on top
- * and override config upstreams with the same `name`. The resulting
- * list is sorted by the proxy at compile time.
+ * are operator-owned and win over adapter presets with the same
+ * `name`; presets fill only missing names. The resulting list is
+ * sorted by the proxy at compile time.
  *
  * Presets without a `match()` and without a `path_prefix` are filtered
  * out — they can never route a request and would only inflate the
@@ -198,7 +198,7 @@ function mergeUpstreams(configUpstreams, state) {
     if (hasPathPrefix) entry.path_prefix = preset.path_prefix
     if (typeof preset.priority === 'number') entry.priority = preset.priority
     if (hasMatch) entry.match = preset.match
-    merged.set(preset.name, entry)
+    if (!merged.has(preset.name)) merged.set(preset.name, entry)
   }
   return Array.from(merged.values())
 }

@@ -74,7 +74,7 @@ export function createCodexExchangeProjector(opts = {}) {
 
       const path = input.path ?? ''
       const provider = resolveProvider(input, reqBody, path)
-      const codexContext = resolveCodexContext(input, provider, path)
+      const codexContext = resolveCodexContext(input, provider, path, reqBody)
       const responseBody = parseMaybeJson(input.response_body)
       const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
       const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
@@ -402,12 +402,15 @@ function responsesAssistantFromStream(streamEvents) {
  * @param {string} provider
  * @param {string} path
  */
-function resolveCodexContext(input, provider, path) {
+function resolveCodexContext(input, provider, path, reqBody) {
   if (!isCodexExchange(input, provider, path)) return undefined
   const metadata = readCodexTurnMetadata(input)
   const userAgent = readHeader(input.request_headers, 'user-agent')
   const client = codexClientFromUserAgent(userAgent)
-  const workspace = selectCodexWorkspace(metadata)
+  const workspace = selectCodexWorkspace(
+    metadata,
+    firstString(readRecordedCwd(reqBody), readStringKey(metadata, 'cwd'))
+  )
   const workspaceInfo = workspace?.info
   const remoteUrls = isPlainObject(workspaceInfo?.associated_remote_urls)
     ? workspaceInfo.associated_remote_urls
@@ -501,10 +504,11 @@ function codexClientFromUserAgent(userAgent) {
  * @param {Record<string, unknown> | undefined} metadata
  * @returns {{ path: string, info?: Record<string, unknown> } | undefined}
  */
-function selectCodexWorkspace(metadata) {
+function selectCodexWorkspace(metadata, cwd) {
   const workspaces = readKey(metadata, 'workspaces')
   if (!isPlainObject(workspaces)) return undefined
-  const workspacePath = Object.keys(workspaces).find((key) => key.length > 0)
+  const workspacePaths = Object.keys(workspaces).filter((key) => key.length > 0)
+  const workspacePath = workspacePaths.find((key) => pathsEqual(key, cwd)) ?? workspacePaths[0]
   if (!workspacePath) return undefined
   const info = readKey(workspaces, workspacePath)
   return {
@@ -586,14 +590,12 @@ function resolveConversationSource(provider) {
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  */
 function resolveRecordedContext(reqBody, codexContext) {
-  const meta = readKey(reqBody, 'metadata')
-  const userIdMeta = isPlainObject(meta) ? parseMaybeJson(meta.user_id) : undefined
   const cwd = firstString(
     codexContext?.cwd,
-    readStringKey(reqBody, 'cwd'),
-    readStringKey(meta, 'cwd'),
-    readStringKey(userIdMeta, 'cwd'),
+    readRecordedCwd(reqBody),
   )
+  const meta = readKey(reqBody, 'metadata')
+  const userIdMeta = isPlainObject(meta) ? parseMaybeJson(meta.user_id) : undefined
   const git_branch = firstString(
     readStringKey(reqBody, 'git_branch'),
     readStringKey(meta, 'git_branch'),
@@ -613,10 +615,35 @@ function resolveRecordedContext(reqBody, codexContext) {
   }
 }
 
+/** @param {Record<string, unknown>} reqBody */
+function readRecordedCwd(reqBody) {
+  const meta = readKey(reqBody, 'metadata')
+  const userIdMeta = isPlainObject(meta) ? parseMaybeJson(meta.user_id) : undefined
+  return firstString(
+    readStringKey(reqBody, 'cwd'),
+    readStringKey(meta, 'cwd'),
+    readStringKey(userIdMeta, 'cwd'),
+  )
+}
+
 /** @param {AiGatewayExchangeInput} input */
 function resolveRequestId(input) {
   return readHeader(input.response_headers, 'x-oai-request-id')
     ?? readHeader(input.request_headers, 'x-client-request-id')
+}
+
+/**
+ * @param {string} candidate
+ * @param {string | undefined} wanted
+ */
+function pathsEqual(candidate, wanted) {
+  if (!wanted) return false
+  return trimTrailingSlash(candidate) === trimTrailingSlash(wanted)
+}
+
+/** @param {string} value */
+function trimTrailingSlash(value) {
+  return value.length > 1 ? value.replace(/\/+$/, '') : value
 }
 
 /**

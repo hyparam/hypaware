@@ -161,6 +161,31 @@ test('defaultSessionContextFile resolves under the plugin state dir', () => {
   assert.equal(defaultSessionContextFile(stateDir), expected)
 })
 
+test('appendSessionContext compacts large state files to recent records', async () => {
+  const env = await stageEnv()
+  try {
+    for (let i = 0; i < 8; i++) {
+      await appendSessionContext(env.stateFile, {
+        session_id: `sess-${i}`,
+        cwd: `/workspace/${i}`,
+        transcript_path: undefined,
+        git_branch: undefined,
+        ts: `2026-05-22T10:00:0${i}.000Z`,
+      }, { maxBytes: 240, maxRecords: 3 })
+    }
+
+    const records = await readSessionContext(env.stateFile)
+    assert.deepEqual(
+      records.map((record) => record.session_id),
+      ['sess-5', 'sess-6', 'sess-7']
+    )
+    assert.equal(pickLatestMatching(records, { sessionId: 'sess-1' }), undefined)
+    assert.equal(pickLatestMatching(records, { sessionId: 'sess-7' })?.cwd, '/workspace/7')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 /**
  * @returns {Promise<{ homeDir: string, hypHome: string, stateFile: string, cleanup: () => Promise<void> }>}
  */

@@ -213,6 +213,40 @@ test('thread_source=subagent flips is_sidechain to true', () => {
   assert.equal(projection.user_type, 'subagent')
 })
 
+test('Codex workspace selection prefers recorded cwd over first metadata key', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const actualWorkspace = '/home/me/actual'
+  const turnMetadata = {
+    thread_id: 'thread-x',
+    workspaces: {
+      '/home/me/other': {
+        associated_remote_urls: { origin: 'git@github.com:acme/other.git' },
+      },
+      [actualWorkspace]: {
+        associated_remote_urls: { origin: 'git@github.com:acme/actual.git' },
+        latest_git_commit_hash: 'abc123',
+      },
+    },
+  }
+
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify(turnMetadata),
+    }),
+    request_body: JSON.stringify({
+      cwd: actualWorkspace,
+      input: 'go',
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.cwd, actualWorkspace)
+  assert.equal(projection.attributes.codex.workspace, actualWorkspace)
+  assert.equal(projection.attributes.codex.git_origin_url, 'git@github.com:acme/actual.git')
+})
+
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
   const projector = createCodexExchangeProjector({ env: {} })
   const projection = /** @type {any} */ (projector.project(exchange({

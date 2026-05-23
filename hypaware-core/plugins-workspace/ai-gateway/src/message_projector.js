@@ -408,7 +408,7 @@ function expandMessageParts(ctx) {
   return ctx.content.map((block, partIndex) => {
     const isLast = partIndex === ctx.content.length - 1
     const blockType = typeof block?.type === 'string' ? block.type : undefined
-    const partType = stringValue(ctx.message.provider_type) ?? mapPartType(blockType)
+    const partType = mapPartType(blockType)
     const toolCallId = extractToolCallId(block)
     const toolName = extractToolName(block, toolCallId, ctx.conversationLookup)
     const row = {
