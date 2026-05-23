@@ -239,7 +239,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
  * @param {string} pathname
  * @param {IncomingHttpHeaders} headers
  */
-function matchUpstream(upstreams, method, pathname, headers) {
+export function matchUpstream(upstreams, method, pathname, headers) {
   const routeInput = buildRouteInput(method, pathname, headers)
   for (const u of upstreams) {
     if (typeof u.match === 'function') {
@@ -297,7 +297,7 @@ export function pathMatchesPrefix(pathname, prefix) {
  * @param {UpstreamConfig[]} upstreams
  * @returns {CompiledUpstream[]}
  */
-function compileUpstreams(upstreams) {
+export function compileUpstreams(upstreams) {
   /** @type {CompiledUpstream[]} */
   const out = []
   let seq = 0
