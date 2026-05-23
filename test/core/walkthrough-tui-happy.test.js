@@ -1,0 +1,183 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { PassThrough } from 'node:stream'
+
+import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+
+/**
+ * Build a PassThrough pair that satisfies the TUI runtime's `isTTY` and
+ * `setRawMode` checks. The runtime never queries any other TTY API, so
+ * the polyfill is intentionally tiny.
+ */
+function makeFakeTty() {
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  Object.defineProperty(stdin, 'isTTY', { value: true })
+  Object.defineProperty(stdout, 'isTTY', { value: true })
+  // @ts-expect-error — PassThrough does not declare setRawMode but the runtime probes for it.
+  stdin.setRawMode = () => {}
+  /** @type {string[]} */
+  const writes = []
+  stdout.on('data', (chunk) => writes.push(String(chunk)))
+  return { stdin, stdout, output: () => writes.join('') }
+}
+
+/**
+ * @param {PassThrough} stdin
+ * @param {string[]} chunks
+ */
+async function feed(stdin, chunks) {
+  for (const c of chunks) {
+    stdin.write(c)
+    await new Promise((r) => setImmediate(r))
+  }
+}
+
+/** Settle several microtask + immediate ticks so the next prompt has
+ * a chance to attach its keypress listener before the next chunk lands.
+ */
+async function settle(ticks = 5) {
+  for (let i = 0; i < ticks; i++) {
+    await new Promise((r) => setImmediate(r))
+  }
+}
+
+test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdout are TTYs', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-happy-'))
+  const io = makeFakeTty()
+  const stderr = makeBuf()
+
+  // Force NO_COLOR so the rendered frames stay simple and the runtime's
+  // ANSI color escapes don't clutter the assertion on output.
+  const prevNoColor = process.env.NO_COLOR
+  process.env.NO_COLOR = '1'
+  // Ensure HYP_NO_TUI is unset so the router picks TUI.
+  const prevNoTui = process.env.HYP_NO_TUI
+  delete process.env.HYP_NO_TUI
+
+  try {
+    const promise = runPickerWalkthrough({
+      capabilities: /** @type {any} */ ({}),
+      stdout: io.stdout,
+      stderr,
+      stdin: io.stdin,
+      env: {
+        HOME: tmp,
+        HYP_HOME: path.join(tmp, '.hyp'),
+      },
+    })
+
+    // Sources prompt (PICKER_SOURCES: claude, codex, raw-anthropic,
+    // raw-openai, otel). Move down twice to land on raw-anthropic,
+    // toggle, then enter.
+    await settle()
+    await feed(io.stdin, ['\x1b[B', '\x1b[B', ' ', '\r'])
+
+    // Exports prompt — empty selection falls through to keep-local.
+    await settle()
+    await feed(io.stdin, ['\r'])
+
+    // Retention prompt — empty buffer + enter accepts the 30-day default.
+    await settle()
+    await feed(io.stdin, ['\r'])
+
+    const result = await promise
+    assert.equal(result.exitCode, 0)
+    assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+    assert.equal(result.exportPicked, 'keep-local')
+    assert.equal(result.retentionDays, 30)
+    assert.deepEqual(result.clientsPicked, [])
+
+    // The config file landed at HYP_HOME and contains the expected sink
+    // shape (none configured for keep-local).
+    const configRaw = await fs.readFile(result.configPath, 'utf8')
+    const config = JSON.parse(configRaw)
+    assert.equal(config.version, 2)
+    assert.equal(config.sinks, undefined)
+    // Wire-through evidence: the TUI rendered the source list at least once.
+    assert.match(io.output(), /capture raw Anthropic API traffic/)
+  } finally {
+    if (prevNoColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = prevNoColor
+    if (prevNoTui === undefined) delete process.env.HYP_NO_TUI
+    else process.env.HYP_NO_TUI = prevNoTui
+  }
+})
+
+test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO_TUI=1', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-fallback-'))
+  const input = new PassThrough()
+  // Mark BOTH ends as TTYs so the only signal that flips the router is
+  // the HYP_NO_TUI escape. This proves the env override wins over the
+  // TTY probe.
+  Object.defineProperty(input, 'isTTY', { value: true })
+  const stdout = answerDrivenOutput(input, ['3\n', '1\n', '\n'], true)
+  const stderr = makeBuf()
+
+  const prev = process.env.HYP_NO_TUI
+  process.env.HYP_NO_TUI = '1'
+  try {
+    const result = await runPickerWalkthrough({
+      capabilities: /** @type {any} */ ({}),
+      stdout,
+      stderr,
+      stdin: /** @type {any} */ (input),
+      env: {
+        HOME: tmp,
+        HYP_HOME: path.join(tmp, '.hyp'),
+      },
+    })
+    assert.equal(result.exitCode, 0)
+    assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+    assert.equal(result.exportPicked, 'keep-local')
+    // The legacy prompt prints the numbered-list signature.
+    assert.match(stdout.text(), /select \(e\.g\. 1,3 or "all"\):/)
+  } finally {
+    if (prev === undefined) delete process.env.HYP_NO_TUI
+    else process.env.HYP_NO_TUI = prev
+  }
+})
+
+/**
+ * @param {PassThrough} input
+ * @param {string[]} answers
+ * @param {boolean} [withIsTty]
+ */
+function answerDrivenOutput(input, answers, withIsTty = false) {
+  let value = ''
+  const sink = {
+    write(chunk) {
+      const text = String(chunk)
+      value += text
+      if (text.includes('select (e.g. 1,3 or "all"): ') || text.includes('Cache retention (days)')) {
+        const answer = answers.shift()
+        if (answer !== undefined) input.write(answer)
+        if (answers.length === 0) input.end()
+      }
+    },
+    text() {
+      return value
+    },
+  }
+  if (withIsTty) {
+    Object.defineProperty(sink, 'isTTY', { value: true })
+  }
+  return sink
+}
+
+function makeBuf() {
+  let value = ''
+  return {
+    write(chunk) {
+      value += String(chunk)
+    },
+    text() {
+      return value
+    },
+  }
+}

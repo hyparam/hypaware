@@ -8,6 +8,8 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { ensureDurableBinForNpx } from './global_install.js'
+import { multiselect, text } from './tui/index.js'
+import { shouldUseTui } from './tui-router.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
@@ -375,7 +377,7 @@ function resolveHypHome(env) {
  * @param {WalkthroughOptions} opts
  * @returns {AsyncPickPrompt}
  */
-function defaultPromptFactory(opts) {
+function legacyNumberedPromptFactory(opts) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function ask(question) {
@@ -407,7 +409,7 @@ function defaultPromptFactory(opts) {
  * @param {WalkthroughOptions} opts
  * @returns {AsyncRetentionPrompt}
  */
-function defaultRetentionPromptFactory(opts) {
+function legacyRetentionPromptFactory(opts) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function (prompt, defaultDays) {
@@ -423,6 +425,80 @@ function defaultRetentionPromptFactory(opts) {
       rl.close()
     }
   }
+}
+
+/**
+ * Render each pick category through the new TUI multiselect prompt.
+ *
+ * @param {WalkthroughOptions} opts
+ * @returns {AsyncPickPrompt}
+ */
+function tuiPromptFactory(opts) {
+  return async function ask(question) {
+    const result = await multiselect({
+      title: question.title,
+      options: question.options.map((o) => ({
+        value: o.value,
+        label: o.label,
+        ...(o.summary && o.summary !== o.label ? { summary: o.summary } : {}),
+      })),
+      ...(question.bounds ? { bounds: question.bounds } : {}),
+      stdin: opts.stdin ?? process.stdin,
+      stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
+    })
+    return /** @type {string[]} */ (result)
+  }
+}
+
+/**
+ * Prompt for the cache retention window through the TUI text input.
+ * Empty input falls through to the supplied default to match the legacy
+ * behavior.
+ *
+ * @param {WalkthroughOptions} opts
+ * @returns {AsyncRetentionPrompt}
+ */
+function tuiRetentionPromptFactory(opts) {
+  return async function (prompt, defaultDays) {
+    const v = await text({
+      title: prompt,
+      default: String(defaultDays),
+      validate: (s) => {
+        if (s.trim() === '') return null
+        const n = Number.parseInt(s.trim(), 10)
+        return Number.isInteger(n) && n >= 0 ? null : 'enter a non-negative integer'
+      },
+      stdin: opts.stdin ?? process.stdin,
+      stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
+    })
+    const trimmed = v.trim()
+    if (trimmed === '') return defaultDays
+    const parsed = Number.parseInt(trimmed, 10)
+    if (!Number.isInteger(parsed) || parsed < 0) return defaultDays
+    return parsed
+  }
+}
+
+/**
+ * Route between the TUI and legacy prompts. Tests and CI keep getting
+ * the legacy numbered list — only real TTYs without `HYP_NO_TUI=1` see
+ * the new interactive multiselect.
+ *
+ * @param {WalkthroughOptions} opts
+ * @returns {AsyncPickPrompt}
+ */
+function defaultPromptFactory(opts) {
+  if (shouldUseTui(opts)) return tuiPromptFactory(opts)
+  return legacyNumberedPromptFactory(opts)
+}
+
+/**
+ * @param {WalkthroughOptions} opts
+ * @returns {AsyncRetentionPrompt}
+ */
+function defaultRetentionPromptFactory(opts) {
+  if (shouldUseTui(opts)) return tuiRetentionPromptFactory(opts)
+  return legacyRetentionPromptFactory(opts)
 }
 
 /**
