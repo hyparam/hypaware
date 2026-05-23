@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { createCodexExchangeProjector } from './exchange-projector.js'
 import { attach, defaultConfigPath, detach } from './settings.js'
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
@@ -34,7 +35,7 @@ const CHATGPT_UPSTREAM_NAME = 'chatgpt'
  */
 export async function activate(ctx) {
   /** @type {AiGatewayCapability} */
-  const gateway = ctx.requireCapability('hypaware.ai-gateway', '^1.0.0')
+  const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
   gateway.registerUpstreamPreset({
     name: UPSTREAM_NAME,
@@ -48,6 +49,8 @@ export async function activate(ctx) {
     path_prefix: '/backend-api/codex',
     provider: 'chatgpt',
   })
+
+  gateway.registerExchangeProjector(createCodexExchangeProjector({ env: ctx.env }))
 
   const logger = getLogger('plugin.codex')
 

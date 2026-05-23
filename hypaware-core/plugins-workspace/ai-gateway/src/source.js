@@ -19,6 +19,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').StartedSource} StartedSource */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
 /** @typedef {import('./api.js').GatewayState} GatewayState */
+/** @typedef {import('./config.js').UpstreamConfig} UpstreamConfig */
 /** @typedef {import('./recorder.js').Exchange} Exchange */
 /** @typedef {import('./recorder.js').FinishedRow} FinishedRow */
 /** @typedef {import('./proxy.js').StartedProxy} StartedProxy */
@@ -52,6 +53,8 @@ export function createStartSource(state) {
             host: proxy.host,
             port: proxy.port,
             upstreams: readConfiguredUpstreamNames(ctx),
+            registered_presets: Array.from(state.presets.keys()),
+            projectors: state.projectors.map((p) => p.name),
           },
         }
         if (liveState.lastError) status.lastError = liveState.lastError
@@ -77,9 +80,10 @@ export function createStartSource(state) {
 }
 
 /**
- * Bind the HTTP listener and wire it to the recorder. Sets
- * `state.listen` so `AiGatewayCapability.localEndpoint()` returns the
- * bound URL; clears it on stop/reload.
+ * Bind the HTTP listener and wire it to the recorder and the
+ * exchange-projector dispatcher. Sets `state.listen` so
+ * `AiGatewayCapability.localEndpoint()` returns the bound URL; clears
+ * it on stop/reload.
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
@@ -91,12 +95,7 @@ async function launchListener(ctx, state, liveState) {
   const recorder = createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
-    enrichers: state.enrichers,
-    enricherContext: {
-      homeDir: ctx.env.HOME ?? '',
-      cacheDir: ctx.paths.cacheDir,
-      log: ctx.log,
-    },
+    projectors: state.projectors,
     log: ctx.log,
   })
   const sourcesLog = getLogger('sources')
@@ -117,15 +116,13 @@ async function launchListener(ctx, state, liveState) {
       const messageRows = await projector.projectExchange(/** @type {Record<string, unknown>} */ (row))
       if (messageRows.length > 0) {
         await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
-      }
-      liveState.rowsWritten += messageRows.length
-      liveState.exchangeBytes += totalBytes
-      if (messageRows.length > 0) {
+        liveState.rowsWritten += messageRows.length
         kernelInstruments.rowsWritten.add(messageRows.length, {
           [Attr.DATASET]: DATASET_NAME,
           [Attr.PLUGIN]: PLUGIN_NAME,
         })
       }
+      liveState.exchangeBytes += totalBytes
       exchangeBytesCounter.add(totalBytes, {
         [Attr.PLUGIN]: PLUGIN_NAME,
         hyp_upstream: row.upstream,
@@ -138,6 +135,7 @@ async function launchListener(ctx, state, liveState) {
         request_bytes: row.request_bytes ?? 0,
         response_bytes: row.response_bytes ?? 0,
         is_sse: row.is_sse ?? false,
+        rows_written: messageRows.length,
         ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
       })
     } catch (err) {
@@ -153,7 +151,7 @@ async function launchListener(ctx, state, liveState) {
 
   const proxy = await startProxy({
     listen: config.listen,
-    upstreams: config.upstreams,
+    upstreams: mergeUpstreams(config.upstreams, state),
     startExchange: (init) => recorder.startExchange(init),
     onExchangeFinished,
   })
@@ -168,6 +166,41 @@ async function launchListener(ctx, state, liveState) {
   }
 
   return proxy
+}
+
+/**
+ * Compile the routing table the proxy uses. TOML-config upstreams
+ * are operator-owned and win over adapter presets with the same
+ * `name`; presets fill only missing names. The resulting list is
+ * sorted by the proxy at compile time.
+ *
+ * Presets without a `match()` and without a `path_prefix` are filtered
+ * out — they can never route a request and would only inflate the
+ * compiled table.
+ *
+ * @param {UpstreamConfig[]} configUpstreams
+ * @param {GatewayState} state
+ * @returns {UpstreamConfig[]}
+ */
+function mergeUpstreams(configUpstreams, state) {
+  /** @type {Map<string, UpstreamConfig>} */
+  const merged = new Map()
+  for (const upstream of configUpstreams) {
+    merged.set(upstream.name, upstream)
+  }
+  for (const preset of state.presets.values()) {
+    const hasMatch = typeof preset.match === 'function'
+    const hasPathPrefix = typeof preset.path_prefix === 'string' && preset.path_prefix.length > 0
+    if (!hasMatch && !hasPathPrefix) continue
+    /** @type {UpstreamConfig} */
+    const entry = { name: preset.name, base_url: preset.base_url }
+    if (preset.provider) entry.provider = preset.provider
+    if (hasPathPrefix) entry.path_prefix = preset.path_prefix
+    if (typeof preset.priority === 'number') entry.priority = preset.priority
+    if (hasMatch) entry.match = preset.match
+    if (!merged.has(preset.name)) merged.set(preset.name, entry)
+  }
+  return Array.from(merged.values())
 }
 
 /**

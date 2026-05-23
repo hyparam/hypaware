@@ -244,7 +244,7 @@ function buildSinkOptions(sinks) {
 function buildClientOptions(capabilities) {
   if (!capabilities.has('hypaware.ai-gateway')) return []
   /** @type {AiGatewayCapability} */
-  const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^1.0.0')
+  const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
   return gateway.listClients().map((c) => ({
     value: c.name,
     label: c.name,
@@ -931,7 +931,7 @@ async function runPickerFinale(args) {
 
   if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
     /** @type {AiGatewayCapability} */
-    const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^1.0.0')
+    const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
     for (const client of clientsPicked) {
       const adapter = gateway.getClient(client)
       if (!adapter) {

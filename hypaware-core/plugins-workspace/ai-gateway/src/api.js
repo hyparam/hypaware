@@ -4,8 +4,16 @@
  * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability
  * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayUpstreamPreset} AiGatewayUpstreamPreset
  * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientRegistration} AiGatewayClientRegistration
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayMessageEnricher} AiGatewayMessageEnricher
+ * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector
  * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayEndpointOptions} AiGatewayEndpointOptions
+ */
+
+/**
+ * @typedef {AiGatewayExchangeProjector & { _seq: number }} RegisteredProjector
+ *
+ * Internal record of a registered exchange projector. `_seq` is the
+ * registration-order tiebreaker the dispatcher applies after sorting
+ * by descending `priority`.
  */
 
 /**
@@ -13,12 +21,13 @@
  * `AiGatewayCapability` facade (what adapter plugins see) and the
  * running source read from this object — the API mutates it via
  * `register*` calls, the source consumes it when compiling the
- * listener's upstream table and when finalizing exchange rows.
+ * listener's upstream table and when dispatching projectors over a
+ * finalized exchange.
  *
  * @typedef {Object} GatewayState
  * @property {Map<string, AiGatewayUpstreamPreset>} presets
  * @property {Map<string, AiGatewayClientRegistration>} clients
- * @property {AiGatewayMessageEnricher[]} enrichers
+ * @property {RegisteredProjector[]} projectors
  * @property {{ host: string, port: number } | undefined} listen
  */
 
@@ -29,24 +38,25 @@ export function createGatewayState() {
   return {
     presets: new Map(),
     clients: new Map(),
-    enrichers: [],
+    projectors: [],
     listen: undefined,
   }
 }
 
 /**
- * Build the capability API exposed under `hypaware.ai-gateway@1.0.0`.
+ * Build the capability API exposed under `hypaware.ai-gateway@2.0.0`.
  * Adapter plugins acquire this through
- * `ctx.requireCapability('hypaware.ai-gateway', '^1.0.0')` and call
+ * `ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')` and call
  * the register hooks to contribute upstream presets, client wiring,
- * and message enrichers. `localEndpoint(opts?)` returns the URL the
- * adapter should hand to the client tool (e.g. Claude Code) so its
- * traffic flows through this gateway.
+ * and exchange projectors. `localEndpoint(opts?)` returns the URL the
+ * adapter should hand to the client tool so its traffic flows through
+ * this gateway.
  *
  * @param {GatewayState} state
  * @returns {AiGatewayCapability}
  */
 export function createAiGatewayApi(state) {
+  let projectorSeq = 0
   return {
     registerUpstreamPreset(preset) {
       if (!preset || typeof preset.name !== 'string' || preset.name.length === 0) {
@@ -55,8 +65,12 @@ export function createAiGatewayApi(state) {
       if (typeof preset.base_url !== 'string' || preset.base_url.length === 0) {
         throw new TypeError(`registerUpstreamPreset '${preset.name}': base_url is required`)
       }
-      if (typeof preset.path_prefix !== 'string' || preset.path_prefix.length === 0) {
-        throw new TypeError(`registerUpstreamPreset '${preset.name}': path_prefix is required`)
+      const hasMatch = typeof preset.match === 'function'
+      const hasPathPrefix = typeof preset.path_prefix === 'string' && preset.path_prefix.length > 0
+      if (!hasMatch && !hasPathPrefix) {
+        throw new TypeError(
+          `registerUpstreamPreset '${preset.name}': either match() or path_prefix is required`
+        )
       }
       state.presets.set(preset.name, preset)
     },
@@ -74,14 +88,17 @@ export function createAiGatewayApi(state) {
       state.clients.set(client.name, client)
     },
 
-    registerMessageEnricher(enricher) {
-      if (!enricher || typeof enricher.name !== 'string' || enricher.name.length === 0) {
-        throw new TypeError('registerMessageEnricher: name is required')
+    registerExchangeProjector(projector) {
+      if (!projector || typeof projector.name !== 'string' || projector.name.length === 0) {
+        throw new TypeError('registerExchangeProjector: name is required')
       }
-      if (typeof enricher.enrich !== 'function') {
-        throw new TypeError(`registerMessageEnricher '${enricher.name}': enrich() is required`)
+      if (typeof projector.match !== 'function') {
+        throw new TypeError(`registerExchangeProjector '${projector.name}': match() is required`)
       }
-      state.enrichers.push(enricher)
+      if (typeof projector.project !== 'function') {
+        throw new TypeError(`registerExchangeProjector '${projector.name}': project() is required`)
+      }
+      state.projectors.push({ ...projector, _seq: projectorSeq++ })
     },
 
     /**

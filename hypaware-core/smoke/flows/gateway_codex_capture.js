@@ -57,15 +57,24 @@ export async function run({ harness, expect }) {
         config: {
           listen: '127.0.0.1:0',
           upstreams: [
-            // `path_prefix: '/v1'` is the same value `@hypaware/codex`
-            // registers for API-key mode in production.
-            { name: 'openai', base_url: openai.url, path_prefix: '/v1', provider: 'openai' },
-            // `path_prefix: '/backend-api/codex'` is the same ChatGPT-auth
-            // route `@hypaware/codex` registers in production.
-            { name: 'chatgpt', base_url: openai.url, path_prefix: '/backend-api/codex', provider: 'chatgpt' },
+            // Config-driven local fakes. Names are prefixed `local-` so
+            // they don't collide with the `openai` / `chatgpt` preset
+            // names @hypaware/codex registers in production. Both
+            // local entries appear first in the merged routing table
+            // (lower seq), so with identical priority + prefix length
+            // they outrank the plugin presets at routing time. The
+            // plugin presets remain in the table — they just never win
+            // routing for this smoke's traffic.
+            { name: 'local-openai', base_url: openai.url, path_prefix: '/v1', provider: 'openai' },
+            { name: 'local-chatgpt', base_url: openai.url, path_prefix: '/backend-api/codex', provider: 'chatgpt' },
           ],
         },
       },
+      // Activate the Codex adapter so its exchange projector gets
+      // registered. The plugin's preset upstreams (real api.openai.com
+      // / chatgpt.com) are also added to the routing table but are
+      // outranked by the local-* config entries above.
+      { name: '@hypaware/codex', config: {} },
     ],
     query: { cache: { retention: { default_days: 30 } } },
   }, null, 2))

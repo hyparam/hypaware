@@ -14,9 +14,12 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  * Activate the `@hypaware/ai-gateway` plugin.
  *
  * Registers:
- *  - capability `hypaware.ai-gateway@1.0.0` so adapter plugins (e.g.
- *    `@hypaware/claude`, `@hypaware/codex`) can contribute upstream
- *    presets, client wiring, and message enrichers
+ *  - capability `hypaware.ai-gateway@2.0.0` so adapter plugins (e.g.
+ *    `@hypaware/claude`, `@hypaware/codex`, future custom integrations)
+ *    can contribute upstream presets, client wiring, and exchange
+ *    projectors. The 2.0.0 surface drops `registerMessageEnricher`
+ *    and `registerExchangeContextProjector` from 1.x in favour of a
+ *    single full-exchange projector hook (see api.js).
  *  - dataset `ai_gateway_messages`
  *  - source `ai-gateway` (configSection: `ai-gateway`)
  *
@@ -33,7 +36,7 @@ export async function activate(ctx) {
   const state = createGatewayState()
   const api = createAiGatewayApi(state)
 
-  ctx.provideCapability('hypaware.ai-gateway', '1.0.0', api)
+  ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)
   ctx.query.registerDataset(aiGatewayDatasetRegistration())
 
   ctx.sources.register({

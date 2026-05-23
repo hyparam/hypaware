@@ -3,7 +3,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -13,13 +12,13 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 
-test('Claude session-context hook exits 0 without configured plugins', async () => {
+test('Claude session-context hook exits 0 without --state-file', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-'))
   const stdout = makeBuf()
   const stderr = makeBuf()
 
   const code = await dispatch(
-    ['claude-hook', 'session-context', '--port', '8787'],
+    ['claude-hook', 'session-context'],
     {
       stdout,
       stderr,
@@ -33,67 +32,49 @@ test('Claude session-context hook exits 0 without configured plugins', async () 
   assert.equal(stderr.text(), '')
 })
 
-test('Claude session-context hook posts cwd context to the local gateway endpoint', async () => {
+test('Claude session-context hook appends one JSONL record per event to --state-file', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-'))
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  /** @type {Array<{ url: string | undefined, method: string | undefined, body: string }>} */
-  const received = []
-  const server = http.createServer((req, res) => {
-    /** @type {Buffer[]} */
-    const chunks = []
-    req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-    req.on('end', () => {
-      received.push({
-        url: req.url,
-        method: req.method,
-        body: Buffer.concat(chunks).toString('utf8'),
-      })
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end('{"ok":true}')
-    })
-  })
-  await listen(server)
-  const addr = server.address()
-  assert.ok(addr && typeof addr === 'object')
-
-  try {
-    const code = await dispatch(
-      ['claude-hook', 'session-context', '--port', String(addr.port)],
-      {
-        stdout,
-        stderr,
-        stdin: stdinFor({
-          session_id: 'sess-hook',
-          cwd: '/tmp/not-a-git-repo',
-          hook_event_name: 'SessionStart',
-        }),
-        env: { ...process.env, HYP_HOME: hypHome },
-      }
-    )
-
-    assert.equal(code, 0)
-    assert.equal(stdout.text(), '')
-    assert.equal(stderr.text(), '')
-    assert.equal(received.length, 1)
-    assert.equal(received[0].url, '/_hypaware/session-context')
-    assert.equal(received[0].method, 'POST')
-    assert.deepEqual(JSON.parse(received[0].body), {
-      session_id: 'sess-hook',
-      cwd: '/tmp/not-a-git-repo',
-    })
-  } finally {
-    await closeServer(server)
-  }
-})
-
-test('Claude session-context hook ignores events without session context', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-'))
+  const stateFile = path.join(hypHome, 'session-context.jsonl')
   const stdout = makeBuf()
   const stderr = makeBuf()
 
   const code = await dispatch(
-    ['claude-hook', 'session-context', '--port', '8787'],
+    ['claude-hook', 'session-context', '--state-file', stateFile],
+    {
+      stdout,
+      stderr,
+      stdin: stdinFor({
+        session_id: 'sess-hook',
+        cwd: '/tmp/not-a-git-repo',
+        transcript_path: '/tmp/sess-hook.jsonl',
+        hook_event_name: 'SessionStart',
+      }),
+      env: { ...process.env, HYP_HOME: hypHome },
+    }
+  )
+
+  assert.equal(code, 0)
+  assert.equal(stdout.text(), '')
+  assert.equal(stderr.text(), '')
+
+  const contents = await fs.readFile(stateFile, 'utf8')
+  const lines = contents.split('\n').filter((line) => line.length > 0)
+  assert.equal(lines.length, 1)
+  const record = JSON.parse(lines[0])
+  assert.equal(record.session_id, 'sess-hook')
+  assert.equal(record.cwd, '/tmp/not-a-git-repo')
+  assert.equal(record.transcript_path, '/tmp/sess-hook.jsonl')
+  assert.equal(typeof record.ts, 'string')
+})
+
+test('Claude session-context hook ignores events without session context', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-'))
+  const stateFile = path.join(hypHome, 'session-context.jsonl')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(
+    ['claude-hook', 'session-context', '--state-file', stateFile],
     {
       stdout,
       stderr,
@@ -105,6 +86,47 @@ test('Claude session-context hook ignores events without session context', async
   assert.equal(code, 0)
   assert.equal(stdout.text(), '')
   assert.equal(stderr.text(), '')
+  await assert.rejects(fs.stat(stateFile), { code: 'ENOENT' })
+})
+
+test('legacy Claude session-context hook --port writes the default plugin state file', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-legacy-'))
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(
+    ['claude-hook', 'session-context', '--port', '4388'],
+    {
+      stdout,
+      stderr,
+      stdin: stdinFor({
+        session_id: 'sess-legacy',
+        cwd: '/tmp/not-a-git-repo',
+        transcript_path: '/tmp/sess-legacy.jsonl',
+      }),
+      env: { ...process.env, HYP_HOME: hypHome },
+    }
+  )
+
+  assert.equal(code, 0)
+  assert.equal(stdout.text(), '')
+  assert.equal(stderr.text(), '')
+
+  const stateFile = path.join(
+    hypHome,
+    'hypaware',
+    'plugins',
+    '@hypaware',
+    'claude',
+    'session-context.jsonl'
+  )
+  const contents = await fs.readFile(stateFile, 'utf8')
+  const lines = contents.split('\n').filter((line) => line.length > 0)
+  assert.equal(lines.length, 1)
+  const record = JSON.parse(lines[0])
+  assert.equal(record.session_id, 'sess-legacy')
+  assert.equal(record.cwd, '/tmp/not-a-git-repo')
+  assert.equal(record.transcript_path, '/tmp/sess-legacy.jsonl')
 })
 
 test('hidden Claude hook command is omitted from top-level help', async () => {
@@ -209,10 +231,14 @@ function fakeClientKernel() {
     ])
   )
 
-  kernel.capabilities.provide('test', 'hypaware.ai-gateway', '1.0.0', {
+  // Fake an `hypaware.ai-gateway@2.0.0` surface — that's the range
+  // the CLI dispatcher requires after the phase-1 capability bump,
+  // and the test's `dispatch(['attach', ...])` call resolves against
+  // it before it ever reaches the client hooks above.
+  kernel.capabilities.provide('test', 'hypaware.ai-gateway', '2.0.0', {
     registerUpstreamPreset() {},
     registerClient() {},
-    registerMessageEnricher() {},
+    registerExchangeProjector() {},
     localEndpoint() {
       return 'http://127.0.0.1:4388'
     },
@@ -247,26 +273,4 @@ function makeBuf() {
 function stdinFor(value) {
   const body = typeof value === 'string' ? value : JSON.stringify(value)
   return /** @type {NodeJS.ReadStream} */ (Readable.from([body]))
-}
-
-/**
- * @param {http.Server} server
- * @returns {Promise<void>}
- */
-function listen(server) {
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.once('listening', () => resolve())
-    server.listen(0, '127.0.0.1')
-  })
-}
-
-/**
- * @param {http.Server} server
- * @returns {Promise<void>}
- */
-function closeServer(server) {
-  return new Promise((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()))
-  })
 }

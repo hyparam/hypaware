@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
-import { createClaudeTranscriptEnricher } from './enricher.js'
+import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
+import { defaultSessionContextFile } from './session_context.js'
 
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
@@ -23,12 +24,27 @@ const UPSTREAM_NAME = 'anthropic'
 const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
+ * Resolve the canonical session-context state file the Claude hook
+ * appends to and the projector reads from. Centralised so attach()
+ * and the projector activation path can never disagree on the path.
+ *
+ * @param {PluginActivationContext} ctx
+ */
+export function claudeSessionContextFile(ctx) {
+  return defaultSessionContextFile(ctx.paths.stateDir)
+}
+
+/**
  * Activate the `@hypaware/claude` adapter plugin.
  *
- * Resolves the `hypaware.ai-gateway` capability, registers the
- * Anthropic upstream preset, wires attach/detach against
- * `~/.claude/settings.json`, registers the transcript enricher,
- * and contributes the three Claude-targeted helper skills.
+ * Resolves the `hypaware.ai-gateway@^2.0.0` capability, registers
+ * the Anthropic upstream preset (path + header signature match) and
+ * the full Anthropic exchange projector, wires attach/detach against
+ * `~/.claude/settings.json`, and contributes the three Claude-targeted
+ * helper skills. The projector reads
+ * `<stateDir>/session-context.jsonl` (written by the managed Claude
+ * hook) for `cwd` / `git_branch` and walks the local Claude JSONL
+ * transcripts under `<HOME>/.claude/projects` for native DAG identity.
  *
  * Each attach/detach emits a `client.attach`/`client.detach` span
  * tagged with `hyp_plugin`, `client_name`, `status`, and
@@ -38,16 +54,36 @@ const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', i
  */
 export async function activate(ctx) {
   /** @type {AiGatewayCapability} */
-  const gateway = ctx.requireCapability('hypaware.ai-gateway', '^1.0.0')
+  const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
-  gateway.registerUpstreamPreset({
-    name: UPSTREAM_NAME,
-    base_url: 'https://api.anthropic.com',
-    path_prefix: '/',
-    provider: 'anthropic',
-  })
+  const upstreamPreset = anthropicUpstreamPreset()
+  // Keep the upstream name stable across the 1.x → 2.x rewrite so
+  // operator TOML configs that hardcoded `name = "anthropic"` keep
+  // working. `anthropicUpstreamPreset()` already uses that name, but
+  // assert it explicitly so a future rename can't silently break
+  // installed configs.
+  if (upstreamPreset.name !== UPSTREAM_NAME) {
+    throw new Error(`@hypaware/claude: unexpected upstream preset name ${upstreamPreset.name}`)
+  }
+  gateway.registerUpstreamPreset(upstreamPreset)
 
   const logger = getLogger('plugin.claude')
+
+  // Session-context state file path is plugin-state-dir scoped, so
+  // attach() and the projector resolve the same absolute path without
+  // a separate config option. The kernel guarantees `paths.stateDir`
+  // is created and writable before activate() runs.
+  const stateFile = claudeSessionContextFile(ctx)
+  const homeDir = ctx.env.HOME ?? os.homedir()
+
+  gateway.registerExchangeProjector(
+    createClaudeExchangeProjector({
+      homeDir,
+      stateFile,
+      clientName: CLIENT_NAME,
+      logger,
+    })
+  )
 
   gateway.registerClient({
     name: CLIENT_NAME,
@@ -87,6 +123,7 @@ export async function activate(ctx) {
             const result = await attach({
               port,
               version: ctx.plugin.version,
+              stateFile,
               settingsPath,
               binPath: resolveHookBinPath(ctx.env),
             })
@@ -180,16 +217,6 @@ export async function activate(ctx) {
         },
         { component: 'plugin.claude' }
       )
-    },
-  })
-
-  const enricher = createClaudeTranscriptEnricher({
-    homeDir: ctx.env.HOME ?? os.homedir(),
-  })
-  gateway.registerMessageEnricher({
-    name: 'claude-transcript',
-    enrich(row) {
-      return enricher(row)
     },
   })
 

@@ -28,6 +28,9 @@ import {
   decideConfirmation,
   renderConfirmationSummary,
 } from '../plugin_install/confirm.js'
+import {
+  appendSessionContext,
+} from '../../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
@@ -189,7 +192,7 @@ function buildCoreCommands() {
     {
       name: 'claude-hook session-context',
       summary: 'Internal Claude Code hook compatibility shim',
-      usage: 'hyp claude-hook session-context [--port <port>]',
+      usage: 'hyp claude-hook session-context --state-file <absolute-path>',
       hidden: true,
       run: runClaudeSessionContextHook,
     },
@@ -571,7 +574,7 @@ function describeDaemon(daemon) {
 function listClientNames(capabilities) {
   if (!capabilities.has('hypaware.ai-gateway')) return []
   /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
-  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^1.0.0')
+  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
   return gateway.listClients().map((c) => c.name).sort()
 }
 
@@ -2259,7 +2262,7 @@ async function runClientLifecycle(action, argv, ctx) {
     return 1
   }
   /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
-  const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^1.0.0')
+  const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
   const clientNames = expandClientName(parsed.client, gateway)
   if (clientNames.length === 0) {
@@ -2449,27 +2452,35 @@ async function runIgnore(_argv, ctx) {
 }
 
 /**
- * `hyp claude-hook session-context --port <port>`
+ * `hyp claude-hook session-context --state-file <absolute-path>`
  *
- * Internal command installed into Claude Code's hook list by the Claude
- * adapter. Claude sends hook events on stdin; this posts the local
- * session context to the gateway so later Messages API exchanges can
- * preserve the working directory in `ai_gateway_messages`.
+ * Internal command installed into Claude Code's hook list by the
+ * `@hypaware/claude` adapter. Claude sends hook events on stdin; this
+ * appends one JSONL record per event to the plugin's session-context
+ * state file. The Claude exchange projector reads the same file when
+ * it projects an Anthropic exchange and recovers `cwd` / `git_branch`
+ * for the row.
  *
- * Hooks must never interrupt Claude Code. Malformed input, a stopped
- * gateway, or a git lookup failure all degrade to "no context recorded"
- * with exit 0.
+ * Phase 2 removed the HTTP `/_hypaware/session-context` channel —
+ * sending session context now lives entirely on disk, so the daemon
+ * does not have to be running for the hook to do its job (the file
+ * is read at projection time, not at hook-fire time).
+ *
+ * Hooks must never interrupt Claude Code. Malformed input, a missing
+ * `--state-file`, a git lookup failure, or a write error all degrade
+ * to "no context recorded" with exit 0.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 async function runClaudeSessionContextHook(argv, ctx) {
   if (argv.includes('--help') || argv.includes('-h')) {
-    ctx.stdout.write('usage: hyp claude-hook session-context [--port <port>]\n')
+    ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
     return 0
   }
   const parsed = parseClaudeSessionContextHookArgs(argv)
-  if (parsed.port === undefined) return 0
+  const stateFile = parsed.stateFile ?? (parsed.legacyPort ? legacyClaudeSessionContextFile(ctx.env) : undefined)
+  if (!stateFile) return 0
 
   const input = await readHookStdin(ctx.stdin ?? process.stdin)
   /** @type {Record<string, unknown>} */
@@ -2486,42 +2497,55 @@ async function runClaudeSessionContextHook(argv, ctx) {
   const sessionId = stringValue(event.session_id)
   const cwd = stringValue(event.new_cwd) ?? stringValue(event.cwd)
   if (!sessionId || !cwd) return 0
-
+  const transcriptPath = stringValue(event.transcript_path)
   const gitBranch = await currentGitBranch(cwd)
+
+  /** @type {Record<string, unknown>} */
+  const record = {
+    session_id: sessionId,
+    cwd,
+    ts: new Date().toISOString(),
+  }
+  if (transcriptPath) record.transcript_path = transcriptPath
+  if (gitBranch) record.git_branch = gitBranch
+
   try {
-    await fetch(`http://127.0.0.1:${parsed.port}/_hypaware/session-context`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        cwd,
-        ...(gitBranch ? { git_branch: gitBranch } : {}),
-      }),
-    })
+    await appendSessionContext(stateFile, /** @type {any} */ (record))
   } catch {
-    return 0
+    /* hook MUST never throw back into Claude — exit 0 even on write failure */
   }
   return 0
 }
 
 /**
  * @param {string[]} argv
- * @returns {{ port?: number }}
+ * @returns {{ stateFile?: string, legacyPort?: number }}
  */
 function parseClaudeSessionContextHookArgs(argv) {
-  /** @type {{ port?: number }} */
+  /** @type {{ stateFile?: string, legacyPort?: number }} */
   const out = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--port' || arg.startsWith('--port=')) {
+    if (arg === '--state-file' || arg.startsWith('--state-file=')) {
+      const value = arg === '--state-file' ? argv[++i] : arg.slice('--state-file='.length)
+      if (typeof value === 'string' && value.length > 0 && path.isAbsolute(value)) {
+        out.stateFile = value
+      }
+    } else if (arg === '--port' || arg.startsWith('--port=')) {
       const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      if (!value || !/^\d+$/.test(value)) return out
-      const port = Number.parseInt(value, 10)
-      if (port < 1 || port > 65535) return out
-      out.port = port
+      const port = typeof value === 'string' ? Number.parseInt(value, 10) : NaN
+      if (Number.isInteger(port) && port > 0 && port <= 65535) out.legacyPort = port
     }
   }
   return out
+}
+
+/** @param {NodeJS.ProcessEnv} env */
+function legacyClaudeSessionContextFile(env) {
+  const home = env.HOME
+  const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
+  if (!hypHome) return undefined
+  return path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'claude', 'session-context.jsonl')
 }
 
 /**

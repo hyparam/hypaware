@@ -129,13 +129,13 @@ export const CAP_HTTP_ENDPOINT = 'hypaware.http-endpoint'
 export function firstPartyPluginMetadata() {
   return new Map(/** @type {[PluginName, PluginMetadata][]} */ ([
     ['@hypaware/ai-gateway', {
-      provides: { 'hypaware.ai-gateway': '1.0.0' },
+      provides: { 'hypaware.ai-gateway': '2.0.0' },
     }],
     ['@hypaware/claude', {
-      requires: { 'hypaware.ai-gateway': '^1.0.0' },
+      requires: { 'hypaware.ai-gateway': '^2.0.0' },
     }],
     ['@hypaware/codex', {
-      requires: { 'hypaware.ai-gateway': '^1.0.0' },
+      requires: { 'hypaware.ai-gateway': '^2.0.0' },
     }],
     ['@hypaware/gascity', {}],
     ['@hypaware/otel', {}],

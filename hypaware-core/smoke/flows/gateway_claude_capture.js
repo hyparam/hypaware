@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
+import { Readable } from 'node:stream'
 
 import { Attr, installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
@@ -11,29 +12,32 @@ import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
- * Phase 7 smoke — Anthropic-style passthrough plus failed-upstream
- * capture under the daemon boot path.
+ * Phase 2 smoke — Claude exchange capture through the daemon.
  *
- * Boots `runDaemon` with `@hypaware/ai-gateway` activated, pointed at
- * three test upstreams:
+ * Boots `runDaemon` with `@hypaware/ai-gateway@2.0.0` AND
+ * `@hypaware/claude@2.0.0` activated against an in-process echo
+ * upstream that mimics the Anthropic Messages API. Then drives three
+ * Anthropic-shaped exchanges through the gateway and asserts the
+ * phase-2 contract:
  *
- *   - `anthropic_ok`     — succeeds with 200 + echoed body (mirrors a
- *                          successful Anthropic call from Claude Code).
- *   - `anthropic_fail`   — returns 500 with a JSON error body (mirrors
- *                          a provider-side failure).
- *   - `anthropic_dead`   — points at a port nothing listens on; the
- *                          proxy returns 502 and records the connection
- *                          error.
- *
- * Bead `hy-bbyi` assertions:
- *
- *   - Each exchange writes one normalized request message row to
- *     `ai_gateway_messages`, all queryable by `dev_run_id` via
- *     `hyp query sql`.
- *   - Gateway diagnostics survive under `attributes.gateway`.
- *   - Daemon self-telemetry (JSONL exporter, under `HYP_DEV_TELEMETRY=1`)
- *     contains `source.start` (ai-gateway), at least one `sink.tick`,
- *     `cache.append` for `ai_gateway_messages`, and `daemon.shutdown`.
+ *   - **Native DAG identity (transcript present)**: for the session
+ *     whose JSONL transcript is staged under
+ *     `<HOME>/.claude/projects/`, the projector pulls
+ *     `message_id = provider_uuid = uuid` and
+ *     `previous_message_id = [parentUuid]` (root → `[]`).
+ *   - **Fallback identity (transcript missing)**: for a different
+ *     session with no transcript file, the row carries
+ *     `attributes.claude.identity_source = "gateway_fallback"` and the
+ *     gateway-computed hash `message_id`.
+ *   - **Session-context state file**: the Claude hook (driven via
+ *     `dispatch()` since this smoke doesn't run a real Claude Code
+ *     install) writes `cwd` / `git_branch` into the plugin's
+ *     session-context JSONL; the projector reads them back and stamps
+ *     them onto every row for that session.
+ *   - **Daemon self-telemetry**: `source.start` for ai-gateway,
+ *     `sink.tick`, `cache.append` for `ai_gateway_messages`,
+ *     `daemon.shutdown`, and the `aigw.exchange` log tagged with the
+ *     contract `dev_run_id` header.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -45,15 +49,49 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // ----- Spin up upstreams the gateway will route to -----
-  const echo = await startEchoUpstream()
-  const errorUpstream = await startStatusUpstream(500, {
-    type: 'invalid_request_error',
-    message: 'simulated upstream failure',
-  })
-  const deadPort = await reserveFreePort()
+  // ----- Spin up an Anthropic-flavored echo upstream -----
+  // The upstream returns a plausible Anthropic response envelope so
+  // the projector's `responseBody` parse path is exercised. The id we
+  // use here also doubles as the "message id hint" for the assistant
+  // row when the projector matches against the transcript.
+  const echo = await startAnthropicEchoUpstream()
 
-  // ----- Stage a v2 config that selects @hypaware/ai-gateway -----
+  // ----- HOME with a Claude transcript fixture -----
+  // The bead's first acceptance: native DAG identity when transcript
+  // fixtures are present. Stage one transcript file with a user/assistant
+  // pair whose `uuid`s we'll assert show up on the rows verbatim.
+  const claudeHome = path.join(harness.hypHome, 'home')
+  const claudeProjectsDir = path.join(claudeHome, '.claude', 'projects', 'some-repo')
+  await fs.mkdir(claudeProjectsDir, { recursive: true })
+  const transcriptSession = `tr-${harness.devRunId}`
+  await fs.writeFile(
+    path.join(claudeProjectsDir, `${transcriptSession}.jsonl`),
+    [
+      JSON.stringify({
+        sessionId: transcriptSession,
+        uuid: 'u-user-1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: `transcript ${harness.devRunId}` },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      JSON.stringify({
+        sessionId: transcriptSession,
+        uuid: 'u-assistant-1',
+        parentUuid: 'u-user-1',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          id: 'msg_assist_1',
+          content: [{ type: 'text', text: 'transcript reply' }],
+        },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ].join('\n') + '\n',
+    'utf8'
+  )
+
+  // ----- Stage a v2 config that picks ai-gateway + claude -----
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify({
@@ -64,18 +102,66 @@ export async function run({ harness, expect }) {
         config: {
           listen: '127.0.0.1:0',
           upstreams: [
-            { name: 'anthropic_ok',   base_url: echo.url,          path_prefix: '/v1/messages' },
-            { name: 'anthropic_fail', base_url: errorUpstream.url, path_prefix: '/v1/error'    },
-            { name: 'anthropic_dead', base_url: `http://127.0.0.1:${deadPort}`, path_prefix: '/v1/dead' },
+            // Use a distinct name so the merge in source.js does NOT
+            // collapse this entry into the Claude plugin's preset
+            // (which would replace the base_url with api.anthropic.com).
+            // Higher priority + identical path_prefix wins routing over
+            // the preset; the projector still matches and processes
+            // the captured exchange because match() looks at path +
+            // headers, not the resolved upstream.
+            {
+              name: 'echo-anthropic',
+              base_url: echo.url,
+              path_prefix: '/v1/messages',
+              priority: 1000,
+            },
           ],
         },
       },
+      { name: '@hypaware/claude' },
     ],
     query: { cache: { retention: { default_days: 30 } } },
   }, null, 2))
 
   process.env.HYP_HOME = harness.hypHome
   process.env.HYP_CONFIG = configPath
+  process.env.HOME = claudeHome
+
+  // ----- Compute the plugin state-file path that the Claude plugin
+  // will use, then drive the hook command to populate it. This
+  // mirrors how Claude Code itself would call the hook on
+  // SessionStart — only the entry path differs. The kernel resolves
+  // `ctx.paths.stateDir` to `<HYP_HOME>/hypaware/plugins/<name>` (see
+  // `src/core/runtime/paths.js`), so we mirror that recipe here.
+  const stateFile = path.join(
+    harness.hypHome,
+    'hypaware', 'plugins', '@hypaware/claude',
+    'session-context.jsonl'
+  )
+  await fs.mkdir(path.dirname(stateFile), { recursive: true })
+
+  const hookStdout = makeBuf()
+  const hookStderr = makeBuf()
+  const hookCode = await dispatch(
+    ['claude-hook', 'session-context', '--state-file', stateFile],
+    {
+      stdout: hookStdout,
+      stderr: hookStderr,
+      stdin: stdinFor({
+        session_id: transcriptSession,
+        cwd: harness.tmpDir,
+        transcript_path: path.join(claudeProjectsDir, `${transcriptSession}.jsonl`),
+        hook_event_name: 'SessionStart',
+      }),
+      env: { ...process.env, HYP_HOME: harness.hypHome, HYP_CONFIG: configPath },
+    }
+  )
+  expect.that('hook: --state-file invocation exited 0', hookCode, (v) => v === 0)
+  expect.that(
+    'hook: state file got one record',
+    (await fs.readFile(stateFile, 'utf8')).split('\n').filter((l) => l.length > 0).length,
+    (v) => v === 1
+  )
 
   // ----- Boot the daemon (under the new boot path) -----
   // tickIntervalMs=50 so at least one `sink.tick` span fires before stop.
@@ -96,63 +182,49 @@ export async function run({ harness, expect }) {
       typeof /** @type {any} */ (v).host === 'string' &&
       typeof /** @type {any} */ (v).port === 'number',
   )
-  const gatewayDetails = /** @type {{ host: string, port: number }} */ (
+  const gatewayDetails = /** @type {{ host: string, port: number, projectors: string[] }} */ (
     snapshot.sources.find((s) => s.name === 'ai-gateway')?.details
   )
+  expect.that(
+    'snapshot: claude exchange projector registered against the gateway',
+    gatewayDetails.projectors,
+    (v) => Array.isArray(v) && v.includes('claude-anthropic-messages'),
+  )
+
   const gatewayUrl = `http://${gatewayDetails.host}:${gatewayDetails.port}`
-  const claudeSessionId = `sess-${harness.devRunId}`
 
-  const contextResp = await postJson(
-    `${gatewayUrl}/_hypaware/session-context`,
-    harness.devRunId,
-    JSON.stringify({
-      session_id: claudeSessionId,
-      cwd: harness.tmpDir,
-      git_branch: 'smoke-branch',
-    })
-  )
-  expect.that(
-    'gateway: Claude session context endpoint returned 200',
-    contextResp.statusCode,
-    (v) => v === 200,
-  )
+  // ----- Drive three exchanges through the gateway -----
+  // 1. Native-DAG identity: session has a transcript fixture on disk.
+  // 2. Missing-log identity: session has no transcript file.
+  // 3. Context propagation: same session as #1, asserts cwd/git_branch
+  //    are stamped on every row tied to the staged state-file entry.
 
-  // ----- Issue three exchanges through the daemon's gateway -----
-  const okBody = JSON.stringify({
+  const transcriptBody = JSON.stringify({
     model: 'claude-3-opus',
-    metadata: { user_id: JSON.stringify({ session_id: claudeSessionId }) },
-    messages: [{ role: 'user', content: `ok ${harness.devRunId}` }],
+    metadata: { user_id: JSON.stringify({ session_id: transcriptSession }) },
+    messages: [{ role: 'user', content: `transcript ${harness.devRunId}` }],
   })
-  const okResp = await postJson(`${gatewayUrl}/v1/messages`, harness.devRunId, okBody)
-  expect.that(
-    'gateway: anthropic_ok upstream returned 200',
-    okResp.statusCode,
-    (v) => v === 200,
-  )
+  const transcriptResp = await postJson(`${gatewayUrl}/v1/messages`, harness.devRunId, transcriptBody, {
+    id: 'msg_assist_1',
+    role: 'assistant',
+    content: [{ type: 'text', text: 'transcript reply' }],
+    stop_reason: 'end_turn',
+  })
+  expect.that('gateway: transcript-session upstream returned 200', transcriptResp.statusCode, (v) => v === 200)
 
-  const failBody = JSON.stringify({
+  const fallbackSession = `nb-${harness.devRunId}`
+  const fallbackBody = JSON.stringify({
     model: 'claude-3-opus',
-    metadata: { user_id: JSON.stringify({ session_id: claudeSessionId }) },
-    messages: [{ role: 'user', content: `fail ${harness.devRunId}` }],
+    metadata: { user_id: JSON.stringify({ session_id: fallbackSession }) },
+    messages: [{ role: 'user', content: `fallback ${harness.devRunId}` }],
   })
-  const failResp = await postJson(`${gatewayUrl}/v1/error`, harness.devRunId, failBody)
-  expect.that(
-    'gateway: anthropic_fail upstream returned 500',
-    failResp.statusCode,
-    (v) => v === 500,
-  )
-
-  const deadBody = JSON.stringify({
-    model: 'claude-3-opus',
-    metadata: { user_id: JSON.stringify({ session_id: claudeSessionId }) },
-    messages: [{ role: 'user', content: `dead ${harness.devRunId}` }],
+  const fallbackResp = await postJson(`${gatewayUrl}/v1/messages`, harness.devRunId, fallbackBody, {
+    id: 'msg_fallback',
+    role: 'assistant',
+    content: [{ type: 'text', text: 'fallback reply' }],
+    stop_reason: 'end_turn',
   })
-  const deadResp = await postJson(`${gatewayUrl}/v1/dead`, harness.devRunId, deadBody)
-  expect.that(
-    'gateway: anthropic_dead returned 502 (upstream connection failed)',
-    deadResp.statusCode,
-    (v) => v === 502,
-  )
+  expect.that('gateway: fallback-session upstream returned 200', fallbackResp.statusCode, (v) => v === 200)
 
   // Wait for the in-flight sink tick interval to fire at least once so
   // the JSONL exporter captures a `sink.tick` span before shutdown.
@@ -162,27 +234,29 @@ export async function run({ harness, expect }) {
   await handle.stop()
   await handle.done
 
-  // The kernel is dead; flush observability before we boot a fresh
-  // dispatch kernel for the query so the JSONL files contain every
-  // daemon-emitted span when `expect.traces()` reads them.
+  // Flush observability before booting a fresh dispatch kernel for
+  // the query so the JSONL files contain every daemon-emitted span
+  // when `expect.traces()` reads them.
   await obs.shutdown()
-
   await echo.close()
-  await errorUpstream.close()
 
-  // ----- Query ai_gateway_messages with a fresh dispatch boot -----
+  // ----- Query ai_gateway_messages -----
   const sql = `
     select
+      role,
       content_text,
-      JSON_VALUE(attributes, '$.gateway.status_code') as status_code,
-      JSON_VALUE(attributes, '$.gateway.error') as error,
-      JSON_VALUE(attributes, '$.gateway.upstream') as upstream,
-      JSON_VALUE(attributes, '$.gateway.path') as path,
+      message_id,
+      provider_uuid,
+      previous_message_id,
       cwd,
-      git_branch
+      git_branch,
+      JSON_VALUE(attributes, '$.claude.identity_source') as claude_identity_source,
+      JSON_VALUE(attributes, '$.gateway.identity_source') as gateway_identity_source,
+      JSON_VALUE(attributes, '$.gateway.upstream') as upstream,
+      JSON_VALUE(attributes, '$.gateway.status_code') as status_code
     from ai_gateway_messages
     where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
-    order by message_created_at
+    order by conversation_id, message_index
   `.trim().replace(/\s+/g, ' ')
   const stdoutBuf = makeBuf()
   const stderrBuf = makeBuf()
@@ -209,36 +283,94 @@ export async function run({ harness, expect }) {
     )
     return
   }
+
+  // Expect 4 rows total: 2 per exchange (user + assistant) × 2 exchanges.
   expect.that(
-    'query: ai_gateway_messages has exactly three normalized request rows for the dev_run_id',
+    'query: ai_gateway_messages has four projected rows (2 messages × 2 exchanges)',
     rows,
-    (v) => Array.isArray(v) && v.length === 3,
-  )
-  expect.that(
-    'query: every Claude row carries hook-recorded cwd and git_branch',
-    rows.map((r) => [r.cwd, r.git_branch]),
-    (v) => Array.isArray(v) &&
-      v.length === 3 &&
-      v.every(([cwd, gitBranch]) => cwd === harness.tmpDir && gitBranch === 'smoke-branch'),
+    (v) => Array.isArray(v) && v.length === 4,
   )
 
-  // The diagnostic fields live under attributes.gateway on each part row.
-  const byUpstream = new Map(rows.map((r) => [r.upstream, r]))
+  const transcriptRows = rows.filter((r) => r.message_id === 'u-user-1' || r.message_id === 'u-assistant-1')
   expect.that(
-    'query: anthropic_ok row has status_code=200 and no error',
-    [byUpstream.get('anthropic_ok')?.status_code, byUpstream.get('anthropic_ok')?.error],
-    ([s, e]) => Number(s) === 200 && (e === null || e === undefined),
+    'query: transcript session produced two rows with native uuid identity',
+    transcriptRows,
+    (v) => Array.isArray(v) && v.length === 2,
+  )
+  const transcriptUser = transcriptRows.find((r) => r.role === 'user')
+  const transcriptAssistant = transcriptRows.find((r) => r.role === 'assistant')
+
+  expect.that(
+    'query: transcript user row → message_id == provider_uuid == "u-user-1"',
+    [transcriptUser?.message_id, transcriptUser?.provider_uuid],
+    (v) => Array.isArray(v) && v[0] === 'u-user-1' && v[1] === 'u-user-1',
   )
   expect.that(
-    'query: anthropic_fail row has status_code=500',
-    byUpstream.get('anthropic_fail')?.status_code,
-    (v) => Number(v) === 500,
+    'query: transcript user row → previous_message_id is [] (root)',
+    parseJson(transcriptUser?.previous_message_id),
+    (v) => Array.isArray(v) && v.length === 0,
   )
   expect.that(
-    'query: anthropic_dead row has status_code=502 and a non-null error string',
-    [byUpstream.get('anthropic_dead')?.status_code, byUpstream.get('anthropic_dead')?.error],
-    ([s, e]) => Number(s) === 502 && typeof e === 'string' && e.length > 0,
+    'query: transcript assistant row → message_id == provider_uuid == "u-assistant-1"',
+    [transcriptAssistant?.message_id, transcriptAssistant?.provider_uuid],
+    (v) => Array.isArray(v) && v[0] === 'u-assistant-1' && v[1] === 'u-assistant-1',
   )
+  expect.that(
+    'query: transcript assistant row → previous_message_id is ["u-user-1"]',
+    parseJson(transcriptAssistant?.previous_message_id),
+    (v) => Array.isArray(v) && v.length === 1 && v[0] === 'u-user-1',
+  )
+
+  // Both transcript rows must carry the cwd/git_branch from the state
+  // file the hook populated above.
+  for (const row of transcriptRows) {
+    expect.that(
+      `query: transcript ${row.role} row carries cwd from state file`,
+      row.cwd,
+      (v) => v === harness.tmpDir,
+    )
+    expect.that(
+      `query: transcript ${row.role} row has no claude.identity_source (native DAG path)`,
+      row.claude_identity_source,
+      (v) => v === undefined || v === null,
+    )
+    expect.that(
+      `query: transcript ${row.role} row has no gateway.identity_source (projector supplied message_id)`,
+      row.gateway_identity_source,
+      (v) => v === undefined || v === null,
+    )
+  }
+
+  // The fallback session's rows must have hash message_ids, no
+  // provider_uuid, AND both fallback markers set.
+  const fallbackRows = rows.filter((r) => r.message_id !== 'u-user-1' && r.message_id !== 'u-assistant-1')
+  expect.that(
+    'query: fallback session produced two rows',
+    fallbackRows,
+    (v) => Array.isArray(v) && v.length === 2,
+  )
+  for (const row of fallbackRows) {
+    expect.that(
+      `query: fallback ${row.role} row has hash message_id (not a uuid)`,
+      row.message_id,
+      (v) => typeof v === 'string' && v.length > 0 && v !== 'u-user-1' && v !== 'u-assistant-1',
+    )
+    expect.that(
+      `query: fallback ${row.role} row has no provider_uuid`,
+      row.provider_uuid,
+      (v) => v === undefined || v === null,
+    )
+    expect.that(
+      `query: fallback ${row.role} row marked claude.identity_source=gateway_fallback`,
+      row.claude_identity_source,
+      (v) => v === 'gateway_fallback',
+    )
+    expect.that(
+      `query: fallback ${row.role} row marked gateway.identity_source=gateway_fallback`,
+      row.gateway_identity_source,
+      (v) => v === 'gateway_fallback',
+    )
+  }
 
   // ----- Daemon-self-telemetry assertions (JSONL) -----
   const traces = await expect.traces()
@@ -264,9 +396,9 @@ export async function run({ harness, expect }) {
       t.name === 'cache.append' && t.attributes?.hyp_dataset === 'ai_gateway_messages',
   )
   expect.that(
-    'traces: at least three cache.append spans for ai_gateway_messages (one per exchange)',
+    'traces: at least two cache.append spans for ai_gateway_messages (one per exchange)',
     cacheAppends,
-    (rows) => Array.isArray(rows) && rows.length >= 3,
+    (rows) => Array.isArray(rows) && rows.length >= 2,
   )
 
   const shutdownSpans = traces.filter((/** @type {any} */ t) => t.name === 'daemon.shutdown')
@@ -276,8 +408,6 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
 
-  // The contract header still tags the per-exchange log event even
-  // though query rows now expose it via attributes.dev_run_id.
   const logs = await expect.logs()
   const exchanges = logs.filter(
     (/** @type {any} */ l) =>
@@ -286,35 +416,35 @@ export async function run({ harness, expect }) {
   expect.that(
     'logs: aigw.exchange tagged with dev_run_id for every captured request',
     exchanges,
-    (rows) => Array.isArray(rows) && rows.length === 3,
+    (rows) => Array.isArray(rows) && rows.length === 2,
   )
 }
 
 // ---------------------------------------------------------------------
-// Test upstream helpers
+// Test upstream + helpers
 // ---------------------------------------------------------------------
 
 /**
- * Start an in-process HTTP echo upstream — the proxy's "happy path".
- * Returns 200 with a JSON body that echoes the bytes the proxy
- * forwarded.
+ * Echo upstream that returns the requested assistant body when the
+ * caller supplies one. Mirrors Anthropic's response envelope shape so
+ * the projector's `responseBody` path is exercised.
  *
- * @returns {Promise<{ url: string, close: () => Promise<void> }>}
+ * The caller sets the assistant payload via a base64 header on the
+ * request (`x-test-assistant-b64`) so the same listener can serve
+ * multiple scripted responses without per-request server config.
  */
-async function startEchoUpstream() {
+async function startAnthropicEchoUpstream() {
   const server = http.createServer((req, res) => {
     /** @type {Buffer[]} */
     const chunks = []
     req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
     req.on('end', () => {
+      const assistantHeader = req.headers['x-test-assistant-b64']
+      const assistant = typeof assistantHeader === 'string'
+        ? safeJson(Buffer.from(assistantHeader, 'base64').toString('utf8'))
+        : { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(
-        JSON.stringify({
-          url: req.url ?? '',
-          method: req.method ?? '',
-          bodyBytes: Buffer.concat(chunks).byteLength,
-        }),
-      )
+      res.end(JSON.stringify(assistant))
     })
     req.on('error', () => res.end())
   })
@@ -325,50 +455,6 @@ async function startEchoUpstream() {
     url: `http://127.0.0.1:${addr.port}`,
     close: () => closeServer(server),
   }
-}
-
-/**
- * Start an upstream that always responds with `statusCode` and a JSON
- * error body. Used to simulate a "real" provider-side failure (the
- * connection succeeds but the request is rejected).
- *
- * @param {number} statusCode
- * @param {Record<string, unknown>} body
- */
-async function startStatusUpstream(statusCode, body) {
-  const payload = JSON.stringify(body)
-  const server = http.createServer((req, res) => {
-    req.resume()
-    req.on('end', () => {
-      res.writeHead(statusCode, { 'content-type': 'application/json' })
-      res.end(payload)
-    })
-  })
-  await listen(server)
-  const addr = server.address()
-  if (!addr || typeof addr !== 'object') throw new Error('error-upstream: failed to bind')
-  return {
-    url: `http://127.0.0.1:${addr.port}`,
-    close: () => closeServer(server),
-  }
-}
-
-/**
- * Reserve and immediately release an ephemeral port. Used to simulate
- * a "dead" upstream — pointing the gateway at this port produces a
- * connection-refused error the proxy turns into a 502 + recorded
- * `error` row.
- *
- * @returns {Promise<number>}
- */
-async function reserveFreePort() {
-  const probe = http.createServer()
-  await listen(probe)
-  const addr = probe.address()
-  if (!addr || typeof addr !== 'object') throw new Error('reserveFreePort: no address')
-  const port = addr.port
-  await closeServer(probe)
-  return port
 }
 
 /**
@@ -392,27 +478,37 @@ function closeServer(server) {
 }
 
 /**
- * Issue one POST through the gateway carrying the contract header.
+ * Issue one POST through the gateway carrying the contract header
+ * and (optionally) a scripted assistant body the upstream echo will
+ * play back.
  *
  * @param {string} url
  * @param {string} runId
  * @param {string} body
+ * @param {Record<string, unknown> | undefined} assistant
  * @returns {Promise<{ statusCode: number, body: string }>}
  */
-function postJson(url, runId, body) {
+function postJson(url, runId, body, assistant) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url)
+    /** @type {Record<string, string>} */
+    const headers = {
+      'content-type': 'application/json',
+      'content-length': String(Buffer.byteLength(body)),
+      'x-hyp-dev-run-id': runId,
+      'anthropic-version': '2023-06-01',
+      'user-agent': 'claude-cli/1.0',
+    }
+    if (assistant) {
+      headers['x-test-assistant-b64'] = Buffer.from(JSON.stringify(assistant), 'utf8').toString('base64')
+    }
     const req = http.request(
       {
         method: 'POST',
         hostname: parsed.hostname,
         port: Number.parseInt(parsed.port, 10),
         path: parsed.pathname + parsed.search,
-        headers: {
-          'content-type': 'application/json',
-          'content-length': String(Buffer.byteLength(body)),
-          'x-hyp-dev-run-id': runId,
-        },
+        headers,
       },
       (res) => {
         /** @type {Buffer[]} */
@@ -431,6 +527,26 @@ function postJson(url, runId, body) {
     req.write(body)
     req.end()
   })
+}
+
+/**
+ * @param {string | Record<string, unknown>} value
+ */
+function stdinFor(value) {
+  const body = typeof value === 'string' ? value : JSON.stringify(value)
+  return /** @type {NodeJS.ReadStream} */ (Readable.from([body]))
+}
+
+/** @param {string} raw */
+function safeJson(raw) {
+  try { return JSON.parse(raw) } catch { return undefined }
+}
+
+/** @param {unknown} raw */
+function parseJson(raw) {
+  if (raw == null) return raw
+  if (typeof raw !== 'string') return raw
+  try { return JSON.parse(raw) } catch { return raw }
 }
 
 /** @param {number} ms */

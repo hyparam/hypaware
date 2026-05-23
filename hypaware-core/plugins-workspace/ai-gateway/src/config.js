@@ -1,20 +1,31 @@
 // @ts-check
 
 /**
+ * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput
+ */
+
+/**
  * Validate and normalize the ai-gateway config slice. Returns the
  * compiled shape used by the source/listener. Validation is strict:
  * missing or malformed `upstreams` is rejected loudly because the
  * gateway has nothing useful to do without at least one upstream.
  *
+ * `UpstreamConfig` is also the runtime shape the proxy uses, so the
+ * adapter-registered `AiGatewayUpstreamPreset` from the capability
+ * surface flows through it directly — TOML-config upstreams and
+ * adapter-registered presets share one structural type.
+ *
  * @typedef {Object} UpstreamConfig
  * @property {string} name
  * @property {string} base_url
- * @property {string} path_prefix
+ * @property {string} [path_prefix]
  * @property {string} [provider]
+ * @property {number} [priority]
+ * @property {((input: AiGatewayRouteInput) => boolean)} [match]
  *
  * @typedef {Object} AiGatewayConfig
  * @property {string} listen           Address as "host:port" (defaults to 127.0.0.1:0).
- * @property {string} gatewayId        Value for the proxy-compatible `gateway_id` column.
+ * @property {string} gatewayId        Value for the `gateway_id` column.
  * @property {UpstreamConfig[]} upstreams
  * @property {string[]} redactHeaders  Extra headers to redact in stored rows.
  */
@@ -51,12 +62,14 @@ export function compileUpstreams(raw) {
     if (!isObject(entry)) continue
     const name = stringField(entry.name)
     const baseUrl = stringField(entry.base_url)
-    const pathPrefix = stringField(entry.path_prefix) ?? '/'
     if (!name || !baseUrl) continue
+    const pathPrefix = stringField(entry.path_prefix) ?? '/'
     /** @type {UpstreamConfig} */
     const upstream = { name, base_url: baseUrl, path_prefix: pathPrefix }
     const provider = stringField(entry.provider)
     if (provider) upstream.provider = provider
+    const priority = numberField(entry.priority)
+    if (priority !== undefined) upstream.priority = priority
     out.push(upstream)
   }
   return out
@@ -101,6 +114,12 @@ function isObject(v) {
 /** @param {unknown} v */
 function stringField(v) {
   return typeof v === 'string' && v.length > 0 ? v : undefined
+}
+
+/** @param {unknown} v */
+function numberField(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  return undefined
 }
 
 /** @param {unknown} raw */
