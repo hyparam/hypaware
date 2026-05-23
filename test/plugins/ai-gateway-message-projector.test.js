@@ -148,6 +148,76 @@ test('projector returning undefined or an empty messages array is skipped', asyn
   assert.equal(rows[0].provider, 'ok')
 })
 
+test('projector returning an invalid shape is skipped and the next one is tried', async () => {
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = collectingLogger(logs)
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('bad-shape', {
+        priority: 20,
+        project: () => /** @type {any} */ ({ provider: '', conversation_id: 'c', messages: [] }),
+      }),
+      registered('ok', { priority: 5, project: () => projection('ok') }),
+    ],
+    log,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.ok(rows.length > 0)
+  assert.equal(rows[0].provider, 'ok')
+  assert.ok(
+    logs.some((entry) => entry.level === 'warn' && entry.message === 'aigw.projector_invalid_output'),
+    'invalid-output projector should produce an aigw.projector_invalid_output warn',
+  )
+})
+
+test('all projectors failing returns zero rows and warns once per failure', async () => {
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = collectingLogger(logs)
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('throws', { priority: 30, project: () => { throw new Error('boom') } }),
+      registered('returns-invalid', {
+        priority: 20,
+        project: () => /** @type {any} */ ({ not: 'a projection' }),
+      }),
+      registered('returns-undefined', { priority: 10, project: () => undefined }),
+    ],
+    log,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 0, 'no rows when every projector fails')
+  const warnings = logs.filter((entry) => entry.level === 'warn').map((entry) => entry.message)
+  assert.ok(warnings.includes('aigw.projector_error'), 'throwing projector logs aigw.projector_error')
+  assert.ok(warnings.includes('aigw.projector_invalid_output'), 'invalid-shape projector logs aigw.projector_invalid_output')
+  assert.ok(
+    warnings.includes('aigw.message_projection_skipped'),
+    'dispatcher logs aigw.message_projection_skipped when no projector succeeds',
+  )
+})
+
+test('skipping a non-matching projector does not call its project()', async () => {
+  let projectCalls = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('mismatch', {
+        priority: 50,
+        match: () => false,
+        project: () => { projectCalls++; return projection('mismatch') },
+      }),
+      registered('ok', { priority: 5, project: () => projection('ok') }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.ok(rows.length > 0)
+  assert.equal(rows[0].provider, 'ok')
+  assert.equal(projectCalls, 0)
+})
+
 test('projector-supplied message_id and previous_message_id are preserved', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -304,4 +374,23 @@ function exchange(overrides = {}) {
 /** @param {unknown} value */
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * @param {Array<{ level: string, message: string, fields: Record<string, unknown> }>} sink
+ */
+function collectingLogger(sink) {
+  /** @param {string} level */
+  const make = (level) => (
+    /** @type {string} */ message,
+    /** @type {Record<string, unknown>=} */ fields,
+  ) => {
+    sink.push({ level, message, fields: fields ?? {} })
+  }
+  return {
+    debug: make('debug'),
+    info: make('info'),
+    warn: make('warn'),
+    error: make('error'),
+  }
 }
