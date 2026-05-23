@@ -8,8 +8,16 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { ensureDurableBinForNpx } from './global_install.js'
-import { multiselect, text } from './tui/index.js'
+import { multiselect, text, PromptCancelledError } from './tui/index.js'
 import { shouldUseTui } from './tui-router.js'
+
+/**
+ * Exit code returned when the user cancels the picker walkthrough
+ * (escape / ctrl+c at any TUI prompt). 130 matches the POSIX
+ * convention for SIGINT and keeps the dispatcher from reporting the
+ * cancel as an unhandled exception.
+ */
+export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
@@ -445,6 +453,7 @@ function tuiPromptFactory(opts) {
       ...(question.bounds ? { bounds: question.bounds } : {}),
       stdin: opts.stdin ?? process.stdin,
       stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
+      env: opts.env,
     })
     return /** @type {string[]} */ (result)
   }
@@ -470,6 +479,7 @@ function tuiRetentionPromptFactory(opts) {
       },
       stdin: opts.stdin ?? process.stdin,
       stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
+      env: opts.env,
     })
     const trimmed = v.trim()
     if (trimmed === '') return defaultDays
@@ -667,26 +677,33 @@ export async function runPickerWalkthrough(opts) {
 
     stdout.write('Welcome to HypAware — the local logs+telemetry collector.\n\n')
 
-    const sourceRaw = await ask({
-      pickType: 'sources',
-      title: 'What do you want to collect? (space to toggle, enter to confirm)',
-      options: PICKER_SOURCES.map((s) => ({ value: s.value, label: s.label, summary: s.summary })),
-    })
-    const sources = /** @type {PickerSource[]} */ (
-      sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
-    )
+    try {
+      const sourceRaw = await ask({
+        pickType: 'sources',
+        title: 'What do you want to collect? (space to toggle, enter to confirm)',
+        options: PICKER_SOURCES.map((s) => ({ value: s.value, label: s.label, summary: s.summary })),
+      })
+      const sources = /** @type {PickerSource[]} */ (
+        sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
+      )
 
-    const exportRaw = await ask({
-      pickType: 'sinks',
-      title: 'Where should HypAware export captured data?',
-      options: PICKER_EXPORTS.map((e) => ({ value: e.value, label: e.label, summary: e.summary })),
-    })
-    const exportChoice = /** @type {PickerExport} */ (
-      PICKER_EXPORTS.find((e) => exportRaw.includes(e.value))?.value ?? 'keep-local'
-    )
+      const exportRaw = await ask({
+        pickType: 'sinks',
+        title: 'Where should HypAware export captured data?',
+        options: PICKER_EXPORTS.map((e) => ({ value: e.value, label: e.label, summary: e.summary })),
+      })
+      const exportChoice = /** @type {PickerExport} */ (
+        PICKER_EXPORTS.find((e) => exportRaw.includes(e.value))?.value ?? 'keep-local'
+      )
 
-    const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
-    picks = { sources, exportChoice, retentionDays }
+      const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
+      picks = { sources, exportChoice, retentionDays }
+    } catch (err) {
+      if (err instanceof PromptCancelledError) {
+        return cancelledResult(opts)
+      }
+      throw err
+    }
   }
 
   for (const value of picks.sources) {
@@ -1146,6 +1163,40 @@ function endpointFromListen(listen) {
 function clientSkillDir(client) {
   if (client === 'claude') return '.claude/skills'
   return '.codex/skills'
+}
+
+/**
+ * Build the canonical cancel result returned by {@link runPickerWalkthrough}
+ * when the user cancels via escape / ctrl+c. Writes a one-line cancel
+ * notice to stderr so the dispatcher does not eat it silently, and
+ * surfaces {@link WALKTHROUGH_CANCEL_EXIT_CODE} (130, matching SIGINT
+ * convention) as the exit code. The returned object satisfies the
+ * required shape of {@link PickerWalkthroughResult} but contains no
+ * config — callers that key off `exitCode` already short-circuit on
+ * non-zero values.
+ *
+ * @param {RunPickerWalkthroughOptions} opts
+ * @returns {PickerWalkthroughResult}
+ */
+function cancelledResult(opts) {
+  try {
+    opts.stderr.write('hyp init: cancelled\n')
+  } catch {
+    // best-effort: stderr might be closed during cleanup
+  }
+  return {
+    exitCode: WALKTHROUGH_CANCEL_EXIT_CODE,
+    configPath: '',
+    config: /** @type {HypAwareV2Config} */ ({
+      version: 2,
+      plugins: [],
+      query: { cache: { retention: { default_days: DEFAULT_RETENTION_DAYS } } },
+    }),
+    sourcesPicked: [],
+    exportPicked: 'keep-local',
+    clientsPicked: [],
+    retentionDays: DEFAULT_RETENTION_DAYS,
+  }
 }
 
 /**

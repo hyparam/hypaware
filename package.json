@@ -28,7 +28,7 @@
   },
   "scripts": {
     "lint": "node scripts/check-syntax.js",
-    "test": "find test -name '*.test.js' -print0 | xargs -0 node --test",
+    "test": "node scripts/run-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
