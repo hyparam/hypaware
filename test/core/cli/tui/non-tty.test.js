@@ -99,3 +99,24 @@ test('HYP_NO_TUI=1 forces the same TTY error even for fake-TTY streams', async (
     else process.env.HYP_NO_TUI = prevFlag
   }
 })
+
+test('injected env.HYP_NO_TUI=1 forces the TTY error even when process.env is clean', async () => {
+  const io = makeFakeTty()
+  const prevFlag = process.env.HYP_NO_TUI
+  delete process.env.HYP_NO_TUI
+  try {
+    await assert.rejects(
+      multiselect({
+        title: 'pick',
+        options: [{ value: 'a', label: 'A' }],
+        stdin: io.stdin,
+        stdout: io.stdout,
+        env: { HYP_NO_TUI: '1' },
+      }),
+      (err) => err instanceof Error && ERROR_RE.test(err.message),
+    )
+  } finally {
+    if (prevFlag === undefined) delete process.env.HYP_NO_TUI
+    else process.env.HYP_NO_TUI = prevFlag
+  }
+})

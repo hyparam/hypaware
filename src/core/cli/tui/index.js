@@ -24,6 +24,7 @@ export { PromptCancelledError }
  * @property {{ min?: number, max?: number }} [bounds]
  * @property {NodeJS.ReadableStream} [stdin]
  * @property {NodeJS.WritableStream} [stdout]
+ * @property {NodeJS.ProcessEnv} [env]
  */
 
 /**
@@ -70,6 +71,7 @@ export async function multiselect(spec) {
  * @property {string|number} [default]
  * @property {NodeJS.ReadableStream} [stdin]
  * @property {NodeJS.WritableStream} [stdout]
+ * @property {NodeJS.ProcessEnv} [env]
  */
 
 /**
@@ -112,6 +114,7 @@ export async function select(spec) {
  * @property {boolean} [mask]
  * @property {NodeJS.ReadableStream} [stdin]
  * @property {NodeJS.WritableStream} [stdout]
+ * @property {NodeJS.ProcessEnv} [env]
  */
 
 /**
@@ -146,6 +149,7 @@ export async function text(spec) {
  * @property {boolean} [default]
  * @property {NodeJS.ReadableStream} [stdin]
  * @property {NodeJS.WritableStream} [stdout]
+ * @property {NodeJS.ProcessEnv} [env]
  */
 
 /**
@@ -169,12 +173,13 @@ export async function confirm(spec) {
 }
 
 /**
- * @param {{ stdin?: NodeJS.ReadableStream, stdout?: NodeJS.WritableStream }} spec
- * @returns {{ stdin: NodeJS.ReadableStream, stdout: NodeJS.WritableStream }}
+ * @param {{ stdin?: NodeJS.ReadableStream, stdout?: NodeJS.WritableStream, env?: NodeJS.ProcessEnv }} spec
+ * @returns {{ stdin: NodeJS.ReadableStream, stdout: NodeJS.WritableStream, env?: NodeJS.ProcessEnv }}
  */
 function resolveIo(spec) {
   return {
     stdin:  spec.stdin  ?? process.stdin,
     stdout: spec.stdout ?? process.stdout,
+    ...(spec.env !== undefined ? { env: spec.env } : {}),
   }
 }

@@ -92,6 +92,25 @@ test('shouldUseTui treats HYP_NO_TUI=0 as not-set (only the literal "1" disables
   })
 })
 
+test('shouldUseTui honors opts.env over process.env when both are set', () => {
+  withHypNoTui(undefined, () => {
+    const stdin = makeStream(true)
+    const stdout = makeStream(true)
+    // process.env says yes-to-TUI but injected env says no.
+    assert.equal(shouldUseTui({ stdin, stdout, env: { HYP_NO_TUI: '1' } }), false)
+  })
+})
+
+test('shouldUseTui ignores process.env.HYP_NO_TUI when opts.env is supplied without it', () => {
+  withHypNoTui('1', () => {
+    const stdin = makeStream(true)
+    const stdout = makeStream(true)
+    // process.env says no-TUI, but the injected env that overrides it
+    // doesn't carry HYP_NO_TUI, so the TUI path should win.
+    assert.equal(shouldUseTui({ stdin, stdout, env: {} }), true)
+  })
+})
+
 test('isTty rejects undefined, null, and primitives', () => {
   assert.equal(isTty(undefined), false)
   assert.equal(isTty(null), false)

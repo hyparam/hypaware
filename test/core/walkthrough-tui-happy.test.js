@@ -7,7 +7,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import {
+  runPickerWalkthrough,
+  WALKTHROUGH_CANCEL_EXIT_CODE,
+} from '../../src/core/cli/walkthrough.js'
 
 /**
  * Build a PassThrough pair that satisfies the TUI runtime's `isTTY` and
@@ -109,6 +112,44 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
   }
 })
 
+test('runPickerWalkthrough returns a deterministic cancel exit code when the user cancels at the source prompt', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-cancel-'))
+  const io = makeFakeTty()
+  const stderr = makeBuf()
+
+  const prevNoColor = process.env.NO_COLOR
+  process.env.NO_COLOR = '1'
+  const prevNoTui = process.env.HYP_NO_TUI
+  delete process.env.HYP_NO_TUI
+
+  try {
+    const promise = runPickerWalkthrough({
+      capabilities: /** @type {any} */ ({}),
+      stdout: io.stdout,
+      stderr,
+      stdin: io.stdin,
+      env: {
+        HOME: tmp,
+        HYP_HOME: path.join(tmp, '.hyp'),
+      },
+    })
+
+    // ctrl+c at the first prompt cancels the walkthrough.
+    await settle()
+    await feed(io.stdin, ['\x03'])
+
+    const result = await promise
+    assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
+    assert.equal(result.exitCode, 130)
+    assert.match(stderr.text(), /hyp init: cancelled/)
+  } finally {
+    if (prevNoColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = prevNoColor
+    if (prevNoTui === undefined) delete process.env.HYP_NO_TUI
+    else process.env.HYP_NO_TUI = prevNoTui
+  }
+})
+
 test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO_TUI=1', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-tui-fallback-'))
   const input = new PassThrough()
@@ -119,28 +160,24 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   const stdout = answerDrivenOutput(input, ['3\n', '1\n', '\n'], true)
   const stderr = makeBuf()
 
-  const prev = process.env.HYP_NO_TUI
-  process.env.HYP_NO_TUI = '1'
-  try {
-    const result = await runPickerWalkthrough({
-      capabilities: /** @type {any} */ ({}),
-      stdout,
-      stderr,
-      stdin: /** @type {any} */ (input),
-      env: {
-        HOME: tmp,
-        HYP_HOME: path.join(tmp, '.hyp'),
-      },
-    })
-    assert.equal(result.exitCode, 0)
-    assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
-    assert.equal(result.exportPicked, 'keep-local')
-    // The legacy prompt prints the numbered-list signature.
-    assert.match(stdout.text(), /select \(e\.g\. 1,3 or "all"\):/)
-  } finally {
-    if (prev === undefined) delete process.env.HYP_NO_TUI
-    else process.env.HYP_NO_TUI = prev
-  }
+  // HYP_NO_TUI flows through opts.env — the same channel real callers
+  // use — so this test also exercises the env-threading contract.
+  const result = await runPickerWalkthrough({
+    capabilities: /** @type {any} */ ({}),
+    stdout,
+    stderr,
+    stdin: /** @type {any} */ (input),
+    env: {
+      HOME: tmp,
+      HYP_HOME: path.join(tmp, '.hyp'),
+      HYP_NO_TUI: '1',
+    },
+  })
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
+  assert.equal(result.exportPicked, 'keep-local')
+  // The legacy prompt prints the numbered-list signature.
+  assert.match(stdout.text(), /select \(e\.g\. 1,3 or "all"\):/)
 })
 
 /**
