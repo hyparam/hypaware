@@ -21,6 +21,10 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
+ * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Phase 9 V1-milestone smoke. Boots the full first-party stack
  * (`@hypaware/ai-gateway` + `@hypaware/otel` + `@hypaware/local-fs` +
  * `@hypaware/format-parquet` + `@hypaware/claude`) against a tmp
@@ -212,7 +216,7 @@ export async function run({ harness, expect }) {
     await kernel.sources.start('ai-gateway', runtime.ctx)
     runtime.started = true
 
-    /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+    /** @type {AiGatewayCapability} */
     const gatewayApi = kernel.capabilities.require(
       '@smoke/walkthrough',
       'hypaware.ai-gateway',

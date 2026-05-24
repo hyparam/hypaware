@@ -1,7 +1,7 @@
 import type {
   PluginManifest,
   PluginName,
-} from '../../collectivus-plugin-kernel-types'
+} from '../../collectivus-plugin-kernel-types.d.ts'
 import type { CapabilityRegistryHandle } from './registry/capabilities'
 
 export type DepGraphErrorKind =

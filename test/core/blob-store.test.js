@@ -16,6 +16,10 @@ import {
 } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * @returns {Promise<string>}
  */
 async function makeTempBase() {
@@ -171,7 +175,7 @@ test('local-fs BlobStore putObject honours ifNoneMatch="*" by failing on existin
         // Stable errorKind keeps the iceberg adapter's translation from
         // depending on the local-fs error MESSAGE.
         assert.equal(/** @type {any} */ (err).errorKind, 'blob_precondition_failed')
-        assert.match(err.message, /precondition failed/i)
+        assert.match(/** @type {any} */ (err).message, /precondition failed/i)
         return true
       },
     )
@@ -240,7 +244,7 @@ test('local-fs BlobStore accepts a Readable stream as body', async () => {
  * keyed by object key — but honours every contract bit the surface
  * needs: kind, ordering, prefix filtering, ifNoneMatch, return shape.
  *
- * @returns {import('../../collectivus-plugin-kernel-types').BlobStore}
+ * @returns {BlobStore}
  */
 function createInMemoryBlobStore() {
   /** @type {Map<string, { bytes: Uint8Array, lastModified: Date }>} */

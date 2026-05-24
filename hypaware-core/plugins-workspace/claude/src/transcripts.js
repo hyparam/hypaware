@@ -21,30 +21,10 @@ import readline from 'node:readline'
  * best-effort: a missing directory, a missing file, or a truncated
  * line never throws — projection falls back to gateway-computed
  * identity in that case.
- *
- * @typedef {Object} TranscriptEntry
- * @property {string} sessionId
- * @property {string | undefined} messageId
- * @property {string | undefined} contentKey
- * @property {string | undefined} provider_uuid
- * @property {string | undefined} parent_uuid
- * @property {string | undefined} logical_parent_uuid
- * @property {string | undefined} source_tool_assistant_uuid
- * @property {string | undefined} request_id
- * @property {string | undefined} prompt_id
- * @property {string | undefined} provider_type
- * @property {string | undefined} provider_subtype
- * @property {string | undefined} entrypoint
- * @property {string | undefined} client_version
- * @property {string | undefined} user_type
- * @property {string | undefined} permission_mode
- * @property {boolean | undefined} is_sidechain
- * @property {string | undefined} attachment_type
- * @property {string | undefined} hook_event
- * @property {boolean | undefined} is_compact_summary
- * @property {unknown} compact_metadata
- * @property {unknown} raw_frame
- * @property {number | undefined} timestampMs
+ */
+
+/**
+ * @import { TranscriptEntry } from './types.d.ts'
  */
 
 /**

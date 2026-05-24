@@ -2,6 +2,11 @@
 
 import { hrTimeToUnixNano, SpanStatusCode } from './runtime.js'
 
+/**
+ * @import { LogRecord, MetricRecord } from './types.d.ts'
+ * @import { Span } from './runtime.js'
+ */
+
 const OTLP_AGGREGATION_TEMPORALITY_CUMULATIVE = 2
 
 class OtlpHttpJsonExporter {
@@ -42,7 +47,7 @@ class OtlpHttpJsonExporter {
 }
 
 export class OtlpSpanExporter extends OtlpHttpJsonExporter {
-  /** @param {import('./runtime.js').Span[]} spans */
+  /** @param {Span[]} spans */
   exportBatch(spans) {
     if (spans.length === 0) return
     this.post({ resourceSpans: groupByResourceAndScope(spans, spanToOtlp) })
@@ -50,7 +55,7 @@ export class OtlpSpanExporter extends OtlpHttpJsonExporter {
 }
 
 export class OtlpLogExporter extends OtlpHttpJsonExporter {
-  /** @param {import('./runtime.js').LogRecord[]} records */
+  /** @param {LogRecord[]} records */
   exportBatch(records) {
     if (records.length === 0) return
     this.post({ resourceLogs: groupLogsByResourceAndScope(records) })
@@ -58,7 +63,7 @@ export class OtlpLogExporter extends OtlpHttpJsonExporter {
 }
 
 export class OtlpMetricExporter extends OtlpHttpJsonExporter {
-  /** @param {import('./runtime.js').MetricRecord[]} records */
+  /** @param {MetricRecord[]} records */
   exportBatch(records) {
     if (records.length === 0) return
     this.post({ resourceMetrics: groupMetricsByResourceAndScope(records) })
@@ -66,8 +71,8 @@ export class OtlpMetricExporter extends OtlpHttpJsonExporter {
 }
 
 /**
- * @param {import('./runtime.js').Span[]} spans
- * @param {(span: import('./runtime.js').Span) => object} mapSpan
+ * @param {Span[]} spans
+ * @param {(span: Span) => object} mapSpan
  */
 function groupByResourceAndScope(spans, mapSpan) {
   /** @type {Map<string, { resource: object, scopeSpans: Array<{ scope: object, spans: object[] }> }>} */
@@ -89,7 +94,7 @@ function groupByResourceAndScope(spans, mapSpan) {
   return [...byResource.values()]
 }
 
-/** @param {import('./runtime.js').LogRecord[]} records */
+/** @param {LogRecord[]} records */
 function groupLogsByResourceAndScope(records) {
   /** @type {Map<string, { resource: object, scopeLogs: Array<{ scope: object, logRecords: object[] }> }>} */
   const byResource = new Map()
@@ -110,7 +115,7 @@ function groupLogsByResourceAndScope(records) {
   return [...byResource.values()]
 }
 
-/** @param {import('./runtime.js').MetricRecord[]} records */
+/** @param {MetricRecord[]} records */
 function groupMetricsByResourceAndScope(records) {
   /** @type {Map<string, { resource: object, scopeMetrics: Array<{ scope: object, metrics: object[] }> }>} */
   const byResource = new Map()
@@ -131,7 +136,7 @@ function groupMetricsByResourceAndScope(records) {
   return [...byResource.values()]
 }
 
-/** @param {import('./runtime.js').Span} span */
+/** @param {Span} span */
 function spanToOtlp(span) {
   const ctx = span.spanContext()
   return cleanObject({
@@ -152,7 +157,7 @@ function spanToOtlp(span) {
   })
 }
 
-/** @param {import('./runtime.js').LogRecord} record */
+/** @param {LogRecord} record */
 function logToOtlp(record) {
   return cleanObject({
     timeUnixNano: String(hrTimeToUnixNano(record.hrTime)),
@@ -167,7 +172,7 @@ function logToOtlp(record) {
   })
 }
 
-/** @param {import('./runtime.js').MetricRecord} record */
+/** @param {MetricRecord} record */
 function metricToOtlp(record) {
   const pointBase = {
     startTimeUnixNano: String(hrTimeToUnixNano(record.startTime)),

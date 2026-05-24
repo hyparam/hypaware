@@ -1,34 +1,8 @@
 // @ts-check
 
 /**
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayUpstreamPreset} AiGatewayUpstreamPreset
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientRegistration} AiGatewayClientRegistration
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayEndpointOptions} AiGatewayEndpointOptions
- */
-
-/**
- * @typedef {AiGatewayExchangeProjector & { _seq: number }} RegisteredProjector
- *
- * Internal record of a registered exchange projector. `_seq` is the
- * registration-order tiebreaker the dispatcher applies after sorting
- * by descending `priority`.
- */
-
-/**
- * Mutable state owned by the ai-gateway plugin instance. Both the
- * `AiGatewayCapability` facade (what adapter plugins see) and the
- * running source read from this object — the API mutates it via
- * `register*` calls, the source consumes it when compiling the
- * listener's upstream table and when dispatching projectors over a
- * finalized exchange.
- *
- * @typedef {Object} GatewayState
- * @property {Map<string, AiGatewayUpstreamPreset>} presets
- * @property {Map<string, AiGatewayClientRegistration>} clients
- * @property {RegisteredProjector[]} projectors
- * @property {{ host: string, port: number } | undefined} listen
+ * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { GatewayState, RegisteredProjector } from './types.d.ts'
  */
 
 /**

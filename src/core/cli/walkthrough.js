@@ -9,61 +9,30 @@ import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginConfigInstance} PluginConfigInstance */
-/** @typedef {import('../registry/sources.js').ExtendedSourceRegistry} ExtendedSourceRegistry */
-/** @typedef {import('../registry/sinks.js').ExtendedSinkRegistry} ExtendedSinkRegistry */
-
 /**
- * @typedef {Object} WalkthroughOptions
- * @property {ExtendedSourceRegistry} sources
- * @property {ExtendedSinkRegistry}   sinks
- * @property {CapabilityRegistry}     capabilities
- * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stdout
- * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.ProcessEnv}     env
- * @property {AsyncPickPrompt}       [prompt]   Override prompt resolver (tests pre-bake answers).
- * @property {AsyncRetentionPrompt}  [retentionPrompt]
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { DaemonInstallOptions } from '../daemon/types.d.ts'
+ * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
+ * @import { ExtendedSourceRegistry } from '../registry/sources.js'
+ * @import { *, *   AsyncPickPrompt, *   AsyncRetentionPrompt, *   FinaleSummary, *   PickerExport, *   PickerFinaleActions, *   PickerPicks, *   PickerSource, *   PickerWalkthroughResult, *   RunPickerWalkthroughOptions, *   WalkthroughOption, *   WalkthroughOptions, *   WalkthroughQuestion, *   WalkthroughResult } from './types.d.ts'
  */
 
 /**
- * @typedef {(question: WalkthroughQuestion) => Promise<string[]>} AsyncPickPrompt
- * Prompt for one category (sources / sinks / clients). Returns the
- * selected `value` strings in the order the user picked them.
- */
-
-/**
- * @typedef {(prompt: string, defaultDays: number) => Promise<number>} AsyncRetentionPrompt
- */
-
-/**
- * @typedef {Object} WalkthroughQuestion
- * @property {'sources'|'sinks'|'clients'} pickType
- * @property {string} title
- * @property {WalkthroughOption[]} options
- * @property {{ min?: number, max?: number }} [bounds]
- */
-
-/**
- * @typedef {Object} WalkthroughOption
- * @property {string} value     Stable identifier (source name, sink contribution key, client name).
- * @property {string} label     User-visible label.
- * @property {string} [summary]
- * @property {string} [plugin]
- */
-
-/**
- * @typedef {Object} WalkthroughResult
- * @property {number} exitCode
- * @property {string} configPath
- * @property {HypAwareV2Config} config
- * @property {string[]} sourcesPicked
- * @property {string[]} sinksPicked
- * @property {string[]} clientsPicked
- * @property {number} retentionDays
+ * @import {
+ *   AsyncPickPrompt,
+ *   AsyncRetentionPrompt,
+ *   PickerSource,
+ *   PickerExport,
+ *   PickerPicks,
+ *   PickerFinaleActions,
+ *   PickerWalkthroughResult,
+ *   RunPickerWalkthroughOptions,
+ *   FinaleSummary,
+ *   WalkthroughOption,
+ *   WalkthroughOptions,
+ *   WalkthroughQuestion,
+ *   WalkthroughResult,
+ * } from './types.d.ts'
  */
 
 const DEFAULT_RETENTION_DAYS = 30
@@ -297,7 +266,7 @@ function composeConfig(args) {
     }
   }
 
-  /** @type {Record<string, import('../../../collectivus-plugin-kernel-types').SinkConfigInstance>} */
+  /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
   for (const sinkValue of args.sinks) {
     if (sinkValue === '__none__') continue
@@ -335,7 +304,7 @@ function composeConfig(args) {
     const pluginName = `@hypaware/${clientName}`
     if (!plugins.find((p) => p.name === pluginName)) {
       plugins.push({
-        name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ (pluginName),
+        name: /** @type {PluginName} */ (pluginName),
         config: { proxy: '@hypaware/ai-gateway' },
       })
     }
@@ -485,61 +454,6 @@ const PICKER_EXPORTS = [
   },
 ]
 
-/**
- * @typedef {'claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel'} PickerSource
- * @typedef {'keep-local'|'local-parquet'|'configure-later'} PickerExport
- */
-
-/**
- * @typedef {Object} PickerPicks
- * @property {PickerSource[]} sources
- * @property {PickerExport}   exportChoice
- * @property {number}         retentionDays
- */
-
-/**
- * @typedef {Object} PickerFinaleActions
- * @property {boolean} [skipDaemon]    When true, skip the daemon install + restart steps (mirrors `--no-daemon`).
- * @property {boolean} [dryRun]        Pass-through to daemon install / attach / skills install.
- * @property {string}  [binPath]       Override the resolved binPath the daemon install plan should point at.
- * @property {boolean} [skipDaemonRestart] When true, run daemon install but skip the restart step.
- */
-
-/**
- * @typedef {Object} RunPickerWalkthroughOptions
- * @property {CapabilityRegistry}                   capabilities
- * @property {{ stopAll?: () => Promise<void> }}    [sources]
- * @property {{ list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] }} [skills]
- * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stdout
- * @property {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
- * @property {NodeJS.ReadableStream}                [stdin]
- * @property {NodeJS.ProcessEnv}                    env
- * @property {PickerPicks}                          [picks]      Pre-baked picks; bypass prompts when set.
- * @property {AsyncPickPrompt}                      [prompt]
- * @property {AsyncRetentionPrompt}                 [retentionPrompt]
- * @property {PickerFinaleActions}                  [finale]     When set, run daemon install / attach / skills / restart after writing config.
- */
-
-/**
- * @typedef {Object} PickerWalkthroughResult
- * @property {number}             exitCode
- * @property {string}             configPath
- * @property {HypAwareV2Config}   config
- * @property {PickerSource[]}     sourcesPicked
- * @property {PickerExport}       exportPicked
- * @property {('claude'|'codex')[]} clientsPicked
- * @property {number}             retentionDays
- * @property {FinaleSummary}      [finale]
- */
-
-/**
- * @typedef {Object} FinaleSummary
- * @property {{ skipped: boolean, dryRun: boolean, plan?: Record<string, unknown>, targetPath?: string }} daemonInstall
- * @property {{ skipped: boolean, installed: boolean, binPath?: string, packageSpec?: string }}                 globalInstall
- * @property {{ client: 'claude'|'codex', dryRun: boolean, ok: boolean }[]}                                attach
- * @property {{ name: string, client: 'claude'|'codex', dest: string, dryRun: boolean }[]}                 skillsInstalled
- * @property {{ skipped: boolean, dryRun: boolean, ok: boolean }}                                          daemonRestart
- */
 
 /**
  * Drive the Phase 5 first-run picker walkthrough.
@@ -789,7 +703,7 @@ export function composePickerConfig(args) {
     })
   }
 
-  /** @type {Record<string, import('../../../collectivus-plugin-kernel-types').SinkConfigInstance>} */
+  /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
   if (args.exportChoice === 'local-parquet') {
     plugins.push({ name: '@hypaware/local-fs' })
@@ -806,13 +720,13 @@ export function composePickerConfig(args) {
 
   if (args.sources.includes('claude')) {
     plugins.push({
-      name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ ('@hypaware/claude'),
+      name: /** @type {PluginName} */ ('@hypaware/claude'),
       config: { proxy: '@hypaware/ai-gateway' },
     })
   }
   if (args.sources.includes('codex')) {
     plugins.push({
-      name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ ('@hypaware/codex'),
+      name: /** @type {PluginName} */ ('@hypaware/codex'),
       config: { proxy: '@hypaware/ai-gateway' },
     })
   }
@@ -892,7 +806,7 @@ async function runPickerFinale(args) {
             span.setAttribute('global_install_installed', durable.installed)
           }
         }
-        /** @type {import('../daemon/install.js').DaemonInstallOptions} */
+        /** @type {DaemonInstallOptions} */
         const options = {
           binPath,
           configPath,

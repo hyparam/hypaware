@@ -463,31 +463,5 @@ function randomHex(bytes) {
 }
 
 /**
- * @typedef {Object} LogRecord
- * @property {string} loggerName
- * @property {string|undefined} loggerVersion
- * @property {{ attributes: Record<string, string|number|boolean> }} resource
- * @property {[number, number]} hrTime
- * @property {[number, number]} hrTimeObserved
- * @property {{ traceId: string, spanId: string, traceFlags?: number }|undefined} spanContext
- * @property {number|undefined} severityNumber
- * @property {string|undefined} severityText
- * @property {unknown} body
- * @property {Record<string, unknown>} attributes
- */
-
-/**
- * @typedef {Object} MetricRecord
- * @property {string} meterName
- * @property {string|undefined} meterVersion
- * @property {{ attributes: Record<string, string|number|boolean> }} resource
- * @property {string} name
- * @property {string|undefined} description
- * @property {string|undefined} unit
- * @property {'counter'|'upDownCounter'|'gauge'|'histogram'} kind
- * @property {boolean} monotonic
- * @property {number} value
- * @property {Record<string, unknown>} attributes
- * @property {[number, number]} startTime
- * @property {[number, number]} endTime
+ * @import { LogRecord, MetricRecord } from './types.d.ts'
  */

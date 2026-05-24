@@ -17,12 +17,7 @@ export function daemonLogDir(stateRoot) {
 }
 
 /**
- * @typedef {Object} DaemonLogger
- * @property {string} path             Absolute path to the open log file.
- * @property {(event: string, fields?: Record<string, unknown>) => void} info
- * @property {(event: string, fields?: Record<string, unknown>) => void} warn
- * @property {(event: string, fields?: Record<string, unknown>) => void} error
- * @property {() => void} close
+ * @import { DaemonLogger } from './types.d.ts'
  */
 
 /**

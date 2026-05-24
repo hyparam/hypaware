@@ -1,7 +1,9 @@
 // @ts-check
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('hyparquet-writer').ColumnSource} ColumnSource */
+/**
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSource } from 'hyparquet-writer'
+ */
 
 /**
  * Convert a row stream + `ColumnSpec[]` schema into the

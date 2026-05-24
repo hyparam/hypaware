@@ -6,19 +6,9 @@ import { createBlobStoreIO, pathToKey, tableUrlForBlobPrefix } from './blob-io.j
 import { commitBatch, probeTable } from './commit.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportOptions} ExportOptions */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').Sink} Sink */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').TableFormatCreateContext} TableFormatCreateContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').TableFormatProvider} TableFormatProvider */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
+/**
+ * @import { BlobStore, ColumnSpec, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkEncoder, TableFormatCreateContext, TableFormatProvider } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 const PLUGIN_NAME = '@hypaware/format-iceberg'
 const FORMAT = 'iceberg'

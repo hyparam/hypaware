@@ -5,39 +5,18 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginConfigInstance} PluginConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkConfigInstance} SinkConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').BlobSinkConfigInstance} BlobSinkConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').RequestSinkConfigInstance} RequestSinkConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryConfig} QueryConfig */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigSectionRegistration} ConfigSectionRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationResult} ValidationResult */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationError} ValidationError */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-
 /**
- * @typedef {Object} LoadConfigSuccess
- * @property {true} ok
- * @property {HypAwareV2Config} config
- * @property {string} configPath
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { *, *   ConfigLoadErrorKind, *   LoadConfigFailure, *   LoadConfigResult, *   LoadConfigSuccess } from './types.d.ts'
  */
 
 /**
- * @typedef {Object} LoadConfigFailure
- * @property {false} ok
- * @property {ConfigErrorKind} errorKind
- * @property {string} message
- * @property {string} configPath
- * @property {ValidationError[]} [errors]
- */
-
-/** @typedef {LoadConfigSuccess | LoadConfigFailure} LoadConfigResult */
-
-/**
- * @typedef {'config_missing'|'config_unreadable'|'config_invalid_json'|'config_invalid_shape'} ConfigErrorKind
+ * @import {
+ *   ConfigLoadErrorKind,
+ *   LoadConfigFailure,
+ *   LoadConfigResult,
+ *   LoadConfigSuccess,
+ * } from './types.d.ts'
  */
 
 /**
@@ -409,7 +388,7 @@ function parseSinkEntry(entry, pointer, errors) {
     /** @type {BlobSinkConfigInstance} */
     const out = { writer: obj.writer, destination: obj.destination }
     if (isPlainObject(obj.config)) {
-      out.config = /** @type {import('../../../collectivus-plugin-kernel-types').SinkInstanceConfig} */ (obj.config)
+      out.config = /** @type {SinkInstanceConfig} */ (obj.config)
     }
     return out
   }
@@ -425,7 +404,7 @@ function parseSinkEntry(entry, pointer, errors) {
     /** @type {RequestSinkConfigInstance} */
     const out = { plugin: obj.plugin }
     if (isPlainObject(obj.config)) {
-      out.config = /** @type {import('../../../collectivus-plugin-kernel-types').SinkInstanceConfig} */ (obj.config)
+      out.config = /** @type {SinkInstanceConfig} */ (obj.config)
     }
     return out
   }
@@ -450,7 +429,7 @@ function parseQueryConfig(obj, pointer, errors) {
     return undefined
   }
   const cache = /** @type {Record<string, unknown>} */ (obj.cache)
-  /** @type {import('../../../collectivus-plugin-kernel-types').QueryCacheConfig} */
+  /** @type {QueryCacheConfig} */
   const out = {}
   if (cache.dir !== undefined) {
     if (!isNonEmptyString(cache.dir)) {

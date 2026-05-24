@@ -9,31 +9,10 @@ import {
 
 import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords } from './schema.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-
 /**
- * @typedef {Object} TableState
- * @property {boolean} exists                 True when at least one metadata file is visible.
- * @property {import('icebird/src/types.js').TableMetadata | null} metadata
- * @property {string | undefined} currentSnapshotId
- */
-
-/**
- * @typedef {Object} CommitInput
- * @property {string} tableUrl                Table URL the resolver understands.
- * @property {readonly ColumnSpec[]} columns  Dataset column schema.
- * @property {readonly Record<string, unknown>[]} rows  Coerced records.
- * @property {import('icebird/src/types.js').Resolver} resolver
- * @property {import('icebird/src/types.js').Lister} lister
- */
-
-/**
- * @typedef {Object} CommitResult
- * @property {string} snapshotId
- * @property {string} metadataVersion
- * @property {string[]} dataFiles
- * @property {number} bytesWritten
- * @property {number} rowCount
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommitInput, CommitResult, TableState } from './types.d.ts'
+ * @import { Lister, Resolver, Snapshot, TableMetadata } from 'icebird/src/types.js'
  */
 
 /**
@@ -43,8 +22,8 @@ import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords }
  * `icebergAppend`.
  *
  * @param {string} tableUrl
- * @param {import('icebird/src/types.js').Resolver} resolver
- * @param {import('icebird/src/types.js').Lister} lister
+ * @param {Resolver} resolver
+ * @param {Lister} lister
  * @returns {Promise<TableState>}
  */
 export async function probeTable(tableUrl, resolver, lister) {
@@ -81,7 +60,7 @@ export async function probeTable(tableUrl, resolver, lister) {
  * can persist an idempotency marker.
  *
  * @param {CommitInput} input
- * @param {{ exists: boolean, metadata: import('icebird/src/types.js').TableMetadata | null }} priorState
+ * @param {{ exists: boolean, metadata: TableMetadata | null }} priorState
  * @returns {Promise<CommitResult>}
  */
 export async function commitBatch(input, priorState) {
@@ -112,7 +91,7 @@ export async function commitBatch(input, priorState) {
     }
   }
 
-  /** @type {import('icebird/src/types.js').TableMetadata} */
+  /** @type {TableMetadata} */
   let postMetadata
   try {
     postMetadata = await icebergAppend({
@@ -153,7 +132,7 @@ export async function commitBatch(input, priorState) {
  * stable to record. (A future cut may resolve the full data-file list
  * by walking the manifest.)
  *
- * @param {import('icebird/src/types.js').Snapshot | undefined} snapshot
+ * @param {Snapshot | undefined} snapshot
  * @returns {string[]}
  */
 function readManifestList(snapshot) {
@@ -164,7 +143,7 @@ function readManifestList(snapshot) {
 
 /**
  * @param {readonly ColumnSpec[]} columns
- * @param {import('icebird/src/types.js').TableMetadata} metadata
+ * @param {TableMetadata} metadata
  */
 function schemaFromExistingMetadata(columns, metadata) {
   const currentSchemaId = metadata['current-schema-id']

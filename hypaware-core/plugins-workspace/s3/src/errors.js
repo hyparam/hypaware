@@ -1,6 +1,10 @@
 // @ts-check
 
 /**
+ * @import { S3ErrorKind } from './types.d.ts'
+ */
+
+/**
  * AWS SDK error → stable `error_kind` mapping for `@hypaware/s3`.
  *
  * Stable tokens are what the rest of HypAware reads. AWS SDK error
@@ -15,19 +19,6 @@
  *
  * We map deterministically against these so the test suite can rely
  * on exact tokens without depending on AWS SDK internals.
- */
-
-/**
- * @typedef {(
- *   's3_config_invalid' |
- *   's3_credentials_missing' |
- *   's3_access_denied' |
- *   's3_bucket_missing' |
- *   's3_region_mismatch' |
- *   's3_put_failed' |
- *   's3_throttled' |
- *   'encoder_failed'
- * )} S3ErrorKind
  */
 
 /**

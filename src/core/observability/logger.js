@@ -6,6 +6,10 @@ import { Attr, buildAttrs } from './attrs.js'
 import { logs, LoggerProvider, SeverityNumber } from './runtime.js'
 import { OtlpLogExporter } from './otlp_exporters.js'
 
+/**
+ * @import { ObservabilityEnv } from './types.d.ts'
+ */
+
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 const SEVERITY_MAP = Object.freeze({
@@ -28,7 +32,7 @@ const SEVERITY_TEXT = Object.freeze({
  * watching the smoke harness sees decisions live.
  *
  * @param {object} args
- * @param {import('./env.js').ObservabilityEnv} args.env
+ * @param {ObservabilityEnv} args.env
  * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
  * @returns {{ provider: LoggerProvider|null, exporters: object[] }}
  */

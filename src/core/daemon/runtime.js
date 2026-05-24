@@ -24,31 +24,22 @@ import {
 import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
-/** @typedef {import('./status.js').DaemonState} DaemonState */
-/** @typedef {import('./status.js').DaemonStatus} DaemonStatus */
-/** @typedef {import('./status.js').SourceSnapshot} SourceSnapshot */
-/** @typedef {import('./status.js').SinkSnapshot} SinkSnapshot */
-/** @typedef {import('../runtime/activation.js').KernelRuntime} KernelRuntime */
-/** @typedef {import('../runtime/boot.js').BootKernelResult} BootKernelResult */
-
 /**
- * @typedef {Object} DaemonHandle
- * @property {Promise<number>} done           Resolves with the daemon exit code after shutdown.
- * @property {() => Promise<number>} stop      Trigger an orderly shutdown (SIGTERM-equivalent).
- * @property {() => DaemonStatus} snapshot     Read the current in-memory status.
- * @property {() => Promise<void>} reload      Trigger a config reload (SIGHUP-equivalent).
- * @property {KernelRuntime} runtime           Phase 3 test affordance. The runtime the daemon activated — exposed so smoke flows can drive sink instantiation, dispatch, and per-test setup until config-driven sink setup lands.
+ * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { KernelRuntime } from '../runtime/activation.js'
+ * @import { BootKernelResult } from '../runtime/types.d.ts'
+ * @import { *, *   DaemonHandle, *   DaemonState, *   DaemonStatus, *   RunDaemonOptions, *   SinkSnapshot, *   SourceSnapshot } from './types.d.ts'
  */
 
 /**
- * @typedef {Object} RunDaemonOptions
- * @property {string} [hypHome]                Override HYP_HOME (defaults from env).
- * @property {string} [configPath]             Explicit config file path.
- * @property {NodeJS.ProcessEnv} [env]
- * @property {string} [runId]                  dev_run_id for telemetry stamping.
- * @property {number} [tickIntervalMs]         Sink tick cadence (default 60_000).
- * @property {boolean} [installSignalHandlers] Default true; smoke flows opt out and drive shutdown directly.
- * @property {boolean} [foreground]            Phase 3 only supports foreground; surfaced for symmetry with `--foreground`.
+ * @import {
+ *   DaemonState,
+ *   DaemonStatus,
+ *   SourceSnapshot,
+ *   SinkSnapshot,
+ *   DaemonHandle,
+ *   RunDaemonOptions,
+ * } from './types.d.ts'
  */
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000
@@ -366,7 +357,7 @@ export async function runDaemon(opts = {}) {
           if (snap.state !== 'started') continue
           const ctx = boot.runtime.activationContexts.get(snap.plugin)
           if (!ctx) continue
-          ctx.config = /** @type {import('../../../collectivus-plugin-kernel-types').JsonObject} */ (
+          ctx.config = /** @type {JsonObject} */ (
             configByName.get(snap.plugin) ?? {}
           )
           try {

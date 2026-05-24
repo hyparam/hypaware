@@ -6,28 +6,13 @@ import { Readable } from 'node:stream'
 import { normalizePrefix } from './config.js'
 import { classifyAwsError } from './errors.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectInput} PutObjectInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectResult} PutObjectResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').GetObjectInput} GetObjectInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').GetObjectResult} GetObjectResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ListObjectsInput} ListObjectsInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ListObjectResult} ListObjectResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DeleteObjectInput} DeleteObjectInput */
+/**
+ * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { S3BlobStoreClientFactory, S3CommandsHandle } from './types.d.ts'
+ * @import { S3ClientConfig } from '@aws-sdk/client-s3'
+ */
 
 export const BLOB_STORE_KIND = 's3'
-
-/**
- * @typedef {Object} S3CommandsHandle
- * @property {(input: { Bucket: string, Key: string, Body: Uint8Array | Buffer, ContentType?: string, ContentLength?: number, Metadata?: Record<string, string>, IfNoneMatch?: string }) => Promise<{ ETag?: string, VersionId?: string }>} putObject
- * @property {(input: { Bucket: string, Key: string }) => Promise<{ Body: NodeJS.ReadableStream | Uint8Array | string | null | undefined, ContentLength?: number, ETag?: string }>} getObject
- * @property {(input: { Bucket: string, Prefix?: string, ContinuationToken?: string }) => Promise<{ Contents?: Array<{ Key?: string, Size?: number, LastModified?: Date }>, NextContinuationToken?: string }>} listObjects
- * @property {(input: { Bucket: string, Key: string }) => Promise<void>} deleteObject
- */
-
-/**
- * @typedef {(opts: { region?: string, profile?: string, endpoint_url?: string, force_path_style?: boolean, env?: NodeJS.ProcessEnv }) => Promise<S3CommandsHandle>} S3BlobStoreClientFactory
- */
 
 /**
  * Construct an S3-backed `BlobStore`. The factory is injectable so the
@@ -252,7 +237,7 @@ function tagS3Error(cause, errorKind, message, key) {
  * @type {S3BlobStoreClientFactory}
  */
 export async function defaultS3BlobStoreClientFactory(opts) {
-  /** @type {import('@aws-sdk/client-s3').S3ClientConfig} */
+  /** @type {S3ClientConfig} */
   const clientConfig = {}
   if (opts.region) clientConfig.region = opts.region
   if (opts.endpoint_url) clientConfig.endpoint = opts.endpoint_url

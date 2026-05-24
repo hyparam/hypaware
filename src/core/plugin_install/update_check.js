@@ -4,8 +4,9 @@ import { spawn } from 'node:child_process'
 
 import { Attr, getKernelInstruments, SpanStatusCode, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginUpdateState} PluginUpdateState */
+/**
+ * @import { PluginLockEntry, PluginUpdateState } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000
 
@@ -174,9 +175,9 @@ async function runProbe(entry, now) {
  * The probe is best-effort: a non-zero exit or unparseable output
  * records an error on the returned state but never throws.
  *
- * @param {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} entry
+ * @param {PluginLockEntry} entry
  * @param {string} checkedAt
- * @returns {Promise<import('../../../collectivus-plugin-kernel-types').PluginUpdateState>}
+ * @returns {Promise<PluginUpdateState>}
  */
 async function runGitProbe(entry, checkedAt) {
   const gitUrl = entry.source.gitUrl

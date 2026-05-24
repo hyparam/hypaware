@@ -17,7 +17,7 @@ import type {
   PluginLockEntry,
   PluginUpdateState,
   SinkSupportTag,
-} from '../../collectivus-plugin-kernel-types'
+} from '../../collectivus-plugin-kernel-types.d.ts'
 
 export type {
   PluginManifest,

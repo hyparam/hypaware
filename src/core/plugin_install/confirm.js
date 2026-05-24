@@ -2,31 +2,9 @@
 
 import readline from 'node:readline/promises'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
-
 /**
- * @typedef {'confirmed'|'auto_yes'|'rejected'|'non_tty_no_yes'} ConfirmOutcome
- */
-
-/**
- * @typedef {Object} ConfirmDecision
- * @property {boolean} proceed
- * @property {ConfirmOutcome} outcome
- */
-
-/**
- * Snapshot of everything the prompt needs to make a trust decision.
- * Built up by `fetchGitSource` immediately before the artifact swap so
- * the user sees the actual commit and hashes that would land on disk.
- *
- * @typedef {Object} StagedArtifact
- * @property {PluginManifest} manifest
- * @property {PluginSourceSpec} source
- * @property {string} resolvedRef
- * @property {string} contentHash
- * @property {string} manifestHash
+ * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from './types.d.ts'
  */
 
 /**

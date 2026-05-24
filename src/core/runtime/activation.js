@@ -12,51 +12,10 @@ import { createSinkRegistry } from '../registry/sinks.js'
 import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistry} CommandRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').InitPresetRegistry} InitPresetRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PermissionContext} PermissionContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPaths} PluginPaths */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPermission} PluginPermission */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../cache/storage.js').ExtendedQueryStorageService} ExtendedQueryStorageService */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SemverRange} SemverRange */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SemverVersion} SemverVersion */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkRegistry} SinkRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SkillRegistry} SkillRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SourceRegistry} SourceRegistry */
-
 /**
- * The kernel-side aggregate that activation contexts facade over.
- * Registries beyond `capabilities`, `commands`, `sources`, `sinks`,
- * `query`, and `storage` are still Phase-2 placeholders; later phases
- * promote each one in place without touching this surface.
- *
- * `activationContexts` is the per-plugin `PluginActivationContext`
- * map populated by `createActivationContext`. The daemon reads from
- * it to drive `sources.start(name, ctx)` and `sources.reload(name,
- * ctx)` for plugins that don't auto-start in their `activate()`.
- *
- * @typedef {Object} KernelRuntime
- * @property {ReturnType<typeof createCapabilityRegistry>} capabilities
- * @property {ReturnType<typeof createCommandRegistry>} commands
- * @property {ConfigRegistry} configRegistry
- * @property {ReturnType<typeof createSourceRegistry>} sources
- * @property {ReturnType<typeof createSinkRegistry>} sinks
- * @property {QueryRegistry} query
- * @property {ExtendedQueryStorageService} storage
- * @property {string} cacheRoot
- * @property {SkillRegistry} skills
- * @property {InitPresetRegistry} initPresets
- * @property {Map<PluginName, PluginActivationContext>} activationContexts
+ * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
+ * @import { KernelRuntime } from './activation.d.ts'
  */
 
 /**
@@ -257,7 +216,7 @@ function createCapabilitiesFacade(pluginName, registry) {
  * @returns {SkillRegistry}
  */
 function createPhase2SkillRegistry() {
-  /** @type {import('../../../collectivus-plugin-kernel-types').SkillContribution[]} */
+  /** @type {SkillContribution[]} */
   const items = []
   return {
     register(skill) {
@@ -299,7 +258,7 @@ function createPhase2SkillRegistry() {
  * @returns {InitPresetRegistry}
  */
 function createInitPresetRegistry() {
-  /** @type {Map<string, import('../../../collectivus-plugin-kernel-types').InitPresetContribution>} */
+  /** @type {Map<string, InitPresetContribution>} */
   const presets = new Map()
   const log = getLogger('init-presets')
 

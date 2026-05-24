@@ -12,33 +12,11 @@ import {
 import { createPluginPaths } from './paths.js'
 import { createActivationContext, createKernelRuntime } from './activation.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('./activation.js').KernelRuntime} KernelRuntime */
-
 /**
- * @typedef {Object} PluginActivationEntry
- * @property {PluginManifest} manifest
- * @property {string} rootDir            Where the manifest was loaded from.
- * @property {JsonObject} [config]       Validated config slice for the plugin.
+ * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { KernelRuntime } from './activation.js'
+ * @import { ActivationFailure, ActivationResult, ActivationSuccess, PluginActivationEntry } from './loader.d.ts'
  */
-
-/**
- * @typedef {Object} ActivationSuccess
- * @property {true} ok
- * @property {ActivePlugin} plugin
- */
-
-/**
- * @typedef {Object} ActivationFailure
- * @property {false} ok
- * @property {ActivePlugin} plugin
- * @property {string} errorKind
- * @property {string} message
- */
-
-/** @typedef {ActivationSuccess|ActivationFailure} ActivationResult */
 
 /**
  * Activate every plugin in `order`. The caller (typically the kernel

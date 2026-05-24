@@ -15,14 +15,18 @@ import {
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import { icebergSchemaForColumns, rowsToIcebergRecords } from './schema.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
+/**
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
+ * @import { AsyncDataSource, AsyncRow } from 'squirreling'
+ */
 
 /**
  * Reusable cache for the local IO pair. Constructed once per process —
  * the resolver/lister are pure functions over the filesystem so there's
  * no per-table state to worry about.
  *
- * @type {Promise<{ resolver: import('icebird/src/types.js').Resolver, lister: import('icebird/src/types.js').Lister }> | null}
+ * @type {Promise<{ resolver: Resolver, lister: Lister }> | null}
  */
 let cachedIO = null
 
@@ -85,7 +89,7 @@ export async function appendRowsToTable(tablePath, columns, rows) {
       formatVersion: 3,
     })
   }
-  /** @type {import('icebird/src/types.js').TableMetadata | null} */
+  /** @type {TableMetadata | null} */
   let metadata = null
   if (rows.length > 0) {
     metadata = await icebergAppend({
@@ -145,7 +149,7 @@ export async function* scanRowsFromTable(tablePath, columns) {
  * an empty table.
  *
  * @param {string} tablePath
- * @returns {Promise<import('squirreling').AsyncDataSource | null>}
+ * @returns {Promise<AsyncDataSource | null>}
  */
 export async function dataSourceForTable(tablePath) {
   if (!tableExists(tablePath)) return null
@@ -157,7 +161,7 @@ export async function dataSourceForTable(tablePath) {
 }
 
 /**
- * @param {import('squirreling').AsyncRow} row
+ * @param {AsyncRow} row
  * @param {string[]} columns
  * @returns {Promise<Record<string, unknown>>}
  */
@@ -172,7 +176,7 @@ async function resolveAsyncRow(row, columns) {
 }
 
 /**
- * @param {import('icebird/src/types.js').TableMetadata} metadata
+ * @param {TableMetadata} metadata
  */
 function addedFilesSize(metadata) {
   const current = metadata['current-snapshot-id']

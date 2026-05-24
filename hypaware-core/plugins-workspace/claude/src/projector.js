@@ -28,10 +28,9 @@ import {
   readSessionContext,
 } from './session_context.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeInput} AiGatewayExchangeInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedExchange} AiGatewayProjectedExchange */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedMessage} AiGatewayProjectedMessage */
+/**
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * Build the Claude exchange projector. Returns the full
@@ -257,7 +256,7 @@ export function createClaudeExchangeProjector(opts) {
  * surface as `match()` on the projector — keeping them paired here
  * avoids drift between routing and projection.
  *
- * @returns {import('../../../../collectivus-plugin-kernel-types').AiGatewayUpstreamPreset}
+ * @returns {AiGatewayUpstreamPreset}
  */
 export function anthropicUpstreamPreset() {
   return {

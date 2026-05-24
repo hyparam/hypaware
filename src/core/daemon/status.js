@@ -28,53 +28,10 @@ import {
 } from './pid.js'
 
 /**
- * Daemon health states the smoke and `hyp daemon status` rely on.
- *
- * - `starting`: the daemon has written its PID file but has not yet
- *   reported every configured source as up.
- * - `healthy`: every configured source returned a `StartedSource`.
- * - `degraded`: at least one source failed to start or failed status.
- * - `stopping`: SIGTERM/SIGINT received, sources are being shut down.
- * - `stopped`: shutdown completed; status file remains so a parallel
- *   `daemon status` can read the last terminal state.
- *
- * @typedef {'starting'|'healthy'|'degraded'|'stopping'|'stopped'} DaemonState
- */
-
-/**
- * @typedef {Object} SourceSnapshot
- * @property {string} name
- * @property {string} plugin
- * @property {'started'|'failed'|'stopped'} state
- * @property {string} [error]
- * @property {object} [details]
- */
-
-/**
- * @typedef {Object} SinkSnapshot
- * @property {string} instance
- * @property {string} plugin
- * @property {string} kind
- * @property {string} [lastTickAt]
- * @property {string} [lastSuccessAt]
- * @property {number} [failedOutboxCount]
- * @property {string} [nextScheduledAt]
- */
-
-/**
- * @typedef {Object} DaemonStatus
- * @property {DaemonState} state
- * @property {number} pid
- * @property {string} startedAt              ISO timestamp of the daemon process boot.
- * @property {string} [healthyAt]            ISO timestamp the daemon first reached `healthy`.
- * @property {string} [stoppedAt]            ISO timestamp the daemon transitioned to `stopped`.
- * @property {number} uptimeMs               Milliseconds since `healthyAt` (0 when not yet healthy).
- * @property {string} runId                  dev_run_id stamped on telemetry from this daemon.
- * @property {string} mode                   `foreground` (Phase 3) or `detached` (Phase 4 installers).
- * @property {string} [configPath]           Active config file, when one was resolved.
- * @property {SourceSnapshot[]} sources
- * @property {SinkSnapshot[]} sinks
- * @property {string[]} [warnings]
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
+ * @import { *, *   ClientAttachReport, *   CollectStatusOptions, *   DaemonState, *   DaemonStatus, *   HypAwareStatusReport, *   ServiceState, *   SinkSnapshot, *   SourceSnapshot, *   StatusDiagnostic, *   StatusDiagnosticKind } from './types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 /**
@@ -132,98 +89,9 @@ export function readStatusFile(stateRoot) {
 
 /* ---------- Phase 8: top-level status collector ---------- */
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../config/validate.js').V1Diagnostic} V1Diagnostic */
-/** @typedef {import('../config/validate.js').ConfigValidationError} ConfigValidationError */
-
 /**
- * @typedef {(
- *   |V1Diagnostic['kind']
- *   |'config_invalid'
- *   |'config_missing'
- *   |'config_unreadable'
- *   |'daemon_binary_missing'
- *   |'daemon_loaded_no_pid'
- *   |'client_attach_missing'
- *   |'recent_errors'
- * )} StatusDiagnosticKind
- */
-
-/**
- * Diagnostic surfaced by `hyp status`. Carries a severity, the
- * machine-readable `kind` (so smoke tests can grep for specific
- * conditions), a human-readable `message`, and a list of `repair`
- * commands the operator can copy/paste.
- *
- * @typedef {Object} StatusDiagnostic
- * @property {'error'|'warning'} severity
- * @property {StatusDiagnosticKind} kind
- * @property {string} message
- * @property {string[]} repair
- * @property {string} [pointer]
- */
-
-/**
- * Per-client attach state probed off the user's home directory.
- *
- * @typedef {Object} ClientAttachReport
- * @property {string} name              `claude` or `codex`.
- * @property {boolean} configured       Plugin enabled in config.
- * @property {boolean} attached         Settings file carries the HypAware marker.
- * @property {string} [settingsPath]    Path the probe inspected.
- * @property {string} [version]         Adapter version recorded in the marker, when present.
- * @property {string} [port]            Local gateway port the adapter routes through, when recorded.
- * @property {string} [error]           Probe error string, when the file was unreadable.
- */
-
-/**
- * Service-level daemon state surfaced by `hyp status`.
- *
- * @typedef {Object} ServiceState
- * @property {boolean} installed              Service file present at the platform path.
- * @property {boolean} loaded                 Service registered with launchd/systemd.
- * @property {boolean} running                A process is currently running.
- * @property {number} [pid]                   PID, if running.
- * @property {DaemonState} [state]            Last reported daemon state, when a status file exists.
- * @property {string} [runId]                 dev_run_id of the active daemon process.
- * @property {string} [mode]                  `foreground` / `detached`.
- * @property {NodeJS.Platform} platform
- * @property {string} [error]                 Error reading installer state, if any.
- */
-
-/**
- * @typedef {Object} HypAwareStatusReport
- * @property {string} configPath                    Path probed for the active config.
- * @property {boolean} configExists                 Config file exists on disk.
- * @property {boolean} configValid                  Schema + cross-plugin validation passed.
- * @property {string[]} activePlugins               Plugin names enabled in the config.
- * @property {ServiceState} daemon                  Daemon + service state.
- * @property {SourceSnapshot[]} sources             Source rows (kernel runtime where available).
- * @property {SinkSnapshot[]} sinks                 Sink rows.
- * @property {ClientAttachReport[]} clients         Per-client attach reports.
- * @property {{ days: number, source: 'config'|'default' }} retention
- * @property {{ totalBytes: number, oldestDate: string|null }} cache
- * @property {number} recentErrorCount              Error-level log entries in the recent telemetry window.
- * @property {StatusDiagnostic[]} diagnostics       Aggregated config + runtime diagnostics.
- * @property {'healthy'|'degraded'} overall
- */
-
-/**
- * @typedef {Object} CollectStatusOptions
- * @property {NodeJS.ProcessEnv} [env]
- * @property {Object} [runtime]                Optional kernel runtime (already booted by the caller).
- * @property {import('../registry/sources.js').ExtendedSourceRegistry} [runtime.sources]
- * @property {import('../registry/sinks.js').ExtendedSinkRegistry} [runtime.sinks]
- * @property {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} [runtime.capabilities]
- * @property {import('../../../collectivus-plugin-kernel-types').QueryRegistry} [runtime.query]
- * @property {{ cacheRoot: string }} [runtime.storage]
- * @property {NodeJS.Platform} [platform]      Override platform (tests).
- * @property {string} [homeDir]                Override $HOME (tests).
- * @property {string} [binPath]                Absolute path to the daemon binary the installer recorded.
- * @property {(opts: any) => boolean} [isLaunchAgentInstalled]
- * @property {(opts: any) => Promise<{ loaded: boolean, pid?: number }>} [launchAgentStatus]
- * @property {(opts: any) => boolean} [isSystemdUnitInstalled]
- * @property {(opts: any) => Promise<{ loaded: boolean, pid?: number }>} [systemdUnitStatus]
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  */
 
 /**
@@ -607,7 +475,7 @@ async function measureCacheStats(cacheRoot) {
  * @param {{ totalBytes: number, oldestMs: number|null }} acc
  */
 async function walkForStats(dir, acc) {
-  /** @type {import('node:fs').Dirent[]} */
+  /** @type {Dirent[]} */
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })

@@ -1,6 +1,8 @@
 // @ts-check
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
+/**
+ * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * `hyp init gascity`

@@ -9,10 +9,9 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { attach, defaultConfigPath, detach } from './settings.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientAttachContext} AiGatewayClientAttachContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientDetachContext} AiGatewayClientDetachContext */
+/**
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 const PLUGIN_NAME = '@hypaware/codex'
 const CLIENT_NAME = 'codex'

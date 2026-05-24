@@ -5,13 +5,12 @@ import https from 'node:https'
 
 import { parseListen } from './config.js'
 
-/** @typedef {import('./config.js').UpstreamConfig} UpstreamConfig */
-/** @typedef {import('./recorder.js').Exchange} Exchange */
-/** @typedef {import('node:http').IncomingMessage} IncomingMessage */
-/** @typedef {import('node:http').ServerResponse} ServerResponse */
-/** @typedef {import('node:http').IncomingHttpHeaders} IncomingHttpHeaders */
-/** @typedef {import('node:http').OutgoingHttpHeaders} OutgoingHttpHeaders */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput */
+/**
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompiledUpstream, ProxyOptions, StartedProxy, UpstreamConfig } from './types.d.ts'
+ * @import { Exchange } from './recorder.js'
+ * @import { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+ */
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to one
@@ -27,29 +26,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ])
-
-/**
- * @typedef {Object} CompiledUpstream
- * @property {string} name
- * @property {string} [provider]
- * @property {URL} baseUrl
- * @property {string | undefined} prefix
- * @property {number} priority
- * @property {number} seq
- * @property {((input: AiGatewayRouteInput) => boolean) | undefined} match
- *
- * @typedef {Object} ProxyOptions
- * @property {string} listen
- * @property {UpstreamConfig[]} upstreams
- * @property {(exchange: Exchange) => void | Promise<void>} onExchangeFinished
- * @property {(init: { upstream: string, provider: string | undefined, method: string | undefined, path: string | undefined, requestHeaders: IncomingHttpHeaders }) => Exchange} startExchange
- *
- * @typedef {Object} StartedProxy
- * @property {string} host
- * @property {number} port
- * @property {Promise<void>} stopped
- * @property {() => Promise<void>} stop
- */
 
 /**
  * Start the HTTP proxy listener. Returns the bound host/port and a

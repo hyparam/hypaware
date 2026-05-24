@@ -12,8 +12,9 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
+/**
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGINS_WORKSPACE = path.resolve(HERE, '..', '..', 'plugins-workspace')

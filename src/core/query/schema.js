@@ -1,8 +1,8 @@
 // @ts-check
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').DatasetSchema} DatasetSchema */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
+/**
+ * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * Resolve the schema for a dataset by name. The kernel does not hard

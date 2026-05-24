@@ -7,19 +7,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 /**
- * @typedef {Object} CommandResult
- * @property {number} exitCode
- * @property {string} stdout
- * @property {string} stderr
- *
- * @typedef {(cmd: string, args: string[], opts: { env: NodeJS.ProcessEnv, cwd?: string }) => Promise<CommandResult>} CommandRunner
- *
- * @typedef {Object} DurableBinResult
- * @property {string} binPath
- * @property {boolean} installed
- * @property {boolean} skipped
- * @property {string} [packageSpec]
- * @property {string} [globalPrefix]
+ * @import { CommandResult, CommandRunner, DurableBinResult } from './types.d.ts'
  */
 
 const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))

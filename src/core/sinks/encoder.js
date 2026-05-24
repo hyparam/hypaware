@@ -2,11 +2,9 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncodeContext} SinkEncodeContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncodedBlob} SinkEncodedBlob */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
+/**
+ * @import { ColumnSpec, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * Wrap a single `encoder.encodePartition` call in a

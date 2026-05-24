@@ -14,4 +14,4 @@ export type {
   QueryConfig,
   QueryCacheConfig,
   QueryCacheRetentionConfig,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'

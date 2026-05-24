@@ -9,15 +9,12 @@
  * The shape mirrors `@hypaware/gascity`'s runtime — same lifecycle hook
  * pattern, same "saved-ctx-as-source-of-truth" convention so reloads
  * read the latest config from `runtime.ctx.config`.
- *
- * @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext
- * @typedef {import('./api.js').GatewayState} GatewayState
- *
- * @typedef {Object} AiGatewayRuntime
- * @property {PluginActivationContext} ctx
- * @property {GatewayState} state
- * @property {import('../../../../src/core/registry/sources.js').ExtendedSourceRegistry} sources
- * @property {boolean} started
+ */
+
+/**
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { GatewayState } from './api.js'
+ * @import { AiGatewayRuntime } from './types.d.ts'
  */
 
 /** @type {AiGatewayRuntime | null} */

@@ -3,4 +3,4 @@ export type {
   SkillContribution,
   InitPresetRegistry,
   InitPresetContribution,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'

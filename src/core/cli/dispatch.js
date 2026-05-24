@@ -21,23 +21,10 @@ import { bootKernel } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistry} CommandRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../runtime/boot.js').BootProfile} BootProfile */
-
 /**
- * @typedef {Object} DispatchOptions
- * @property {NodeJS.WriteStream | { write(chunk: string): unknown }} [stdout]
- * @property {NodeJS.WriteStream | { write(chunk: string): unknown }} [stderr]
- * @property {NodeJS.ReadStream} [stdin]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {string} [cwd]
- * @property {string} [workspaceDir]   Override the local plugin workspace
- * @property {ReturnType<typeof createCommandRegistry>} [registry]
- * @property {ReturnType<typeof createKernelRuntime>} [kernel]
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BootProfile } from '../runtime/types.d.ts'
+ * @import { DispatchOptions } from './dispatch.d.ts'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])

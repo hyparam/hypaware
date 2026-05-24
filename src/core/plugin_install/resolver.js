@@ -4,8 +4,9 @@ import path from 'node:path'
 
 import { applyGitSourceFlags, parseGitSource, redactRawSource } from './git_source.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceKind} PluginSourceKind */
+/**
+ * @import { PluginSourceKind, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i
 const UNSCOPED_NAME_RE = /^([a-z0-9][a-z0-9._-]*)$/i

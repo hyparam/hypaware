@@ -2,13 +2,10 @@
 
 import path from 'node:path'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDataSourceContext} DatasetDataSourceContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDiscoveryContext} DatasetDiscoveryContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult} DatasetRefreshResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
+/**
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/storage.js'
+ */
 
 export const PARTITION_LABEL = 'all'
 export const PLUGIN_NAME = '@hypaware/otel'
@@ -170,7 +167,7 @@ function discoverParts(ctx, dataset) {
 async function createDataSource(partitions, ctx, dataset) {
   const partition = partitions[0]
   if (!partition || !partition.tablePath) return emptySource(dataset)
-  const storage = /** @type {import('../../../../src/core/cache/storage.js').ExtendedQueryStorageService} */ (
+  const storage = /** @type {ExtendedQueryStorageService} */ (
     ctx.storage
   )
   const source = await storage.dataSourceForTable(partition.tablePath)

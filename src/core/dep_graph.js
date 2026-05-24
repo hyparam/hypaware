@@ -6,25 +6,10 @@ import { Attr, getLogger, withSpan } from './observability/index.js'
 import { createCapabilityRegistry } from './registry/capabilities.js'
 import { matchesSemverRange } from './semver.js'
 
-/** @typedef {import('../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {ReturnType<typeof createCapabilityRegistry>} CapabilityRegistryHandle */
-
 /**
- * @typedef {Object} UnsatisfiedRequirement
- * @property {string} plugin
- * @property {'cycle'|'plugin_missing'|'cap_missing'|'cap_version_clash'} errorKind
- * @property {string} [detail]
- */
-
-/**
- * @typedef {Object} DepGraphResolution
- * @property {string[]} order            Topo-sorted plugin activation order.
- * @property {UnsatisfiedRequirement[]} unsatisfied
- * @property {string} resolveOrderHash   Short hash of `order.join('\n')`.
- * @property {number} pluginCount        Total manifests considered.
- * @property {number} capabilityCount    Registry-known capabilities at end.
- * @property {CapabilityRegistryHandle} registry
+ * @import { PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { DepGraphResolution, UnsatisfiedRequirement } from './dep_graph.d.ts'
+ * @import { CapabilityRegistryHandle } from './registry/capabilities.d.ts'
  */
 
 /**

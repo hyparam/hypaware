@@ -2,7 +2,9 @@
 
 import { requireGascityRuntime } from './runtime.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
+/**
+ * @import { CommandRunContext, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * `hyp gascity attach <city> [--api-url <url>]`
@@ -51,7 +53,7 @@ export async function runAttach(argv, ctx) {
   // Mutate the activation config in place so the StartedSource's
   // `reload(ctx)` sees the new city set when the kernel re-invokes
   // through the same context reference.
-  runtime.ctx.config = /** @type {import('../../../../collectivus-plugin-kernel-types').JsonObject} */ (
+  runtime.ctx.config = /** @type {JsonObject} */ (
     { ...config, cities }
   )
 
@@ -97,7 +99,7 @@ export async function runDetach(argv, ctx) {
         /** @type {Record<string, unknown>} */ (raw).name === city
       )
   )
-  runtime.ctx.config = /** @type {import('../../../../collectivus-plugin-kernel-types').JsonObject} */ (
+  runtime.ctx.config = /** @type {JsonObject} */ (
     { ...config, cities: filtered }
   )
   if (runtime.started) {

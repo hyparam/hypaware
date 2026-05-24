@@ -12,6 +12,10 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * In-memory `BlobStore` fixture. The test rig records every put so we
  * can assert on key layout, body bytes, and `ifNoneMatch` semantics.
  */
@@ -23,7 +27,7 @@ function makeBlobStore() {
   return {
     objects,
     ops,
-    /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+    /** @type {BlobStore} */
     blobStore: {
       kind: 'memory',
       async putObject(input) {

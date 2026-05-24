@@ -8,19 +8,7 @@ export { defaultConfigPath } from './config-file.js'
 export { CodexSettingsError } from './errors.js'
 
 /**
- * @typedef {Object} CodexAttachOptions
- * @property {number} port
- * @property {string} version
- * @property {string} [configPath]
- * @property {string} [baseUrl]
- * @property {string} [providerName]
- *
- * @typedef {{ changed: true, prevValue?: string }} CodexAttachResult
- *
- * @typedef {Object} CodexDetachOptions
- * @property {string} [configPath]
- *
- * @typedef {{ changed: true, removed?: string, restoredValue?: string, warning?: string } | { changed: false }} CodexDetachResult
+ * @import { CodexAttachOptions, CodexAttachResult, CodexDetachOptions, CodexDetachResult } from './types.d.ts'
  */
 
 /**

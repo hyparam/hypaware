@@ -8,7 +8,11 @@ import { createSinkRegistry } from '../../src/core/registry/sinks.js'
 import { validateConfig, firstPartyPluginMetadata } from '../../src/core/config/validate.js'
 
 /**
- * @returns {import('../../collectivus-plugin-kernel-types').SinkEncoder}
+ * @import { BlobStore, Sink, SinkEncoder, TableFormatProvider } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
+ * @returns {SinkEncoder}
  */
 function makeEncoder({ format = 'parquet', extension = 'parquet', supports = ['queryable'] } = {}) {
   return {
@@ -23,7 +27,7 @@ function makeEncoder({ format = 'parquet', extension = 'parquet', supports = ['q
 }
 
 /**
- * @returns {import('../../collectivus-plugin-kernel-types').BlobStore}
+ * @returns {BlobStore}
  */
 function makeBlobStore() {
   /** @type {Map<string, Uint8Array>} */
@@ -48,7 +52,7 @@ function makeBlobStore() {
 }
 
 /**
- * @returns {import('../../collectivus-plugin-kernel-types').TableFormatProvider}
+ * @returns {TableFormatProvider}
  */
 function makeTableFormatProvider({ format = 'iceberg', supports = ['queryable'] } = {}) {
   return {
@@ -56,7 +60,7 @@ function makeTableFormatProvider({ format = 'iceberg', supports = ['queryable'] 
     supports,
     async createSink(ctx) {
       // Record dispatch inputs on the sink so the test can assert on them.
-      /** @type {import('../../collectivus-plugin-kernel-types').Sink & { _ctx?: any }} */
+      /** @type {Sink & { _ctx?: any }} */
       const sink = {
         _ctx: {
           name: ctx.name,

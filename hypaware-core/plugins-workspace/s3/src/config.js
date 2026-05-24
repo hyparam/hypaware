@@ -10,29 +10,9 @@
  * already enforces standard 5-field cron, so this module ignores it.
  */
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-
 /**
- * @typedef {Object} S3SinkConfig
- * @property {string} bucket                  Destination bucket (required).
- * @property {string} prefix                  Key prefix under the bucket. Trailing slashes are stripped; default `""`.
- * @property {string} [region]                AWS region (e.g. `us-east-1`). Optional — falls through to the SDK chain.
- * @property {string} [profile]               Named AWS shared-config profile.
- * @property {string} [storage_class]         S3 storage class (e.g. `STANDARD`, `STANDARD_IA`).
- * @property {string} [server_side_encryption] Object SSE setting (e.g. `AES256`, `aws:kms`).
- * @property {string} [endpoint_url]          S3-compatible custom endpoint (e.g. MinIO).
- * @property {boolean} [force_path_style]     Force path-style addressing (required for MinIO with custom endpoint).
- */
-
-/**
- * @typedef {Object} ConfigValidationError
- * @property {string} pointer   JSON pointer into the sink config.
- * @property {string} message
- * @property {'s3_config_invalid'} errorKind
- */
-
-/**
- * @typedef {{ ok: true, config: S3SinkConfig } | { ok: false, errors: ConfigValidationError[] }} ConfigValidationResult
+ * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.d.ts'
  */
 
 const RECOGNIZED_STORAGE_CLASSES = new Set([
@@ -54,10 +34,10 @@ const RECOGNIZED_STORAGE_CLASSES = new Set([
  * without spinning up observability.
  *
  * @param {unknown} value
- * @returns {ConfigValidationResult}
+ * @returns {S3ConfigValidationResult}
  */
 export function validateS3SinkConfig(value) {
-  /** @type {ConfigValidationError[]} */
+  /** @type {S3ConfigValidationError[]} */
   const errors = []
 
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -141,7 +121,7 @@ export function normalizePrefix(prefix) {
 /**
  * @param {Record<string, unknown>} raw
  * @param {string} key
- * @param {ConfigValidationError[]} errors
+ * @param {S3ConfigValidationError[]} errors
  * @param {{ required?: boolean }} [opts]
  * @returns {string | undefined}
  */
@@ -171,7 +151,7 @@ function readString(raw, key, errors, opts = {}) {
 /**
  * @param {Record<string, unknown>} raw
  * @param {string} key
- * @param {ConfigValidationError[]} errors
+ * @param {S3ConfigValidationError[]} errors
  * @returns {boolean | undefined}
  */
 function readBoolean(raw, key, errors) {

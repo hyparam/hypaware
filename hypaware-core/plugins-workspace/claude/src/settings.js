@@ -15,22 +15,11 @@ import path from 'node:path'
  * concurrent edit is detected instead of silently overwritten. The
  * `_hypaware` marker is what `detach()` keys off to know which keys
  * it inserted and is safe to remove.
- *
- * @typedef {Object} ClaudeAttachOptions
- * @property {number} port           — gateway listener port; written into
- *                                     `env.ANTHROPIC_BASE_URL`.
- * @property {string} version
- * @property {string} stateFile      — absolute path to the session-context
- *                                     JSONL file the managed hook appends to.
- *                                     Replaces the v1 `--port` argument:
- *                                     phase 2 moved the session-context
- *                                     channel from HTTP to a file on disk.
- * @property {string} [settingsPath]
- * @property {string} [binPath]
- * @typedef {{ changed: true, prevValue?: string } | { changed: false }} ClaudeAttachResult
- * @typedef {Object} ClaudeDetachOptions
- * @property {string} [settingsPath]
- * @typedef {{ changed: true, removed?: string, warning?: string } | { changed: false }} ClaudeDetachResult
+ */
+
+/**
+ * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.d.ts'
+ * @import { FileHandle } from 'node:fs/promises'
  */
 
 const MARKER_KEY = '_hypaware'
@@ -236,7 +225,7 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
   const body = JSON.stringify(value, null, 2) + '\n'
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
 
-  /** @type {import('node:fs/promises').FileHandle | undefined} */
+  /** @type {FileHandle | undefined} */
   let handle
   try {
     handle = await fs.open(tmpPath, 'w', 0o600)

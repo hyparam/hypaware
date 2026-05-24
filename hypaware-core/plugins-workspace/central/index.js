@@ -6,8 +6,9 @@ import { validateCentralConfig } from './src/config.js'
 import { IdentityClient } from './src/identity_client.js'
 import { createForwardSink } from './src/sink.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkCreateContext} SinkCreateContext */
+/**
+ * @import { PluginActivationContext, SinkCreateContext } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * `@hypaware/central` — request sink that forwards ready cache

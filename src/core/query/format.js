@@ -1,12 +1,8 @@
 // @ts-check
 
 /**
- * @typedef {Object} QueryResultSet
- * @property {string[]} columns
- * @property {Record<string, unknown>[]} rows
+ * @import { QueryFormat, QueryResultSet } from './types.d.ts'
  */
-
-/** @typedef {'table' | 'json' | 'jsonl' | 'markdown'} QueryFormat */
 
 /**
  * Render a query result set into the requested output format.

@@ -1,20 +1,15 @@
 // @ts-check
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
+/**
+ * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { GitSourceParts } from './types.d.ts'
+ */
 
 const HTTPS_GITHUB_RE = /^https?:\/\/(?:[^@/\s]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:#(.+))?$/i
 const GITHUB_SHORTHAND_RE = /^github:([^/]+)\/([^/#]+?)(?:\.git)?(?:#(.+))?$/i
 const GIT_SSH_GITHUB_RE = /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?(?:#(.+))?$/i
 const PASSTHROUGH_GIT_RE = /^(?:git\+|git:|ssh:|https?:\/\/|gitlab:|bitbucket:|file:\/\/)/i
 
-/**
- * @typedef {Object} GitSourceParts
- * @property {string} gitUrl  HTTPS-normalized clone URL (or untouched for non-GitHub sources)
- * @property {string} [ref]   Ref parsed from a `#fragment`, if present
- * @property {string} [owner] GitHub owner segment (for telemetry / lock provenance)
- * @property {string} [repo]  GitHub repo segment (for telemetry / lock provenance)
- * @property {string} [host]  URL host (for telemetry)
- */
 
 /**
  * Pure parser for the git URL forms `hyp plugin install` accepts:

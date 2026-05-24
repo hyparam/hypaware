@@ -21,54 +21,12 @@ import {
 } from './bundled.js'
 import { discoverInstalledPlugins } from './installed.js'
 
-/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('./activation.js').KernelRuntime} KernelRuntime */
-/** @typedef {import('./loader.js').ActivationResult} ActivationResult */
-
 /**
- * @typedef {'config' | 'all-bundled' | 'all-available' | { activate: PluginName[] }} BootProfile
- *
- * - `config` (default): activate only plugins listed in the loaded
- *   config file (intersected with the V1 allowlist). When no config is
- *   present, no plugins activate. Used by ordinary commands.
- *
- * - `all-bundled`: activate the entire V1 allowlist. Used by `hyp init`
- *   so the walkthrough picker sees every bundled source, sink, and
- *   client even before the user has written a config.
- *
- * - `{ activate: [...] }`: explicit plugin set, intersected with the
- *   allowlist. Reserved for the daemon and future installer paths
- *   that resolve plugin names from a different source.
- */
-
-/**
- * @typedef {Object} BootKernelOptions
- * @property {string} [hypHome]                  Override HYP_HOME (defaults from env).
- * @property {string} [configPath]               Explicit config file path. If omitted, falls back to env.HYP_CONFIG, then `<HYP_HOME>/hypaware-config.json`.
- * @property {'cli'|'daemon'|'smoke'|'walkthrough'|'init'} [mode]   Caller identity (lands on `kernel.boot` span).
- * @property {string} [runId]                    Per-boot identifier; lands on `kernel.boot` as `dev_run_id`.
- * @property {BootProfile} [bootProfile]         Active plugin selection strategy.
- * @property {string} [workspaceDir]             Override bundled plugins workspace.
- * @property {string} [cacheRoot]                Cache root for the kernel storage service.
- * @property {ReturnType<typeof createCommandRegistry>} [commandRegistry]  Pre-built command registry to inject into the kernel.
- * @property {NodeJS.ProcessEnv} [env]           Override env (tests).
- * @property {string} [tmpRoot]                  Override OS temp root (tests).
- */
-
-/**
- * @typedef {Object} BootKernelResult
- * @property {KernelRuntime} runtime
- * @property {ActivePlugin[]} activePlugins   Plugins that activated successfully.
- * @property {ActivationResult[]} activations Full per-plugin activation results.
- * @property {HypAwareV2Config|null} config   Loaded config (null if missing or unreadable).
- * @property {string|null} configPath         Path that was probed for config.
- * @property {string} mode
- * @property {string} runId
- * @property {PluginName[]} skipped           Bundled plugins available but not activated this boot.
+ * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { LoadedManifest } from '../manifest.js'
+ * @import { KernelRuntime } from './activation.js'
+ * @import { ActivationResult } from './loader.js'
+ * @import { BootKernelOptions, BootKernelResult, BootProfile } from './types.d.ts'
  */
 
 /**

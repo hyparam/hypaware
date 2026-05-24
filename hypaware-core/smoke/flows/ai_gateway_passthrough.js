@@ -18,6 +18,10 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
+ * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Gateway core 2.0 pass-through smoke. Brings up an in-process echo
  * upstream, activates `@hypaware/ai-gateway@2.0.0` in a temp HYP_HOME
  * pointed at it (with NO exchange projector registered), drives one
@@ -122,7 +126,7 @@ export async function run({ harness, expect }) {
     registered,
     (v) => v !== undefined && v.version === '2.0.0'
   )
-  /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+  /** @type {AiGatewayCapability} */
   const aiGatewayApi = kernel.capabilities.require(
     '@smoke/ai-gateway-passthrough',
     'hypaware.ai-gateway',

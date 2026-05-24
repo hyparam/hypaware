@@ -13,4 +13,4 @@ export type {
   QueryScanOptions,
   QueryScanResult,
   QueryStorageService,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'

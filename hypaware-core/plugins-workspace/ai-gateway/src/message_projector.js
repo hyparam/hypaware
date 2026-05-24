@@ -4,12 +4,10 @@ import { createHash } from 'node:crypto'
 
 export const SCHEMA_VERSION = 4
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeInput} AiGatewayExchangeInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedExchange} AiGatewayProjectedExchange */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedMessage} AiGatewayProjectedMessage */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('./api.js').RegisteredProjector} RegisteredProjector */
+/**
+ * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { RegisteredProjector } from './types.d.ts'
+ */
 
 /**
  * HypAware's normalized AI gateway message-part query schema.

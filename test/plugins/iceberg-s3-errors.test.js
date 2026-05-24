@@ -6,6 +6,10 @@ import assert from 'node:assert/strict'
 import { createBlobStoreIO } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Build a BlobStore stub whose putObject/getObject/listObjects throw a
  * pre-tagged error matching what the real `@hypaware/s3` BlobStore would
  * surface when AWS classifies the call against `classifyAwsError`.
@@ -19,7 +23,7 @@ function failingBlobStore({ errorKind, operation = 'put' }) {
     err.errorKind = errorKind
     return err
   }
-  return /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */ ({
+  return /** @type {BlobStore} */ ({
     kind: 's3',
     async putObject(input) {
       if (operation === 'put') throw makeErr()
@@ -123,7 +127,7 @@ for (const { input, expected } of LIST_MAPPING) {
 test('writer onWrite observer fires with key + etag for successful puts', async () => {
   /** @type {Array<{ key: string, etag: string | undefined, ifNoneMatch: string | undefined }>} */
   const events = []
-  /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+  /** @type {BlobStore} */
   const blobStore = {
     kind: 's3',
     async putObject(input) {
@@ -149,7 +153,7 @@ test('writer onWrite observer fires with key + etag for successful puts', async 
 })
 
 test('writer onWrite observer that throws does not break the commit', async () => {
-  /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+  /** @type {BlobStore} */
   const blobStore = {
     kind: 's3',
     async putObject(input) { return { key: input.key, etag: '"abc"' } },

@@ -13,9 +13,13 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 
 /**
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * @returns {{
  *   objects: Map<string, Uint8Array>,
- *   blobStore: import('../../collectivus-plugin-kernel-types').BlobStore,
+ *   blobStore: BlobStore,
  * }}
  */
 function makeBlobStore() {

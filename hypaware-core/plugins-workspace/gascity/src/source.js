@@ -3,18 +3,10 @@
 import { gascityTablePath, GASCITY_SCHEMA_COLUMNS } from './dataset.js'
 import { getActiveTransport } from './transport.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').StartedSource} StartedSource */
-/** @typedef {import('./transport.js').GascityCitySubscription} GascityCitySubscription */
-/** @typedef {import('./transport.js').GascityFrame} GascityFrame */
-
 /**
- * @typedef {Object} CityConfig
- * @property {string} name
- * @property {string} [api_url]
+ * @import { PluginActivationContext, PluginLogger, QueryStorageService, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { GascityCitySubscription, GascityFrame } from './transport.js'
+ * @import { CityConfig } from './types.d.ts'
  */
 
 /**

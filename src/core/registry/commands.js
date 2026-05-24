@@ -1,7 +1,8 @@
 // @ts-check
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistry} CommandRegistry */
+/**
+ * @import { CommandRegistration, CommandRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
 
 /**
  * Build a kernel CommandRegistry that conforms to

@@ -12,12 +12,7 @@
  */
 
 /**
- * @typedef {Object} SseEvent
- * @property {string} event   Event type. Defaults to 'message' when no
- *                            `event:` field is present in the block.
- * @property {string} data    Joined `data:` lines (multi-line `data`
- *                            fields concatenate with `\n` per spec).
- * @property {string} [id]    Round-tripped `id:` field when present.
+ * @import { SseEvent } from './types.d.ts'
  */
 
 export class SseParser {

@@ -1,6 +1,11 @@
 // @ts-check
 
 /**
+ * @import { CredentialSourceKind, S3ClientFactory, S3ClientHandle, S3ClientOptions } from './types.d.ts'
+ * @import { S3ClientConfig } from '@aws-sdk/client-s3'
+ */
+
+/**
  * AWS SDK v3 client wiring for `@hypaware/s3`. Two design choices:
  *
  *  1. Credential chain order matches the AWS SDK's default: explicit
@@ -18,52 +23,6 @@
  * The factory is intentionally async + lazy: importing the AWS SDK is
  * expensive (>30 MB tree) and we don't want to pay that cost in unit
  * tests that never reach `create()`.
- */
-
-/**
- * @typedef {'profile' | 'env' | 'web_identity' | 'sso' | 'process' | 'metadata' | 'injected'} CredentialSourceKind
- */
-
-/**
- * @typedef {Object} S3ClientHandle
- * @property {(input: PutObjectInput) => Promise<PutObjectOutput>} putObject
- * @property {() => void} destroy
- */
-
-/**
- * @typedef {Object} PutObjectInput
- * @property {string} Bucket
- * @property {string} Key
- * @property {Uint8Array | Buffer | string} Body
- * @property {string} [StorageClass]
- * @property {string} [ServerSideEncryption]
- * @property {string} [ContentType]
- * @property {number} [ContentLength]
- */
-
-/**
- * @typedef {Object} PutObjectOutput
- * @property {string} [ETag]
- * @property {string} [VersionId]
- */
-
-/**
- * @typedef {Object} S3ClientOptions
- * @property {string} [region]
- * @property {string} [profile]
- * @property {string} [endpoint_url]
- * @property {boolean} [force_path_style]
- * @property {Record<string, string | undefined>} [env]
- */
-
-/**
- * @typedef {Object} S3ClientFactoryResult
- * @property {S3ClientHandle} client
- * @property {CredentialSourceKind} credential_source_kind
- */
-
-/**
- * @typedef {(opts: S3ClientOptions) => Promise<S3ClientFactoryResult>} S3ClientFactory
  */
 
 /**
@@ -100,7 +59,7 @@ export function detectCredentialSourceKind(opts) {
  */
 export async function defaultClientFactory(opts) {
   const credential_source_kind = detectCredentialSourceKind(opts)
-  /** @type {import('@aws-sdk/client-s3').S3ClientConfig} */
+  /** @type {S3ClientConfig} */
   const clientConfig = {}
   if (opts.region) clientConfig.region = opts.region
   if (opts.endpoint_url) clientConfig.endpoint = opts.endpoint_url

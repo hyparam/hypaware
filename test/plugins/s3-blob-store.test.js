@@ -11,6 +11,10 @@ import {
 } from '../../hypaware-core/plugins-workspace/s3/src/blob-store.js'
 
 /**
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Build an in-memory S3 client handle that mimics the AWS SDK shape
  * the BlobStore expects. Used to drive every put/get/list/delete path
  * without spinning up real S3.
@@ -224,7 +228,7 @@ test('s3 BlobStore rejects keys that try to escape the configured prefix', async
 
 test('s3 BlobStore exposes bucket and prefix for downstream telemetry', () => {
   const client = makeFakeS3Client()
-  const store = /** @type {import('../../collectivus-plugin-kernel-types').BlobStore & { bucket?: string, prefix?: string }} */ (
+  const store = /** @type {BlobStore & { bucket?: string, prefix?: string }} */ (
     createS3BlobStore({ bucket: 'my-bucket', prefix: 'hyp/exports/', client })
   )
   assert.equal(store.kind, 's3')

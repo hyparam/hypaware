@@ -1,7 +1,7 @@
 import type {
   PluginName,
   PluginPaths,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 
 export type { PluginPaths }
 

@@ -6,7 +6,10 @@ import { installTracerProvider } from './tracer.js'
 import { installLoggerProvider } from './logger.js'
 import { installMeterProvider, resetKernelInstruments } from './meter.js'
 
-/** @typedef {Awaited<ReturnType<typeof installObservability>>} ObservabilityHandle */
+/**
+ * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
+ * @import { ObservabilityEnv, ObservabilityHandle } from './types.d.ts'
+ */
 
 /** @type {ReturnType<typeof buildHandle> | null} */
 let installed = null
@@ -17,7 +20,7 @@ let installed = null
  * and a `shutdown()` that flushes and closes exporters in reverse
  * order. Idempotent — a second call returns the existing handle.
  *
- * @param {{ env?: import('./env.js').ObservabilityEnv }} [opts]
+ * @param {{ env?: ObservabilityEnv }} [opts]
  */
 export function installObservability(opts = {}) {
   if (installed) return installed
@@ -32,11 +35,11 @@ export function installObservability(opts = {}) {
 
 /**
  * @param {{
- *   env: import('./env.js').ObservabilityEnv,
+ *   env: ObservabilityEnv,
  *   resource: { attributes: Record<string, string|number|boolean> },
- *   tracer: { provider: import('./runtime.js').TracerProvider|null },
- *   logger: { provider: import('./runtime.js').LoggerProvider|null },
- *   meter: { provider: import('./runtime.js').MeterProvider|null, readers: object[] }
+ *   tracer: { provider: TracerProvider|null },
+ *   logger: { provider: LoggerProvider|null },
+ *   meter: { provider: MeterProvider|null, readers: object[] }
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter }) {

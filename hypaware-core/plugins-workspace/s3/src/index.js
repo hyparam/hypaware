@@ -14,19 +14,10 @@ import { defaultClientFactory } from './client.js'
 import { classifyAwsError, describeS3ErrorKind } from './errors.js'
 import { keyIsWithinPrefix, renderObjectKey } from './keys.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportOptions} ExportOptions */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').Sink} Sink */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkCreateContext} SinkCreateContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
-/** @typedef {import('./client.js').S3ClientFactory} S3ClientFactory */
-/** @typedef {import('./client.js').S3ClientHandle} S3ClientHandle */
-/** @typedef {import('./errors.js').S3ErrorKind} S3ErrorKind */
+/**
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { S3BlobStoreClientFactory, S3ClientFactory, S3ClientHandle, S3ErrorKind, S3SinkConfig } from './types.d.ts'
+ */
 
 const PLUGIN_NAME = '@hypaware/s3'
 const PLUGIN_VERSION = '1.0.0'
@@ -142,7 +133,7 @@ function resolveClientFactory(sinkCtx) {
 
 /**
  * @param {{
- *   config: import('./config.js').S3SinkConfig,
+ *   config: S3SinkConfig,
  *   client: S3ClientHandle,
  *   encoder: SinkEncoder,
  *   sinkCtx: SinkCreateContext,
@@ -396,7 +387,7 @@ async function resolveBlobStore(ctx) {
     return createUnconfiguredS3BlobStore()
   }
   const validated = validation.config
-  const factory = /** @type {{ __blobStoreClientFactory?: import('./blob-store.js').S3BlobStoreClientFactory }} */ (
+  const factory = /** @type {{ __blobStoreClientFactory?: S3BlobStoreClientFactory }} */ (
     /** @type {unknown} */ (config)
   ).__blobStoreClientFactory ?? defaultS3BlobStoreClientFactory
   const client = await factory({

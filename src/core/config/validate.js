@@ -2,85 +2,22 @@
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationError} ValidationError */
-/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
-
 /**
- * @typedef {(
- *   |'sink_pair_incompatible'
- *   |'sink_writer_invalid'
- *   |'sink_destination_invalid'
- *   |'request_sink_invalid_keys'
- *   |'sink_schedule_invalid'
- *   |'sink_plugin_unknown'
- *   |'sink_encoder_invalid'
- *   |'dataset_unknown'
- *   |'capability_ambiguous'
- *   |'config_section_invalid'
- *   |'plugin_unknown'
- *   |'duplicate_plugin'
- * )} ConfigErrorKind
+ * @import { BlobSinkConfigInstance, CapabilityName, ConfigRegistry, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance, ValidationError } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { LoadedManifest } from '../manifest.js'
+ * @import { *, *   ConfigValidationError, *   ConfigValidationErrorKind, *   PluginMetadata, *   V1Diagnostic, *   V1DiagnosticKind, *   ValidateContext, *   ValidateResult } from './types.d.ts'
  */
 
 /**
- * @typedef {ValidationError & { errorKind: ConfigErrorKind }} ConfigValidationError
- */
-
-/**
- * Phase 8 diagnostic kinds — internally inconsistent configurations
- * that are not catastrophic enough to fail `hyp config validate` but
- * which `hyp status` surfaces with concrete repair suggestions.
- *
- * - `client_without_gateway`: a client plugin (`@hypaware/claude` or
- *   `@hypaware/codex`) is enabled but `@hypaware/ai-gateway` is not.
- * - `gateway_missing_anthropic_upstream`: `@hypaware/claude` is enabled
- *   but no Anthropic upstream is registered with the gateway config.
- * - `gateway_missing_openai_upstream`: `@hypaware/codex` is enabled
- *   but no OpenAI upstream is registered.
- * - `sink_missing_encoder`: a local-fs sink is configured but no
- *   encoder plugin (`@hypaware/format-parquet` /
- *   `@hypaware/format-jsonl`) is enabled.
- *
- * @typedef {(
- *   |'client_without_gateway'
- *   |'gateway_missing_anthropic_upstream'
- *   |'gateway_missing_openai_upstream'
- *   |'sink_missing_encoder'
- * )} V1DiagnosticKind
- */
-
-/**
- * @typedef {Object} V1Diagnostic
- * @property {V1DiagnosticKind} kind
- * @property {string} pointer
- * @property {string} message
- * @property {string[]} repair    Suggested repair commands.
- */
-
-/**
- * @typedef {Object} PluginMetadata
- * @property {Partial<Record<CapabilityName, string>>} [provides]
- * @property {Partial<Record<CapabilityName, string>>} [requires]
- */
-
-/**
- * @typedef {Object} ValidateContext
- * @property {Map<PluginName, PluginMetadata>} [knownPlugins]
- * @property {Set<string>} [knownDatasets]
- * @property {ConfigRegistry} [configRegistry]
- */
-
-/**
- * @typedef {Object} ValidateResult
- * @property {boolean} ok
- * @property {ConfigValidationError[]} errors
- * @property {number} pluginCount
- * @property {number} sinkCount
+ * @import {
+ *   ConfigValidationErrorKind,
+ *   ConfigValidationError,
+ *   V1DiagnosticKind,
+ *   V1Diagnostic,
+ *   PluginMetadata,
+ *   ValidateContext,
+ *   ValidateResult,
+ * } from './types.d.ts'
  */
 
 /**
@@ -366,9 +303,9 @@ function checkSinks(config, knownPlugins, errors) {
         })
         continue
       }
-      checkBlobSink(name, /** @type {import('../../../collectivus-plugin-kernel-types').BlobSinkConfigInstance} */ (raw), knownPlugins, errors)
+      checkBlobSink(name, /** @type {BlobSinkConfigInstance} */ (raw), knownPlugins, errors)
     } else if ('plugin' in entry) {
-      checkRequestSink(name, /** @type {import('../../../collectivus-plugin-kernel-types').RequestSinkConfigInstance} */ (raw), knownPlugins, errors)
+      checkRequestSink(name, /** @type {RequestSinkConfigInstance} */ (raw), knownPlugins, errors)
     } else {
       errors.push({
         pointer,
@@ -383,7 +320,7 @@ function checkSinks(config, knownPlugins, errors) {
 
 /**
  * @param {string} name
- * @param {import('../../../collectivus-plugin-kernel-types').BlobSinkConfigInstance} sink
+ * @param {BlobSinkConfigInstance} sink
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
  */
@@ -509,7 +446,7 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
 
 /**
  * @param {string} name
- * @param {import('../../../collectivus-plugin-kernel-types').RequestSinkConfigInstance} sink
+ * @param {RequestSinkConfigInstance} sink
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
  */
@@ -775,10 +712,10 @@ export function diagnoseV1Config(config) {
 
 /**
  * @param {HypAwareV2Config} config
- * @returns {Map<PluginName, import('../../../collectivus-plugin-kernel-types').JsonObject>}
+ * @returns {Map<PluginName, JsonObject>}
  */
 function enabledPluginIndex(config) {
-  /** @type {Map<PluginName, import('../../../collectivus-plugin-kernel-types').JsonObject>} */
+  /** @type {Map<PluginName, JsonObject>} */
   const out = new Map()
   for (const entry of config.plugins ?? []) {
     if (entry.enabled === false) continue
@@ -803,7 +740,7 @@ function pluginPointer(config, name) {
  * `name` (`anthropic` / `openai` / `chatgpt`), or by `base_url` host. The gateway
  * config shape is intentionally loose, so check all three.
  *
- * @param {import('../../../collectivus-plugin-kernel-types').JsonObject} gatewayConfig
+ * @param {JsonObject} gatewayConfig
  * @param {'anthropic'|'openai'|'chatgpt'} provider
  */
 function gatewayHasUpstreamProvider(gatewayConfig, provider) {

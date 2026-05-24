@@ -30,56 +30,14 @@ function defaultLabelFor(platform) {
 }
 
 /**
- * @typedef {import('./macos.js').LaunchAgentInstallPlan} LaunchAgentInstallPlan
- * @typedef {import('./linux.js').SystemdInstallPlan} SystemdInstallPlan
- * @typedef {LaunchAgentInstallPlan | SystemdInstallPlan} DaemonInstallPlan
- */
-
-/**
- * @typedef {Object} DaemonInstallOptions
- * @property {string} binPath              Absolute path to the HypAware CLI entrypoint.
- * @property {string} [configPath]         Config path passed to the daemon (defaults to ~/.hyp/hypaware-config.json).
- * @property {string} [label]              Override the launch label (defaults to com.hyperparam.hypaware).
- * @property {string} [logDir]             Override stdout/stderr log dir (defaults to ~/.hyp/hypaware/logs).
- * @property {string} [nodePath]           Override the node binary used as ProgramArguments[0] (defaults to process.execPath).
- * @property {string} [homeDir]            Override $HOME for resolving default dirs (used in tests).
- * @property {NodeJS.Platform} [platform]  Force platform selection for dry-runs / tests.
- * @property {Record<string,string>} [env] Extra environment variables for the launched daemon.
- * @property {boolean} [keepAlive]         macOS: KeepAlive (default true).
- * @property {boolean} [runAtLoad]         macOS: RunAtLoad (default true).
- * @property {boolean} [restart]           Linux: Restart=always vs Restart=no (default true).
- * @property {number}  [restartSec]        Linux: RestartSec= seconds (default 5).
- * @property {boolean} [foreground]        Pass `--foreground` to the daemon (default true).
- * @property {string} [plistDir]           macOS: override LaunchAgents dir.
- * @property {string} [unitDir]            Linux: override systemd --user unit dir.
- * @property {string} [description]        Linux: override [Unit] Description value.
- * @property {import('./macos.js').LaunchctlAdapter} [launchctl]
- * @property {import('./linux.js').SystemctlAdapter} [systemctl]
- * @property {string} [userDomain]         macOS: override the launchctl user domain (e.g. gui/501).
- */
-
-/**
- * @typedef {Object} DaemonUninstallOptions
- * @property {string} [label]
- * @property {string} [homeDir]
- * @property {string} [plistDir]
- * @property {string} [unitDir]
- * @property {NodeJS.Platform} [platform]
- * @property {import('./macos.js').LaunchctlAdapter} [launchctl]
- * @property {import('./linux.js').SystemctlAdapter} [systemctl]
- * @property {string} [userDomain]
- */
-
-/**
- * @typedef {Object} DaemonServiceOptions
- * @property {string} [label]
- * @property {NodeJS.Platform} [platform]
- * @property {string} [homeDir]
- * @property {string} [plistDir]
- * @property {string} [unitDir]
- * @property {import('./macos.js').LaunchctlAdapter} [launchctl]
- * @property {import('./linux.js').SystemctlAdapter} [systemctl]
- * @property {string} [userDomain]
+ * @import {
+ *   LaunchAgentInstallPlan,
+ *   SystemdInstallPlan,
+ *   DaemonInstallPlan,
+ *   DaemonInstallOptions,
+ *   DaemonUninstallOptions,
+ *   DaemonServiceOptions,
+ * } from './types.d.ts'
  */
 
 export class DaemonInstallError extends Error {

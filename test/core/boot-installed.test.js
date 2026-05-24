@@ -19,6 +19,10 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /**
+ * @import { PluginManifest } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Materialise an installed-plugin fixture under `<hypHome>/hypaware/plugins`
  * and register it in `plugin-lock.json`. Mirrors what `hyp plugin install`
  * lands on disk but skips the actual install pipeline so tests stay fast.
@@ -352,7 +356,7 @@ test('dispatch routes hyp init <installed-preset> even when preset args include 
 })
 
 test('resolveDependencies works over a merged bundled+installed manifest pool', async () => {
-  /** @type {import('../../collectivus-plugin-kernel-types').PluginManifest[]} */
+  /** @type {PluginManifest[]} */
   const manifests = [
     {
       schema_version: 1,

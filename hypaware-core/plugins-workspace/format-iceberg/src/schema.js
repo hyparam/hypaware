@@ -1,6 +1,9 @@
 // @ts-check
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
+/**
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { IcebergField } from './types.d.ts'
+ */
 
 const ICEBERG_SCHEMA_ID = 0
 
@@ -291,10 +294,3 @@ function newDataError(kind, message) {
   return err
 }
 
-/**
- * @typedef {Object} IcebergField
- * @property {number} id
- * @property {string} name
- * @property {boolean} required
- * @property {string} type
- */

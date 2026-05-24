@@ -32,11 +32,15 @@ import {
   appendSessionContext,
 } from '../../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
-/** @typedef {ReturnType<typeof import('../registry/commands.js').createCommandRegistry>} CommandRegistryExtended */
-/** @typedef {import('../query/sql.js').RefreshMode} RefreshMode */
-/** @typedef {import('../query/format.js').QueryFormat} QueryFormat */
+/**
+ * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
+ * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
+ * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
+ * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
+ * @import { ExtendedSourceRegistry } from '../registry/sources.js'
+ * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'
+ */
 
 const execFileAsync = promisify(execFile)
 
@@ -295,9 +299,9 @@ function buildCoreCommands() {
 async function runStatus(argv, ctx) {
   const json = argv.includes('--json')
 
-  /** @type {import('../registry/sources.js').ExtendedSourceRegistry} */
+  /** @type {ExtendedSourceRegistry} */
   const sources = /** @type {any} */ (ctx.sources)
-  /** @type {import('../registry/sinks.js').ExtendedSinkRegistry} */
+  /** @type {ExtendedSinkRegistry} */
   const sinks = /** @type {any} */ (ctx.sinks)
 
   const runtimeClientNames = listClientNames(ctx.capabilities)
@@ -383,7 +387,7 @@ async function runStatus(argv, ctx) {
  * V1 contract (Phase 8 bead): the V1 surface must not require either.
  *
  * @param {{
- *   report: import('../daemon/status.js').HypAwareStatusReport,
+ *   report: HypAwareStatusReport,
  *   clientNames: string[],
  *   datasets: { name: string, plugin: string }[],
  *   cacheRoot: string,
@@ -464,7 +468,7 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
  * suggestions at the bottom.
  *
  * @param {{
- *   report: import('../daemon/status.js').HypAwareStatusReport,
+ *   report: HypAwareStatusReport,
  *   clientNames: string[],
  *   datasets: { name: string, plugin: string }[],
  *   cacheRoot: string,
@@ -553,7 +557,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
 }
 
 /**
- * @param {import('../daemon/status.js').ServiceState} daemon
+ * @param {ServiceState} daemon
  */
 function describeDaemon(daemon) {
   const parts = []
@@ -573,7 +577,7 @@ function describeDaemon(daemon) {
  */
 function listClientNames(capabilities) {
   if (!capabilities.has('hypaware.ai-gateway')) return []
-  /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+  /** @type {AiGatewayCapability} */
   const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
   return gateway.listClients().map((c) => c.name).sort()
 }
@@ -910,7 +914,7 @@ async function runPluginInstall(argv, ctx) {
  *   ctx: CommandRunContext,
  *   headerKind: 'install' | 'update',
  * }} args
- * @returns {import('../plugin_install/install.js').ConfirmInstall}
+ * @returns {ConfirmInstall}
  */
 function buildPluginInstallConfirm({ yes, ctx, headerKind }) {
   const stderr = ctx.stderr
@@ -1537,7 +1541,7 @@ async function runDaemonInstall(argv, ctx) {
     return 2
   }
 
-  /** @type {import('../daemon/install.js').DaemonInstallOptions} */
+  /** @type {DaemonInstallOptions} */
   const options = {
     binPath,
     ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
@@ -1941,19 +1945,6 @@ function hasInitFlags(argv) {
 }
 
 /**
- * @typedef {Object} InitFlags
- * @property {boolean} yes
- * @property {boolean} noDaemon
- * @property {boolean} dryRun
- * @property {('claude'|'codex')[]} clients
- * @property {('claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel')[]} sources
- * @property {('keep-local'|'local-parquet'|'configure-later') | undefined} exportChoice
- * @property {number} retentionDays
- * @property {string} [fromFile]
- * @property {string} [binPath]
- */
-
-/**
  * @param {string[]} argv
  * @returns {{ flags: InitFlags, error?: string }}
  */
@@ -2261,7 +2252,7 @@ async function runClientLifecycle(action, argv, ctx) {
     )
     return 1
   }
-  /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+  /** @type {AiGatewayCapability} */
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
   const clientNames = expandClientName(parsed.client, gateway)
@@ -2336,7 +2327,7 @@ async function runClientLifecycle(action, argv, ctx) {
  * commands like `hyp attach`, which only need to write client settings
  * to the same fixed port the daemon will bind later.
  *
- * @param {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} config
+ * @param {HypAwareV2Config} config
  * @returns {string | undefined}
  */
 function configuredGatewayEndpoint(config) {
@@ -2433,7 +2424,7 @@ function parseClientArgs(argv) {
  * return the requested name verbatim.
  *
  * @param {string} requested
- * @param {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} gateway
+ * @param {AiGatewayCapability} gateway
  */
 function expandClientName(requested, gateway) {
   if (requested === 'all') {

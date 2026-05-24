@@ -5,34 +5,11 @@ import path from 'node:path'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../registry/sinks.js').ExtendedSinkRegistry} ExtendedSinkRegistry */
-/** @typedef {import('../registry/sinks.js').ExtendedSinkHandle} ExtendedSinkHandle */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-
 /**
- * @typedef {Object} DriverOptions
- * @property {ExtendedSinkRegistry} sinkRegistry
- * @property {QueryRegistry} queryRegistry
- * @property {QueryStorageService} storage
- * @property {string} stateRoot                 Kernel state root (e.g. `<HYP_HOME>/hypaware`).
- * @property {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} [config]
- */
-
-/**
- * @typedef {Object} TickOptions
- * @property {Date} [now]
- * @property {string} [sinkInstance]            Only fire one sink (test/manual use).
- * @property {boolean} [force]                  Ignore cron-due check and fire every sink (test use).
- * @property {'daemon'|'manual'} [source]       Tag the tick metric so daemon vs. manual ticks split cleanly. Default `manual`.
- */
-
-/**
- * @typedef {Object} TickReport
- * @property {Array<{ instance: string, status: ExportResult['status'], partitionsExported: number, bytesWritten: number, error?: string }>} sinks
+ * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Span } from '../observability/runtime.js'
+ * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/sinks.js'
+ * @import { DriverOptions, TickOptions, TickReport } from './types.d.ts'
  */
 
 /**
@@ -228,7 +205,7 @@ export function createSinkDriver(opts) {
    * @param {string} batchId
    * @param {number} partitionsCount
    * @param {string} message
-   * @param {import('../observability/runtime.js').Span} span
+   * @param {Span} span
    */
   function recordFailure(handle, batchId, partitionsCount, message, span) {
     instruments.sinkExportFailuresTotal.add(1, {
