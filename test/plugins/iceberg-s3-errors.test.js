@@ -76,7 +76,7 @@ for (const { input, expected } of WRITE_MAPPING) {
     const writer = resolver.writer(`blob://${KEY}`, { ifNoneMatch: '*' })
     writer.appendBytes(new Uint8Array([1, 2, 3]))
     await assert.rejects(
-      () => writer.finish(),
+      async () => writer.finish(),
       (err) => /** @type {HypError} */ (err).hypErrorKind === expected,
     )
   })
@@ -101,7 +101,7 @@ for (const { input, expected } of READ_MAPPING) {
     const blobStore = failingBlobStore({ errorKind: input, operation: 'get' })
     const { resolver } = await createBlobStoreIO(blobStore)
     await assert.rejects(
-      () => resolver.reader(`blob://${KEY}`),
+      async () => resolver.reader(`blob://${KEY}`),
       (err) => /** @type {HypError} */ (err).hypErrorKind === expected,
     )
   })

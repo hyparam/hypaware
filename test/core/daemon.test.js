@@ -12,8 +12,13 @@ import { readStatusFile, statusFilePath, writeStatusFile } from '../../src/core/
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
+/**
+ * @import { DaemonStatus } from '../../src/core/daemon/types.d.ts'
+ */
+
 test('writeStatusFile writes an atomic readable status snapshot', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-status-test-'))
+  /** @type {DaemonStatus} */
   const status = {
     state: 'healthy',
     pid: 12345,

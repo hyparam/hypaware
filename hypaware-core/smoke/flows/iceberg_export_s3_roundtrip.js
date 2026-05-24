@@ -24,7 +24,8 @@ import {
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, JsonObject, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -105,9 +106,10 @@ export async function run({ harness, expect }) {
             .join('; ')}`
         )
       }
+      /** @type {PluginActivationEntry[]} */
       const entries = loaded.map((l) => {
         if (l.manifest.name === '@hypaware/s3') {
-          /** @type {Record<string, unknown>} */
+          /** @type {JsonObject} */
           const config = {
             bucket,
             prefix: runPrefix,

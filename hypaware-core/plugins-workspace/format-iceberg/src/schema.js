@@ -3,6 +3,7 @@
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { IcebergField } from './types.d.ts'
+ * @import { IcebergType } from 'icebird/src/types.js'
  */
 
 const ICEBERG_SCHEMA_ID = 0
@@ -150,7 +151,7 @@ export function rowsToIcebergRecords(columns, rows) {
 /**
  * @param {ColumnSpec['type']} type
  * @param {string} columnName
- * @returns {string}
+ * @returns {IcebergType}
  */
 function icebergTypeForBasicType(type, columnName) {
   switch (type) {

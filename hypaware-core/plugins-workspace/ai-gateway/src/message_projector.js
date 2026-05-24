@@ -236,7 +236,7 @@ async function dispatchProjector(projectors, input, log) {
   for (const projector of matching) {
     let result
     try {
-      result = await Promise.resolve(projector.project(input, { log: log ?? noopLogger() }))
+      result = await Promise.resolve(projector.project(input, { log: { ...noopLogger(), ...(log ?? {}) } }))
     } catch (err) {
       log?.warn?.('aigw.projector_error', {
         projector: projector.name,

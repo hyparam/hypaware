@@ -70,7 +70,7 @@ export function createCodexExchangeProjector(opts = {}) {
       const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
       const recordedContext = resolveRecordedContext(reqBody, codexContext)
 
-      /** @type {Record<string, unknown>} */
+      /** @type {JsonObject} */
       const codexAttributes = codexContext?.attributes ? { ...codexContext.attributes } : {}
       // The projector never supplies message_id today, so every row
       // takes the gateway's fallback identity. Stamp the codex-side
@@ -423,7 +423,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
     ? workspaceInfo.has_changes
     : undefined
 
-  /** @type {Record<string, unknown>} */
+  /** @type {JsonObject} */
   const attributes = {}
   setIfString(attributes, 'thread_id', thread_id)
   setIfString(attributes, 'session_id', session_id)
@@ -665,11 +665,11 @@ function extractSystemText(system) {
  *
  * @param {CodexLogReader[]} readers
  * @param {AiGatewayExchangeInput} input
- * @returns {Record<string, unknown> | undefined}
+ * @returns {JsonObject | undefined}
  */
 function augmentFromLogReaders(readers, input) {
   if (readers.length === 0) return undefined
-  /** @type {Record<string, unknown>} */
+  /** @type {JsonObject} */
   const merged = {}
   for (const reader of readers) {
     try {
@@ -767,7 +767,7 @@ function readStringKey(obj, key) {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
-/** @param {Record<string, unknown>} target @param {string} key @param {string | undefined} value */
+/** @param {JsonObject} target @param {string} key @param {string | undefined} value */
 function setIfString(target, key, value) {
   if (value !== undefined) target[key] = value
 }
@@ -800,14 +800,15 @@ function sortKeys(value) {
 }
 
 /**
- * @param {Record<string, unknown>} obj
- * @returns {any}
+ * @template T
+ * @param {T} obj
+ * @returns {T}
  */
 function stripUndefined(obj) {
   /** @type {Record<string, unknown>} */
   const out = {}
-  for (const [key, value] of Object.entries(obj)) {
+  for (const [key, value] of Object.entries(/** @type {Record<string, unknown>} */ (obj))) {
     if (value !== undefined) out[key] = value
   }
-  return out
+  return /** @type {T} */ (out)
 }

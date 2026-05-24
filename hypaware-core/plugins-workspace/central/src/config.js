@@ -62,7 +62,7 @@ export function validateCentralConfig(value) {
     return invalid('central.config_etag_path must be a string when set')
   }
 
-  return { ok: true, config: /** @type {CentralSinkConfig} */ (cfg) }
+  return { ok: true, config: /** @type {CentralSinkConfig} */ (/** @type {unknown} */ (cfg)) }
 }
 
 /** @param {string} message */

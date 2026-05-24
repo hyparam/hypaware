@@ -653,6 +653,10 @@ export interface SinkEncodedBlob {
  */
 export interface BlobStore {
   kind: string
+  /** Advisory S3-only metadata; consumers may read it for telemetry. */
+  bucket?: string
+  /** Advisory prefix surfaced by stores that scope writes under one. */
+  prefix?: string
   putObject(input: PutObjectInput): Promise<PutObjectResult>
   getObject(input: GetObjectInput): Promise<GetObjectResult | null>
   listObjects(input: ListObjectsInput): AsyncIterable<ListObjectResult>

@@ -484,7 +484,10 @@ function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v)
 }
 
-/** @param {unknown} v */
+/**
+ * @param {unknown} v
+ * @returns {v is string}
+ */
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.length > 0
 }

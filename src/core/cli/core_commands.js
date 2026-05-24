@@ -34,6 +34,7 @@ import {
 
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
@@ -689,7 +690,7 @@ async function runQuerySql(argv, ctx) {
     const result = await executeQuerySql({
       query: parsed.sql,
       registry: ctx.query,
-      storage: ctx.storage,
+      storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       refresh: parsed.refresh,
       config: ctx.config,
     })

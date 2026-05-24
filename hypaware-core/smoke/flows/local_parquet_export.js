@@ -207,7 +207,7 @@ export async function run({ harness, expect }) {
     parquetBytes.byteOffset,
     parquetBytes.byteOffset + parquetBytes.byteLength,
   )
-  const decoded = await parquetReadObjects({ file: asyncBufferFromArrayBuffer(buf) })
+  const decoded = await parquetReadObjects({ file: buf })
   expect.that(
     'good sink: Parquet decoded to at least one row',
     decoded,
@@ -374,19 +374,6 @@ async function postOtlp(url, payload) {
     throw new Error(`local_parquet_export: POST ${url} returned ${response.status}`)
   }
   await response.text()
-}
-
-/**
- * @param {ArrayBufferLike} buffer
- */
-function asyncBufferFromArrayBuffer(buffer) {
-  return {
-    byteLength: buffer.byteLength,
-    /** @param {number} start @param {number} [end] */
-    slice(start, end) {
-      return buffer.slice(start, end ?? buffer.byteLength)
-    },
-  }
 }
 
 /** @param {number} ms */
