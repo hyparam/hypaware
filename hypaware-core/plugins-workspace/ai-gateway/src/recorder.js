@@ -73,7 +73,7 @@ export function createRecorder(options = {}) {
       const outcome = await Promise.race([settled.then(() => 'done'), timeout])
       if (outcome === 'timeout') {
         for (const exchange of Array.from(active)) {
-          await exchange.finalize().catch(() => undefined)
+          try { exchange.finalize() } catch { /* swallow */ }
         }
       }
     },
