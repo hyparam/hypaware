@@ -1,17 +1,21 @@
 {
   "compilerOptions": {
-    "allowJs": false,
+    "allowJs": true,
+    "checkJs": true,
     "lib": ["esnext"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "noEmit": true,
     "skipLibCheck": true,
-    "strict": true,
+    "strict": false,
+    "strictNullChecks": true,
     "target": "es2022",
     "types": ["node"]
   },
   "include": [
     "collectivus-plugin-kernel-types.d.ts",
-    "src/**/*.d.ts"
+    "hypaware-core",
+    "src",
+    "test"
   ]
 }

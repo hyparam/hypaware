@@ -302,6 +302,7 @@ test('s3 BlobStore deleteObject treats NotFound as benign and returns', async ()
     throw err
   }
   const store = createS3BlobStore({ bucket: 'my-bucket', client })
+  assert.ok(store.deleteObject, 'store exposes deleteObject')
   await store.deleteObject({ key: 'missing/file.bin' })
 })
 

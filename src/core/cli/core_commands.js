@@ -34,11 +34,11 @@ import {
 
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
- * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
- * @import { ExtendedSourceRegistry } from '../registry/sources.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'
  */
 
@@ -682,7 +682,7 @@ async function runQueryStatus(_argv, ctx) {
  */
 async function runQuerySql(argv, ctx) {
   const parsed = parseQuerySqlArgv(argv)
-  if (parsed.error) {
+  if (!parsed.ok) {
     ctx.stderr.write(parsed.error + '\n')
     return 2
   }
@@ -690,7 +690,7 @@ async function runQuerySql(argv, ctx) {
     const result = await executeQuerySql({
       query: parsed.sql,
       registry: ctx.query,
-      storage: ctx.storage,
+      storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       refresh: parsed.refresh,
       config: ctx.config,
     })
@@ -751,10 +751,10 @@ async function runQueryRefresh(argv, ctx) {
 
 /**
  * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
- * `--refresh` / `--format` flags in any order. Returns `{ sql, refresh,
- * format }` on success or `{ error }` on failure.
+ * `--refresh` / `--format` flags in any order.
  *
  * @param {string[]} argv
+ * @returns {{ ok: true, sql: string, refresh: RefreshMode, format: QueryFormat } | { ok: false, error: string }}
  */
 function parseQuerySqlArgv(argv) {
   /** @type {string[]} */
@@ -769,14 +769,14 @@ function parseQuerySqlArgv(argv) {
     if (token === '--refresh') {
       const value = argv[i + 1]
       if (value !== 'never' && value !== 'auto' && value !== 'always') {
-        return { error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
       }
       refresh = value
       i += 1
     } else if (token === '--format') {
       const value = argv[i + 1]
       if (value !== 'table' && value !== 'json' && value !== 'jsonl' && value !== 'markdown') {
-        return { error: `hyp query sql: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query sql: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
       }
       format = value
       i += 1
@@ -786,10 +786,10 @@ function parseQuerySqlArgv(argv) {
   }
 
   if (positional.length === 0) {
-    return { error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]' }
+    return { ok: false, error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]' }
   }
   const sql = positional.join(' ')
-  return { sql, refresh, format }
+  return { ok: true, sql, refresh, format }
 }
 
 /* ---------- collect ---------- */
@@ -1287,7 +1287,7 @@ async function runConfig(argv, ctx) {
  */
 async function runConfigValidate(argv, ctx) {
   const parsed = parseConfigValidateArgv(argv, ctx.env)
-  if (parsed.error) {
+  if (parsed.error !== undefined) {
     ctx.stderr.write(parsed.error + '\n')
     return 2
   }
@@ -1326,7 +1326,7 @@ async function runConfigValidate(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {NodeJS.ProcessEnv} env
- * @returns {{ configPath: string } | { error: string }}
+ * @returns {{ configPath: string, error?: undefined } | { error: string, configPath?: undefined }}
  */
 function parseConfigValidateArgv(argv, env) {
   /** @type {string|undefined} */

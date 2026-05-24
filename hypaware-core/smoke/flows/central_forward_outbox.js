@@ -17,6 +17,10 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 
 /**
+ * @import { ActivePlugin } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Phase 8.5 smoke. Stands up:
  *
  *   - `@hypaware/test-otel` (fixture stand-in for `@hypaware/otel`):

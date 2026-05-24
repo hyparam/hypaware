@@ -75,7 +75,7 @@ export async function defaultClientFactory(opts) {
   /** @type {S3ClientHandle} */
   const handle = {
     async putObject(input) {
-      const result = await client.send(new PutObjectCommand(input))
+      const result = await client.send(new PutObjectCommand(/** @type {any} */ (input)))
       return {
         ETag: result.ETag,
         VersionId: result.VersionId,

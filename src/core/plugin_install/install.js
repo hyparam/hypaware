@@ -57,17 +57,17 @@ import { checkForPluginUpdate } from './update_check.js'
  * updates the lock entry's `update` field with the result.
  *
  * @param {object} args
- * @param {string} args.rawSource    — e.g. `./plugins-workspace/dummy-a`
- * @param {string} args.stateDir     — kernel state root
- * @param {string} [args.cwd]        — for resolving relative paths
- * @param {() => Date} [args.now]    — injectable for tests
- * @param {{ ref?: string, subdir?: string }} [args.opts] — CLI flag overrides
- * @param {ConfirmInstall} [args.confirm] — optional trust gate. Called
+ * @param {string} args.rawSource    - e.g. `./plugins-workspace/dummy-a`
+ * @param {string} args.stateDir     - kernel state root
+ * @param {string} [args.cwd]        - for resolving relative paths
+ * @param {() => Date} [args.now]    - injectable for tests
+ * @param {{ ref?: string, subdir?: string }} [args.opts] - CLI flag overrides
+ * @param {ConfirmInstall} [args.confirm] - optional trust gate. Called
  *   after fetch+manifest validation and immediately before the artifact
  *   swap. Returning `proceed=false` aborts the install with the
  *   appropriate `remote_install_*` error kind and the outcome is
  *   stamped onto the `plugin.install` span.
- * @param {PluginLockEntry} [args.previous] — prior lock entry (only set
+ * @param {PluginLockEntry} [args.previous] - prior lock entry (only set
  *   on update flows). Forwarded to `confirm` so the prompt can render a
  *   diff against the installed version/commit.
  * @returns {Promise<InstallResult & { confirmation?: ConfirmOutcome }>}

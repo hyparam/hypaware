@@ -195,7 +195,6 @@ export async function run({ harness, expect }) {
   let unsupportedError
   try {
     renderDaemonInstall({
-      // @ts-expect-error — exercise the unsupported branch on purpose
       platform: 'win32',
       binPath,
       configPath,

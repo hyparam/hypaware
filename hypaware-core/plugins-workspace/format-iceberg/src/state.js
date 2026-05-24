@@ -170,9 +170,10 @@ function isAncestorSnapshot(markerSnapshotId, currentSnapshotId, metadata) {
   /** @type {Map<string, string | undefined>} */
   const parents = new Map()
   for (const snap of snapshots) {
-    const id = snap && /** @type {Record<string, unknown>} */ (snap)['snapshot-id']
+    if (!snap) continue
+    const id = snap['snapshot-id']
     if (id === undefined || id === null) continue
-    const parentRaw = /** @type {Record<string, unknown>} */ (snap)['parent-snapshot-id']
+    const parentRaw = snap['parent-snapshot-id']
     const parent = parentRaw === undefined || parentRaw === null
       ? undefined
       : String(parentRaw)

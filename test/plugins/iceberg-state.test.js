@@ -13,7 +13,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -57,11 +57,11 @@ test('markerKey renders <prefix>/state/exported-batches/<sink>/<dataset>/<batch>
 test('markerKey rejects empty segments with iceberg_state_invalid', () => {
   assert.throws(
     () => markerKey('iceberg/lake', '', 'ds', 'b'),
-    (err) => err.hypErrorKind === 'iceberg_state_invalid'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_state_invalid'
   )
   assert.throws(
     () => markerKey('iceberg/lake', 'sink', 'ds', ''),
-    (err) => err.hypErrorKind === 'iceberg_state_invalid'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_state_invalid'
   )
 })
 
@@ -106,7 +106,7 @@ test('loadMarker surfaces malformed JSON as iceberg_metadata_read_failed', async
   fixture.objects.set(key, Buffer.from('{ not json', 'utf8'))
   await assert.rejects(
     () => loadMarker(fixture.blobStore, key),
-    (err) => err.hypErrorKind === 'iceberg_metadata_read_failed'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_metadata_read_failed'
   )
 })
 

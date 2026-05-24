@@ -14,6 +14,10 @@ import {
 import { firstPartyPluginMetadata } from '../../src/core/config/validate.js'
 import { createTableFormatProvider } from '../../hypaware-core/plugins-workspace/format-iceberg/src/table-format.js'
 
+/**
+ * @import { HypError } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '../..')
 const PLUGIN_DIR = path.join(REPO_ROOT, 'hypaware-core', 'plugins-workspace', 'format-iceberg')
@@ -104,7 +108,7 @@ test('TableFormatProvider.createSink rejects missing BlobStore / encoder / non-p
       blobStore: undefined,
       encoder: { format: 'parquet', extension: 'parquet', supports: ['queryable'], encodePartition: async () => ({ filename: 'f', bytes: new Uint8Array() }) },
     }),
-    (err) => err.hypErrorKind === 'iceberg_blob_store_missing'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_store_missing'
   )
 
   // No encoder.
@@ -114,7 +118,7 @@ test('TableFormatProvider.createSink rejects missing BlobStore / encoder / non-p
       blobStore: makeStubBlobStore(),
       encoder: undefined,
     }),
-    (err) => err.hypErrorKind === 'iceberg_encoder_missing'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_encoder_missing'
   )
 
   // Non-parquet inner encoder.
@@ -124,7 +128,7 @@ test('TableFormatProvider.createSink rejects missing BlobStore / encoder / non-p
       blobStore: makeStubBlobStore(),
       encoder: { format: 'jsonl', extension: 'jsonl', supports: [], encodePartition: async () => ({ filename: 'f', bytes: new Uint8Array() }) },
     }),
-    (err) => err.hypErrorKind === 'iceberg_encoder_missing'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_encoder_missing'
   )
 })
 

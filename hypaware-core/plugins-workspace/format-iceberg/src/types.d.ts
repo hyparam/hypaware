@@ -59,9 +59,3 @@ export interface BlobIOWriteEvent {
 
 export type BlobIOWriteObserver = (event: BlobIOWriteEvent) => void
 
-export interface IcebergField {
-  id: number
-  name: string
-  required: boolean
-  type: string
-}

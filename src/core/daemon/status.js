@@ -30,7 +30,7 @@ import {
 /**
  * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
- * @import { *, *   ClientAttachReport, *   CollectStatusOptions, *   DaemonState, *   DaemonStatus, *   HypAwareStatusReport, *   ServiceState, *   SinkSnapshot, *   SourceSnapshot, *   StatusDiagnostic, *   StatusDiagnosticKind } from './types.d.ts'
+ * @import { ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  */
 
@@ -88,11 +88,6 @@ export function readStatusFile(stateRoot) {
 }
 
 /* ---------- Phase 8: top-level status collector ---------- */
-
-/**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
- */
 
 /**
  * Collect everything `hyp status` shows. Reads config from disk,
@@ -309,7 +304,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const runtimeSources = opts.runtime?.sources?.list?.() ?? []
   if (runtimeSources.length > 0) {
     for (const contribution of runtimeSources) {
-      const started = opts.runtime.sources.started?.(contribution.name)
+      const started = opts.runtime?.sources.started?.(contribution.name)
       sources.push({
         name: contribution.name,
         plugin: contribution.plugin,
@@ -338,10 +333,9 @@ export async function collectHypAwareStatus(opts = {}) {
   if (config?.sinks) {
     for (const [name, raw] of Object.entries(config.sinks)) {
       const handle = handleByInstance.get(name)
-      const entry = /** @type {Record<string, unknown>} */ (raw)
-      const writer = typeof entry.writer === 'string' ? entry.writer : undefined
-      const destination = typeof entry.destination === 'string' ? entry.destination : undefined
-      const requestPlugin = typeof entry.plugin === 'string' ? entry.plugin : undefined
+      const writer = 'writer' in raw && typeof raw.writer === 'string' ? raw.writer : undefined
+      const destination = 'destination' in raw && typeof raw.destination === 'string' ? raw.destination : undefined
+      const requestPlugin = 'plugin' in raw && typeof raw.plugin === 'string' ? raw.plugin : undefined
       sinks.push({
         instance: name,
         plugin: handle?.plugin ?? requestPlugin ?? destination ?? writer ?? '',

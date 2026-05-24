@@ -41,6 +41,12 @@ export interface KernelRuntime {
 
 export interface CreateKernelRuntimeArgs {
   capabilityRegistry?: CapabilityRegistryHandle
+  commandRegistry?: CommandRegistry
+  queryRegistry?: QueryRegistry
+  sourceRegistry?: ExtendedSourceRegistry
+  sinkRegistry?: ExtendedSinkRegistry
+  storage?: ExtendedQueryStorageService
+  cacheRoot?: string
 }
 
 export interface CreateActivationContextArgs {

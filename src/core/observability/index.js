@@ -49,13 +49,15 @@ function buildHandle({ env, resource, tracer, logger, meter }) {
       if (env.devTelemetry) await safe(() => withTimeout(reader.forceFlush(), timeoutMs))
       await safe(() => withTimeout(reader.shutdown(), timeoutMs))
     }
-    if (logger.provider) {
-      if (env.devTelemetry) await safe(() => withTimeout(logger.provider.forceFlush(), timeoutMs))
-      await safe(() => withTimeout(logger.provider.shutdown(), timeoutMs))
+    const loggerProvider = logger.provider
+    if (loggerProvider) {
+      if (env.devTelemetry) await safe(() => withTimeout(loggerProvider.forceFlush(), timeoutMs))
+      await safe(() => withTimeout(loggerProvider.shutdown(), timeoutMs))
     }
-    if (tracer.provider) {
-      if (env.devTelemetry) await safe(() => withTimeout(tracer.provider.forceFlush(), timeoutMs))
-      await safe(() => withTimeout(tracer.provider.shutdown(), timeoutMs))
+    const tracerProvider = tracer.provider
+    if (tracerProvider) {
+      if (env.devTelemetry) await safe(() => withTimeout(tracerProvider.forceFlush(), timeoutMs))
+      await safe(() => withTimeout(tracerProvider.shutdown(), timeoutMs))
     }
     resetKernelInstruments()
     installed = null

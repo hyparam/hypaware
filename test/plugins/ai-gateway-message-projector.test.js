@@ -6,6 +6,10 @@ import test from 'node:test'
 import { AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
+/**
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 const EXPECTED_COLUMNS = [
   ['gateway_id', 'STRING', false],
   ['schema_version', 'INT32', false],
@@ -74,7 +78,7 @@ test('projectExchange returns zero rows when no projector is registered', async 
 test('projectExchange returns zero rows when no projector matches', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
-    projectors: [registered('never', { match: () => false })],
+    projectors: [registered('never', { match: () => false, project: () => undefined })],
   })
   const rows = await projector.projectExchange(exchange())
   assert.equal(rows.length, 0)
@@ -333,7 +337,11 @@ function projection(provider) {
 
 /**
  * @param {string} name
- * @param {{ priority?: number, match?: (input: unknown) => boolean, project: (input: unknown, ctx: unknown) => unknown }} body
+ * @param {{
+ *   priority?: number,
+ *   match?: (input: AiGatewayExchangeInput) => boolean,
+ *   project: (input: AiGatewayExchangeInput, ctx: AiGatewayExchangeProjectorContext) => AiGatewayProjectedExchange | Promise<AiGatewayProjectedExchange | undefined> | undefined,
+ * }} body
  */
 function registered(name, body) {
   return {
@@ -371,7 +379,10 @@ function exchange(overrides = {}) {
   }
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }

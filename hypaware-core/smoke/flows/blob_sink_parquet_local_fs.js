@@ -17,6 +17,10 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
+/**
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PLUGINS_WORKSPACE = path.resolve(SMOKE_DIR, '../../plugins-workspace')
 const DATASET = 'dummy_rows'
@@ -221,7 +225,7 @@ export async function run({ harness, expect }) {
     parquetBytes.byteOffset,
     parquetBytes.byteOffset + parquetBytes.byteLength
   )
-  const decoded = await parquetReadObjects({ file: asyncBufferFromArrayBuffer(arrayBuffer) })
+  const decoded = await parquetReadObjects({ file: arrayBuffer })
   expect.that(
     'parquet: decoded row count matches fixture',
     decoded,
@@ -324,21 +328,6 @@ export async function run({ harness, expect }) {
     exportSpan?.attributes?.status,
     (v) => v === 'ok'
   )
-}
-
-/**
- * Wrap an ArrayBuffer in the `AsyncBuffer` shape `hyparquet` expects.
- *
- * @param {ArrayBufferLike} buffer
- * @returns {{ byteLength: number, slice(start: number, end?: number): ArrayBuffer }}
- */
-function asyncBufferFromArrayBuffer(buffer) {
-  return {
-    byteLength: buffer.byteLength,
-    slice(start, end) {
-      return buffer.slice(start, end ?? buffer.byteLength)
-    },
-  }
 }
 
 /**

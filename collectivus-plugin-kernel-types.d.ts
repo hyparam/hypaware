@@ -14,6 +14,10 @@
  * track the HypAware design.
  */
 
+import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
+
+export type { AsyncDataSource, ScanOptions, ScanResults }
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
 
@@ -65,6 +69,24 @@ export type PluginPermission =
   | string
 
 export type PluginRuntime = 'node'
+
+// =============================================================================
+// Errors
+// =============================================================================
+
+/**
+ * Tagged error shape used across HypAware. Code that throws attaches
+ * `hypErrorKind` to a plain `Error`; consumers (tests, log enrichers,
+ * conflict detectors) read it back. Optional `code`, `status`,
+ * `statusCode` mirror Node/HTTP idioms when the error originated from
+ * a system or remote call.
+ */
+export interface HypError extends Error {
+  hypErrorKind: string
+  code?: string
+  status?: number
+  statusCode?: number
+}
 
 // =============================================================================
 // Manifest and install metadata
@@ -631,6 +653,10 @@ export interface SinkEncodedBlob {
  */
 export interface BlobStore {
   kind: string
+  /** Advisory S3-only metadata; consumers may read it for telemetry. */
+  bucket?: string
+  /** Advisory prefix surfaced by stores that scope writes under one. */
+  prefix?: string
   putObject(input: PutObjectInput): Promise<PutObjectResult>
   getObject(input: GetObjectInput): Promise<GetObjectResult | null>
   listObjects(input: ListObjectsInput): AsyncIterable<ListObjectResult>
@@ -784,7 +810,7 @@ export interface ExportResult {
  */
 export interface SinkQueryReader {
   discoverPartitions(scope: QueryScope): Promise<QueryPartition[]> | QueryPartition[]
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<QueryDataSource> | QueryDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
 }
 
 // =============================================================================
@@ -806,7 +832,7 @@ export interface DatasetRegistration {
   fallbackTimestampColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<QueryDataSource> | QueryDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
 }
 
 export interface DatasetSchema {
@@ -865,25 +891,6 @@ export interface QueryScope {
   to?: string
   service?: string
   limit: number
-}
-
-export interface QueryDataSource {
-  columns: string[]
-  numRows?: number
-  scan(options: QueryScanOptions): QueryScanResult
-}
-
-export interface QueryScanOptions {
-  limit?: number
-  offset?: number
-  where?: unknown
-  columns?: string[]
-}
-
-export interface QueryScanResult {
-  appliedWhere: boolean
-  appliedLimitOffset: boolean
-  rows(): AsyncIterable<Record<string, unknown>>
 }
 
 /**
@@ -1180,6 +1187,8 @@ export interface AiGatewayProjectedMessage {
   compact_metadata?: JsonValue
   raw_frame?: JsonObject
   attributes?: JsonObject
+  /** Provider-supplied finish/stop reason for the message; consumed by the gateway to derive `finish_reason`. */
+  stop_reason?: string
 }
 
 // =============================================================================

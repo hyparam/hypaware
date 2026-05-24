@@ -40,6 +40,7 @@ export type FetchErrorKind =
   | 'entrypoint_invalid'
   | 'artifact_symlink_unsupported'
   | 'artifact_copy_failed'
+  | 'lock_write_error'
   | 'remote_install_confirmation_required'
   | 'remote_install_rejected'
 

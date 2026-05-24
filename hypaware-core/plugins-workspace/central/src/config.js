@@ -62,7 +62,7 @@ export function validateCentralConfig(value) {
     return invalid('central.config_etag_path must be a string when set')
   }
 
-  return { ok: true, config: /** @type {CentralSinkConfig} */ (cfg) }
+  return { ok: true, config: /** @type {CentralSinkConfig} */ (/** @type {unknown} */ (cfg)) }
 }
 
 /** @param {string} message */
@@ -70,7 +70,10 @@ function invalid(message) {
   return /** @type {const} */ ({ ok: false, message })
 }
 
-/** @param {unknown} v */
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
 }

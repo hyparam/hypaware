@@ -25,6 +25,11 @@ import {
   tableUrlForBlobPrefix,
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
+/**
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ */
+
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PLUGINS_WORKSPACE = path.resolve(SMOKE_DIR, '../../plugins-workspace')
 const DATASET = 'iceberg_s3_smoke_rows'
@@ -181,6 +186,7 @@ export async function run({ harness, expect }) {
             .join('; ')}`
         )
       }
+      /** @type {PluginActivationEntry[]} */
       const entries = loaded.map((l) => {
         // Pin the @hypaware/s3 plugin config so its BlobStore boots over
         // the fake client factory pointed at our in-memory bucket.
@@ -188,12 +194,12 @@ export async function run({ harness, expect }) {
           return {
             manifest: l.manifest,
             rootDir: l.rootDir,
-            config: {
+            config: /** @type {any} */ ({
               bucket: BUCKET,
               prefix: PREFIX,
               region: 'us-east-1',
               __blobStoreClientFactory: async () => fakeClient,
-            },
+            }),
           }
         }
         return { manifest: l.manifest, rootDir: l.rootDir }

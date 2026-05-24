@@ -12,7 +12,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -81,8 +81,8 @@ test('pathToKey reverses the table URL and accepts subpaths', () => {
 })
 
 test('pathToKey rejects empty input', () => {
-  assert.throws(() => pathToKey(''), (err) => err.hypErrorKind === 'iceberg_blob_io_invalid_url')
-  assert.throws(() => pathToKey('blob:///'), (err) => err.hypErrorKind === 'iceberg_blob_io_invalid_url')
+  assert.throws(() => pathToKey(''), (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_io_invalid_url')
+  assert.throws(() => pathToKey('blob:///'), (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_io_invalid_url')
 })
 
 test('createBlobStoreIO writer flushes via putObject and applies ifNoneMatch', async () => {
@@ -100,8 +100,8 @@ test('createBlobStoreIO writer flushes via putObject and applies ifNoneMatch', a
   const collision = resolver.writer('blob://iceberg/datasets/foo/metadata/v1.metadata.json', { ifNoneMatch: '*' })
   collision.appendBytes(new Uint8Array([5]))
   await assert.rejects(
-    () => collision.finish(),
-    (err) => err.hypErrorKind === 'iceberg_commit_conflict' && err.status === 412
+    async () => collision.finish(),
+    (/** @type {any} */ err) => err.hypErrorKind === 'iceberg_commit_conflict' && err.status === 412
   )
 })
 
@@ -111,7 +111,7 @@ test('createBlobStoreIO reader returns AsyncBuffer with byte-faithful slice', as
   const { resolver } = await createBlobStoreIO(fixture.blobStore)
   const buf = await resolver.reader('blob://iceberg/datasets/foo/metadata/v1.metadata.json')
   assert.equal(buf.byteLength, 5)
-  const slice = buf.slice(1, 4)
+  const slice = await buf.slice(1, 4)
   assert.deepEqual(Array.from(new Uint8Array(slice)), [20, 30, 40])
 })
 
@@ -119,8 +119,8 @@ test('createBlobStoreIO reader surfaces ENOENT for missing objects', async () =>
   const fixture = makeBlobStore()
   const { resolver } = await createBlobStoreIO(fixture.blobStore)
   await assert.rejects(
-    () => resolver.reader('blob://iceberg/datasets/foo/metadata/v1.metadata.json'),
-    (err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code === 'ENOENT'
+    async () => resolver.reader('blob://iceberg/datasets/foo/metadata/v1.metadata.json'),
+    (/** @type {any} */ err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code === 'ENOENT'
   )
 })
 
@@ -151,6 +151,6 @@ test('collectStream concatenates Node-stream chunks deterministically', async ()
 test('createBlobStoreIO refuses BlobStores without putObject', async () => {
   await assert.rejects(
     () => createBlobStoreIO(/** @type {any} */ ({ kind: 'broken' })),
-    (err) => err.hypErrorKind === 'iceberg_blob_store_missing'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_store_missing'
   )
 })

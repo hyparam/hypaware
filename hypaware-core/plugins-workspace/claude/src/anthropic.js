@@ -3,6 +3,10 @@
 import { createHash } from 'node:crypto'
 
 /**
+ * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Anthropic Messages HTTP + SSE parsing. Ported from the gateway
  * core's pre-2.0 `message_projector.js` — the same logic, scoped to
  * the Anthropic shape (no OpenAI/Codex branches). The projector in
@@ -24,6 +28,7 @@ import { createHash } from 'node:crypto'
  * @returns {Record<string, unknown>[]}
  */
 export function anthropicMessages(reqBody, responseBody, streamEvents) {
+  /** @type {Record<string, unknown>[]} */
   const messages = Array.isArray(reqBody.messages)
     ? reqBody.messages.filter(isPlainObject).map((message) => ({ ...message }))
     : []
@@ -261,11 +266,12 @@ export function resolveAnthropicUserId(reqBody) {
  * @param {Record<string, unknown>} reqBody
  * @param {unknown} responseBody
  * @param {number | null | undefined} durationMs
+ * @returns {JsonObject | undefined}
  */
 export function anthropicExchangeAttributes(reqBody, responseBody, durationMs) {
-  /** @type {Record<string, unknown>} */
+  /** @type {JsonObject} */
   const attrs = {}
-  /** @type {Record<string, unknown>} */
+  /** @type {JsonObject} */
   const request = {}
   copyIfPresent(reqBody, request, 'max_tokens')
   copyIfPresent(reqBody, request, 'thinking')
@@ -273,10 +279,11 @@ export function anthropicExchangeAttributes(reqBody, responseBody, durationMs) {
   copyIfPresent(reqBody, request, 'context_management')
   copyIfPresent(reqBody, request, 'stream')
   if (Object.keys(request).length > 0) attrs.request = request
-  if (reqBody.metadata != null) attrs.provider_raw = { metadata: reqBody.metadata }
+  if (reqBody.metadata != null) attrs.provider_raw = { metadata: /** @type {JsonValue} */ (reqBody.metadata) }
   if (isPlainObject(responseBody)) {
+    /** @type {JsonObject} */
     const providerRaw = isPlainObject(attrs.provider_raw)
-      ? { ...attrs.provider_raw }
+      ? { .../** @type {JsonObject} */ (attrs.provider_raw) }
       : {}
     if (typeof responseBody.id === 'string') providerRaw.response_id = responseBody.id
     if (Object.keys(providerRaw).length > 0) attrs.provider_raw = providerRaw
@@ -292,11 +299,12 @@ export function anthropicExchangeAttributes(reqBody, responseBody, durationMs) {
  * `cache_creation_input_tokens` → `cache_write_tokens`; we keep that.
  *
  * @param {unknown} message
+ * @returns {JsonObject | undefined}
  */
 export function anthropicMessageAttributes(message) {
   if (!isPlainObject(message) || !isPlainObject(message.usage)) return undefined
-  const usage = message.usage
-  /** @type {Record<string, unknown>} */
+  const usage = /** @type {JsonObject} */ (message.usage)
+  /** @type {JsonObject} */
   const out = {}
   if (usage.input_tokens != null) out.input_tokens = usage.input_tokens
   if (usage.output_tokens != null) out.output_tokens = usage.output_tokens
@@ -388,7 +396,10 @@ function readMetadataSessionId(reqBody) {
   return stringValue(userId.session_id)
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isAnthropicAssistant(value) {
   return isPlainObject(value) && value.role === 'assistant'
 }
@@ -426,11 +437,12 @@ function parseHeaders(raw) {
 }
 
 /**
- * @param {Record<string, string | string[] | undefined>} headers
+ * @param {Record<string, string | string[] | undefined> | undefined} headers
  * @param {string} name
  * @returns {string | undefined}
  */
 function headerValue(headers, name) {
+  if (!headers) return undefined
   const wanted = name.toLowerCase()
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() !== wanted) continue
@@ -449,7 +461,10 @@ function readKey(obj, key) {
   return obj[key]
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -475,11 +490,11 @@ function copyIfString(src, dst, key) {
   if (value != null) dst[key] = value
 }
 
-/** @param {unknown} src @param {Record<string, unknown>} dst @param {string} key */
+/** @param {unknown} src @param {JsonObject} dst @param {string} key */
 function copyIfPresent(src, dst, key) {
   if (!isPlainObject(src)) return
   const value = src[key]
-  if (value !== undefined && value !== null) dst[key] = value
+  if (value !== undefined && value !== null) dst[key] = /** @type {JsonValue} */ (value)
 }
 
 /** @param {unknown} value */

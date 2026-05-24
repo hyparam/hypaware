@@ -36,7 +36,7 @@ const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])
  * @param {object} args
  * @param {PluginSourceSpec} args.source
  * @param {string} args.stateDir
- * @param {BeforeCommitCallback} [args.beforeCommit] — forwarded to the
+ * @param {BeforeCommitCallback} [args.beforeCommit] - forwarded to the
  *   git fetcher so the CLI can prompt for confirmation immediately
  *   before the artifact rename swap. Ignored for local-dir sources,
  *   which keep their non-interactive behavior by design.

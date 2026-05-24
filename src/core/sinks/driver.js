@@ -8,7 +8,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 /**
  * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { Span } from '../observability/runtime.js'
- * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/sinks.js'
+ * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types.d.ts'
  * @import { DriverOptions, TickOptions, TickReport } from './types.d.ts'
  */
 

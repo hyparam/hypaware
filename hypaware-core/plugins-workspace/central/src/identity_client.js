@@ -333,7 +333,10 @@ async function readErrorDetail(response) {
   return `${response.status} ${response.statusText || ''}`.trim()
 }
 
-/** @param {unknown} v */
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
 }

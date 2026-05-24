@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { createBlobStoreIO } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -76,8 +76,8 @@ for (const { input, expected } of WRITE_MAPPING) {
     const writer = resolver.writer(`blob://${KEY}`, { ifNoneMatch: '*' })
     writer.appendBytes(new Uint8Array([1, 2, 3]))
     await assert.rejects(
-      () => writer.finish(),
-      (err) => err.hypErrorKind === expected,
+      async () => writer.finish(),
+      (err) => /** @type {HypError} */ (err).hypErrorKind === expected,
     )
   })
 }
@@ -101,8 +101,8 @@ for (const { input, expected } of READ_MAPPING) {
     const blobStore = failingBlobStore({ errorKind: input, operation: 'get' })
     const { resolver } = await createBlobStoreIO(blobStore)
     await assert.rejects(
-      () => resolver.reader(`blob://${KEY}`),
-      (err) => err.hypErrorKind === expected,
+      async () => resolver.reader(`blob://${KEY}`),
+      (err) => /** @type {HypError} */ (err).hypErrorKind === expected,
     )
   })
 }
@@ -119,7 +119,7 @@ for (const { input, expected } of LIST_MAPPING) {
     const { lister } = await createBlobStoreIO(blobStore)
     await assert.rejects(
       () => lister(`blob://iceberg/datasets/foo/metadata`),
-      (err) => err.hypErrorKind === expected,
+      (err) => /** @type {HypError} */ (err).hypErrorKind === expected,
     )
   })
 }

@@ -2,7 +2,7 @@
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { IcebergField } from './types.d.ts'
+ * @import { Field, IcebergType, Schema } from 'icebird/src/types.js'
  */
 
 const ICEBERG_SCHEMA_ID = 0
@@ -24,10 +24,10 @@ const ICEBERG_SCHEMA_ID = 0
  *   JSON      -> string        (canonical-JSON payload)
  *
  * @param {readonly ColumnSpec[]} columns
- * @returns {{ type: 'struct', 'schema-id': number, fields: IcebergField[] }}
+ * @returns {Schema}
  */
 export function icebergSchemaForColumns(columns) {
-  /** @type {IcebergField[]} */
+  /** @type {Field[]} */
   const fields = []
   let id = 1
   for (const column of columns) {
@@ -60,11 +60,11 @@ export function icebergSchemaForColumns(columns) {
  * - Column removals are rejected (V1 is append-only).
  *
  * @param {readonly ColumnSpec[]} columns
- * @param {{ fields: IcebergField[], 'schema-id'?: number }} existing
- * @returns {{ type: 'struct', 'schema-id': number, fields: IcebergField[] }}
+ * @param {Schema} existing
+ * @returns {Schema}
  */
 export function mergeFieldIdsFromTable(columns, existing) {
-  /** @type {Map<string, IcebergField>} */
+  /** @type {Map<string, Field>} */
   const existingByName = new Map()
   /** @type {Set<string>} */
   const seen = new Set()
@@ -73,7 +73,7 @@ export function mergeFieldIdsFromTable(columns, existing) {
     existingByName.set(f.name, f)
     if (typeof f.id === 'number' && f.id > maxId) maxId = f.id
   }
-  /** @type {IcebergField[]} */
+  /** @type {Field[]} */
   const fields = []
   for (const column of columns) {
     const prior = existingByName.get(column.name)
@@ -150,7 +150,7 @@ export function rowsToIcebergRecords(columns, rows) {
 /**
  * @param {ColumnSpec['type']} type
  * @param {string} columnName
- * @returns {string}
+ * @returns {IcebergType}
  */
 function icebergTypeForBasicType(type, columnName) {
   switch (type) {

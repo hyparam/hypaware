@@ -15,6 +15,10 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 
 /**
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/**
  * Phase 5 smoke. Stands up:
  *
  *   - `@hypaware/test-encoder` — provides `hypaware.encoder@1` with a

@@ -5,8 +5,7 @@ import { getActiveTransport } from './transport.js'
 
 /**
  * @import { PluginActivationContext, PluginLogger, QueryStorageService, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { GascityCitySubscription, GascityFrame } from './transport.js'
- * @import { CityConfig } from './types.d.ts'
+ * @import { CityConfig, GascityCitySubscription, GascityFrame } from './types.d.ts'
  */
 
 /**

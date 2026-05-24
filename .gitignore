@@ -6,6 +6,7 @@
 
 # Node
 node_modules/
+package-lock.json
 
 # Donor/reference codebase kept out of the active HypAware repo
 collectivus/

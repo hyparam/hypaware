@@ -23,6 +23,11 @@ import {
   tableUrlForBlobPrefix,
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
+/**
+ * @import { ActivePlugin, BlobStore, JsonObject, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ */
+
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PLUGINS_WORKSPACE = path.resolve(SMOKE_DIR, '../../plugins-workspace')
 const DATASET = 'iceberg_s3_roundtrip_rows'
@@ -101,9 +106,10 @@ export async function run({ harness, expect }) {
             .join('; ')}`
         )
       }
+      /** @type {PluginActivationEntry[]} */
       const entries = loaded.map((l) => {
         if (l.manifest.name === '@hypaware/s3') {
-          /** @type {Record<string, unknown>} */
+          /** @type {JsonObject} */
           const config = {
             bucket,
             prefix: runPrefix,

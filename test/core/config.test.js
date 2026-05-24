@@ -14,6 +14,10 @@ import {
   validateConfig,
 } from '../../src/core/config/validate.js'
 
+/**
+ * @import { BlobSinkConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 test('defaultConfigPath resolves the v2 config basename under HYP_HOME', () => {
   assert.equal(defaultConfigPath('/tmp/hyp-home'), '/tmp/hyp-home/hypaware-config.json')
 })
@@ -59,7 +63,8 @@ test('parseConfigShape accepts the supported v2 config shape', () => {
 
   assert.equal(result.ok, true)
   assert.equal(result.config.plugins?.length, 4)
-  assert.equal(result.config.sinks?.local?.writer, '@hypaware/format-parquet')
+  const localSink = /** @type {BlobSinkConfigInstance | undefined} */ (result.config.sinks?.local)
+  assert.equal(localSink?.writer, '@hypaware/format-parquet')
   assert.equal(result.config.query?.cache?.retention?.datasets?.ai_gateway_messages, 3)
 })
 

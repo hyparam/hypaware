@@ -29,7 +29,7 @@ import {
 } from './session_context.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -193,7 +193,7 @@ export function createClaudeExchangeProjector(opts) {
           // The gateway core reads `stop_reason` off the projected
           // message; the projector contract keeps it on the message
           // (not on the exchange) so per-message status mapping works.
-          /** @type {any} */ (projected).stop_reason = message.stop_reason
+          projected.stop_reason = message.stop_reason
         }
         projectedMessages.push(projected)
       }
@@ -343,17 +343,18 @@ async function loadTranscriptSafe(opts, logger) {
 }
 
 /**
- * @param {Record<string, unknown> | undefined} a
- * @param {Record<string, unknown> | undefined} b
+ * @param {JsonObject | undefined} a
+ * @param {JsonObject | undefined} b
+ * @returns {JsonObject | undefined}
  */
 function mergeAttrs(a, b) {
   if (!a) return b
   if (!b) return a
-  /** @type {Record<string, unknown>} */
+  /** @type {JsonObject} */
   const out = { ...a }
   for (const [key, value] of Object.entries(b)) {
     if (isPlainObject(value) && isPlainObject(out[key])) {
-      out[key] = { ...(/** @type {Record<string, unknown>} */ (out[key])), ...value }
+      out[key] = { ...(/** @type {JsonObject} */ (out[key])), ...(/** @type {JsonObject} */ (value)) }
     } else {
       out[key] = value
     }
@@ -383,7 +384,10 @@ function parseHeaders(raw) {
   }
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }

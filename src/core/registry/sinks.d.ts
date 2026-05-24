@@ -12,3 +12,5 @@ export type {
   ExportResult,
   SinkQueryReader,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
+
+export function createSinkRegistry(): import('./types.d.ts').ExtendedSinkRegistry
