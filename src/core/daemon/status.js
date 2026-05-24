@@ -304,7 +304,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const runtimeSources = opts.runtime?.sources?.list?.() ?? []
   if (runtimeSources.length > 0) {
     for (const contribution of runtimeSources) {
-      const started = opts.runtime.sources.started?.(contribution.name)
+      const started = opts.runtime?.sources.started?.(contribution.name)
       sources.push({
         name: contribution.name,
         plugin: contribution.plugin,

@@ -681,7 +681,7 @@ async function runQueryStatus(_argv, ctx) {
  */
 async function runQuerySql(argv, ctx) {
   const parsed = parseQuerySqlArgv(argv)
-  if (parsed.error) {
+  if (!parsed.ok) {
     ctx.stderr.write(parsed.error + '\n')
     return 2
   }
@@ -750,10 +750,10 @@ async function runQueryRefresh(argv, ctx) {
 
 /**
  * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
- * `--refresh` / `--format` flags in any order. Returns `{ sql, refresh,
- * format }` on success or `{ error }` on failure.
+ * `--refresh` / `--format` flags in any order.
  *
  * @param {string[]} argv
+ * @returns {{ ok: true, sql: string, refresh: RefreshMode, format: QueryFormat } | { ok: false, error: string }}
  */
 function parseQuerySqlArgv(argv) {
   /** @type {string[]} */
@@ -768,14 +768,14 @@ function parseQuerySqlArgv(argv) {
     if (token === '--refresh') {
       const value = argv[i + 1]
       if (value !== 'never' && value !== 'auto' && value !== 'always') {
-        return { error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
       }
       refresh = value
       i += 1
     } else if (token === '--format') {
       const value = argv[i + 1]
       if (value !== 'table' && value !== 'json' && value !== 'jsonl' && value !== 'markdown') {
-        return { error: `hyp query sql: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
+        return { ok: false, error: `hyp query sql: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
       }
       format = value
       i += 1
@@ -785,10 +785,10 @@ function parseQuerySqlArgv(argv) {
   }
 
   if (positional.length === 0) {
-    return { error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]' }
+    return { ok: false, error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]' }
   }
   const sql = positional.join(' ')
-  return { sql, refresh, format }
+  return { ok: true, sql, refresh, format }
 }
 
 /* ---------- collect ---------- */

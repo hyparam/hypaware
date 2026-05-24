@@ -581,26 +581,24 @@ function buildOtlpLogPayload(runId) {
 }
 
 async function startEchoUpstream() {
-  /** @type {http.Server} */
-  let server
-  await new Promise((resolve) => {
-    server = http.createServer((req, res) => {
-      const chunks = /** @type {Buffer[]} */ ([])
-      req.on('data', (c) => chunks.push(c))
-      req.on('end', () => {
-        const body = Buffer.concat(chunks)
-        res.statusCode = 200
-        res.setHeader('content-type', 'application/json')
-        res.end(
-          JSON.stringify({
-            url: req.url,
-            method: req.method,
-            headers: req.headers,
-            bodyBytes: body.length,
-          })
-        )
-      })
+  const server = http.createServer((req, res) => {
+    const chunks = /** @type {Buffer[]} */ ([])
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const body = Buffer.concat(chunks)
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/json')
+      res.end(
+        JSON.stringify({
+          url: req.url,
+          method: req.method,
+          headers: req.headers,
+          bodyBytes: body.length,
+        })
+      )
     })
+  })
+  await new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve(undefined))
   })
   const address = /** @type {{ address: string, port: number }} */ (server.address())

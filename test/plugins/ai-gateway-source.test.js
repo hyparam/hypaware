@@ -21,7 +21,9 @@ test('source starts with only adapter-registered upstream presets', async () => 
   }))
 
   try {
+    assert.ok(source.status, 'source exposes status()')
     const status = await source.status()
+    assert.ok(status.details, 'status carries details')
     const body = await fetchText(`http://${status.details.host}:${status.details.port}/anything`)
     assert.equal(body.status, 200)
     assert.equal(body.text, 'preset-ok')
@@ -51,7 +53,9 @@ test('operator configured upstream wins over same-name adapter preset', async ()
   }))
 
   try {
+    assert.ok(source.status, 'source exposes status()')
     const status = await source.status()
+    assert.ok(status.details, 'status carries details')
     const body = await fetchText(`http://${status.details.host}:${status.details.port}/v1/responses`)
     assert.equal(body.status, 200)
     assert.equal(body.text, 'config-ok')

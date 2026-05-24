@@ -557,7 +557,7 @@ export async function runPickerWalkthrough(opts) {
       [Attr.COMPONENT]: 'walkthrough',
       [Attr.OPERATION]: 'walkthrough.write_config',
       config_path: configPath,
-      plugin_count: config.plugins.length,
+      plugin_count: config.plugins?.length ?? 0,
       status: 'ok',
     },
     async () => {

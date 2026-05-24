@@ -426,11 +426,12 @@ function parseHeaders(raw) {
 }
 
 /**
- * @param {Record<string, string | string[] | undefined>} headers
+ * @param {Record<string, string | string[] | undefined> | undefined} headers
  * @param {string} name
  * @returns {string | undefined}
  */
 function headerValue(headers, name) {
+  if (!headers) return undefined
   const wanted = name.toLowerCase()
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() !== wanted) continue
