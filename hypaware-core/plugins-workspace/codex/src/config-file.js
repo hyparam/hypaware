@@ -9,6 +9,10 @@ import process from 'node:process'
 import { CodexSettingsError } from './errors.js'
 
 /**
+ * @import { FileHandle } from 'node:fs/promises'
+ */
+
+/**
  * Default Codex config location: `$CODEX_HOME/config.toml` when set,
  * otherwise `~/.codex/config.toml`.
  *
@@ -81,7 +85,7 @@ export async function writeAtomic(filePath, body, expectedMtimeMs) {
 
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
 
-  /** @type {import('node:fs/promises').FileHandle | undefined} */
+  /** @type {FileHandle | undefined} */
   let handle
   try {
     handle = await fs.open(tmpPath, 'w', 0o600)

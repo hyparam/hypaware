@@ -16,7 +16,9 @@ import { keyIsWithinPrefix, renderObjectKey } from './keys.js'
 
 /**
  * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types'
+ * @import { S3BlobStoreClientFactory } from './blob-store.js'
  * @import { S3ClientFactory, S3ClientHandle } from './client.js'
+ * @import { S3SinkConfig } from './config.js'
  * @import { S3ErrorKind } from './errors.js'
  */
 
@@ -134,7 +136,7 @@ function resolveClientFactory(sinkCtx) {
 
 /**
  * @param {{
- *   config: import('./config.js').S3SinkConfig,
+ *   config: S3SinkConfig,
  *   client: S3ClientHandle,
  *   encoder: SinkEncoder,
  *   sinkCtx: SinkCreateContext,
@@ -388,7 +390,7 @@ async function resolveBlobStore(ctx) {
     return createUnconfiguredS3BlobStore()
   }
   const validated = validation.config
-  const factory = /** @type {{ __blobStoreClientFactory?: import('./blob-store.js').S3BlobStoreClientFactory }} */ (
+  const factory = /** @type {{ __blobStoreClientFactory?: S3BlobStoreClientFactory }} */ (
     /** @type {unknown} */ (config)
   ).__blobStoreClientFactory ?? defaultS3BlobStoreClientFactory
   const client = await factory({

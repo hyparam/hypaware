@@ -1,13 +1,17 @@
 // @ts-check
 
 /**
+ * @import { ObservabilityEnv } from './env.js'
+ */
+
+/**
  * Build the resource metadata that the tracer, logger, and meter providers
  * share. `service.name` comes from env; `dev_run_id` is mirrored onto
  * the resource so every signal carries it even when a caller forgets
  * to set it as a span attribute. Any `OTEL_RESOURCE_ATTRIBUTES` value
  * (a=b,c=d shape) is merged last so user-supplied keys win.
  *
- * @param {import('./env.js').ObservabilityEnv} env
+ * @param {ObservabilityEnv} env
  * @returns {{ attributes: Record<string, string|number|boolean> }}
  */
 export function buildResource(env) {

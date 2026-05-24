@@ -9,7 +9,7 @@ import { encodePartition } from 'hypaware/core/sinks'
 import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types'
  */
 
 const PLUGIN_NAME = '@hypaware/local-fs'
@@ -204,7 +204,7 @@ function emptyAsyncIterable() {
  *
  * @param {string} baseDir
  * @param {QueryPartition} partition
- * @param {import('../../../../collectivus-plugin-kernel-types').SinkEncodedBlob} blob
+ * @param {SinkEncodedBlob} blob
  * @returns {Promise<string>}
  */
 async function writeBlob(baseDir, partition, blob) {

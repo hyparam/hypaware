@@ -6,7 +6,8 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types'
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types'
+ * @import { *, *   ConfigLoadErrorKind, *   LoadConfigFailure, *   LoadConfigResult, *   LoadConfigSuccess } from './types.d.ts'
  */
 
 /**
@@ -387,7 +388,7 @@ function parseSinkEntry(entry, pointer, errors) {
     /** @type {BlobSinkConfigInstance} */
     const out = { writer: obj.writer, destination: obj.destination }
     if (isPlainObject(obj.config)) {
-      out.config = /** @type {import('../../../collectivus-plugin-kernel-types').SinkInstanceConfig} */ (obj.config)
+      out.config = /** @type {SinkInstanceConfig} */ (obj.config)
     }
     return out
   }
@@ -403,7 +404,7 @@ function parseSinkEntry(entry, pointer, errors) {
     /** @type {RequestSinkConfigInstance} */
     const out = { plugin: obj.plugin }
     if (isPlainObject(obj.config)) {
-      out.config = /** @type {import('../../../collectivus-plugin-kernel-types').SinkInstanceConfig} */ (obj.config)
+      out.config = /** @type {SinkInstanceConfig} */ (obj.config)
     }
     return out
   }
@@ -428,7 +429,7 @@ function parseQueryConfig(obj, pointer, errors) {
     return undefined
   }
   const cache = /** @type {Record<string, unknown>} */ (obj.cache)
-  /** @type {import('../../../collectivus-plugin-kernel-types').QueryCacheConfig} */
+  /** @type {QueryCacheConfig} */
   const out = {}
   if (cache.dir !== undefined) {
     if (!isNonEmptyString(cache.dir)) {

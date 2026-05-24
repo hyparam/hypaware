@@ -3,7 +3,8 @@
 import path from 'node:path'
 
 /**
- * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/storage.js'
  */
 
 export const DATASET_NAME = 'gascity_messages'
@@ -74,7 +75,7 @@ export function discoverParts(ctx) {
  * per `dataset.refreshPartition` semantics).
  *
  * @param {QueryPartition} _partition
- * @returns {Promise<import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult>}
+ * @returns {Promise<DatasetRefreshResult>}
  */
 export async function refreshPartition(_partition) {
   return { status: 'skipped', rows: 0 }
@@ -92,7 +93,7 @@ export async function refreshPartition(_partition) {
 export async function createDataSource(partitions, ctx) {
   const partition = partitions[0]
   if (!partition || !partition.tablePath) return emptySource()
-  const storage = /** @type {import('../../../../src/core/cache/storage.js').ExtendedQueryStorageService} */ (
+  const storage = /** @type {ExtendedQueryStorageService} */ (
     ctx.storage
   )
   const source = await storage.dataSourceForTable(partition.tablePath)

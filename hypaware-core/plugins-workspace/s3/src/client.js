@@ -2,6 +2,7 @@
 
 /**
  * @import { CredentialSourceKind, S3ClientFactory, S3ClientHandle, S3ClientOptions } from './types.d.ts'
+ * @import { S3ClientConfig } from '@aws-sdk/client-s3'
  */
 
 /**
@@ -58,7 +59,7 @@ export function detectCredentialSourceKind(opts) {
  */
 export async function defaultClientFactory(opts) {
   const credential_source_kind = detectCredentialSourceKind(opts)
-  /** @type {import('@aws-sdk/client-s3').S3ClientConfig} */
+  /** @type {S3ClientConfig} */
   const clientConfig = {}
   if (opts.region) clientConfig.region = opts.region
   if (opts.endpoint_url) clientConfig.endpoint = opts.endpoint_url

@@ -19,12 +19,16 @@ import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types'
+ */
+
+/**
  * Build a real `@hypaware/local-fs` BlobStore over a fresh temp dir.
  * The commit module runs through icebird, which needs real bytes on
  * disk — an in-memory shim doesn't exercise the metadata read/write
  * cycle, so the test pins the contract by writing to disk.
  *
- * @returns {Promise<{ blobStore: import('../../collectivus-plugin-kernel-types').BlobStore, baseDir: string, cleanup: () => Promise<void> }>}
+ * @returns {Promise<{ blobStore: BlobStore, baseDir: string, cleanup: () => Promise<void> }>}
  */
 async function freshLocalFsStore() {
   const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-iceberg-commit-'))
@@ -144,7 +148,7 @@ test('commitBatch retries past a transient metadata precondition collision', asy
     /** @type {{ key: string, ifNoneMatch?: string }[]} */
     const puts = []
     let firstConditionalMetadataAttempt = true
-    const wrappedStore = /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */ ({
+    const wrappedStore = /** @type {BlobStore} */ ({
       kind: 'wrapped',
       async putObject(input) {
         puts.push({ key: input.key, ifNoneMatch: input.ifNoneMatch })
@@ -377,7 +381,7 @@ test('probeTable propagates transient metadata read failures instead of masking 
   // would drive the sink into a fresh `create` path against an
   // existing table. The reader must surface the real error so the
   // sink driver can retry.
-  /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+  /** @type {BlobStore} */
   const blobStore = {
     kind: 'transient-fail',
     async putObject() {
@@ -418,7 +422,7 @@ test('commitBatch normalises blob_precondition_failed into iceberg_commit_confli
   // precondition-failed error for the metadata write. This proves the
   // adapter's conflict translation lands on the commit-level error
   // kind the spec calls out.
-  /** @type {import('../../collectivus-plugin-kernel-types').BlobStore} */
+  /** @type {BlobStore} */
   const blobStore = {
     kind: 'broken',
     async putObject(input) {

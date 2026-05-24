@@ -15,6 +15,10 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
+ * @import { BlobStore } from '../../../collectivus-plugin-kernel-types'
+ */
+
+/**
  * BlobStore API smoke. Activates `@hypaware/local-fs`, reaches into the
  * kernel's capability registry for the resolved `hypaware.blob-store`
  * value, and exercises every method on the contract:
@@ -86,7 +90,7 @@ export async function run({ harness, expect }) {
   // Resolve the BlobStore through the capability registry. From V1
   // onwards the capability VALUE is the BlobStore object itself, not a
   // metadata-only `{ kind: ... }` marker.
-  const blobStore = /** @type {import('../../../collectivus-plugin-kernel-types').BlobStore} */ (
+  const blobStore = /** @type {BlobStore} */ (
     kernel.capabilities.require('blobstore_api_local_fs.smoke', 'hypaware.blob-store', '^1.0.0')
   )
 

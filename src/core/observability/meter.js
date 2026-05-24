@@ -5,6 +5,10 @@ import { devTelemetryDir } from './env.js'
 import { MeterProvider, metrics } from './runtime.js'
 import { OtlpMetricExporter } from './otlp_exporters.js'
 
+/**
+ * @import { ObservabilityEnv } from './env.js'
+ */
+
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
@@ -14,7 +18,7 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  * default 60s push.
  *
  * @param {object} args
- * @param {import('./env.js').ObservabilityEnv} args.env
+ * @param {ObservabilityEnv} args.env
  * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
  * @returns {{ provider: MeterProvider|null, exporters: object[], readers: object[] }}
  */

@@ -10,9 +10,11 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types'
+ * @import { DaemonInstallOptions } from '../daemon/install.js'
  * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
  * @import { ExtendedSourceRegistry } from '../registry/sources.js'
+ * @import { *, *   AsyncPickPrompt, *   AsyncRetentionPrompt, *   FinaleSummary, *   PickerExport, *   PickerFinaleActions, *   PickerPicks, *   PickerSource, *   PickerWalkthroughResult, *   RunPickerWalkthroughOptions, *   WalkthroughOption, *   WalkthroughOptions, *   WalkthroughQuestion, *   WalkthroughResult } from './types.d.ts'
  */
 
 /**
@@ -264,7 +266,7 @@ function composeConfig(args) {
     }
   }
 
-  /** @type {Record<string, import('../../../collectivus-plugin-kernel-types').SinkConfigInstance>} */
+  /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
   for (const sinkValue of args.sinks) {
     if (sinkValue === '__none__') continue
@@ -302,7 +304,7 @@ function composeConfig(args) {
     const pluginName = `@hypaware/${clientName}`
     if (!plugins.find((p) => p.name === pluginName)) {
       plugins.push({
-        name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ (pluginName),
+        name: /** @type {PluginName} */ (pluginName),
         config: { proxy: '@hypaware/ai-gateway' },
       })
     }
@@ -701,7 +703,7 @@ export function composePickerConfig(args) {
     })
   }
 
-  /** @type {Record<string, import('../../../collectivus-plugin-kernel-types').SinkConfigInstance>} */
+  /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
   if (args.exportChoice === 'local-parquet') {
     plugins.push({ name: '@hypaware/local-fs' })
@@ -718,13 +720,13 @@ export function composePickerConfig(args) {
 
   if (args.sources.includes('claude')) {
     plugins.push({
-      name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ ('@hypaware/claude'),
+      name: /** @type {PluginName} */ ('@hypaware/claude'),
       config: { proxy: '@hypaware/ai-gateway' },
     })
   }
   if (args.sources.includes('codex')) {
     plugins.push({
-      name: /** @type {import('../../../collectivus-plugin-kernel-types').PluginName} */ ('@hypaware/codex'),
+      name: /** @type {PluginName} */ ('@hypaware/codex'),
       config: { proxy: '@hypaware/ai-gateway' },
     })
   }
@@ -804,7 +806,7 @@ async function runPickerFinale(args) {
             span.setAttribute('global_install_installed', durable.installed)
           }
         }
-        /** @type {import('../daemon/install.js').DaemonInstallOptions} */
+        /** @type {DaemonInstallOptions} */
         const options = {
           binPath,
           configPath,

@@ -12,6 +12,8 @@ import { pluginInstallDir } from './paths.js'
 
 /**
  * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { *, *   BeforeCommitCallback, *   GitFetchErrorKind, *   GitFetchFailure, *   GitFetchResult, *   GitFetchStaged, *   GitFetchSuccess } from './types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 const SKIPPED_DIR_NAMES = new Set([
@@ -455,7 +457,7 @@ export function validateEntrypoint(entrypoint, root) {
  * @returns {Promise<string | null>}
  */
 export async function findSymlink(root, dir) {
-  /** @type {import('node:fs').Dirent[]} */
+  /** @type {Dirent[]} */
   let entries
   try {
     entries = await fs.readdir(dir, { withFileTypes: true })

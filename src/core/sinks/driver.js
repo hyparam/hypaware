@@ -7,6 +7,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 
 /**
  * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../collectivus-plugin-kernel-types'
+ * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/sinks.js'
  * @import { DriverOptions, TickOptions, TickReport } from './types.d.ts'
  */
@@ -204,7 +205,7 @@ export function createSinkDriver(opts) {
    * @param {string} batchId
    * @param {number} partitionsCount
    * @param {string} message
-   * @param {import('../observability/runtime.js').Span} span
+   * @param {Span} span
    */
   function recordFailure(handle, batchId, partitionsCount, message, span) {
     instruments.sinkExportFailuresTotal.add(1, {

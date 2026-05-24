@@ -5,6 +5,10 @@ import path from 'node:path'
 
 import { hrTimeToIso } from './runtime.js'
 
+/**
+ * @import { LogRecord, MetricRecord, Span } from './runtime.js'
+ */
+
 const ExportResultCode = Object.freeze({
   SUCCESS: 0,
   FAILED: 1,
@@ -80,7 +84,7 @@ class JsonlWriter {
 }
 
 /**
- * @param {import('./runtime.js').Span} span
+ * @param {Span} span
  */
 function spanToJsonl(span) {
   const ctx = span.spanContext()
@@ -133,7 +137,7 @@ export class JsonlSpanExporter {
   }
 
   /**
-   * @param {import('./runtime.js').Span[]} spans
+   * @param {Span[]} spans
    * @param {(result: { code: number, error?: Error }) => void} resultCallback
    */
   export(spans, resultCallback) {
@@ -148,7 +152,7 @@ export class JsonlSpanExporter {
     }
   }
 
-  /** @param {import('./runtime.js').Span[]} spans */
+  /** @param {Span[]} spans */
   exportBatch(spans) {
     this.export(spans, () => {})
   }
@@ -163,7 +167,7 @@ export class JsonlSpanExporter {
 }
 
 /**
- * @param {import('./runtime.js').LogRecord} record
+ * @param {LogRecord} record
  */
 function logRecordToJsonl(record) {
   const hr = record.hrTime || record.hrTimeObserved || [0, 0]
@@ -206,7 +210,7 @@ export class JsonlLogRecordExporter {
   }
 
   /**
-   * @param {import('./runtime.js').LogRecord[]} records
+   * @param {LogRecord[]} records
    * @param {(result: { code: number, error?: Error }) => void} resultCallback
    */
   export(records, resultCallback) {
@@ -221,7 +225,7 @@ export class JsonlLogRecordExporter {
     }
   }
 
-  /** @param {import('./runtime.js').LogRecord[]} records */
+  /** @param {LogRecord[]} records */
   exportBatch(records) {
     this.export(records, () => {})
   }
@@ -251,7 +255,7 @@ export class JsonlMetricExporter {
   }
 
   /**
-   * @param {import('./runtime.js').MetricRecord[]} records
+   * @param {MetricRecord[]} records
    * @param {(result: { code: number, error?: Error }) => void} resultCallback
    */
   export(records, resultCallback) {
@@ -266,7 +270,7 @@ export class JsonlMetricExporter {
     }
   }
 
-  /** @param {import('./runtime.js').MetricRecord[]} records */
+  /** @param {MetricRecord[]} records */
   exportBatch(records) {
     this.export(records, () => {})
   }
@@ -281,7 +285,7 @@ export class JsonlMetricExporter {
 }
 
 /**
- * @param {import('./runtime.js').MetricRecord} record
+ * @param {MetricRecord} record
  */
 function metricRecordToJsonl(record) {
   const resourceAttrs = record.resource.attributes

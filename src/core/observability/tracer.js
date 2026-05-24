@@ -5,6 +5,10 @@ import { devTelemetryDir } from './env.js'
 import { OtlpSpanExporter } from './otlp_exporters.js'
 import { trace, TracerProvider } from './runtime.js'
 
+/**
+ * @import { ObservabilityEnv } from './env.js'
+ */
+
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
@@ -20,7 +24,7 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  *   tracer remains a no-op.
  *
  * @param {object} args
- * @param {import('./env.js').ObservabilityEnv} args.env
+ * @param {ObservabilityEnv} args.env
  * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
  * @returns {{ provider: TracerProvider|null, exporters: object[] }}
  */

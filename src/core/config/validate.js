@@ -3,8 +3,9 @@
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { CapabilityName, ConfigRegistry, HypAwareV2Config, PluginManifest, PluginName, ValidationError } from '../../../collectivus-plugin-kernel-types'
+ * @import { BlobSinkConfigInstance, CapabilityName, ConfigRegistry, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance, ValidationError } from '../../../collectivus-plugin-kernel-types'
  * @import { LoadedManifest } from '../manifest.js'
+ * @import { *, *   ConfigValidationError, *   ConfigValidationErrorKind, *   PluginMetadata, *   V1Diagnostic, *   V1DiagnosticKind, *   ValidateContext, *   ValidateResult } from './types.d.ts'
  */
 
 /**
@@ -302,9 +303,9 @@ function checkSinks(config, knownPlugins, errors) {
         })
         continue
       }
-      checkBlobSink(name, /** @type {import('../../../collectivus-plugin-kernel-types').BlobSinkConfigInstance} */ (raw), knownPlugins, errors)
+      checkBlobSink(name, /** @type {BlobSinkConfigInstance} */ (raw), knownPlugins, errors)
     } else if ('plugin' in entry) {
-      checkRequestSink(name, /** @type {import('../../../collectivus-plugin-kernel-types').RequestSinkConfigInstance} */ (raw), knownPlugins, errors)
+      checkRequestSink(name, /** @type {RequestSinkConfigInstance} */ (raw), knownPlugins, errors)
     } else {
       errors.push({
         pointer,
@@ -319,7 +320,7 @@ function checkSinks(config, knownPlugins, errors) {
 
 /**
  * @param {string} name
- * @param {import('../../../collectivus-plugin-kernel-types').BlobSinkConfigInstance} sink
+ * @param {BlobSinkConfigInstance} sink
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
  */
@@ -445,7 +446,7 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
 
 /**
  * @param {string} name
- * @param {import('../../../collectivus-plugin-kernel-types').RequestSinkConfigInstance} sink
+ * @param {RequestSinkConfigInstance} sink
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
  */
@@ -711,10 +712,10 @@ export function diagnoseV1Config(config) {
 
 /**
  * @param {HypAwareV2Config} config
- * @returns {Map<PluginName, import('../../../collectivus-plugin-kernel-types').JsonObject>}
+ * @returns {Map<PluginName, JsonObject>}
  */
 function enabledPluginIndex(config) {
-  /** @type {Map<PluginName, import('../../../collectivus-plugin-kernel-types').JsonObject>} */
+  /** @type {Map<PluginName, JsonObject>} */
   const out = new Map()
   for (const entry of config.plugins ?? []) {
     if (entry.enabled === false) continue
@@ -739,7 +740,7 @@ function pluginPointer(config, name) {
  * `name` (`anthropic` / `openai` / `chatgpt`), or by `base_url` host. The gateway
  * config shape is intentionally loose, so check all three.
  *
- * @param {import('../../../collectivus-plugin-kernel-types').JsonObject} gatewayConfig
+ * @param {JsonObject} gatewayConfig
  * @param {'anthropic'|'openai'|'chatgpt'} provider
  */
 function gatewayHasUpstreamProvider(gatewayConfig, provider) {

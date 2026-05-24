@@ -21,6 +21,10 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
+ * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types'
+ */
+
+/**
  * Phase 5 V1-milestone smoke. Drives `hyp init --yes --client claude
  * --client codex --source otel --export local-parquet --retention-days
  * 30 --dry-run --bin <stable-bin>` end-to-end against a tmp HYP_HOME
@@ -284,7 +288,7 @@ export async function run({ harness, expect }) {
     await kernel.sources.start('ai-gateway', runtime.ctx)
     runtime.started = true
 
-    /** @type {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} */
+    /** @type {AiGatewayCapability} */
     const gatewayApi = kernel.capabilities.require(
       '@smoke/walkthrough-picker',
       'hypaware.ai-gateway',

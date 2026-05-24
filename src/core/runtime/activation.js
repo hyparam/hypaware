@@ -13,7 +13,7 @@ import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
 /**
- * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types'
  * @import { ExtendedQueryStorageService } from '../cache/storage.js'
  * @import { KernelRuntime } from './activation.d.ts'
  */
@@ -216,7 +216,7 @@ function createCapabilitiesFacade(pluginName, registry) {
  * @returns {SkillRegistry}
  */
 function createPhase2SkillRegistry() {
-  /** @type {import('../../../collectivus-plugin-kernel-types').SkillContribution[]} */
+  /** @type {SkillContribution[]} */
   const items = []
   return {
     register(skill) {
@@ -258,7 +258,7 @@ function createPhase2SkillRegistry() {
  * @returns {InitPresetRegistry}
  */
 function createInitPresetRegistry() {
-  /** @type {Map<string, import('../../../collectivus-plugin-kernel-types').InitPresetContribution>} */
+  /** @type {Map<string, InitPresetContribution>} */
   const presets = new Map()
   const log = getLogger('init-presets')
 

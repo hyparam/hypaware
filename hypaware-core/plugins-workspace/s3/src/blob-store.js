@@ -9,6 +9,7 @@ import { classifyAwsError } from './errors.js'
 /**
  * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types'
  * @import { S3BlobStoreClientFactory, S3CommandsHandle } from './types.d.ts'
+ * @import { S3ClientConfig } from '@aws-sdk/client-s3'
  */
 
 export const BLOB_STORE_KIND = 's3'
@@ -236,7 +237,7 @@ function tagS3Error(cause, errorKind, message, key) {
  * @type {S3BlobStoreClientFactory}
  */
 export async function defaultS3BlobStoreClientFactory(opts) {
-  /** @type {import('@aws-sdk/client-s3').S3ClientConfig} */
+  /** @type {S3ClientConfig} */
   const clientConfig = {}
   if (opts.region) clientConfig.region = opts.region
   if (opts.endpoint_url) clientConfig.endpoint = opts.endpoint_url

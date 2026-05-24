@@ -19,6 +19,7 @@ import path from 'node:path'
 
 /**
  * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.d.ts'
+ * @import { FileHandle } from 'node:fs/promises'
  */
 
 const MARKER_KEY = '_hypaware'
@@ -224,7 +225,7 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
   const body = JSON.stringify(value, null, 2) + '\n'
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
 
-  /** @type {import('node:fs/promises').FileHandle | undefined} */
+  /** @type {FileHandle | undefined} */
   let handle
   try {
     handle = await fs.open(tmpPath, 'w', 0o600)

@@ -175,9 +175,9 @@ async function runProbe(entry, now) {
  * The probe is best-effort: a non-zero exit or unparseable output
  * records an error on the returned state but never throws.
  *
- * @param {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} entry
+ * @param {PluginLockEntry} entry
  * @param {string} checkedAt
- * @returns {Promise<import('../../../collectivus-plugin-kernel-types').PluginUpdateState>}
+ * @returns {Promise<PluginUpdateState>}
  */
 async function runGitProbe(entry, checkedAt) {
   const gitUrl = entry.source.gitUrl

@@ -5,6 +5,8 @@ import { Buffer } from 'node:buffer'
 /**
  * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types'
  * @import { BlobIOWriteEvent, BlobIOWriteObserver } from './types.d.ts'
+ * @import { Writer } from 'hyparquet-writer/src/types.js'
+ * @import { Lister, Resolver } from 'icebird/src/types.js'
  */
 
 const TABLE_URL_SCHEME = 'blob://'
@@ -102,8 +104,8 @@ export function pathToKey(url) {
  * @param {BlobStore} blobStore
  * @param {{ onWrite?: BlobIOWriteObserver }} [options]
  * @returns {Promise<{
- *   resolver: import('icebird/src/types.js').Resolver,
- *   lister: import('icebird/src/types.js').Lister
+ *   resolver: Resolver,
+ *   lister: Lister
  * }>}
  */
 export async function createBlobStoreIO(blobStore, options) {
@@ -121,7 +123,7 @@ export async function createBlobStoreIO(blobStore, options) {
   // whether bytes will land on disk or in S3.
   const { ByteWriter } = await import('hyparquet-writer')
 
-  /** @type {import('icebird/src/types.js').Resolver} */
+  /** @type {Resolver} */
   const resolver = {
     async reader(url) {
       const key = pathToKey(url)
@@ -163,7 +165,7 @@ export async function createBlobStoreIO(blobStore, options) {
     },
     writer(url, options) {
       const key = pathToKey(url)
-      /** @type {import('hyparquet-writer/src/types.js').Writer} */
+      /** @type {Writer} */
       const writer = new ByteWriter()
       writer.finish = async function () {
         const bytes = writer.getBytes().slice()
@@ -223,7 +225,7 @@ export async function createBlobStoreIO(blobStore, options) {
     },
   }
 
-  /** @type {import('icebird/src/types.js').Lister} */
+  /** @type {Lister} */
   async function lister(url) {
     const prefix = ensureTrailingSlash(pathToKey(url))
     /** @type {string[]} */

@@ -25,8 +25,10 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
+ * @import { JsonObject } from '../../../collectivus-plugin-kernel-types'
  * @import { KernelRuntime } from '../runtime/activation.js'
  * @import { BootKernelResult } from '../runtime/boot.js'
+ * @import { *, *   DaemonHandle, *   DaemonState, *   DaemonStatus, *   RunDaemonOptions, *   SinkSnapshot, *   SourceSnapshot } from './types.d.ts'
  */
 
 /**
@@ -355,7 +357,7 @@ export async function runDaemon(opts = {}) {
           if (snap.state !== 'started') continue
           const ctx = boot.runtime.activationContexts.get(snap.plugin)
           if (!ctx) continue
-          ctx.config = /** @type {import('../../../collectivus-plugin-kernel-types').JsonObject} */ (
+          ctx.config = /** @type {JsonObject} */ (
             configByName.get(snap.plugin) ?? {}
           )
           try {

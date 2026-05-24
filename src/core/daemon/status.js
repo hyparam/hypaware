@@ -28,18 +28,10 @@ import {
 } from './pid.js'
 
 /**
- * @import {
- *   DaemonState,
- *   SourceSnapshot,
- *   SinkSnapshot,
- *   DaemonStatus,
- *   StatusDiagnosticKind,
- *   StatusDiagnostic,
- *   ClientAttachReport,
- *   ServiceState,
- *   HypAwareStatusReport,
- *   CollectStatusOptions,
- * } from './types.d.ts'
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
+ * @import { ConfigValidationError, V1Diagnostic } from '../config/validate.js'
+ * @import { *, *   ClientAttachReport, *   CollectStatusOptions, *   DaemonState, *   DaemonStatus, *   HypAwareStatusReport, *   ServiceState, *   SinkSnapshot, *   SourceSnapshot, *   StatusDiagnostic, *   StatusDiagnosticKind } from './types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 /**
@@ -483,7 +475,7 @@ async function measureCacheStats(cacheRoot) {
  * @param {{ totalBytes: number, oldestMs: number|null }} acc
  */
 async function walkForStats(dir, acc) {
-  /** @type {import('node:fs').Dirent[]} */
+  /** @type {Dirent[]} */
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })

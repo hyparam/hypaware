@@ -6,6 +6,7 @@ import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
 
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/storage.js'
  */
 
 export const DATASET_NAME = 'ai_gateway_messages'
@@ -76,7 +77,7 @@ export async function refreshPartition() {
 export async function createDataSource(partitions, ctx) {
   const partition = partitions[0]
   if (!partition || !partition.tablePath) return emptySource()
-  const storage = /** @type {import('../../../../src/core/cache/storage.js').ExtendedQueryStorageService} */ (
+  const storage = /** @type {ExtendedQueryStorageService} */ (
     ctx.storage
   )
   const source = await storage.dataSourceForTable(partition.tablePath)

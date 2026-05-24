@@ -5,6 +5,10 @@ import assert from 'node:assert/strict'
 
 import { classifyAwsError, describeS3ErrorKind } from '../../hypaware-core/plugins-workspace/s3/src/errors.js'
 
+/**
+ * @import { S3ErrorKind } from '../../hypaware-core/plugins-workspace/s3/src/types.d.ts'
+ */
+
 test('classifyAwsError maps CredentialsProviderError to s3_credentials_missing', () => {
   const err = Object.assign(new Error('Could not load credentials from any provider'), {
     name: 'CredentialsProviderError',
@@ -78,7 +82,7 @@ test('classifyAwsError survives non-object inputs', () => {
 })
 
 test('describeS3ErrorKind returns a non-empty diagnostic for every error kind', () => {
-  /** @type {import('../../hypaware-core/plugins-workspace/s3/src/errors.js').S3ErrorKind[]} */
+  /** @type {S3ErrorKind[]} */
   const allKinds = [
     's3_config_invalid',
     's3_credentials_missing',
