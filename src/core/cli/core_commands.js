@@ -1286,7 +1286,7 @@ async function runConfig(argv, ctx) {
  */
 async function runConfigValidate(argv, ctx) {
   const parsed = parseConfigValidateArgv(argv, ctx.env)
-  if (parsed.error) {
+  if (parsed.error !== undefined) {
     ctx.stderr.write(parsed.error + '\n')
     return 2
   }
@@ -1325,7 +1325,7 @@ async function runConfigValidate(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {NodeJS.ProcessEnv} env
- * @returns {{ configPath: string } | { error: string }}
+ * @returns {{ configPath: string, error?: undefined } | { error: string, configPath?: undefined }}
  */
 function parseConfigValidateArgv(argv, env) {
   /** @type {string|undefined} */

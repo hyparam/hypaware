@@ -55,8 +55,8 @@ export function makeReceiveHandler(ctx, state, log) {
           rows = FLATTENERS[req.signal](req.data)
         } catch (err) {
           state.lastError = err instanceof Error ? err.message : String(err)
-          const wrapped = err instanceof Error ? err : new Error(String(err))
-          /** @type {Error & { hypErrorKind?: string }} */ (wrapped).hypErrorKind = 'otlp_parse'
+          const wrapped = /** @type {Error & { hypErrorKind?: string }} */ (err instanceof Error ? err : new Error(String(err)))
+          wrapped.hypErrorKind = 'otlp_parse'
           span.setAttribute('error_kind', 'otlp_parse')
           span.setAttribute('row_count', 0)
           log.error('otel.parse_failed', {
@@ -77,8 +77,8 @@ export function makeReceiveHandler(ctx, state, log) {
           state.rowsWritten += rows.length
         } catch (err) {
           state.lastError = err instanceof Error ? err.message : String(err)
-          const wrapped = err instanceof Error ? err : new Error(String(err))
-          /** @type {Error & { hypErrorKind?: string }} */ (wrapped).hypErrorKind = 'otlp_persist'
+          const wrapped = /** @type {Error & { hypErrorKind?: string }} */ (err instanceof Error ? err : new Error(String(err)))
+          wrapped.hypErrorKind = 'otlp_persist'
           span.setAttribute('error_kind', 'otlp_persist')
           log.error('otel.persist_failed', {
             signal: req.signal,

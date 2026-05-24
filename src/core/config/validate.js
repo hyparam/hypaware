@@ -291,10 +291,9 @@ function checkSinks(config, knownPlugins, errors) {
   if (!config.sinks) return
   for (const [name, raw] of Object.entries(config.sinks)) {
     const pointer = `/sinks/${name}`
-    const entry = /** @type {Record<string, unknown>} */ (raw)
     // Defensive: re-derive shape rather than trust schema layer alone.
-    if ('writer' in entry || 'destination' in entry) {
-      if ('plugin' in entry) {
+    if ('writer' in raw || 'destination' in raw) {
+      if ('plugin' in raw) {
         errors.push({
           pointer,
           errorKind: 'request_sink_invalid_keys',
@@ -302,9 +301,9 @@ function checkSinks(config, knownPlugins, errors) {
         })
         continue
       }
-      checkBlobSink(name, /** @type {BlobSinkConfigInstance} */ (raw), knownPlugins, errors)
-    } else if ('plugin' in entry) {
-      checkRequestSink(name, /** @type {RequestSinkConfigInstance} */ (raw), knownPlugins, errors)
+      checkBlobSink(name, raw, knownPlugins, errors)
+    } else if ('plugin' in raw) {
+      checkRequestSink(name, raw, knownPlugins, errors)
     } else {
       errors.push({
         pointer,
@@ -313,7 +312,7 @@ function checkSinks(config, knownPlugins, errors) {
       })
       continue
     }
-    checkSchedule(name, /** @type {{config?: {schedule?: unknown}}} */ (raw)?.config?.schedule, pointer, errors)
+    checkSchedule(name, raw.config?.schedule, pointer, errors)
   }
 }
 
@@ -687,10 +686,9 @@ export function diagnoseV1Config(config) {
 
   if (config.sinks) {
     for (const [name, raw] of Object.entries(config.sinks)) {
-      const entry = /** @type {Record<string, unknown>} */ (raw)
-      if (!('writer' in entry) && !('destination' in entry)) continue
-      const writer = typeof entry.writer === 'string' ? /** @type {PluginName} */ (entry.writer) : null
-      const destination = typeof entry.destination === 'string' ? /** @type {PluginName} */ (entry.destination) : null
+      if (!('writer' in raw) && !('destination' in raw)) continue
+      const writer = 'writer' in raw && typeof raw.writer === 'string' ? raw.writer : null
+      const destination = 'destination' in raw && typeof raw.destination === 'string' ? raw.destination : null
       if (destination !== LOCAL_FS_PLUGIN) continue
       if (writer !== null && enabledByName.has(writer) && ENCODER_PLUGINS.has(writer)) continue
       out.push({

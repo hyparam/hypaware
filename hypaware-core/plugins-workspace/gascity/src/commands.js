@@ -142,7 +142,7 @@ export async function runList(_argv, ctx) {
 
 /**
  * @param {string[]} argv
- * @returns {{ city: string, apiUrl?: string } | { error: string, city?: undefined, apiUrl?: undefined }}
+ * @returns {{ city: string, apiUrl?: string, error?: undefined } | { error: string, city?: undefined, apiUrl?: undefined }}
  */
 function parseAttachArgv(argv) {
   /** @type {string | undefined} */

@@ -193,7 +193,7 @@ export function createClaudeExchangeProjector(opts) {
           // The gateway core reads `stop_reason` off the projected
           // message; the projector contract keeps it on the message
           // (not on the exchange) so per-message status mapping works.
-          /** @type {any} */ (projected).stop_reason = message.stop_reason
+          projected.stop_reason = message.stop_reason
         }
         projectedMessages.push(projected)
       }

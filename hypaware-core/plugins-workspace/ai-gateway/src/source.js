@@ -110,7 +110,7 @@ async function launchListener(ctx, state, liveState) {
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
     try {
-      const messageRows = await projector.projectExchange(/** @type {Record<string, unknown>} */ (row))
+      const messageRows = await projector.projectExchange(row)
       if (messageRows.length > 0) {
         await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
         liveState.rowsWritten += messageRows.length

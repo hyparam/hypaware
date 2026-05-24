@@ -6,7 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from './observability/index.js'
 
 /**
- * @import { PluginManifest } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../collectivus-plugin-kernel-types.d.ts'
  * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from './manifest.d.ts'
  */
 
@@ -146,7 +146,22 @@ export function validateManifest(value) {
   if (m.contributes !== undefined && !isPlainObject(m.contributes)) {
     return invalid('contributes must be an object when present')
   }
-  return { ok: true, manifest: /** @type {PluginManifest} */ (m) }
+  /** @type {PluginManifest} */
+  const manifest = {
+    schema_version: 1,
+    name: m.name,
+    version: m.version,
+    hypaware_api: m.hypaware_api,
+    runtime: 'node',
+    entrypoint: m.entrypoint,
+  }
+  if (typeof m.description === 'string') manifest.description = m.description
+  if (typeof m.node_engine === 'string') manifest.node_engine = m.node_engine
+  if (isPlainObject(m.requires)) manifest.requires = /** @type {PluginRequirements} */ (m.requires)
+  if (isPlainObject(m.provides)) manifest.provides = /** @type {PluginProvides} */ (m.provides)
+  if (isStringArray(m.permissions)) manifest.permissions = /** @type {PluginPermission[]} */ (m.permissions)
+  if (isPlainObject(m.contributes)) manifest.contributes = /** @type {PluginContributionManifest} */ (m.contributes)
+  return { ok: true, manifest }
 }
 
 /**
@@ -171,7 +186,11 @@ function invalid(message) {
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v)
 }
-/** @param {unknown} v */
+
+/**
+ * @param {unknown} v
+ * @returns {v is string}
+ */
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.length > 0
 }
@@ -183,7 +202,11 @@ function isStringMap(v) {
   }
   return true
 }
-/** @param {unknown} v */
+
+/**
+ * @param {unknown} v
+ * @returns {v is string[]}
+ */
 function isStringArray(v) {
   return Array.isArray(v) && v.every((x) => typeof x === 'string')
 }

@@ -9,7 +9,14 @@ import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { installObservability } from '../../../src/core/observability/index.js'
 
+/**
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { KernelRuntime } from '../../../src/core/runtime/activation.d.ts'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.d.ts'
+ */
+
 const DATASET = 'spool_rows'
+/** @type {ColumnSpec[]} */
 const COLUMNS = [
   { name: 'id', type: 'INT64', nullable: false },
   { name: 'value', type: 'STRING', nullable: false },
@@ -58,7 +65,9 @@ export async function run({ harness, expect }) {
   await obs.shutdown()
 }
 
-/** @param {ReturnType<typeof createKernelRuntime>} kernel */
+/**
+ * @param {KernelRuntime} kernel
+ */
 function registerDataset(kernel) {
   kernel.query.registerDataset({
     name: DATASET,
@@ -68,7 +77,8 @@ function registerDataset(kernel) {
       return [{ dataset: DATASET, partition: {}, tablePath: kernel.storage.cacheTablePath(DATASET) }]
     },
     async createDataSource(partitions, ctx) {
-      const source = await ctx.storage.dataSourceForTable(partitions[0]?.tablePath ?? '')
+      const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+      const source = await storage.dataSourceForTable(partitions[0]?.tablePath ?? '')
       return source ?? {
         columns: COLUMNS.map((c) => c.name),
         scan() {

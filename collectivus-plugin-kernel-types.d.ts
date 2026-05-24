@@ -1180,6 +1180,8 @@ export interface AiGatewayProjectedMessage {
   compact_metadata?: JsonValue
   raw_frame?: JsonObject
   attributes?: JsonObject
+  /** Provider-supplied finish/stop reason for the message; consumed by the gateway to derive `finish_reason`. */
+  stop_reason?: string
 }
 
 // =============================================================================

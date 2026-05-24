@@ -333,10 +333,9 @@ export async function collectHypAwareStatus(opts = {}) {
   if (config?.sinks) {
     for (const [name, raw] of Object.entries(config.sinks)) {
       const handle = handleByInstance.get(name)
-      const entry = /** @type {Record<string, unknown>} */ (raw)
-      const writer = typeof entry.writer === 'string' ? entry.writer : undefined
-      const destination = typeof entry.destination === 'string' ? entry.destination : undefined
-      const requestPlugin = typeof entry.plugin === 'string' ? entry.plugin : undefined
+      const writer = 'writer' in raw && typeof raw.writer === 'string' ? raw.writer : undefined
+      const destination = 'destination' in raw && typeof raw.destination === 'string' ? raw.destination : undefined
+      const requestPlugin = 'plugin' in raw && typeof raw.plugin === 'string' ? raw.plugin : undefined
       sinks.push({
         instance: name,
         plugin: handle?.plugin ?? requestPlugin ?? destination ?? writer ?? '',
