@@ -5,6 +5,15 @@ HypAware is the active codebase. Prefer files under `src/`, `hypaware-core/`,
 repo; do not assume its tests, package scripts, or agent notes are available
 unless a task explicitly provides that context.
 
+## Code Style
+
+- JavaScript, no semicolons.
+- Types are defined in JSDoc comments, not TypeScript.
+- Never use inline `import('...')` types. Declare type imports at the top of
+  the file with `@import` JSDoc comments, then reference the bare names.
+- Do not use `@typedef` in JSDoc. Define shared types as `interface`s in
+  `.d.ts` files and import them via `@import`.
+
 ## Development Checks
 
 - Run `npm test` for the active traditional test suite. It is intentionally
