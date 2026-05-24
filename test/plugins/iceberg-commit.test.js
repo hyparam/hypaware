@@ -19,7 +19,7 @@ import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -239,7 +239,7 @@ test('commitBatch surfaces iceberg_commit_conflict when initial create races', a
           { tableUrl, columns, rows: [{ id: 2n, value: 'b' }], resolver: rB, lister: lB },
           { exists: false, metadata: null }
         ),
-      (err) => err.hypErrorKind === 'iceberg_commit_conflict',
+      (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_commit_conflict',
     )
   } finally {
     await fixture.cleanup()
@@ -412,7 +412,10 @@ test('probeTable propagates transient metadata read failures instead of masking 
   const { resolver, lister } = await createBlobStoreIO(blobStore)
   await assert.rejects(
     () => probeTable(tableUrlForBlobPrefix('iceberg/datasets/transient'), resolver, lister),
-    (err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code !== 'ENOENT',
+    (err) => {
+      const e = /** @type {HypError} */ (err)
+      return e.hypErrorKind === 'iceberg_metadata_read_failed' && e.code !== 'ENOENT'
+    },
     'transient read must surface, not be masked as a probe miss'
   )
 })
@@ -457,6 +460,6 @@ test('commitBatch normalises blob_precondition_failed into iceberg_commit_confli
         },
         { exists: false, metadata: null }
       ),
-    (err) => err.hypErrorKind === 'iceberg_commit_conflict'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_commit_conflict'
   )
 })

@@ -67,6 +67,24 @@ export type PluginPermission =
 export type PluginRuntime = 'node'
 
 // =============================================================================
+// Errors
+// =============================================================================
+
+/**
+ * Tagged error shape used across HypAware. Code that throws attaches
+ * `hypErrorKind` to a plain `Error`; consumers (tests, log enrichers,
+ * conflict detectors) read it back. Optional `code`, `status`,
+ * `statusCode` mirror Node/HTTP idioms when the error originated from
+ * a system or remote call.
+ */
+export interface HypError extends Error {
+  hypErrorKind: string
+  code?: string
+  status?: number
+  statusCode?: number
+}
+
+// =============================================================================
 // Manifest and install metadata
 // =============================================================================
 

@@ -9,6 +9,10 @@ import {
   rowsToIcebergRecords,
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/schema.js'
 
+/**
+ * @import { HypError } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 test('icebergSchemaForColumns maps every kernel basic type', () => {
   const schema = icebergSchemaForColumns([
     { name: 's', type: 'STRING', nullable: true },
@@ -67,7 +71,7 @@ test('mergeFieldIdsFromTable rejects incompatible type changes with iceberg_sche
         [{ name: 'a', type: 'STRING', nullable: true }],
         existing
       ),
-    (err) => err.hypErrorKind === 'iceberg_schema_incompatible'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_schema_incompatible'
   )
 })
 
@@ -85,7 +89,7 @@ test('mergeFieldIdsFromTable rejects new required columns', () => {
         ],
         existing
       ),
-    (err) => err.hypErrorKind === 'iceberg_schema_incompatible'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_schema_incompatible'
   )
 })
 
@@ -103,7 +107,7 @@ test('mergeFieldIdsFromTable rejects column removals', () => {
         [{ name: 'a', type: 'STRING', nullable: true }],
         existing
       ),
-    (err) => err.hypErrorKind === 'iceberg_schema_incompatible'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_schema_incompatible'
   )
 })
 
@@ -118,7 +122,7 @@ test('mergeFieldIdsFromTable rejects nullable → required tightening', () => {
         [{ name: 'a', type: 'STRING', nullable: false }],
         existing
       ),
-    (err) => err.hypErrorKind === 'iceberg_schema_incompatible'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_schema_incompatible'
   )
 })
 
@@ -146,7 +150,7 @@ test('rowsToIcebergRecords throws iceberg_data_write_failed on required nulls', 
         [{ name: 'id', type: 'INT64', nullable: false }],
         [{ id: null }]
       ),
-    (err) => err.hypErrorKind === 'iceberg_data_write_failed'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_data_write_failed'
   )
 })
 

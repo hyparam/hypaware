@@ -12,7 +12,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -81,8 +81,8 @@ test('pathToKey reverses the table URL and accepts subpaths', () => {
 })
 
 test('pathToKey rejects empty input', () => {
-  assert.throws(() => pathToKey(''), (err) => err.hypErrorKind === 'iceberg_blob_io_invalid_url')
-  assert.throws(() => pathToKey('blob:///'), (err) => err.hypErrorKind === 'iceberg_blob_io_invalid_url')
+  assert.throws(() => pathToKey(''), (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_io_invalid_url')
+  assert.throws(() => pathToKey('blob:///'), (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_io_invalid_url')
 })
 
 test('createBlobStoreIO writer flushes via putObject and applies ifNoneMatch', async () => {
@@ -151,6 +151,6 @@ test('collectStream concatenates Node-stream chunks deterministically', async ()
 test('createBlobStoreIO refuses BlobStores without putObject', async () => {
   await assert.rejects(
     () => createBlobStoreIO(/** @type {any} */ ({ kind: 'broken' })),
-    (err) => err.hypErrorKind === 'iceberg_blob_store_missing'
+    (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_blob_store_missing'
   )
 })
