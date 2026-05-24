@@ -181,14 +181,14 @@ export async function run({ harness, expect }) {
     destination: contribution,
     writerPlugin: '@hypaware/format-parquet',
     encoder,
-    config: {
+    config: /** @type {any} */ ({
       schedule: '* * * * *',
       bucket: BUCKET,
       prefix: PREFIX,
       region: 'us-east-1',
       storage_class: 'STANDARD',
       __clientFactory: fakeClientFactory,
-    },
+    }),
     plugin: destinationPlugin,
     paths: {
       rootDir: s3Dir,
@@ -257,8 +257,8 @@ export async function run({ harness, expect }) {
     put?.Body,
     async (bytes) => {
       const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-      const decoded = await parquetReadObjects({ file: asyncBufferFromArrayBuffer(arrayBuffer) })
-      return Array.isArray(decoded) && decoded.length === ROW_COUNT
+      const decoded = await parquetReadObjects({ file: arrayBuffer })
+      return decoded.length === ROW_COUNT
     }
   )
   expect.that(
@@ -401,19 +401,6 @@ export async function run({ harness, expect }) {
     if (dangerous.test(payload)) {
       throw new Error(`s3_sink_export_fixture: credential-shaped substring found in span: ${trace.name}`)
     }
-  }
-}
-
-/**
- * @param {ArrayBufferLike} buffer
- * @returns {{ byteLength: number, slice(start: number, end?: number): ArrayBuffer }}
- */
-function asyncBufferFromArrayBuffer(buffer) {
-  return {
-    byteLength: buffer.byteLength,
-    slice(start, end) {
-      return buffer.slice(start, end ?? buffer.byteLength)
-    },
   }
 }
 
