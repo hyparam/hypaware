@@ -29,7 +29,7 @@ import {
 } from './session_context.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -343,17 +343,18 @@ async function loadTranscriptSafe(opts, logger) {
 }
 
 /**
- * @param {Record<string, unknown> | undefined} a
- * @param {Record<string, unknown> | undefined} b
+ * @param {JsonObject | undefined} a
+ * @param {JsonObject | undefined} b
+ * @returns {JsonObject | undefined}
  */
 function mergeAttrs(a, b) {
   if (!a) return b
   if (!b) return a
-  /** @type {Record<string, unknown>} */
+  /** @type {JsonObject} */
   const out = { ...a }
   for (const [key, value] of Object.entries(b)) {
     if (isPlainObject(value) && isPlainObject(out[key])) {
-      out[key] = { ...(/** @type {Record<string, unknown>} */ (out[key])), ...value }
+      out[key] = { ...(/** @type {JsonObject} */ (out[key])), ...(/** @type {JsonObject} */ (value)) }
     } else {
       out[key] = value
     }
