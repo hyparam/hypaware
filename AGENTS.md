@@ -1,8 +1,9 @@
 # Repository Guidance
 
-HypAware is the active codebase. The old `collectivus/` donor tree is not part
-of this repo; do not assume its tests, package scripts, or agent notes are
-available unless a task explicitly provides that context.
+HypAware is the active codebase. Prefer files under `src/`, `hypaware-core/`,
+`bin/`, and root `test/`. The old `collectivus/` donor tree is not part of this
+repo; do not assume its tests, package scripts, or agent notes are available
+unless a task explicitly provides that context.
 
 ## Development Checks
 
@@ -26,7 +27,8 @@ Keep three tiers distinct:
    confidence and plugin/kernel wiring checks.
 3. Acceptance smokes: heavier release or manual gates that use the packaged CLI,
    real daemon install/start/stop, real user-home style config, production-ish
-   telemetry defaults, and bounded disk-growth assertions.
+   telemetry defaults, client attach behavior, and bounded disk-growth
+   assertions.
 
 Good acceptance smoke candidates:
 
@@ -45,6 +47,9 @@ When adding or changing workflows, make the app observable enough that failures
 identify the broken step rather than only returning a nonzero exit code.
 
 - Give every smoke a stable `DEV_RUN_ID`, `smoke_name`, and `smoke_step`.
+- Emit structured logs/spans/metrics around entrypoints, lifecycle transitions,
+  external calls, retries, validation decisions, source/sink starts, and error
+  paths.
 - Prefer structured attributes such as `component`, `operation`, `status`,
   `error_kind`, plugin names, dataset names, and sink/source ids.
 - Verify both external behavior and emitted telemetry. A smoke should assert
@@ -62,4 +67,5 @@ Useful commands:
 npm test
 npm run smoke -- core_boot_noop
 npm run smoke -- gateway_codex_capture
+npm run smoke -- daemon_foreground_start_stop
 ```
