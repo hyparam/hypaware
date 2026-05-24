@@ -14,6 +14,10 @@
  * track the HypAware design.
  */
 
+import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
+
+export type { AsyncDataSource, ScanOptions, ScanResults }
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
 
@@ -802,7 +806,7 @@ export interface ExportResult {
  */
 export interface SinkQueryReader {
   discoverPartitions(scope: QueryScope): Promise<QueryPartition[]> | QueryPartition[]
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<QueryDataSource> | QueryDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
 }
 
 // =============================================================================
@@ -824,7 +828,7 @@ export interface DatasetRegistration {
   fallbackTimestampColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<QueryDataSource> | QueryDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
 }
 
 export interface DatasetSchema {
@@ -883,25 +887,6 @@ export interface QueryScope {
   to?: string
   service?: string
   limit: number
-}
-
-export interface QueryDataSource {
-  columns: string[]
-  numRows?: number
-  scan(options: QueryScanOptions): QueryScanResult
-}
-
-export interface QueryScanOptions {
-  limit?: number
-  offset?: number
-  where?: unknown
-  columns?: string[]
-}
-
-export interface QueryScanResult {
-  appliedWhere: boolean
-  appliedLimitOffset: boolean
-  rows(): AsyncIterable<Record<string, unknown>>
 }
 
 /**

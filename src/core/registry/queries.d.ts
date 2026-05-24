@@ -9,8 +9,8 @@ export type {
   DatasetRefreshResult,
   DatasetDataSourceContext,
   QueryScope,
-  QueryDataSource,
-  QueryScanOptions,
-  QueryScanResult,
+  AsyncDataSource,
+  ScanOptions,
+  ScanResults,
   QueryStorageService,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
