@@ -5,8 +5,10 @@ import { aiGatewayDatasetRegistration } from './dataset.js'
 import { createStartSource } from './source.js'
 import { setAiGatewayRuntime } from './runtime.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../src/core/registry/sources.js').ExtendedSourceRegistry} ExtendedSourceRegistry */
+/**
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/sources.js'
+ */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
 

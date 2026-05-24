@@ -17,7 +17,9 @@
 
 export const TRANSPORT_SYMBOL = Symbol.for('hypaware-gascity:transport')
 
-/** @import { GascityFrame, GascityCitySubscription, GascityTransport } from './types.d.ts' */
+/**
+ * @import { GascityCitySubscription, GascityFrame, GascityTransport } from './types.d.ts'
+ */
 
 /**
  * Look up the active transport from the `globalThis` registry. The

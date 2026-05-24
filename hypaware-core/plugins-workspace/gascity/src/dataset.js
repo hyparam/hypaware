@@ -2,12 +2,9 @@
 
 import path from 'node:path'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDiscoveryContext} DatasetDiscoveryContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDataSourceContext} DatasetDataSourceContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
+/**
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 export const DATASET_NAME = 'gascity_messages'
 export const PARTITION_LABEL = 'all'

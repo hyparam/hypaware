@@ -3,9 +3,9 @@
 import { createOtlpServer, listenAndResolve } from './server.js'
 import { makeReceiveHandler, stampBoundAddress } from './collector.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').StartedSource} StartedSource */
+/**
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4318

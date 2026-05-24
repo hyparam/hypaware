@@ -1,13 +1,15 @@
 // @ts-check
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
+/**
+ * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { GitSourceParts } from './types.d.ts'
+ */
 
 const HTTPS_GITHUB_RE = /^https?:\/\/(?:[^@/\s]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:#(.+))?$/i
 const GITHUB_SHORTHAND_RE = /^github:([^/]+)\/([^/#]+?)(?:\.git)?(?:#(.+))?$/i
 const GIT_SSH_GITHUB_RE = /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?(?:#(.+))?$/i
 const PASSTHROUGH_GIT_RE = /^(?:git\+|git:|ssh:|https?:\/\/|gitlab:|bitbucket:|file:\/\/)/i
 
-/** @import { GitSourceParts } from './types.d.ts' */
 
 /**
  * Pure parser for the git URL forms `hyp plugin install` accepts:

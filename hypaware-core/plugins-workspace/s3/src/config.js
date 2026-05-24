@@ -10,8 +10,10 @@
  * already enforces standard 5-field cron, so this module ignores it.
  */
 
-/** @import { S3SinkConfig, S3ConfigValidationError, S3ConfigValidationResult } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
+/**
+ * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types'
+ * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.d.ts'
+ */
 
 const RECOGNIZED_STORAGE_CLASSES = new Set([
   'STANDARD',

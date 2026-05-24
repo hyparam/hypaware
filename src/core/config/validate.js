@@ -2,13 +2,10 @@
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationError} ValidationError */
-/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
+/**
+ * @import { CapabilityName, ConfigRegistry, HypAwareV2Config, PluginManifest, PluginName, ValidationError } from '../../../collectivus-plugin-kernel-types'
+ * @import { LoadedManifest } from '../manifest.js'
+ */
 
 /**
  * @import {

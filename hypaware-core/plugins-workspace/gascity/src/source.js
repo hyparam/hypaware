@@ -3,14 +3,11 @@
 import { gascityTablePath, GASCITY_SCHEMA_COLUMNS } from './dataset.js'
 import { getActiveTransport } from './transport.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').StartedSource} StartedSource */
-/** @import { CityConfig } from './types.d.ts' */
-/** @typedef {import('./transport.js').GascityCitySubscription} GascityCitySubscription */
-/** @typedef {import('./transport.js').GascityFrame} GascityFrame */
+/**
+ * @import { PluginActivationContext, PluginLogger, QueryStorageService, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types'
+ * @import { GascityCitySubscription, GascityFrame } from './transport.js'
+ * @import { CityConfig } from './types.d.ts'
+ */
 
 /**
  * `startGascitySource(ctx)` is the `SourceContribution.start` callback

@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * @import { Schema, IcebergType } from 'icebird/src/types.js'
- * @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types'
+ * @import { IcebergType, Schema } from 'icebird/src/types.js'
  */
 
 /**

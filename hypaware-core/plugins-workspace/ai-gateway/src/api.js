@@ -1,14 +1,9 @@
 // @ts-check
 
 /**
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayUpstreamPreset} AiGatewayUpstreamPreset
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientRegistration} AiGatewayClientRegistration
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayEndpointOptions} AiGatewayEndpointOptions
+ * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types'
+ * @import { GatewayState, RegisteredProjector } from './types.d.ts'
  */
-
-/** @import { RegisteredProjector, GatewayState } from './types.d.ts' */
 
 /**
  * @returns {GatewayState}

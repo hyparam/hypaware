@@ -6,10 +6,11 @@ import { Attr, getLogger, withSpan } from './observability/index.js'
 import { createCapabilityRegistry } from './registry/capabilities.js'
 import { matchesSemverRange } from './semver.js'
 
-/** @typedef {import('../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @import { UnsatisfiedRequirement, DepGraphResolution } from './dep_graph.d.ts' */
-/** @import { CapabilityRegistryHandle } from './registry/capabilities.d.ts' */
+/**
+ * @import { PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types'
+ * @import { DepGraphResolution, UnsatisfiedRequirement } from './dep_graph.d.ts'
+ * @import { CapabilityRegistryHandle } from './registry/capabilities.d.ts'
+ */
 
 /**
  * Resolve a topological activation order over a set of loaded plugin

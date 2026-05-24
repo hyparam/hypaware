@@ -5,8 +5,10 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from './observability/index.js'
 
-/** @typedef {import('../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @import { ManifestErrorKind, LoadedManifest, FailedManifest } from './manifest.d.ts' */
+/**
+ * @import { PluginManifest } from '../../collectivus-plugin-kernel-types'
+ * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from './manifest.d.ts'
+ */
 
 const MANIFEST_BASENAME = 'hypaware.plugin.json'
 

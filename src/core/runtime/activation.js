@@ -12,29 +12,11 @@ import { createSinkRegistry } from '../registry/sinks.js'
 import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityName} CapabilityName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistry} CommandRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').InitPresetRegistry} InitPresetRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PermissionContext} PermissionContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPaths} PluginPaths */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPermission} PluginPermission */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../cache/storage.js').ExtendedQueryStorageService} ExtendedQueryStorageService */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SemverRange} SemverRange */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SemverVersion} SemverVersion */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkRegistry} SinkRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SkillRegistry} SkillRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SourceRegistry} SourceRegistry */
-
-/** @import { KernelRuntime } from './activation.d.ts' */
+/**
+ * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedQueryStorageService } from '../cache/storage.js'
+ * @import { KernelRuntime } from './activation.d.ts'
+ */
 
 /**
  * Build the kernel-global registries shared across an activation pass.

@@ -28,10 +28,9 @@ import {
   readSessionContext,
 } from './session_context.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeInput} AiGatewayExchangeInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedExchange} AiGatewayProjectedExchange */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedMessage} AiGatewayProjectedMessage */
+/**
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * Build the Claude exchange projector. Returns the full

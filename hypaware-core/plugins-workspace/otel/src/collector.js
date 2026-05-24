@@ -10,9 +10,10 @@ import { flattenOtlpLogs } from './otlp/logs.js'
 import { flattenOtlpTraces } from './otlp/traces.js'
 import { flattenOtlpMetrics } from './otlp/metrics.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('./server.js').OtlpRequest} OtlpRequest */
+/**
+ * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types'
+ * @import { OtlpRequest } from './server.js'
+ */
 
 const FLATTENERS = {
   logs: flattenOtlpLogs,

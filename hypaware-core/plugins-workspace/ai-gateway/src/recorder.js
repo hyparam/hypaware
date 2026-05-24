@@ -19,7 +19,9 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
   'chatgpt-account-id',
 ])
 
-/** @import { ExchangeInit, ResponseStart, RecorderOptions, FinishedRow } from './types.d.ts' */
+/**
+ * @import { ExchangeInit, FinishedRow, RecorderOptions, ResponseStart } from './types.d.ts'
+ */
 
 /**
  * Build a Recorder. The recorder owns the redact set so per-exchange

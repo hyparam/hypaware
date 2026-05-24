@@ -2,12 +2,10 @@
 
 import { createHash } from 'node:crypto'
 
-/** @import { CodexLogReader } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeInput} AiGatewayExchangeInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedExchange} AiGatewayProjectedExchange */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedMessage} AiGatewayProjectedMessage */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
+/**
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types'
+ * @import { CodexLogReader } from './types.d.ts'
+ */
 
 /**
  * Build the `@hypaware/codex` adapter's full exchange projector. The

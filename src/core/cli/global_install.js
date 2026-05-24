@@ -6,7 +6,9 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-/** @import { CommandResult, CommandRunner, DurableBinResult } from './types.d.ts' */
+/**
+ * @import { CommandResult, CommandRunner, DurableBinResult } from './types.d.ts'
+ */
 
 const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const PACKAGE_JSON = path.join(PACKAGE_ROOT, 'package.json')

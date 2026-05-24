@@ -5,14 +5,12 @@ import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } fr
 import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryScope} QueryScope */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../cache/storage.js').ExtendedQueryStorageService} ExtendedQueryStorageService */
-/** @typedef {import('squirreling').AsyncDataSource} AsyncDataSource */
-
-/** @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from './types.d.ts' */
+/**
+ * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedQueryStorageService } from '../cache/storage.js'
+ * @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from './types.d.ts'
+ * @import { AsyncDataSource } from 'squirreling'
+ */
 
 /**
  * Run a read-only SELECT against the kernel's dataset registry. The

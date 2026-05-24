@@ -2,7 +2,9 @@
 
 import { normalizePrefix } from './config.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
+/**
+ * @import { QueryPartition } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * Render the partition's directory segment using the same convention as

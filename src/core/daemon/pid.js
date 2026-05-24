@@ -3,7 +3,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-/** @import { PidFileEntry } from './types.d.ts' */
+/**
+ * @import { PidFileEntry } from './types.d.ts'
+ */
 
 /**
  * Resolve the directory the daemon uses for runtime state files —

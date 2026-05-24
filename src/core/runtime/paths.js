@@ -4,8 +4,9 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPaths} PluginPaths */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
+/**
+ * @import { PluginName, PluginPaths } from '../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * Build a per-plugin `PluginPaths` bag. The kernel hands one of these

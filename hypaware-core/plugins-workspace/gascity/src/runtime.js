@@ -14,10 +14,11 @@
  * `clearGascityRuntime`.
  */
 
-/** @import { GascityRuntime } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../../../../src/core/registry/sources.js').ExtendedSourceRegistry} ExtendedSourceRegistry */
+/**
+ * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/sources.js'
+ * @import { GascityRuntime } from './types.d.ts'
+ */
 
 /** @type {GascityRuntime | null} */
 let runtime = null

@@ -14,19 +14,11 @@ import { defaultClientFactory } from './client.js'
 import { classifyAwsError, describeS3ErrorKind } from './errors.js'
 import { keyIsWithinPrefix, renderObjectKey } from './keys.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportOptions} ExportOptions */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').Sink} Sink */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkCreateContext} SinkCreateContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
-/** @typedef {import('./client.js').S3ClientFactory} S3ClientFactory */
-/** @typedef {import('./client.js').S3ClientHandle} S3ClientHandle */
-/** @typedef {import('./errors.js').S3ErrorKind} S3ErrorKind */
+/**
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types'
+ * @import { S3ClientFactory, S3ClientHandle } from './client.js'
+ * @import { S3ErrorKind } from './errors.js'
+ */
 
 const PLUGIN_NAME = '@hypaware/s3'
 const PLUGIN_VERSION = '1.0.0'

@@ -23,7 +23,9 @@ import readline from 'node:readline'
  * identity in that case.
  */
 
-/** @import { TranscriptEntry } from './types.d.ts' */
+/**
+ * @import { TranscriptEntry } from './types.d.ts'
+ */
 
 /**
  * @param {string} homeDir

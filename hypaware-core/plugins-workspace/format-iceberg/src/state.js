@@ -4,7 +4,11 @@ import { Buffer } from 'node:buffer'
 
 import { collectStream, pathToKey } from './blob-io.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
+/**
+ * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExportMarker, ProbeStateLike } from './types.d.ts'
+ * @import { TableMetadata } from 'icebird/src/types.js'
+ */
 
 /**
  * Layout of idempotency markers under the sink instance's BlobStore.
@@ -19,7 +23,6 @@ import { collectStream, pathToKey } from './blob-io.js'
  */
 const STATE_DIR = 'state/exported-batches'
 
-/** @import { ExportMarker } from './types.d.ts' */
 
 /**
  * Build the BlobStore key for a marker.
@@ -95,8 +98,6 @@ export async function writeMarker(blobStore, key, marker) {
   }
 }
 
-/** @import { ProbeStateLike } from './types.d.ts' */
-/** @typedef {import('icebird/src/types.js').TableMetadata} TableMetadata */
 
 /**
  * Decide whether the marker proves the current batch has already

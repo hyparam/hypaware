@@ -4,8 +4,10 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @import { SpoolAppendResult, FlushResult, PendingInfo, CacheSpool } from './types.d.ts' */
+/**
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from './types.d.ts'
+ */
 
 export const SPOOL_DIR = '_hypaware_spool'
 export const DEFAULT_SPOOL_BYTES_THRESHOLD = 4 * 1024 * 1024

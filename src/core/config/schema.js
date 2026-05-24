@@ -5,18 +5,9 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginConfigInstance} PluginConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkConfigInstance} SinkConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').BlobSinkConfigInstance} BlobSinkConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').RequestSinkConfigInstance} RequestSinkConfigInstance */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryConfig} QueryConfig */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigRegistry} ConfigRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ConfigSectionRegistration} ConfigSectionRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationResult} ValidationResult */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ValidationError} ValidationError */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
+/**
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * @import {

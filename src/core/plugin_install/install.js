@@ -25,11 +25,11 @@ import { pluginInstallDir } from './paths.js'
 import { resolveSource } from './resolver.js'
 import { checkForPluginUpdate } from './update_check.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockFile} PluginLockFile */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
-/** @typedef {import('./fetch.js').FetchResult} FetchResult */
+/**
+ * @import { PluginLockEntry, PluginLockFile, PluginName, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { FetchResult } from './fetch.js'
+ */
+
 /**
  * @import {
  *   ConfirmInstall,

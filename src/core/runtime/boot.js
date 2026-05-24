@@ -21,15 +21,13 @@ import {
 } from './bundled.js'
 import { discoverInstalledPlugins } from './installed.js'
 
-/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-/** @typedef {import('./activation.js').KernelRuntime} KernelRuntime */
-/** @typedef {import('./loader.js').ActivationResult} ActivationResult */
-
-/** @import { BootProfile, BootKernelOptions, BootKernelResult } from './types.d.ts' */
+/**
+ * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../collectivus-plugin-kernel-types'
+ * @import { LoadedManifest } from '../manifest.js'
+ * @import { KernelRuntime } from './activation.js'
+ * @import { ActivationResult } from './loader.js'
+ * @import { BootKernelOptions, BootKernelResult, BootProfile } from './types.d.ts'
+ */
 
 /**
  * Boot the kernel: load config, discover bundled plugin manifests,

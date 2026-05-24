@@ -1,7 +1,8 @@
 // @ts-check
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
+/**
+ * @import { DatasetRegistration, QueryRegistry } from '../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * In-memory dataset registry. Built-in core registers **zero** datasets;

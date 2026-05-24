@@ -17,7 +17,9 @@ import path from 'node:path'
  * it inserted and is safe to remove.
  */
 
-/** @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.d.ts' */
+/**
+ * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.d.ts'
+ */
 
 const MARKER_KEY = '_hypaware'
 const MANAGED_HOOK_SPECS = [

@@ -11,9 +11,10 @@ import {
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @import { ExtendedQueryStorageService } from './types.d.ts' */
+/**
+ * @import { ColumnSpec, QueryStorageService } from '../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedQueryStorageService } from './types.d.ts'
+ */
 
 /**
  * Build the kernel-owned `QueryStorageService`. Plugins reach this

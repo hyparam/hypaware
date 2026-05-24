@@ -7,7 +7,9 @@ const DEFAULT_SERVICE_NAME = 'hypaware'
 const DEFAULT_HYP_HOME_DIRNAME = '.hyp'
 const HYP_STATE_SUBDIR = 'hypaware'
 
-/** @import { ObservabilityEnv } from './types.d.ts' */
+/**
+ * @import { ObservabilityEnv } from './types.d.ts'
+ */
 
 /**
  * @param {NodeJS.ProcessEnv} [env]

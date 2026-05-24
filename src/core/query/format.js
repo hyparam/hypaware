@@ -1,6 +1,8 @@
 // @ts-check
 
-/** @import { QueryResultSet, QueryFormat } from './types.d.ts' */
+/**
+ * @import { QueryFormat, QueryResultSet } from './types.d.ts'
+ */
 
 /**
  * Render a query result set into the requested output format.

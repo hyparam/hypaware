@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url'
 
 import { loadManifests } from '../manifest.js'
 
-/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
-/** @typedef {import('../manifest.js').FailedManifest} FailedManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
+/**
+ * @import { PluginName } from '../../../collectivus-plugin-kernel-types'
+ * @import { FailedManifest, LoadedManifest } from '../manifest.js'
+ * @import { DiscoverBundledResult } from './types.d.ts'
+ */
 
 /**
  * V1 bundled plugin allowlist (finish-v1.md §Phase 2). A plugin must
@@ -58,7 +60,6 @@ export function defaultBundledWorkspaceDir() {
   return path.join(repoRoot, 'hypaware-core', 'plugins-workspace')
 }
 
-/** @import { DiscoverBundledResult } from './types.d.ts' */
 
 /**
  * Walk `workspaceDir` and split discovered plugin manifests into:

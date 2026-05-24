@@ -11,7 +11,9 @@
  * next chunk completes them.
  */
 
-/** @import { SseEvent } from './types.d.ts' */
+/**
+ * @import { SseEvent } from './types.d.ts'
+ */
 
 export class SseParser {
   constructor() {

@@ -16,7 +16,9 @@ export function daemonLogDir(stateRoot) {
   return path.join(stateRoot, 'logs')
 }
 
-/** @import { DaemonLogger } from './types.d.ts' */
+/**
+ * @import { DaemonLogger } from './types.d.ts'
+ */
 
 /**
  * Open the daemon log file for append. One line per event in JSON

@@ -1,7 +1,9 @@
 // @ts-check
 
-/** @import { UpstreamConfig, AiGatewayConfig } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput */
+/**
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types'
+ * @import { AiGatewayConfig, UpstreamConfig } from './types.d.ts'
+ */
 
 const DEFAULT_LISTEN = '127.0.0.1:0'
 const DEFAULT_GATEWAY_ID = 'hypaware-local'

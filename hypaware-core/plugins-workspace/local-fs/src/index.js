@@ -8,16 +8,9 @@ import { encodePartition } from 'hypaware/core/sinks'
 
 import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportOptions} ExportOptions */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').Sink} Sink */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkCreateContext} SinkCreateContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
+/**
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 const PLUGIN_NAME = '@hypaware/local-fs'
 const PLUGIN_VERSION = '1.0.0'

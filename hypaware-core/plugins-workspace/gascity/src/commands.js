@@ -2,7 +2,9 @@
 
 import { requireGascityRuntime } from './runtime.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
+/**
+ * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * `hyp gascity attach <city> [--api-url <url>]`

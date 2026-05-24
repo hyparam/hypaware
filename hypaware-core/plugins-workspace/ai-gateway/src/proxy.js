@@ -5,14 +5,13 @@ import https from 'node:https'
 
 import { parseListen } from './config.js'
 
-/** @import { CompiledUpstream, ProxyOptions, StartedProxy } from './types.d.ts' */
-/** @typedef {import('./config.js').UpstreamConfig} UpstreamConfig */
-/** @typedef {import('./recorder.js').Exchange} Exchange */
-/** @typedef {import('node:http').IncomingMessage} IncomingMessage */
-/** @typedef {import('node:http').ServerResponse} ServerResponse */
-/** @typedef {import('node:http').IncomingHttpHeaders} IncomingHttpHeaders */
-/** @typedef {import('node:http').OutgoingHttpHeaders} OutgoingHttpHeaders */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput */
+/**
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types'
+ * @import { UpstreamConfig } from './config.js'
+ * @import { Exchange } from './recorder.js'
+ * @import { CompiledUpstream, ProxyOptions, StartedProxy } from './types.d.ts'
+ * @import { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+ */
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to one

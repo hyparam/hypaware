@@ -3,12 +3,9 @@
 import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncodeContext} SinkEncodeContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncodedBlob} SinkEncodedBlob */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
+/**
+ * @import { ColumnSpec, PluginActivationContext, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 const PLUGIN_NAME = '@hypaware/format-parquet'
 const PLUGIN_VERSION = '1.0.0'

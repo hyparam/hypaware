@@ -2,13 +2,9 @@
 
 import path from 'node:path'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDataSourceContext} DatasetDataSourceContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDiscoveryContext} DatasetDiscoveryContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult} DatasetRefreshResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
+/**
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 export const PARTITION_LABEL = 'all'
 export const PLUGIN_NAME = '@hypaware/otel'

@@ -24,7 +24,11 @@ import {
 import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
-/** @typedef {import('../runtime/boot.js').BootKernelResult} BootKernelResult */
+/**
+ * @import { KernelRuntime } from '../runtime/activation.js'
+ * @import { BootKernelResult } from '../runtime/boot.js'
+ */
+
 /**
  * @import {
  *   DaemonState,
@@ -35,7 +39,6 @@ import { statusFilePath, writeStatusFile } from './status.js'
  *   RunDaemonOptions,
  * } from './types.d.ts'
  */
-/** @import { KernelRuntime } from '../runtime/activation.js' */
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000
 const MIN_TICK_INTERVAL_MS = 25

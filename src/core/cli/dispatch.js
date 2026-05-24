@@ -21,13 +21,11 @@ import { bootKernel } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistry} CommandRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../runtime/boot.js').BootProfile} BootProfile */
-/** @import { DispatchOptions } from './dispatch.d.ts' */
+/**
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
+ * @import { BootProfile } from '../runtime/boot.js'
+ * @import { DispatchOptions } from './dispatch.d.ts'
+ */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
 

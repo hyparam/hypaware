@@ -1,6 +1,8 @@
 // @ts-check
 
-/** @typedef {import('./types.d.ts').CentralSinkConfig} CentralSinkConfig */
+/**
+ * @import { CentralSinkConfig } from './types.d.ts'
+ */
 
 const MIN_POLL_INTERVAL = 5
 const MAX_POLL_INTERVAL = 3600

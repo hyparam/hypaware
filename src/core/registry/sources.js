@@ -2,13 +2,10 @@
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SourceRegistry} SourceRegistryContract */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SourceContribution} SourceContribution */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').StartedSource} StartedSource */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-
-/** @import { ExtendedSourceRegistry } from './types.d.ts' */
+/**
+ * @import { PluginActivationContext, SourceContribution, SourceRegistry, SourceStatus, StartedSource } from '../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedSourceRegistry } from './types.d.ts'
+ */
 
 /**
  * Build the kernel-side SourceRegistry. The contract surface

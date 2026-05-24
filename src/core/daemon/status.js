@@ -97,10 +97,10 @@ export function readStatusFile(stateRoot) {
 
 /* ---------- Phase 8: top-level status collector ---------- */
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../config/validate.js').V1Diagnostic} V1Diagnostic */
-/** @typedef {import('../config/validate.js').ConfigValidationError} ConfigValidationError */
-
+/**
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
+ * @import { ConfigValidationError, V1Diagnostic } from '../config/validate.js'
+ */
 
 /**
  * Collect everything `hyp status` shows. Reads config from disk,

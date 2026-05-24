@@ -462,4 +462,6 @@ function randomHex(bytes) {
   return crypto.randomBytes(bytes).toString('hex')
 }
 
-/** @import { LogRecord, MetricRecord } from './types.d.ts' */
+/**
+ * @import { LogRecord, MetricRecord } from './types.d.ts'
+ */

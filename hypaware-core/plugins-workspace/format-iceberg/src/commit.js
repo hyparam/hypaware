@@ -9,8 +9,10 @@ import {
 
 import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords } from './schema.js'
 
-/** @import { TableState, CommitInput, CommitResult } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
+/**
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types'
+ * @import { CommitInput, CommitResult, TableState } from './types.d.ts'
+ */
 
 /**
  * Probe the table for an existing snapshot. Returns `exists=false`

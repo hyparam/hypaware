@@ -2,10 +2,10 @@
 
 import readline from 'node:readline/promises'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
-/** @import { ConfirmOutcome, ConfirmDecision, StagedArtifact } from './types.d.ts' */
+/**
+ * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from './types.d.ts'
+ */
 
 /**
  * Optional warning lines printed to stderr ahead of the prompt. Soft

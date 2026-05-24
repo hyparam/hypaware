@@ -2,8 +2,10 @@
 
 import { Buffer } from 'node:buffer'
 
-/** @import { BlobIOWriteEvent, BlobIOWriteObserver } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
+/**
+ * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types'
+ * @import { BlobIOWriteEvent, BlobIOWriteObserver } from './types.d.ts'
+ */
 
 const TABLE_URL_SCHEME = 'blob://'
 

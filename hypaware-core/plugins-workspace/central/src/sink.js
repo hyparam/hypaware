@@ -1,16 +1,10 @@
 // @ts-check
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').Sink} Sink */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportOptions} ExportOptions */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('./types.d.ts').CentralSinkConfig} CentralSinkConfig */
-/** @typedef {import('./types.d.ts').IngestSignal} IngestSignal */
-/** @typedef {import('./identity_client.js').IdentityClient} IdentityClient */
+/**
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink } from '../../../../collectivus-plugin-kernel-types'
+ * @import { IdentityClient } from './identity_client.js'
+ * @import { CentralSinkConfig, IngestSignal } from './types.d.ts'
+ */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 

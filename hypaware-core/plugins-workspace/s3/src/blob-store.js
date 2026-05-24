@@ -6,15 +6,10 @@ import { Readable } from 'node:stream'
 import { normalizePrefix } from './config.js'
 import { classifyAwsError } from './errors.js'
 
-/** @import { S3CommandsHandle, S3BlobStoreClientFactory } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectInput} PutObjectInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectResult} PutObjectResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').GetObjectInput} GetObjectInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').GetObjectResult} GetObjectResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ListObjectsInput} ListObjectsInput */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ListObjectResult} ListObjectResult */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DeleteObjectInput} DeleteObjectInput */
+/**
+ * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types'
+ * @import { S3BlobStoreClientFactory, S3CommandsHandle } from './types.d.ts'
+ */
 
 export const BLOB_STORE_KIND = 's3'
 

@@ -5,12 +5,11 @@ import { loadLock } from '../plugin_install/install.js'
 import { listEntries } from '../plugin_install/lock.js'
 import { loadManifest } from '../manifest.js'
 
-/** @typedef {import('../manifest.js').LoadedManifest} LoadedManifest */
-/** @typedef {import('../manifest.js').FailedManifest} FailedManifest */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
-
-/** @import { DiscoverInstalledResult } from './types.d.ts' */
+/**
+ * @import { PluginLockEntry, PluginName } from '../../../collectivus-plugin-kernel-types'
+ * @import { FailedManifest, LoadedManifest } from '../manifest.js'
+ * @import { DiscoverInstalledResult } from './types.d.ts'
+ */
 
 /**
  * Walk the kernel state's `plugin-lock.json` and load the manifest from

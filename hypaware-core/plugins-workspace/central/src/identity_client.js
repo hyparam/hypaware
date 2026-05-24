@@ -3,9 +3,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-/** @typedef {import('./types.d.ts').PersistedIdentity} PersistedIdentity */
-/** @typedef {import('./types.d.ts').IdentityResponse} IdentityResponse */
-/** @typedef {'loaded' | 'refreshed' | 'bootstrapped'} AcquireSource */
+/**
+ * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.d.ts'
+ */
 
 /**
  * Eagerly refresh when the remaining lifetime falls inside this window

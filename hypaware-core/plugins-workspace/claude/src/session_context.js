@@ -20,7 +20,9 @@ export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
  * preference): `transcript_path`, `session_id`.
  */
 
-/** @import { SessionContextRecord } from './types.d.ts' */
+/**
+ * @import { SessionContextRecord } from './types.d.ts'
+ */
 
 /**
  * @param {string} stateDir

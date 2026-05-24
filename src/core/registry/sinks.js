@@ -2,21 +2,9 @@
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkRegistry} SinkRegistryContract */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkContribution} SinkContribution */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkHandle} SinkHandle */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').Sink} Sink */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkEncoder} SinkEncoder */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkInstanceConfig} SinkInstanceConfig */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkSupportTag} SinkSupportTag */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').SinkCreateContext} SinkCreateContext */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginPaths} PluginPaths */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').TableFormatProvider} TableFormatProvider */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
+/**
+ * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * @import {

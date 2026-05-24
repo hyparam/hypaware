@@ -12,12 +12,11 @@ import {
 import { createPluginPaths } from './paths.js'
 import { createActivationContext, createKernelRuntime } from './activation.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ActivePlugin} ActivePlugin */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {import('./activation.js').KernelRuntime} KernelRuntime */
-
-/** @import { PluginActivationEntry, ActivationSuccess, ActivationFailure, ActivationResult } from './loader.d.ts' */
+/**
+ * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types'
+ * @import { KernelRuntime } from './activation.js'
+ * @import { ActivationFailure, ActivationResult, ActivationSuccess, PluginActivationEntry } from './loader.d.ts'
+ */
 
 /**
  * Activate every plugin in `order`. The caller (typically the kernel

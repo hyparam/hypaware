@@ -4,13 +4,9 @@ import path from 'node:path'
 
 import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRegistration} DatasetRegistration */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDiscoveryContext} DatasetDiscoveryContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetDataSourceContext} DatasetDataSourceContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').DatasetRefreshResult} DatasetRefreshResult */
+/**
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 export const DATASET_NAME = 'ai_gateway_messages'
 export const PARTITION_LABEL = 'proxy_messages_v4'

@@ -15,7 +15,9 @@ import {
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import { icebergSchemaForColumns, rowsToIcebergRecords } from './schema.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
+/**
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 /**
  * Reusable cache for the local IO pair. Constructed once per process —

@@ -8,8 +8,10 @@ import { loadManifest } from '../manifest.js'
 import { fetchGitSource } from './git_fetch.js'
 import { pluginInstallDir } from './paths.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
+/**
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ */
+
 /**
  * @import {
  *   FetchSuccess,

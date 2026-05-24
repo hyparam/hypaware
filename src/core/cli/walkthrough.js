@@ -9,12 +9,12 @@ import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginConfigInstance} PluginConfigInstance */
-/** @typedef {import('../registry/sources.js').ExtendedSourceRegistry} ExtendedSourceRegistry */
-/** @typedef {import('../registry/sinks.js').ExtendedSinkRegistry} ExtendedSinkRegistry */
+/**
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
+ * @import { ExtendedSourceRegistry } from '../registry/sources.js'
+ */
+
 /**
  * @import {
  *   AsyncPickPrompt,

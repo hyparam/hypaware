@@ -1,6 +1,8 @@
 // @ts-check
 
-/** @import { S3ErrorKind } from './types.d.ts' */
+/**
+ * @import { S3ErrorKind } from './types.d.ts'
+ */
 
 /**
  * AWS SDK error → stable `error_kind` mapping for `@hypaware/s3`.

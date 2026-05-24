@@ -7,7 +7,9 @@ import { Attr, getKernelInstruments, getMeter, withSpan } from '../observability
 import { datasetsRoot } from './paths.js'
 import { readRowsFromTable, tableExists } from './iceberg/store.js'
 
-/** @import { RetentionConfig } from './types.d.ts' */
+/**
+ * @import { RetentionConfig } from './types.d.ts'
+ */
 
 /**
  * Default retention is 30 days per `hypaware-design.md` §Local Query

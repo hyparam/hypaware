@@ -5,15 +5,11 @@ import path from 'node:path'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
-/** @typedef {import('../registry/sinks.js').ExtendedSinkRegistry} ExtendedSinkRegistry */
-/** @typedef {import('../registry/sinks.js').ExtendedSinkHandle} ExtendedSinkHandle */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryRegistry} QueryRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryPartition} QueryPartition */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
-
-/** @import { DriverOptions, TickOptions, TickReport } from './types.d.ts' */
+/**
+ * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../collectivus-plugin-kernel-types'
+ * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/sinks.js'
+ * @import { DriverOptions, TickOptions, TickReport } from './types.d.ts'
+ */
 
 /**
  * Build the kernel sink driver. The driver iterates sink handles on

@@ -3,8 +3,10 @@
 import { Attr, getKernelInstruments, getLogger } from '../observability/index.js'
 import { matchesSemverRange } from '../semver.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistry} CapabilityRegistry */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CapabilityRegistration} CapabilityRegistration */
+/**
+ * @import { CapabilityRegistration, CapabilityRegistry } from '../../../collectivus-plugin-kernel-types'
+ * @import { InternalRegistration } from './types.d.ts'
+ */
 
 /**
  * Build a `CapabilityRegistry` that emits the Phase 1 instrumentation
@@ -101,7 +103,6 @@ export function createCapabilityRegistry() {
   }
 }
 
-/** @import { InternalRegistration } from './types.d.ts' */
 
 /**
  * @param {InternalRegistration[]} registrations

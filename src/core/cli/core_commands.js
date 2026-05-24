@@ -32,11 +32,12 @@ import {
   appendSessionContext,
 } from '../../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
-/** @typedef {import('../query/sql.js').RefreshMode} RefreshMode */
-/** @typedef {import('../query/format.js').QueryFormat} QueryFormat */
-/** @import { CommandRegistryExtended, InitFlags } from './types.d.ts' */
+/**
+ * @import { CommandRegistration, CommandRunContext } from '../../../collectivus-plugin-kernel-types'
+ * @import { QueryFormat } from '../query/format.js'
+ * @import { RefreshMode } from '../query/sql.js'
+ * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'
+ */
 
 const execFileAsync = promisify(execFile)
 

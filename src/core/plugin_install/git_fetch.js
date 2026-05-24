@@ -10,8 +10,9 @@ import { Attr, withSpan } from '../observability/index.js'
 import { provenanceFromUrl } from './git_source.js'
 import { pluginInstallDir } from './paths.js'
 
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
-/** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
+/**
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ */
 
 const SKIPPED_DIR_NAMES = new Set([
   '.git',

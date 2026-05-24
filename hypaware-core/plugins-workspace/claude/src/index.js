@@ -11,12 +11,9 @@ import { attach, defaultSettingsPath, detach } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { defaultSessionContextFile } from './session_context.js'
 
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayCapability} AiGatewayCapability */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientAttachContext} AiGatewayClientAttachContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayClientDetachContext} AiGatewayClientDetachContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').HypAwareV2Config} HypAwareV2Config */
+/**
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ */
 
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'

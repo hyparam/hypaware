@@ -11,9 +11,11 @@
  * read the latest config from `runtime.ctx.config`.
  */
 
-/** @import { AiGatewayRuntime } from './types.d.ts' */
-/** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
-/** @typedef {import('./api.js').GatewayState} GatewayState */
+/**
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ * @import { GatewayState } from './api.js'
+ * @import { AiGatewayRuntime } from './types.d.ts'
+ */
 
 /** @type {AiGatewayRuntime | null} */
 let runtime = null

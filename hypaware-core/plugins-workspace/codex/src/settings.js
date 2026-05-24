@@ -7,7 +7,9 @@ import { isManagedAttached, prepareAttach, prepareDetach } from './toml-config.j
 export { defaultConfigPath } from './config-file.js'
 export { CodexSettingsError } from './errors.js'
 
-/** @import { CodexAttachOptions, CodexAttachResult, CodexDetachOptions, CodexDetachResult } from './types.d.ts' */
+/**
+ * @import { CodexAttachOptions, CodexAttachResult, CodexDetachOptions, CodexDetachResult } from './types.d.ts'
+ */
 
 /**
  * Route Codex through the local AI gateway by adding a managed

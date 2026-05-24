@@ -1,6 +1,8 @@
 // @ts-check
 
-/** @import { CredentialSourceKind, S3ClientHandle, S3ClientOptions, S3ClientFactory } from './types.d.ts' */
+/**
+ * @import { CredentialSourceKind, S3ClientFactory, S3ClientHandle, S3ClientOptions } from './types.d.ts'
+ */
 
 /**
  * AWS SDK v3 client wiring for `@hypaware/s3`. Two design choices:

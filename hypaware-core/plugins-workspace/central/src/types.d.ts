@@ -7,6 +7,8 @@
 /** Signal name as it appears on `/v1/ingest/{signal}`. */
 export type IngestSignal = 'logs' | 'traces' | 'metrics' | 'proxy'
 
+export type AcquireSource = 'loaded' | 'refreshed' | 'bootstrapped'
+
 /** Body of a successful bootstrap or refresh response. */
 export interface IdentityResponse {
   jwt: string
