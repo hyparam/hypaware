@@ -120,7 +120,6 @@ export async function installDaemon(options) {
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
-  /** @type {DaemonInstallOptions} */
   const merged = { ...options, configPath, logDir }
   const log = getLogger('daemon')
   return withSpan(

@@ -396,7 +396,10 @@ function readMetadataSessionId(reqBody) {
   return stringValue(userId.session_id)
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isAnthropicAssistant(value) {
   return isPlainObject(value) && value.role === 'assistant'
 }

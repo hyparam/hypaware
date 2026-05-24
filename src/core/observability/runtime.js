@@ -30,7 +30,12 @@ let globalLoggerProvider = null
 let globalMeterProvider = null
 
 export const context = Object.freeze({
-  /** @param {{ span: Span|null }} ctx @param {() => unknown} fn */
+  /**
+   * @template T
+   * @param {{ span: Span|null }} ctx
+   * @param {() => T} fn
+   * @returns {T}
+   */
   with(ctx, fn) {
     return activeContext.run(ctx ?? ROOT_CONTEXT, fn)
   },

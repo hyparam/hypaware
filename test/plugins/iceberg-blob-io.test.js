@@ -100,8 +100,8 @@ test('createBlobStoreIO writer flushes via putObject and applies ifNoneMatch', a
   const collision = resolver.writer('blob://iceberg/datasets/foo/metadata/v1.metadata.json', { ifNoneMatch: '*' })
   collision.appendBytes(new Uint8Array([5]))
   await assert.rejects(
-    () => collision.finish(),
-    (err) => err.hypErrorKind === 'iceberg_commit_conflict' && err.status === 412
+    async () => collision.finish(),
+    (/** @type {any} */ err) => err.hypErrorKind === 'iceberg_commit_conflict' && err.status === 412
   )
 })
 
@@ -111,7 +111,7 @@ test('createBlobStoreIO reader returns AsyncBuffer with byte-faithful slice', as
   const { resolver } = await createBlobStoreIO(fixture.blobStore)
   const buf = await resolver.reader('blob://iceberg/datasets/foo/metadata/v1.metadata.json')
   assert.equal(buf.byteLength, 5)
-  const slice = buf.slice(1, 4)
+  const slice = await buf.slice(1, 4)
   assert.deepEqual(Array.from(new Uint8Array(slice)), [20, 30, 40])
 })
 
@@ -119,8 +119,8 @@ test('createBlobStoreIO reader surfaces ENOENT for missing objects', async () =>
   const fixture = makeBlobStore()
   const { resolver } = await createBlobStoreIO(fixture.blobStore)
   await assert.rejects(
-    () => resolver.reader('blob://iceberg/datasets/foo/metadata/v1.metadata.json'),
-    (err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code === 'ENOENT'
+    async () => resolver.reader('blob://iceberg/datasets/foo/metadata/v1.metadata.json'),
+    (/** @type {any} */ err) => err.hypErrorKind === 'iceberg_metadata_read_failed' && err.code === 'ENOENT'
   )
 })
 

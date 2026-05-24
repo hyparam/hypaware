@@ -339,7 +339,7 @@ function resolveHypHome(env) {
  * the provided stdin/stdout. Accepts comma-separated indices (1-based)
  * or "all" for every option.
  *
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
  * @returns {AsyncPickPrompt}
  */
 function defaultPromptFactory(opts) {
@@ -371,7 +371,7 @@ function defaultPromptFactory(opts) {
 }
 
 /**
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
  * @returns {AsyncRetentionPrompt}
  */
 function defaultRetentionPromptFactory(opts) {
