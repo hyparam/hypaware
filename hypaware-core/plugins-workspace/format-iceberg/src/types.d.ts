@@ -1,5 +1,5 @@
 import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
-import type { IcebergType, TableMetadata, Resolver, Lister } from 'icebird/src/types.js'
+import type { TableMetadata, Resolver, Lister } from 'icebird/src/types.js'
 
 export interface TableState {
   /** True when at least one metadata file is visible. */
@@ -59,9 +59,3 @@ export interface BlobIOWriteEvent {
 
 export type BlobIOWriteObserver = (event: BlobIOWriteEvent) => void
 
-export interface IcebergField {
-  id: number
-  name: string
-  required: boolean
-  type: IcebergType
-}
