@@ -8,17 +8,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
 
-/**
- * @typedef {SourceRegistryContract & {
- *   start: (name: string, ctx: PluginActivationContext) => Promise<StartedSource>,
- *   stop: (name: string) => Promise<void>,
- *   reload: (name: string, ctx: PluginActivationContext) => Promise<void>,
- *   status: (name: string) => Promise<SourceStatus | undefined>,
- *   started: (name: string) => StartedSource | undefined,
- *   listStarted: () => Array<{ name: string, started: StartedSource }>,
- *   stopAll: () => Promise<void>,
- * }} ExtendedSourceRegistry
- */
+/** @import { ExtendedSourceRegistry } from './types.d.ts' */
 
 /**
  * Build the kernel-side SourceRegistry. The contract surface

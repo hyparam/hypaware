@@ -3,13 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-/**
- * @typedef {Object} PidFileEntry
- * @property {number} pid
- * @property {string} startedAt              ISO timestamp written by the daemon at boot.
- * @property {string} runId                  dev_run_id stamped on telemetry from this daemon process.
- * @property {string} mode                   `foreground` (Phase 3) or `detached` (Phase 4 installers).
- */
+/** @import { PidFileEntry } from './types.d.ts' */
 
 /**
  * Resolve the directory the daemon uses for runtime state files —

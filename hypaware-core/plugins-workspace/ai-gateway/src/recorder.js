@@ -19,43 +19,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
   'chatgpt-account-id',
 ])
 
-/**
- * @typedef {Object} ExchangeInit
- * @property {string} upstream
- * @property {string | undefined} provider
- * @property {string | undefined} method
- * @property {string | undefined} path
- * @property {Record<string, string | string[] | undefined>} requestHeaders
- *
- * @typedef {Object} ResponseStart
- * @property {number | undefined} status
- * @property {Record<string, string | string[] | undefined>} headers
- *
- * @typedef {Object} RecorderOptions
- * @property {readonly string[]} [redactHeaders]
- *
- * @typedef {Object} FinishedRow
- * @property {string} exchange_id
- * @property {string} ts_start
- * @property {string | null} ts_end
- * @property {number | null} duration_ms
- * @property {string} upstream
- * @property {string | null} provider
- * @property {string | null} method
- * @property {string | null} path
- * @property {number | null} status_code
- * @property {number | null} request_bytes
- * @property {number | null} response_bytes
- * @property {boolean | null} is_sse
- * @property {number | null} stream_event_count
- * @property {string | null} request_headers     JSON-stringified headers (post-redact)
- * @property {string | null} request_body
- * @property {string | null} response_headers
- * @property {string | null} response_body
- * @property {string | null} error
- * @property {string | null} metadata             JSON-stringified metadata (incl. dev_run_id)
- * @property {Array<{ kind: 'stream_event', exchange_id: string, t_ms: number, event: string, data: string, id?: string }>} stream_events
- */
+/** @import { ExchangeInit, ResponseStart, RecorderOptions, FinishedRow } from './types.d.ts' */
 
 /**
  * Build a Recorder. The recorder owns the redact set so per-exchange

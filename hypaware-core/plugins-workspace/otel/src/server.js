@@ -3,19 +3,7 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
 
-/** @typedef {'logs' | 'traces' | 'metrics'} OtlpSignal */
-
-/**
- * @typedef {Object} OtlpRequest
- * @property {OtlpSignal} signal
- * @property {unknown} data
- * @property {number} payloadBytes
- */
-
-/**
- * @typedef {Object} OtlpReceiveHandler
- * @property {(req: OtlpRequest) => Promise<void>} handle
- */
+/** @import { OtlpSignal, OtlpRequest, OtlpReceiveHandler } from './types.d.ts' */
 
 const JSON_CT = { 'Content-Type': 'application/json' }
 

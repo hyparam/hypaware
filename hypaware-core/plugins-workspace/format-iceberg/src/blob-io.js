@@ -2,18 +2,8 @@
 
 import { Buffer } from 'node:buffer'
 
+/** @import { BlobIOWriteEvent, BlobIOWriteObserver } from './types.d.ts' */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
-
-/**
- * @typedef {Object} BlobIOWriteEvent
- * @property {string} key       BlobStore key the write landed on.
- * @property {string | undefined} etag  Server-returned ETag (S3) or undefined (local-fs).
- * @property {string | undefined} ifNoneMatch  The conditional-write token that was sent, if any.
- */
-
-/**
- * @typedef {(event: BlobIOWriteEvent) => void} BlobIOWriteObserver
- */
 
 const TABLE_URL_SCHEME = 'blob://'
 

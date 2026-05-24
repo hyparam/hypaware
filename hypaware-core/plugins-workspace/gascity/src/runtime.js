@@ -14,18 +14,10 @@
  * `clearGascityRuntime`.
  */
 
+/** @import { GascityRuntime } from './types.d.ts' */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginActivationContext} PluginActivationContext */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PluginLogger} PluginLogger */
 /** @typedef {import('../../../../src/core/registry/sources.js').ExtendedSourceRegistry} ExtendedSourceRegistry */
-
-/**
- * @typedef {Object} GascityRuntime
- * @property {string[]} cities             Attached city names (in attach order).
- * @property {PluginActivationContext} ctx Activation context shared across attach/reload.
- * @property {ExtendedSourceRegistry} sources Kernel source registry.
- * @property {PluginLogger} log            Plugin logger pinned to `@hypaware/gascity`.
- * @property {boolean} started             Whether `sources.start('gascity', ...)` has run.
- */
 
 /** @type {GascityRuntime | null} */
 let runtime = null

@@ -13,60 +13,13 @@ import {
 } from './platform.js'
 
 /**
- * @typedef {Object} LaunchctlResult
- * @property {number} exitCode
- * @property {string} stdout
- * @property {string} stderr
- */
-
-/**
- * @typedef {Object} LaunchctlAdapter
- * @property {(args: string[]) => Promise<LaunchctlResult>} bootstrap
- * @property {(args: string[]) => Promise<LaunchctlResult>} bootout
- * @property {(args: string[]) => Promise<LaunchctlResult>} kickstart
- * @property {(args: string[]) => Promise<LaunchctlResult>} print
- */
-
-/**
- * @typedef {Object} BuildPlistOptions
- * @property {string} [label]
- * @property {string} nodePath
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} logDir
- * @property {Record<string,string>} [env]
- * @property {boolean} [keepAlive]
- * @property {boolean} [runAtLoad]
- * @property {boolean} [foreground]
- */
-
-/**
- * @typedef {Object} PlanLaunchAgentInstallOptions
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} [label]
- * @property {string} [logDir]
- * @property {string} [nodePath]
- * @property {string} [homeDir]
- * @property {string} [plistDir]
- * @property {Record<string,string>} [env]
- * @property {boolean} [keepAlive]
- * @property {boolean} [runAtLoad]
- * @property {boolean} [foreground]
- */
-
-/**
- * @typedef {Object} LaunchAgentInstallPlan
- * @property {'darwin'} platform
- * @property {string} label
- * @property {string} targetPath
- * @property {string} content
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} logDir
- * @property {string} nodePath
- * @property {string} plistDir
- * @property {string[][]} manageCommands
+ * @import {
+ *   LaunchctlResult,
+ *   LaunchctlAdapter,
+ *   BuildPlistOptions,
+ *   PlanLaunchAgentInstallOptions,
+ *   LaunchAgentInstallPlan,
+ * } from './types.d.ts'
  */
 
 export class LaunchAgentError extends Error {

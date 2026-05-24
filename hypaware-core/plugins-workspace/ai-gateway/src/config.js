@@ -1,8 +1,10 @@
 // @ts-check
 
-/**
- * @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput
- */
+/** @import { UpstreamConfig, AiGatewayConfig } from './types.d.ts' */
+/** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayRouteInput} AiGatewayRouteInput */
+
+const DEFAULT_LISTEN = '127.0.0.1:0'
+const DEFAULT_GATEWAY_ID = 'hypaware-local'
 
 /**
  * Validate and normalize the ai-gateway config slice. Returns the
@@ -10,30 +12,6 @@
  * missing or malformed `upstreams` is rejected loudly because the
  * gateway has nothing useful to do without at least one upstream.
  *
- * `UpstreamConfig` is also the runtime shape the proxy uses, so the
- * adapter-registered `AiGatewayUpstreamPreset` from the capability
- * surface flows through it directly — TOML-config upstreams and
- * adapter-registered presets share one structural type.
- *
- * @typedef {Object} UpstreamConfig
- * @property {string} name
- * @property {string} base_url
- * @property {string} [path_prefix]
- * @property {string} [provider]
- * @property {number} [priority]
- * @property {((input: AiGatewayRouteInput) => boolean)} [match]
- *
- * @typedef {Object} AiGatewayConfig
- * @property {string} listen           Address as "host:port" (defaults to 127.0.0.1:0).
- * @property {string} gatewayId        Value for the `gateway_id` column.
- * @property {UpstreamConfig[]} upstreams
- * @property {string[]} redactHeaders  Extra headers to redact in stored rows.
- */
-
-const DEFAULT_LISTEN = '127.0.0.1:0'
-const DEFAULT_GATEWAY_ID = 'hypaware-local'
-
-/**
  * @param {unknown} raw
  * @returns {AiGatewayConfig}
  */

@@ -7,12 +7,7 @@ import { Attr, getKernelInstruments, getMeter, withSpan } from '../observability
 import { datasetsRoot } from './paths.js'
 import { readRowsFromTable, tableExists } from './iceberg/store.js'
 
-/**
- * @typedef {Object} RetentionConfig
- * @property {number} default_days
- * @property {Record<string, number>} [datasets]
- * @property {boolean} [wait_for_sink_ack]  Reserved feature flag (see "open question" in plan §Phase 4); not implemented at V1.
- */
+/** @import { RetentionConfig } from './types.d.ts' */
 
 /**
  * Default retention is 30 days per `hypaware-design.md` §Local Query

@@ -34,30 +34,7 @@ import { createQueryStorageService } from '../cache/storage.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SkillRegistry} SkillRegistry */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').SourceRegistry} SourceRegistry */
 
-/**
- * The kernel-side aggregate that activation contexts facade over.
- * Registries beyond `capabilities`, `commands`, `sources`, `sinks`,
- * `query`, and `storage` are still Phase-2 placeholders; later phases
- * promote each one in place without touching this surface.
- *
- * `activationContexts` is the per-plugin `PluginActivationContext`
- * map populated by `createActivationContext`. The daemon reads from
- * it to drive `sources.start(name, ctx)` and `sources.reload(name,
- * ctx)` for plugins that don't auto-start in their `activate()`.
- *
- * @typedef {Object} KernelRuntime
- * @property {ReturnType<typeof createCapabilityRegistry>} capabilities
- * @property {ReturnType<typeof createCommandRegistry>} commands
- * @property {ConfigRegistry} configRegistry
- * @property {ReturnType<typeof createSourceRegistry>} sources
- * @property {ReturnType<typeof createSinkRegistry>} sinks
- * @property {QueryRegistry} query
- * @property {ExtendedQueryStorageService} storage
- * @property {string} cacheRoot
- * @property {SkillRegistry} skills
- * @property {InitPresetRegistry} initPresets
- * @property {Map<PluginName, PluginActivationContext>} activationContexts
- */
+/** @import { KernelRuntime } from './activation.d.ts' */
 
 /**
  * Build the kernel-global registries shared across an activation pass.

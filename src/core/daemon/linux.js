@@ -13,67 +13,13 @@ import {
 } from './platform.js'
 
 /**
- * @typedef {Object} SystemctlResult
- * @property {number} exitCode
- * @property {string} stdout
- * @property {string} stderr
- */
-
-/**
- * @typedef {Object} SystemctlAdapter
- * @property {() => Promise<SystemctlResult>} daemonReload
- * @property {(unit: string) => Promise<SystemctlResult>} enable
- * @property {(unit: string) => Promise<SystemctlResult>} disable
- * @property {(unit: string) => Promise<SystemctlResult>} start
- * @property {(unit: string) => Promise<SystemctlResult>} stop
- * @property {(unit: string) => Promise<SystemctlResult>} restart
- * @property {(unit: string) => Promise<SystemctlResult>} status
- * @property {(unit: string) => Promise<SystemctlResult>} show
- */
-
-/**
- * @typedef {Object} BuildUnitOptions
- * @property {string} [label]
- * @property {string} [description]
- * @property {string} nodePath
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} logDir
- * @property {Record<string,string>} [env]
- * @property {boolean} [restart]
- * @property {number} [restartSec]
- * @property {boolean} [foreground]
- */
-
-/**
- * @typedef {Object} PlanSystemdInstallOptions
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} [label]
- * @property {string} [description]
- * @property {string} [logDir]
- * @property {string} [nodePath]
- * @property {string} [homeDir]
- * @property {string} [unitDir]
- * @property {Record<string,string>} [env]
- * @property {boolean} [restart]
- * @property {number} [restartSec]
- * @property {boolean} [foreground]
- */
-
-/**
- * @typedef {Object} SystemdInstallPlan
- * @property {'linux'} platform
- * @property {string} label
- * @property {string} unitName
- * @property {string} targetPath
- * @property {string} content
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} logDir
- * @property {string} nodePath
- * @property {string} unitDir
- * @property {string[][]} manageCommands
+ * @import {
+ *   SystemctlResult,
+ *   SystemctlAdapter,
+ *   BuildUnitOptions,
+ *   PlanSystemdInstallOptions,
+ *   SystemdInstallPlan,
+ * } from './types.d.ts'
  */
 
 export class SystemdUnitError extends Error {

@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import { normalizePrefix } from './config.js'
 import { classifyAwsError } from './errors.js'
 
+/** @import { S3CommandsHandle, S3BlobStoreClientFactory } from './types.d.ts' */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').BlobStore} BlobStore */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectInput} PutObjectInput */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').PutObjectResult} PutObjectResult */
@@ -16,18 +17,6 @@ import { classifyAwsError } from './errors.js'
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').DeleteObjectInput} DeleteObjectInput */
 
 export const BLOB_STORE_KIND = 's3'
-
-/**
- * @typedef {Object} S3CommandsHandle
- * @property {(input: { Bucket: string, Key: string, Body: Uint8Array | Buffer, ContentType?: string, ContentLength?: number, Metadata?: Record<string, string>, IfNoneMatch?: string }) => Promise<{ ETag?: string, VersionId?: string }>} putObject
- * @property {(input: { Bucket: string, Key: string }) => Promise<{ Body: NodeJS.ReadableStream | Uint8Array | string | null | undefined, ContentLength?: number, ETag?: string }>} getObject
- * @property {(input: { Bucket: string, Prefix?: string, ContinuationToken?: string }) => Promise<{ Contents?: Array<{ Key?: string, Size?: number, LastModified?: Date }>, NextContinuationToken?: string }>} listObjects
- * @property {(input: { Bucket: string, Key: string }) => Promise<void>} deleteObject
- */
-
-/**
- * @typedef {(opts: { region?: string, profile?: string, endpoint_url?: string, force_path_style?: boolean, env?: NodeJS.ProcessEnv }) => Promise<S3CommandsHandle>} S3BlobStoreClientFactory
- */
 
 /**
  * Construct an S3-backed `BlobStore`. The factory is injectable so the

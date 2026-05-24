@@ -18,14 +18,9 @@ export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
  * Lines are append-only and one JSON object per line; the projector
  * picks the most-recent matching entry. Match keys (in order of
  * preference): `transcript_path`, `session_id`.
- *
- * @typedef {Object} SessionContextRecord
- * @property {string} session_id
- * @property {string | undefined} transcript_path
- * @property {string | undefined} cwd
- * @property {string | undefined} git_branch
- * @property {string | undefined} ts
  */
+
+/** @import { SessionContextRecord } from './types.d.ts' */
 
 /**
  * @param {string} stateDir

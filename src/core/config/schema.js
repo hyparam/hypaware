@@ -19,25 +19,12 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
 
 /**
- * @typedef {Object} LoadConfigSuccess
- * @property {true} ok
- * @property {HypAwareV2Config} config
- * @property {string} configPath
- */
-
-/**
- * @typedef {Object} LoadConfigFailure
- * @property {false} ok
- * @property {ConfigErrorKind} errorKind
- * @property {string} message
- * @property {string} configPath
- * @property {ValidationError[]} [errors]
- */
-
-/** @typedef {LoadConfigSuccess | LoadConfigFailure} LoadConfigResult */
-
-/**
- * @typedef {'config_missing'|'config_unreadable'|'config_invalid_json'|'config_invalid_shape'} ConfigErrorKind
+ * @import {
+ *   ConfigLoadErrorKind,
+ *   LoadConfigFailure,
+ *   LoadConfigResult,
+ *   LoadConfigSuccess,
+ * } from './types.d.ts'
  */
 
 /**

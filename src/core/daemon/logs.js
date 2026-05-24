@@ -16,14 +16,7 @@ export function daemonLogDir(stateRoot) {
   return path.join(stateRoot, 'logs')
 }
 
-/**
- * @typedef {Object} DaemonLogger
- * @property {string} path             Absolute path to the open log file.
- * @property {(event: string, fields?: Record<string, unknown>) => void} info
- * @property {(event: string, fields?: Record<string, unknown>) => void} warn
- * @property {(event: string, fields?: Record<string, unknown>) => void} error
- * @property {() => void} close
- */
+/** @import { DaemonLogger } from './types.d.ts' */
 
 /**
  * Open the daemon log file for append. One line per event in JSON

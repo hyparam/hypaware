@@ -10,12 +10,7 @@ import { loadManifest } from '../manifest.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginLockEntry} PluginLockEntry */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
 
-/**
- * @typedef {Object} DiscoverInstalledResult
- * @property {LoadedManifest[]} loaded        Manifests that parsed cleanly from each lock entry.
- * @property {FailedManifest[]} failed        Lock entries whose `install_dir` manifest failed to load.
- * @property {PluginLockEntry[]} lockEntries  All lock entries that were considered (loaded + failed).
- */
+/** @import { DiscoverInstalledResult } from './types.d.ts' */
 
 /**
  * Walk the kernel state's `plugin-lock.json` and load the manifest from

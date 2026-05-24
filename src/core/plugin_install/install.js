@@ -30,38 +30,15 @@ import { checkForPluginUpdate } from './update_check.js'
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginName} PluginName */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
 /** @typedef {import('./fetch.js').FetchResult} FetchResult */
-/** @typedef {import('./confirm.js').ConfirmOutcome} ConfirmOutcome */
-
 /**
- * @callback ConfirmInstall
- * @param {{
- *   manifest: import('../../../collectivus-plugin-kernel-types').PluginManifest,
- *   source: PluginSourceSpec,
- *   resolvedRef: string,
- *   contentHash: string,
- *   manifestHash: string,
- *   previous?: PluginLockEntry,
- * }} staged
- * @returns {Promise<{ proceed: boolean, outcome: ConfirmOutcome }>}
+ * @import {
+ *   ConfirmInstall,
+ *   ConfirmOutcome,
+ *   InstallSuccess,
+ *   InstallFailure,
+ *   InstallResult,
+ * } from './types.d.ts'
  */
-
-/**
- * @typedef {Object} InstallSuccess
- * @property {true} ok
- * @property {PluginLockEntry} entry
- * @property {PluginLockFile} lock
- * @property {ConfirmOutcome} [confirmation]
- */
-
-/**
- * @typedef {Object} InstallFailure
- * @property {false} ok
- * @property {string} errorKind
- * @property {string} message
- * @property {ConfirmOutcome} [confirmation]
- */
-
-/** @typedef {InstallSuccess | InstallFailure} InstallResult */
 
 /**
  * Install a plugin end-to-end. Wraps the work in a `plugin.install`

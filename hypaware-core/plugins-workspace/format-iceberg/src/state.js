@@ -19,18 +19,7 @@ import { collectStream, pathToKey } from './blob-io.js'
  */
 const STATE_DIR = 'state/exported-batches'
 
-/**
- * @typedef {Object} ExportMarker
- * @property {string} dataset
- * @property {string} batchId
- * @property {Record<string, string>} partition
- * @property {number} rowCount
- * @property {number} bytesWritten
- * @property {string[]} dataFiles  Iceberg-relative or BlobStore-key data file paths.
- * @property {string} snapshotId   `current-snapshot-id` after the commit (stringified bigint or number).
- * @property {string} metadataVersion  e.g. `v3`.
- * @property {string} committedAt  ISO timestamp.
- */
+/** @import { ExportMarker } from './types.d.ts' */
 
 /**
  * Build the BlobStore key for a marker.
@@ -106,13 +95,8 @@ export async function writeMarker(blobStore, key, marker) {
   }
 }
 
+/** @import { ProbeStateLike } from './types.d.ts' */
 /** @typedef {import('icebird/src/types.js').TableMetadata} TableMetadata */
-
-/**
- * @typedef {Object} ProbeStateLike
- * @property {string | undefined} currentSnapshotId
- * @property {TableMetadata | null} [metadata]
- */
 
 /**
  * Decide whether the marker proves the current batch has already

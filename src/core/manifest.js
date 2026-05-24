@@ -6,24 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from './observability/index.js'
 
 /** @typedef {import('../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-/** @typedef {'manifest_invalid'} ManifestErrorKind */
-
-/**
- * @typedef {Object} LoadedManifest
- * @property {true} ok
- * @property {PluginManifest} manifest
- * @property {string} manifestPath
- * @property {string} rootDir
- */
-
-/**
- * @typedef {Object} FailedManifest
- * @property {false} ok
- * @property {ManifestErrorKind} errorKind
- * @property {string} message
- * @property {string} manifestPath
- * @property {string} rootDir
- */
+/** @import { ManifestErrorKind, LoadedManifest, FailedManifest } from './manifest.d.ts' */
 
 const MANIFEST_BASENAME = 'hypaware.plugin.json'
 

@@ -13,27 +13,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ExportBatch} ExportBatch */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ExportResult} ExportResult */
 
-/**
- * @typedef {Object} DriverOptions
- * @property {ExtendedSinkRegistry} sinkRegistry
- * @property {QueryRegistry} queryRegistry
- * @property {QueryStorageService} storage
- * @property {string} stateRoot                 Kernel state root (e.g. `<HYP_HOME>/hypaware`).
- * @property {import('../../../collectivus-plugin-kernel-types').HypAwareV2Config} [config]
- */
-
-/**
- * @typedef {Object} TickOptions
- * @property {Date} [now]
- * @property {string} [sinkInstance]            Only fire one sink (test/manual use).
- * @property {boolean} [force]                  Ignore cron-due check and fire every sink (test use).
- * @property {'daemon'|'manual'} [source]       Tag the tick metric so daemon vs. manual ticks split cleanly. Default `manual`.
- */
-
-/**
- * @typedef {Object} TickReport
- * @property {Array<{ instance: string, status: ExportResult['status'], partitionsExported: number, bytesWritten: number, error?: string }>} sinks
- */
+/** @import { DriverOptions, TickOptions, TickReport } from './types.d.ts' */
 
 /**
  * Build the kernel sink driver. The driver iterates sink handles on

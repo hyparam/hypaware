@@ -5,6 +5,7 @@ import fsSync from 'node:fs'
 import path from 'node:path'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
+/** @import { SpoolAppendResult, FlushResult, PendingInfo, CacheSpool } from './types.d.ts' */
 
 export const SPOOL_DIR = '_hypaware_spool'
 export const DEFAULT_SPOOL_BYTES_THRESHOLD = 4 * 1024 * 1024
@@ -15,38 +16,6 @@ const ACTIVE_FILE = 'active.jsonl'
 const FLUSH_PREFIX = 'flush-'
 const FLUSH_SUFFIX = '.jsonl'
 const LAST_FLUSH_FILE = 'last-flush.json'
-
-/**
- * @typedef {Object} SpoolAppendResult
- * @property {number} bytesWritten
- * @property {number} pendingBytes
- */
-
-/**
- * @typedef {Object} FlushResult
- * @property {boolean} flushed
- * @property {number} rowCount
- * @property {number} chunkCount
- * @property {number} bytesWritten
- * @property {number} pendingBytes
- * @property {string} reason
- */
-
-/**
- * @typedef {Object} PendingInfo
- * @property {boolean} pending
- * @property {number} pendingBytes
- * @property {number | null} lastFlushAtMs
- */
-
-/**
- * @typedef {Object} CacheSpool
- * @property {(tablePath: string, columns: readonly ColumnSpec[], rows: Record<string, unknown>[]) => Promise<SpoolAppendResult>} append
- * @property {(tablePath: string, opts?: { reason?: string, force?: boolean }) => Promise<FlushResult>} flushTable
- * @property {(opts?: { reason?: string, force?: boolean }) => Promise<FlushResult>} flushAll
- * @property {(tablePath: string) => Promise<PendingInfo>} pendingInfo
- * @property {(tablePath: string) => boolean} hasPendingSync
- */
 
 /**
  * @param {{

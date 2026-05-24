@@ -10,49 +10,15 @@ import { pluginInstallDir } from './paths.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginSourceSpec} PluginSourceSpec */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').PluginManifest} PluginManifest */
-
 /**
- * @typedef {Object} FetchSuccess
- * @property {true} ok
- * @property {PluginManifest} manifest
- * @property {string} installDir
- * @property {string} contentHash
- * @property {string} manifestHash
- * @property {string} [resolvedRef]
- * @property {{ host?: string, owner?: string, repo?: string }} [provenance]
+ * @import {
+ *   FetchSuccess,
+ *   FetchFailure,
+ *   FetchResult,
+ *   FetchErrorKind,
+ *   BeforeCommitCallback,
+ * } from './types.d.ts'
  */
-
-/**
- * @typedef {Object} FetchFailure
- * @property {false} ok
- * @property {FetchErrorKind} errorKind
- * @property {string} message
- */
-
-/** @typedef {FetchSuccess | FetchFailure} FetchResult */
-
-/**
- * @typedef {(
- *   'local_dir_missing'|
- *   'local_dir_invalid'|
- *   'manifest_invalid'|
- *   'manifest_name_mismatch'|
- *   'fetch_unsupported'|
- *   'git_unavailable'|
- *   'git_clone_failed'|
- *   'git_checkout_failed'|
- *   'git_ref_not_found'|
- *   'git_subdir_missing'|
- *   'git_subdir_unsupported'|
- *   'entrypoint_invalid'|
- *   'artifact_symlink_unsupported'|
- *   'artifact_copy_failed'|
- *   'remote_install_confirmation_required'|
- *   'remote_install_rejected'
- * )} FetchErrorKind
- */
-
-/** @typedef {import('./git_fetch.js').BeforeCommitCallback} BeforeCommitCallback */
 
 const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])
 

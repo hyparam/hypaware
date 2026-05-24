@@ -17,35 +17,7 @@
 
 export const TRANSPORT_SYMBOL = Symbol.for('hypaware-gascity:transport')
 
-/**
- * @typedef {Object} GascityFrame
- * @property {string} city
- * @property {string} provider_session_id
- * @property {string} event_kind
- * @property {string} event_time
- * @property {string} [template]
- * @property {string} [content_text]
- * @property {Record<string, unknown>} [metadata]
- */
-
-/**
- * @typedef {Object} GascityCitySubscription
- * @property {() => Promise<void>} close
- */
-
-/**
- * The transport surface a fixture must implement. `subscribe` is
- * called once per attached city; the supervisor pumps frames into the
- * supplied `onFrame` callback.
- *
- * @typedef {Object} GascityTransport
- * @property {(opts: {
- *   city: string,
- *   apiUrl?: string,
- *   onFrame: (frame: GascityFrame) => Promise<void> | void,
- *   signal: AbortSignal,
- * }) => Promise<GascityCitySubscription>} subscribe
- */
+/** @import { GascityFrame, GascityCitySubscription, GascityTransport } from './types.d.ts' */
 
 /**
  * Look up the active transport from the `globalThis` registry. The

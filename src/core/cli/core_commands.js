@@ -34,9 +34,9 @@ import {
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRegistration} CommandRegistration */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').CommandRunContext} CommandRunContext */
-/** @typedef {ReturnType<typeof import('../registry/commands.js').createCommandRegistry>} CommandRegistryExtended */
 /** @typedef {import('../query/sql.js').RefreshMode} RefreshMode */
 /** @typedef {import('../query/format.js').QueryFormat} QueryFormat */
+/** @import { CommandRegistryExtended, InitFlags } from './types.d.ts' */
 
 const execFileAsync = promisify(execFile)
 
@@ -1939,19 +1939,6 @@ function hasInitFlags(argv) {
     return false
   })
 }
-
-/**
- * @typedef {Object} InitFlags
- * @property {boolean} yes
- * @property {boolean} noDaemon
- * @property {boolean} dryRun
- * @property {('claude'|'codex')[]} clients
- * @property {('claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel')[]} sources
- * @property {('keep-local'|'local-parquet'|'configure-later') | undefined} exportChoice
- * @property {number} retentionDays
- * @property {string} [fromFile]
- * @property {string} [binPath]
- */
 
 /**
  * @param {string[]} argv

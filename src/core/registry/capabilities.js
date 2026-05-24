@@ -101,13 +101,7 @@ export function createCapabilityRegistry() {
   }
 }
 
-/**
- * @typedef {Object} InternalRegistration
- * @property {string} provider
- * @property {string} name
- * @property {string} version
- * @property {unknown} value
- */
+/** @import { InternalRegistration } from './types.d.ts' */
 
 /**
  * @param {InternalRegistration[]} registrations

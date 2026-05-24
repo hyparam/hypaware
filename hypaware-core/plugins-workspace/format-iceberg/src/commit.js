@@ -9,32 +9,8 @@ import {
 
 import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords } from './schema.js'
 
+/** @import { TableState, CommitInput, CommitResult } from './types.d.ts' */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
-
-/**
- * @typedef {Object} TableState
- * @property {boolean} exists                 True when at least one metadata file is visible.
- * @property {import('icebird/src/types.js').TableMetadata | null} metadata
- * @property {string | undefined} currentSnapshotId
- */
-
-/**
- * @typedef {Object} CommitInput
- * @property {string} tableUrl                Table URL the resolver understands.
- * @property {readonly ColumnSpec[]} columns  Dataset column schema.
- * @property {readonly Record<string, unknown>[]} rows  Coerced records.
- * @property {import('icebird/src/types.js').Resolver} resolver
- * @property {import('icebird/src/types.js').Lister} lister
- */
-
-/**
- * @typedef {Object} CommitResult
- * @property {string} snapshotId
- * @property {string} metadataVersion
- * @property {string[]} dataFiles
- * @property {number} bytesWritten
- * @property {number} rowCount
- */
 
 /**
  * Probe the table for an existing snapshot. Returns `exists=false`

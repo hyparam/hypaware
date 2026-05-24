@@ -12,26 +12,7 @@ import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 /** @typedef {import('../cache/storage.js').ExtendedQueryStorageService} ExtendedQueryStorageService */
 /** @typedef {import('squirreling').AsyncDataSource} AsyncDataSource */
 
-/** @typedef {'never' | 'auto' | 'always'} RefreshMode */
-
-/**
- * @typedef {Object} ExecuteSqlOptions
- * @property {string} query
- * @property {QueryRegistry} registry
- * @property {ExtendedQueryStorageService} storage
- * @property {HypAwareV2Config} [config]
- * @property {QueryScope} [scope]
- * @property {RefreshMode} [refresh]
- * @property {PluginLogger} [log]
- */
-
-/**
- * @typedef {Object} ExecuteSqlResult
- * @property {string[]} columns
- * @property {Record<string, unknown>[]} rows
- * @property {string[]} datasets
- * @property {string[]} freshnessMessages
- */
+/** @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from './types.d.ts' */
 
 /**
  * Run a read-only SELECT against the kernel's dataset registry. The

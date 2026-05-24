@@ -8,14 +8,9 @@ import { getActiveTransport } from './transport.js'
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').SourceStatus} SourceStatus */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').StartedSource} StartedSource */
+/** @import { CityConfig } from './types.d.ts' */
 /** @typedef {import('./transport.js').GascityCitySubscription} GascityCitySubscription */
 /** @typedef {import('./transport.js').GascityFrame} GascityFrame */
-
-/**
- * @typedef {Object} CityConfig
- * @property {string} name
- * @property {string} [api_url]
- */
 
 /**
  * `startGascitySource(ctx)` is the `SourceContribution.start` callback

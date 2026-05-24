@@ -6,7 +6,7 @@ import { installTracerProvider } from './tracer.js'
 import { installLoggerProvider } from './logger.js'
 import { installMeterProvider, resetKernelInstruments } from './meter.js'
 
-/** @typedef {Awaited<ReturnType<typeof installObservability>>} ObservabilityHandle */
+/** @import { ObservabilityHandle } from './types.d.ts' */
 
 /** @type {ReturnType<typeof buildHandle> | null} */
 let installed = null

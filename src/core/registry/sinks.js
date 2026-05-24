@@ -19,68 +19,14 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 /** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
 
 /**
- * @typedef {Object} InstantiateBlobArgs
- * @property {'blob'} kind
- * @property {string} instanceName
- * @property {SinkContribution} destination  Sink contribution providing the destination (e.g. `local-fs`).
- * @property {string} writerPlugin           Writer plugin name (e.g. `@hypaware/format-parquet`).
- * @property {SinkEncoder} encoder           Encoder resolved from the writer plugin's `hypaware.encoder` capability.
- * @property {SinkInstanceConfig} config     Validated instance config (with `schedule`).
- * @property {ActivePlugin} plugin           The destination's active plugin record.
- * @property {PluginPaths} paths             Per-plugin paths for the destination.
- * @property {PluginLogger} log              Per-plugin logger for the destination.
- */
-
-/**
- * @typedef {Object} InstantiateTableFormatArgs
- * @property {'table-format'} kind
- * @property {string} instanceName
- * @property {TableFormatProvider} tableFormat Capability value from the writer plugin's `hypaware.table-format`.
- * @property {string} writerPlugin            Writer plugin name (e.g. `@hypaware/format-iceberg`).
- * @property {string} destinationPlugin       Destination plugin name (e.g. `@hypaware/local-fs`).
- * @property {BlobStore} blobStore            BlobStore from the destination plugin's `hypaware.blob-store`.
- * @property {SinkEncoder} encoder            Inner encoder; defaults to format-parquet when no `config.encoder` pin.
- * @property {SinkInstanceConfig} config      Validated instance config (with `schedule`).
- * @property {ActivePlugin} plugin            The writer plugin's active plugin record.
- * @property {PluginPaths} paths              Per-plugin paths for the writer.
- * @property {PluginLogger} log               Per-plugin logger for the writer.
- * @property {QueryRegistry} query            Kernel query registry.
- * @property {QueryStorageService} storage    Kernel storage service.
- */
-
-/**
- * @typedef {Object} InstantiateRequestArgs
- * @property {'request'} kind
- * @property {string} instanceName
- * @property {SinkContribution} contribution Sink contribution for the request destination.
- * @property {SinkInstanceConfig} config
- * @property {ActivePlugin} plugin
- * @property {PluginPaths} paths
- * @property {PluginLogger} log
- */
-
-/** @typedef {InstantiateBlobArgs | InstantiateTableFormatArgs | InstantiateRequestArgs} InstantiateArgs */
-
-/**
- * @typedef {SinkHandle & {
- *   kind: 'blob' | 'request' | 'table-format',
- *   instanceName: string,
- *   writer?: string,
- *   destination?: string,
- *   config: SinkInstanceConfig,
- *   encoder?: SinkEncoder,
- *   tableFormat?: string,
- * }} ExtendedSinkHandle
- */
-
-/**
- * @typedef {SinkRegistryContract & {
- *   instantiate: (args: InstantiateArgs) => Promise<ExtendedSinkHandle>,
- *   getContribution: (plugin: string, sinkName: string) => SinkContribution | undefined,
- *   listContributions: () => Array<{ plugin: string, contribution: SinkContribution }>,
- *   listHandles: () => ExtendedSinkHandle[],
- *   closeAll: () => Promise<void>,
- * }} ExtendedSinkRegistry
+ * @import {
+ *   InstantiateBlobArgs,
+ *   InstantiateTableFormatArgs,
+ *   InstantiateRequestArgs,
+ *   InstantiateArgs,
+ *   ExtendedSinkHandle,
+ *   ExtendedSinkRegistry,
+ * } from './types.d.ts'
  */
 
 /**

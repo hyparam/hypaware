@@ -2,25 +2,12 @@
 
 import { createHash } from 'node:crypto'
 
+/** @import { CodexLogReader } from './types.d.ts' */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeProjector} AiGatewayExchangeProjector */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayExchangeInput} AiGatewayExchangeInput */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedExchange} AiGatewayProjectedExchange */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').AiGatewayProjectedMessage} AiGatewayProjectedMessage */
 /** @typedef {import('../../../../collectivus-plugin-kernel-types').JsonObject} JsonObject */
-
-/**
- * @typedef {Object} CodexLogReader
- * @property {string} name
- *   Identifier used in telemetry and de-dup.
- * @property {(input: AiGatewayExchangeInput) => Record<string, unknown> | undefined} read
- *   Pure function that may augment the projection with locally-collected
- *   Codex state (e.g. parsed SQLite turn rows). Returning `undefined`
- *   means "no augmentation"; the projector still proceeds.
- *
- * Reserved for a follow-up bead — the Codex SQLite reader is not in
- * this phase. Registration today is a no-op behind the
- * `HYPAWARE_CODEX_SQLITE_READS` env flag.
- */
 
 /**
  * Build the `@hypaware/codex` adapter's full exchange projector. The

@@ -291,10 +291,4 @@ function newDataError(kind, message) {
   return err
 }
 
-/**
- * @typedef {Object} IcebergField
- * @property {number} id
- * @property {string} name
- * @property {boolean} required
- * @property {string} type
- */
+/** @import { IcebergField } from './types.d.ts' */

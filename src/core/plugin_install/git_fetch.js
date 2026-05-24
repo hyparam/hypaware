@@ -25,64 +25,14 @@ const SKIPPED_DIR_NAMES = new Set([
 ])
 
 /**
- * @typedef {Object} GitFetchSuccess
- * @property {true} ok
- * @property {PluginManifest} manifest
- * @property {string} installDir
- * @property {string} contentHash
- * @property {string} manifestHash
- * @property {string} resolvedRef
- * @property {{ host?: string, owner?: string, repo?: string }} provenance
- */
-
-/**
- * @typedef {Object} GitFetchFailure
- * @property {false} ok
- * @property {GitFetchErrorKind} errorKind
- * @property {string} message
- */
-
-/** @typedef {GitFetchSuccess | GitFetchFailure} GitFetchResult */
-
-/**
- * @typedef {(
- *   'git_unavailable'|
- *   'git_clone_failed'|
- *   'git_checkout_failed'|
- *   'git_ref_not_found'|
- *   'git_subdir_missing'|
- *   'git_subdir_unsupported'|
- *   'manifest_invalid'|
- *   'manifest_name_mismatch'|
- *   'entrypoint_invalid'|
- *   'artifact_symlink_unsupported'|
- *   'artifact_copy_failed'|
- *   'lock_write_error'|
- *   'remote_install_confirmation_required'|
- *   'remote_install_rejected'
- * )} GitFetchErrorKind
- */
-
-/**
- * Snapshot of a fetched-but-not-yet-installed artifact. Passed to the
- * `beforeCommit` callback so a CLI front-end can prompt the user (or
- * enforce `--yes`) immediately before the rename swap that places the
- * artifact into the kernel install root. Mirrors the public
- * `StagedArtifact` shape in `confirm.js` but kept structurally typed
- * to avoid the cross-module import for callers that just want hashes.
- *
- * @typedef {Object} GitFetchStaged
- * @property {PluginManifest} manifest
- * @property {string} resolvedRef
- * @property {string} contentHash
- * @property {string} manifestHash
- * @property {{ host?: string, owner?: string, repo?: string }} provenance
- */
-
-/**
- * @callback BeforeCommitCallback
- * @param {GitFetchStaged} staged
- * @returns {Promise<{ proceed: boolean, errorKind?: GitFetchErrorKind, message?: string }>}
+ * @import {
+ *   GitFetchSuccess,
+ *   GitFetchFailure,
+ *   GitFetchResult,
+ *   GitFetchErrorKind,
+ *   GitFetchStaged,
+ *   BeforeCommitCallback,
+ * } from './types.d.ts'
  */
 
 /**

@@ -7,16 +7,7 @@ const DEFAULT_SERVICE_NAME = 'hypaware'
 const DEFAULT_HYP_HOME_DIRNAME = '.hyp'
 const HYP_STATE_SUBDIR = 'hypaware'
 
-/**
- * @typedef {Object} ObservabilityEnv
- * @property {boolean} devTelemetry
- * @property {string} otlpEndpoint
- * @property {string} serviceName
- * @property {string} hypHome
- * @property {string} stateDir
- * @property {string|undefined} devRunId
- * @property {string} resourceAttributes
- */
+/** @import { ObservabilityEnv } from './types.d.ts' */
 
 /**
  * @param {NodeJS.ProcessEnv} [env]

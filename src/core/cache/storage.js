@@ -13,15 +13,7 @@ import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 
 /** @typedef {import('../../../collectivus-plugin-kernel-types').ColumnSpec} ColumnSpec */
 /** @typedef {import('../../../collectivus-plugin-kernel-types').QueryStorageService} QueryStorageService */
-
-/**
- * @typedef {QueryStorageService & {
- *   dataSourceForTable(tablePath: string): Promise<import('squirreling').AsyncDataSource | null>,
- *   flushTable(tablePath: string, opts?: { reason?: string, force?: boolean }): Promise<{ flushed: boolean, rowCount: number, chunkCount: number, bytesWritten: number, pendingBytes: number, reason: string }>,
- *   flushAll(opts?: { reason?: string, force?: boolean }): Promise<{ flushed: boolean, rowCount: number, chunkCount: number, bytesWritten: number, pendingBytes: number, reason: string }>,
- *   pendingInfo(tablePath: string): Promise<{ pending: boolean, pendingBytes: number, lastFlushAtMs: number | null }>
- * }} ExtendedQueryStorageService
- */
+/** @import { ExtendedQueryStorageService } from './types.d.ts' */
 
 /**
  * Build the kernel-owned `QueryStorageService`. Plugins reach this

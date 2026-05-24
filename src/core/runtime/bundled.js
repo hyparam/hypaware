@@ -58,13 +58,7 @@ export function defaultBundledWorkspaceDir() {
   return path.join(repoRoot, 'hypaware-core', 'plugins-workspace')
 }
 
-/**
- * @typedef {Object} DiscoverBundledResult
- * @property {LoadedManifest[]} loaded         Manifests inside the V1 allowlist.
- * @property {FailedManifest[]} failed         Manifests that failed to parse.
- * @property {LoadedManifest[]} excluded       Loadable but excluded from V1 default surface.
- * @property {string[]} unknownDirs            Directories with manifests not in the allowlist or excluded set.
- */
+/** @import { DiscoverBundledResult } from './types.d.ts' */
 
 /**
  * Walk `workspaceDir` and split discovered plugin manifests into:
