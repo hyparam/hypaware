@@ -11,6 +11,7 @@ import {
 
 /**
  * @import { HypError } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Schema } from 'icebird/src/types.js'
  */
 
 test('icebergSchemaForColumns maps every kernel basic type', () => {
@@ -37,7 +38,9 @@ test('icebergSchemaForColumns maps every kernel basic type', () => {
 })
 
 test('mergeFieldIdsFromTable preserves existing field ids and appends nullable additions', () => {
+  /** @type {Schema} */
   const existing = {
+    type: 'struct',
     'schema-id': 7,
     fields: [
       { id: 11, name: 'a', required: false, type: 'string' },
@@ -61,7 +64,9 @@ test('mergeFieldIdsFromTable preserves existing field ids and appends nullable a
 })
 
 test('mergeFieldIdsFromTable rejects incompatible type changes with iceberg_schema_incompatible', () => {
+  /** @type {Schema} */
   const existing = {
+    type: 'struct',
     'schema-id': 0,
     fields: [{ id: 1, name: 'a', required: false, type: 'long' }],
   }
@@ -76,7 +81,9 @@ test('mergeFieldIdsFromTable rejects incompatible type changes with iceberg_sche
 })
 
 test('mergeFieldIdsFromTable rejects new required columns', () => {
+  /** @type {Schema} */
   const existing = {
+    type: 'struct',
     'schema-id': 0,
     fields: [{ id: 1, name: 'a', required: false, type: 'string' }],
   }
@@ -94,7 +101,9 @@ test('mergeFieldIdsFromTable rejects new required columns', () => {
 })
 
 test('mergeFieldIdsFromTable rejects column removals', () => {
+  /** @type {Schema} */
   const existing = {
+    type: 'struct',
     'schema-id': 0,
     fields: [
       { id: 1, name: 'a', required: false, type: 'string' },
@@ -112,7 +121,9 @@ test('mergeFieldIdsFromTable rejects column removals', () => {
 })
 
 test('mergeFieldIdsFromTable rejects nullable → required tightening', () => {
+  /** @type {Schema} */
   const existing = {
+    type: 'struct',
     'schema-id': 0,
     fields: [{ id: 1, name: 'a', required: false, type: 'string' }],
   }

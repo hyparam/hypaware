@@ -2,7 +2,7 @@
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { Field, IcebergType } from 'icebird/src/types.js'
+ * @import { Field, IcebergType, Schema } from 'icebird/src/types.js'
  */
 
 const ICEBERG_SCHEMA_ID = 0
@@ -24,7 +24,7 @@ const ICEBERG_SCHEMA_ID = 0
  *   JSON      -> string        (canonical-JSON payload)
  *
  * @param {readonly ColumnSpec[]} columns
- * @returns {{ type: 'struct', 'schema-id': number, fields: Field[] }}
+ * @returns {Schema}
  */
 export function icebergSchemaForColumns(columns) {
   /** @type {Field[]} */
@@ -60,8 +60,8 @@ export function icebergSchemaForColumns(columns) {
  * - Column removals are rejected (V1 is append-only).
  *
  * @param {readonly ColumnSpec[]} columns
- * @param {{ fields: Field[], 'schema-id'?: number }} existing
- * @returns {{ type: 'struct', 'schema-id': number, fields: Field[] }}
+ * @param {Schema} existing
+ * @returns {Schema}
  */
 export function mergeFieldIdsFromTable(columns, existing) {
   /** @type {Map<string, Field>} */

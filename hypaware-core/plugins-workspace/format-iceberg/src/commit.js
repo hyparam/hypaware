@@ -154,7 +154,7 @@ function schemaFromExistingMetadata(columns, metadata) {
   if (!existing) {
     return icebergSchemaForColumns(columns)
   }
-  return mergeFieldIdsFromTable(columns, /** @type {any} */ (existing))
+  return mergeFieldIdsFromTable(columns, existing)
 }
 
 /**
