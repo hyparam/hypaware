@@ -372,7 +372,7 @@ export function isLaunchAgentInstalled(options) {
  * not in its domain. When loaded, includes a `pid` only if the agent
  * currently has a running process.
  *
- * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string, homeDir?: string, platform?: NodeJS.Platform }} options
  * @returns {Promise<{ loaded: boolean, pid?: number }>}
  */
 export async function launchAgentStatus(options) {

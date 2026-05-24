@@ -4,3 +4,5 @@ export type {
   StartedSource,
   SourceStatus,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
+
+export function createSourceRegistry(): import('./types.d.ts').ExtendedSourceRegistry

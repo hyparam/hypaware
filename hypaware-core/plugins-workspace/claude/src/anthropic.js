@@ -449,7 +449,10 @@ function readKey(obj, key) {
   return obj[key]
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }

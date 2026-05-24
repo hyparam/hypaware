@@ -5,7 +5,6 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 /**
  * @import { BlobSinkConfigInstance, CapabilityName, ConfigRegistry, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance, ValidationError } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { LoadedManifest } from '../manifest.js'
- * @import { *, *   ConfigValidationError, *   ConfigValidationErrorKind, *   PluginMetadata, *   V1Diagnostic, *   V1DiagnosticKind, *   ValidateContext, *   ValidateResult } from './types.d.ts'
  */
 
 /**

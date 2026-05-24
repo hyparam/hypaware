@@ -4,7 +4,7 @@ import path from 'node:path'
 
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/storage.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
  */
 
 export const DATASET_NAME = 'gascity_messages'

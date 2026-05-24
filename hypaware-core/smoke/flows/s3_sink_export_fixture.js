@@ -18,6 +18,10 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
+/**
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PLUGINS_WORKSPACE = path.resolve(SMOKE_DIR, '../../plugins-workspace')
 const DATASET = 'dummy_rows'

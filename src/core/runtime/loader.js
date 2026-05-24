@@ -126,7 +126,7 @@ export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpR
  * @param {string} message
  */
 function newActivationError(errorKind, message) {
-  const err = new Error(message)
-  /** @type {Error & { hypErrorKind?: string }} */ (err).hypErrorKind = errorKind
+  const err = /** @type {Error & { hypErrorKind?: string }} */ (new Error(message))
+  err.hypErrorKind = errorKind
   return err
 }

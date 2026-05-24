@@ -12,9 +12,7 @@ import { ensureDurableBinForNpx } from './global_install.js'
 /**
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { DaemonInstallOptions } from '../daemon/types.d.ts'
- * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
- * @import { ExtendedSourceRegistry } from '../registry/sources.js'
- * @import { *, *   AsyncPickPrompt, *   AsyncRetentionPrompt, *   FinaleSummary, *   PickerExport, *   PickerFinaleActions, *   PickerPicks, *   PickerSource, *   PickerWalkthroughResult, *   RunPickerWalkthroughOptions, *   WalkthroughOption, *   WalkthroughOptions, *   WalkthroughQuestion, *   WalkthroughResult } from './types.d.ts'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  */
 
 /**

@@ -66,7 +66,6 @@ export function planDaemonInstall(options) {
   }
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
-  /** @type {DaemonInstallOptions} */
   const merged = { ...options, configPath, logDir }
   if (platform === 'darwin') return macos.planLaunchAgentInstall(merged)
   return linux.planSystemdInstall(merged)

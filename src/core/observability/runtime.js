@@ -220,6 +220,7 @@ export class Span {
     this.kind = 0
     this.attributes = { ...attributes }
     this.events = []
+    /** @type {{ code: number, message?: string }} */
     this.status = { code: SpanStatusCode.UNSET }
     this.startTime = nowHrTime()
     this.endTime = this.startTime
@@ -429,7 +430,10 @@ export function nowUnixNano() {
   return BigInt(Math.round((performance.timeOrigin + performance.now()) * 1_000_000))
 }
 
-/** @param {bigint} ns */
+/**
+ * @param {bigint} ns
+ * @returns {[number, number]}
+ */
 export function nsToHrTime(ns) {
   const sec = ns / 1_000_000_000n
   const nanos = ns % 1_000_000_000n

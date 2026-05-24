@@ -12,7 +12,7 @@ import { flattenOtlpMetrics } from './otlp/metrics.js'
 
 /**
  * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { OtlpRequest } from './server.js'
+ * @import { OtlpRequest } from './types.d.ts'
  */
 
 const FLATTENERS = {

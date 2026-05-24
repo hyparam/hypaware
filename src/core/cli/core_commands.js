@@ -37,8 +37,7 @@ import {
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
- * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
- * @import { ExtendedSourceRegistry } from '../registry/sources.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'
  */
 

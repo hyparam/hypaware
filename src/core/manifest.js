@@ -154,8 +154,8 @@ export function validateManifest(value) {
  * @param {string} message
  */
 function newManifestError(errorKind, message) {
-  const err = new Error(message)
-  /** @type {Error & { hypErrorKind?: string }} */ (err).hypErrorKind = errorKind
+  const err = /** @type {Error & { hypErrorKind?: string }} */ (new Error(message))
+  err.hypErrorKind = errorKind
   return err
 }
 
@@ -164,7 +164,10 @@ function invalid(message) {
   return /** @type {const} */ ({ ok: false, errorKind: 'manifest_invalid', message })
 }
 
-/** @param {unknown} v */
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v)
 }

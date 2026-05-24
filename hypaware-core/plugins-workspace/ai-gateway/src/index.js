@@ -7,7 +7,7 @@ import { setAiGatewayRuntime } from './runtime.js'
 
 /**
  * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/sources.js'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'

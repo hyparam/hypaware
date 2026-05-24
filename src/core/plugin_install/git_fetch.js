@@ -12,7 +12,6 @@ import { pluginInstallDir } from './paths.js'
 
 /**
  * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { *, *   BeforeCommitCallback, *   GitFetchErrorKind, *   GitFetchFailure, *   GitFetchResult, *   GitFetchStaged, *   GitFetchSuccess } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  */
 
@@ -57,8 +56,8 @@ const SKIPPED_DIR_NAMES = new Set([
  * @param {object} args
  * @param {PluginSourceSpec & { subdir?: string }} args.source
  * @param {string} args.stateDir
- * @param {string} [args.runId] — injectable for tests/smokes
- * @param {BeforeCommitCallback} [args.beforeCommit] — fires after manifest
+ * @param {string} [args.runId] - injectable for tests/smokes
+ * @param {BeforeCommitCallback} [args.beforeCommit] - fires after manifest
  *   validate + hash computation, immediately before the artifact rename
  *   swap. Returning `proceed=false` aborts the fetch with the supplied
  *   `errorKind` and leaves any prior install untouched.

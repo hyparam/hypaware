@@ -5,7 +5,7 @@ import { startOtelSource } from './source.js'
 
 /**
  * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/sources.js'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
  */
 
 /**

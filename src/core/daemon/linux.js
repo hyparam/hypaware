@@ -367,7 +367,7 @@ export function isSystemdUnitInstalled(options) {
  * Query the runtime status of the systemd user unit via
  * `systemctl --user show <unit>`.
  *
- * @param {{ label?: string, systemctl?: SystemctlAdapter }} options
+ * @param {{ label?: string, systemctl?: SystemctlAdapter, homeDir?: string, platform?: NodeJS.Platform }} options
  * @returns {Promise<{ loaded: boolean, pid?: number }>}
  */
 export async function systemdUnitStatus(options) {

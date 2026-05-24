@@ -70,7 +70,10 @@ function invalid(message) {
   return /** @type {const} */ ({ ok: false, message })
 }
 
-/** @param {unknown} v */
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
 }

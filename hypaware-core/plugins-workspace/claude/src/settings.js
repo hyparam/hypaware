@@ -351,7 +351,10 @@ function shellQuote(value) {
   return quote + value.split(quote).join(quote + '\\' + quote + quote) + quote
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
