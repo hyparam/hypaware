@@ -5,7 +5,7 @@ import type {
   PluginConfigInstance,
   CommandRegistration,
   CommandRunContext,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ExtendedSourceRegistry } from '../registry/sources.js'
 import type { ExtendedSinkRegistry } from '../registry/sinks.js'
 import type { createCommandRegistry } from '../registry/commands.js'

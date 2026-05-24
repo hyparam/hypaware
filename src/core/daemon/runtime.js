@@ -25,9 +25,9 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
- * @import { JsonObject } from '../../../collectivus-plugin-kernel-types'
+ * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { KernelRuntime } from '../runtime/activation.js'
- * @import { BootKernelResult } from '../runtime/boot.js'
+ * @import { BootKernelResult } from '../runtime/types.d.ts'
  * @import { *, *   DaemonHandle, *   DaemonState, *   DaemonStatus, *   RunDaemonOptions, *   SinkSnapshot, *   SourceSnapshot } from './types.d.ts'
  */
 

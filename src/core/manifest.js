@@ -6,7 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from './observability/index.js'
 
 /**
- * @import { PluginManifest } from '../../collectivus-plugin-kernel-types'
+ * @import { PluginManifest } from '../../collectivus-plugin-kernel-types.d.ts'
  * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from './manifest.d.ts'
  */
 

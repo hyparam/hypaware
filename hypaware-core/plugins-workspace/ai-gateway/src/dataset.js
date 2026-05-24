@@ -5,8 +5,8 @@ import path from 'node:path'
 import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
 
 /**
- * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/storage.js'
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
  */
 
 export const DATASET_NAME = 'ai_gateway_messages'

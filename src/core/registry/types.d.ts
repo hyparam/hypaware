@@ -15,7 +15,7 @@ import type {
   StartedSource,
   SourceStatus,
   TableFormatProvider,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 
 export interface InternalRegistration {
   provider: string

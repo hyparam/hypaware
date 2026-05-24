@@ -2,7 +2,7 @@ import type {
   HypAwareV2Config,
   CapabilityRegistry,
   QueryRegistry,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
 import type { ExtendedSourceRegistry } from '../registry/sources.js'
 import type { ExtendedSinkRegistry } from '../registry/sinks.js'

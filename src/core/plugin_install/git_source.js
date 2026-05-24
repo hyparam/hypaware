@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { GitSourceParts } from './types.d.ts'
  */
 

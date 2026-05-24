@@ -12,7 +12,7 @@
  */
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { GatewayState } from './api.js'
  * @import { AiGatewayRuntime } from './types.d.ts'
  */

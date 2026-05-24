@@ -1,7 +1,7 @@
 import type {
   CapabilityRegistry,
   CapabilityRegistration,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 
 export type { CapabilityRegistry, CapabilityRegistration }
 

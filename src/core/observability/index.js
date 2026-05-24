@@ -7,9 +7,8 @@ import { installLoggerProvider } from './logger.js'
 import { installMeterProvider, resetKernelInstruments } from './meter.js'
 
 /**
- * @import { ObservabilityEnv } from './env.js'
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
- * @import { ObservabilityHandle } from './types.d.ts'
+ * @import { ObservabilityEnv, ObservabilityHandle } from './types.d.ts'
  */
 
 /** @type {ReturnType<typeof buildHandle> | null} */

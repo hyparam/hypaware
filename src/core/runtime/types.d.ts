@@ -3,7 +3,7 @@ import type {
   HypAwareV2Config,
   PluginLockEntry,
   PluginName,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { LoadedManifest, FailedManifest } from '../manifest.d.ts'
 import type { KernelRuntime } from './activation.d.ts'

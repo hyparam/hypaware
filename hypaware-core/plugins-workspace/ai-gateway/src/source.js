@@ -16,11 +16,9 @@ import { createRecorder } from './recorder.js'
 const PLUGIN_NAME = '@hypaware/ai-gateway'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types'
- * @import { GatewayState } from './api.js'
- * @import { UpstreamConfig } from './config.js'
- * @import { StartedProxy } from './proxy.js'
- * @import { Exchange, FinishedRow } from './recorder.js'
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { FinishedRow, GatewayState, StartedProxy, UpstreamConfig } from './types.d.ts'
+ * @import { Exchange } from './recorder.js'
  */
 
 /**

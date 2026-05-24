@@ -28,8 +28,8 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
- * @import { ConfigValidationError, V1Diagnostic } from '../config/validate.js'
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  * @import { *, *   ClientAttachReport, *   CollectStatusOptions, *   DaemonState, *   DaemonStatus, *   HypAwareStatusReport, *   ServiceState, *   SinkSnapshot, *   SourceSnapshot, *   StatusDiagnostic, *   StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  */
@@ -90,8 +90,8 @@ export function readStatusFile(stateRoot) {
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
- * @import { ConfigValidationError, V1Diagnostic } from '../config/validate.js'
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  */
 
 /**

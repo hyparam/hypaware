@@ -5,7 +5,7 @@ import type {
   AiGatewayRouteInput,
   AiGatewayUpstreamPreset,
   PluginActivationContext,
-} from '../../../../collectivus-plugin-kernel-types'
+} from '../../../../collectivus-plugin-kernel-types.d.ts'
 import type { Exchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 

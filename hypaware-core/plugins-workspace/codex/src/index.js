@@ -10,7 +10,7 @@ import { createCodexExchangeProjector } from './exchange-projector.js'
 import { attach, defaultConfigPath, detach } from './settings.js'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/codex'

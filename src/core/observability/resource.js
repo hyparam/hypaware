@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ObservabilityEnv } from './env.js'
+ * @import { ObservabilityEnv } from './types.d.ts'
  */
 
 /**

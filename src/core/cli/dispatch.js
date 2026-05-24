@@ -22,8 +22,8 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 
 /**
- * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
- * @import { BootProfile } from '../runtime/boot.js'
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BootProfile } from '../runtime/types.d.ts'
  * @import { DispatchOptions } from './dispatch.d.ts'
  */
 

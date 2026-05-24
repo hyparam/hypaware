@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types'
+ * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

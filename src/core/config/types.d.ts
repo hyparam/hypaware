@@ -4,7 +4,7 @@ import type {
   CapabilityName,
   ConfigRegistry,
   ValidationError,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 
 export interface LoadConfigSuccess {
   ok: true

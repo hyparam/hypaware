@@ -3,7 +3,7 @@
 import { normalizePrefix } from './config.js'
 
 /**
- * @import { QueryPartition } from '../../../../collectivus-plugin-kernel-types'
+ * @import { QueryPartition } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

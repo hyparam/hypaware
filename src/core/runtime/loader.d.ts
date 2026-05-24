@@ -2,7 +2,7 @@ import type {
   ActivePlugin,
   JsonObject,
   PluginManifest,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { KernelRuntime } from './activation'
 
 export interface PluginActivationEntry {

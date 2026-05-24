@@ -13,7 +13,7 @@ import { createPluginPaths } from './paths.js'
 import { createActivationContext, createKernelRuntime } from './activation.js'
 
 /**
- * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { KernelRuntime } from './activation.js'
  * @import { ActivationFailure, ActivationResult, ActivationSuccess, PluginActivationEntry } from './loader.d.ts'
  */

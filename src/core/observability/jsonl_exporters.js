@@ -6,7 +6,8 @@ import path from 'node:path'
 import { hrTimeToIso } from './runtime.js'
 
 /**
- * @import { LogRecord, MetricRecord, Span } from './runtime.js'
+ * @import { LogRecord, MetricRecord } from './types.d.ts'
+ * @import { Span } from './runtime.js'
  */
 
 const ExportResultCode = Object.freeze({

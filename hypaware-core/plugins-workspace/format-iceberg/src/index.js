@@ -3,7 +3,7 @@
 import { createTableFormatProvider } from './table-format.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/format-iceberg'

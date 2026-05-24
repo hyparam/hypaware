@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { IdentityClient } from './identity_client.js'
  * @import { CentralSinkConfig, IngestSignal } from './types.d.ts'
  */

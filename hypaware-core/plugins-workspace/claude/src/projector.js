@@ -29,7 +29,7 @@ import {
 } from './session_context.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

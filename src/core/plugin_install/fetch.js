@@ -9,7 +9,7 @@ import { fetchGitSource } from './git_fetch.js'
 import { pluginInstallDir } from './paths.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

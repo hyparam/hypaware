@@ -11,7 +11,7 @@
  */
 
 /**
- * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types'
+ * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.d.ts'
  */
 

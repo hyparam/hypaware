@@ -33,12 +33,10 @@ import {
 } from '../../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /**
- * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types'
- * @import { DaemonInstallOptions } from '../daemon/install.js'
- * @import { HypAwareStatusReport, ServiceState } from '../daemon/status.js'
- * @import { ConfirmInstall } from '../plugin_install/install.js'
- * @import { QueryFormat } from '../query/format.js'
- * @import { RefreshMode } from '../query/sql.js'
+ * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
+ * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
+ * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
  * @import { ExtendedSinkRegistry } from '../registry/sinks.js'
  * @import { ExtendedSourceRegistry } from '../registry/sources.js'
  * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'

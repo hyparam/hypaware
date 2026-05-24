@@ -3,7 +3,7 @@ import type {
   PluginSourceSpec,
   PluginLockEntry,
   PluginLockFile,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 
 export type ConfirmOutcome = 'confirmed' | 'auto_yes' | 'rejected' | 'non_tty_no_yes'
 

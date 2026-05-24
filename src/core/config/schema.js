@@ -6,7 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types'
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { *, *   ConfigLoadErrorKind, *   LoadConfigFailure, *   LoadConfigResult, *   LoadConfigSuccess } from './types.d.ts'
  */
 

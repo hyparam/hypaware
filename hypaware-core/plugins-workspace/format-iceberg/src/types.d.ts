@@ -1,4 +1,4 @@
-import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types'
+import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
 import type { TableMetadata, Resolver, Lister } from 'icebird/src/types.js'
 
 export interface TableState {

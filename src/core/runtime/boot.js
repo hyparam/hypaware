@@ -22,7 +22,7 @@ import {
 import { discoverInstalledPlugins } from './installed.js'
 
 /**
- * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { LoadedManifest } from '../manifest.js'
  * @import { KernelRuntime } from './activation.js'
  * @import { ActivationResult } from './loader.js'

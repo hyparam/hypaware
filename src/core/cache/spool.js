@@ -5,7 +5,7 @@ import fsSync from 'node:fs'
 import path from 'node:path'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from './types.d.ts'
  */
 

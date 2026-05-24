@@ -3,7 +3,7 @@
 import { Attr, withSpan } from '../observability/index.js'
 
 /**
- * @import { ColumnSpec, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../collectivus-plugin-kernel-types'
+ * @import { ColumnSpec, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

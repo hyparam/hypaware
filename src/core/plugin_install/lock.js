@@ -6,7 +6,7 @@ import path from 'node:path'
 import { pluginLockPath } from './paths.js'
 
 /**
- * @import { PluginLockEntry, PluginLockFile, PluginName } from '../../../collectivus-plugin-kernel-types'
+ * @import { PluginLockEntry, PluginLockFile, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const SCHEMA_VERSION = 1

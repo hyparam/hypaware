@@ -6,7 +6,7 @@ import { listEntries } from '../plugin_install/lock.js'
 import { loadManifest } from '../manifest.js'
 
 /**
- * @import { PluginLockEntry, PluginName } from '../../../collectivus-plugin-kernel-types'
+ * @import { PluginLockEntry, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { FailedManifest, LoadedManifest } from '../manifest.js'
  * @import { DiscoverInstalledResult } from './types.d.ts'
  */

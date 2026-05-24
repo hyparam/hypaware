@@ -12,7 +12,7 @@ import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projec
 import { defaultSessionContextFile } from './session_context.js'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'

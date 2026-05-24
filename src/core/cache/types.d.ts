@@ -1,4 +1,4 @@
-import type { ColumnSpec, QueryStorageService } from '../../../collectivus-plugin-kernel-types'
+import type { ColumnSpec, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { AsyncDataSource } from 'squirreling'
 
 export interface RetentionConfig {

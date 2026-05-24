@@ -9,7 +9,7 @@ import type {
   PluginPaths,
   QueryRegistry,
   SkillRegistry,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { CapabilityRegistryHandle } from '../registry/capabilities'
 import type { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
 import type { ExtendedQueryStorageService } from '../cache/types.d.ts'

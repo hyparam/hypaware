@@ -6,10 +6,9 @@ import https from 'node:https'
 import { parseListen } from './config.js'
 
 /**
- * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types'
- * @import { UpstreamConfig } from './config.js'
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompiledUpstream, ProxyOptions, StartedProxy, UpstreamConfig } from './types.d.ts'
  * @import { Exchange } from './recorder.js'
- * @import { CompiledUpstream, ProxyOptions, StartedProxy } from './types.d.ts'
  * @import { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
  */
 

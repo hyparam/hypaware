@@ -11,7 +11,7 @@ import { provenanceFromUrl } from './git_source.js'
 import { pluginInstallDir } from './paths.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types'
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { *, *   BeforeCommitCallback, *   GitFetchErrorKind, *   GitFetchFailure, *   GitFetchResult, *   GitFetchStaged, *   GitFetchSuccess } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  */

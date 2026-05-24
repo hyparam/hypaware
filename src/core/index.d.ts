@@ -14,4 +14,4 @@ export type {
   WriteStream,
   PluginPermission,
   PluginRuntime,
-} from '../../collectivus-plugin-kernel-types'
+} from '../../collectivus-plugin-kernel-types.d.ts'

@@ -473,7 +473,7 @@ function fixturePluginSource() {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const DATASET = 'dummy_rows'

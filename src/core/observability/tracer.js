@@ -6,7 +6,7 @@ import { OtlpSpanExporter } from './otlp_exporters.js'
 import { trace, TracerProvider } from './runtime.js'
 
 /**
- * @import { ObservabilityEnv } from './env.js'
+ * @import { ObservabilityEnv } from './types.d.ts'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000

@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto'
 export const SCHEMA_VERSION = 4
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types'
- * @import { RegisteredProjector } from './api.js'
+ * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { RegisteredProjector } from './types.d.ts'
  */
 
 /**

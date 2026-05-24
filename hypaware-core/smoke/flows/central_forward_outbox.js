@@ -421,7 +421,7 @@ function otelFixturePluginSource(devRunId) {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const DATASET = 'logs'

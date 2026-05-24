@@ -13,7 +13,7 @@ import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))

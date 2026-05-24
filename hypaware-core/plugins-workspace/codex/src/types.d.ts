@@ -1,4 +1,4 @@
-import type { AiGatewayExchangeInput } from '../../../../collectivus-plugin-kernel-types'
+import type { AiGatewayExchangeInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
 
 export interface CodexLogReader {
   /** Identifier used in telemetry and de-dup. */

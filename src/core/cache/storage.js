@@ -12,7 +12,7 @@ import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 
 /**
- * @import { ColumnSpec, QueryStorageService } from '../../../collectivus-plugin-kernel-types'
+ * @import { ColumnSpec, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from './types.d.ts'
  */
 

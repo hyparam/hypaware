@@ -4,7 +4,7 @@ import { createOtlpServer, listenAndResolve } from './server.js'
 import { makeReceiveHandler, stampBoundAddress } from './collector.js'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types'
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const DEFAULT_HOST = '127.0.0.1'

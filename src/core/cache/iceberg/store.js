@@ -16,7 +16,7 @@ import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import { icebergSchemaForColumns, rowsToIcebergRecords } from './schema.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */

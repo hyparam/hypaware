@@ -3,7 +3,7 @@ import type {
   PluginLogger,
   QueryRegistry,
   QueryScope,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
 
 export type QueryFormat = 'table' | 'json' | 'jsonl' | 'markdown'

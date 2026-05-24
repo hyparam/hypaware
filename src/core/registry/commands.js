@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CommandRegistration, CommandRegistry } from '../../../collectivus-plugin-kernel-types'
+ * @import { CommandRegistration, CommandRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

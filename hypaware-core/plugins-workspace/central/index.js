@@ -7,7 +7,7 @@ import { IdentityClient } from './src/identity_client.js'
 import { createForwardSink } from './src/sink.js'
 
 /**
- * @import { PluginActivationContext, SinkCreateContext } from '../../../collectivus-plugin-kernel-types'
+ * @import { PluginActivationContext, SinkCreateContext } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

@@ -3,7 +3,7 @@ import type {
   HypAwareV2Config,
   QueryRegistry,
   QueryStorageService,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ExtendedSinkRegistry } from '../registry/types.d.ts'
 
 export interface DriverOptions {

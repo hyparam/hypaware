@@ -13,8 +13,8 @@ import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
 /**
- * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types'
- * @import { ExtendedQueryStorageService } from '../cache/storage.js'
+ * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { KernelRuntime } from './activation.d.ts'
  */
 

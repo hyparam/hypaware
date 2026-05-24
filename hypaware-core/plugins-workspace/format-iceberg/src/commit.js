@@ -10,7 +10,7 @@ import {
 import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords } from './schema.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CommitInput, CommitResult, TableState } from './types.d.ts'
  * @import { Lister, Resolver, Snapshot, TableMetadata } from 'icebird/src/types.js'
  */

@@ -3,7 +3,8 @@
 import { hrTimeToUnixNano, SpanStatusCode } from './runtime.js'
 
 /**
- * @import { LogRecord, MetricRecord, Span } from './runtime.js'
+ * @import { LogRecord, MetricRecord } from './types.d.ts'
+ * @import { Span } from './runtime.js'
  */
 
 const OTLP_AGGREGATION_TEMPORALITY_CUMULATIVE = 2

@@ -3,7 +3,7 @@
 import { Buffer } from 'node:buffer'
 
 /**
- * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types'
+ * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { BlobIOWriteEvent, BlobIOWriteObserver } from './types.d.ts'
  * @import { Writer } from 'hyparquet-writer/src/types.js'
  * @import { Lister, Resolver } from 'icebird/src/types.js'

@@ -6,7 +6,7 @@ import { MeterProvider, metrics } from './runtime.js'
 import { OtlpMetricExporter } from './otlp_exporters.js'
 
 /**
- * @import { ObservabilityEnv } from './env.js'
+ * @import { ObservabilityEnv } from './types.d.ts'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000

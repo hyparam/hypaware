@@ -11,4 +11,4 @@ export type {
   ExportOptions,
   ExportResult,
   SinkQueryReader,
-} from '../../../collectivus-plugin-kernel-types'
+} from '../../../collectivus-plugin-kernel-types.d.ts'

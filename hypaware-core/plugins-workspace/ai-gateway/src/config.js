@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types'
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { AiGatewayConfig, UpstreamConfig } from './types.d.ts'
  */
 

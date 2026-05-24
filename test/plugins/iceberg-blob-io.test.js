@@ -12,7 +12,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types'
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**

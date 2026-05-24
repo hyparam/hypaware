@@ -270,7 +270,7 @@ function fixturePluginSource() {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const DATASET = '${DATASET}'

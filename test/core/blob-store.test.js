@@ -16,7 +16,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types'
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
