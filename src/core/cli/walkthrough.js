@@ -700,7 +700,7 @@ export async function runPickerWalkthrough(opts) {
       picks = { sources, exportChoice, retentionDays }
     } catch (err) {
       if (err instanceof PromptCancelledError) {
-        return cancelledResult(opts)
+        return await cancelledResult(opts)
       }
       throw err
     }
@@ -1176,9 +1176,25 @@ function clientSkillDir(client) {
  * non-zero values.
  *
  * @param {RunPickerWalkthroughOptions} opts
- * @returns {PickerWalkthroughResult}
+ * @returns {Promise<PickerWalkthroughResult>}
  */
-function cancelledResult(opts) {
+async function cancelledResult(opts) {
+  await withSpan(
+    'walkthrough.finish',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.finish',
+      sources_picked: 0,
+      export_picked: '',
+      clients_picked: 0,
+      retention_days: DEFAULT_RETENTION_DAYS,
+      config_path: '',
+      exit_code: WALKTHROUGH_CANCEL_EXIT_CODE,
+      status: 'cancelled',
+    },
+    async () => {},
+    { component: 'walkthrough' }
+  )
   try {
     opts.stderr.write('hyp init: cancelled\n')
   } catch {

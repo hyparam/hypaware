@@ -13,6 +13,8 @@ const CURSOR_HIDE  = '\x1b[?25l'
 const CURSOR_SHOW  = '\x1b[?25h'
 const CLEAR_TO_END = '\x1b[J'
 
+let activeRun = false
+
 /**
  * @typedef {Object} RunOpts
  * @property {NodeJS.ReadableStream} stdin
@@ -32,6 +34,10 @@ const CLEAR_TO_END = '\x1b[J'
 export async function run(initialState, io) {
   const env = io.env ?? process.env
   ensureTty(io.stdin, io.stdout, env)
+  if (activeRun) {
+    throw new Error('TUI prompt already active')
+  }
+  activeRun = true
 
   const color = env.NO_COLOR ? false : true
   /** @type {NodeJS.ReadStream} */
@@ -47,11 +53,9 @@ export async function run(initialState, io) {
 
   // Snapshot raw mode so we can restore it on exit.
   const previousRawMode = typeof stdin.isRaw === 'boolean' ? stdin.isRaw : false
-  readline.emitKeypressEvents(stdin)
-  if (typeof stdin.setRawMode === 'function') {
-    stdin.setRawMode(true)
-  }
-  stdout.write(CURSOR_HIDE)
+  const previousReadableFlowing = typeof stdin.readableFlowing === 'boolean' ? stdin.readableFlowing : null
+  const previousPaused = typeof stdin.isPaused === 'function' ? stdin.isPaused() : previousReadableFlowing === false
+  const shouldPauseOnCleanup = previousPaused || previousReadableFlowing !== true
 
   /** @returns {void} */
   function cleanup() {
@@ -64,6 +68,11 @@ export async function run(initialState, io) {
     try {
       if (typeof stdin.setRawMode === 'function') {
         stdin.setRawMode(previousRawMode)
+      }
+    } catch {}
+    try {
+      if (shouldPauseOnCleanup && typeof stdin.pause === 'function') {
+        stdin.pause()
       }
     } catch {}
     try { stdout.write(CURSOR_SHOW) } catch {}
@@ -80,24 +89,39 @@ export async function run(initialState, io) {
     stdout.write(buf)
   }
 
-  writeFrame()
-
-  return await new Promise((resolve, reject) => {
-    onKeypress = (str, key) => {
-      const k = normalizeKey(str, key)
-      state = reduce(state, k)
-      writeFrame()
-      if (state.status === 'resolved') {
-        cleanup()
-        resolve(state)
-      } else if (state.status === 'cancelled') {
-        cleanup()
-        reject(new PromptCancelledError())
-      }
+  try {
+    readline.emitKeypressEvents(stdin)
+    if (typeof stdin.setRawMode === 'function') {
+      stdin.setRawMode(true)
     }
-    stdin.on('keypress', onKeypress)
-    if (typeof stdin.resume === 'function') stdin.resume()
-  }).finally(() => cleanup())
+    stdout.write(CURSOR_HIDE)
+    writeFrame()
+
+    return await new Promise((resolve, reject) => {
+      onKeypress = (str, key) => {
+        try {
+          const k = normalizeKey(str, key)
+          state = reduce(state, k)
+          writeFrame()
+          if (state.status === 'resolved') {
+            cleanup()
+            resolve(state)
+          } else if (state.status === 'cancelled') {
+            cleanup()
+            reject(new PromptCancelledError())
+          }
+        } catch (err) {
+          cleanup()
+          reject(err)
+        }
+      }
+      stdin.on('keypress', onKeypress)
+      if (typeof stdin.resume === 'function') stdin.resume()
+    }).finally(() => cleanup())
+  } finally {
+    activeRun = false
+    cleanup()
+  }
 }
 
 /**

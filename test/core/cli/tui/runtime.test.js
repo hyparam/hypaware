@@ -24,8 +24,11 @@ function makeTty() {
   const stdout = new PassThrough()
   Object.defineProperty(stdin, 'isTTY', { value: true })
   Object.defineProperty(stdout, 'isTTY', { value: true })
+  Object.defineProperty(stdin, 'isRaw', { value: false, writable: true })
   // @ts-expect-error — PassThrough does not declare setRawMode but the runtime probes for it.
-  stdin.setRawMode = () => {}
+  stdin.setRawMode = (enabled) => {
+    stdin.isRaw = enabled
+  }
   // Collect stdout writes so tests can assert on what was rendered.
   /** @type {string[]} */
   const writes = []
@@ -216,4 +219,64 @@ test('runtime: cursor-show is written even on cancel', async () => {
   await feed(io.stdin, ['\x03'])
   await rejection
   assert.ok(io.output().includes('\x1b[?25h'), 'cursor-show escape not emitted on cancel')
+})
+
+test('runtime: cleanup restores paused stdin after prompt completion', async () => {
+  const io = makeTty()
+  io.stdin.pause()
+  assert.equal(io.stdin.readableFlowing, false)
+
+  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
+  await feed(io.stdin, ['y'])
+  assert.equal(await promise, true)
+
+  assert.equal(io.stdin.readableFlowing, false)
+  assert.equal(io.stdin.isPaused(), true)
+  assert.equal(/** @type {any} */ (io.stdin).isRaw, false)
+})
+
+test('runtime: cleanup preserves previously flowing stdin after prompt completion', async () => {
+  const io = makeTty()
+  io.stdin.resume()
+  assert.equal(io.stdin.readableFlowing, true)
+
+  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
+  await feed(io.stdin, ['y'])
+  assert.equal(await promise, true)
+
+  assert.equal(io.stdin.readableFlowing, true)
+  assert.equal(/** @type {any} */ (io.stdin).isRaw, false)
+})
+
+test('runtime: render failures during keypress reject and clean up', async () => {
+  const io = makeTty()
+  const originalWrite = io.stdout.write.bind(io.stdout)
+  let writes = 0
+  io.stdout.write = /** @type {any} */ ((chunk, ...args) => {
+    writes += 1
+    if (writes >= 3) throw new Error('render failed')
+    return originalWrite(chunk, ...args)
+  })
+
+  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
+  const rejection = assert.rejects(promise, /render failed/)
+  await feed(io.stdin, ['y'])
+  await rejection
+
+  assert.equal(io.stdin.readableFlowing, false)
+  assert.equal(/** @type {any} */ (io.stdin).isRaw, false)
+})
+
+test('runtime: overlapping prompts are rejected', async () => {
+  const first = makeTty()
+  const second = makeTty()
+  const promise = confirm({ title: 'first?', stdin: first.stdin, stdout: first.stdout })
+
+  await assert.rejects(
+    confirm({ title: 'second?', stdin: second.stdin, stdout: second.stdout }),
+    /TUI prompt already active/,
+  )
+
+  await feed(first.stdin, ['y'])
+  assert.equal(await promise, true)
 })

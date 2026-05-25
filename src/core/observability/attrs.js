@@ -8,7 +8,7 @@ const MAX_ATTRS = 64
  * Allowed status values. Other values are coerced to `failed` to keep
  * the attribute set queryable.
  */
-const STATUS_VALUES = new Set(['ok', 'failed', 'skipped', 'degraded'])
+const STATUS_VALUES = new Set(['ok', 'failed', 'skipped', 'degraded', 'cancelled'])
 
 /**
  * Sanitize a single attribute key. Snake_case keys are passed through
