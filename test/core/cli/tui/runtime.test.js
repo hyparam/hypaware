@@ -27,7 +27,7 @@ function makeTty() {
   Object.defineProperty(stdin, 'isRaw', { value: false, writable: true })
   // @ts-expect-error — PassThrough does not declare setRawMode but the runtime probes for it.
   stdin.setRawMode = (enabled) => {
-    stdin.isRaw = enabled
+    /** @type {any} */ (stdin).isRaw = enabled
   }
   // Collect stdout writes so tests can assert on what was rendered.
   /** @type {string[]} */

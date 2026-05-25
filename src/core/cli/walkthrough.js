@@ -382,7 +382,7 @@ function resolveHypHome(env) {
  * the provided stdin/stdout. Accepts comma-separated indices (1-based)
  * or "all" for every option.
  *
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
  * @returns {AsyncPickPrompt}
  */
 function legacyNumberedPromptFactory(opts) {
@@ -414,7 +414,7 @@ function legacyNumberedPromptFactory(opts) {
 }
 
 /**
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
  * @returns {AsyncRetentionPrompt}
  */
 function legacyRetentionPromptFactory(opts) {
@@ -438,7 +438,7 @@ function legacyRetentionPromptFactory(opts) {
 /**
  * Render each pick category through the new TUI multiselect prompt.
  *
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncPickPrompt}
  */
 function tuiPromptFactory(opts) {
@@ -464,7 +464,7 @@ function tuiPromptFactory(opts) {
  * Empty input falls through to the supplied default to match the legacy
  * behavior.
  *
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncRetentionPrompt}
  */
 function tuiRetentionPromptFactory(opts) {
@@ -494,7 +494,7 @@ function tuiRetentionPromptFactory(opts) {
  * the legacy numbered list — only real TTYs without `HYP_NO_TUI=1` see
  * the new interactive multiselect.
  *
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncPickPrompt}
  */
 function defaultPromptFactory(opts) {
@@ -503,7 +503,7 @@ function defaultPromptFactory(opts) {
 }
 
 /**
- * @param {WalkthroughOptions} opts
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncRetentionPrompt}
  */
 function defaultRetentionPromptFactory(opts) {
