@@ -250,6 +250,7 @@ export async function run({ harness, expect }) {
       previous_message_id,
       cwd,
       git_branch,
+      client_name,
       JSON_VALUE(attributes, '$.claude.identity_source') as claude_identity_source,
       JSON_VALUE(attributes, '$.gateway.identity_source') as gateway_identity_source,
       JSON_VALUE(attributes, '$.gateway.upstream') as upstream,
@@ -371,6 +372,39 @@ export async function run({ harness, expect }) {
       (v) => v === 'gateway_fallback',
     )
   }
+
+  // ----- Partition layout assertions -----
+  for (const row of rows) {
+    expect.that(
+      `query: ${row.role} row has client_name populated`,
+      row.client_name,
+      (v) => typeof v === 'string' && v.length > 0,
+    )
+  }
+
+  // Verify rows land in new per-client/date partition layout
+  const { discoverCachePartitions } = await import('../../../src/core/cache/partition.js')
+  const cacheRoot = path.join(harness.hypHome, 'hypaware', 'cache')
+  const partitions = await discoverCachePartitions(cacheRoot, {
+    datasets: ['ai_gateway_messages'],
+  })
+  const clientPartitions = partitions.filter(
+    (p) => p.partition.client && p.partition.date,
+  )
+  expect.that(
+    'partitions: at least one client=*/date=* partition exists for ai_gateway_messages',
+    clientPartitions,
+    (v) => Array.isArray(v) && v.length >= 1,
+  )
+  const today = new Date().toISOString().slice(0, 10)
+  const claudeToday = clientPartitions.find(
+    (p) => p.partition.client === 'claude' && p.partition.date === today,
+  )
+  expect.that(
+    `partitions: client=claude/date=${today} partition exists with rows`,
+    claudeToday,
+    (v) => v !== undefined && v.rowCount > 0,
+  )
 
   // ----- Daemon-self-telemetry assertions (JSONL) -----
   const traces = await expect.traces()

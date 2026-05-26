@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../observability/index.js'
+import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
@@ -69,7 +70,7 @@ function buildCoreCommands() {
     },
     {
       name: 'query',
-      summary: 'Query the local cache (see subcommands: schema, status, sql, refresh)',
+      summary: 'Query the local cache (see subcommands: schema, status, sql, refresh, maintain)',
       usage: 'hyp query <subcommand> [args...]',
       run: runQuery,
     },
@@ -96,6 +97,12 @@ function buildCoreCommands() {
       summary: 'Force a cache refresh for a dataset',
       usage: 'hyp query refresh [dataset]',
       run: runQueryRefresh,
+    },
+    {
+      name: 'query maintain',
+      summary: 'Migrate legacy cache partitions to the new per-source/day layout',
+      usage: 'hyp query maintain [--force]',
+      run: runQueryMaintain,
     },
     {
       name: 'collect',
@@ -610,11 +617,11 @@ function inferDatasetsFromPlugins(activePlugins) {
 async function runQuery(argv, ctx) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write('usage: hyp query <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: schema, status, sql, refresh\n')
+    ctx.stdout.write('  subcommands: schema, status, sql, refresh, maintain\n')
     return 0
   }
   ctx.stderr.write(`hyp query: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: schema, status, sql, refresh\n')
+  ctx.stderr.write('  expected one of: schema, status, sql, refresh, maintain\n')
   return 2
 }
 
@@ -735,6 +742,54 @@ async function runQueryRefresh(argv, ctx) {
   }
   ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s)\n`)
   return 0
+}
+
+/**
+ * `hyp query maintain [--force]`
+ *
+ * Migrates legacy cache partitions (e.g. `proxy_messages_v4`, `all`)
+ * into the new per-source/day layout. Idempotent: re-running on an
+ * already-migrated cache is a no-op.
+ *
+ * Without `--force`, reports what would be migrated. With `--force`,
+ * performs the migration and retires old partition paths.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runQueryMaintain(argv, ctx) {
+  const force = argv.includes('--force')
+  const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+  return withSpan(
+    'query.maintain',
+    {
+      [Attr.COMPONENT]: 'query',
+      [Attr.OPERATION]: 'query.maintain',
+      force,
+      status: 'ok',
+    },
+    async (span) => {
+      const result = await migrateLegacyPartitions({
+        cacheRoot: storage.cacheRoot,
+        force,
+      })
+      span.setAttribute('partitions_scanned', result.scanned)
+      span.setAttribute('partitions_migrated', result.migrated)
+      span.setAttribute('rows_migrated', result.rowsMigrated)
+      if (!force) {
+        if (result.scanned === 0) {
+          ctx.stdout.write('maintain: no legacy partitions found\n')
+        } else {
+          ctx.stdout.write(`maintain: ${result.scanned} legacy partition(s) found, ${result.rowsMigrated} row(s) to migrate\n`)
+          ctx.stdout.write('  run with --force to perform the migration\n')
+        }
+        return 0
+      }
+      ctx.stdout.write(`maintain: migrated ${result.migrated} partition(s), ${result.rowsMigrated} row(s)\n`)
+      return 0
+    },
+    { component: 'query' }
+  )
 }
 
 /**

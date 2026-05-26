@@ -16,6 +16,7 @@ import {
   resolvePartitionSegments,
   writeCursor,
 } from '../../src/core/cache/partition.js'
+import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 
 /** @type {import('../../collectivus-plugin-kernel-types.d.ts').ColumnSpec[]} */
 const TEST_COLUMNS = [
@@ -298,4 +299,56 @@ test('resolvePartitionSegments returns client=unknown+date when only date presen
     resolvePartitionSegments({ timestamp: '2026-05-26T12:00:00Z' }),
     ['client=unknown', 'date=2026-05-26']
   )
+})
+
+// --- legacy partition discovery ---
+
+test('discoverCachePartitions detects a legacy Iceberg table without cursor.json', async () => {
+  const cacheRoot = await makeTmpDir('discover-legacy')
+  try {
+    // Simulate the real pre-cursor legacy layout: Iceberg data directly
+    // in the partition dir (no epoch= subdir, no cursor.json).
+    const partDir = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'proxy_messages_v4')
+    await fs.mkdir(partDir, { recursive: true })
+    await appendRowsToTable(partDir, TEST_COLUMNS, [{ id: 1, value: 'old' }])
+    const result = await discoverCachePartitions(cacheRoot)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].dataset, 'ai_gateway_messages')
+    assert.equal(result[0].legacy, true)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('discoverCachePartitions finds both legacy and new-style partitions', async () => {
+  const cacheRoot = await makeTmpDir('discover-legacy-new')
+  try {
+    const legacyDir = path.join(cacheRoot, 'datasets', 'ai_gw', 'proxy_messages_v4')
+    await fs.mkdir(legacyDir, { recursive: true })
+    await appendRowsToTable(legacyDir, TEST_COLUMNS, [{ id: 1, value: 'old' }])
+    await appendRowsToPartition(cacheRoot, 'ai_gw', ['client=claude', 'date=2026-05-26'], TEST_COLUMNS, [{ id: 2, value: 'new' }])
+    const result = await discoverCachePartitions(cacheRoot)
+    assert.equal(result.length, 2)
+    const legacy = result.find((r) => r.legacy === true)
+    const modern = result.find((r) => r.partition.client === 'claude')
+    assert.ok(legacy, 'legacy partition should be found')
+    assert.ok(modern, 'modern partition should be found')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('discoverCachePartitions skips .retired directories', async () => {
+  const cacheRoot = await makeTmpDir('discover-retired')
+  try {
+    await appendRowsToPartition(cacheRoot, 'data', ['client=claude', 'date=2026-05-26'], TEST_COLUMNS, [{ id: 1, value: 'live' }])
+    const retiredDir = path.join(cacheRoot, 'datasets', 'data', '.retired', 'proxy_messages_v4')
+    await fs.mkdir(retiredDir, { recursive: true })
+    await writeCursor(retiredDir, { epoch: 0, rowCount: 5, compaction: null })
+    const result = await discoverCachePartitions(cacheRoot)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].partition.client, 'claude')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
 })
