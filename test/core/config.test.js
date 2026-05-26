@@ -157,22 +157,76 @@ test('isCronExpression accepts narrow standard cron and rejects aliases', () => 
   assert.equal(isCronExpression('60 * * * *'), false)
 })
 
-test('diagnoseV1Config reports advisory product wiring gaps', () => {
-  const diagnostics = diagnoseV1Config({
-    version: 2,
-    plugins: [
-      { name: '@hypaware/codex' },
-      { name: '@hypaware/local-fs' },
-    ],
-    sinks: {
-      local: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+test('diagnoseV1Config reports advisory product wiring gaps', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const diagnostics = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/codex' },
+        { name: '@hypaware/local-fs' },
+      ],
+      sinks: {
+        local: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+      },
     },
-  })
+    {
+      clientDescriptors: catalog.clientDescriptors,
+      knownPlugins: catalog.pluginMetadata,
+    }
+  )
 
   assert.deepEqual(
     diagnostics.map((diagnostic) => diagnostic.kind).sort(),
     ['client_without_gateway', 'sink_missing_encoder']
   )
+})
+
+test('diagnoseV1Config falls back to first-party client descriptors', () => {
+  const withoutGateway = diagnoseV1Config({
+    version: 2,
+    plugins: [{ name: '@hypaware/codex' }],
+  })
+  assert.deepEqual(withoutGateway.map((diagnostic) => diagnostic.kind), ['client_without_gateway'])
+
+  const missingUpstream = diagnoseV1Config({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+      { name: '@hypaware/claude' },
+    ],
+  })
+  assert.deepEqual(missingUpstream.map((diagnostic) => diagnostic.kind), [
+    'gateway_missing_anthropic_upstream',
+  ])
+})
+
+test('diagnoseV1Config emits descriptor-derived upstream diagnostic kinds', () => {
+  const diagnostics = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+        { name: '@third-party/gemini' },
+      ],
+    },
+    {
+      clientDescriptors: new Map([
+        ['gemini', {
+          plugin: '@third-party/gemini',
+          name: 'gemini',
+          skillDir: '.gemini/skills',
+          requiredUpstreams: ['gemini'],
+        }],
+      ]),
+    }
+  )
+
+  assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.kind), [
+    'gateway_missing_gemini_upstream',
+  ])
 })
 
 test('buildPluginCatalog derives capability metadata from bundled manifests', async () => {
@@ -196,6 +250,26 @@ test('buildPluginCatalog derives capability metadata from bundled manifests', as
   })
 })
 
+test('buildPluginCatalog extracts client descriptors from manifests', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  assert.ok(catalog.clientDescriptors.has('claude'))
+  const claude = catalog.clientDescriptors.get('claude')
+  assert.equal(claude?.plugin, '@hypaware/claude')
+  assert.equal(claude?.skillDir, '.claude/skills')
+  assert.equal(claude?.attachProbe?.format, 'json')
+  assert.equal(claude?.attachProbe?.marker_key, '_hypaware')
+  assert.deepEqual(claude?.requiredUpstreams, ['anthropic'])
+
+  assert.ok(catalog.clientDescriptors.has('codex'))
+  const codex = catalog.clientDescriptors.get('codex')
+  assert.equal(codex?.plugin, '@hypaware/codex')
+  assert.equal(codex?.skillDir, '.codex/skills')
+  assert.equal(codex?.attachProbe?.format, 'toml')
+  assert.deepEqual(codex?.requiredUpstreams, ['openai', 'chatgpt'])
+})
+
 test('buildPluginCatalog collects known datasets from manifest contributions', async () => {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
@@ -204,6 +278,36 @@ test('buildPluginCatalog collects known datasets from manifest contributions', a
   assert.ok(catalog.knownDatasets.has('logs'))
   assert.ok(catalog.knownDatasets.has('traces'))
   assert.ok(catalog.knownDatasets.has('metrics'))
+  assert.ok(
+    catalog.knownDatasets.has('gascity_messages'),
+    'catalog includes gascity_messages from excluded plugin manifest'
+  )
+})
+
+test('buildPluginCatalog includes excluded gascity plugin as a catalog entry', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const entry = catalog.plugins.get('@hypaware/gascity')
+  assert.ok(entry, 'gascity must be in catalog when excluded manifests are included')
+  assert.equal(entry.name, '@hypaware/gascity')
+  assert.ok(entry.contributes, 'gascity catalog entry must carry its contributions')
+  assert.ok(
+    entry.contributes.sources?.some((s) => s.name === 'gascity'),
+    'gascity contributes a "gascity" source'
+  )
+  assert.ok(
+    entry.contributes.commands?.some((c) => c.name === 'gascity attach'),
+    'gascity contributes a "gascity attach" command'
+  )
+  assert.ok(
+    entry.contributes.init_presets?.some((p) => p.name === 'gascity'),
+    'gascity contributes a "gascity" init preset'
+  )
+  assert.ok(
+    entry.contributes.skills?.some((s) => s.name === 'hypaware-gascity'),
+    'gascity contributes the hypaware-gascity skill'
+  )
 })
 
 test('validateConfig uses catalog-derived metadata for sink validation', async () => {
@@ -364,21 +468,30 @@ test('buildPluginCatalog bundled wins over installed on name collision', () => {
   assert.deepEqual(meta?.provides, { 'hypaware.blob-store': '1.0.0' })
 })
 
-test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', () => {
-  const diagnostics = diagnoseV1Config({
-    version: 2,
-    plugins: [
-      {
-        name: '@hypaware/ai-gateway',
-        config: {
-          upstreams: [
-            { name: 'chatgpt', base_url: 'https://chatgpt.com', provider: 'chatgpt' },
-          ],
+test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const diagnostics = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        {
+          name: '@hypaware/ai-gateway',
+          config: {
+            upstreams: [
+              { name: 'chatgpt', base_url: 'https://chatgpt.com', provider: 'chatgpt' },
+            ],
+          },
         },
-      },
-      { name: '@hypaware/codex' },
-    ],
-  })
+        { name: '@hypaware/codex' },
+      ],
+    },
+    {
+      clientDescriptors: catalog.clientDescriptors,
+      knownPlugins: catalog.pluginMetadata,
+    }
+  )
 
   assert.equal(
     diagnostics.some((diagnostic) => diagnostic.kind === 'gateway_missing_openai_upstream'),

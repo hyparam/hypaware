@@ -19,6 +19,16 @@
     }
   },
   "contributes": {
+    "client": {
+      "name": "codex",
+      "skill_dir": ".codex/skills",
+      "attach_probe": {
+        "format": "toml",
+        "settings_file": ".codex/config.toml",
+        "marker_header": "[model_providers.hypaware]"
+      },
+      "required_upstreams": ["openai", "chatgpt"]
+    },
     "skills": [
       { "name": "hypaware-query", "clients": ["codex"] }
     ]

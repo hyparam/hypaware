@@ -128,12 +128,10 @@ export async function bootKernel(opts = {}) {
       const loadedConfig = configPath ? await loadConfigFile(configPath) : null
       const config = loadedConfig?.ok ? loadedConfig.config : null
 
-      // The full plugin pool the kernel knows about: V1 allowlist plus
-      // the excluded-from-default set (so developers can still activate
-      // `@hypaware/central` or `@hypaware/gascity` by naming them in
-      // config), plus every plugin in `plugin-lock.json` whose manifest
-      // loaded. `all-bundled` boots intentionally skip the excluded and
-      // installed sets so the picker only sees the V1 default surface.
+      // Full plugin pool: V1 allowlist + excluded-from-default set +
+      // installed plugins. Excluded plugins are in the pool so they
+      // activate when named in config or an init preset — the allowlist
+      // only governs default activation, not discoverability.
       const installedNames = new Set(installed.loaded.map((m) => m.manifest.name))
       const excludedAvailable = discovered.excluded.filter(
         (m) => !installedNames.has(/** @type {PluginName} */ (m.manifest.name))

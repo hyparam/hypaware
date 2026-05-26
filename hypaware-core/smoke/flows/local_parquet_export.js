@@ -7,17 +7,12 @@ import { fileURLToPath } from 'node:url'
 
 import { parquetReadObjects } from 'hyparquet'
 
-import { Attr, installObservability } from '../../../src/core/observability/index.js'
+import { installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
-/**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
- */
-
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PLUGINS_WORKSPACE = path.resolve(HERE, '..', '..', 'plugins-workspace')
 
 /**
  * Phase 7 smoke — Parquet export through the `@hypaware/local-fs` +
@@ -64,22 +59,8 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // ----- Stage config: otel + local-fs + format-parquet -----
-  const configPath = defaultConfigPath(harness.hypHome)
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  await fs.writeFile(configPath, JSON.stringify({
-    version: 2,
-    plugins: [
-      { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 0 } },
-      { name: '@hypaware/format-parquet' },
-      { name: '@hypaware/local-fs' },
-    ],
-    query: { cache: { retention: { default_days: 30 } } },
-  }, null, 2))
-
-  process.env.HYP_HOME = harness.hypHome
-  process.env.HYP_CONFIG = configPath
-
+  // ----- Stage config: otel + local-fs + format-parquet with
+  //       config-backed sinks -----
   const goodDir = path.join(harness.tmpDir, 'sink-good')
   const brokenDir = path.join(harness.tmpDir, 'sink-broken')
   await fs.mkdir(goodDir, { recursive: true })
@@ -89,6 +70,33 @@ export async function run({ harness, expect }) {
   // `<brokenDir>/logs/partition=all` recursively, which hits ENOTDIR
   // because `<brokenDir>/logs` is already a regular file.
   await fs.writeFile(path.join(brokenDir, 'logs'), 'not-a-directory')
+
+  const configPath = defaultConfigPath(harness.hypHome)
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 0 } },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/local-fs' },
+    ],
+    sinks: {
+      good: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { schedule: '* * * * *', dir: goodDir },
+      },
+      broken: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+        config: { schedule: '* * * * *', dir: brokenDir },
+      },
+    },
+    query: { cache: { retention: { default_days: 30 } } },
+  }, null, 2))
+
+  process.env.HYP_HOME = harness.hypHome
+  process.env.HYP_CONFIG = configPath
 
   // ----- Boot the daemon (otel listener auto-starts; local-fs's sink
   //       contribution registers; format-parquet's encoder capability
@@ -116,53 +124,28 @@ export async function run({ harness, expect }) {
     buildLogsPayload(harness.devRunId),
   )
 
-  // ----- Wire two sink instances on the daemon's kernel -----
+  // ----- Verify sinks were materialized from config -----
   const kernel = handle.runtime
-  const encoder = /** @type {SinkEncoder} */ (
-    kernel.capabilities.require('@hypaware/local-fs', 'hypaware.encoder', '^1.0.0')
-  )
   const contribution = kernel.sinks.getContribution('@hypaware/local-fs', 'local-fs')
   expect.that(
     'sinks: local-fs contributed a local-fs sink under daemon boot',
     contribution,
     (v) => v !== undefined,
   )
-  if (!contribution) return
 
-  const localFsDir = path.join(PLUGINS_WORKSPACE, 'local-fs')
-  /** @type {ActivePlugin} */
-  const destinationPlugin = {
-    name: '@hypaware/local-fs',
-    version: '1.0.0',
-    manifest: {
-      schema_version: 1,
-      name: '@hypaware/local-fs',
-      version: '1.0.0',
-      hypaware_api: '^1.0.0',
-      runtime: 'node',
-      entrypoint: './src/index.js',
-    },
-    rootDir: localFsDir,
-  }
+  const goodHandle = kernel.sinks.get('good')
+  expect.that(
+    'sinks: "good" instance materialized from config (not manual instantiate)',
+    goodHandle,
+    (v) => v !== undefined && v.kind === 'blob' && v.writer === '@hypaware/format-parquet',
+  )
 
-  for (const instance of ['good', 'broken']) {
-    await kernel.sinks.instantiate({
-      kind: 'blob',
-      instanceName: instance,
-      destination: contribution,
-      writerPlugin: '@hypaware/format-parquet',
-      encoder,
-      config: { schedule: '* * * * *', dir: instance === 'good' ? goodDir : brokenDir },
-      plugin: destinationPlugin,
-      paths: {
-        rootDir: localFsDir,
-        stateDir: path.join(harness.stateDir, 'plugins', '@hypaware/local-fs', instance),
-        cacheDir: path.join(harness.stateDir, 'cache', 'plugins', '@hypaware/local-fs', instance),
-        tempDir: path.join(harness.tmpDir, 'plugin-temp', instance),
-      },
-      log: makeNoopLogger(),
-    })
-  }
+  const brokenHandle = kernel.sinks.get('broken')
+  expect.that(
+    'sinks: "broken" instance materialized from config',
+    brokenHandle,
+    (v) => v !== undefined && v.kind === 'blob',
+  )
 
   // ----- Drive the forced tick through the CLI (`hyp sink force`) -----
   const forceStdout = makeBuf()
@@ -379,10 +362,6 @@ async function postOtlp(url, payload) {
 /** @param {number} ms */
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function makeNoopLogger() {
-  return { debug() {}, info() {}, warn() {}, error() {} }
 }
 
 function makeBuf() {

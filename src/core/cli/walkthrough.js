@@ -7,6 +7,8 @@ import readline from 'node:readline/promises'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 import { multiselect, text, PromptCancelledError } from './tui/index.js'
 import { shouldUseTui } from './tui-router.js'
@@ -965,6 +967,7 @@ async function runPickerFinale(args) {
   }
 
   if (clientsPicked.length > 0 && skills) {
+    const skillDirMap = await buildWalkthroughSkillDirMap()
     await withSpan(
       'skills.install',
       {
@@ -978,7 +981,9 @@ async function runPickerFinale(args) {
         for (const skill of skills.list()) {
           for (const targetClient of skill.clients) {
             if (!clientsPicked.includes(targetClient)) continue
-            const dest = path.join(homeDir, clientSkillDir(targetClient), skill.name)
+            const skillDir = skillDirMap.get(targetClient)
+            if (!skillDir) continue
+            const dest = path.join(homeDir, skillDir, skill.name)
             if (dryRun) {
               stdout.write(`(dry-run) Would install skill '${skill.name}' → ${dest}\n`)
             } else {
@@ -1071,10 +1076,20 @@ function endpointFromListen(listen) {
   return `http://${formattedHost}:${port}`
 }
 
-/** @param {'claude'|'codex'} client */
-function clientSkillDir(client) {
-  if (client === 'claude') return '.claude/skills'
-  return '.codex/skills'
+/**
+ * @returns {Promise<Map<string, string>>}
+ */
+async function buildWalkthroughSkillDirMap() {
+  /** @type {Map<string, string>} */
+  const map = new Map()
+  try {
+    const bundled = await discoverBundledPlugins()
+    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+    for (const [clientName, descriptor] of catalog.clientDescriptors) {
+      map.set(clientName, descriptor.skillDir)
+    }
+  } catch { /* discovery failure → empty map */ }
+  return map
 }
 
 /**

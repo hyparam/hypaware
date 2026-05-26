@@ -12,12 +12,14 @@ import { loadManifests } from '../manifest.js'
  */
 
 /**
- * V1 bundled plugin allowlist (finish-v1.md §Phase 2). A plugin must
- * appear here to be discoverable through the default boot path. The
- * allowlist exists so the V1 default install does not pull
- * `@hypaware/central` or `@hypaware/gascity` into the picker, the
- * default config, or the V1 smokes — both remain on disk for
- * developers but are excluded from V1 acceptance gates.
+ * V1 bundled plugin allowlist. A plugin must appear here to be
+ * activated by the default boot profiles (`all-bundled`,
+ * `all-available`). Excluded plugins (`@hypaware/central`,
+ * `@hypaware/gascity`) are still discoverable through the plugin
+ * catalog — their manifest contributions (datasets, client
+ * descriptors, capability metadata) are visible to config validation
+ * and the walkthrough. They are activatable via explicit config or
+ * init presets; the allowlist only governs default activation.
  *
  * @type {ReadonlySet<PluginName>}
  */
@@ -34,10 +36,12 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
 ]))
 
 /**
- * Bundled plugins present in the repo workspace but excluded from the
- * V1 default surface. They remain loadable for developers (via
- * explicit manifest discovery) but never appear in the V1 picker,
- * default configs, V1 docs, or V1 smokes.
+ * Bundled plugins excluded from default activation. Their manifests
+ * are still loaded by `discoverBundledPlugins` (in the `excluded`
+ * bucket) so the plugin catalog can derive datasets, client
+ * descriptors, and capability metadata for config validation.
+ * Activation requires explicit config (`{ name: '@hypaware/gascity' }`)
+ * or an init preset — the picker and default boot profiles skip them.
  *
  * @type {ReadonlySet<PluginName>}
  */
@@ -67,8 +71,10 @@ export function defaultBundledWorkspaceDir() {
  *  - `loaded`    — manifests whose `name` is in the V1 allowlist.
  *  - `excluded`  — manifests whose `name` is in the V1 exclude set
  *                  (`@hypaware/central`, `@hypaware/gascity`). These
- *                  remain available for developers but are not surfaced
- *                  by the default boot path.
+ *                  are excluded from default activation but their
+ *                  manifests feed the plugin catalog so datasets,
+ *                  client descriptors, and capability metadata remain
+ *                  visible to config validation and the walkthrough.
  *  - `unknownDirs` — directories that hold a parseable manifest under
  *                    a name the kernel doesn't recognise as bundled.
  *

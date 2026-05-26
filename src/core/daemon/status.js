@@ -34,6 +34,8 @@ import {
  * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  * @import { ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
+ * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
+ * @import { LoadedManifest } from '../manifest.js'
  */
 
 /**
@@ -118,23 +120,28 @@ export async function collectHypAwareStatus(opts = {}) {
   const config = loaded.ok ? loaded.config : null
   const configExists = loaded.ok || (loaded.errorKind !== 'config_missing')
 
+  /** @type {PluginCatalog | undefined} */
+  let catalog
+  try {
+    /** @type {LoadedManifest[]} */
+    let bundledLoaded = []
+    /** @type {LoadedManifest[]} */
+    let installedLoaded = []
+    try {
+      const bundled = await discoverBundledPlugins()
+      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+    } catch { /* bundled discovery failure is non-fatal */ }
+    try {
+      const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
+      installedLoaded = installed.loaded
+    } catch { /* installed discovery failure is non-fatal */ }
+    catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
+  } catch { /* catalog build failure is non-fatal */ }
+
   /** @type {ConfigValidationError[]} */
   let validationErrors = []
-  if (loaded.ok) {
+  if (loaded.ok && catalog) {
     try {
-      /** @type {import('../manifest.js').LoadedManifest[]} */
-      let bundledLoaded = []
-      /** @type {import('../manifest.js').LoadedManifest[]} */
-      let installedLoaded = []
-      try {
-        const bundled = await discoverBundledPlugins()
-        bundledLoaded = [...bundled.loaded, ...bundled.excluded]
-      } catch { /* bundled discovery failure is non-fatal */ }
-      try {
-        const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
-        installedLoaded = installed.loaded
-      } catch { /* installed discovery failure is non-fatal */ }
-      const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
       const result = await validateConfig(loaded.config, {
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
@@ -183,7 +190,10 @@ export async function collectHypAwareStatus(opts = {}) {
   }
 
   // V1 advisory diagnostics layered on top.
-  const v1Diagnostics = diagnoseV1Config(config)
+  const v1Diagnostics = diagnoseV1Config(config, {
+    clientDescriptors: catalog?.clientDescriptors,
+    knownPlugins: catalog?.pluginMetadata,
+  })
   for (const d of v1Diagnostics) {
     diagnostics.push({
       severity: 'warning',
@@ -363,10 +373,12 @@ export async function collectHypAwareStatus(opts = {}) {
   // ----- client attach -----
   /** @type {ClientAttachReport[]} */
   const clients = []
-  for (const clientName of /** @type {const} */ (['claude', 'codex'])) {
-    const pluginName = clientName === 'claude' ? '@hypaware/claude' : '@hypaware/codex'
-    const configured = activePlugins.includes(pluginName)
-    const probe = await probeClientAttach({ clientName, homeDir, env })
+  const clientDescriptors = catalog?.clientDescriptors ?? new Map()
+  for (const [clientName, descriptor] of clientDescriptors) {
+    const configured = activePlugins.includes(descriptor.plugin)
+    const probe = descriptor.attachProbe
+      ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+      : { attached: false }
     clients.push({
       name: clientName,
       configured,
@@ -380,7 +392,7 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_missing',
-        message: `'${pluginName}' is enabled but ${clientName} settings show no HypAware marker — run 'hyp attach --client ${clientName}'`,
+        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker — run 'hyp attach --client ${clientName}'`,
         repair: [`hyp attach --client ${clientName}`],
       })
     }
@@ -511,33 +523,30 @@ function readRetention(config) {
   return { days: 30, source: 'default' }
 }
 
-const CLAUDE_MARKER = '_hypaware'
-const CODEX_PROVIDER_HEADER = '[model_providers.hypaware]'
-
 /**
- * Probe the on-disk settings for a client adapter and report whether
- * the HypAware attach marker is present.
+ * Probe on-disk client settings using the descriptor's attach_probe
+ * definition. Supports JSON (marker key lookup) and TOML (header
+ * string search) formats. Returns a probe result without importing
+ * any client plugin code.
  *
- * - claude: parses `~/.claude/settings.json`, looks for the
- *   `_hypaware` marker the adapter writes.
- * - codex: reads `~/.codex/config.toml`, looks for the
- *   `[model_providers.hypaware]` header the adapter writes.
- *
- * @param {{ clientName: 'claude'|'codex', homeDir: string, env?: NodeJS.ProcessEnv }} args
+ * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
  * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
  */
-async function probeClientAttach({ clientName, homeDir, env }) {
-  if (!homeDir) return { attached: false }
-  if (clientName === 'claude') {
-    const settingsPath = path.join(homeDir, '.claude', 'settings.json')
-    try {
-      const raw = await fsp.readFile(settingsPath, 'utf8')
+export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
+  if (!homeDir || !descriptor.attachProbe) return { attached: false }
+  const probe = descriptor.attachProbe
+  const settingsPath = resolveClientSettingsPath(descriptor.name, probe.settings_file, env, homeDir)
+
+  try {
+    const raw = await fsp.readFile(settingsPath, 'utf8')
+
+    if (probe.format === 'json' && probe.marker_key) {
       /** @type {unknown} */
       const parsed = JSON.parse(raw)
       if (!parsed || typeof parsed !== 'object') {
         return { attached: false, settingsPath }
       }
-      const marker = /** @type {Record<string, unknown>} */ (parsed)[CLAUDE_MARKER]
+      const marker = /** @type {Record<string, unknown>} */ (parsed)[probe.marker_key]
       if (!marker || typeof marker !== 'object') return { attached: false, settingsPath }
       const markerObj = /** @type {Record<string, unknown>} */ (marker)
       return {
@@ -546,21 +555,13 @@ async function probeClientAttach({ clientName, homeDir, env }) {
         version: typeof markerObj.version === 'string' ? markerObj.version : undefined,
         port: typeof markerObj.port === 'number' ? String(markerObj.port) : undefined,
       }
-    } catch (err) {
-      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
-      if (code === 'ENOENT') return { attached: false, settingsPath }
-      return {
-        attached: false,
-        settingsPath,
-        error: err instanceof Error ? err.message : String(err),
-      }
     }
-  }
-  // codex
-  const settingsPath = path.join(codexHomeDir(env, homeDir), 'config.toml')
-  try {
-    const raw = await fsp.readFile(settingsPath, 'utf8')
-    return { attached: raw.includes(CODEX_PROVIDER_HEADER), settingsPath }
+
+    if (probe.format === 'toml' && probe.marker_header) {
+      return { attached: raw.includes(probe.marker_header), settingsPath }
+    }
+
+    return { attached: false, settingsPath }
   } catch (err) {
     const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
     if (code === 'ENOENT') return { attached: false, settingsPath }
@@ -573,13 +574,25 @@ async function probeClientAttach({ clientName, homeDir, env }) {
 }
 
 /**
+ * Resolve the absolute settings-file path for a client. The manifest
+ * `settings_file` is relative to `$HOME` (e.g. `.codex/config.toml`).
+ * Client-specific env overrides like `CODEX_HOME` replace the first
+ * directory component (`.codex` → `$CODEX_HOME`).
+ *
+ * @param {string} clientName
+ * @param {string} settingsFile
  * @param {NodeJS.ProcessEnv | undefined} env
  * @param {string} homeDir
+ * @returns {string}
  */
-function codexHomeDir(env, homeDir) {
-  const codexHome = env?.CODEX_HOME
-  if (typeof codexHome === 'string' && codexHome.length > 0) return codexHome
-  return path.join(homeDir, '.codex')
+export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir) {
+  const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
+  const override = env?.[envKey]
+  if (typeof override === 'string' && override.length > 0) {
+    const parts = settingsFile.split('/')
+    return path.join(override, ...parts.slice(1))
+  }
+  return path.join(homeDir, ...settingsFile.split('/'))
 }
 
 /**

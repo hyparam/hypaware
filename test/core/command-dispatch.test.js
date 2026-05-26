@@ -11,11 +11,27 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
+
+function hookKernelAndRegistry() {
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  registry.register({
+    name: 'claude-hook session-context',
+    summary: 'Internal Claude Code hook',
+    usage: 'hyp claude-hook session-context --state-file <path>',
+    hidden: true,
+    run: runClaudeSessionContextHook,
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  return { kernel, registry }
+}
 
 test('Claude session-context hook exits 0 without --state-file', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-'))
   const stdout = makeBuf()
   const stderr = makeBuf()
+  const { kernel, registry: hookRegistry } = hookKernelAndRegistry()
 
   const code = await dispatch(
     ['claude-hook', 'session-context'],
@@ -24,6 +40,8 @@ test('Claude session-context hook exits 0 without --state-file', async () => {
       stderr,
       stdin: stdinFor(''),
       env: { ...process.env, HYP_HOME: hypHome },
+      registry: hookRegistry,
+      kernel,
     }
   )
 
@@ -37,6 +55,7 @@ test('Claude session-context hook appends one JSONL record per event to --state-
   const stateFile = path.join(hypHome, 'session-context.jsonl')
   const stdout = makeBuf()
   const stderr = makeBuf()
+  const { kernel, registry: hookRegistry } = hookKernelAndRegistry()
 
   const code = await dispatch(
     ['claude-hook', 'session-context', '--state-file', stateFile],
@@ -50,6 +69,8 @@ test('Claude session-context hook appends one JSONL record per event to --state-
         hook_event_name: 'SessionStart',
       }),
       env: { ...process.env, HYP_HOME: hypHome },
+      registry: hookRegistry,
+      kernel,
     }
   )
 
@@ -72,6 +93,7 @@ test('Claude session-context hook ignores events without session context', async
   const stateFile = path.join(hypHome, 'session-context.jsonl')
   const stdout = makeBuf()
   const stderr = makeBuf()
+  const { kernel, registry: hookRegistry } = hookKernelAndRegistry()
 
   const code = await dispatch(
     ['claude-hook', 'session-context', '--state-file', stateFile],
@@ -80,6 +102,8 @@ test('Claude session-context hook ignores events without session context', async
       stderr,
       stdin: stdinFor({ cwd: '/tmp/not-a-git-repo' }),
       env: { ...process.env, HYP_HOME: hypHome },
+      registry: hookRegistry,
+      kernel,
     }
   )
 
@@ -93,6 +117,7 @@ test('legacy Claude session-context hook --port writes the default plugin state 
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-hook-legacy-'))
   const stdout = makeBuf()
   const stderr = makeBuf()
+  const { kernel, registry: hookRegistry } = hookKernelAndRegistry()
 
   const code = await dispatch(
     ['claude-hook', 'session-context', '--port', '4388'],
@@ -105,6 +130,8 @@ test('legacy Claude session-context hook --port writes the default plugin state 
         transcript_path: '/tmp/sess-legacy.jsonl',
       }),
       env: { ...process.env, HYP_HOME: hypHome },
+      registry: hookRegistry,
+      kernel,
     }
   )
 
@@ -138,6 +165,45 @@ test('hidden Claude hook command is omitted from top-level help', async () => {
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   assert.equal(stdout.text().includes('claude-hook'), false)
+})
+
+test('dispatch surfaces boot-path sink materialization warnings', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-sink-warning-'))
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+      },
+    },
+  }))
+
+  const registry = createCommandRegistry()
+  registry.register({
+    name: 'noop',
+    summary: 'Test command',
+    usage: 'hyp noop',
+    async run() { return 0 },
+  })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['noop'], {
+    stdout,
+    stderr,
+    registry,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+  })
+
+  assert.equal(code, 0)
+  assert.equal(stdout.text(), '')
+  assert.match(
+    stderr.text(),
+    /warning: sink 'local' not materialized \[sink_plugin_not_active\]/
+  )
 })
 
 test('attach accepts a positional client name', async () => {

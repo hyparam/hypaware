@@ -124,6 +124,7 @@ export interface PluginProvides {
 }
 
 export interface PluginContributionManifest {
+  client?: PluginClientManifest
   commands?: PluginCommandManifest[]
   config_sections?: PluginConfigSectionManifest[]
   sources?: PluginSourceManifest[]
@@ -131,6 +132,20 @@ export interface PluginContributionManifest {
   datasets?: PluginDatasetManifest[]
   skills?: PluginSkillManifest[]
   init_presets?: PluginInitPresetManifest[]
+}
+
+export interface PluginClientManifest {
+  name: string
+  skill_dir: string
+  attach_probe?: PluginAttachProbeManifest
+  required_upstreams?: string[]
+}
+
+export interface PluginAttachProbeManifest {
+  format: 'json' | 'toml'
+  settings_file: string
+  marker_key?: string
+  marker_header?: string
 }
 
 export interface PluginCommandManifest {
@@ -318,6 +333,7 @@ export interface CapabilityRegistry {
   require<T = unknown>(requester: PluginName, name: CapabilityName, range?: SemverRange): T
   has(name: CapabilityName, range?: SemverRange): boolean
   list(): CapabilityRegistration[]
+  fromProvider<T = unknown>(provider: PluginName | 'core', name: CapabilityName, range?: SemverRange): T | undefined
 }
 
 export interface CapabilityRegistration {

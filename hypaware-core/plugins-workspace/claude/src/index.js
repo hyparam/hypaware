@@ -10,6 +10,7 @@ import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { defaultSessionContextFile } from './session_context.js'
+import { runClaudeSessionContextHook } from './hook_command.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -215,6 +216,14 @@ export async function activate(ctx) {
         { component: 'plugin.claude' }
       )
     },
+  })
+
+  ctx.commands.register({
+    name: 'claude-hook session-context',
+    summary: 'Internal Claude Code hook — appends session context to the state file',
+    usage: 'hyp claude-hook session-context --state-file <absolute-path>',
+    hidden: true,
+    run: runClaudeSessionContextHook,
   })
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')

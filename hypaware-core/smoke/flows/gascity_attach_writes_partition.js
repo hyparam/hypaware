@@ -16,19 +16,17 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
- * Phase 8.6 smoke. Boots `@hypaware/gascity` from the in-repo
- * workspace, attaches an in-process fixture supervisor through
- * `hyp gascity attach`, drives a few SSE-shaped frames, and asserts
- * the §Phase 8.6 contract from the implementation plan:
+ * Gascity plugin-surface acceptance smoke. Boots `@hypaware/gascity`
+ * from the in-repo workspace and exercises the full plugin lifecycle
+ * through plugin-owned contributions:
  *
- * - traces: a `source.start` span tagged `hyp_plugin=@hypaware/gascity`
- *   appears on the first `gascity attach`
- * - traces: a `source.reload` span tagged `hyp_plugin=@hypaware/gascity`
- *   appears on the second `gascity attach`
- * - query: `select count(*) from gascity_messages` returns the number
- *   of frames the fixture pushed
- * - cache: at least one `cache.append` span landed for
- *   `hyp_dataset=gascity_messages`
+ * - `gascity attach` starts/reloads the source through plugin code
+ * - `gascity list` shows attached city state
+ * - `select count(*) from gascity_messages` returns captured rows
+ * - `gascity detach` removes a city and reloads cleanly
+ * - traces: `source.start` tagged `hyp_plugin=@hypaware/gascity`
+ * - traces: `source.reload` on subsequent attach/detach
+ * - cache: `cache.append` spans for `hyp_dataset=gascity_messages`
  *
  * The fixture supervisor lives entirely in this file and is wired to
  * the plugin via `globalThis[Symbol.for('hypaware-gascity:transport')]`
@@ -171,6 +169,39 @@ export async function run({ harness, expect }) {
     (v) => v === true
   )
 
+  // Detach hypburb and verify the source reloads cleanly.
+  const detachOut = await dispatchCommand(
+    ['gascity', 'detach', 'hypburb'],
+    { kernel, registry, harness }
+  )
+  expect.that(
+    "stdout: detach prints confirmation for 'hypburb'",
+    detachOut.includes('hypburb'),
+    (v) => v === true
+  )
+
+  // After detach, list should still show hyptown but not hypburb.
+  const list2Stdout = makeBuf()
+  const list2Stderr = makeBuf()
+  await dispatch(['gascity', 'list'], {
+    stdout: list2Stdout,
+    stderr: list2Stderr,
+    kernel,
+    registry,
+    env: smokeEnv(harness),
+  })
+  const list2Text = list2Stdout.text()
+  expect.that(
+    'stdout: gascity list after detach still includes hyptown',
+    list2Text.includes('hyptown'),
+    (v) => v === true
+  )
+  expect.that(
+    'stdout: gascity list after detach no longer includes hypburb',
+    list2Text.includes('hypburb'),
+    (v) => v === false
+  )
+
   await obs.shutdown()
   fixture.uninstall()
 
@@ -199,9 +230,9 @@ export async function run({ harness, expect }) {
     (/** @type {any} */ t) => t.name === 'source.reload'
   )
   expect.that(
-    'traces: at least one source.reload span emitted (from the second attach)',
+    'traces: at least 2 source.reload spans emitted (attach + detach)',
     reloadSpans,
-    (rows) => rows.length >= 1
+    (rows) => rows.length >= 2
   )
   expect.that(
     'traces: source.reload tagged hyp_plugin=@hypaware/gascity',

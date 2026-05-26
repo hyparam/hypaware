@@ -368,6 +368,8 @@ export interface RunDaemonOptions {
   installSignalHandlers?: boolean
   /** Phase 3 only supports foreground; surfaced for symmetry with `--foreground`. */
   foreground?: boolean
+  /** Temp directory root for sink materialization scratch files. */
+  tmpRoot?: string
 }
 
 export interface DaemonLogger {
