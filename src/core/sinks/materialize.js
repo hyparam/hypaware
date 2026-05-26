@@ -67,12 +67,14 @@ export async function materializeSinks(runtime, config, opts) {
     return { handles: [], errors: [] }
   }
 
+  const sinks = config.sinks
+
   return withSpan(
     'sink.materialize',
     {
       [Attr.COMPONENT]: 'sinks',
       [Attr.OPERATION]: 'sink.materialize',
-      sink_count: Object.keys(config.sinks).length,
+      sink_count: Object.keys(sinks).length,
       status: 'ok',
     },
     async (span) => {
@@ -81,7 +83,7 @@ export async function materializeSinks(runtime, config, opts) {
       /** @type {MaterializeError[]} */
       const errors = []
 
-      for (const [instanceName, raw] of Object.entries(config.sinks)) {
+      for (const [instanceName, raw] of Object.entries(sinks)) {
         try {
           const handle = await materializeOne(
             runtime, instanceName, raw, config, opts, log
