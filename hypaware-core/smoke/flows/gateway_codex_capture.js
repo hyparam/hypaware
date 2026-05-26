@@ -166,6 +166,7 @@ export async function run({ harness, expect }) {
       content_text,
       conversation_id,
       cwd,
+      client_name,
       client_version,
       entrypoint,
       user_type,
@@ -255,6 +256,39 @@ export async function run({ harness, expect }) {
       r.codex_workspace === codexWorkspace &&
       r.codex_git_origin_url === 'https://github.com/hyparam/hypaware.git'
     ),
+  )
+
+  // ----- Partition layout assertions -----
+  // Codex/chatgpt rows must have client_name populated by the codex projector
+  for (const row of responseRows) {
+    expect.that(
+      `query: ${row.role} row (${row.provider}) has client_name populated`,
+      row.client_name,
+      (v) => typeof v === 'string' && v.length > 0,
+    )
+  }
+
+  const { discoverCachePartitions } = await import('../../../src/core/cache/partition.js')
+  const cacheRoot = path.join(harness.hypHome, 'hypaware', 'cache')
+  const partitions = await discoverCachePartitions(cacheRoot, {
+    datasets: ['ai_gateway_messages'],
+  })
+  const clientPartitions = partitions.filter(
+    (p) => p.partition.client && p.partition.date,
+  )
+  expect.that(
+    'partitions: at least one client=*/date=* partition exists for ai_gateway_messages',
+    clientPartitions,
+    (v) => Array.isArray(v) && v.length >= 1,
+  )
+  const today = new Date().toISOString().slice(0, 10)
+  const codexToday = clientPartitions.find(
+    (p) => p.partition.client === 'codex' && p.partition.date === today,
+  )
+  expect.that(
+    `partitions: client=codex/date=${today} partition exists with rows`,
+    codexToday,
+    (v) => v !== undefined && v.rowCount > 0,
   )
 
   // ----- Daemon-self-telemetry assertions -----

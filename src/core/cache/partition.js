@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
-import { appendRowsToTable } from './iceberg/store.js'
+import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot } from './paths.js'
 
 /**
@@ -14,6 +14,7 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 
 const CURSOR_FILE = 'cursor.json'
 const SPOOL_DIR = '_hypaware_spool'
+const RETIRED_DIR = '.retired'
 
 /**
  * Read the cursor for a logical partition directory.  Returns the
@@ -106,8 +107,10 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
     } catch {
       return
     }
-    if (entries.some((e) => e.isFile() && e.name === CURSOR_FILE)) {
-      const cursor = readCursorSync(dir)
+    const hasCursor = entries.some((e) => e.isFile() && e.name === CURSOR_FILE)
+    const hasIceberg = !hasCursor && icebergTableExists(dir)
+    if (hasCursor || hasIceberg) {
+      const cursor = hasCursor ? readCursorSync(dir) : { epoch: 0, rowCount: 0, compaction: null }
       const rel = path.relative(root, dir)
       const parts = rel.split(path.sep)
       const dataset = parts[0]
@@ -132,6 +135,7 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
         path: dir,
         epoch: cursor.epoch,
         rowCount: cursor.rowCount,
+        legacy: hasIceberg,
       })
       return
     }
@@ -139,6 +143,7 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
       if (!entry.isDirectory()) continue
       if (entry.name.startsWith('epoch=')) continue
       if (entry.name === SPOOL_DIR) continue
+      if (entry.name === RETIRED_DIR) continue
       await walk(path.join(dir, entry.name))
     }
   }

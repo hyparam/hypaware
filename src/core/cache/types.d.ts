@@ -13,6 +13,7 @@ export interface CachePartitionMeta {
   path: string
   epoch: number
   rowCount: number
+  legacy?: boolean
 }
 
 export interface RetentionConfig {
