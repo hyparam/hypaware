@@ -98,6 +98,12 @@ function buildCoreCommands() {
       run: runQueryRefresh,
     },
     {
+      name: 'query maintain',
+      summary: 'Run cache maintenance (snapshot expiration + compaction)',
+      usage: 'hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
+      run: runQueryMaintain,
+    },
+    {
       name: 'collect',
       summary: 'Collect rows from a registered source (see subcommands: list, remove)',
       usage: 'hyp collect <subcommand> [args...]',
@@ -610,11 +616,11 @@ function inferDatasetsFromPlugins(activePlugins) {
 async function runQuery(argv, ctx) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write('usage: hyp query <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: schema, status, sql, refresh\n')
+    ctx.stdout.write('  subcommands: schema, status, sql, refresh, maintain\n')
     return 0
   }
   ctx.stderr.write(`hyp query: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: schema, status, sql, refresh\n')
+  ctx.stderr.write('  expected one of: schema, status, sql, refresh, maintain\n')
   return 2
 }
 
@@ -655,11 +661,21 @@ async function runQuerySchema(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runQueryStatus(_argv, ctx) {
+  const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
-  ctx.stdout.write(`cache:    ${ctx.storage.cacheRoot}\n`)
+  const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
+  ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
+  ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
   ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
   for (const dataset of datasets) {
     ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  }
+  if (report.partitions.length > 0) {
+    ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
+    for (const p of report.partitions) {
+      const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
+      ctx.stdout.write(`  ${p.dataset}/${partKey || 'all'}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
+    }
   }
   return 0
 }
@@ -778,6 +794,75 @@ function parseQuerySqlArgv(argv) {
   }
   const sql = positional.join(' ')
   return { ok: true, sql, refresh, format }
+}
+
+/**
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runQueryMaintain(argv, ctx) {
+  const { maintainCache } = await import('../cache/maintenance.js')
+  const parsed = parseQueryMaintainArgv(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`hyp query maintain: ${parsed.error}\n`)
+    return 2
+  }
+  const maintenanceConfig = ctx.config?.query?.cache?.maintenance
+  const report = await maintainCache({
+    cacheRoot: ctx.storage.cacheRoot,
+    dataset: parsed.dataset,
+    force: parsed.force,
+    dryRun: parsed.dryRun,
+    compactOnly: parsed.compactOnly,
+    expireOnly: parsed.expireOnly,
+    config: maintenanceConfig,
+  })
+  if (report.dryRun) {
+    ctx.stdout.write('[dry-run]\n')
+  }
+  for (const p of report.partitions) {
+    const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
+    const label = `${p.dataset}/${partKey || 'all'}`
+    const actions = []
+    if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
+    if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    if (actions.length > 0) {
+      ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
+    }
+  }
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted (${report.elapsedMs}ms)\n`)
+  return 0
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean, error?: undefined } | { error: string }}
+ */
+function parseQueryMaintainArgv(argv) {
+  /** @type {string | undefined} */
+  let dataset
+  let dryRun = false
+  let force = false
+  let compactOnly = false
+  let expireOnly = false
+  for (const arg of argv) {
+    if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--force') { force = true; continue }
+    if (arg === '--compact-only') { compactOnly = true; continue }
+    if (arg === '--expire-only') { expireOnly = true; continue }
+    if (arg === '--help' || arg === '-h') {
+      return { error: 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]' }
+    }
+    if (arg.startsWith('--')) {
+      return { error: `unknown flag '${arg}'` }
+    }
+    if (dataset === undefined) { dataset = arg; continue }
+    return { error: `unexpected argument '${arg}'` }
+  }
+  if (compactOnly && expireOnly) {
+    return { error: '--compact-only and --expire-only are mutually exclusive' }
+  }
+  return { dataset, dryRun, force, compactOnly, expireOnly }
 }
 
 /* ---------- collect ---------- */

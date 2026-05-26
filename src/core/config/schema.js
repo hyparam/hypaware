@@ -476,6 +476,35 @@ function parseQueryConfig(obj, pointer, errors) {
       }
     }
   }
+  if (cache.maintenance !== undefined) {
+    if (!isPlainObject(cache.maintenance)) {
+      errors.push({ pointer: `${pointer}/cache/maintenance`, message: 'query.cache.maintenance must be an object' })
+    } else {
+      const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
+      /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').QueryCacheMaintenanceConfig} */
+      const maint = {}
+      if (m.enabled !== undefined) {
+        if (typeof m.enabled !== 'boolean') {
+          errors.push({ pointer: `${pointer}/cache/maintenance/enabled`, message: 'must be a boolean' })
+        } else {
+          maint.enabled = m.enabled
+        }
+      }
+      for (const key of /** @type {const} */ ([
+        'interval_minutes', 'target_file_bytes', 'min_snapshots_to_keep',
+        'max_snapshot_age_hours', 'compact_file_count', 'compact_avg_file_bytes', 'max_tick_ms',
+      ])) {
+        if (m[key] !== undefined) {
+          if (typeof m[key] !== 'number' || !Number.isFinite(/** @type {number} */ (m[key])) || /** @type {number} */ (m[key]) < 0) {
+            errors.push({ pointer: `${pointer}/cache/maintenance/${key}`, message: `must be a non-negative number` })
+          } else {
+            maint[key] = /** @type {number} */ (m[key])
+          }
+        }
+      }
+      out.maintenance = maint
+    }
+  }
   return { cache: out }
 }
 

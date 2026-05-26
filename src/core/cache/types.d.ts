@@ -54,6 +54,64 @@ export interface CacheSpool {
   hasPendingSync(tablePath: string): boolean
 }
 
+export interface MaintenanceConfig {
+  enabled: boolean
+  interval_minutes: number
+  target_file_bytes: number
+  min_snapshots_to_keep: number
+  max_snapshot_age_hours: number
+  compact_file_count: number
+  compact_avg_file_bytes: number
+  max_tick_ms: number
+}
+
+export interface MaintenanceOptions {
+  cacheRoot: string
+  dataset?: string
+  force?: boolean
+  dryRun?: boolean
+  compactOnly?: boolean
+  expireOnly?: boolean
+  budgetMs?: number
+  config?: Partial<MaintenanceConfig>
+}
+
+export interface MaintenancePartitionReport {
+  dataset: string
+  partition: Record<string, string>
+  path: string
+  snapshotsExpired: number
+  compacted: boolean
+  newEpoch?: number
+  rowCount: number
+  dataFilesBefore: number
+  dataFilesAfter: number
+}
+
+export interface MaintenanceReport {
+  partitions: MaintenancePartitionReport[]
+  totalSnapshotsExpired: number
+  totalCompacted: number
+  dryRun: boolean
+  elapsedMs: number
+}
+
+export interface CacheStatusPartition {
+  dataset: string
+  partition: Record<string, string>
+  epoch: number
+  rowCount: number
+  dataFileCount: number
+  metadataBytes: number
+  snapshotCount: number
+}
+
+export interface CacheStatusReport {
+  cacheRoot: string
+  pendingSpoolBytes: number
+  partitions: CacheStatusPartition[]
+}
+
 export type ExtendedQueryStorageService = QueryStorageService & {
   dataSourceForTable(tablePath: string): Promise<AsyncDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
