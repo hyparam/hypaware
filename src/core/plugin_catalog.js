@@ -33,8 +33,14 @@
 
 /**
  * Build a plugin catalog from loaded manifests. The catalog derives
- * capability metadata, known datasets, and contribution summaries
- * from the manifest files themselves rather than a hardcoded table.
+ * capability metadata, known datasets, client descriptors, and
+ * contribution summaries from the manifest files themselves rather
+ * than a hardcoded table.
+ *
+ * Callers should pass both `bundled.loaded` and `bundled.excluded`
+ * manifests so excluded plugins (like `@hypaware/gascity`) remain
+ * visible for config validation and descriptor resolution even though
+ * they are not activated by default.
  *
  * Duplicate plugin names are resolved by first-writer-wins: the first
  * manifest array is treated as authoritative (bundled plugins), so
