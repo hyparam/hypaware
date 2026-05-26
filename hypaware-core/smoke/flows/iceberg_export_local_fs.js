@@ -307,9 +307,9 @@ export async function run({ harness, expect }) {
 
   const exportSpans = traces.filter((t) => t.name === 'iceberg.export_batch')
   expect.that(
-    'traces: exactly one iceberg.export_batch span',
+    'traces: two iceberg.export_batch spans (batch-1 + batch-2)',
     exportSpans,
-    (rows) => rows.length === 1
+    (rows) => rows.length === 2
   )
   const exportSpan = exportSpans[0]
   expect.that(

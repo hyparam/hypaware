@@ -178,7 +178,7 @@ export async function commitRowStream(input, priorState, opts = {}) {
 
   for await (const row of input.rows) {
     batch.push(row)
-    batchBytes += Buffer.byteLength(JSON.stringify(row), 'utf8')
+    batchBytes += Buffer.byteLength(jsonStringifyBigIntSafe(row), 'utf8')
     if (batch.length >= batchRowLimit || batchBytes >= batchByteLimit) {
       await flushBatch()
     }
@@ -292,6 +292,16 @@ function wrapCommitError(err, kind, hint) {
     }
   }
   return newError(kind, `iceberg-format: ${hint}: ${message}`)
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function jsonStringifyBigIntSafe(value) {
+  return JSON.stringify(value, (_key, v) =>
+    typeof v === 'bigint' ? Number(v) : v
+  )
 }
 
 /**
