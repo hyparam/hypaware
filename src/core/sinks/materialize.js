@@ -16,6 +16,7 @@ import {
  *   PluginName,
  *   RequestSinkConfigInstance,
  *   SinkEncoder,
+ *   PluginActivationContext,
  *   TableFormatProvider,
  * } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { KernelRuntime } from '../runtime/activation.d.ts'
@@ -121,7 +122,7 @@ export async function materializeSinks(runtime, config, opts) {
  * @param {BlobSinkConfigInstance | RequestSinkConfigInstance} raw
  * @param {HypAwareV2Config} config
  * @param {{ stateRoot: string, runId: string, tmpRoot?: string }} opts
- * @param {ReturnType<import('../observability/index.js').getLogger>} log
+ * @param {ReturnType<typeof getLogger>} log
  * @returns {Promise<ExtendedSinkHandle>}
  */
 async function materializeOne(runtime, instanceName, raw, config, opts, log) {
@@ -262,8 +263,8 @@ async function materializeBlob(runtime, instanceName, raw, config, opts) {
  * @param {{ stateRoot: string, runId: string, tmpRoot?: string }} opts
  * @param {PluginName} writerName
  * @param {PluginName} destName
- * @param {import('../../../collectivus-plugin-kernel-types.d.ts').PluginActivationContext} writerCtx
- * @param {import('../../../collectivus-plugin-kernel-types.d.ts').PluginActivationContext} destCtx
+ * @param {PluginActivationContext} writerCtx
+ * @param {PluginActivationContext} destCtx
  * @param {TableFormatProvider} tableFormat
  * @returns {Promise<ExtendedSinkHandle>}
  */

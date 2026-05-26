@@ -20,6 +20,7 @@ import { materializeSinks } from '../../src/core/sinks/materialize.js'
  * @import {
  *   ActivePlugin,
  *   BlobStore,
+ *   HypAwareV2Config,
  *   PluginActivationContext,
  *   PluginLogger,
  *   PluginPaths,
@@ -218,7 +219,7 @@ test('materializeSinks materializes a request sink from a plugin with one contri
     create: async () => makeSink(),
   })
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'my-central': { plugin: '@hypaware/central', config: { schedule: '* * * * *' } },
@@ -235,7 +236,7 @@ test('materializeSinks materializes a request sink from a plugin with one contri
 test('materializeSinks errors when request sink plugin is not active', async () => {
   const runtime = makeRuntime()
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'my-central': { plugin: '@hypaware/central' },
@@ -252,7 +253,7 @@ test('materializeSinks errors when request sink plugin has no contributions', as
   const runtime = makeRuntime()
   registerActivationContext('@hypaware/central', runtime)
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'my-central': { plugin: '@hypaware/central' },
@@ -281,7 +282,7 @@ test('materializeSinks errors when request sink plugin has multiple contribution
     create: async () => makeSink(),
   })
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'my-central': { plugin: '@hypaware/central' },
@@ -307,7 +308,7 @@ test('materializeSinks materializes a blob sink (encoder writer + destination)',
     create: async () => makeSink(),
   })
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'local-parquet': {
@@ -337,7 +338,7 @@ test('materializeSinks materializes a table-format sink', async () => {
   runtime.capabilities.provide('@hypaware/local-fs', 'hypaware.blob-store', '1.0.0', makeBlobStore())
   runtime.capabilities.provide('@hypaware/format-parquet', 'hypaware.encoder', '1.0.0', makeEncoder())
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'iceberg-local': {
@@ -368,7 +369,7 @@ test('materializeSinks table-format sink uses config.encoder pin', async () => {
   const jsonlEncoder = { ...makeEncoder(), format: 'jsonl', extension: 'jsonl' }
   runtime.capabilities.provide('@hypaware/format-jsonl', 'hypaware.encoder', '1.0.0', jsonlEncoder)
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'iceberg-jsonl': {
@@ -388,7 +389,7 @@ test('materializeSinks errors when writer plugin is not active', async () => {
   const runtime = makeRuntime()
   registerActivationContext('@hypaware/local-fs', runtime)
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'broken': {
@@ -409,7 +410,7 @@ test('materializeSinks errors when destination plugin is not active', async () =
   registerActivationContext('@hypaware/format-parquet', runtime)
   runtime.capabilities.provide('@hypaware/format-parquet', 'hypaware.encoder', '1.0.0', makeEncoder())
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'broken': {
@@ -430,7 +431,7 @@ test('materializeSinks errors when writer provides neither encoder nor table-for
   registerActivationContext('@hypaware/format-parquet', runtime)
   registerActivationContext('@hypaware/local-fs', runtime)
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'broken': {
@@ -454,7 +455,7 @@ test('materializeSinks errors when table-format destination has no blob-store', 
   runtime.capabilities.provide('@hypaware/format-iceberg', 'hypaware.table-format', '1.0.0', makeTableFormatProvider())
   runtime.capabilities.provide('@hypaware/format-parquet', 'hypaware.encoder', '1.0.0', makeEncoder())
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'broken': {
@@ -478,7 +479,7 @@ test('materializeSinks errors when table-format encoder pin is not active', asyn
   runtime.capabilities.provide('@hypaware/format-iceberg', 'hypaware.table-format', '1.0.0', makeTableFormatProvider())
   runtime.capabilities.provide('@hypaware/local-fs', 'hypaware.blob-store', '1.0.0', makeBlobStore())
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'broken': {
@@ -498,7 +499,7 @@ test('materializeSinks errors when table-format encoder pin is not active', asyn
 test('materializeSinks continues past failures and reports all errors', async () => {
   const runtime = makeRuntime()
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'bad-a': { plugin: '@hypaware/central' },
@@ -519,7 +520,7 @@ test('materializeSinks destination contribution missing for blob sink', async ()
   registerActivationContext('@hypaware/local-fs', runtime)
   runtime.capabilities.provide('@hypaware/format-parquet', 'hypaware.encoder', '1.0.0', makeEncoder())
 
-  const config = /** @type {import('../../collectivus-plugin-kernel-types.d.ts').HypAwareV2Config} */ ({
+  const config = /** @type {HypAwareV2Config} */ ({
     version: 2,
     sinks: {
       'no-contrib': {
