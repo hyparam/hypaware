@@ -318,6 +318,7 @@ export interface CapabilityRegistry {
   require<T = unknown>(requester: PluginName, name: CapabilityName, range?: SemverRange): T
   has(name: CapabilityName, range?: SemverRange): boolean
   list(): CapabilityRegistration[]
+  fromProvider<T = unknown>(provider: PluginName | 'core', name: CapabilityName, range?: SemverRange): T | undefined
 }
 
 export interface CapabilityRegistration {

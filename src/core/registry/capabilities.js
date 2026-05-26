@@ -74,6 +74,24 @@ export function createCapabilityRegistry() {
   }
 
   /**
+   * Resolve a capability from a specific provider plugin. Returns the
+   * value if the named provider registered the capability within the
+   * semver range, or `undefined` otherwise.
+   *
+   * @template T
+   * @param {string} provider
+   * @param {string} name
+   * @param {string} [range]
+   * @returns {T | undefined}
+   */
+  function fromProvider(provider, name, range) {
+    const match = registrations.find(
+      (r) => r.provider === provider && r.name === name && matchesSemverRange(r.version, range)
+    )
+    return match ? /** @type {T} */ (match.value) : undefined
+  }
+
+  /**
    * @param {string} name
    * @param {string} [range]
    */
@@ -99,6 +117,7 @@ export function createCapabilityRegistry() {
     require: requireCapability,
     has,
     list,
+    fromProvider,
     _registrations,
   }
 }

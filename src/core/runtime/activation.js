@@ -197,6 +197,7 @@ function createCapabilitiesFacade(pluginName, registry) {
     },
     has(name, range) { return registry.has(name, range) },
     list() { return registry.list() },
+    fromProvider(provider, name, range) { return registry.fromProvider(provider, name, range) },
   }
 }
 

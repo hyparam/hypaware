@@ -14,6 +14,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { loadConfigFile } from '../config/schema.js'
 import { bootKernel } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
+import { materializeSinks } from '../sinks/materialize.js'
 import {
   clearPidFile,
   pidFilePath,
@@ -209,6 +210,22 @@ export async function runDaemon(opts = {}) {
   if (status.state === 'healthy') {
     healthyAtMs = Date.now()
     status.healthyAt = new Date(healthyAtMs).toISOString()
+  }
+
+  // ----- Materialize config-backed sinks -----
+  const sinkResult = await materializeSinks(boot.runtime, boot.config, {
+    stateRoot,
+    runId,
+    tmpRoot: opts.tmpRoot,
+  })
+  if (sinkResult.errors.length > 0) {
+    for (const e of sinkResult.errors) {
+      fileLog.error('daemon.sink_materialize_failed', {
+        instance: e.instance,
+        error_kind: e.errorKind,
+        message: e.message,
+      })
+    }
   }
 
   // ----- Sink driver -----
