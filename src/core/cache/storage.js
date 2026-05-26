@@ -2,7 +2,6 @@
 
 import { Attr, withSpan } from '../observability/index.js'
 import {
-  appendRowsToTable,
   dataSourceForTable,
   scanRowsFromTable,
   tableExists as icebergTableExists,
@@ -11,14 +10,35 @@ import {
 import {
   appendRowsToPartition as appendRowsToPartitionImpl,
   discoverCachePartitions as discoverCachePartitionsImpl,
+  readCursorSync,
+  resolvePartitionSegments,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
+
+import path from 'node:path'
 
 /**
  * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from './types.d.ts'
  */
+
+/**
+ * Resolve a tablePath to the Iceberg table directory.  When the path
+ * is a partition directory (has cursor.json), the actual Iceberg table
+ * lives at `epoch=<N>/`.  For flat paths without a cursor the path is
+ * returned unchanged.
+ *
+ * @param {string} tablePath
+ * @returns {string}
+ */
+function resolveIcebergDir(tablePath) {
+  const cursor = readCursorSync(tablePath)
+  if (cursor.rowCount > 0 || cursor.epoch > 0) {
+    return path.join(tablePath, `epoch=${cursor.epoch}`)
+  }
+  return tablePath
+}
 
 /**
  * Build the kernel-owned `QueryStorageService`. Plugins reach this
@@ -37,8 +57,26 @@ export function createQueryStorageService({ cacheRoot }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const spool = createCacheSpool({
     cacheRoot,
-    appendChunk(tablePath, columns, rows) {
-      return appendRowsToTable(tablePath, columns, rows)
+    async appendChunk(tablePath, columns, rows) {
+      const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
+      const groups = new Map()
+      for (const row of rows) {
+        const segments = resolvePartitionSegments(row)
+        const key = segments.join('/')
+        let group = groups.get(key)
+        if (!group) {
+          group = { segments, rows: [] }
+          groups.set(key, group)
+        }
+        group.rows.push(row)
+      }
+      let totalBytes = 0
+      for (const { segments, rows: groupRows } of groups.values()) {
+        const result = await appendRowsToPartitionImpl(cacheRoot, dataset, segments, columns, groupRows)
+        totalBytes += result.bytesWritten
+      }
+      return { bytesWritten: totalBytes }
     },
   })
 
@@ -75,19 +113,20 @@ export function createQueryStorageService({ cacheRoot }) {
     },
 
     tableExists(tablePath) {
-      return icebergTableExists(tablePath) || spool.hasPendingSync(tablePath)
+      const dir = resolveIcebergDir(tablePath)
+      return icebergTableExists(dir) || spool.hasPendingSync(tablePath)
     },
 
     tableUrl(tablePath) {
-      return icebergTableUrl(tablePath)
+      return icebergTableUrl(resolveIcebergDir(tablePath))
     },
 
     readRows(tablePath, columns) {
-      return scanRowsFromTable(tablePath, columns)
+      return scanRowsFromTable(resolveIcebergDir(tablePath), columns)
     },
 
     dataSourceForTable(tablePath) {
-      return dataSourceForTable(tablePath)
+      return dataSourceForTable(resolveIcebergDir(tablePath))
     },
 
     async flushTable(tablePath, opts = {}) {

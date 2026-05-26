@@ -12,6 +12,8 @@ import {
   discoverCachePartitions,
   readCursorSync,
   resolveClientName,
+  resolvePartitionDate,
+  resolvePartitionSegments,
   writeCursor,
 } from '../../src/core/cache/partition.js'
 
@@ -240,4 +242,60 @@ test('resolveClientName falls back to "unknown"', () => {
 
 test('resolveClientName skips empty strings in the fallback chain', () => {
   assert.equal(resolveClientName({ client_name: '', conversation_source: '', provider: 'anthropic' }), 'anthropic')
+})
+
+// --- resolvePartitionDate ---
+
+test('resolvePartitionDate extracts date from ISO timestamp string', () => {
+  assert.equal(resolvePartitionDate({ timestamp: '2026-05-26T12:00:00Z' }), '2026-05-26')
+})
+
+test('resolvePartitionDate extracts date from Date object', () => {
+  assert.equal(resolvePartitionDate({ timestamp: new Date('2026-05-26T12:00:00Z') }), '2026-05-26')
+})
+
+test('resolvePartitionDate extracts date from epoch ms number', () => {
+  assert.equal(resolvePartitionDate({ timestamp: new Date('2026-05-26T00:00:00Z').getTime() }), '2026-05-26')
+})
+
+test('resolvePartitionDate extracts date from created_at field', () => {
+  assert.equal(resolvePartitionDate({ created_at: '2026-05-25T08:30:00Z' }), '2026-05-25')
+})
+
+test('resolvePartitionDate extracts date from date field', () => {
+  assert.equal(resolvePartitionDate({ date: '2026-05-24' }), '2026-05-24')
+})
+
+test('resolvePartitionDate returns undefined when no timestamp field present', () => {
+  assert.equal(resolvePartitionDate({ id: 1, value: 'foo' }), undefined)
+})
+
+// --- resolvePartitionSegments ---
+
+test('resolvePartitionSegments returns client+date for rows with both', () => {
+  assert.deepEqual(
+    resolvePartitionSegments({ client_name: 'claude', timestamp: '2026-05-26T12:00:00Z' }),
+    ['client=claude', 'date=2026-05-26']
+  )
+})
+
+test('resolvePartitionSegments returns client+date using fallback chain', () => {
+  assert.deepEqual(
+    resolvePartitionSegments({ provider: 'openai', created_at: '2026-05-25T00:00:00Z' }),
+    ['client=openai', 'date=2026-05-25']
+  )
+})
+
+test('resolvePartitionSegments falls back to ["all"] when no partition keys', () => {
+  assert.deepEqual(
+    resolvePartitionSegments({ id: 1, value: 'test' }),
+    ['all']
+  )
+})
+
+test('resolvePartitionSegments returns client=unknown+date when only date present', () => {
+  assert.deepEqual(
+    resolvePartitionSegments({ timestamp: '2026-05-26T12:00:00Z' }),
+    ['client=unknown', 'date=2026-05-26']
+  )
 })

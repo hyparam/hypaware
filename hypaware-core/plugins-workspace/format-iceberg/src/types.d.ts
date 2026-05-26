@@ -25,6 +25,7 @@ export interface CommitResult {
   dataFiles: string[]
   bytesWritten: number
   rowCount: number
+  metadata: TableMetadata
 }
 
 export interface ExportMarker {
