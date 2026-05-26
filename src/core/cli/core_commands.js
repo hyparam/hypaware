@@ -809,17 +809,17 @@ async function runQueryMaintain(argv, ctx) {
     ctx.stderr.write(`hyp query maintain: ${parsed.error}\n`)
     return 2
   }
-  if (!parsed.compactOnly && !parsed.expireOnly) {
+  const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
+  if (!compactOnly && !expireOnly) {
     const migrationResult = await migrateLegacyPartitions({
       cacheRoot: ctx.storage.cacheRoot,
-      force: parsed.force,
+      force,
     })
     if (migrationResult.migrated > 0) {
       ctx.stdout.write(`migrate: ${migrationResult.migrated} legacy partition(s), ${migrationResult.rowsMigrated} row(s)\n`)
     }
   }
   const maintenanceConfig = ctx.config?.query?.cache?.maintenance
-  const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
   const report = await maintainCache({
     cacheRoot: ctx.storage.cacheRoot,
     dataset,
