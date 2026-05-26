@@ -9,8 +9,11 @@ import test from 'node:test'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
+import { createCommandRegistry } from '../../src/core/registry/commands.js'
+import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
 import { appendSessionContext, defaultSessionContextFile, pickLatestMatching, readSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /**
@@ -36,6 +39,16 @@ test('hook → state file → projector roundtrip writes cwd onto the row', asyn
     // Stage 1: hook writes a record into the state file.
     const stdout = makeBuf()
     const stderr = makeBuf()
+    const registry = createCommandRegistry()
+    registerCoreCommands(registry)
+    registry.register({
+      name: 'claude-hook session-context',
+      summary: 'Internal Claude Code hook',
+      usage: 'hyp claude-hook session-context --state-file <path>',
+      hidden: true,
+      run: runClaudeSessionContextHook,
+    })
+    const kernel = createKernelRuntime({ commandRegistry: registry })
     const code = await dispatch(
       ['claude-hook', 'session-context', '--state-file', env.stateFile],
       {
@@ -48,6 +61,8 @@ test('hook → state file → projector roundtrip writes cwd onto the row', asyn
           hook_event_name: 'SessionStart',
         }),
         env: { ...process.env, HYP_HOME: env.hypHome },
+        registry,
+        kernel,
       }
     )
     assert.equal(code, 0)

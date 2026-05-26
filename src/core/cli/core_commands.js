@@ -1,9 +1,7 @@
 // @ts-check
 
-import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { promisify } from 'node:util'
 
 import { Attr, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -30,9 +28,6 @@ import {
   decideConfirmation,
   renderConfirmationSummary,
 } from '../plugin_install/confirm.js'
-import {
-  appendSessionContext,
-} from '../../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -43,8 +38,6 @@ import {
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'
  */
-
-const execFileAsync = promisify(execFile)
 
 /**
  * Register the V1 core command set onto the supplied registry. These
@@ -194,13 +187,6 @@ function buildCoreCommands() {
       summary: 'Mark the current session as ignored by recording sources',
       usage: 'hyp ignore',
       run: runIgnore,
-    },
-    {
-      name: 'claude-hook session-context',
-      summary: 'Internal Claude Code hook compatibility shim',
-      usage: 'hyp claude-hook session-context --state-file <absolute-path>',
-      hidden: true,
-      run: runClaudeSessionContextHook,
     },
     {
       name: 'skills install',
@@ -2453,163 +2439,6 @@ async function runIgnore(_argv, ctx) {
 }
 
 /**
- * `hyp claude-hook session-context --state-file <absolute-path>`
- *
- * Internal command installed into Claude Code's hook list by the
- * `@hypaware/claude` adapter. Claude sends hook events on stdin; this
- * appends one JSONL record per event to the plugin's session-context
- * state file. The Claude exchange projector reads the same file when
- * it projects an Anthropic exchange and recovers `cwd` / `git_branch`
- * for the row.
- *
- * Phase 2 removed the HTTP `/_hypaware/session-context` channel —
- * sending session context now lives entirely on disk, so the daemon
- * does not have to be running for the hook to do its job (the file
- * is read at projection time, not at hook-fire time).
- *
- * Hooks must never interrupt Claude Code. Malformed input, a missing
- * `--state-file`, a git lookup failure, or a write error all degrade
- * to "no context recorded" with exit 0.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-async function runClaudeSessionContextHook(argv, ctx) {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
-    return 0
-  }
-  const parsed = parseClaudeSessionContextHookArgs(argv)
-  const stateFile = parsed.stateFile ?? (parsed.legacyPort ? legacyClaudeSessionContextFile(ctx.env) : undefined)
-  if (!stateFile) return 0
-
-  const input = await readHookStdin(ctx.stdin ?? process.stdin)
-  /** @type {Record<string, unknown>} */
-  let event
-  try {
-    const parsedEvent = JSON.parse(input || '{}')
-    event = parsedEvent && typeof parsedEvent === 'object' && !Array.isArray(parsedEvent)
-      ? /** @type {Record<string, unknown>} */ (parsedEvent)
-      : {}
-  } catch {
-    return 0
-  }
-
-  const sessionId = stringValue(event.session_id)
-  const cwd = stringValue(event.new_cwd) ?? stringValue(event.cwd)
-  if (!sessionId || !cwd) return 0
-  const transcriptPath = stringValue(event.transcript_path)
-  const gitBranch = await currentGitBranch(cwd)
-
-  /** @type {Record<string, unknown>} */
-  const record = {
-    session_id: sessionId,
-    cwd,
-    ts: new Date().toISOString(),
-  }
-  if (transcriptPath) record.transcript_path = transcriptPath
-  if (gitBranch) record.git_branch = gitBranch
-
-  try {
-    await appendSessionContext(stateFile, /** @type {any} */ (record))
-  } catch {
-    /* hook MUST never throw back into Claude — exit 0 even on write failure */
-  }
-  return 0
-}
-
-/**
- * @param {string[]} argv
- * @returns {{ stateFile?: string, legacyPort?: number }}
- */
-function parseClaudeSessionContextHookArgs(argv) {
-  /** @type {{ stateFile?: string, legacyPort?: number }} */
-  const out = {}
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]
-    if (arg === '--state-file' || arg.startsWith('--state-file=')) {
-      const value = arg === '--state-file' ? argv[++i] : arg.slice('--state-file='.length)
-      if (typeof value === 'string' && value.length > 0 && path.isAbsolute(value)) {
-        out.stateFile = value
-      }
-    } else if (arg === '--port' || arg.startsWith('--port=')) {
-      const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      const port = typeof value === 'string' ? Number.parseInt(value, 10) : NaN
-      if (Number.isInteger(port) && port > 0 && port <= 65535) out.legacyPort = port
-    }
-  }
-  return out
-}
-
-/** @param {NodeJS.ProcessEnv} env */
-function legacyClaudeSessionContextFile(env) {
-  const home = env.HOME
-  const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
-  if (!hypHome) return undefined
-  return path.join(hypHome, 'hypaware', 'plugins', '@hypaware', 'claude', 'session-context.jsonl')
-}
-
-/**
- * @param {NodeJS.ReadStream} stdin
- * @returns {Promise<string>}
- */
-function readHookStdin(stdin) {
-  if (stdin.isTTY) return Promise.resolve('')
-  stdin.setEncoding('utf8')
-  return new Promise((resolve) => {
-    let data = ''
-    let settled = false
-    const finish = (value) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      resolve(value)
-    }
-    const timeout = setTimeout(() => finish(data), 1000)
-    stdin.on('data', (chunk) => { data += chunk })
-    stdin.on('end', () => finish(data))
-    stdin.on('error', () => finish(''))
-  })
-}
-
-/**
- * @param {string} cwd
- * @returns {Promise<string | undefined>}
- */
-async function currentGitBranch(cwd) {
-  try {
-    const { stdout } = await execFileAsync(
-      'git',
-      ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'],
-      { timeout: 1000 }
-    )
-    const branch = stdout.trim()
-    if (branch && branch !== 'HEAD') return branch
-  } catch {
-    return undefined
-  }
-  try {
-    const { stdout } = await execFileAsync(
-      'git',
-      ['-C', cwd, 'rev-parse', '--short', 'HEAD'],
-      { timeout: 1000 }
-    )
-    const commit = stdout.trim()
-    return commit || undefined
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * @param {unknown} value
- * @returns {string | undefined}
- */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
-/**
  * `hyp skills install [--client <name>]`
  *
  * Walks the kernel skill registry and materializes each contribution
@@ -2639,11 +2468,18 @@ async function runSkillsInstall(argv, ctx) {
     return 1
   }
 
+  const skillDirMap = await buildSkillDirMap()
+
   let count = 0
   for (const skill of skills) {
     for (const targetClient of skill.clients) {
       if (parsed.client !== 'all' && parsed.client !== targetClient) continue
-      const dest = path.join(homeDir, clientSkillDir(targetClient), skill.name)
+      const skillDir = skillDirMap.get(targetClient)
+      if (!skillDir) {
+        ctx.stderr.write(`warning: skill '${skill.name}' targets unknown client '${targetClient}'\n`)
+        continue
+      }
+      const dest = path.join(homeDir, skillDir, skill.name)
       try {
         await fs.rm(dest, { recursive: true, force: true })
         await copyDir(skill.sourceDir, dest)
@@ -2659,19 +2495,35 @@ async function runSkillsInstall(argv, ctx) {
   return 0
 }
 
+/**
+ * Build a map from client name to skill directory by reading plugin
+ * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
+ * in core.
+ *
+ * @returns {Promise<Map<string, string>>}
+ */
+async function buildSkillDirMap() {
+  /** @type {Map<string, string>} */
+  const map = new Map()
+  try {
+    const bundled = await discoverBundledPlugins()
+    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+    for (const [clientName, descriptor] of catalog.clientDescriptors) {
+      map.set(clientName, descriptor.skillDir)
+    }
+  } catch { /* discovery failure → empty map → warnings per skill */ }
+  return map
+}
+
 /** @param {string[]} argv */
 function parseSkillsArgs(argv) {
-  /** @type {{ client: 'all' | 'claude' | 'codex', error?: string }} */
+  /** @type {{ client: string, error?: string }} */
   const r = { client: 'all' }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--client' || arg.startsWith('--client=')) {
       const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
       if (!value) { r.error = '--client requires a name'; return r }
-      if (value !== 'all' && value !== 'claude' && value !== 'codex') {
-        r.error = `--client: expected all, claude, or codex (got "${value}")`
-        return r
-      }
       r.client = value
       continue
     }
@@ -2679,13 +2531,6 @@ function parseSkillsArgs(argv) {
     return r
   }
   return r
-}
-
-/** @param {'claude'|'codex'|'all'} client */
-function clientSkillDir(client) {
-  if (client === 'claude') return '.claude/skills'
-  if (client === 'codex') return '.codex/skills'
-  throw new Error(`clientSkillDir: '${client}' has no per-client directory`)
 }
 
 /**

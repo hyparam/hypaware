@@ -157,17 +157,26 @@ test('isCronExpression accepts narrow standard cron and rejects aliases', () => 
   assert.equal(isCronExpression('60 * * * *'), false)
 })
 
-test('diagnoseV1Config reports advisory product wiring gaps', () => {
-  const diagnostics = diagnoseV1Config({
-    version: 2,
-    plugins: [
-      { name: '@hypaware/codex' },
-      { name: '@hypaware/local-fs' },
-    ],
-    sinks: {
-      local: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+test('diagnoseV1Config reports advisory product wiring gaps', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const diagnostics = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/codex' },
+        { name: '@hypaware/local-fs' },
+      ],
+      sinks: {
+        local: { writer: '@hypaware/format-parquet', destination: '@hypaware/local-fs' },
+      },
     },
-  })
+    {
+      clientDescriptors: catalog.clientDescriptors,
+      knownPlugins: catalog.pluginMetadata,
+    }
+  )
 
   assert.deepEqual(
     diagnostics.map((diagnostic) => diagnostic.kind).sort(),
@@ -194,6 +203,26 @@ test('buildPluginCatalog derives capability metadata from bundled manifests', as
     'hypaware.blob-store': '^1.0.0',
     'hypaware.encoder': '^1.0.0',
   })
+})
+
+test('buildPluginCatalog extracts client descriptors from manifests', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  assert.ok(catalog.clientDescriptors.has('claude'))
+  const claude = catalog.clientDescriptors.get('claude')
+  assert.equal(claude?.plugin, '@hypaware/claude')
+  assert.equal(claude?.skillDir, '.claude/skills')
+  assert.equal(claude?.attachProbe?.format, 'json')
+  assert.equal(claude?.attachProbe?.marker_key, '_hypaware')
+  assert.deepEqual(claude?.requiredUpstreams, ['anthropic'])
+
+  assert.ok(catalog.clientDescriptors.has('codex'))
+  const codex = catalog.clientDescriptors.get('codex')
+  assert.equal(codex?.plugin, '@hypaware/codex')
+  assert.equal(codex?.skillDir, '.codex/skills')
+  assert.equal(codex?.attachProbe?.format, 'toml')
+  assert.deepEqual(codex?.requiredUpstreams, ['openai', 'chatgpt'])
 })
 
 test('buildPluginCatalog collects known datasets from manifest contributions', async () => {
@@ -364,21 +393,30 @@ test('buildPluginCatalog bundled wins over installed on name collision', () => {
   assert.deepEqual(meta?.provides, { 'hypaware.blob-store': '1.0.0' })
 })
 
-test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', () => {
-  const diagnostics = diagnoseV1Config({
-    version: 2,
-    plugins: [
-      {
-        name: '@hypaware/ai-gateway',
-        config: {
-          upstreams: [
-            { name: 'chatgpt', base_url: 'https://chatgpt.com', provider: 'chatgpt' },
-          ],
+test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const diagnostics = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        {
+          name: '@hypaware/ai-gateway',
+          config: {
+            upstreams: [
+              { name: 'chatgpt', base_url: 'https://chatgpt.com', provider: 'chatgpt' },
+            ],
+          },
         },
-      },
-      { name: '@hypaware/codex' },
-    ],
-  })
+        { name: '@hypaware/codex' },
+      ],
+    },
+    {
+      clientDescriptors: catalog.clientDescriptors,
+      knownPlugins: catalog.pluginMetadata,
+    }
+  )
 
   assert.equal(
     diagnostics.some((diagnostic) => diagnostic.kind === 'gateway_missing_openai_upstream'),

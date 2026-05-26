@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CapabilityName, PluginContributionManifest, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CapabilityName, PluginAttachProbeManifest, PluginContributionManifest, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
  * @import { LoadedManifest } from './manifest.js'
  * @import { PluginMetadata } from './config/types.d.ts'
  */
@@ -15,10 +15,20 @@
  */
 
 /**
+ * @typedef {object} ClientDescriptor
+ * @property {PluginName} plugin
+ * @property {string} name
+ * @property {string} skillDir
+ * @property {PluginAttachProbeManifest} [attachProbe]
+ * @property {string[]} [requiredUpstreams]
+ */
+
+/**
  * @typedef {object} PluginCatalog
  * @property {Map<PluginName, PluginCatalogEntry>} plugins
  * @property {Map<PluginName, PluginMetadata>} pluginMetadata
  * @property {Set<string>} knownDatasets
+ * @property {Map<string, ClientDescriptor>} clientDescriptors
  */
 
 /**
@@ -41,6 +51,8 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
   const pluginMetadata = new Map()
   /** @type {Set<string>} */
   const knownDatasets = new Set()
+  /** @type {Map<string, ClientDescriptor>} */
+  const clientDescriptors = new Map()
 
   for (const source of [bundledManifests, installedManifests]) {
     for (const entry of source) {
@@ -64,10 +76,27 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           }
         }
       }
+
+      const client = entry.manifest.contributes?.client
+      if (client && typeof client.name === 'string' && typeof client.skill_dir === 'string') {
+        if (!clientDescriptors.has(client.name)) {
+          /** @type {ClientDescriptor} */
+          const descriptor = {
+            plugin: name,
+            name: client.name,
+            skillDir: client.skill_dir,
+          }
+          if (client.attach_probe) descriptor.attachProbe = client.attach_probe
+          if (Array.isArray(client.required_upstreams)) {
+            descriptor.requiredUpstreams = client.required_upstreams
+          }
+          clientDescriptors.set(client.name, descriptor)
+        }
+      }
     }
   }
 
-  return { plugins, pluginMetadata, knownDatasets }
+  return { plugins, pluginMetadata, knownDatasets, clientDescriptors }
 }
 
 /**
