@@ -923,9 +923,24 @@ export interface QueryStorageService {
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
+  appendRowsToPartition(
+    dataset: string,
+    partitionSegments: string[],
+    columns: ColumnSpec[],
+    rows: Record<string, unknown>[],
+  ): Promise<void>
+  discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string
   readRows(tablePath: string, columns?: string[]): AsyncIterable<Record<string, unknown>>
+}
+
+export interface CachePartitionMeta {
+  dataset: string
+  partition: Record<string, string>
+  path: string
+  epoch: number
+  rowCount: number
 }
 
 // =============================================================================
