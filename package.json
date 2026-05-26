@@ -11,7 +11,8 @@
     ".": "./src/core/index.js",
     "./core": "./src/core/index.js",
     "./core/observability": "./src/core/observability/index.js",
-    "./core/sinks": "./src/core/sinks/index.js"
+    "./core/sinks": "./src/core/sinks/index.js",
+    "./tui": "./src/core/cli/tui/index.js"
   },
   "imports": {
     "#core/observability": "./src/core/observability/index.js"
@@ -27,7 +28,7 @@
   },
   "scripts": {
     "lint": "node scripts/check-syntax.js",
-    "test": "node --test test/**/*.test.js",
+    "test": "node scripts/run-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
