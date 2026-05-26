@@ -4,6 +4,8 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 
+import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
+
 /**
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from './types.d.ts'
@@ -28,7 +30,6 @@ const LAST_FLUSH_FILE = 'last-flush.json'
  * @returns {CacheSpool}
  */
 export function createCacheSpool(args) {
-  const rowChunkSize = args.rowChunkSize ?? DEFAULT_FLUSH_ROW_CHUNK_SIZE
   /** @type {Map<string, { writeLock: Promise<unknown>, flushLock: Promise<unknown> }>} */
   const states = new Map()
   /** @type {Set<string>} */
@@ -111,13 +112,19 @@ export function createCacheSpool(args) {
         let chunkCount = 0
         let bytesWritten = 0
         for (const filePath of files) {
-          const chunks = await readFlushChunks(filePath, rowChunkSize)
-          for (const chunk of chunks) {
-            const written = await args.appendChunk(tablePath, chunk.columns, chunk.rows)
-            rowCount += chunk.rows.length
+          const progress = await readProgress(filePath)
+          const startOffset = progress?.byteOffset ?? 0
+          const batchId = `flush-${Date.now()}-${process.pid}`
+
+          for await (const batch of streamFlushFile({ filePath, batchId, startOffset })) {
+            const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
+            rowCount += batch.chunk.rows.length
             chunkCount += 1
             bytesWritten += written.bytesWritten
+            await writeProgress(filePath, batch.resumeOffset)
           }
+
+          await removeProgress(filePath)
           await fs.rm(filePath, { force: true })
         }
         if (chunkCount > 0) {
@@ -206,51 +213,6 @@ function listFlushFiles(tablePath) {
   }
 }
 
-/**
- * @param {string} filePath
- * @param {number} rowChunkSize
- * @returns {Promise<Array<{ columns: readonly ColumnSpec[], rows: Record<string, unknown>[] }>>}
- */
-async function readFlushChunks(filePath, rowChunkSize) {
-  const text = await fs.readFile(filePath, 'utf8')
-  /** @type {Array<{ columns: readonly ColumnSpec[], rows: Record<string, unknown>[] }>} */
-  const chunks = []
-  /** @type {readonly ColumnSpec[] | null} */
-  let currentColumns = null
-  let currentSignature = ''
-  /** @type {Record<string, unknown>[]} */
-  let currentRows = []
-
-  function flushCurrent() {
-    if (!currentColumns || currentRows.length === 0) return
-    chunks.push({ columns: currentColumns, rows: currentRows })
-    currentColumns = null
-    currentSignature = ''
-    currentRows = []
-  }
-
-  for (const line of text.split('\n')) {
-    if (line.length === 0) continue
-    const envelope = /** @type {{ version?: number, columns?: readonly ColumnSpec[], rows?: Record<string, unknown>[] }} */ (JSON.parse(line))
-    if (envelope.version !== 1 || !Array.isArray(envelope.columns) || !Array.isArray(envelope.rows)) {
-      throw new Error(`invalid cache spool envelope in ${filePath}`)
-    }
-    const signature = JSON.stringify(envelope.columns)
-    if (currentColumns && signature !== currentSignature) flushCurrent()
-    currentColumns = envelope.columns
-    currentSignature = signature
-    for (const row of envelope.rows) {
-      currentRows.push(row)
-      if (currentRows.length >= rowChunkSize) flushCurrent()
-      if (!currentColumns) {
-        currentColumns = envelope.columns
-        currentSignature = signature
-      }
-    }
-  }
-  flushCurrent()
-  return chunks
-}
 
 /**
  * @param {string} tablePath
