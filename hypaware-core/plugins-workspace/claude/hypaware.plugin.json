@@ -20,6 +20,16 @@
     }
   },
   "contributes": {
+    "client": {
+      "name": "claude",
+      "skill_dir": ".claude/skills",
+      "attach_probe": {
+        "format": "json",
+        "settings_file": ".claude/settings.json",
+        "marker_key": "_hypaware"
+      },
+      "required_upstreams": ["anthropic"]
+    },
     "skills": [
       { "name": "hypaware-query", "clients": ["claude"] },
       { "name": "hypaware-ignore", "clients": ["claude"] },

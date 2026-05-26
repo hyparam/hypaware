@@ -598,13 +598,6 @@ function runPerPluginSectionValidators(config, registry, errors) {
 
 /* ---------- Phase 8 V1 diagnostics ---------- */
 
-const CLIENT_PLUGINS = /** @type {ReadonlySet<PluginName>} */ (
-  new Set(/** @type {PluginName[]} */ (['@hypaware/claude', '@hypaware/codex']))
-)
-const ENCODER_PLUGINS = /** @type {ReadonlySet<PluginName>} */ (
-  new Set(/** @type {PluginName[]} */ (['@hypaware/format-parquet', '@hypaware/format-jsonl']))
-)
-const LOCAL_FS_PLUGIN = /** @type {PluginName} */ ('@hypaware/local-fs')
 const AI_GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
 
 /**
@@ -614,87 +607,84 @@ const AI_GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
  * give `hyp status` a concrete list of "what's wrong and how to fix
  * it" lines.
  *
- * Each diagnostic carries one or more `repair` strings — concrete
- * commands the operator can run. The status renderer surfaces them
- * verbatim under each diagnostic line.
+ * Client and upstream checks use the plugin catalog's client
+ * descriptors rather than hardcoded plugin names — any plugin that
+ * declares a `contributes.client` with `required_upstreams` gets the
+ * same diagnostic coverage.
+ *
+ * Encoder / blob-store checks use the capability metadata from the
+ * catalog so new encoder or destination plugins are automatically
+ * included.
  *
  * @param {HypAwareV2Config | null | undefined} config
+ * @param {{ clientDescriptors?: Map<string, import('../plugin_catalog.js').ClientDescriptor>, knownPlugins?: Map<PluginName, PluginMetadata> }} [ctx]
  * @returns {V1Diagnostic[]}
  */
-export function diagnoseV1Config(config) {
+export function diagnoseV1Config(config, ctx = {}) {
   /** @type {V1Diagnostic[]} */
   const out = []
   if (!config) return out
 
   const enabledByName = enabledPluginIndex(config)
   const gatewayConfig = enabledByName.get(AI_GATEWAY_PLUGIN)
+  const clientDescriptors = ctx.clientDescriptors ?? new Map()
+  const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
 
-  for (const clientName of CLIENT_PLUGINS) {
-    if (!enabledByName.has(clientName)) continue
+  for (const [clientName, descriptor] of clientDescriptors) {
+    const pluginName = descriptor.plugin
+    if (!enabledByName.has(pluginName)) continue
+
     if (gatewayConfig === undefined) {
       out.push({
         kind: 'client_without_gateway',
-        pointer: pluginPointer(config, clientName),
+        pointer: pluginPointer(config, pluginName),
         message:
-          `client plugin '${clientName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not — ` +
+          `client plugin '${pluginName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not — ` +
           `attach commands will fail until the gateway is enabled.`,
         repair: [
           `hyp init --from-file <config.json>  # re-run picker to add the gateway`,
-          `hyp attach --client ${clientName === '@hypaware/claude' ? 'claude' : 'codex'}`,
+          `hyp attach --client ${clientName}`,
         ],
       })
+    }
+
+    if (gatewayConfig !== undefined && descriptor.requiredUpstreams?.length) {
+      const hasAny = descriptor.requiredUpstreams.some((u) =>
+        gatewayHasUpstreamProvider(gatewayConfig, u)
+      )
+      if (!hasAny) {
+        const upstreamList = descriptor.requiredUpstreams.join(' or ')
+        out.push({
+          kind: /** @type {V1DiagnosticKind} */ (`gateway_missing_${descriptor.requiredUpstreams[0]}_upstream`),
+          pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
+          message:
+            `'${pluginName}' is enabled but the gateway has no ${upstreamList} upstream — ` +
+            `${clientName} requests will have nowhere to forward.`,
+          repair: [
+            `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
+            `hyp attach --client ${clientName}`,
+          ],
+        })
+      }
     }
   }
 
-  if (enabledByName.has(/** @type {PluginName} */ ('@hypaware/claude'))) {
-    if (gatewayConfig !== undefined && !gatewayHasUpstreamProvider(gatewayConfig, 'anthropic')) {
-      out.push({
-        kind: 'gateway_missing_anthropic_upstream',
-        pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
-        message:
-          `'@hypaware/claude' is enabled but the gateway has no Anthropic upstream — ` +
-          `Claude requests will have nowhere to forward.`,
-        repair: [
-          `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
-          `hyp attach --client claude`,
-        ],
-      })
-    }
-  }
-
-  if (enabledByName.has(/** @type {PluginName} */ ('@hypaware/codex'))) {
-    if (
-      gatewayConfig !== undefined &&
-      !gatewayHasUpstreamProvider(gatewayConfig, 'openai') &&
-      !gatewayHasUpstreamProvider(gatewayConfig, 'chatgpt')
-    ) {
-      out.push({
-        kind: 'gateway_missing_openai_upstream',
-        pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
-        message:
-          `'@hypaware/codex' is enabled but the gateway has no OpenAI or ChatGPT upstream — ` +
-          `Codex requests will have nowhere to forward.`,
-        repair: [
-          `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
-          `hyp attach --client codex`,
-        ],
-      })
-    }
-  }
+  const encoderPlugins = derivePluginsByCapability(knownPlugins, 'hypaware.encoder', 'provides')
+  const blobStorePlugins = derivePluginsByCapability(knownPlugins, 'hypaware.blob-store', 'provides')
 
   if (config.sinks) {
     for (const [name, raw] of Object.entries(config.sinks)) {
       if (!('writer' in raw) && !('destination' in raw)) continue
       const writer = 'writer' in raw && typeof raw.writer === 'string' ? raw.writer : null
       const destination = 'destination' in raw && typeof raw.destination === 'string' ? raw.destination : null
-      if (destination !== LOCAL_FS_PLUGIN) continue
-      if (writer !== null && enabledByName.has(writer) && ENCODER_PLUGINS.has(writer)) continue
+      if (!blobStorePlugins.has(/** @type {PluginName} */ (destination))) continue
+      if (writer !== null && enabledByName.has(writer) && encoderPlugins.has(writer)) continue
       out.push({
         kind: 'sink_missing_encoder',
         pointer: `/sinks/${name}`,
         message:
-          `sink '${name}' targets '${LOCAL_FS_PLUGIN}' but no encoder plugin ` +
-          `(${[...ENCODER_PLUGINS].join(' or ')}) is enabled — local export will produce no files.`,
+          `sink '${name}' targets '${destination}' but no encoder plugin ` +
+          `(${[...encoderPlugins].join(' or ')}) is enabled — local export will produce no files.`,
         repair: [
           `hyp init --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
         ],
@@ -702,6 +692,24 @@ export function diagnoseV1Config(config) {
     }
   }
 
+  return out
+}
+
+/**
+ * Derive the set of plugins providing (or requiring) a given capability
+ * from the known-plugins metadata map.
+ *
+ * @param {Map<PluginName, PluginMetadata>} known
+ * @param {string} capability
+ * @param {'provides' | 'requires'} direction
+ * @returns {Set<PluginName>}
+ */
+function derivePluginsByCapability(known, capability, direction) {
+  /** @type {Set<PluginName>} */
+  const out = new Set()
+  for (const [name, meta] of known) {
+    if (meta[direction]?.[capability]) out.add(name)
+  }
   return out
 }
 
@@ -736,21 +744,24 @@ function pluginPointer(config, name) {
  * config shape is intentionally loose, so check all three.
  *
  * @param {JsonObject} gatewayConfig
- * @param {'anthropic'|'openai'|'chatgpt'} provider
+ * @param {string} provider
  */
 function gatewayHasUpstreamProvider(gatewayConfig, provider) {
   const upstreams = gatewayConfig?.upstreams
   if (!Array.isArray(upstreams)) return false
-  const hostHint =
-    provider === 'anthropic' ? 'anthropic.com'
-    : provider === 'chatgpt' ? 'chatgpt.com'
-    : 'openai.com'
+  /** @type {Record<string, string>} */
+  const HOST_HINTS = {
+    anthropic: 'anthropic.com',
+    chatgpt: 'chatgpt.com',
+    openai: 'openai.com',
+  }
+  const hostHint = HOST_HINTS[provider]
   for (const raw of upstreams) {
     if (!raw || typeof raw !== 'object') continue
     const u = /** @type {Record<string, unknown>} */ (raw)
     if (typeof u.provider === 'string' && u.provider === provider) return true
     if (typeof u.name === 'string' && u.name === provider) return true
-    if (typeof u.base_url === 'string' && u.base_url.includes(hostHint)) return true
+    if (hostHint && typeof u.base_url === 'string' && u.base_url.includes(hostHint)) return true
   }
   return false
 }
