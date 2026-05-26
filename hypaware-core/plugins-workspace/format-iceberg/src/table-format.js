@@ -365,7 +365,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
   try {
     const retentionConfig = normalizeExportRetentionConfig(
       /** @type {Partial<import('./maintenance.js').ExportRetentionConfig> | undefined} */ (
-        config.maintenance
+        ctx.sinkInstanceConfig?.maintenance
       )
     )
     const expirationResult = await expireExportSnapshots({
