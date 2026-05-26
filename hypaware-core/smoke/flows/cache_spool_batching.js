@@ -136,12 +136,6 @@ export async function run({ harness, expect }) {
     await kernel.storage.appendRows(resumeTablePath, resumeColumns, [{ id: BigInt(i), value: `r-${i}` }])
   }
 
-  let flushCallCount = 0
-  const origAppendChunk = kernel.storage._spool?.appendChunk
-  if (origAppendChunk) {
-    // cannot easily intercept — fall through to basic flush
-  }
-
   await kernel.storage.flushTable(resumeTablePath, { force: true, reason: 'smoke_resume' })
 
   const resumeStdout = makeBuf()
