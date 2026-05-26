@@ -20,6 +20,7 @@ import { createKernelRuntime } from '../runtime/activation.js'
 import { bootKernel } from '../runtime/boot.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
+import { materializeSinks } from '../sinks/materialize.js'
 
 /**
  * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -114,6 +115,11 @@ export async function dispatch(argv, opts = {}) {
     kernel = boot.runtime
     activePlugins = boot.activePlugins
     if (boot.config) activeConfig = boot.config
+
+    await materializeSinks(kernel, boot.config, {
+      stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
+      runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
+    })
   }
 
   if (argv.length === 0) {
