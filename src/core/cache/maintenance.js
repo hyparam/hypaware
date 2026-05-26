@@ -273,6 +273,8 @@ function needsCompaction(epochDir, cfg) {
  * @param {MaintenanceConfig} _cfg
  * @returns {Promise<{ newEpoch: number, rowCount: number, dataFiles: number } | null>}
  */
+const COMPACT_BATCH_SIZE = 10_000
+
 async function compactPartition(partitionDir, cursor, _cfg) {
   const oldEpochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
   if (!tableExists(oldEpochDir)) return null
@@ -281,10 +283,11 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   const newEpochDir = path.join(partitionDir, `epoch=${newEpoch}`)
 
   const seen = new Set()
-  /** @type {Record<string, unknown>[]} */
-  const dedupedRows = []
   /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').ColumnSpec[] | null} */
   let columns = null
+  /** @type {Record<string, unknown>[]} */
+  let batch = []
+  let totalRows = 0
 
   for await (const row of scanRowsFromTable(oldEpochDir)) {
     if (!columns) {
@@ -297,16 +300,25 @@ async function compactPartition(partitionDir, cursor, _cfg) {
     const rowId = row._hyp_cache_row_id
     if (typeof rowId === 'string' && seen.has(rowId)) continue
     if (typeof rowId === 'string') seen.add(rowId)
-    dedupedRows.push(row)
+    batch.push(row)
+
+    if (batch.length >= COMPACT_BATCH_SIZE) {
+      await appendRowsToTable(newEpochDir, columns, batch)
+      totalRows += batch.length
+      batch = []
+    }
   }
 
-  if (dedupedRows.length === 0 || !columns) return null
+  if (batch.length > 0 && columns) {
+    await appendRowsToTable(newEpochDir, columns, batch)
+    totalRows += batch.length
+  }
 
-  await appendRowsToTable(newEpochDir, columns, dedupedRows)
+  if (totalRows === 0 || !columns) return null
 
   await writeCursor(partitionDir, {
     epoch: newEpoch,
-    rowCount: dedupedRows.length,
+    rowCount: totalRows,
     compaction: {
       previousEpoch: cursor.epoch,
       compactedAt: new Date().toISOString(),
@@ -318,7 +330,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
 
   return {
     newEpoch,
-    rowCount: dedupedRows.length,
+    rowCount: totalRows,
     dataFiles: countDataFiles(newEpochDir),
   }
 }
