@@ -100,8 +100,8 @@ function buildCoreCommands() {
     },
     {
       name: 'query maintain',
-      summary: 'Migrate legacy cache partitions to the new per-source/day layout',
-      usage: 'hyp query maintain [--force]',
+      summary: 'Run cache maintenance (legacy migration, snapshot expiration, compaction)',
+      usage: 'hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
       run: runQueryMaintain,
     },
     {
@@ -662,11 +662,21 @@ async function runQuerySchema(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runQueryStatus(_argv, ctx) {
+  const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
-  ctx.stdout.write(`cache:    ${ctx.storage.cacheRoot}\n`)
+  const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
+  ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
+  ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
   ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
   for (const dataset of datasets) {
     ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  }
+  if (report.partitions.length > 0) {
+    ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
+    for (const p of report.partitions) {
+      const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
+      ctx.stdout.write(`  ${p.dataset}/${partKey || 'all'}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
+    }
   }
   return 0
 }
@@ -744,53 +754,6 @@ async function runQueryRefresh(argv, ctx) {
   return 0
 }
 
-/**
- * `hyp query maintain [--force]`
- *
- * Migrates legacy cache partitions (e.g. `proxy_messages_v4`, `all`)
- * into the new per-source/day layout. Idempotent: re-running on an
- * already-migrated cache is a no-op.
- *
- * Without `--force`, reports what would be migrated. With `--force`,
- * performs the migration and retires old partition paths.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-async function runQueryMaintain(argv, ctx) {
-  const force = argv.includes('--force')
-  const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
-  return withSpan(
-    'query.maintain',
-    {
-      [Attr.COMPONENT]: 'query',
-      [Attr.OPERATION]: 'query.maintain',
-      force,
-      status: 'ok',
-    },
-    async (span) => {
-      const result = await migrateLegacyPartitions({
-        cacheRoot: storage.cacheRoot,
-        force,
-      })
-      span.setAttribute('partitions_scanned', result.scanned)
-      span.setAttribute('partitions_migrated', result.migrated)
-      span.setAttribute('rows_migrated', result.rowsMigrated)
-      if (!force) {
-        if (result.scanned === 0) {
-          ctx.stdout.write('maintain: no legacy partitions found\n')
-        } else {
-          ctx.stdout.write(`maintain: ${result.scanned} legacy partition(s) found, ${result.rowsMigrated} row(s) to migrate\n`)
-          ctx.stdout.write('  run with --force to perform the migration\n')
-        }
-        return 0
-      }
-      ctx.stdout.write(`maintain: migrated ${result.migrated} partition(s), ${result.rowsMigrated} row(s)\n`)
-      return 0
-    },
-    { component: 'query' }
-  )
-}
 
 /**
  * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
@@ -833,6 +796,85 @@ function parseQuerySqlArgv(argv) {
   }
   const sql = positional.join(' ')
   return { ok: true, sql, refresh, format }
+}
+
+/**
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runQueryMaintain(argv, ctx) {
+  const { maintainCache } = await import('../cache/maintenance.js')
+  const parsed = parseQueryMaintainArgv(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`hyp query maintain: ${parsed.error}\n`)
+    return 2
+  }
+  const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
+  if (!compactOnly && !expireOnly) {
+    const migrationResult = await migrateLegacyPartitions({
+      cacheRoot: ctx.storage.cacheRoot,
+      force,
+    })
+    if (migrationResult.migrated > 0) {
+      ctx.stdout.write(`migrate: ${migrationResult.migrated} legacy partition(s), ${migrationResult.rowsMigrated} row(s)\n`)
+    }
+  }
+  const maintenanceConfig = ctx.config?.query?.cache?.maintenance
+  const report = await maintainCache({
+    cacheRoot: ctx.storage.cacheRoot,
+    dataset,
+    force,
+    dryRun,
+    compactOnly,
+    expireOnly,
+    config: maintenanceConfig,
+  })
+  if (report.dryRun) {
+    ctx.stdout.write('[dry-run]\n')
+  }
+  for (const p of report.partitions) {
+    const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
+    const label = `${p.dataset}/${partKey || 'all'}`
+    const actions = []
+    if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
+    if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    if (actions.length > 0) {
+      ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
+    }
+  }
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted (${report.elapsedMs}ms)\n`)
+  return 0
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean, error?: undefined } | { error: string }}
+ */
+function parseQueryMaintainArgv(argv) {
+  /** @type {string | undefined} */
+  let dataset
+  let dryRun = false
+  let force = false
+  let compactOnly = false
+  let expireOnly = false
+  for (const arg of argv) {
+    if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--force') { force = true; continue }
+    if (arg === '--compact-only') { compactOnly = true; continue }
+    if (arg === '--expire-only') { expireOnly = true; continue }
+    if (arg === '--help' || arg === '-h') {
+      return { error: 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]' }
+    }
+    if (arg.startsWith('--')) {
+      return { error: `unknown flag '${arg}'` }
+    }
+    if (dataset === undefined) { dataset = arg; continue }
+    return { error: `unexpected argument '${arg}'` }
+  }
+  if (compactOnly && expireOnly) {
+    return { error: '--compact-only and --expire-only are mutually exclusive' }
+  }
+  return { dataset, dryRun, force, compactOnly, expireOnly }
 }
 
 /* ---------- collect ---------- */

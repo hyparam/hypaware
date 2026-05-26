@@ -437,6 +437,18 @@ export interface QueryCacheConfig {
   /** Override the cache root (default: `~/.hyp/hypaware/`). Layout inside is fixed. */
   dir?: string
   retention?: QueryCacheRetentionConfig
+  maintenance?: QueryCacheMaintenanceConfig
+}
+
+export interface QueryCacheMaintenanceConfig {
+  enabled?: boolean
+  interval_minutes?: number
+  target_file_bytes?: number
+  min_snapshots_to_keep?: number
+  max_snapshot_age_hours?: number
+  compact_file_count?: number
+  compact_avg_file_bytes?: number
+  max_tick_ms?: number
 }
 
 export interface QueryCacheRetentionConfig {
