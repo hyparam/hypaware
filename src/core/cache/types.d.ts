@@ -34,6 +34,7 @@ export interface FlushResult {
   chunkCount: number
   bytesWritten: number
   pendingBytes: number
+  malformedCount: number
   reason: string
 }
 
