@@ -13,6 +13,7 @@ import { readProgress, removeProgress, streamFlushFile, writeProgress } from './
 
 export const SPOOL_DIR = '_hypaware_spool'
 export const DEFAULT_SPOOL_BYTES_THRESHOLD = 4 * 1024 * 1024
+/** @deprecated Superseded by streaming reader batch limits. */
 export const DEFAULT_FLUSH_ROW_CHUNK_SIZE = 1000
 export const QUERY_FLUSH_DEBOUNCE_MS = 2 * 60 * 1000
 
@@ -25,7 +26,8 @@ const LAST_FLUSH_FILE = 'last-flush.json'
  * @param {{
  *   cacheRoot: string,
  *   appendChunk(tablePath: string, columns: readonly ColumnSpec[], rows: Record<string, unknown>[]): Promise<{ bytesWritten: number }>,
- *   rowChunkSize?: number,
+ *   batchRowLimit?: number,
+ *   batchByteLimit?: number,
  * }} args
  * @returns {CacheSpool}
  */
@@ -116,7 +118,7 @@ export function createCacheSpool(args) {
           const startOffset = progress?.byteOffset ?? 0
           const batchId = `flush-${Date.now()}-${process.pid}`
 
-          for await (const batch of streamFlushFile({ filePath, batchId, startOffset })) {
+          for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit })) {
             const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
             rowCount += batch.chunk.rows.length
             chunkCount += 1

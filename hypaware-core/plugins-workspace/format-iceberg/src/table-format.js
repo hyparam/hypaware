@@ -3,7 +3,7 @@
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 import { createBlobStoreIO, pathToKey, tableUrlForBlobPrefix } from './blob-io.js'
-import { commitBatch, probeTable } from './commit.js'
+import { commitBatch, commitRowStream, probeTable } from './commit.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'
 
 /**
@@ -207,20 +207,10 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
   const markerPath = markerKey(prefix, ctx.name, dataset, batch.batchId)
   const tracer = getTracer('plugin.format-iceberg')
 
-  // Drain rows up-front so the commit span only fires once we've
-  // already paid the IO cost. `storage.flushTable` is called per
-  // partition so any pending cache buffer lands before we read.
-  /** @type {Record<string, unknown>[]} */
-  const rows = []
-  let rowsLoaded = 0
+  // Flush any pending spool buffers so the row iterables are current.
   for (const partition of partitions) {
     if (partition.tablePath) {
       await flushIfSupported(ctx.storage, partition.tablePath, 'iceberg_export')
-    }
-    const iterable = openRows(ctx.storage, partition)
-    for await (const row of iterable) {
-      rows.push(row)
-      rowsLoaded += 1
     }
   }
 
@@ -267,9 +257,64 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
   }
 
-  // Empty batches still emit a no-op trace + marker so a partition
-  // with zero ready rows doesn't leave the batch in a half-state.
-  if (rows.length === 0) {
+  // Stream rows through target-sized batch commits instead of draining
+  // everything into memory first.  Each batch is a single Iceberg append.
+  async function* rowStream() {
+    for (const partition of partitions) {
+      const iterable = openRows(ctx.storage, partition)
+      for await (const row of iterable) yield row
+    }
+  }
+
+  const commitSpanName = priorState.exists ? 'iceberg.snapshot.commit' : 'iceberg.table.create'
+  const commit = await tracer.startActiveSpan(
+    commitSpanName,
+    {
+      attributes: {
+        hyp_plugin: PLUGIN_NAME,
+        hyp_sink_instance: ctx.name,
+        hyp_dataset: dataset,
+        hyp_batch_id: batch.batchId,
+        encoder_format: ctx.encoder.format,
+        status: 'ok',
+        ...destinationAttrs,
+      },
+    },
+    async (span) => {
+      try {
+        const result = await commitRowStream(
+          { tableUrl, columns, rows: rowStream(), resolver, lister },
+          { exists: priorState.exists, metadata: priorState.metadata }
+        )
+        span.setAttribute('snapshot_id', result.snapshotId)
+        span.setAttribute('bytes_written', result.bytesWritten)
+        span.setAttribute('row_count', result.rowCount)
+        span.setAttribute('batch_count', result.batchCount)
+        if (lastMetadataWrite?.etag) span.setAttribute('etag', lastMetadataWrite.etag)
+        return result
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        const errorKind = readErrorKind(err) ?? 'iceberg_commit_failed'
+        span.setStatus({ code: SpanStatusCode.ERROR, message })
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', errorKind)
+        log.warn('iceberg.snapshot.commit_failed', {
+          hyp_plugin: PLUGIN_NAME,
+          hyp_sink_instance: ctx.name,
+          hyp_dataset: dataset,
+          hyp_batch_id: batch.batchId,
+          error_kind: errorKind,
+          message,
+          ...destinationAttrs,
+        })
+        throw err
+      } finally {
+        span.end()
+      }
+    }
+  )
+
+  if (commit.rowCount === 0) {
     log.debug('iceberg.export_dataset.empty', {
       hyp_plugin: PLUGIN_NAME,
       hyp_sink_instance: ctx.name,
@@ -292,66 +337,15 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
   }
 
-  const commitSpanName = priorState.exists ? 'iceberg.snapshot.commit' : 'iceberg.table.create'
-  const commit = await tracer.startActiveSpan(
-    commitSpanName,
-    {
-      attributes: {
-        hyp_plugin: PLUGIN_NAME,
-        hyp_sink_instance: ctx.name,
-        hyp_dataset: dataset,
-        hyp_batch_id: batch.batchId,
-        encoder_format: ctx.encoder.format,
-        row_count: rowsLoaded,
-        status: 'ok',
-        ...destinationAttrs,
-      },
-    },
-    async (span) => {
-      try {
-        const result = await commitBatch(
-          { tableUrl, columns, rows, resolver, lister },
-          { exists: priorState.exists, metadata: priorState.metadata }
-        )
-        span.setAttribute('snapshot_id', result.snapshotId)
-        span.setAttribute('metadata_version', result.metadataVersion)
-        span.setAttribute('data_file_count', result.dataFiles.length)
-        span.setAttribute('bytes_written', result.bytesWritten)
-        if (lastMetadataWrite?.etag) span.setAttribute('etag', lastMetadataWrite.etag)
-        return result
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        const errorKind = readErrorKind(err) ?? 'iceberg_commit_failed'
-        span.setStatus({ code: SpanStatusCode.ERROR, message })
-        span.setAttribute('status', 'failed')
-        span.setAttribute('error_kind', errorKind)
-        // Sister log so consumers don't have to walk the trace tree to
-        // see the failure name.
-        log.warn('iceberg.snapshot.commit_failed', {
-          hyp_plugin: PLUGIN_NAME,
-          hyp_sink_instance: ctx.name,
-          hyp_dataset: dataset,
-          hyp_batch_id: batch.batchId,
-          error_kind: errorKind,
-          message,
-          ...destinationAttrs,
-        })
-        throw err
-      } finally {
-        span.end()
-      }
-    }
-  )
-
   await writeMarker(ctx.blobStore, markerPath, {
     dataset,
     batchId: batch.batchId,
     partition: collectPartitionKeys(partitions),
-    rowCount: commit.rowCount || rowsLoaded,
+    rowCount: commit.rowCount,
     bytesWritten: commit.bytesWritten,
-    dataFiles: commit.dataFiles,
+    dataFiles: [],
     snapshotId: commit.snapshotId,
-    metadataVersion: commit.metadataVersion,
+    metadataVersion: '',
     committedAt: new Date().toISOString(),
   })
 
@@ -361,8 +355,9 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     hyp_dataset: dataset,
     hyp_batch_id: batch.batchId,
     snapshot_id: commit.snapshotId,
-    row_count: commit.rowCount || rowsLoaded,
+    row_count: commit.rowCount,
     bytes_written: commit.bytesWritten,
+    batch_count: commit.batchCount,
   })
 
   return {
