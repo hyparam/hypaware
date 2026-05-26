@@ -8,11 +8,15 @@ import {
   tableExists as icebergTableExists,
   tableUrl as icebergTableUrl,
 } from './iceberg/store.js'
+import {
+  appendRowsToPartition as appendRowsToPartitionImpl,
+  discoverCachePartitions as discoverCachePartitionsImpl,
+} from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 
 /**
- * @import { ColumnSpec, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from './types.d.ts'
  */
 
@@ -132,6 +136,29 @@ export function createQueryStorageService({ cacheRoot }) {
         },
         { component: 'cache' }
       )
+    },
+
+    async appendRowsToPartition(dataset, partitionSegments, columns, rows) {
+      await withSpan(
+        'cache.append_partition',
+        {
+          [Attr.COMPONENT]: 'cache',
+          [Attr.OPERATION]: 'cache.append_partition',
+          [Attr.DATASET]: dataset,
+          row_count: rows.length,
+          status: 'ok',
+        },
+        async (span) => {
+          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, rows)
+          span.setAttribute('bytes_written', result.bytesWritten)
+          span.setAttribute('appended', result.appended)
+        },
+        { component: 'cache' }
+      )
+    },
+
+    discoverCachePartitions(scope) {
+      return discoverCachePartitionsImpl(cacheRoot, scope)
     },
 
     pendingInfo(tablePath) {
