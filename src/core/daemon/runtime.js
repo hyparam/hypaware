@@ -284,6 +284,43 @@ export async function runDaemon(opts = {}) {
     if (typeof tickHandle.unref === 'function') tickHandle.unref()
   }
 
+  // ----- Maintenance -----
+  /** @type {NodeJS.Timeout | null} */
+  let maintenanceHandle = null
+  const maintenanceCfg = boot.config?.query?.cache?.maintenance
+  const maintenanceEnabled = maintenanceCfg?.enabled !== false
+  if (maintenanceEnabled) {
+    const { maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
+    const mCfg = normalizeMaintenanceConfig(maintenanceCfg)
+    const intervalMs = mCfg.interval_minutes * 60 * 1000
+    async function runMaintenance() {
+      await withSpan(
+        'maintenance.tick',
+        {
+          [Attr.COMPONENT]: 'daemon',
+          [Attr.OPERATION]: 'maintenance.tick',
+          daemon_mode: mode,
+          status: 'ok',
+        },
+        async () => {
+          await maintainCache({
+            cacheRoot: boot.runtime.storage.cacheRoot,
+            budgetMs: mCfg.max_tick_ms,
+            config: mCfg,
+          })
+        },
+        { component: 'daemon' }
+      ).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        fileLog.error('daemon.maintenance_failed', { message })
+      })
+    }
+    if (intervalMs > 0) {
+      maintenanceHandle = setInterval(() => { void runMaintenance() }, intervalMs)
+      if (typeof maintenanceHandle.unref === 'function') maintenanceHandle.unref()
+    }
+  }
+
   // ----- Shutdown -----
   /** @param {'signal'|'manual'} reason */
   async function shutdown(reason) {
@@ -292,6 +329,10 @@ export async function runDaemon(opts = {}) {
     if (tickHandle) {
       clearInterval(tickHandle)
       tickHandle = null
+    }
+    if (maintenanceHandle) {
+      clearInterval(maintenanceHandle)
+      maintenanceHandle = null
     }
     persist({ state: 'stopping' })
     fileLog.info('daemon.stopping', { reason })
