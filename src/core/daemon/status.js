@@ -532,7 +532,7 @@ function readRetention(config) {
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
  * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
  */
-async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
+export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
   const probe = descriptor.attachProbe
   const settingsPath = resolveClientSettingsPath(descriptor.name, probe.settings_file, env, homeDir)
@@ -585,7 +585,7 @@ async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
  * @param {string} homeDir
  * @returns {string}
  */
-function resolveClientSettingsPath(clientName, settingsFile, env, homeDir) {
+export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir) {
   const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
   const override = env?.[envKey]
   if (typeof override === 'string' && override.length > 0) {

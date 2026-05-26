@@ -12,7 +12,6 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
  * @import {
  *   ConfigValidationErrorKind,
  *   ConfigValidationError,
- *   V1DiagnosticKind,
  *   V1Diagnostic,
  *   PluginMetadata,
  *   ValidateContext,
@@ -602,6 +601,55 @@ function runPerPluginSectionValidators(config, registry, errors) {
 const AI_GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
 
 /**
+ * Fallback client descriptors for first-party clients. `hyp status`
+ * uses catalog-derived descriptors when manifest discovery succeeds,
+ * but diagnostics should still catch common Claude/Codex wiring gaps
+ * when bundled manifest discovery is unavailable.
+ *
+ * @returns {Map<string, ClientDescriptor>}
+ */
+function firstPartyClientDescriptors() {
+  return new Map(/** @type {[string, ClientDescriptor][]} */ ([
+    ['claude', {
+      plugin: /** @type {PluginName} */ ('@hypaware/claude'),
+      name: 'claude',
+      skillDir: '.claude/skills',
+      attachProbe: {
+        format: 'json',
+        settings_file: '.claude/settings.json',
+        marker_key: '_hypaware',
+      },
+      requiredUpstreams: ['anthropic'],
+    }],
+    ['codex', {
+      plugin: /** @type {PluginName} */ ('@hypaware/codex'),
+      name: 'codex',
+      skillDir: '.codex/skills',
+      attachProbe: {
+        format: 'toml',
+        settings_file: '.codex/config.toml',
+        marker_header: '[model_providers.hypaware]',
+      },
+      requiredUpstreams: ['openai', 'chatgpt'],
+    }],
+  ]))
+}
+
+/**
+ * @param {Map<string, ClientDescriptor> | undefined} clientDescriptors
+ * @returns {Map<string, ClientDescriptor>}
+ */
+function clientDescriptorsWithFallback(clientDescriptors) {
+  const fallback = firstPartyClientDescriptors()
+  if (!clientDescriptors || clientDescriptors.size === 0) return fallback
+  const out = new Map(clientDescriptors)
+  for (const [name, descriptor] of fallback) {
+    if (!out.has(name)) out.set(name, descriptor)
+  }
+  return out
+}
+
+/**
  * Walk a v2 config and report Phase 8 V1 diagnostic findings. The
  * checks are advisory: they do not fail `hyp config validate` (so a
  * partially configured walkthrough output still passes), but they
@@ -628,7 +676,7 @@ export function diagnoseV1Config(config, ctx = {}) {
 
   const enabledByName = enabledPluginIndex(config)
   const gatewayConfig = enabledByName.get(AI_GATEWAY_PLUGIN)
-  const clientDescriptors = ctx.clientDescriptors ?? new Map()
+  const clientDescriptors = clientDescriptorsWithFallback(ctx.clientDescriptors)
   const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
 
   for (const [clientName, descriptor] of clientDescriptors) {
@@ -650,13 +698,15 @@ export function diagnoseV1Config(config, ctx = {}) {
     }
 
     if (gatewayConfig !== undefined && descriptor.requiredUpstreams?.length) {
+      const primaryUpstream = descriptor.requiredUpstreams[0]
+      if (typeof primaryUpstream !== 'string' || primaryUpstream.length === 0) continue
       const hasAny = descriptor.requiredUpstreams.some((u) =>
         gatewayHasUpstreamProvider(gatewayConfig, u)
       )
       if (!hasAny) {
         const upstreamList = descriptor.requiredUpstreams.join(' or ')
         out.push({
-          kind: /** @type {V1DiagnosticKind} */ (`gateway_missing_${descriptor.requiredUpstreams[0]}_upstream`),
+          kind: `gateway_missing_${primaryUpstream}_upstream`,
           pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
           message:
             `'${pluginName}' is enabled but the gateway has no ${upstreamList} upstream — ` +

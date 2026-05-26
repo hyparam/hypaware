@@ -8,11 +8,18 @@ import path from 'node:path'
 
 import { renderDaemonInstall } from '../../src/core/daemon/install.js'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
-import { readStatusFile, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
+import {
+  probeClientAttachFromDescriptor,
+  readStatusFile,
+  resolveClientSettingsPath,
+  statusFilePath,
+  writeStatusFile,
+} from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
+ * @import { ClientDescriptor } from '../../src/core/plugin_catalog.js'
  * @import { DaemonStatus } from '../../src/core/daemon/types.d.ts'
  */
 
@@ -41,6 +48,81 @@ test('readStatusFile returns null before the daemon has written status', async (
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-status-missing-test-'))
 
   assert.equal(readStatusFile(tmp), null)
+})
+
+test('resolveClientSettingsPath sanitizes client env override names', () => {
+  assert.equal(
+    resolveClientSettingsPath(
+      'claude-desktop',
+      '.claude-desktop/settings.json',
+      { CLAUDE_DESKTOP_HOME: '/tmp/claude-desktop-home' },
+      '/Users/hyp'
+    ),
+    '/tmp/claude-desktop-home/settings.json'
+  )
+  assert.equal(
+    resolveClientSettingsPath('codex', '.codex/config.toml', {}, '/Users/hyp'),
+    '/Users/hyp/.codex/config.toml'
+  )
+})
+
+test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-json-'))
+  const settingsPath = path.join(tmp, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(settingsPath, JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388 } }))
+
+  const descriptor = /** @type {ClientDescriptor} */ ({
+    plugin: '@hypaware/claude',
+    name: 'claude',
+    skillDir: '.claude/skills',
+    attachProbe: {
+      format: 'json',
+      settings_file: '.claude/settings.json',
+      marker_key: '_hypaware',
+    },
+  })
+
+  assert.deepEqual(
+    await probeClientAttachFromDescriptor({ descriptor, homeDir: tmp }),
+    {
+      attached: true,
+      settingsPath,
+      version: '2.0.0',
+      port: '4388',
+    }
+  )
+})
+
+test('probeClientAttachFromDescriptor honors sanitized TOML home overrides', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-toml-'))
+  const overrideHome = path.join(tmp, 'claude-desktop-home')
+  const settingsPath = path.join(overrideHome, 'config.toml')
+  await fs.mkdir(overrideHome, { recursive: true })
+  await fs.writeFile(settingsPath, '[hypaware.gateway]\n')
+
+  const descriptor = /** @type {ClientDescriptor} */ ({
+    plugin: '@third-party/claude-desktop',
+    name: 'claude-desktop',
+    skillDir: '.claude-desktop/skills',
+    attachProbe: {
+      format: 'toml',
+      settings_file: '.claude-desktop/config.toml',
+      marker_header: '[hypaware.gateway]',
+    },
+  })
+
+  assert.deepEqual(
+    await probeClientAttachFromDescriptor({
+      descriptor,
+      homeDir: tmp,
+      env: { CLAUDE_DESKTOP_HOME: overrideHome },
+    }),
+    {
+      attached: true,
+      settingsPath,
+    }
+  )
 })
 
 test('renderDaemonInstall renders a deterministic systemd dry-run payload', () => {

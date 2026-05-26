@@ -184,6 +184,51 @@ test('diagnoseV1Config reports advisory product wiring gaps', async () => {
   )
 })
 
+test('diagnoseV1Config falls back to first-party client descriptors', () => {
+  const withoutGateway = diagnoseV1Config({
+    version: 2,
+    plugins: [{ name: '@hypaware/codex' }],
+  })
+  assert.deepEqual(withoutGateway.map((diagnostic) => diagnostic.kind), ['client_without_gateway'])
+
+  const missingUpstream = diagnoseV1Config({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+      { name: '@hypaware/claude' },
+    ],
+  })
+  assert.deepEqual(missingUpstream.map((diagnostic) => diagnostic.kind), [
+    'gateway_missing_anthropic_upstream',
+  ])
+})
+
+test('diagnoseV1Config emits descriptor-derived upstream diagnostic kinds', () => {
+  const diagnostics = diagnoseV1Config(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+        { name: '@third-party/gemini' },
+      ],
+    },
+    {
+      clientDescriptors: new Map([
+        ['gemini', {
+          plugin: '@third-party/gemini',
+          name: 'gemini',
+          skillDir: '.gemini/skills',
+          requiredUpstreams: ['gemini'],
+        }],
+      ]),
+    }
+  )
+
+  assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.kind), [
+    'gateway_missing_gemini_upstream',
+  ])
+})
+
 test('buildPluginCatalog derives capability metadata from bundled manifests', async () => {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])

@@ -51,18 +51,16 @@ export type ConfigValidationError = ValidationError & { errorKind: ConfigValidat
  *
  * - `client_without_gateway`: a client plugin (`@hypaware/claude` or
  *   `@hypaware/codex`) is enabled but `@hypaware/ai-gateway` is not.
- * - `gateway_missing_anthropic_upstream`: `@hypaware/claude` is enabled
- *   but no Anthropic upstream is registered with the gateway config.
- * - `gateway_missing_openai_upstream`: `@hypaware/codex` is enabled
- *   but no OpenAI upstream is registered.
+ * - `gateway_missing_*_upstream`: a client plugin is enabled but the
+ *   gateway config does not include one of its required upstream
+ *   providers.
  * - `sink_missing_encoder`: a local-fs sink is configured but no
  *   encoder plugin (`@hypaware/format-parquet` /
  *   `@hypaware/format-jsonl`) is enabled.
  */
 export type V1DiagnosticKind =
   | 'client_without_gateway'
-  | 'gateway_missing_anthropic_upstream'
-  | 'gateway_missing_openai_upstream'
+  | `gateway_missing_${string}_upstream`
   | 'sink_missing_encoder'
 
 export interface V1Diagnostic {
