@@ -34,6 +34,8 @@ import {
  * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  * @import { ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
+ * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
+ * @import { LoadedManifest } from '../manifest.js'
  */
 
 /**
@@ -118,12 +120,12 @@ export async function collectHypAwareStatus(opts = {}) {
   const config = loaded.ok ? loaded.config : null
   const configExists = loaded.ok || (loaded.errorKind !== 'config_missing')
 
-  /** @type {import('../plugin_catalog.js').PluginCatalog | undefined} */
+  /** @type {PluginCatalog | undefined} */
   let catalog
   try {
-    /** @type {import('../manifest.js').LoadedManifest[]} */
+    /** @type {LoadedManifest[]} */
     let bundledLoaded = []
-    /** @type {import('../manifest.js').LoadedManifest[]} */
+    /** @type {LoadedManifest[]} */
     let installedLoaded = []
     try {
       const bundled = await discoverBundledPlugins()
@@ -527,7 +529,7 @@ function readRetention(config) {
  * string search) formats. Returns a probe result without importing
  * any client plugin code.
  *
- * @param {{ descriptor: import('../plugin_catalog.js').ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
+ * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
  * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
  */
 async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
@@ -584,7 +586,7 @@ async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
  * @returns {string}
  */
 function resolveClientSettingsPath(clientName, settingsFile, env, homeDir) {
-  const envKey = `${clientName.toUpperCase()}_HOME`
+  const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
   const override = env?.[envKey]
   if (typeof override === 'string' && override.length > 0) {
     const parts = settingsFile.split('/')
