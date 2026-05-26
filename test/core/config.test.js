@@ -13,6 +13,8 @@ import {
   isCronExpression,
   validateConfig,
 } from '../../src/core/config/validate.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
+import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 
 /**
  * @import { BlobSinkConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -171,6 +173,195 @@ test('diagnoseV1Config reports advisory product wiring gaps', () => {
     diagnostics.map((diagnostic) => diagnostic.kind).sort(),
     ['client_without_gateway', 'sink_missing_encoder']
   )
+})
+
+test('buildPluginCatalog derives capability metadata from bundled manifests', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const central = catalog.pluginMetadata.get('@hypaware/central')
+  assert.ok(central, 'catalog must include @hypaware/central from excluded bundled set')
+  assert.deepEqual(central.provides, { 'hypaware.http-endpoint': '1.0.0' })
+
+  const localFs = catalog.pluginMetadata.get('@hypaware/local-fs')
+  assert.ok(localFs)
+  assert.deepEqual(localFs.provides, { 'hypaware.blob-store': '1.0.0' })
+
+  const iceberg = catalog.pluginMetadata.get('@hypaware/format-iceberg')
+  assert.ok(iceberg)
+  assert.deepEqual(iceberg.provides, { 'hypaware.table-format': '1.0.0' })
+  assert.deepEqual(iceberg.requires, {
+    'hypaware.blob-store': '^1.0.0',
+    'hypaware.encoder': '^1.0.0',
+  })
+})
+
+test('buildPluginCatalog collects known datasets from manifest contributions', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  assert.ok(catalog.knownDatasets.has('ai_gateway_messages'))
+  assert.ok(catalog.knownDatasets.has('logs'))
+  assert.ok(catalog.knownDatasets.has('traces'))
+  assert.ok(catalog.knownDatasets.has('metrics'))
+})
+
+test('validateConfig uses catalog-derived metadata for sink validation', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const result = await validateConfig(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/format-parquet' },
+        { name: '@hypaware/local-fs' },
+      ],
+      sinks: {
+        local: {
+          writer: '@hypaware/format-parquet',
+          destination: '@hypaware/local-fs',
+          config: { schedule: '0 * * * *' },
+        },
+      },
+    },
+    { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets }
+  )
+
+  assert.equal(result.ok, true)
+})
+
+test('validateConfig with catalog rejects @hypaware/central as blob-sink writer', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const result = await validateConfig(
+    {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/central' },
+        { name: '@hypaware/local-fs' },
+      ],
+      sinks: {
+        bad: {
+          writer: '@hypaware/central',
+          destination: '@hypaware/local-fs',
+          config: { schedule: '0 * * * *' },
+        },
+      },
+    },
+    { knownPlugins: catalog.pluginMetadata }
+  )
+
+  assert.equal(result.ok, false)
+  assert.ok(result.errors.some((e) => e.errorKind === 'sink_writer_invalid'))
+})
+
+test('validateConfig with catalog accepts @hypaware/central as request sink', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const result = await validateConfig(
+    {
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: {
+        fwd: {
+          plugin: '@hypaware/central',
+          config: { schedule: '*/5 * * * *' },
+        },
+      },
+    },
+    { knownPlugins: catalog.pluginMetadata }
+  )
+
+  assert.equal(result.ok, true)
+})
+
+test('buildPluginCatalog merges installed manifests with bundled', () => {
+  const catalog = buildPluginCatalog(
+    [
+      {
+        ok: true,
+        manifest: /** @type {any} */ ({
+          schema_version: 1,
+          name: '@hypaware/ai-gateway',
+          version: '2.0.0',
+          hypaware_api: '^1.0.0',
+          runtime: 'node',
+          entrypoint: './index.js',
+          provides: { capabilities: { 'hypaware.ai-gateway': '2.0.0' } },
+        }),
+        manifestPath: '/tmp/bundled/hypaware.plugin.json',
+        rootDir: '/tmp/bundled',
+      },
+    ],
+    [
+      {
+        ok: true,
+        manifest: /** @type {any} */ ({
+          schema_version: 1,
+          name: '@third-party/custom-sink',
+          version: '0.1.0',
+          hypaware_api: '^1.0.0',
+          runtime: 'node',
+          entrypoint: './index.js',
+          provides: { capabilities: { 'hypaware.http-endpoint': '1.0.0' } },
+          contributes: { datasets: [{ name: 'custom_data' }] },
+        }),
+        manifestPath: '/tmp/installed/hypaware.plugin.json',
+        rootDir: '/tmp/installed',
+      },
+    ]
+  )
+
+  assert.ok(catalog.pluginMetadata.has('@hypaware/ai-gateway'))
+  assert.ok(catalog.pluginMetadata.has('@third-party/custom-sink'))
+  assert.deepEqual(
+    catalog.pluginMetadata.get('@third-party/custom-sink')?.provides,
+    { 'hypaware.http-endpoint': '1.0.0' }
+  )
+  assert.ok(catalog.knownDatasets.has('custom_data'))
+})
+
+test('buildPluginCatalog bundled wins over installed on name collision', () => {
+  const catalog = buildPluginCatalog(
+    [
+      {
+        ok: true,
+        manifest: /** @type {any} */ ({
+          schema_version: 1,
+          name: '@hypaware/local-fs',
+          version: '1.0.0',
+          hypaware_api: '^1.0.0',
+          runtime: 'node',
+          entrypoint: './index.js',
+          provides: { capabilities: { 'hypaware.blob-store': '1.0.0' } },
+        }),
+        manifestPath: '/bundled/hypaware.plugin.json',
+        rootDir: '/bundled',
+      },
+    ],
+    [
+      {
+        ok: true,
+        manifest: /** @type {any} */ ({
+          schema_version: 1,
+          name: '@hypaware/local-fs',
+          version: '99.0.0',
+          hypaware_api: '^1.0.0',
+          runtime: 'node',
+          entrypoint: './index.js',
+          provides: { capabilities: { 'evil.cap': '1.0.0' } },
+        }),
+        manifestPath: '/installed/hypaware.plugin.json',
+        rootDir: '/installed',
+      },
+    ]
+  )
+
+  const meta = catalog.pluginMetadata.get('@hypaware/local-fs')
+  assert.deepEqual(meta?.provides, { 'hypaware.blob-store': '1.0.0' })
 })
 
 test('diagnoseV1Config treats ChatGPT as a valid Codex upstream', () => {

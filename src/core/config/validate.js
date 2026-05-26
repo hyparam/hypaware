@@ -51,14 +51,12 @@ export const CAP_TABLE_FORMAT = 'hypaware.table-format'
 export const CAP_HTTP_ENDPOINT = 'hypaware.http-endpoint'
 
 /**
- * First-party plugin metadata baked into the kernel. The Phase 6
- * cross-plugin validator runs before any plugin install path exists
- * (Phase 7), so the only way to validate a sink's writer/destination
- * pair is to ship the known first-party requires/provides matrix here.
- * From Phase 7 forward, callers augment this table with the
- * `mergeInstalledManifestsIntoKnown` helper so installed third-party
- * plugins are not flagged `plugin_unknown` and so their provides/requires
- * participate in sink-pair and capability-ambiguity checks.
+ * First-party plugin metadata baked into the kernel.
+ *
+ * @deprecated Prefer `buildPluginCatalog()` from `../plugin_catalog.js`
+ * which derives the same data from bundled manifest files on disk.
+ * This helper is retained only for tests and public-API consumers
+ * that have not migrated to the catalog path yet.
  *
  * @returns {Map<PluginName, PluginMetadata>}
  */

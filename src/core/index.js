@@ -8,3 +8,4 @@
 export * from './observability/index.js'
 export { createConfigRegistry, defaultConfigPath, loadConfigFile, parseConfigShape, CONFIG_BASENAME } from './config/schema.js'
 export { validateConfig, firstPartyPluginMetadata, mergeInstalledManifestsIntoKnown, isCronExpression, CAP_ENCODER, CAP_BLOB_STORE, CAP_HTTP_ENDPOINT } from './config/validate.js'
+export { buildPluginCatalog } from './plugin_catalog.js'

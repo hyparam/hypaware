@@ -11,6 +11,8 @@ import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { buildPluginCatalog } from '../plugin_catalog.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -844,27 +846,35 @@ function pluginStateDir(ctx) {
 }
 
 /**
- * Build the `knownPlugins` map used by `validateConfig`. Merges the
- * built-in first-party metadata with whatever third-party plugins are
- * recorded in `plugin-lock.json` so installed plugin names are not
- * flagged `plugin_unknown` and their capability provides/requires
- * participate in sink-pair and ambiguity checks.
+ * Build the `knownPlugins` map and `knownDatasets` set used by
+ * `validateConfig`. Discovers bundled and installed plugin manifests
+ * and derives capability metadata from the manifests themselves via
+ * `buildPluginCatalog`, so config validation runs against the actual
+ * declared capabilities rather than a hardcoded table.
  *
- * Installed-plugin discovery failures are absorbed silently — `hyp
- * config validate` keeps working when the lock is missing or any
- * installed manifest is corrupt; the underlying discovery layer logs
- * its own diagnostics.
+ * Discovery failures are absorbed silently — `hyp config validate`
+ * keeps working when the lock is missing or any installed manifest is
+ * corrupt; the underlying discovery layer logs its own diagnostics.
  *
  * @param {CommandRunContext} ctx
+ * @returns {Promise<{ knownPlugins: Map<import('../../../collectivus-plugin-kernel-types.d.ts').PluginName, import('../config/types.d.ts').PluginMetadata>, knownDatasets: Set<string> }>}
  */
 async function buildKnownPluginsForCtx(ctx) {
+  /** @type {import('../manifest.js').LoadedManifest[]} */
+  let bundledLoaded = []
+  /** @type {import('../manifest.js').LoadedManifest[]} */
+  let installedLoaded = []
+  try {
+    const bundled = await discoverBundledPlugins()
+    bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+  } catch { /* bundled discovery failure is non-fatal */ }
   try {
     const stateDir = pluginStateDir(ctx)
     const installed = await discoverInstalledPlugins({ stateDir })
-    return mergeInstalledManifestsIntoKnown(installed.loaded)
-  } catch {
-    return mergeInstalledManifestsIntoKnown([])
-  }
+    installedLoaded = installed.loaded
+  } catch { /* installed discovery failure is non-fatal */ }
+  const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
+  return { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets }
 }
 
 /**
@@ -1298,8 +1308,8 @@ async function runConfigValidate(argv, ctx) {
     return 1
   }
 
-  const knownPlugins = await buildKnownPluginsForCtx(ctx)
-  const result = await validateConfig(loadResult.config, { knownPlugins })
+  const { knownPlugins, knownDatasets } = await buildKnownPluginsForCtx(ctx)
+  const result = await validateConfig(loadResult.config, { knownPlugins, knownDatasets })
   if (!result.ok) {
     ctx.stderr.write(
       `hyp config validate: ${result.errors.length} error(s) in ${loadResult.configPath}\n`
@@ -2106,8 +2116,8 @@ async function runInitFromFile(flags, ctx) {
     ctx.stderr.write(`hyp init: --from-file: invalid JSON: ${message}\n`)
     return 1
   }
-  const knownPluginsFromFile = await buildKnownPluginsForCtx(ctx)
-  const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: knownPluginsFromFile })
+  const catalogCtx = await buildKnownPluginsForCtx(ctx)
+  const validation = await validateConfig(/** @type {any} */ (parsed), { knownPlugins: catalogCtx.knownPlugins, knownDatasets: catalogCtx.knownDatasets })
   if (!validation.ok) {
     for (const err of validation.errors) {
       ctx.stderr.write(

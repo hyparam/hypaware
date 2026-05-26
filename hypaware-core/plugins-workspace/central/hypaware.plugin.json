@@ -6,6 +6,11 @@
   "runtime": "node",
   "entrypoint": "./index.js",
   "description": "Request sink that forwards cache partitions to a central HypAware server.",
+  "provides": {
+    "capabilities": {
+      "hypaware.http-endpoint": "1.0.0"
+    }
+  },
   "contributes": {
     "sinks": [
       { "name": "forward", "supports": [] }

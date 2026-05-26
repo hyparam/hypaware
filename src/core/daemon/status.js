@@ -7,8 +7,10 @@ import process from 'node:process'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
-import { diagnoseV1Config, mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
+import { diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { buildPluginCatalog } from '../plugin_catalog.js'
 import {
   defaultLogDir,
   platformIsSupported,
@@ -120,15 +122,23 @@ export async function collectHypAwareStatus(opts = {}) {
   let validationErrors = []
   if (loaded.ok) {
     try {
-      /** @type {Awaited<ReturnType<typeof discoverInstalledPlugins>>} */
-      let installed
+      /** @type {import('../manifest.js').LoadedManifest[]} */
+      let bundledLoaded = []
+      /** @type {import('../manifest.js').LoadedManifest[]} */
+      let installedLoaded = []
       try {
-        installed = await discoverInstalledPlugins({ stateDir: stateRoot })
-      } catch {
-        installed = { loaded: [], failed: [], lockEntries: [] }
-      }
-      const knownPlugins = mergeInstalledManifestsIntoKnown(installed.loaded)
-      const result = await validateConfig(loaded.config, { knownPlugins })
+        const bundled = await discoverBundledPlugins()
+        bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+      } catch { /* bundled discovery failure is non-fatal */ }
+      try {
+        const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
+        installedLoaded = installed.loaded
+      } catch { /* installed discovery failure is non-fatal */ }
+      const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
+      const result = await validateConfig(loaded.config, {
+        knownPlugins: catalog.pluginMetadata,
+        knownDatasets: catalog.knownDatasets,
+      })
       validationErrors = result.errors
     } catch (err) {
       validationErrors = [{
