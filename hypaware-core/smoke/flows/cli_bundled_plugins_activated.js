@@ -21,10 +21,11 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *  3. `hyp attach --client codex --dry-run` reaches the Codex adapter
  *     (same shape).
  *  4. `hyp status --json` emits a stable JSON document listing the
- *     configured sources, sinks, clients, and active plugins, *without*
- *     mentioning `@hypaware/central` or `@hypaware/gascity` (both
- *     remain loadable for developers but are excluded from the V1
- *     default surface).
+ *     configured sources, sinks, clients, and active plugins. Because
+ *     neither `@hypaware/central` nor `@hypaware/gascity` is in this
+ *     config, they must not appear — they are excluded from default
+ *     activation but remain discoverable through the plugin catalog and
+ *     activatable via explicit config or init presets.
  *
  * Telemetry contract (per bead):
  *  - One `kernel.boot` root span per dispatch boot.
@@ -48,9 +49,9 @@ export async function run({ harness, expect }) {
   // Stage a v2 config that selects six of the nine V1-bundled
   // plugins. `@hypaware/format-jsonl`, `@hypaware/s3`, and
   // `@hypaware/format-iceberg` are intentionally omitted so the smoke
-  // can assert the "skipped" log surface, and we exclude
-  // `@hypaware/central` / `@hypaware/gascity` because they are not on
-  // the V1 default surface in the first place.
+  // can assert the "skipped" log surface. `@hypaware/central` and
+  // `@hypaware/gascity` are not in this config — they are excluded from
+  // default activation but activatable via explicit config.
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify({
@@ -131,7 +132,7 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.every((/** @type {any} */ r) => r.source === 'bundled')
   )
   expect.that(
-    'plugins: no excluded-from-default plugin (central/gascity) appears',
+    'plugins: unconfigured plugins (central/gascity) absent from active list',
     (listed.plugins ?? []).map((/** @type {any} */ p) => p.name),
     (v) =>
       Array.isArray(v) &&
@@ -219,12 +220,12 @@ export async function run({ harness, expect }) {
       typeof v.state === 'string'
   )
   expect.that(
-    'status: JSON does not reference @hypaware/central',
+    'status: unconfigured @hypaware/central absent from status JSON',
     statusStdout.text(),
     (v) => typeof v === 'string' && !v.includes('@hypaware/central')
   )
   expect.that(
-    'status: JSON does not reference @hypaware/gascity',
+    'status: unconfigured @hypaware/gascity absent from status JSON',
     statusStdout.text(),
     (v) => typeof v === 'string' && !v.includes('@hypaware/gascity')
   )

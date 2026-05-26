@@ -233,6 +233,36 @@ test('buildPluginCatalog collects known datasets from manifest contributions', a
   assert.ok(catalog.knownDatasets.has('logs'))
   assert.ok(catalog.knownDatasets.has('traces'))
   assert.ok(catalog.knownDatasets.has('metrics'))
+  assert.ok(
+    catalog.knownDatasets.has('gascity_messages'),
+    'catalog includes gascity_messages from excluded plugin manifest'
+  )
+})
+
+test('buildPluginCatalog includes excluded gascity plugin as a catalog entry', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+
+  const entry = catalog.plugins.get('@hypaware/gascity')
+  assert.ok(entry, 'gascity must be in catalog when excluded manifests are included')
+  assert.equal(entry.name, '@hypaware/gascity')
+  assert.ok(entry.contributes, 'gascity catalog entry must carry its contributions')
+  assert.ok(
+    entry.contributes.sources?.some((s) => s.name === 'gascity'),
+    'gascity contributes a "gascity" source'
+  )
+  assert.ok(
+    entry.contributes.commands?.some((c) => c.name === 'gascity attach'),
+    'gascity contributes a "gascity attach" command'
+  )
+  assert.ok(
+    entry.contributes.init_presets?.some((p) => p.name === 'gascity'),
+    'gascity contributes a "gascity" init preset'
+  )
+  assert.ok(
+    entry.contributes.skills?.some((s) => s.name === 'hypaware-gascity'),
+    'gascity contributes the hypaware-gascity skill'
+  )
 })
 
 test('validateConfig uses catalog-derived metadata for sink validation', async () => {
