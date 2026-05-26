@@ -22,6 +22,9 @@ import {
   createBlobStoreIO,
   tableUrlForBlobPrefix,
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
+import {
+  maintainExportTables,
+} from '../../plugins-workspace/format-iceberg/src/maintenance.js'
 
 /**
  * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -249,6 +252,48 @@ export async function run({ harness, expect }) {
     'marker: state/exported-batches/.../<batch>.json exists after commit',
     markerStat,
     (v) => v !== null && typeof v === 'object' && v.isFile()
+  )
+
+  // Export a second batch to accumulate another snapshot.
+  const exportResult2 = await handle.sink.exportBatch(
+    { batchId: 'iceberg-smoke-batch-2', partitions },
+    { format: 'iceberg', schedule: '* * * * *' }
+  )
+  expect.that('export2: status=exported', exportResult2.status, (v) => v === 'exported')
+
+  // Maintenance: snapshot expiration + compaction status.
+  const maintainReport = await maintainExportTables({
+    blobStore,
+    prefix: 'iceberg/datasets',
+  })
+  expect.that(
+    'maintain: discovered the smoke dataset',
+    maintainReport.datasets,
+    (ds) => Array.isArray(ds) && ds.some((d) => d.dataset === DATASET)
+  )
+  expect.that(
+    'maintain: compactionSupported is false (icebird V1 limitation)',
+    maintainReport.compactionSupported,
+    (v) => v === false
+  )
+  const datasetReport = maintainReport.datasets.find((d) => d.dataset === DATASET)
+  expect.that(
+    'maintain: dataset report has snapshotsBefore >= 2',
+    datasetReport?.snapshotsBefore,
+    (v) => typeof v === 'number' && v >= 2
+  )
+  expect.that(
+    'maintain: per-dataset compactionSupported is false',
+    datasetReport?.compactionSupported,
+    (v) => v === false
+  )
+
+  // After maintenance the table is still readable.
+  const { readTableRows: postMaintainRows } = await readIcebergTable(tableUrl, blobStore)
+  expect.that(
+    'maintain: table still readable after maintenance',
+    postMaintainRows,
+    (rows) => Array.isArray(rows) && rows.length >= ROW_COUNT
   )
 
   await obs.shutdown()
