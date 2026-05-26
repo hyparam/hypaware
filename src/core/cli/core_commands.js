@@ -251,7 +251,7 @@ function buildCoreCommands() {
     },
     {
       name: 'sink',
-      summary: 'Manage sink instances (subcommand: force)',
+      summary: 'Manage sink instances (subcommands: force, maintain)',
       usage: 'hyp sink <subcommand> [args...]',
       run: runSinkHelp,
     },
@@ -260,6 +260,12 @@ function buildCoreCommands() {
       summary: 'Force the sink driver to fire a tick now (optionally for one instance)',
       usage: 'hyp sink force [instance]',
       run: runSinkForce,
+    },
+    {
+      name: 'sink maintain',
+      summary: 'Run export maintenance (snapshot expiration) on table-format sinks',
+      usage: 'hyp sink maintain [instance] [--dry-run]',
+      run: runSinkMaintain,
     },
     {
       name: 'smoke',
@@ -1863,7 +1869,8 @@ async function runSmoke(argv, ctx) {
 async function runSinkHelp(_argv, ctx) {
   ctx.stdout.write('usage: hyp sink <subcommand> [args...]\n')
   ctx.stdout.write('  subcommands:\n')
-  ctx.stdout.write('    force [instance]   Run a sink tick now, ignoring schedules\n')
+  ctx.stdout.write('    force [instance]        Run a sink tick now, ignoring schedules\n')
+  ctx.stdout.write('    maintain [instance]      Run export maintenance (snapshot expiration)\n')
   return 0
 }
 
@@ -1912,6 +1919,102 @@ async function runSinkForce(argv, ctx) {
     )
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * `hyp sink maintain [instance] [--dry-run]`
+ *
+ * Runs export maintenance on table-format (Iceberg) sink instances:
+ * snapshot expiration on exported tables.  Data-file compaction is not
+ * yet supported by the underlying icebird library; the command reports
+ * `compaction_unsupported` when this is the case.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runSinkMaintain(argv, ctx) {
+  let instance = /** @type {string | undefined} */ (undefined)
+  let dryRun = false
+  for (const arg of argv) {
+    if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--help' || arg === '-h') {
+      ctx.stdout.write('usage: hyp sink maintain [instance] [--dry-run]\n')
+      return 0
+    }
+    if (arg.startsWith('--')) {
+      ctx.stderr.write(`hyp sink maintain: unknown flag '${arg}'\n`)
+      return 2
+    }
+    if (instance === undefined) { instance = arg; continue }
+    ctx.stderr.write(`hyp sink maintain: unexpected argument '${arg}'\n`)
+    return 2
+  }
+
+  const { maintainExportTables } = await import(
+    '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
+  )
+
+  const allHandles = /** @type {any} */ (ctx.sinks).listHandles?.() ?? []
+  const tableFormatHandles = allHandles.filter(
+    /** @param {any} h */
+    (h) => h.kind === 'table-format' && h.tableFormat === 'iceberg' && h.blobStore
+  )
+
+  if (instance) {
+    const match = tableFormatHandles.find(/** @param {any} h */ (h) => h.instanceName === instance)
+    if (!match) {
+      ctx.stderr.write(`hyp sink maintain: no iceberg table-format sink named '${instance}'\n`)
+      const available = tableFormatHandles.map(/** @param {any} h */ (h) => h.instanceName)
+      if (available.length > 0) {
+        ctx.stderr.write(`  available: ${available.join(', ')}\n`)
+      }
+      return 1
+    }
+  }
+
+  const targets = instance
+    ? tableFormatHandles.filter(/** @param {any} h */ (h) => h.instanceName === instance)
+    : tableFormatHandles
+
+  if (targets.length === 0) {
+    ctx.stdout.write('no iceberg table-format sinks instantiated; nothing to maintain\n')
+    return 0
+  }
+
+  if (dryRun) ctx.stdout.write('[dry-run]\n')
+
+  let totalExpired = 0
+  for (const handle of targets) {
+    const config = handle.config ?? {}
+    const prefix = typeof config.prefix === 'string' && config.prefix.length > 0
+      ? config.prefix
+      : 'iceberg/datasets'
+
+    const report = await maintainExportTables({
+      blobStore: handle.blobStore,
+      prefix,
+      config: typeof config.maintenance === 'object' ? config.maintenance : undefined,
+      dryRun,
+    })
+
+    for (const d of report.datasets) {
+      const actions = []
+      if (d.snapshotsExpired > 0) actions.push(`expired ${d.snapshotsExpired} snapshots (was ${d.snapshotsBefore})`)
+      if (!d.compactionSupported) actions.push('compaction_unsupported')
+      ctx.stdout.write(`  ${handle.instanceName}/${d.dataset}: ${actions.join(', ')}\n`)
+    }
+    totalExpired += report.totalSnapshotsExpired
+
+    if (report.datasets.length === 0) {
+      ctx.stdout.write(`  ${handle.instanceName}: no exported datasets found\n`)
+    }
+  }
+
+  ctx.stdout.write(
+    `sink maintain: ${totalExpired} snapshots expired` +
+    ' (compaction not supported by icebird — data-file rewriting will be available in a future release)\n'
+  )
+  return 0
 }
 
 /* ---------- misc ---------- */

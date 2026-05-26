@@ -4,6 +4,7 @@ import { getTracer, SpanStatusCode } from '../../../../src/core/observability/in
 
 import { createBlobStoreIO, pathToKey, tableUrlForBlobPrefix } from './blob-io.js'
 import { commitBatch, commitRowStream, probeTable } from './commit.js'
+import { expireExportSnapshots, normalizeExportRetentionConfig } from './maintenance.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'
 
 /**
@@ -359,6 +360,31 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     bytes_written: commit.bytesWritten,
     batch_count: commit.batchCount,
   })
+
+  // Best-effort snapshot expiration after a successful commit.
+  try {
+    const retentionConfig = normalizeExportRetentionConfig(
+      /** @type {Partial<import('./maintenance.js').ExportRetentionConfig> | undefined} */ (
+        ctx.sinkInstanceConfig?.maintenance
+      )
+    )
+    const expirationResult = await expireExportSnapshots({
+      tableUrl,
+      resolver,
+      lister,
+      config: retentionConfig,
+    })
+    if (expirationResult.expired > 0) {
+      log.debug('iceberg.snapshots.expired', {
+        hyp_plugin: PLUGIN_NAME,
+        hyp_sink_instance: ctx.name,
+        hyp_dataset: dataset,
+        expired: expirationResult.expired,
+      })
+    }
+  } catch {
+    // Snapshot expiration is best-effort; the commit already succeeded.
+  }
 
   return {
     partitionsExported: partitions.length,
