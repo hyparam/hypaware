@@ -167,6 +167,45 @@ test('hidden Claude hook command is omitted from top-level help', async () => {
   assert.equal(stdout.text().includes('claude-hook'), false)
 })
 
+test('dispatch surfaces boot-path sink materialization warnings', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-sink-warning-'))
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+      },
+    },
+  }))
+
+  const registry = createCommandRegistry()
+  registry.register({
+    name: 'noop',
+    summary: 'Test command',
+    usage: 'hyp noop',
+    async run() { return 0 },
+  })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['noop'], {
+    stdout,
+    stderr,
+    registry,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath },
+  })
+
+  assert.equal(code, 0)
+  assert.equal(stdout.text(), '')
+  assert.match(
+    stderr.text(),
+    /warning: sink 'local' not materialized \[sink_plugin_not_active\]/
+  )
+})
+
 test('attach accepts a positional client name', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
   const stdout = makeBuf()

@@ -116,10 +116,15 @@ export async function dispatch(argv, opts = {}) {
     activePlugins = boot.activePlugins
     if (boot.config) activeConfig = boot.config
 
-    await materializeSinks(kernel, boot.config, {
+    const sinkResult = await materializeSinks(kernel, boot.config, {
       stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
       runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
     })
+    for (const err of sinkResult.errors) {
+      stderr.write(
+        `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
+      )
+    }
   }
 
   if (argv.length === 0) {
