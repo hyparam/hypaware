@@ -79,7 +79,6 @@ export async function* streamFlushFile(opts) {
   let currentRows = []
   let currentBatchBytes = 0
   let malformedCount = 0
-  let batchStartOffset = absoluteOffset
 
   /**
    * @returns {FlushChunk | null}
@@ -130,10 +129,8 @@ export async function* streamFlushFile(opts) {
       if (currentColumns && signature !== currentSignature) {
         const sealed = sealBatch()
         if (sealed) {
-          const resumeOffset = batchStartOffset + batchByteLen(sealed)
           yield { chunk: sealed, resumeOffset: absoluteOffset - lineByteLen, malformedCount }
           malformedCount = 0
-          batchStartOffset = absoluteOffset - lineByteLen
         }
       }
 
@@ -151,7 +148,6 @@ export async function* streamFlushFile(opts) {
           if (sealed) {
             yield { chunk: sealed, resumeOffset: absoluteOffset, malformedCount }
             malformedCount = 0
-            batchStartOffset = absoluteOffset
           }
           if (!currentColumns) {
             currentColumns = envelope.columns
@@ -201,19 +197,6 @@ function stableReplacer(_key, value) {
   }
   if (typeof value === 'bigint') return value.toString()
   return value
-}
-
-/**
- * Dead-simple byte estimate for a sealed batch (used only as a fallback
- * when we need to compute a resume offset from a batch object rather than
- * tracking offsets inline). In normal flow the inline `absoluteOffset`
- * tracking makes this unnecessary — the function exists for completeness.
- *
- * @param {FlushChunk} _chunk
- * @returns {number}
- */
-function batchByteLen(_chunk) {
-  return 0
 }
 
 /**
