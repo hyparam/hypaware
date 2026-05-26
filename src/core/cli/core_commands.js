@@ -819,13 +819,14 @@ async function runQueryMaintain(argv, ctx) {
     }
   }
   const maintenanceConfig = ctx.config?.query?.cache?.maintenance
+  const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
   const report = await maintainCache({
     cacheRoot: ctx.storage.cacheRoot,
-    dataset: parsed.dataset,
-    force: parsed.force,
-    dryRun: parsed.dryRun,
-    compactOnly: parsed.compactOnly,
-    expireOnly: parsed.expireOnly,
+    dataset,
+    force,
+    dryRun,
+    compactOnly,
+    expireOnly,
     config: maintenanceConfig,
   })
   if (report.dryRun) {

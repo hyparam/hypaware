@@ -226,7 +226,7 @@ async function expireSnapshots(epochDir, cfg, opts) {
   const cutoffMs = Date.now() - cfg.max_snapshot_age_hours * 60 * 60 * 1000
 
   const sorted = [...snapshots].sort((a, b) => b['timestamp-ms'] - a['timestamp-ms'])
-  /** @type {(number | bigint)[]} */
+  /** @type {number[]} */
   const toExpire = []
   for (let i = 0; i < sorted.length; i++) {
     const snap = sorted[i]
@@ -290,7 +290,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
     if (!columns) {
       columns = Object.keys(row).map((name) => ({
         name,
-        type: /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').ColumnType} */ ('STRING'),
+        type: /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').ColumnSpec['type']} */ ('STRING'),
         nullable: true,
       }))
     }
