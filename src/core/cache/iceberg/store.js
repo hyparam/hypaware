@@ -13,10 +13,17 @@ import {
 } from 'icebird'
 
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
-import { icebergSchemaForColumns, rowsToIcebergRecords } from './schema.js'
+import {
+  icebergSchemaForColumns,
+  mergeFieldIdsFromTable,
+  partitionSpecForDeclaration,
+  rowsToIcebergRecords,
+  validatePartitionSpecStability,
+} from './schema.js'
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CachePartitioningDeclaration } from '../types.d.ts'
  * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */
@@ -65,29 +72,60 @@ export function tableExists(tablePath) {
 }
 
 /**
+ * @typedef {{ declaration?: CachePartitioningDeclaration }} AppendOptions
+ */
+
+/**
  * Append `rows` to the Iceberg table rooted at `tablePath`, creating
  * the table on first use. Returns the byte size of the newest data
  * files written by this append so callers can populate
  * `bytes_written` on observability spans.
  *
+ * When `options.declaration` is provided:
+ * - **New tables** are created with an Iceberg partition spec derived
+ *   from the declaration.
+ * - **Existing tables** validate schema evolution (stable field IDs,
+ *   no partition-column removal/type changes, no new required columns)
+ *   and reject partition-spec drift.
+ *
  * @param {string} tablePath
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
+ * @param {AppendOptions} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
-export async function appendRowsToTable(tablePath, columns, rows) {
+export async function appendRowsToTable(tablePath, columns, rows, options) {
   const url = tableUrlForDir(tablePath)
   const { resolver, lister } = await getLocalIO()
   const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
   const schema = icebergSchemaForColumns(columns)
+  const declaration = options?.declaration
 
   if (!tableExists(tablePath)) {
+    /** @type {import('icebird/src/types.js').PartitionSpec | undefined} */
+    const partitionSpec = declaration
+      ? partitionSpecForDeclaration(declaration, schema)
+      : undefined
     await icebergCreateTable({
       catalog,
       tableUrl: url,
       schema,
       formatVersion: 3,
+      partitionSpec,
     })
+  } else if (declaration) {
+    const { metadata: existing } = await loadLatestFileCatalogMetadata({
+      tableUrl: url, resolver, lister,
+    })
+    const existingSchema = currentSchema(existing)
+    if (existingSchema) {
+      const partitionColumns = new Set(declaration.iceberg.fields.map(f => f.column))
+      mergeFieldIdsFromTable(columns, existingSchema, partitionColumns)
+    }
+    const existingSpec = currentPartitionSpec(existing)
+    if (existingSpec) {
+      validatePartitionSpecStability(declaration, existingSpec)
+    }
   }
   /** @type {TableMetadata | null} */
   let metadata = null
@@ -173,6 +211,34 @@ async function resolveAsyncRow(row, columns) {
     out[column] = await row.cells[column]?.()
   }
   return out
+}
+
+/**
+ * @param {TableMetadata} metadata
+ * @returns {import('icebird/src/types.js').Schema | undefined}
+ */
+function currentSchema(metadata) {
+  const schemaId = metadata['current-schema-id']
+  if (metadata.schemas?.length) {
+    const match = metadata.schemas.find(s => s['schema-id'] === schemaId)
+    if (match) return match
+    return metadata.schemas[metadata.schemas.length - 1]
+  }
+  return undefined
+}
+
+/**
+ * @param {TableMetadata} metadata
+ * @returns {import('icebird/src/types.js').PartitionSpec | undefined}
+ */
+function currentPartitionSpec(metadata) {
+  const specId = metadata['default-spec-id']
+  if (metadata['partition-specs']?.length) {
+    const match = metadata['partition-specs'].find(s => s['spec-id'] === specId)
+    if (match) return match
+    return metadata['partition-specs'][metadata['partition-specs'].length - 1]
+  }
+  return undefined
 }
 
 /**
