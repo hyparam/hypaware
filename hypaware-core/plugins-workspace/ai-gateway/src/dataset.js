@@ -2,11 +2,13 @@
 
 import path from 'node:path'
 
+import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
 
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+ * @import { AsyncDataSource } from 'squirreling'
  */
 
 export const DATASET_NAME = 'ai_gateway_messages'
@@ -36,22 +38,42 @@ export function aiGatewayTablePath(storage) {
 }
 
 /**
- * Surface the single partition for `ai_gateway_messages`. The kernel
- * cache discovers its own files, so this only needs to return the
- * partition descriptor pointing at the table path.
+ * Discover all partitions for `ai_gateway_messages`, including
+ * new-style per-client/date partitions and legacy `proxy_messages_v4`
+ * or `all` partitions.  Always includes the legacy spool path so
+ * pending data gets flushed during query settlement.
  *
  * @param {DatasetDiscoveryContext} ctx
- * @returns {QueryPartition[]}
+ * @returns {Promise<QueryPartition[]>}
  */
-export function discoverParts(ctx) {
+export async function discoverParts(ctx) {
   const cacheDir = ctx.cacheDir ?? ''
   if (!cacheDir) return []
-  const tablePath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
-  return [{
+
+  /** @type {QueryPartition[]} */
+  const partitions = []
+  const seen = new Set()
+
+  const legacyPath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
+  partitions.push({
     dataset: DATASET_NAME,
     partition: { partition: PARTITION_LABEL },
-    tablePath,
-  }]
+    tablePath: legacyPath,
+  })
+  seen.add(legacyPath)
+
+  const discovered = await discoverCachePartitions(cacheDir, buildDiscoveryScope(ctx.scope))
+  for (const p of discovered) {
+    if (seen.has(p.path)) continue
+    seen.add(p.path)
+    partitions.push({
+      dataset: DATASET_NAME,
+      partition: p.partition,
+      tablePath: p.path,
+    })
+  }
+
+  return partitions
 }
 
 /**
@@ -66,22 +88,86 @@ export async function refreshPartition() {
 }
 
 /**
- * Build a squirreling-compatible AsyncDataSource over the partition.
- * Returns an empty source when the table has not yet been materialized
- * so `select count(*) from ai_gateway_messages` still succeeds on a
- * cold cache.
+ * Build a squirreling-compatible AsyncDataSource over all discovered
+ * partitions.  Unions data from legacy and new-style partitions so
+ * queries see a seamless view across the transition.
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
  */
 export async function createDataSource(partitions, ctx) {
-  const partition = partitions[0]
-  if (!partition || !partition.tablePath) return emptySource()
-  const storage = /** @type {ExtendedQueryStorageService} */ (
-    ctx.storage
-  )
-  const source = await storage.dataSourceForTable(partition.tablePath)
-  return source ?? emptySource()
+  const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+
+  // Re-discover partitions to pick up any newly flushed data that
+  // wasn't visible during the initial discoverParts call.
+  const freshPartitions = await discoverCachePartitions(storage.cacheRoot, buildDiscoveryScope(ctx.scope))
+
+  /** @type {Set<string>} */
+  const tablePaths = new Set()
+  for (const p of partitions) {
+    if (p.tablePath) tablePaths.add(p.tablePath)
+  }
+  for (const p of freshPartitions) {
+    tablePaths.add(p.path)
+  }
+
+  /** @type {AsyncDataSource[]} */
+  const sources = []
+  for (const tablePath of tablePaths) {
+    const source = await storage.dataSourceForTable(tablePath)
+    if (source && (source.numRows ?? 0) > 0) sources.push(source)
+  }
+
+  if (sources.length === 0) return emptySource()
+  if (sources.length === 1) return sources[0]
+  return unionSources(sources)
+}
+
+/**
+ * @param {DatasetDiscoveryContext['scope'] | DatasetDataSourceContext['scope'] | undefined} scope
+ */
+function buildDiscoveryScope(scope) {
+  return {
+    datasets: [DATASET_NAME],
+    ...(scope?.date ? { date: scope.date } : {}),
+    ...(scope?.dates ? { dates: scope.dates } : {}),
+    ...(scope?.from ? { from: scope.from } : {}),
+    ...(scope?.to ? { to: scope.to } : {}),
+  }
+}
+
+/**
+ * Merge multiple AsyncDataSources into a single union source.
+ *
+ * @param {AsyncDataSource[]} sources
+ * @returns {AsyncDataSource}
+ */
+function unionSources(sources) {
+  /** @type {Set<string>} */
+  const allColumns = new Set()
+  let totalRows = 0
+  for (const s of sources) {
+    for (const col of s.columns) allColumns.add(col)
+    totalRows += s.numRows ?? 0
+  }
+  return {
+    columns: Array.from(allColumns),
+    numRows: totalRows,
+    scan(options) {
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const source of sources) {
+            const scan = source.scan(options)
+            for await (const row of scan.rows()) {
+              yield row
+            }
+          }
+        },
+      }
+    },
+  }
 }
 
 function emptySource() {

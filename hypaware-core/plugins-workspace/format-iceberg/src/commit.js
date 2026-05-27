@@ -122,7 +122,75 @@ export async function commitBatch(input, priorState) {
     dataFiles,
     bytesWritten: toNumber(summary['added-files-size']),
     rowCount: toNumber(summary['added-records']),
+    metadata: postMetadata,
   }
+}
+
+const DEFAULT_STREAM_BYTE_LIMIT = 128 * 1024 * 1024
+const DEFAULT_STREAM_ROW_LIMIT = 100_000
+
+/**
+ * Stream rows from an async iterable and commit them in target-sized
+ * batches.  Each batch is a single Iceberg append; the table is
+ * created on the first non-empty batch.
+ *
+ * Returns cumulative stats across all committed batches.
+ *
+ * @param {{
+ *   tableUrl: string,
+ *   columns: readonly ColumnSpec[],
+ *   rows: AsyncIterable<Record<string, unknown>>,
+ *   resolver: Resolver,
+ *   lister: Lister,
+ * }} input
+ * @param {{ exists: boolean, metadata: TableMetadata | null }} priorState
+ * @param {{ batchByteLimit?: number, batchRowLimit?: number }} [opts]
+ * @returns {Promise<{ snapshotId: string, metadataVersion: string, bytesWritten: number, rowCount: number, batchCount: number, dataFiles: string[] }>}
+ */
+export async function commitRowStream(input, priorState, opts = {}) {
+  const batchByteLimit = opts.batchByteLimit ?? DEFAULT_STREAM_BYTE_LIMIT
+  const batchRowLimit = opts.batchRowLimit ?? DEFAULT_STREAM_ROW_LIMIT
+
+  let state = { exists: priorState.exists, metadata: priorState.metadata }
+  let totalBytesWritten = 0
+  let totalRowCount = 0
+  let batchCount = 0
+  let lastSnapshotId = ''
+  let lastMetadataVersion = ''
+  /** @type {string[]} */
+  const allDataFiles = []
+
+  /** @type {Record<string, unknown>[]} */
+  let batch = []
+  let batchBytes = 0
+
+  async function flushBatch() {
+    if (batch.length === 0) return
+    const result = await commitBatch(
+      { tableUrl: input.tableUrl, columns: input.columns, rows: batch, resolver: input.resolver, lister: input.lister },
+      state
+    )
+    state = { exists: true, metadata: result.metadata }
+    totalBytesWritten += result.bytesWritten
+    totalRowCount += result.rowCount || batch.length
+    batchCount += 1
+    lastSnapshotId = result.snapshotId
+    lastMetadataVersion = result.metadataVersion
+    allDataFiles.push(...result.dataFiles)
+    batch = []
+    batchBytes = 0
+  }
+
+  for await (const row of input.rows) {
+    batch.push(row)
+    batchBytes += Buffer.byteLength(jsonStringifyBigIntSafe(row), 'utf8')
+    if (batch.length >= batchRowLimit || batchBytes >= batchByteLimit) {
+      await flushBatch()
+    }
+  }
+  await flushBatch()
+
+  return { snapshotId: lastSnapshotId, metadataVersion: lastMetadataVersion, bytesWritten: totalBytesWritten, rowCount: totalRowCount, batchCount, dataFiles: allDataFiles }
 }
 
 /**
@@ -229,6 +297,16 @@ function wrapCommitError(err, kind, hint) {
     }
   }
   return newError(kind, `iceberg-format: ${hint}: ${message}`)
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function jsonStringifyBigIntSafe(value) {
+  return JSON.stringify(value, (_key, v) =>
+    typeof v === 'bigint' ? Number(v) : v
+  )
 }
 
 /**

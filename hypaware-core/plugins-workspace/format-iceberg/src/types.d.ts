@@ -25,6 +25,7 @@ export interface CommitResult {
   dataFiles: string[]
   bytesWritten: number
   rowCount: number
+  metadata: TableMetadata
 }
 
 export interface ExportMarker {
@@ -58,4 +59,24 @@ export interface BlobIOWriteEvent {
 }
 
 export type BlobIOWriteObserver = (event: BlobIOWriteEvent) => void
+
+export interface ExportRetentionConfig {
+  min_snapshots_to_keep: number
+  max_snapshot_age_hours: number
+}
+
+export interface ExportMaintenanceDatasetReport {
+  dataset: string
+  snapshotsExpired: number
+  snapshotsBefore: number
+  compactionSupported: false
+}
+
+export interface ExportMaintenanceReport {
+  datasets: ExportMaintenanceDatasetReport[]
+  totalSnapshotsExpired: number
+  compactionSupported: false
+  dryRun: boolean
+  elapsedMs: number
+}
 

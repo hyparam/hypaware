@@ -3,11 +3,13 @@
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 import { createBlobStoreIO, pathToKey, tableUrlForBlobPrefix } from './blob-io.js'
-import { commitBatch, probeTable } from './commit.js'
+import { commitBatch, commitRowStream, probeTable } from './commit.js'
+import { expireExportSnapshots, normalizeExportRetentionConfig } from './maintenance.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'
 
 /**
  * @import { BlobStore, ColumnSpec, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkEncoder, TableFormatCreateContext, TableFormatProvider } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExportRetentionConfig } from './types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/format-iceberg'
@@ -67,6 +69,9 @@ function buildSink(ctx) {
   const config = ctx.sinkInstanceConfig ?? {}
   const prefix = resolvePrefix(config)
   const log = ctx.log
+  const maintenanceConfig = /** @type {Partial<ExportRetentionConfig> | undefined} */ (
+    config.maintenance
+  )
 
   const exportSpanAttrs = blobStoreDestinationAttrs(ctx.blobStore)
   return {
@@ -107,6 +112,7 @@ function buildSink(ctx) {
                   partitions,
                   prefix,
                   log,
+                  maintenanceConfig,
                 })
                 bytesWritten += result.bytesWritten
                 partitionsExported += result.partitionsExported
@@ -171,10 +177,11 @@ function buildSink(ctx) {
  *   partitions: QueryPartition[],
  *   prefix: string,
  *   log: PluginLogger,
+ *   maintenanceConfig?: Partial<ExportRetentionConfig>,
  * }} input
  * @returns {Promise<{ partitionsExported: number, bytesWritten: number, status: 'committed' | 'skipped' }>}
  */
-async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
+async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, maintenanceConfig }) {
   const columns = resolveColumns(ctx.query, dataset)
   if (columns.length === 0) {
     log.warn('iceberg.dataset.no_schema', {
@@ -207,20 +214,10 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
   const markerPath = markerKey(prefix, ctx.name, dataset, batch.batchId)
   const tracer = getTracer('plugin.format-iceberg')
 
-  // Drain rows up-front so the commit span only fires once we've
-  // already paid the IO cost. `storage.flushTable` is called per
-  // partition so any pending cache buffer lands before we read.
-  /** @type {Record<string, unknown>[]} */
-  const rows = []
-  let rowsLoaded = 0
+  // Flush any pending spool buffers so the row iterables are current.
   for (const partition of partitions) {
     if (partition.tablePath) {
       await flushIfSupported(ctx.storage, partition.tablePath, 'iceberg_export')
-    }
-    const iterable = openRows(ctx.storage, partition)
-    for await (const row of iterable) {
-      rows.push(row)
-      rowsLoaded += 1
     }
   }
 
@@ -267,29 +264,13 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
   }
 
-  // Empty batches still emit a no-op trace + marker so a partition
-  // with zero ready rows doesn't leave the batch in a half-state.
-  if (rows.length === 0) {
-    log.debug('iceberg.export_dataset.empty', {
-      hyp_plugin: PLUGIN_NAME,
-      hyp_sink_instance: ctx.name,
-      hyp_dataset: dataset,
-      hyp_batch_id: batch.batchId,
-    })
-    if (priorState.currentSnapshotId) {
-      await writeMarker(ctx.blobStore, markerPath, {
-        dataset,
-        batchId: batch.batchId,
-        partition: collectPartitionKeys(partitions),
-        rowCount: 0,
-        bytesWritten: 0,
-        dataFiles: [],
-        snapshotId: priorState.currentSnapshotId,
-        metadataVersion: '',
-        committedAt: new Date().toISOString(),
-      })
+  // Stream rows through target-sized batch commits instead of draining
+  // everything into memory first.  Each batch is a single Iceberg append.
+  async function* rowStream() {
+    for (const partition of partitions) {
+      const iterable = openRows(ctx.storage, partition)
+      for await (const row of iterable) yield row
     }
-    return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
   }
 
   const commitSpanName = priorState.exists ? 'iceberg.snapshot.commit' : 'iceberg.table.create'
@@ -302,21 +283,20 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
         hyp_dataset: dataset,
         hyp_batch_id: batch.batchId,
         encoder_format: ctx.encoder.format,
-        row_count: rowsLoaded,
         status: 'ok',
         ...destinationAttrs,
       },
     },
     async (span) => {
       try {
-        const result = await commitBatch(
-          { tableUrl, columns, rows, resolver, lister },
+        const result = await commitRowStream(
+          { tableUrl, columns, rows: rowStream(), resolver, lister },
           { exists: priorState.exists, metadata: priorState.metadata }
         )
         span.setAttribute('snapshot_id', result.snapshotId)
-        span.setAttribute('metadata_version', result.metadataVersion)
-        span.setAttribute('data_file_count', result.dataFiles.length)
         span.setAttribute('bytes_written', result.bytesWritten)
+        span.setAttribute('row_count', result.rowCount)
+        span.setAttribute('batch_count', result.batchCount)
         if (lastMetadataWrite?.etag) span.setAttribute('etag', lastMetadataWrite.etag)
         return result
       } catch (err) {
@@ -325,8 +305,6 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
         span.setStatus({ code: SpanStatusCode.ERROR, message })
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', errorKind)
-        // Sister log so consumers don't have to walk the trace tree to
-        // see the failure name.
         log.warn('iceberg.snapshot.commit_failed', {
           hyp_plugin: PLUGIN_NAME,
           hyp_sink_instance: ctx.name,
@@ -343,11 +321,34 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     }
   )
 
+  if (commit.rowCount === 0) {
+    log.debug('iceberg.export_dataset.empty', {
+      hyp_plugin: PLUGIN_NAME,
+      hyp_sink_instance: ctx.name,
+      hyp_dataset: dataset,
+      hyp_batch_id: batch.batchId,
+    })
+    if (priorState.currentSnapshotId) {
+      await writeMarker(ctx.blobStore, markerPath, {
+        dataset,
+        batchId: batch.batchId,
+        partition: collectPartitionKeys(partitions),
+        rowCount: 0,
+        bytesWritten: 0,
+        dataFiles: [],
+        snapshotId: priorState.currentSnapshotId,
+        metadataVersion: `v${priorState.metadata?.['last-sequence-number'] ?? priorState.metadata?.['format-version'] ?? 1}`,
+        committedAt: new Date().toISOString(),
+      })
+    }
+    return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
+  }
+
   await writeMarker(ctx.blobStore, markerPath, {
     dataset,
     batchId: batch.batchId,
     partition: collectPartitionKeys(partitions),
-    rowCount: commit.rowCount || rowsLoaded,
+    rowCount: commit.rowCount,
     bytesWritten: commit.bytesWritten,
     dataFiles: commit.dataFiles,
     snapshotId: commit.snapshotId,
@@ -361,9 +362,31 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     hyp_dataset: dataset,
     hyp_batch_id: batch.batchId,
     snapshot_id: commit.snapshotId,
-    row_count: commit.rowCount || rowsLoaded,
+    row_count: commit.rowCount,
     bytes_written: commit.bytesWritten,
+    batch_count: commit.batchCount,
   })
+
+  // Best-effort snapshot expiration after a successful commit.
+  try {
+    const retentionConfig = normalizeExportRetentionConfig(maintenanceConfig)
+    const expirationResult = await expireExportSnapshots({
+      tableUrl,
+      resolver,
+      lister,
+      config: retentionConfig,
+    })
+    if (expirationResult.expired > 0) {
+      log.debug('iceberg.snapshots.expired', {
+        hyp_plugin: PLUGIN_NAME,
+        hyp_sink_instance: ctx.name,
+        hyp_dataset: dataset,
+        expired: expirationResult.expired,
+      })
+    }
+  } catch {
+    // Snapshot expiration is best-effort; the commit already succeeded.
+  }
 
   return {
     partitionsExported: partitions.length,

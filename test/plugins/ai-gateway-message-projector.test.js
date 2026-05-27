@@ -21,6 +21,7 @@ const EXPECTED_COLUMNS = [
   ['tools', 'JSON', true],
   ['conversation_started_at', 'TIMESTAMP', false],
   ['conversation_source', 'STRING', true],
+  ['client_name', 'STRING', true],
   ['cwd', 'STRING', true],
   ['git_branch', 'STRING', true],
   ['client_version', 'STRING', true],

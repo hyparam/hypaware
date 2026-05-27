@@ -280,6 +280,7 @@ export function createSinkRegistry() {
           destination: args.destinationPlugin,
           encoder,
           tableFormat: tableFormat.format,
+          blobStore,
         }
         handles.set(instanceName, handle)
         instruments.sinksRegistered.add(1, {

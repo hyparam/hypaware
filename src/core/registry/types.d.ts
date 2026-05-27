@@ -91,6 +91,7 @@ export type ExtendedSinkHandle = SinkHandle & {
   config: SinkInstanceConfig
   encoder?: SinkEncoder
   tableFormat?: string
+  blobStore?: BlobStore
 }
 
 export type ExtendedSinkRegistry = SinkRegistry & {

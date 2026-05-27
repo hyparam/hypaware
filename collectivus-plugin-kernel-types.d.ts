@@ -437,6 +437,18 @@ export interface QueryCacheConfig {
   /** Override the cache root (default: `~/.hyp/hypaware/`). Layout inside is fixed. */
   dir?: string
   retention?: QueryCacheRetentionConfig
+  maintenance?: QueryCacheMaintenanceConfig
+}
+
+export interface QueryCacheMaintenanceConfig {
+  enabled?: boolean
+  interval_minutes?: number
+  target_file_bytes?: number
+  min_snapshots_to_keep?: number
+  max_snapshot_age_hours?: number
+  compact_file_count?: number
+  compact_avg_file_bytes?: number
+  max_tick_ms?: number
 }
 
 export interface QueryCacheRetentionConfig {
@@ -923,9 +935,24 @@ export interface QueryStorageService {
   cacheRoot: string
   cacheTablePath(dataset: string, partitionSegments?: string[]): string
   appendRows(tablePath: string, columns: ColumnSpec[], rows: Record<string, unknown>[]): Promise<void>
+  appendRowsToPartition(
+    dataset: string,
+    partitionSegments: string[],
+    columns: ColumnSpec[],
+    rows: Record<string, unknown>[],
+  ): Promise<void>
+  discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string
   readRows(tablePath: string, columns?: string[]): AsyncIterable<Record<string, unknown>>
+}
+
+export interface CachePartitionMeta {
+  dataset: string
+  partition: Record<string, string>
+  path: string
+  epoch: number
+  rowCount: number
 }
 
 // =============================================================================

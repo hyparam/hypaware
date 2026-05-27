@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../observability/index.js'
+import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
@@ -69,7 +70,7 @@ function buildCoreCommands() {
     },
     {
       name: 'query',
-      summary: 'Query the local cache (see subcommands: schema, status, sql, refresh)',
+      summary: 'Query the local cache (see subcommands: schema, status, sql, refresh, maintain)',
       usage: 'hyp query <subcommand> [args...]',
       run: runQuery,
     },
@@ -96,6 +97,12 @@ function buildCoreCommands() {
       summary: 'Force a cache refresh for a dataset',
       usage: 'hyp query refresh [dataset]',
       run: runQueryRefresh,
+    },
+    {
+      name: 'query maintain',
+      summary: 'Run cache maintenance (legacy migration, snapshot expiration, compaction)',
+      usage: 'hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
+      run: runQueryMaintain,
     },
     {
       name: 'collect',
@@ -244,7 +251,7 @@ function buildCoreCommands() {
     },
     {
       name: 'sink',
-      summary: 'Manage sink instances (subcommand: force)',
+      summary: 'Manage sink instances (subcommands: force, maintain)',
       usage: 'hyp sink <subcommand> [args...]',
       run: runSinkHelp,
     },
@@ -253,6 +260,12 @@ function buildCoreCommands() {
       summary: 'Force the sink driver to fire a tick now (optionally for one instance)',
       usage: 'hyp sink force [instance]',
       run: runSinkForce,
+    },
+    {
+      name: 'sink maintain',
+      summary: 'Run export maintenance (snapshot expiration) on table-format sinks',
+      usage: 'hyp sink maintain [instance] [--dry-run]',
+      run: runSinkMaintain,
     },
     {
       name: 'smoke',
@@ -610,11 +623,11 @@ function inferDatasetsFromPlugins(activePlugins) {
 async function runQuery(argv, ctx) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write('usage: hyp query <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: schema, status, sql, refresh\n')
+    ctx.stdout.write('  subcommands: schema, status, sql, refresh, maintain\n')
     return 0
   }
   ctx.stderr.write(`hyp query: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: schema, status, sql, refresh\n')
+  ctx.stderr.write('  expected one of: schema, status, sql, refresh, maintain\n')
   return 2
 }
 
@@ -655,11 +668,21 @@ async function runQuerySchema(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 async function runQueryStatus(_argv, ctx) {
+  const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
-  ctx.stdout.write(`cache:    ${ctx.storage.cacheRoot}\n`)
+  const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
+  ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
+  ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
   ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
   for (const dataset of datasets) {
     ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
+  }
+  if (report.partitions.length > 0) {
+    ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
+    for (const p of report.partitions) {
+      const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
+      ctx.stdout.write(`  ${p.dataset}/${partKey || 'all'}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
+    }
   }
   return 0
 }
@@ -737,6 +760,7 @@ async function runQueryRefresh(argv, ctx) {
   return 0
 }
 
+
 /**
  * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
  * `--refresh` / `--format` flags in any order.
@@ -778,6 +802,85 @@ function parseQuerySqlArgv(argv) {
   }
   const sql = positional.join(' ')
   return { ok: true, sql, refresh, format }
+}
+
+/**
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runQueryMaintain(argv, ctx) {
+  const { maintainCache } = await import('../cache/maintenance.js')
+  const parsed = parseQueryMaintainArgv(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`hyp query maintain: ${parsed.error}\n`)
+    return 2
+  }
+  const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
+  if (!compactOnly && !expireOnly && !dryRun) {
+    const migrationResult = await migrateLegacyPartitions({
+      cacheRoot: ctx.storage.cacheRoot,
+      force,
+    })
+    if (migrationResult.migrated > 0) {
+      ctx.stdout.write(`migrate: ${migrationResult.migrated} legacy partition(s), ${migrationResult.rowsMigrated} row(s)\n`)
+    }
+  }
+  const maintenanceConfig = ctx.config?.query?.cache?.maintenance
+  const report = await maintainCache({
+    cacheRoot: ctx.storage.cacheRoot,
+    dataset,
+    force,
+    dryRun,
+    compactOnly,
+    expireOnly,
+    config: maintenanceConfig,
+  })
+  if (report.dryRun) {
+    ctx.stdout.write('[dry-run]\n')
+  }
+  for (const p of report.partitions) {
+    const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
+    const label = `${p.dataset}/${partKey || 'all'}`
+    const actions = []
+    if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
+    if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    if (actions.length > 0) {
+      ctx.stdout.write(`  ${label}: ${actions.join(', ')}\n`)
+    }
+  }
+  ctx.stdout.write(`maintenance: ${report.totalSnapshotsExpired} snapshots expired, ${report.totalCompacted} partitions compacted (${report.elapsedMs}ms)\n`)
+  return 0
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean, error?: undefined } | { error: string }}
+ */
+function parseQueryMaintainArgv(argv) {
+  /** @type {string | undefined} */
+  let dataset
+  let dryRun = false
+  let force = false
+  let compactOnly = false
+  let expireOnly = false
+  for (const arg of argv) {
+    if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--force') { force = true; continue }
+    if (arg === '--compact-only') { compactOnly = true; continue }
+    if (arg === '--expire-only') { expireOnly = true; continue }
+    if (arg === '--help' || arg === '-h') {
+      return { error: 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]' }
+    }
+    if (arg.startsWith('--')) {
+      return { error: `unknown flag '${arg}'` }
+    }
+    if (dataset === undefined) { dataset = arg; continue }
+    return { error: `unexpected argument '${arg}'` }
+  }
+  if (compactOnly && expireOnly) {
+    return { error: '--compact-only and --expire-only are mutually exclusive' }
+  }
+  return { dataset, dryRun, force, compactOnly, expireOnly }
 }
 
 /* ---------- collect ---------- */
@@ -1766,7 +1869,8 @@ async function runSmoke(argv, ctx) {
 async function runSinkHelp(_argv, ctx) {
   ctx.stdout.write('usage: hyp sink <subcommand> [args...]\n')
   ctx.stdout.write('  subcommands:\n')
-  ctx.stdout.write('    force [instance]   Run a sink tick now, ignoring schedules\n')
+  ctx.stdout.write('    force [instance]        Run a sink tick now, ignoring schedules\n')
+  ctx.stdout.write('    maintain [instance]      Run export maintenance (snapshot expiration)\n')
   return 0
 }
 
@@ -1815,6 +1919,102 @@ async function runSinkForce(argv, ctx) {
     )
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * `hyp sink maintain [instance] [--dry-run]`
+ *
+ * Runs export maintenance on table-format (Iceberg) sink instances:
+ * snapshot expiration on exported tables.  Data-file compaction is not
+ * yet supported by the underlying icebird library; the command reports
+ * `compaction_unsupported` when this is the case.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runSinkMaintain(argv, ctx) {
+  let instance = /** @type {string | undefined} */ (undefined)
+  let dryRun = false
+  for (const arg of argv) {
+    if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--help' || arg === '-h') {
+      ctx.stdout.write('usage: hyp sink maintain [instance] [--dry-run]\n')
+      return 0
+    }
+    if (arg.startsWith('--')) {
+      ctx.stderr.write(`hyp sink maintain: unknown flag '${arg}'\n`)
+      return 2
+    }
+    if (instance === undefined) { instance = arg; continue }
+    ctx.stderr.write(`hyp sink maintain: unexpected argument '${arg}'\n`)
+    return 2
+  }
+
+  const { maintainExportTables } = await import(
+    '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
+  )
+
+  const allHandles = /** @type {any} */ (ctx.sinks).listHandles?.() ?? []
+  const tableFormatHandles = allHandles.filter(
+    /** @param {any} h */
+    (h) => h.kind === 'table-format' && h.tableFormat === 'iceberg' && h.blobStore
+  )
+
+  if (instance) {
+    const match = tableFormatHandles.find(/** @param {any} h */ (h) => h.instanceName === instance)
+    if (!match) {
+      ctx.stderr.write(`hyp sink maintain: no iceberg table-format sink named '${instance}'\n`)
+      const available = tableFormatHandles.map(/** @param {any} h */ (h) => h.instanceName)
+      if (available.length > 0) {
+        ctx.stderr.write(`  available: ${available.join(', ')}\n`)
+      }
+      return 1
+    }
+  }
+
+  const targets = instance
+    ? tableFormatHandles.filter(/** @param {any} h */ (h) => h.instanceName === instance)
+    : tableFormatHandles
+
+  if (targets.length === 0) {
+    ctx.stdout.write('no iceberg table-format sinks instantiated; nothing to maintain\n')
+    return 0
+  }
+
+  if (dryRun) ctx.stdout.write('[dry-run]\n')
+
+  let totalExpired = 0
+  for (const handle of targets) {
+    const config = handle.config ?? {}
+    const prefix = typeof config.prefix === 'string' && config.prefix.length > 0
+      ? config.prefix
+      : 'iceberg/datasets'
+
+    const report = await maintainExportTables({
+      blobStore: handle.blobStore,
+      prefix,
+      config: typeof config.maintenance === 'object' ? config.maintenance : undefined,
+      dryRun,
+    })
+
+    for (const d of report.datasets) {
+      const actions = []
+      if (d.snapshotsExpired > 0) actions.push(`expired ${d.snapshotsExpired} snapshots (was ${d.snapshotsBefore})`)
+      if (!d.compactionSupported) actions.push('compaction_unsupported')
+      ctx.stdout.write(`  ${handle.instanceName}/${d.dataset}: ${actions.join(', ')}\n`)
+    }
+    totalExpired += report.totalSnapshotsExpired
+
+    if (report.datasets.length === 0) {
+      ctx.stdout.write(`  ${handle.instanceName}: no exported datasets found\n`)
+    }
+  }
+
+  ctx.stdout.write(
+    `sink maintain: ${totalExpired} snapshots expired` +
+    ' (compaction not supported by icebird — data-file rewriting will be available in a future release)\n'
+  )
+  return 0
 }
 
 /* ---------- misc ---------- */
