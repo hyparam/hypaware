@@ -131,10 +131,7 @@ export function createCacheSpool(args) {
 
           if (fileMalformed > 0) {
             malformedCount += fileMalformed
-            throw new Error(
-              `Spool file contains ${fileMalformed} malformed line(s): ${filePath}. ` +
-              'File retained for inspection; progress saved at last good offset.'
-            )
+            continue
           }
 
           await removeProgress(filePath)

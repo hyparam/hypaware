@@ -68,6 +68,9 @@ function buildSink(ctx) {
   const config = ctx.sinkInstanceConfig ?? {}
   const prefix = resolvePrefix(config)
   const log = ctx.log
+  const maintenanceConfig = /** @type {Partial<import('./maintenance.js').ExportRetentionConfig> | undefined} */ (
+    config.maintenance
+  )
 
   const exportSpanAttrs = blobStoreDestinationAttrs(ctx.blobStore)
   return {
@@ -108,6 +111,7 @@ function buildSink(ctx) {
                   partitions,
                   prefix,
                   log,
+                  maintenanceConfig,
                 })
                 bytesWritten += result.bytesWritten
                 partitionsExported += result.partitionsExported
@@ -172,10 +176,11 @@ function buildSink(ctx) {
  *   partitions: QueryPartition[],
  *   prefix: string,
  *   log: PluginLogger,
+ *   maintenanceConfig?: Partial<import('./maintenance.js').ExportRetentionConfig>,
  * }} input
  * @returns {Promise<{ partitionsExported: number, bytesWritten: number, status: 'committed' | 'skipped' }>}
  */
-async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
+async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, maintenanceConfig }) {
   const columns = resolveColumns(ctx.query, dataset)
   if (columns.length === 0) {
     log.warn('iceberg.dataset.no_schema', {
@@ -344,7 +349,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
     partition: collectPartitionKeys(partitions),
     rowCount: commit.rowCount,
     bytesWritten: commit.bytesWritten,
-    dataFiles: [],
+    dataFiles: commit.dataFiles,
     snapshotId: commit.snapshotId,
     metadataVersion: '',
     committedAt: new Date().toISOString(),
@@ -363,11 +368,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log }) {
 
   // Best-effort snapshot expiration after a successful commit.
   try {
-    const retentionConfig = normalizeExportRetentionConfig(
-      /** @type {Partial<import('./maintenance.js').ExportRetentionConfig> | undefined} */ (
-        ctx.sinkInstanceConfig?.maintenance
-      )
-    )
+    const retentionConfig = normalizeExportRetentionConfig(maintenanceConfig)
     const expirationResult = await expireExportSnapshots({
       tableUrl,
       resolver,
