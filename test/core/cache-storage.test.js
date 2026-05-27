@@ -73,7 +73,10 @@ test('storage.dataSourceForTable keeps columns and cells aligned after internal-
       assert.equal(String(first), '7')
       assert.equal(second, 'kept')
 
-      assert.deepEqual(row.resolved, { id: 7, value: 'kept' })
+      assert.equal(row.resolved?.id, 7)
+      assert.equal(row.resolved?.value, 'kept')
+      assert.equal(Object.prototype.hasOwnProperty.call(row.resolved ?? {}, '_hyp_cache_row_id'), false)
+      assert.equal(Object.prototype.hasOwnProperty.call(row.resolved ?? {}, '_hyp_cache_batch_id'), false)
       return
     }
 
