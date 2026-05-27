@@ -9,9 +9,11 @@ import {
 } from './iceberg/store.js'
 import {
   appendRowsToPartition as appendRowsToPartitionImpl,
+  appendRowsToSourceTable as appendRowsToSourceTableImpl,
   discoverCachePartitions as discoverCachePartitionsImpl,
   readCursorSync,
-  resolvePartitionSegments,
+  resolveClientName,
+  sanitizePathSegment,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
@@ -67,8 +69,9 @@ export function createQueryStorageService({ cacheRoot }) {
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
       for (const row of rows) {
-        const segments = resolvePartitionSegments(row)
-        const key = segments.join('/')
+        const source = sanitizePathSegment(resolveClientName(row))
+        const segments = [`source=${source}`]
+        const key = source
         let group = groups.get(key)
         if (!group) {
           group = { segments, rows: [] }
@@ -78,7 +81,7 @@ export function createQueryStorageService({ cacheRoot }) {
       }
       let totalBytes = 0
       for (const { segments, rows: groupRows } of groups.values()) {
-        const result = await appendRowsToPartitionImpl(cacheRoot, dataset, segments, columns, groupRows)
+        const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows)
         totalBytes += result.bytesWritten
       }
       return { bytesWritten: totalBytes }

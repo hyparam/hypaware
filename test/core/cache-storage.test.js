@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { readCursorSync } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD } from '../../src/core/cache/spool.js'
 
@@ -38,6 +39,54 @@ test('storage.appendRowsToPartition writes data without error', async () => {
       SIMPLE_COLUMNS,
       [{ id: 1, value: 'a' }]
     )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('spool flush groups rows by source and creates source-table layout', async () => {
+  const cacheRoot = await makeTmpDir('flush-source')
+  try {
+    const storage = createQueryStorageService({ cacheRoot })
+    const tablePath = storage.cacheTablePath('test_data', ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, SIMPLE_COLUMNS, [
+      { id: 1, value: 'a', client_name: 'claude' },
+      { id: 2, value: 'b', client_name: 'codex' },
+      { id: 3, value: 'c', client_name: 'claude' },
+    ])
+    await storage.flushTable(tablePath, { force: true })
+
+    const claudeDir = path.join(cacheRoot, 'datasets', 'test_data', 'source=claude')
+    const codexDir = path.join(cacheRoot, 'datasets', 'test_data', 'source=codex')
+
+    const claudeCursor = readCursorSync(claudeDir)
+    assert.equal(claudeCursor.layout, 'source-table')
+    assert.equal(claudeCursor.rowCount, 2)
+
+    const codexCursor = readCursorSync(codexDir)
+    assert.equal(codexCursor.layout, 'source-table')
+    assert.equal(codexCursor.rowCount, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('spool flush falls back to source=unknown when no client columns present', async () => {
+  const cacheRoot = await makeTmpDir('flush-unknown')
+  try {
+    const storage = createQueryStorageService({ cacheRoot })
+    const tablePath = storage.cacheTablePath('logs', ['spool'])
+
+    await storage.appendRows(tablePath, SIMPLE_COLUMNS, [
+      { id: 1, value: 'a' },
+    ])
+    await storage.flushTable(tablePath, { force: true })
+
+    const unknownDir = path.join(cacheRoot, 'datasets', 'logs', 'source=unknown')
+    const cursor = readCursorSync(unknownDir)
+    assert.equal(cursor.layout, 'source-table')
+    assert.equal(cursor.rowCount, 1)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
