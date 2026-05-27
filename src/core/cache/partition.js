@@ -190,6 +190,7 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
       if (entry.name.startsWith('epoch=')) continue
+      if (entry.name.startsWith('table')) continue
       if (entry.name === SPOOL_DIR) continue
       if (entry.name === RETIRED_DIR) continue
       await walk(path.join(dir, entry.name))

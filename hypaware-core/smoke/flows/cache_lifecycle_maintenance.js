@@ -112,18 +112,18 @@ export async function run({ harness, expect }) {
   )
 
   // --- 4. Verify post-maintenance state ---
-  const cursor = readCursorSync(path.join(
-    cacheRoot, 'datasets', DATASET, 'all'
-  ))
-  expect.that(
-    'post-maintenance: cursor epoch advanced',
-    cursor.epoch,
-    (v) => typeof v === 'number' && v > 0
-  )
+  // Source-table layout: data lives under source=unknown (no client columns)
+  const sourceDir = path.join(cacheRoot, 'datasets', DATASET, 'source=unknown')
+  const cursor = readCursorSync(sourceDir)
   expect.that(
     'post-maintenance: cursor has compaction metadata',
     cursor.compaction,
     (v) => v !== null && typeof v === 'object'
+  )
+  expect.that(
+    'post-maintenance: source-table layout preserved',
+    cursor.layout,
+    (v) => v === 'source-table'
   )
   expect.that(
     'post-maintenance: row count preserved',
@@ -214,8 +214,11 @@ function registerDataset(kernel) {
       }
       const sources = []
       for (const m of partMetas) {
-        const epochDir = path.join(m.path, `epoch=${m.epoch}`)
-        const source = await storage.dataSourceForTable(epochDir)
+        const cursor = readCursorSync(m.path)
+        const tableDir = cursor.layout === 'source-table'
+          ? path.join(m.path, cursor.tableDir ?? 'table')
+          : path.join(m.path, `epoch=${m.epoch}`)
+        const source = await storage.dataSourceForTable(tableDir)
         if (source) sources.push(source)
       }
       if (sources.length === 0) {
