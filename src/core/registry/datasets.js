@@ -1,8 +1,34 @@
 // @ts-check
 
 /**
- * @import { DatasetRegistration, QueryRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CachePartitioningDeclaration } from '../cache/types.d.ts'
  */
+
+/**
+ * @param {CachePartitioningDeclaration} decl
+ * @param {DatasetSchema} schema
+ * @param {string} datasetName
+ */
+function validateCachePartitioning(decl, schema, datasetName) {
+  const colNames = new Set(schema.columns.map(c => c.name))
+
+  for (const col of decl.source.columns) {
+    if (!colNames.has(col)) {
+      throw new Error(
+        `registerDataset '${datasetName}': cachePartitioning source column '${col}' not found in schema`
+      )
+    }
+  }
+
+  for (const field of decl.iceberg.fields) {
+    if (field.required && !colNames.has(field.column)) {
+      throw new Error(
+        `registerDataset '${datasetName}': cachePartitioning required Iceberg field '${field.column}' not found in schema`
+      )
+    }
+  }
+}
 
 /**
  * In-memory dataset registry. Built-in core registers **zero** datasets;
@@ -25,6 +51,9 @@ export function createQueryRegistry() {
       }
       if (datasets.has(dataset.name)) {
         throw new Error(`registerDataset: dataset '${dataset.name}' already registered`)
+      }
+      if (dataset.cachePartitioning) {
+        validateCachePartitioning(dataset.cachePartitioning, dataset.schema, dataset.name)
       }
       datasets.set(dataset.name, dataset)
     },
