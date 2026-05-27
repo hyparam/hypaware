@@ -11,7 +11,11 @@ import { appendRowsToPartition, discoverCachePartitions } from '../../src/core/c
 import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { migrateLegacyPartitions } from '../../src/core/cache/migrate.js'
 
-/** @type {import('../../collectivus-plugin-kernel-types.d.ts').ColumnSpec[]} */
+/**
+ * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/** @type {ColumnSpec[]} */
 const TEST_COLUMNS = [
   { name: 'id', type: 'INT32', nullable: false },
   { name: 'value', type: 'STRING', nullable: true },

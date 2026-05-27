@@ -23,6 +23,16 @@ export interface RetentionConfig {
   wait_for_sink_ack?: boolean
 }
 
+export interface FlushChunk {
+  columns: readonly ColumnSpec[]
+  rows: Record<string, unknown>[]
+}
+
+export interface ProgressState {
+  byteOffset: number
+  updatedAt: string
+}
+
 export interface SpoolAppendResult {
   bytesWritten: number
   pendingBytes: number

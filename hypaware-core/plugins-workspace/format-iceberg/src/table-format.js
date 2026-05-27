@@ -336,7 +336,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
         bytesWritten: 0,
         dataFiles: [],
         snapshotId: priorState.currentSnapshotId,
-        metadataVersion: '',
+        metadataVersion: `v${priorState.metadata?.['last-sequence-number'] ?? priorState.metadata?.['format-version'] ?? 1}`,
         committedAt: new Date().toISOString(),
       })
     }
@@ -351,7 +351,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
     bytesWritten: commit.bytesWritten,
     dataFiles: commit.dataFiles,
     snapshotId: commit.snapshotId,
-    metadataVersion: '',
+    metadataVersion: commit.metadataVersion,
     committedAt: new Date().toISOString(),
   })
 

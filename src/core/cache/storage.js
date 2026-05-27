@@ -15,6 +15,7 @@ import {
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
+import { INTERNAL_FIELDS } from './streaming-reader.js'
 
 import path from 'node:path'
 
@@ -121,12 +122,42 @@ export function createQueryStorageService({ cacheRoot }) {
       return icebergTableUrl(resolveIcebergDir(tablePath))
     },
 
-    readRows(tablePath, columns) {
-      return scanRowsFromTable(resolveIcebergDir(tablePath), columns)
+    async *readRows(tablePath, columns) {
+      const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected)) {
+        for (const f of INTERNAL_FIELDS) delete row[f]
+        yield row
+      }
     },
 
-    dataSourceForTable(tablePath) {
-      return dataSourceForTable(resolveIcebergDir(tablePath))
+    async dataSourceForTable(tablePath) {
+      const source = await dataSourceForTable(resolveIcebergDir(tablePath))
+      if (!source) return null
+      return {
+        numRows: source.numRows,
+        columns: source.columns.filter((c) => !INTERNAL_FIELDS.includes(c)),
+        scan(options) {
+          const inner = source.scan({
+            ...options,
+            columns: options.columns?.filter((c) => !INTERNAL_FIELDS.includes(c)),
+          })
+          return {
+            appliedWhere: inner.appliedWhere,
+            appliedLimitOffset: inner.appliedLimitOffset,
+            async *rows() {
+              for await (const row of inner.rows()) {
+                yield {
+                  columns: row.columns.filter((c) => !INTERNAL_FIELDS.includes(c)),
+                  cells: row.cells,
+                  resolved: row.resolved
+                    ? Object.fromEntries(Object.entries(row.resolved).filter(([k]) => !INTERNAL_FIELDS.includes(k)))
+                    : undefined,
+                }
+              }
+            },
+          }
+        },
+      }
     },
 
     async flushTable(tablePath, opts = {}) {

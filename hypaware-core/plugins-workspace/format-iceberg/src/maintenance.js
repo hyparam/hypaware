@@ -12,28 +12,7 @@ import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
 /**
  * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { Resolver, Lister, TableMetadata } from 'icebird/src/types.js'
- */
-
-/**
- * @typedef {{
- *   min_snapshots_to_keep: number
- *   max_snapshot_age_hours: number
- * }} ExportRetentionConfig
- *
- * @typedef {{
- *   dataset: string
- *   snapshotsExpired: number
- *   snapshotsBefore: number
- *   compactionSupported: false
- * }} ExportMaintenanceDatasetReport
- *
- * @typedef {{
- *   datasets: ExportMaintenanceDatasetReport[]
- *   totalSnapshotsExpired: number
- *   compactionSupported: false
- *   dryRun: boolean
- *   elapsedMs: number
- * }} ExportMaintenanceReport
+ * @import { ExportRetentionConfig, ExportMaintenanceDatasetReport, ExportMaintenanceReport } from './types.d.ts'
  */
 
 /** @type {ExportRetentionConfig} */

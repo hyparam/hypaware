@@ -145,7 +145,7 @@ const DEFAULT_STREAM_ROW_LIMIT = 100_000
  * }} input
  * @param {{ exists: boolean, metadata: TableMetadata | null }} priorState
  * @param {{ batchByteLimit?: number, batchRowLimit?: number }} [opts]
- * @returns {Promise<{ snapshotId: string, bytesWritten: number, rowCount: number, batchCount: number, dataFiles: string[] }>}
+ * @returns {Promise<{ snapshotId: string, metadataVersion: string, bytesWritten: number, rowCount: number, batchCount: number, dataFiles: string[] }>}
  */
 export async function commitRowStream(input, priorState, opts = {}) {
   const batchByteLimit = opts.batchByteLimit ?? DEFAULT_STREAM_BYTE_LIMIT
@@ -156,6 +156,7 @@ export async function commitRowStream(input, priorState, opts = {}) {
   let totalRowCount = 0
   let batchCount = 0
   let lastSnapshotId = ''
+  let lastMetadataVersion = ''
   /** @type {string[]} */
   const allDataFiles = []
 
@@ -174,6 +175,7 @@ export async function commitRowStream(input, priorState, opts = {}) {
     totalRowCount += result.rowCount || batch.length
     batchCount += 1
     lastSnapshotId = result.snapshotId
+    lastMetadataVersion = result.metadataVersion
     allDataFiles.push(...result.dataFiles)
     batch = []
     batchBytes = 0
@@ -188,7 +190,7 @@ export async function commitRowStream(input, priorState, opts = {}) {
   }
   await flushBatch()
 
-  return { snapshotId: lastSnapshotId, bytesWritten: totalBytesWritten, rowCount: totalRowCount, batchCount, dataFiles: allDataFiles }
+  return { snapshotId: lastSnapshotId, metadataVersion: lastMetadataVersion, bytesWritten: totalBytesWritten, rowCount: totalRowCount, batchCount, dataFiles: allDataFiles }
 }
 
 /**
