@@ -4,9 +4,10 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
 import {
-  appendRowsToPartition,
+  appendRowsToSourceTable,
   discoverCachePartitions,
-  resolvePartitionSegments,
+  resolveClientName,
+  sanitizePathSegment,
 } from './partition.js'
 import { readRowsFromTable } from './iceberg/store.js'
 import { datasetsRoot } from './paths.js'
@@ -16,17 +17,17 @@ import { datasetsRoot } from './paths.js'
  */
 
 /**
- * Scan for legacy (pre-partitioned) cache directories and optionally
- * migrate their rows into the new per-source/day layout.
+ * Scan for partitions not yet in the source-table layout and optionally
+ * migrate their rows into `source=<x>/table/`.
  *
- * A partition is "legacy" when `discoverCachePartitions` marks it with
- * `legacy: true` (Iceberg data without cursor.json) OR when it carries
- * no `key=value` partition segments (e.g. `proxy_messages_v4`, `all`).
+ * Legacy partitions include: direct Iceberg tables without cursors,
+ * bare table names (`proxy_messages_v4`, `all`), and the old
+ * `client=<x>/date=<y>` epoch layout.
  *
  * Migration is idempotent: rows are read from the legacy Iceberg table,
- * re-partitioned by `resolvePartitionSegments`, and written to the new
- * layout via `appendRowsToPartition`.  The legacy directory is then
- * moved to `.retired/<original-name>` so subsequent runs are a no-op.
+ * grouped by source (via `resolveClientName`), and written to the
+ * source-table layout via `appendRowsToSourceTable`.  The legacy
+ * directory is then moved to `.retired/` so subsequent runs are a no-op.
  *
  * @param {{ cacheRoot: string, force: boolean }} opts
  * @returns {Promise<{ scanned: number, migrated: number, rowsMigrated: number }>}
@@ -50,8 +51,9 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
       for (const row of rows) {
-        const segments = resolvePartitionSegments(row)
-        const key = segments.join('/')
+        const source = sanitizePathSegment(resolveClientName(row))
+        const segments = [`source=${source}`]
+        const key = source
         let group = groups.get(key)
         if (!group) {
           group = { segments, rows: [] }
@@ -60,7 +62,7 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
         group.rows.push(row)
       }
       for (const { segments, rows: groupRows } of groups.values()) {
-        await appendRowsToPartition(cacheRoot, partition.dataset, segments, columns, groupRows)
+        await appendRowsToSourceTable(cacheRoot, partition.dataset, segments, columns, groupRows)
       }
       rowsMigrated += rows.length
       await retirePartition(partition.path)
@@ -72,15 +74,17 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
 }
 
 /**
+ * A partition needs migration unless it is already in the source-table
+ * layout (`source=<x>` partition key).  Everything else — direct Iceberg
+ * tables without cursors, bare table names (`proxy_messages_v4`, `all`),
+ * and the old `client=<x>/date=<y>` epoch layout — is legacy.
+ *
  * @param {import('./types.d.ts').CachePartitionMeta} partition
  * @returns {boolean}
  */
 function isLegacyPartition(partition) {
-  if (partition.legacy) return true
-  const keys = Object.keys(partition.partition)
-  if (keys.length === 0) return true
-  if (keys.every((k) => !k.includes('client') && !k.includes('date'))) return true
-  return false
+  if ('source' in partition.partition) return false
+  return true
 }
 
 /**
