@@ -11,6 +11,7 @@ export interface PartitionCursor {
     lastCutoffDate?: string
     lastDeletedAt?: string
     rowsDeleted?: number
+    lastSnapshotId?: string
   }
 }
 

@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -12,6 +13,7 @@ import { DEFAULT_SPOOL_BYTES_THRESHOLD } from '../../src/core/cache/spool.js'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.d.ts'
  */
 
 /** @param {string} prefix */
@@ -127,6 +129,95 @@ test('storage.dataSourceForTable keeps columns and cells aligned after internal-
     }
 
     assert.fail('expected one row from data source')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('spool flush creates Iceberg table with partition spec when declaration is provided', async () => {
+  const cacheRoot = await makeTmpDir('flush-with-decl')
+  try {
+    /** @type {CachePartitioningDeclaration} */
+    const declaration = {
+      source: {
+        columns: ['client_name'],
+        fallback: 'unknown',
+      },
+      iceberg: {
+        fields: [
+          { column: 'client_name', transform: 'identity', required: true },
+        ],
+      },
+    }
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'client_name', type: 'STRING', nullable: false },
+      { name: 'value', type: 'STRING', nullable: true },
+    ]
+
+    const storage = createQueryStorageService({
+      cacheRoot,
+      getDeclaration: (dataset) => dataset === 'declared_ds' ? declaration : undefined,
+    })
+    const tablePath = storage.cacheTablePath('declared_ds', ['proxy'])
+
+    await storage.appendRows(tablePath, columns, [
+      { id: 1, value: 'a', client_name: 'claude' },
+    ])
+    await storage.flushTable(tablePath, { force: true })
+
+    const tableDir = path.join(cacheRoot, 'datasets', 'declared_ds', 'source=claude', 'table')
+    const metadataDir = path.join(tableDir, 'metadata')
+    const files = fsSync.readdirSync(metadataDir)
+    const metaFile = files.find(f => f.endsWith('.metadata.json'))
+    assert.ok(metaFile, 'metadata file should exist')
+
+    const meta = JSON.parse(fsSync.readFileSync(path.join(metadataDir, metaFile), 'utf8'))
+    const specs = meta['partition-specs']
+    assert.ok(specs, 'partition-specs should be in metadata')
+    assert.ok(specs[0].fields.length > 0, 'partition spec should have fields from declaration')
+    assert.equal(specs[0].fields[0].name, 'client_name')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('spool flush uses resolveSourceSegments when declaration is provided', async () => {
+  const cacheRoot = await makeTmpDir('flush-source-decl')
+  try {
+    /** @type {CachePartitioningDeclaration} */
+    const declaration = {
+      source: {
+        columns: ['provider', 'conversation_source'],
+        fallback: 'default_source',
+      },
+      iceberg: {
+        fields: [],
+      },
+    }
+    const storage = createQueryStorageService({
+      cacheRoot,
+      getDeclaration: (dataset) => dataset === 'custom_ds' ? declaration : undefined,
+    })
+    const tablePath = storage.cacheTablePath('custom_ds', ['proxy'])
+
+    await storage.appendRows(tablePath, SIMPLE_COLUMNS, [
+      { id: 1, value: 'a', provider: 'anthropic' },
+      { id: 2, value: 'b' },
+    ])
+    await storage.flushTable(tablePath, { force: true })
+
+    const anthropicDir = path.join(cacheRoot, 'datasets', 'custom_ds', 'source=anthropic')
+    const defaultDir = path.join(cacheRoot, 'datasets', 'custom_ds', 'source=default_source')
+
+    const anthropicCursor = readCursorSync(anthropicDir)
+    assert.equal(anthropicCursor.layout, 'source-table')
+    assert.equal(anthropicCursor.rowCount, 1)
+
+    const defaultCursor = readCursorSync(defaultDir)
+    assert.equal(defaultCursor.layout, 'source-table')
+    assert.equal(defaultCursor.rowCount, 1)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

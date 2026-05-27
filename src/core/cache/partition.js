@@ -76,9 +76,10 @@ export async function writeCursor(partitionDir, cursor) {
  * @param {string[]} sourceSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
+ * @param {{ declaration?: CachePartitioningDeclaration }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
-export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows) {
+export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
   if (rows.length === 0) {
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
@@ -86,7 +87,8 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
   const cursor = readCursorSync(partitionDir)
   const tableDir = cursor.tableDir ?? 'table'
   const icebergDir = path.join(partitionDir, tableDir)
-  const result = await appendRowsToTable(icebergDir, columns, rows)
+  const declaration = options?.declaration
+  const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
   await writeCursor(partitionDir, {
     epoch: cursor.epoch,
     rowCount: cursor.rowCount + rows.length,
@@ -199,9 +201,11 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
 }
 
 /**
- * Resolve the `client_name` partition key for an ai_gateway_messages
- * row using the fallback chain: client_name → conversation_source →
- * provider → "unknown".
+ * Resolve the source partition key from a row using the fallback
+ * chain: client_name → conversation_source → provider → "unknown".
+ * Used as the default source resolver for all datasets when no
+ * `CachePartitioningDeclaration` is registered. Datasets without any
+ * of these fields will be grouped under "unknown".
  *
  * @param {Record<string, unknown>} row
  * @returns {string}

@@ -20,6 +20,7 @@ import { appendRowsToTable, scanRowsFromTable, tableExists } from './iceberg/sto
 /**
  * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import {
+ *   CachePartitionMeta,
  *   CacheStatusPartition,
  *   CacheStatusReport,
  *   MaintenanceConfig,
@@ -197,7 +198,7 @@ async function maintainSourceTable(r, cursor, cfg, opts, snapshotsExpiredCounter
  * Maintain a legacy epoch-layout partition.
  *
  * @param {MaintenancePartitionReport} r
- * @param {import('./types.d.ts').CachePartitionMeta} part
+ * @param {CachePartitionMeta} part
  * @param {PartitionCursor} cursor
  * @param {MaintenanceConfig} cfg
  * @param {MaintenanceOptions} opts
@@ -495,6 +496,8 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   }
 
   if (!columns) return null
+  // Keep epoch progression deterministic even when dedup filters out all
+  // rows; this lets old epochs be marked and retired safely.
   if (totalRows === 0) {
     await appendRowsToTable(newEpochDir, columns, [])
   }
