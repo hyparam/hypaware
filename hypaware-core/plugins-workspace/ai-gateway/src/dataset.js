@@ -62,12 +62,7 @@ export async function discoverParts(ctx) {
   })
   seen.add(legacyPath)
 
-  const discovered = await discoverCachePartitions(cacheDir, {
-    datasets: [DATASET_NAME],
-    ...(ctx.scope?.date ? { date: ctx.scope.date } : {}),
-    ...(ctx.scope?.from ? { from: ctx.scope.from } : {}),
-    ...(ctx.scope?.to ? { to: ctx.scope.to } : {}),
-  })
+  const discovered = await discoverCachePartitions(cacheDir, buildDiscoveryScope(ctx.scope))
   for (const p of discovered) {
     if (seen.has(p.path)) continue
     seen.add(p.path)
@@ -105,9 +100,7 @@ export async function createDataSource(partitions, ctx) {
 
   // Re-discover partitions to pick up any newly flushed data that
   // wasn't visible during the initial discoverParts call.
-  const freshPartitions = await discoverCachePartitions(storage.cacheRoot, {
-    datasets: [DATASET_NAME],
-  })
+  const freshPartitions = await discoverCachePartitions(storage.cacheRoot, buildDiscoveryScope(ctx.scope))
 
   /** @type {Set<string>} */
   const tablePaths = new Set()
@@ -128,6 +121,19 @@ export async function createDataSource(partitions, ctx) {
   if (sources.length === 0) return emptySource()
   if (sources.length === 1) return sources[0]
   return unionSources(sources)
+}
+
+/**
+ * @param {DatasetDiscoveryContext['scope'] | DatasetDataSourceContext['scope'] | undefined} scope
+ */
+function buildDiscoveryScope(scope) {
+  return {
+    datasets: [DATASET_NAME],
+    ...(scope?.date ? { date: scope.date } : {}),
+    ...(scope?.dates ? { dates: scope.dates } : {}),
+    ...(scope?.from ? { from: scope.from } : {}),
+    ...(scope?.to ? { to: scope.to } : {}),
+  }
 }
 
 /**

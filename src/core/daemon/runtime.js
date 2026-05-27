@@ -319,6 +319,7 @@ export async function runDaemon(opts = {}) {
     }
     if (intervalMs > 0) {
       maintenanceHandle = setInterval(() => {
+        if (maintenanceInFlight) return
         maintenanceInFlight = runMaintenance().finally(() => { maintenanceInFlight = null })
       }, intervalMs)
       if (typeof maintenanceHandle.unref === 'function') maintenanceHandle.unref()

@@ -323,7 +323,12 @@ async function compactPartition(partitionDir, cursor, _cfg) {
     totalRows += batch.length
   }
 
-  if (totalRows === 0 || !columns) return null
+  if (!columns) return null
+  if (totalRows === 0) {
+    // Keep epoch progression deterministic even when dedup filters out
+    // all rows; this lets old epochs be marked and retired safely.
+    await appendRowsToTable(newEpochDir, columns, [])
+  }
 
   await writeCursor(partitionDir, {
     epoch: newEpoch,

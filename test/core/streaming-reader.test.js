@@ -176,6 +176,43 @@ test('resume cursor updates correctly and restart from cursor produces identical
   await fs.rm(dir, { recursive: true, force: true })
 })
 
+test('resume offset does not advance past a partially flushed line', async () => {
+  const dir = await makeTmpDir()
+  const filePath = path.join(dir, 'resume-partial-line.jsonl')
+
+  const rows = []
+  for (let i = 0; i < 5; i++) rows.push({ id: i, msg: `row-${i}` })
+  await fs.writeFile(filePath, envelope(rows))
+
+  let firstResumeOffset = -1
+  let firstBatchRows = 0
+  for await (const batch of streamFlushFile({
+    filePath,
+    batchId: 'run-partial-1',
+    batchRowLimit: 2,
+  })) {
+    firstResumeOffset = batch.resumeOffset
+    firstBatchRows = batch.chunk.rows.length
+    break
+  }
+
+  assert.equal(firstBatchRows, 2)
+  assert.equal(firstResumeOffset, 0, 'resume offset should stay at line start when line was only partially flushed')
+
+  let resumedRows = 0
+  for await (const batch of streamFlushFile({
+    filePath,
+    batchId: 'run-partial-2',
+    startOffset: firstResumeOffset,
+    batchRowLimit: 2,
+  })) {
+    resumedRows += batch.chunk.rows.length
+  }
+  assert.equal(resumedRows, 5, 'resuming from stored offset should not skip unflushed rows from the same line')
+
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
 test('batch boundaries respect row-count threshold', async () => {
   const dir = await makeTmpDir()
   const filePath = path.join(dir, 'row-limit.jsonl')

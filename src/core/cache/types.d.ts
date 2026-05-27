@@ -134,6 +134,6 @@ export type ExtendedQueryStorageService = QueryStorageService & {
     partitionSegments: string[],
     columns: readonly ColumnSpec[],
     rows: Record<string, unknown>[],
-  ): Promise<void>
+  ): Promise<{ tableUrl: string; appended: boolean; bytesWritten: number }>
   discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
 }

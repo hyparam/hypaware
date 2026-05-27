@@ -146,9 +146,19 @@ export function createQueryStorageService({ cacheRoot }) {
             appliedLimitOffset: inner.appliedLimitOffset,
             async *rows() {
               for await (const row of inner.rows()) {
+                /** @type {number[]} */
+                const keptIndexes = []
+                const keptColumns = row.columns.filter((column, idx) => {
+                  if (INTERNAL_FIELDS.includes(column)) return false
+                  keptIndexes.push(idx)
+                  return true
+                })
+                const keptCells = Array.isArray(row.cells)
+                  ? keptIndexes.map((idx) => row.cells[idx])
+                  : keptColumns.map((column) => row.cells?.[column])
                 yield {
-                  columns: row.columns.filter((c) => !INTERNAL_FIELDS.includes(c)),
-                  cells: row.cells,
+                  columns: keptColumns,
+                  cells: keptCells,
                   resolved: row.resolved
                     ? Object.fromEntries(Object.entries(row.resolved).filter(([k]) => !INTERNAL_FIELDS.includes(k)))
                     : undefined,
@@ -209,7 +219,7 @@ export function createQueryStorageService({ cacheRoot }) {
     },
 
     async appendRowsToPartition(dataset, partitionSegments, columns, rows) {
-      await withSpan(
+      return withSpan(
         'cache.append_partition',
         {
           [Attr.COMPONENT]: 'cache',
@@ -222,6 +232,7 @@ export function createQueryStorageService({ cacheRoot }) {
           const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, rows)
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('appended', result.appended)
+          return result
         },
         { component: 'cache' }
       )

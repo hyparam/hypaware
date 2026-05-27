@@ -88,6 +88,7 @@ export async function* streamFlushFile(opts) {
     while ((newlineIdx = tail.indexOf('\n')) !== -1) {
       const line = tail.slice(0, newlineIdx)
       const lineByteLen = Buffer.byteLength(line, 'utf8') + 1
+      const lineStartOffset = absoluteOffset
       tail = tail.slice(newlineIdx + 1)
       absoluteOffset += lineByteLen
 
@@ -124,7 +125,8 @@ export async function* streamFlushFile(opts) {
       currentColumns = envelope.columns
       currentSignature = signature
 
-      for (const row of envelope.rows) {
+      for (let idx = 0; idx < envelope.rows.length; idx++) {
+        const row = envelope.rows[idx]
         const decorated = decorateRow(row, batchId)
         const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
         currentRows.push(decorated)
@@ -133,7 +135,12 @@ export async function* streamFlushFile(opts) {
         if (currentRows.length >= batchRowLimit || currentBatchBytes >= batchByteLimit) {
           const sealed = sealBatch()
           if (sealed) {
-            yield { chunk: sealed, resumeOffset: absoluteOffset, malformedCount }
+            const endedOnLineBoundary = idx === envelope.rows.length - 1
+            yield {
+              chunk: sealed,
+              resumeOffset: endedOnLineBoundary ? absoluteOffset : lineStartOffset,
+              malformedCount,
+            }
             malformedCount = 0
           }
           if (!currentColumns) {
