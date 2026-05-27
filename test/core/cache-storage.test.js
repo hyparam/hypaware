@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { DEFAULT_SPOOL_BYTES_THRESHOLD } from '../../src/core/cache/spool.js'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -22,6 +23,10 @@ const SIMPLE_COLUMNS = [
   { name: 'id', type: 'INT32', nullable: false },
   { name: 'value', type: 'STRING', nullable: true },
 ]
+
+test('default spool threshold is Iceberg-sized to avoid frequent small commits', () => {
+  assert.equal(DEFAULT_SPOOL_BYTES_THRESHOLD, 512 * 1024 * 1024)
+})
 
 test('storage.appendRowsToPartition writes data without error', async () => {
   const cacheRoot = await makeTmpDir('append-meta')
