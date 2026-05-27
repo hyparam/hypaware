@@ -309,9 +309,12 @@ export function validateIcebergPartitionFields(row, declaration) {
   return { valid: missing.length === 0, missing }
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
 function nonEmpty(value) {
   if (value == null) return undefined
   if (typeof value === 'string') return value.length > 0 ? value : undefined
-  return value
+  return String(value)
 }

@@ -482,11 +482,12 @@ test('validateIcebergPartitionFields treats empty strings as missing', () => {
 
 test('validateIcebergPartitionFields accepts non-string required fields', () => {
   const declaration = {
+    source: { columns: ['count'] },
     iceberg: {
       fields: [
-        { column: 'count', source: 'count', required: true },
-        { column: 'active', source: 'active', required: true },
-        { column: 'date', source: 'date', required: true },
+        { column: 'count', transform: 'identity', required: true },
+        { column: 'active', transform: 'identity', required: true },
+        { column: 'date', transform: 'identity', required: true },
       ],
     },
   }
@@ -500,10 +501,11 @@ test('validateIcebergPartitionFields accepts non-string required fields', () => 
 
 test('validateIcebergPartitionFields rejects null and undefined required fields', () => {
   const declaration = {
+    source: { columns: ['a'] },
     iceberg: {
       fields: [
-        { column: 'a', source: 'a', required: true },
-        { column: 'b', source: 'b', required: true },
+        { column: 'a', transform: 'identity', required: true },
+        { column: 'b', transform: 'identity', required: true },
       ],
     },
   }
