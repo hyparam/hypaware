@@ -11,6 +11,7 @@ import {
 } from 'icebird'
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
+import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
@@ -28,13 +29,17 @@ import { appendRowsToTable, scanRowsFromTable, tableExists } from './iceberg/sto
  * } from './types.d.ts'
  */
 
+export const SNAPSHOT_RETENTION_DEFAULTS = Object.freeze({
+  min_snapshots_to_keep: 10,
+  max_snapshot_age_hours: 24,
+})
+
 /** @type {MaintenanceConfig} */
 const DEFAULTS = {
   enabled: true,
   interval_minutes: 60,
   target_file_bytes: 128 * 1024 * 1024,
-  min_snapshots_to_keep: 10,
-  max_snapshot_age_hours: 24,
+  ...SNAPSHOT_RETENTION_DEFAULTS,
   compact_file_count: 32,
   compact_avg_file_bytes: 32 * 1024 * 1024,
   max_tick_ms: 30_000,
@@ -293,7 +298,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
     if (!columns) {
       columns = Object.keys(row).map((name) => ({
         name,
-        type: /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').ColumnSpec['type']} */ ('STRING'),
+        type: inferColumnType(row[name]),
         nullable: true,
       }))
     }

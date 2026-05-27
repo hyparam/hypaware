@@ -6,6 +6,7 @@ import {
   loadLatestFileCatalogMetadata,
 } from 'icebird'
 
+import { SNAPSHOT_RETENTION_DEFAULTS } from '../../../../src/core/cache/maintenance.js'
 import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
 
 /**
@@ -36,10 +37,7 @@ import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
  */
 
 /** @type {ExportRetentionConfig} */
-const DEFAULTS = {
-  min_snapshots_to_keep: 10,
-  max_snapshot_age_hours: 24,
-}
+const DEFAULTS = SNAPSHOT_RETENTION_DEFAULTS
 
 /**
  * @param {Partial<ExportRetentionConfig> | undefined} config

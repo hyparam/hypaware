@@ -63,9 +63,9 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
         await appendRowsToPartition(cacheRoot, partition.dataset, segments, columns, groupRows)
       }
       rowsMigrated += rows.length
+      await retirePartition(partition.path)
+      migrated++
     }
-    await retirePartition(partition.path)
-    migrated++
   }
 
   return { scanned: legacy.length, migrated, rowsMigrated }
@@ -132,7 +132,7 @@ function inferColumnsFromRows(rows) {
  * @param {unknown} value
  * @returns {'STRING' | 'INT32' | 'INT64' | 'DOUBLE' | 'BOOLEAN' | 'TIMESTAMP' | 'JSON'}
  */
-function inferColumnType(value) {
+export function inferColumnType(value) {
   if (typeof value === 'boolean') return 'BOOLEAN'
   if (typeof value === 'number') {
     if (Number.isInteger(value)) return value > 2_147_483_647 || value < -2_147_483_648 ? 'INT64' : 'INT32'

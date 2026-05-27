@@ -287,6 +287,8 @@ export async function runDaemon(opts = {}) {
   // ----- Maintenance -----
   /** @type {NodeJS.Timeout | null} */
   let maintenanceHandle = null
+  /** @type {Promise<void> | null} */
+  let maintenanceInFlight = null
   const maintenanceCfg = boot.config?.query?.cache?.maintenance
   const maintenanceEnabled = maintenanceCfg?.enabled !== false
   if (maintenanceEnabled) {
@@ -316,7 +318,9 @@ export async function runDaemon(opts = {}) {
       })
     }
     if (intervalMs > 0) {
-      maintenanceHandle = setInterval(() => { void runMaintenance() }, intervalMs)
+      maintenanceHandle = setInterval(() => {
+        maintenanceInFlight = runMaintenance().finally(() => { maintenanceInFlight = null })
+      }, intervalMs)
       if (typeof maintenanceHandle.unref === 'function') maintenanceHandle.unref()
     }
   }
@@ -333,6 +337,9 @@ export async function runDaemon(opts = {}) {
     if (maintenanceHandle) {
       clearInterval(maintenanceHandle)
       maintenanceHandle = null
+    }
+    if (maintenanceInFlight) {
+      await maintenanceInFlight
     }
     persist({ state: 'stopping' })
     fileLog.info('daemon.stopping', { reason })
