@@ -129,11 +129,7 @@ export function createCacheSpool(args) {
             await writeProgress(filePath, batch.resumeOffset)
           }
 
-          if (fileMalformed > 0) {
-            malformedCount += fileMalformed
-            continue
-          }
-
+          malformedCount += fileMalformed
           await removeProgress(filePath)
           await fs.rm(filePath, { force: true })
         }

@@ -8,6 +8,7 @@ import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+ * @import { AsyncDataSource } from 'squirreling'
  */
 
 export const DATASET_NAME = 'ai_gateway_messages'
@@ -117,7 +118,7 @@ export async function createDataSource(partitions, ctx) {
     tablePaths.add(p.path)
   }
 
-  /** @type {import('squirreling').AsyncDataSource[]} */
+  /** @type {AsyncDataSource[]} */
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)
@@ -132,8 +133,8 @@ export async function createDataSource(partitions, ctx) {
 /**
  * Merge multiple AsyncDataSources into a single union source.
  *
- * @param {import('squirreling').AsyncDataSource[]} sources
- * @returns {import('squirreling').AsyncDataSource}
+ * @param {AsyncDataSource[]} sources
+ * @returns {AsyncDataSource}
  */
 function unionSources(sources) {
   /** @type {Set<string>} */

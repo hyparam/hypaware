@@ -26,7 +26,11 @@ import { appendRowsToTable, scanRowsFromTable, tableExists } from './iceberg/sto
  *   MaintenanceOptions,
  *   MaintenancePartitionReport,
  *   MaintenanceReport,
+ *   PartitionCursor,
  * } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { TableMetadata } from 'icebird/src/types.js'
+ * @import { Dirent } from 'node:fs'
  */
 
 export const SNAPSHOT_RETENTION_DEFAULTS = Object.freeze({
@@ -215,7 +219,7 @@ async function expireSnapshots(epochDir, cfg, opts) {
   const url = tableUrlForDir(epochDir)
   const { resolver, lister } = await createLocalIcebergIO()
 
-  /** @type {import('icebird/src/types.js').TableMetadata} */
+  /** @type {TableMetadata} */
   let metadata
   try {
     const loaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
@@ -274,7 +278,7 @@ function needsCompaction(epochDir, cfg) {
 
 /**
  * @param {string} partitionDir
- * @param {import('./types.d.ts').PartitionCursor} cursor
+ * @param {PartitionCursor} cursor
  * @param {MaintenanceConfig} _cfg
  * @returns {Promise<{ newEpoch: number, rowCount: number, dataFiles: number } | null>}
  */
@@ -288,7 +292,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   const newEpochDir = path.join(partitionDir, `epoch=${newEpoch}`)
 
   const seen = new Set()
-  /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').ColumnSpec[] | null} */
+  /** @type {ColumnSpec[] | null} */
   let columns = null
   /** @type {Record<string, unknown>[]} */
   let batch = []
@@ -357,7 +361,7 @@ async function cleanRetiredEpochs(cacheRoot) {
  * @param {string} dir
  */
 async function walkForRetired(dir) {
-  /** @type {import('node:fs').Dirent[]} */
+  /** @type {Dirent[]} */
   let entries
   try {
     entries = await fsPromises.readdir(dir, { withFileTypes: true })

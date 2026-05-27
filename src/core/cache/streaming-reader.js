@@ -6,20 +6,7 @@ import fs from 'node:fs/promises'
 
 /**
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- */
-
-/**
- * @typedef {{
- *   columns: readonly ColumnSpec[],
- *   rows: Record<string, unknown>[],
- * }} FlushChunk
- */
-
-/**
- * @typedef {{
- *   byteOffset: number,
- *   updatedAt: string,
- * }} ProgressState
+ * @import { FlushChunk, ProgressState } from './types.d.ts'
  */
 
 export const BATCH_BYTE_LIMIT = 128 * 1024 * 1024

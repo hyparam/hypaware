@@ -18,7 +18,11 @@ import {
 } from '../../src/core/cache/partition.js'
 import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 
-/** @type {import('../../collectivus-plugin-kernel-types.d.ts').ColumnSpec[]} */
+/**
+ * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
+/** @type {ColumnSpec[]} */
 const TEST_COLUMNS = [
   { name: 'id', type: 'INT32', nullable: false },
   { name: 'value', type: 'STRING', nullable: true },
