@@ -681,7 +681,15 @@ async function runQueryStatus(_argv, ctx) {
     ctx.stdout.write(`partitions: ${report.partitions.length}\n`)
     for (const p of report.partitions) {
       const partKey = Object.entries(p.partition).map(([k, v]) => `${k}=${v}`).join('/')
-      ctx.stdout.write(`  ${p.dataset}/${partKey || 'all'}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
+      const label = `${p.dataset}/${partKey || 'all'}`
+      if (p.layout === 'source-table') {
+        const extras = []
+        if (p.deleteFileCount) extras.push(`deletes=${p.deleteFileCount}`)
+        if (p.lastRetentionCutoffDate) extras.push(`retention_cutoff=${p.lastRetentionCutoffDate}`)
+        ctx.stdout.write(`  ${label}  source-table  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B${extras.length ? '  ' + extras.join('  ') : ''}\n`)
+      } else {
+        ctx.stdout.write(`  ${label}  epoch=${p.epoch}  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B\n`)
+      }
     }
   }
   return 0

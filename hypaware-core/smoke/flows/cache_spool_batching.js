@@ -53,7 +53,7 @@ export async function run({ harness, expect }) {
 
   await kernel.storage.flushTable(tablePath, { force: true, reason: 'smoke_batching' })
 
-  const dataFiles = await listDataFiles(tablePath)
+  const dataFiles = await listAllDataFiles(kernel, DATASET, tablePath)
   expect.that(
     'cache: one-row appends landed in fewer Iceberg data files than rows',
     dataFiles.length,
@@ -93,21 +93,15 @@ export async function run({ harness, expect }) {
 
   const partitions = await kernel.storage.discoverCachePartitions({ datasets: [PARTITIONED_DATASET] })
   expect.that(
-    'partition: rows land in multiple per-client/date partitions',
+    'partition: rows land in per-source partitions',
     partitions.length,
-    (v) => typeof v === 'number' && v >= 4
+    (v) => typeof v === 'number' && v >= 2
   )
 
-  const clientPartitions = new Set(partitions.map((p) => p.partition.client))
+  const sourcePartitions = new Set(partitions.map((p) => p.partition.source))
   expect.that(
-    'partition: both clients appear',
-    clientPartitions.size,
-    (v) => v === 2
-  )
-  const datePartitions = new Set(partitions.map((p) => p.partition.date))
-  expect.that(
-    'partition: both dates appear',
-    datePartitions.size,
+    'partition: both sources appear',
+    sourcePartitions.size,
     (v) => v === 2
   )
 
@@ -167,6 +161,15 @@ function registerDataset(kernel) {
     },
     async createDataSource(partitions, ctx) {
       const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+      const partMetas = await storage.discoverCachePartitions({ datasets: [DATASET] })
+      if (partMetas.length > 0) {
+        const sources = []
+        for (const m of partMetas) {
+          const source = await storage.dataSourceForTable(m.path)
+          if (source) sources.push(source)
+        }
+        if (sources.length === 1) return sources[0]
+      }
       const source = await storage.dataSourceForTable(partitions[0]?.tablePath ?? '')
       return source ?? {
         columns: COLUMNS.map((c) => c.name),
@@ -245,6 +248,15 @@ function registerSimpleDataset(kernel, name, columns) {
     },
     async createDataSource(partitions, ctx) {
       const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+      const partMetas = await storage.discoverCachePartitions({ datasets: [name] })
+      if (partMetas.length > 0) {
+        const sources = []
+        for (const m of partMetas) {
+          const source = await storage.dataSourceForTable(m.path)
+          if (source) sources.push(source)
+        }
+        if (sources.length === 1) return sources[0]
+      }
       const source = await storage.dataSourceForTable(partitions[0]?.tablePath ?? '')
       return source ?? {
         columns: columns.map((c) => c.name),
@@ -259,15 +271,39 @@ function registerSimpleDataset(kernel, name, columns) {
 /** @param {string} tablePath */
 async function listDataFiles(tablePath) {
   const cursor = readCursorSync(tablePath)
-  const dataDir = (cursor.rowCount > 0 || cursor.epoch > 0)
-    ? path.join(tablePath, `epoch=${cursor.epoch}`, 'data')
-    : path.join(tablePath, 'data')
+  /** @type {string} */
+  let dataDir
+  if (cursor.layout === 'source-table') {
+    dataDir = path.join(tablePath, cursor.tableDir ?? 'table', 'data')
+  } else if (cursor.rowCount > 0 || cursor.epoch > 0) {
+    dataDir = path.join(tablePath, `epoch=${cursor.epoch}`, 'data')
+  } else {
+    dataDir = path.join(tablePath, 'data')
+  }
   try {
     const entries = await fs.readdir(dataDir, { withFileTypes: true })
     return entries.filter((entry) => entry.isFile() && entry.name.endsWith('.parquet'))
   } catch {
     return []
   }
+}
+
+/**
+ * @param {KernelRuntime} kernel
+ * @param {string} dataset
+ * @param {string} tablePath
+ */
+async function listAllDataFiles(kernel, dataset, tablePath) {
+  const storage = /** @type {ExtendedQueryStorageService} */ (kernel.storage)
+  const partMetas = await storage.discoverCachePartitions({ datasets: [dataset] })
+  if (partMetas.length === 0) return listDataFiles(tablePath)
+  /** @type {import('node:fs').Dirent[]} */
+  const allFiles = []
+  for (const m of partMetas) {
+    const files = await listDataFiles(m.path)
+    allFiles.push(...files)
+  }
+  return allFiles
 }
 
 function makeBuf() {

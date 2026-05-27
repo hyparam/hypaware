@@ -88,6 +88,33 @@ function registerDataset(kernel) {
     },
     async createDataSource(partitions, ctx) {
       const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+      const partMetas = await storage.discoverCachePartitions({ datasets: [DATASET] })
+      if (partMetas.length > 0) {
+        const sources = []
+        for (const m of partMetas) {
+          const source = await storage.dataSourceForTable(m.path)
+          if (source) sources.push(source)
+        }
+        if (sources.length === 1) return sources[0]
+        if (sources.length > 1) {
+          const columns = COLUMNS.map((c) => c.name)
+          return {
+            columns,
+            scan(opts) {
+              return {
+                appliedWhere: false,
+                appliedLimitOffset: false,
+                async *rows() {
+                  for (const source of sources) {
+                    const scan = source.scan(opts ?? {})
+                    for await (const row of scan.rows()) yield row
+                  }
+                },
+              }
+            },
+          }
+        }
+      }
       const source = await storage.dataSourceForTable(partitions[0]?.tablePath ?? '')
       return source ?? {
         columns: COLUMNS.map((c) => c.name),

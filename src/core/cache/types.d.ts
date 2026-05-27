@@ -139,12 +139,30 @@ export interface CacheStatusPartition {
   dataFileCount: number
   metadataBytes: number
   snapshotCount: number
+  source?: string
+  deleteFileCount?: number
+  lastRetentionCutoffDate?: string
+  layout?: 'epoch' | 'source-table'
 }
 
 export interface CacheStatusReport {
   cacheRoot: string
   pendingSpoolBytes: number
   partitions: CacheStatusPartition[]
+}
+
+export interface RetentionSourceTableResult {
+  dataset: string
+  source: string
+  cutoffDate: string
+  rowsDeleted: number
+  batchCount: number
+  candidateFileCount: number
+}
+
+export interface RetentionResult {
+  evicted: Array<{ dataset: string, partition: string, rowCount: number }>
+  sourceTableResults: RetentionSourceTableResult[]
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
