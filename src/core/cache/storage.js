@@ -13,6 +13,7 @@ import {
   discoverCachePartitions as discoverCachePartitionsImpl,
   readCursorSync,
   resolveClientName,
+  resolveSourceSegments,
   sanitizePathSegment,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
@@ -23,7 +24,7 @@ import path from 'node:path'
 
 /**
  * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from './types.d.ts'
+ * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from './types.d.ts'
  */
 
 /**
@@ -57,21 +58,23 @@ export function resolveIcebergDir(tablePath) {
  * Phase 4 smoke (and the SQL assertion in the implementation plan)
  * exercise.
  *
- * @param {{ cacheRoot: string }} args
+ * @param {{ cacheRoot: string, getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined }} args
  * @returns {ExtendedQueryStorageService}
  */
-export function createQueryStorageService({ cacheRoot }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const spool = createCacheSpool({
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      const declaration = getDeclaration?.(dataset)
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
       for (const row of rows) {
-        const source = sanitizePathSegment(resolveClientName(row))
-        const segments = [`source=${source}`]
-        const key = source
+        const segments = declaration
+          ? resolveSourceSegments(row, declaration)
+          : [`source=${sanitizePathSegment(resolveClientName(row))}`]
+        const key = segments.join('/')
         let group = groups.get(key)
         if (!group) {
           group = { segments, rows: [] }
@@ -80,8 +83,9 @@ export function createQueryStorageService({ cacheRoot }) {
         group.rows.push(row)
       }
       let totalBytes = 0
+      const opts = declaration ? { declaration } : undefined
       for (const { segments, rows: groupRows } of groups.values()) {
-        const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows)
+        const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
         totalBytes += result.bytesWritten
       }
       return { bytesWritten: totalBytes }

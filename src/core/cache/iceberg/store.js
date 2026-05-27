@@ -24,7 +24,7 @@ import {
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CachePartitioningDeclaration } from '../types.d.ts'
- * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
+ * @import { Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */
 
@@ -102,7 +102,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   const declaration = options?.declaration
 
   if (!tableExists(tablePath)) {
-    /** @type {import('icebird/src/types.js').PartitionSpec | undefined} */
+    /** @type {PartitionSpec | undefined} */
     const partitionSpec = declaration
       ? partitionSpecForDeclaration(declaration, schema)
       : undefined
@@ -215,7 +215,7 @@ async function resolveAsyncRow(row, columns) {
 
 /**
  * @param {TableMetadata} metadata
- * @returns {import('icebird/src/types.js').Schema | undefined}
+ * @returns {Schema | undefined}
  */
 function currentSchema(metadata) {
   const schemaId = metadata['current-schema-id']
@@ -229,7 +229,7 @@ function currentSchema(metadata) {
 
 /**
  * @param {TableMetadata} metadata
- * @returns {import('icebird/src/types.js').PartitionSpec | undefined}
+ * @returns {PartitionSpec | undefined}
  */
 function currentPartitionSpec(metadata) {
   const specId = metadata['default-spec-id']

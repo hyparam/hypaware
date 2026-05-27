@@ -294,6 +294,40 @@ test('compaction preserves source-table layout', async () => {
   }
 })
 
+test('retention second tick reports zero newly deleted rows (no duplicate deletes)', async () => {
+  const cacheRoot = await makeTmpDir('retention-two-tick')
+  try {
+    const oldTimestamp = isoDateDaysAgo(45)
+    const recentTimestamp = isoDateDaysAgo(5)
+
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'old-1', timestamp: oldTimestamp },
+      { id: 2, value: 'old-2', timestamp: oldTimestamp },
+      { id: 3, value: 'recent', timestamp: recentTimestamp },
+    ])
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+    })
+
+    const result1 = await enforcer.tick()
+    assert.equal(result1.sourceTableResults.length, 1)
+    assert.equal(result1.sourceTableResults[0].rowsDeleted, 2)
+
+    const result2 = await enforcer.tick()
+    assert.equal(result2.sourceTableResults.length, 1)
+    assert.equal(result2.sourceTableResults[0].rowsDeleted, 0,
+      'second tick should not re-delete already-deleted rows')
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.rowCount, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('source-table directory remains intact after retention', async () => {
   const cacheRoot = await makeTmpDir('retention-intact')
   try {

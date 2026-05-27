@@ -18,7 +18,8 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { readRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
- * @import { RetentionConfig, RetentionResult, RetentionSourceTableResult } from './types.d.ts'
+ * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from './types.d.ts'
+ * @import { Resolver } from 'icebird/src/types.js'
  * @import { TableMetadata } from 'icebird/src/types.js'
  */
 
@@ -79,8 +80,8 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
   /**
    * Row-level purge for source-table layout partitions.
    *
-   * @param {import('./types.d.ts').CachePartitionMeta} part
-   * @param {import('./types.d.ts').PartitionCursor} cursor
+   * @param {CachePartitionMeta} part
+   * @param {PartitionCursor} cursor
    * @param {number} retentionDays
    * @param {Date} now
    * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} counter
@@ -108,6 +109,20 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
 
     if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
       return null
+    }
+
+    const currentSnapshotId = String(metadata['current-snapshot-id'])
+
+    // Skip if no new data has arrived since the last retention pass.
+    if (cursor.retention?.lastSnapshotId === currentSnapshotId) {
+      return {
+        dataset: part.dataset,
+        source,
+        cutoffDate,
+        rowsDeleted: 0,
+        batchCount: 0,
+        candidateFileCount: 0,
+      }
     }
 
     const dataFileMap = await findDataFileEntries(metadata, resolver)
@@ -155,21 +170,33 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
           batchCount++
         }
 
+        // Reload metadata to capture the post-delete snapshot ID so
+        // subsequent ticks skip this partition when no new data arrives.
+        let postSnapshotId = currentSnapshotId
         if (totalDeleted > 0) {
-          counter.add(totalDeleted, {
-            [Attr.DATASET]: part.dataset,
-            source,
-          })
-          await writeCursor(part.path, {
-            ...cursor,
-            rowCount: Math.max(0, cursor.rowCount - totalDeleted),
-            retention: {
-              lastCutoffDate: cutoffDate,
-              lastDeletedAt: now.toISOString(),
-              rowsDeleted: totalDeleted,
-            },
-          })
+          try {
+            const reloaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+            postSnapshotId = String(reloaded.metadata['current-snapshot-id'])
+          } catch {
+            // Fall back to pre-delete snapshot; next tick will re-scan
+            // but won't double-delete because the snapshot guard catches it.
+          }
         }
+
+        counter.add(totalDeleted, {
+          [Attr.DATASET]: part.dataset,
+          source,
+        })
+        await writeCursor(part.path, {
+          ...cursor,
+          rowCount: Math.max(0, cursor.rowCount - totalDeleted),
+          retention: {
+            lastCutoffDate: cutoffDate,
+            lastDeletedAt: now.toISOString(),
+            rowsDeleted: totalDeleted,
+            lastSnapshotId: postSnapshotId,
+          },
+        })
 
         return {
           dataset: part.dataset,
@@ -212,7 +239,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
   /**
    * Legacy directory eviction for epoch-layout partitions.
    *
-   * @param {import('./types.d.ts').CachePartitionMeta} part
+   * @param {CachePartitionMeta} part
    * @param {number} retentionDays
    * @param {Date} now
    * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} counter
@@ -263,7 +290,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
  *
  * @param {string} filePath
  * @param {number} cutoffMs
- * @param {import('icebird/src/types.js').Resolver} resolver
+ * @param {Resolver} resolver
  * @returns {Promise<number[]>}
  */
 async function scanFileForExpiredRows(filePath, cutoffMs, resolver) {

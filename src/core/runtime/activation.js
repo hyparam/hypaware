@@ -42,14 +42,18 @@ import { createQueryStorageService } from '../cache/storage.js'
  */
 export function createKernelRuntime(opts = {}) {
   const cacheRoot = opts.cacheRoot ?? opts.storage?.cacheRoot ?? defaultCacheRoot()
-  const storage = opts.storage ?? createQueryStorageService({ cacheRoot })
+  const query = opts.queryRegistry ?? createQueryRegistry()
+  const storage = opts.storage ?? createQueryStorageService({
+    cacheRoot,
+    getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
+  })
   return {
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
     commands: opts.commandRegistry ?? createCommandRegistry(),
     configRegistry: createConfigRegistry(),
     sources: opts.sourceRegistry ?? createSourceRegistry(),
     sinks: opts.sinkRegistry ?? createSinkRegistry(),
-    query: opts.queryRegistry ?? createQueryRegistry(),
+    query,
     storage,
     cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
