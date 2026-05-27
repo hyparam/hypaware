@@ -816,7 +816,7 @@ async function runQueryMaintain(argv, ctx) {
     return 2
   }
   const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
-  if (!compactOnly && !expireOnly) {
+  if (!compactOnly && !expireOnly && !dryRun) {
     const migrationResult = await migrateLegacyPartitions({
       cacheRoot: ctx.storage.cacheRoot,
       force,

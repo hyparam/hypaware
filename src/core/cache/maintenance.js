@@ -161,7 +161,9 @@ export async function maintainCache(opts) {
     reports.push(report)
   }
 
-  await cleanRetiredEpochs(opts.cacheRoot)
+  if (!opts.dryRun) {
+    await cleanRetiredEpochs(opts.cacheRoot)
+  }
 
   return {
     partitions: reports,
