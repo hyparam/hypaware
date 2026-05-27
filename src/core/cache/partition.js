@@ -302,14 +302,19 @@ export function validateIcebergPartitionFields(row, declaration) {
   /** @type {string[]} */
   const missing = []
   for (const field of declaration.iceberg.fields) {
-    if (field.required && !nonEmpty(row[field.column])) {
+    if (field.required && nonEmpty(row[field.column]) === undefined) {
       missing.push(field.column)
     }
   }
   return { valid: missing.length === 0, missing }
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
 function nonEmpty(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
+  if (value == null) return undefined
+  if (typeof value === 'string') return value.length > 0 ? value : undefined
+  return String(value)
 }

@@ -480,6 +480,43 @@ test('validateIcebergPartitionFields treats empty strings as missing', () => {
   assert.deepEqual(result.missing, ['conversation_id'])
 })
 
+test('validateIcebergPartitionFields accepts non-string required fields', () => {
+  const declaration = {
+    source: { columns: ['count'] },
+    iceberg: {
+      fields: [
+        { column: 'count', transform: 'identity', required: true },
+        { column: 'active', transform: 'identity', required: true },
+        { column: 'date', transform: 'identity', required: true },
+      ],
+    },
+  }
+  const result = validateIcebergPartitionFields(
+    { count: 0, active: false, date: '2026-05-26' },
+    declaration
+  )
+  assert.equal(result.valid, true)
+  assert.deepEqual(result.missing, [])
+})
+
+test('validateIcebergPartitionFields rejects null and undefined required fields', () => {
+  const declaration = {
+    source: { columns: ['a'] },
+    iceberg: {
+      fields: [
+        { column: 'a', transform: 'identity', required: true },
+        { column: 'b', transform: 'identity', required: true },
+      ],
+    },
+  }
+  const result = validateIcebergPartitionFields(
+    { a: null, b: undefined },
+    declaration
+  )
+  assert.equal(result.valid, false)
+  assert.deepEqual(result.missing, ['a', 'b'])
+})
+
 // --- readCursorSync preserves new fields ---
 
 test('readCursorSync preserves layout and retention fields', async () => {

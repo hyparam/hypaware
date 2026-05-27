@@ -1,6 +1,6 @@
 // @ts-check
 
-import { Attr, withSpan } from '../observability/index.js'
+import { Attr, getMeter, withSpan } from '../observability/index.js'
 import {
   dataSourceForTable,
   scanRowsFromTable,
@@ -64,6 +64,10 @@ export function resolveIcebergDir(tablePath) {
  */
 export function createQueryStorageService({ cacheRoot, getDeclaration }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
+  const meter = getMeter('cache')
+  const partitionDropCounter = meter.createCounter('hyp_partition_validation_drops', {
+    description: 'Rows dropped due to missing required Iceberg partition fields',
+  })
   const spool = createCacheSpool({
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
@@ -71,10 +75,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
       const declaration = getDeclaration?.(dataset)
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
+      let droppedCount = 0
       for (const row of rows) {
         if (declaration) {
-          const { valid } = validateIcebergPartitionFields(row, declaration)
-          if (!valid) continue
+          const { valid, missing } = validateIcebergPartitionFields(row, declaration)
+          if (!valid) {
+            droppedCount++
+            partitionDropCounter.add(1, {
+              [Attr.DATASET]: dataset,
+              missing_fields: missing.join(','),
+            })
+            continue
+          }
         }
         const segments = declaration
           ? resolveSourceSegments(row, declaration)
