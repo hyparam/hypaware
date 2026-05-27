@@ -9,6 +9,7 @@ import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './
 
 /**
  * @import { BlobStore, ColumnSpec, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkEncoder, TableFormatCreateContext, TableFormatProvider } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExportRetentionConfig } from './types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/format-iceberg'
@@ -68,7 +69,7 @@ function buildSink(ctx) {
   const config = ctx.sinkInstanceConfig ?? {}
   const prefix = resolvePrefix(config)
   const log = ctx.log
-  const maintenanceConfig = /** @type {Partial<import('./maintenance.js').ExportRetentionConfig> | undefined} */ (
+  const maintenanceConfig = /** @type {Partial<ExportRetentionConfig> | undefined} */ (
     config.maintenance
   )
 
@@ -176,7 +177,7 @@ function buildSink(ctx) {
  *   partitions: QueryPartition[],
  *   prefix: string,
  *   log: PluginLogger,
- *   maintenanceConfig?: Partial<import('./maintenance.js').ExportRetentionConfig>,
+ *   maintenanceConfig?: Partial<ExportRetentionConfig>,
  * }} input
  * @returns {Promise<{ partitionsExported: number, bytesWritten: number, status: 'committed' | 'skipped' }>}
  */
