@@ -15,7 +15,7 @@ import { Attr, getKernelInstruments, getMeter, withSpan } from '../observability
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
-import { readRowsFromTable, tableExists } from './iceberg/store.js'
+import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
  * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from './types.d.ts'
@@ -173,6 +173,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
         // Reload metadata to capture the post-delete snapshot ID so
         // subsequent ticks skip this partition when no new data arrives.
         let postSnapshotId = currentSnapshotId
+        let newRowCount = Math.max(0, cursor.rowCount - totalDeleted)
         if (totalDeleted > 0) {
           try {
             const reloaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
@@ -180,6 +181,17 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
           } catch {
             // Fall back to pre-delete snapshot; next tick will re-scan
             // but won't double-delete because the snapshot guard catches it.
+          }
+          // Count actual visible rows to avoid drift from re-scanning
+          // positions that were already deleted in prior retention passes.
+          try {
+            let count = 0
+            for await (const _ of scanRowsFromTable(tableDir)) {
+              count++
+            }
+            newRowCount = count
+          } catch {
+            // Fall back to decrement if scan fails
           }
         }
 
@@ -189,7 +201,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
         })
         await writeCursor(part.path, {
           ...cursor,
-          rowCount: Math.max(0, cursor.rowCount - totalDeleted),
+          rowCount: newRowCount,
           retention: {
             lastCutoffDate: cutoffDate,
             lastDeletedAt: now.toISOString(),

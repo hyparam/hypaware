@@ -57,9 +57,12 @@ export function partitionSpecForDeclaration(declaration, schema) {
   for (const pf of declaration.iceberg.fields) {
     const sf = fieldsByName.get(pf.column)
     if (!sf) {
-      throw new Error(
-        `cache-iceberg: partition field "${pf.column}" not found in schema`
-      )
+      if (pf.required) {
+        throw new Error(
+          `cache-iceberg: required partition field "${pf.column}" not found in schema`
+        )
+      }
+      continue
     }
     fields.push({
       'source-id': sf.id,
@@ -189,6 +192,47 @@ export function rowsToIcebergRecords(columns, rows) {
     }
     return out
   })
+}
+
+/**
+ * @param {IcebergType} type
+ * @returns {ColumnSpec['type']}
+ */
+export function basicTypeForIcebergType(type) {
+  switch (type) {
+    case 'string':
+      return 'STRING'
+    case 'int':
+      return 'INT32'
+    case 'long':
+      return 'INT64'
+    case 'double':
+      return 'DOUBLE'
+    case 'boolean':
+      return 'BOOLEAN'
+    case 'timestamptz':
+    case 'timestamp':
+      return 'TIMESTAMP'
+    case 'variant':
+      return 'JSON'
+    default:
+      return 'STRING'
+  }
+}
+
+/**
+ * Build a `ColumnSpec[]` from an existing Iceberg schema, preserving
+ * field types and nullability instead of inferring from row data.
+ *
+ * @param {Schema} schema
+ * @returns {ColumnSpec[]}
+ */
+export function columnsFromIcebergSchema(schema) {
+  return schema.fields.map(f => ({
+    name: f.name,
+    type: basicTypeForIcebergType(/** @type {IcebergType} */ (f.type)),
+    nullable: !f.required,
+  }))
 }
 
 /**

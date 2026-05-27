@@ -72,7 +72,7 @@ export function tableExists(tablePath) {
 }
 
 /**
- * @typedef {{ declaration?: CachePartitioningDeclaration }} AppendOptions
+ * @typedef {{ declaration?: CachePartitioningDeclaration, partitionSpec?: PartitionSpec }} AppendOptions
  */
 
 /**
@@ -105,7 +105,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
     /** @type {PartitionSpec | undefined} */
     const partitionSpec = declaration
       ? partitionSpecForDeclaration(declaration, schema)
-      : undefined
+      : options?.partitionSpec
     await icebergCreateTable({
       catalog,
       tableUrl: url,
@@ -217,7 +217,7 @@ async function resolveAsyncRow(row, columns) {
  * @param {TableMetadata} metadata
  * @returns {Schema | undefined}
  */
-function currentSchema(metadata) {
+export function currentSchema(metadata) {
   const schemaId = metadata['current-schema-id']
   if (metadata.schemas?.length) {
     const match = metadata.schemas.find(s => s['schema-id'] === schemaId)
@@ -231,7 +231,7 @@ function currentSchema(metadata) {
  * @param {TableMetadata} metadata
  * @returns {PartitionSpec | undefined}
  */
-function currentPartitionSpec(metadata) {
+export function currentPartitionSpec(metadata) {
   const specId = metadata['default-spec-id']
   if (metadata['partition-specs']?.length) {
     const match = metadata['partition-specs'].find(s => s['spec-id'] === specId)
