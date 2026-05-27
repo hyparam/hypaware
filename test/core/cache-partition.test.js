@@ -9,6 +9,7 @@ import os from 'node:os'
 
 import {
   appendRowsToPartition,
+  appendRowsToSourceTable,
   discoverCachePartitions,
   readCursorSync,
   resolveClientName,
@@ -555,4 +556,147 @@ test('resolveIcebergDir returns epoch path for legacy layout', async () => {
 
 test('resolveIcebergDir returns tablePath unchanged when no cursor', () => {
   assert.equal(resolveIcebergDir('/nonexistent/path'), '/nonexistent/path')
+})
+
+// --- appendRowsToSourceTable ---
+
+test('appendRowsToSourceTable creates source-table layout with table subdirectory', async () => {
+  const cacheRoot = await makeTmpDir('source-table-first')
+  try {
+    const result = await appendRowsToSourceTable(
+      cacheRoot, 'test_data', ['source=claude'],
+      TEST_COLUMNS, [{ id: 1, value: 'hello' }]
+    )
+    assert.equal(result.appended, true)
+    assert.ok(result.bytesWritten > 0)
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'test_data', 'source=claude')
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.layout, 'source-table')
+    assert.equal(cursor.tableDir, 'table')
+    assert.equal(cursor.rowCount, 1)
+
+    const tableDir = path.join(sourceDir, 'table')
+    assert.ok(fsSync.existsSync(tableDir))
+    const metadataDir = path.join(tableDir, 'metadata')
+    assert.ok(fsSync.existsSync(metadataDir))
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('appendRowsToSourceTable accumulates rowCount across multiple writes', async () => {
+  const cacheRoot = await makeTmpDir('source-table-multi')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'data', ['source=claude'], TEST_COLUMNS, [{ id: 1, value: 'a' }])
+    await appendRowsToSourceTable(cacheRoot, 'data', ['source=claude'], TEST_COLUMNS, [{ id: 2, value: 'b' }, { id: 3, value: 'c' }])
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'data', 'source=claude')
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.layout, 'source-table')
+    assert.equal(cursor.rowCount, 3)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('appendRowsToSourceTable with multiple dates creates one source table', async () => {
+  const cacheRoot = await makeTmpDir('source-table-dates')
+  try {
+    await appendRowsToSourceTable(
+      cacheRoot, 'msgs', ['source=claude'],
+      TEST_COLUMNS,
+      [{ id: 1, value: '2026-05-25' }, { id: 2, value: '2026-05-26' }]
+    )
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'msgs', 'source=claude')
+    assert.ok(fsSync.existsSync(sourceDir))
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.layout, 'source-table')
+    assert.equal(cursor.rowCount, 2)
+
+    const tableDir = path.join(sourceDir, 'table')
+    assert.ok(fsSync.existsSync(tableDir))
+    const metadataDirs = fsSync.readdirSync(sourceDir).filter(n => n !== 'cursor.json' && n !== '_hypaware_spool')
+    assert.deepEqual(metadataDirs, ['table'])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('appendRowsToSourceTable with two sources creates two source tables', async () => {
+  const cacheRoot = await makeTmpDir('source-table-two')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'msgs', ['source=claude'], TEST_COLUMNS, [{ id: 1, value: 'a' }])
+    await appendRowsToSourceTable(cacheRoot, 'msgs', ['source=codex'], TEST_COLUMNS, [{ id: 2, value: 'b' }])
+
+    const claudeDir = path.join(cacheRoot, 'datasets', 'msgs', 'source=claude')
+    const codexDir = path.join(cacheRoot, 'datasets', 'msgs', 'source=codex')
+    assert.ok(fsSync.existsSync(claudeDir))
+    assert.ok(fsSync.existsSync(codexDir))
+    assert.equal(readCursorSync(claudeDir).layout, 'source-table')
+    assert.equal(readCursorSync(codexDir).layout, 'source-table')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('appendRowsToSourceTable returns early for empty rows', async () => {
+  const cacheRoot = await makeTmpDir('source-table-empty')
+  try {
+    const result = await appendRowsToSourceTable(cacheRoot, 'test', ['source=x'], TEST_COLUMNS, [])
+    assert.equal(result.appended, false)
+    assert.equal(result.bytesWritten, 0)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- discovery with source-table layout ---
+
+test('discoverCachePartitions finds source-table partitions', async () => {
+  const cacheRoot = await makeTmpDir('discover-source-table')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], TEST_COLUMNS, [{ id: 1, value: 'a' }])
+    const result = await discoverCachePartitions(cacheRoot)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].dataset, 'ai_gateway_messages')
+    assert.deepEqual(result[0].partition, { source: 'claude' })
+    assert.equal(result[0].rowCount, 1)
+    assert.equal(result[0].legacy, false)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('discoverCachePartitions does not filter source-table partitions by date scope', async () => {
+  const cacheRoot = await makeTmpDir('discover-source-no-date')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=claude'], TEST_COLUMNS, [{ id: 1, value: 'a' }])
+    const result = await discoverCachePartitions(cacheRoot, { date: '2026-05-26' })
+    assert.equal(result.length, 1, 'source-table partition should not be filtered by date')
+    assert.deepEqual(result[0].partition, { source: 'claude' })
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('discoverCachePartitions finds both source-table and legacy partitions', async () => {
+  const cacheRoot = await makeTmpDir('discover-source-legacy')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'ai_gw', ['source=claude'], TEST_COLUMNS, [{ id: 1, value: 'a' }])
+    const legacyDir = path.join(cacheRoot, 'datasets', 'ai_gw', 'proxy_messages_v4')
+    await fs.mkdir(legacyDir, { recursive: true })
+    await appendRowsToTable(legacyDir, TEST_COLUMNS, [{ id: 2, value: 'b' }])
+
+    const result = await discoverCachePartitions(cacheRoot)
+    assert.equal(result.length, 2)
+    const sourceTable = result.find(r => r.partition.source === 'claude')
+    const legacy = result.find(r => r.legacy === true)
+    assert.ok(sourceTable, 'source-table partition should be found')
+    assert.ok(legacy, 'legacy partition should be found')
+    assert.equal(sourceTable.legacy, false)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
 })

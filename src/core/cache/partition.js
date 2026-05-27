@@ -62,6 +62,43 @@ export async function writeCursor(partitionDir, cursor) {
 }
 
 /**
+ * Append rows into the source-table layout for the resolved
+ * partition.  Creates the partition directory, Iceberg table
+ * subdirectory, and cursor on first write.
+ *
+ * The on-disk layout is:
+ *   `<cacheRoot>/datasets/<dataset>/source=<source>/table/`
+ * with a `cursor.json` at the `source=<source>/` level carrying
+ * `layout: 'source-table'`.
+ *
+ * @param {string} cacheRoot
+ * @param {string} dataset
+ * @param {string[]} sourceSegments
+ * @param {readonly ColumnSpec[]} columns
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
+ */
+export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows) {
+  if (rows.length === 0) {
+    return { tableUrl: '', appended: false, bytesWritten: 0 }
+  }
+  const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
+  const cursor = readCursorSync(partitionDir)
+  const tableDir = cursor.tableDir ?? 'table'
+  const icebergDir = path.join(partitionDir, tableDir)
+  const result = await appendRowsToTable(icebergDir, columns, rows)
+  await writeCursor(partitionDir, {
+    epoch: cursor.epoch,
+    rowCount: cursor.rowCount + rows.length,
+    compaction: cursor.compaction,
+    layout: 'source-table',
+    tableDir,
+    retention: cursor.retention,
+  })
+  return result
+}
+
+/**
  * Append rows into the current epoch's Iceberg table for the resolved
  * partition.  Creates the partition directory and cursor on first
  * write.
