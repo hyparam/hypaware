@@ -5,6 +5,29 @@ export interface PartitionCursor {
   epoch: number
   rowCount: number
   compaction: unknown | null
+  layout?: 'epoch' | 'source-table'
+  tableDir?: string
+  retention?: {
+    lastCutoffDate?: string
+    lastDeletedAt?: string
+    rowsDeleted?: number
+  }
+}
+
+export interface CachePartitioningDeclaration {
+  source: {
+    columns: string[]
+    fallback?: string
+  }
+  iceberg: {
+    fields: CachePartitionField[]
+  }
+}
+
+export interface CachePartitionField {
+  column: string
+  transform: 'identity' | 'day' | 'month' | 'year' | string
+  required?: boolean
 }
 
 export interface CachePartitionMeta {

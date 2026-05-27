@@ -8,7 +8,9 @@ import path from 'node:path'
 
 import { appendRowsToPartition } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import {
+  aiGatewayDatasetRegistration,
   createDataSource,
   DATASET_NAME,
   discoverParts,
@@ -28,6 +30,80 @@ const TEST_COLUMNS = [
   { name: 'id', type: 'INT32', nullable: false },
   { name: 'date', type: 'STRING', nullable: false },
 ]
+
+// --- cache partitioning registration ---
+
+test('ai-gateway registers cache partitioning for source columns and iceberg fields', () => {
+  const registry = createQueryRegistry()
+  const reg = aiGatewayDatasetRegistration()
+  registry.registerDataset(reg)
+  const dataset = registry.getDataset(DATASET_NAME)
+  assert.ok(dataset)
+  assert.ok(dataset.cachePartitioning)
+  assert.deepEqual(dataset.cachePartitioning.source.columns, ['client_name', 'conversation_source', 'provider'])
+  assert.equal(dataset.cachePartitioning.source.fallback, 'unknown')
+  assert.equal(dataset.cachePartitioning.iceberg.fields.length, 3)
+  assert.equal(dataset.cachePartitioning.iceberg.fields[0].column, 'conversation_id')
+  assert.equal(dataset.cachePartitioning.iceberg.fields[0].required, true)
+  assert.equal(dataset.cachePartitioning.iceberg.fields[1].column, 'cwd')
+  assert.equal(dataset.cachePartitioning.iceberg.fields[1].required, undefined)
+  assert.equal(dataset.cachePartitioning.iceberg.fields[2].column, 'date')
+  assert.equal(dataset.cachePartitioning.iceberg.fields[2].required, true)
+})
+
+test('registry rejects cachePartitioning with source column absent from schema', () => {
+  const registry = createQueryRegistry()
+  assert.throws(
+    () => registry.registerDataset({
+      name: 'bad_source',
+      plugin: 'test',
+      schema: { columns: [{ name: 'id', type: 'INT32', nullable: false }] },
+      cachePartitioning: {
+        source: { columns: ['nonexistent_col'] },
+        iceberg: { fields: [] },
+      },
+      discoverPartitions: () => [],
+      createDataSource: () => { throw new Error('unused') },
+    }),
+    { message: /source column 'nonexistent_col' not found in schema/ }
+  )
+})
+
+test('registry rejects cachePartitioning with required Iceberg field absent from schema', () => {
+  const registry = createQueryRegistry()
+  assert.throws(
+    () => registry.registerDataset({
+      name: 'bad_iceberg',
+      plugin: 'test',
+      schema: { columns: [{ name: 'id', type: 'INT32', nullable: false }] },
+      cachePartitioning: {
+        source: { columns: ['id'] },
+        iceberg: { fields: [{ column: 'missing_field', transform: 'identity', required: true }] },
+      },
+      discoverPartitions: () => [],
+      createDataSource: () => { throw new Error('unused') },
+    }),
+    { message: /required Iceberg field 'missing_field' not found in schema/ }
+  )
+})
+
+test('registry accepts cachePartitioning with optional Iceberg field absent from schema', () => {
+  const registry = createQueryRegistry()
+  registry.registerDataset({
+    name: 'optional_iceberg',
+    plugin: 'test',
+    schema: { columns: [{ name: 'id', type: 'INT32', nullable: false }] },
+    cachePartitioning: {
+      source: { columns: ['id'] },
+      iceberg: { fields: [{ column: 'optional_col', transform: 'identity' }] },
+    },
+    discoverPartitions: () => [],
+    createDataSource: () => { throw new Error('unused') },
+  })
+  assert.ok(registry.getDataset('optional_iceberg'))
+})
+
+// --- existing tests ---
 
 test('ai-gateway createDataSource honors scope when re-discovering fresh partitions', async () => {
   const cacheRoot = await makeTmpDir('scope')

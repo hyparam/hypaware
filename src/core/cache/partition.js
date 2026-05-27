@@ -9,7 +9,7 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitionMeta, PartitionCursor } from './types.d.ts'
+ * @import { CachePartitioningDeclaration, CachePartitionMeta, PartitionCursor } from './types.d.ts'
  */
 
 const CURSOR_FILE = 'cursor.json'
@@ -27,11 +27,22 @@ export function readCursorSync(partitionDir) {
   try {
     const raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
     const parsed = JSON.parse(raw)
-    return {
+    /** @type {PartitionCursor} */
+    const cursor = {
       epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }
+    if (parsed.layout === 'source-table' || parsed.layout === 'epoch') {
+      cursor.layout = parsed.layout
+    }
+    if (typeof parsed.tableDir === 'string') {
+      cursor.tableDir = parsed.tableDir
+    }
+    if (parsed.retention && typeof parsed.retention === 'object') {
+      cursor.retention = parsed.retention
+    }
+    return cursor
   } catch {
     return { epoch: 0, rowCount: 0, compaction: null }
   }
@@ -199,6 +210,61 @@ export function resolvePartitionSegments(row) {
   segments.push(`client=${client}`)
   if (date) segments.push(`date=${date}`)
   return segments
+}
+
+/**
+ * Sanitize a value for use as a filesystem path segment.
+ * Replaces path separators, control characters, and reserved names with
+ * safe alternatives.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function sanitizePathSegment(value) {
+  let safe = value.replace(/[\x00-\x1f/\\:*?"<>|]/g, '_')
+  if (safe === '.' || safe === '..') safe = `_${safe}_`
+  if (safe.length === 0) safe = '_empty_'
+  return safe
+}
+
+/**
+ * Resolve path segments for the source table using the dataset's
+ * declared source columns. Falls back through the column list in
+ * order, then to the declaration's fallback value.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {CachePartitioningDeclaration} declaration
+ * @returns {string[]}
+ */
+export function resolveSourceSegments(row, declaration) {
+  let source = declaration.source.fallback ?? 'unknown'
+  for (const col of declaration.source.columns) {
+    const val = nonEmpty(row[col])
+    if (val) {
+      source = val
+      break
+    }
+  }
+  return [`source=${sanitizePathSegment(source)}`]
+}
+
+/**
+ * Validate that required Iceberg partition fields are present and
+ * non-empty in a row.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {CachePartitioningDeclaration} declaration
+ * @returns {{ valid: boolean, missing: string[] }}
+ */
+export function validateIcebergPartitionFields(row, declaration) {
+  /** @type {string[]} */
+  const missing = []
+  for (const field of declaration.iceberg.fields) {
+    if (field.required && !nonEmpty(row[field.column])) {
+      missing.push(field.column)
+    }
+  }
+  return { valid: missing.length === 0, missing }
 }
 
 /** @param {unknown} value */

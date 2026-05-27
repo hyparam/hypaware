@@ -25,16 +25,20 @@ import path from 'node:path'
  */
 
 /**
- * Resolve a tablePath to the Iceberg table directory.  When the path
- * is a partition directory (has cursor.json), the actual Iceberg table
- * lives at `epoch=<N>/`.  For flat paths without a cursor the path is
- * returned unchanged.
+ * Resolve a tablePath to the Iceberg table directory.
+ *
+ * - source-table layout (`cursor.layout === 'source-table'`): `<tablePath>/table`
+ * - legacy epoch layout (`cursor.layout` absent or `'epoch'`): `<tablePath>/epoch=<N>`
+ * - direct legacy Iceberg table (no cursor, table exists at tablePath): unchanged
  *
  * @param {string} tablePath
  * @returns {string}
  */
-function resolveIcebergDir(tablePath) {
+export function resolveIcebergDir(tablePath) {
   const cursor = readCursorSync(tablePath)
+  if (cursor.layout === 'source-table') {
+    return path.join(tablePath, cursor.tableDir ?? 'table')
+  }
   if (cursor.rowCount > 0 || cursor.epoch > 0) {
     return path.join(tablePath, `epoch=${cursor.epoch}`)
   }

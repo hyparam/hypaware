@@ -196,6 +196,19 @@ export function aiGatewayDatasetRegistration() {
     plugin: '@hypaware/ai-gateway',
     schema: AI_GATEWAY_SCHEMA,
     primaryTimestampColumn: 'message_created_at',
+    cachePartitioning: {
+      source: {
+        columns: ['client_name', 'conversation_source', 'provider'],
+        fallback: 'unknown',
+      },
+      iceberg: {
+        fields: [
+          { column: 'conversation_id', transform: 'identity', required: true },
+          { column: 'cwd', transform: 'identity' },
+          { column: 'date', transform: 'identity', required: true },
+        ],
+      },
+    },
     discoverPartitions: discoverParts,
     refreshPartition,
     createDataSource,

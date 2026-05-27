@@ -15,6 +15,7 @@
  */
 
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
+import type { CachePartitioningDeclaration } from './src/core/cache/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
@@ -858,6 +859,7 @@ export interface DatasetRegistration {
   sourceSignal?: string
   primaryTimestampColumn?: string
   fallbackTimestampColumns?: string[]
+  cachePartitioning?: CachePartitioningDeclaration
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
   createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource

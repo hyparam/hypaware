@@ -14,9 +14,13 @@ import {
   resolveClientName,
   resolvePartitionDate,
   resolvePartitionSegments,
+  resolveSourceSegments,
+  sanitizePathSegment,
+  validateIcebergPartitionFields,
   writeCursor,
 } from '../../src/core/cache/partition.js'
 import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
+import { resolveIcebergDir } from '../../src/core/cache/storage.js'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -355,4 +359,200 @@ test('discoverCachePartitions skips .retired directories', async () => {
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
+})
+
+// --- sanitizePathSegment ---
+
+test('sanitizePathSegment passes through normal values', () => {
+  assert.equal(sanitizePathSegment('claude'), 'claude')
+  assert.equal(sanitizePathSegment('my-app'), 'my-app')
+})
+
+test('sanitizePathSegment replaces path separators and special chars', () => {
+  assert.equal(sanitizePathSegment('a/b\\c'), 'a_b_c')
+  assert.equal(sanitizePathSegment('a:b*c'), 'a_b_c')
+  assert.equal(sanitizePathSegment('a<b>c'), 'a_b_c')
+})
+
+test('sanitizePathSegment escapes dot and dotdot', () => {
+  assert.equal(sanitizePathSegment('.'), '_._')
+  assert.equal(sanitizePathSegment('..'), '_.._')
+})
+
+test('sanitizePathSegment handles empty string', () => {
+  assert.equal(sanitizePathSegment(''), '_empty_')
+})
+
+test('sanitizePathSegment replaces control characters', () => {
+  assert.equal(sanitizePathSegment('a\x00b\x1fc'), 'a_b_c')
+})
+
+// --- resolveSourceSegments ---
+
+/** @type {import('../../src/core/cache/types.d.ts').CachePartitioningDeclaration} */
+const AI_GATEWAY_PARTITIONING = {
+  source: {
+    columns: ['client_name', 'conversation_source', 'provider'],
+    fallback: 'unknown',
+  },
+  iceberg: {
+    fields: [
+      { column: 'conversation_id', transform: 'identity', required: true },
+      { column: 'cwd', transform: 'identity' },
+      { column: 'date', transform: 'identity', required: true },
+    ],
+  },
+}
+
+test('resolveSourceSegments uses first non-empty source column', () => {
+  assert.deepEqual(
+    resolveSourceSegments({ client_name: 'claude', conversation_source: 'api', provider: 'anthropic' }, AI_GATEWAY_PARTITIONING),
+    ['source=claude']
+  )
+})
+
+test('resolveSourceSegments falls through source columns', () => {
+  assert.deepEqual(
+    resolveSourceSegments({ conversation_source: 'cli', provider: 'anthropic' }, AI_GATEWAY_PARTITIONING),
+    ['source=cli']
+  )
+  assert.deepEqual(
+    resolveSourceSegments({ provider: 'openai' }, AI_GATEWAY_PARTITIONING),
+    ['source=openai']
+  )
+})
+
+test('resolveSourceSegments uses fallback when no columns match', () => {
+  assert.deepEqual(
+    resolveSourceSegments({}, AI_GATEWAY_PARTITIONING),
+    ['source=unknown']
+  )
+})
+
+test('resolveSourceSegments skips empty string values', () => {
+  assert.deepEqual(
+    resolveSourceSegments({ client_name: '', provider: 'anthropic' }, AI_GATEWAY_PARTITIONING),
+    ['source=anthropic']
+  )
+})
+
+test('resolveSourceSegments sanitizes path-unsafe source values', () => {
+  const result = resolveSourceSegments({ client_name: 'a/b' }, AI_GATEWAY_PARTITIONING)
+  assert.deepEqual(result, ['source=a_b'])
+})
+
+// --- validateIcebergPartitionFields ---
+
+test('validateIcebergPartitionFields passes when required fields present', () => {
+  const result = validateIcebergPartitionFields(
+    { conversation_id: 'conv-1', cwd: '/tmp', date: '2026-05-26' },
+    AI_GATEWAY_PARTITIONING
+  )
+  assert.equal(result.valid, true)
+  assert.deepEqual(result.missing, [])
+})
+
+test('validateIcebergPartitionFields fails when required fields missing', () => {
+  const result = validateIcebergPartitionFields(
+    { cwd: '/tmp' },
+    AI_GATEWAY_PARTITIONING
+  )
+  assert.equal(result.valid, false)
+  assert.deepEqual(result.missing, ['conversation_id', 'date'])
+})
+
+test('validateIcebergPartitionFields ignores optional fields', () => {
+  const result = validateIcebergPartitionFields(
+    { conversation_id: 'conv-1', date: '2026-05-26' },
+    AI_GATEWAY_PARTITIONING
+  )
+  assert.equal(result.valid, true)
+  assert.deepEqual(result.missing, [])
+})
+
+test('validateIcebergPartitionFields treats empty strings as missing', () => {
+  const result = validateIcebergPartitionFields(
+    { conversation_id: '', cwd: '/tmp', date: '2026-05-26' },
+    AI_GATEWAY_PARTITIONING
+  )
+  assert.equal(result.valid, false)
+  assert.deepEqual(result.missing, ['conversation_id'])
+})
+
+// --- readCursorSync preserves new fields ---
+
+test('readCursorSync preserves layout and retention fields', async () => {
+  const dir = await makeTmpDir('cursor-extended')
+  try {
+    await writeCursor(dir, {
+      epoch: 0,
+      rowCount: 42,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+      retention: { lastCutoffDate: '2026-05-20', rowsDeleted: 10 },
+    })
+    const cursor = readCursorSync(dir)
+    assert.equal(cursor.layout, 'source-table')
+    assert.equal(cursor.tableDir, 'table')
+    assert.deepEqual(cursor.retention, { lastCutoffDate: '2026-05-20', rowsDeleted: 10 })
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('readCursorSync returns default cursor without new fields when missing', () => {
+  const cursor = readCursorSync('/nonexistent/path')
+  assert.equal(cursor.epoch, 0)
+  assert.equal(cursor.rowCount, 0)
+  assert.equal(cursor.layout, undefined)
+  assert.equal(cursor.tableDir, undefined)
+  assert.equal(cursor.retention, undefined)
+})
+
+// --- resolveIcebergDir ---
+
+test('resolveIcebergDir returns tablePath/table for source-table layout', async () => {
+  const dir = await makeTmpDir('resolve-source-table')
+  try {
+    await writeCursor(dir, {
+      epoch: 0,
+      rowCount: 5,
+      compaction: null,
+      layout: 'source-table',
+    })
+    assert.equal(resolveIcebergDir(dir), path.join(dir, 'table'))
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('resolveIcebergDir uses custom tableDir for source-table layout', async () => {
+  const dir = await makeTmpDir('resolve-custom-tabledir')
+  try {
+    await writeCursor(dir, {
+      epoch: 0,
+      rowCount: 5,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'my-table',
+    })
+    assert.equal(resolveIcebergDir(dir), path.join(dir, 'my-table'))
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('resolveIcebergDir returns epoch path for legacy layout', async () => {
+  const dir = await makeTmpDir('resolve-epoch')
+  try {
+    await writeCursor(dir, { epoch: 2, rowCount: 10, compaction: null })
+    assert.equal(resolveIcebergDir(dir), path.join(dir, 'epoch=2'))
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('resolveIcebergDir returns tablePath unchanged when no cursor', () => {
+  assert.equal(resolveIcebergDir('/nonexistent/path'), '/nonexistent/path')
 })
