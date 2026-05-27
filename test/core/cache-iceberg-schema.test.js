@@ -8,6 +8,8 @@ import path from 'node:path'
 import os from 'node:os'
 
 import {
+  basicTypeForIcebergType,
+  columnsFromIcebergSchema,
   icebergSchemaForColumns,
   mergeFieldIdsFromTable,
   partitionSpecForDeclaration,
@@ -82,7 +84,7 @@ test('partitionSpecForDeclaration builds spec for ai_gateway_messages', () => {
   assert.equal(spec.fields[2].transform, 'identity')
 })
 
-test('partitionSpecForDeclaration throws when column not in schema', () => {
+test('partitionSpecForDeclaration skips optional column not in schema', () => {
   const schema = icebergSchemaForColumns([
     { name: 'id', type: 'INT32', nullable: false },
   ])
@@ -93,9 +95,24 @@ test('partitionSpecForDeclaration throws when column not in schema', () => {
       fields: [{ column: 'missing_col', transform: 'identity' }],
     },
   }
+  const spec = partitionSpecForDeclaration(decl, schema)
+  assert.equal(spec.fields.length, 0)
+})
+
+test('partitionSpecForDeclaration throws when required column not in schema', () => {
+  const schema = icebergSchemaForColumns([
+    { name: 'id', type: 'INT32', nullable: false },
+  ])
+  /** @type {CachePartitioningDeclaration} */
+  const decl = {
+    source: { columns: ['id'] },
+    iceberg: {
+      fields: [{ column: 'missing_col', transform: 'identity', required: true }],
+    },
+  }
   assert.throws(
     () => partitionSpecForDeclaration(decl, schema),
-    /partition field "missing_col" not found in schema/
+    /required partition field "missing_col" not found in schema/
   )
 })
 
@@ -386,4 +403,42 @@ test('appendRowsToTable validates schema on existing table with declaration', as
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
+})
+
+// --- basicTypeForIcebergType ---
+
+test('basicTypeForIcebergType round-trips known types', () => {
+  const pairs = [
+    ['string', 'STRING'],
+    ['int', 'INT32'],
+    ['long', 'INT64'],
+    ['double', 'DOUBLE'],
+    ['boolean', 'BOOLEAN'],
+    ['timestamptz', 'TIMESTAMP'],
+    ['variant', 'JSON'],
+  ]
+  for (const [iceberg, basic] of pairs) {
+    assert.equal(
+      basicTypeForIcebergType(/** @type {any} */ (iceberg)),
+      basic,
+      `${iceberg} → ${basic}`
+    )
+  }
+})
+
+test('basicTypeForIcebergType defaults unknown types to STRING', () => {
+  assert.equal(basicTypeForIcebergType(/** @type {any} */ ('decimal')), 'STRING')
+})
+
+// --- columnsFromIcebergSchema ---
+
+test('columnsFromIcebergSchema preserves types and nullability', () => {
+  const schema = icebergSchemaForColumns(AI_GATEWAY_COLUMNS)
+  const columns = columnsFromIcebergSchema(schema)
+  assert.equal(columns.length, AI_GATEWAY_COLUMNS.length)
+  assert.equal(columns[0].name, 'conversation_id')
+  assert.equal(columns[0].type, 'STRING')
+  assert.equal(columns[0].nullable, false)
+  assert.equal(columns[1].name, 'client_name')
+  assert.equal(columns[1].nullable, true)
 })

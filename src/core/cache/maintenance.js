@@ -15,7 +15,8 @@ import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
-import { appendRowsToTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
+import { columnsFromIcebergSchema } from './iceberg/schema.js'
+import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
  * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -386,16 +387,33 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
   const oldTableDir = path.join(partitionDir, oldTableDirName)
   if (!tableExists(oldTableDir)) return null
 
+  /** @type {import('icebird/src/types.js').PartitionSpec | undefined} */
+  let existingSpec
+  /** @type {ColumnSpec[] | null} */
+  let schemaColumns = null
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const url = tableUrlForDir(oldTableDir)
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+    const schema = currentSchema(metadata)
+    if (schema) schemaColumns = columnsFromIcebergSchema(schema)
+    existingSpec = currentPartitionSpec(metadata)
+  } catch {
+    // Fall back to inference if metadata is unreadable
+  }
+
   const seq = Date.now()
   const newTableDirName = `table-${seq}`
   const newTableDir = path.join(partitionDir, newTableDirName)
 
   const seen = new Set()
   /** @type {ColumnSpec[] | null} */
-  let columns = null
+  let columns = schemaColumns
   /** @type {Record<string, unknown>[]} */
   let batch = []
   let totalRows = 0
+  /** @type {import('./iceberg/store.js').AppendOptions | undefined} */
+  const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
   for await (const row of scanRowsFromTable(oldTableDir)) {
     if (!columns) {
@@ -411,20 +429,20 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
     batch.push(row)
 
     if (batch.length >= COMPACT_BATCH_SIZE) {
-      await appendRowsToTable(newTableDir, columns, batch)
+      await appendRowsToTable(newTableDir, columns, batch, appendOpts)
       totalRows += batch.length
       batch = []
     }
   }
 
   if (batch.length > 0 && columns) {
-    await appendRowsToTable(newTableDir, columns, batch)
+    await appendRowsToTable(newTableDir, columns, batch, appendOpts)
     totalRows += batch.length
   }
 
   if (!columns) return null
   if (totalRows === 0) {
-    await appendRowsToTable(newTableDir, columns, [])
+    await appendRowsToTable(newTableDir, columns, [], appendOpts)
   }
 
   await writeCursor(partitionDir, {
@@ -460,15 +478,32 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   const oldEpochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
   if (!tableExists(oldEpochDir)) return null
 
+  /** @type {import('icebird/src/types.js').PartitionSpec | undefined} */
+  let existingSpec
+  /** @type {ColumnSpec[] | null} */
+  let schemaColumns = null
+  try {
+    const { resolver, lister } = await createLocalIcebergIO()
+    const url = tableUrlForDir(oldEpochDir)
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+    const schema = currentSchema(metadata)
+    if (schema) schemaColumns = columnsFromIcebergSchema(schema)
+    existingSpec = currentPartitionSpec(metadata)
+  } catch {
+    // Fall back to inference if metadata is unreadable
+  }
+
   const newEpoch = cursor.epoch + 1
   const newEpochDir = path.join(partitionDir, `epoch=${newEpoch}`)
 
   const seen = new Set()
   /** @type {ColumnSpec[] | null} */
-  let columns = null
+  let columns = schemaColumns
   /** @type {Record<string, unknown>[]} */
   let batch = []
   let totalRows = 0
+  /** @type {import('./iceberg/store.js').AppendOptions | undefined} */
+  const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
   for await (const row of scanRowsFromTable(oldEpochDir)) {
     if (!columns) {
@@ -484,22 +519,20 @@ async function compactPartition(partitionDir, cursor, _cfg) {
     batch.push(row)
 
     if (batch.length >= COMPACT_BATCH_SIZE) {
-      await appendRowsToTable(newEpochDir, columns, batch)
+      await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
       totalRows += batch.length
       batch = []
     }
   }
 
   if (batch.length > 0 && columns) {
-    await appendRowsToTable(newEpochDir, columns, batch)
+    await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
     totalRows += batch.length
   }
 
   if (!columns) return null
-  // Keep epoch progression deterministic even when dedup filters out all
-  // rows; this lets old epochs be marked and retired safely.
   if (totalRows === 0) {
-    await appendRowsToTable(newEpochDir, columns, [])
+    await appendRowsToTable(newEpochDir, columns, [], appendOpts)
   }
 
   await writeCursor(partitionDir, {

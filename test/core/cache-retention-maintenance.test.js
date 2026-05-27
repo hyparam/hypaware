@@ -9,7 +9,9 @@ import path from 'node:path'
 import { createRetentionEnforcer, DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
-import { readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
+import { currentPartitionSpec, currentSchema, readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
+import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
+import { loadLatestFileCatalogMetadata } from 'icebird'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -294,6 +296,66 @@ test('compaction preserves source-table layout', async () => {
   }
 })
 
+test('compaction preserves partition spec and column types from declaration', async () => {
+  const cacheRoot = await makeTmpDir('maint-compact-decl')
+  try {
+    /** @type {ColumnSpec[]} */
+    const declColumns = [
+      { name: 'conversation_id', type: 'STRING', nullable: false },
+      { name: 'date', type: 'STRING', nullable: false },
+      { name: 'message', type: 'STRING', nullable: true },
+    ]
+    /** @type {import('../../src/core/cache/types.d.ts').CachePartitioningDeclaration} */
+    const declaration = {
+      source: { columns: ['conversation_id'] },
+      iceberg: {
+        fields: [
+          { column: 'conversation_id', transform: 'identity', required: true },
+          { column: 'date', transform: 'identity', required: true },
+        ],
+      },
+    }
+
+    for (let i = 0; i < 40; i++) {
+      await appendRowsToSourceTable(cacheRoot, 'ds1', ['source=test'], declColumns, [
+        { conversation_id: `c${i}`, date: '2026-05-27', message: `msg-${i}` },
+      ], { declaration })
+    }
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const tableDirBefore = path.join(sourceDir, 'table')
+    const { resolver, lister } = await createLocalIcebergIO()
+    const urlBefore = tableUrlForDir(tableDirBefore)
+    const { metadata: metaBefore } = await loadLatestFileCatalogMetadata({ tableUrl: urlBefore, resolver, lister })
+    const specBefore = currentPartitionSpec(metaBefore)
+    const schemaBefore = currentSchema(metaBefore)
+    assert.ok(specBefore, 'pre-compaction table should have a partition spec')
+    assert.equal(specBefore.fields.length, 2)
+    assert.ok(schemaBefore?.fields.some(f => f.name === 'conversation_id' && f.required === true))
+
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+
+    const cursorAfter = readCursorSync(sourceDir)
+    const newTableDir = path.join(sourceDir, cursorAfter.tableDir ?? 'table')
+    const urlAfter = tableUrlForDir(newTableDir)
+    const { metadata: metaAfter } = await loadLatestFileCatalogMetadata({ tableUrl: urlAfter, resolver, lister })
+    const specAfter = currentPartitionSpec(metaAfter)
+    const schemaAfter = currentSchema(metaAfter)
+
+    assert.ok(specAfter, 'post-compaction table must preserve partition spec')
+    assert.equal(specAfter.fields.length, 2)
+    assert.equal(specAfter.fields[0].name, 'conversation_id')
+    assert.equal(specAfter.fields[1].name, 'date')
+
+    assert.ok(schemaAfter?.fields.some(f => f.name === 'conversation_id' && f.required === true),
+      'required columns must stay required after compaction')
+
+    assert.equal(cursorAfter.rowCount, 40)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('retention second tick reports zero newly deleted rows (no duplicate deletes)', async () => {
   const cacheRoot = await makeTmpDir('retention-two-tick')
   try {
@@ -323,6 +385,45 @@ test('retention second tick reports zero newly deleted rows (no duplicate delete
     const sourceDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')
     const cursor = readCursorSync(sourceDir)
     assert.equal(cursor.rowCount, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention cursor stays accurate after new data arrives between ticks', async () => {
+  const cacheRoot = await makeTmpDir('retention-interleave')
+  try {
+    const oldTimestamp = isoDateDaysAgo(45)
+    const recentTimestamp = isoDateDaysAgo(5)
+
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'old-1', timestamp: oldTimestamp },
+      { id: 2, value: 'old-2', timestamp: oldTimestamp },
+      { id: 3, value: 'recent', timestamp: recentTimestamp },
+    ])
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+    })
+
+    const result1 = await enforcer.tick()
+    assert.equal(result1.sourceTableResults[0].rowsDeleted, 2)
+
+    // New data arrives — creates a new snapshot, triggering a re-scan
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 4, value: 'new-recent', timestamp: recentTimestamp },
+    ])
+
+    const result2 = await enforcer.tick()
+    // Old expired rows are still in data files but position-deleted;
+    // cursor rowCount must reflect actual visible rows, not drift.
+    const sourceDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.rowCount, 2, 'cursor should reflect 2 visible rows (1 original recent + 1 new)')
+
+    const rows = await readRowsFromTable(path.join(sourceDir, 'table'))
+    assert.equal(rows.length, 2, 'table should have 2 visible rows')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

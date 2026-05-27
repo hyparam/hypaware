@@ -15,6 +15,7 @@ import {
   resolveClientName,
   resolveSourceSegments,
   sanitizePathSegment,
+  validateIcebergPartitionFields,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
@@ -71,6 +72,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
       for (const row of rows) {
+        if (declaration) {
+          const { valid } = validateIcebergPartitionFields(row, declaration)
+          if (!valid) continue
+        }
         const segments = declaration
           ? resolveSourceSegments(row, declaration)
           : [`source=${sanitizePathSegment(resolveClientName(row))}`]
