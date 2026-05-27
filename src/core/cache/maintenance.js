@@ -31,7 +31,8 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTab
  *   PartitionCursor,
  * } from './types.d.ts'
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { TableMetadata } from 'icebird/src/types.js'
+ * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
+ * @import { AppendOptions } from './iceberg/store.js'
  * @import { Dirent } from 'node:fs'
  */
 
@@ -387,7 +388,7 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
   const oldTableDir = path.join(partitionDir, oldTableDirName)
   if (!tableExists(oldTableDir)) return null
 
-  /** @type {import('icebird/src/types.js').PartitionSpec | undefined} */
+  /** @type {PartitionSpec | undefined} */
   let existingSpec
   /** @type {ColumnSpec[] | null} */
   let schemaColumns = null
@@ -412,7 +413,7 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
   /** @type {Record<string, unknown>[]} */
   let batch = []
   let totalRows = 0
-  /** @type {import('./iceberg/store.js').AppendOptions | undefined} */
+  /** @type {AppendOptions | undefined} */
   const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
   for await (const row of scanRowsFromTable(oldTableDir)) {
@@ -478,7 +479,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   const oldEpochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
   if (!tableExists(oldEpochDir)) return null
 
-  /** @type {import('icebird/src/types.js').PartitionSpec | undefined} */
+  /** @type {PartitionSpec | undefined} */
   let existingSpec
   /** @type {ColumnSpec[] | null} */
   let schemaColumns = null
@@ -502,7 +503,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   /** @type {Record<string, unknown>[]} */
   let batch = []
   let totalRows = 0
-  /** @type {import('./iceberg/store.js').AppendOptions | undefined} */
+  /** @type {AppendOptions | undefined} */
   const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
   for await (const row of scanRowsFromTable(oldEpochDir)) {
