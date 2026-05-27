@@ -15,7 +15,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec, QueryScope } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /** @param {string} prefix */
@@ -48,7 +48,8 @@ test('ai-gateway createDataSource honors scope when re-discovering fresh partiti
     )
 
     const storage = createQueryStorageService({ cacheRoot })
-    const scope = { date: '2026-05-26' }
+    /** @type {QueryScope} */
+    const scope = { date: '2026-05-26', limit: 1000 }
     const partitions = await discoverParts({ cacheDir: cacheRoot, scope, config: { version: 2 } })
     const source = await createDataSource(partitions, { scope, storage })
 
@@ -56,9 +57,7 @@ test('ai-gateway createDataSource honors scope when re-discovering fresh partiti
     for await (const row of source.scan({}).rows()) {
       if (row.resolved) {
         seen.push(row.resolved)
-        continue
       }
-      seen.push(await resolveRow(row))
     }
 
     assert.equal(seen.length, 1)
@@ -68,17 +67,3 @@ test('ai-gateway createDataSource honors scope when re-discovering fresh partiti
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
-
-/**
- * @param {{ columns: string[], cells: unknown[] }} row
- * @returns {Promise<Record<string, unknown>>}
- */
-async function resolveRow(row) {
-  /** @type {Record<string, unknown>} */
-  const out = {}
-  for (let i = 0; i < row.columns.length; i++) {
-    const cell = row.cells[i]
-    out[row.columns[i]] = typeof cell === 'function' ? await cell() : await Promise.resolve(cell)
-  }
-  return out
-}
