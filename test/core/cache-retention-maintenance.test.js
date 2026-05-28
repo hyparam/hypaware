@@ -8,13 +8,14 @@ import path from 'node:path'
 
 import { createRetentionEnforcer, DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../src/core/cache/maintenance.js'
-import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
-import { currentPartitionSpec, currentSchema, readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
+import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.d.ts'
  */
 
 /** @param {string} prefix */
@@ -296,6 +297,37 @@ test('compaction preserves source-table layout', async () => {
   }
 })
 
+test('compaction retires empty source table and advances cursor', async () => {
+  const cacheRoot = await makeTmpDir('maint-empty-source')
+  try {
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const tableDir = path.join(sourceDir, 'table')
+    await appendRowsToTable(tableDir, COLUMNS, [])
+    await writeCursor(sourceDir, {
+      epoch: 0,
+      rowCount: 0,
+      compaction: null,
+      layout: 'source-table',
+      tableDir: 'table',
+    })
+
+    const report = await maintainCache({
+      cacheRoot,
+      force: true,
+      compactOnly: true,
+    })
+
+    assert.equal(report.totalCompacted, 1)
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.layout, 'source-table')
+    assert.equal(cursor.rowCount, 0)
+    assert.notEqual(cursor.tableDir, 'table')
+    await fs.stat(path.join(tableDir, '.retired'))
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('compaction preserves partition spec and column types from declaration', async () => {
   const cacheRoot = await makeTmpDir('maint-compact-decl')
   try {
@@ -305,7 +337,7 @@ test('compaction preserves partition spec and column types from declaration', as
       { name: 'date', type: 'STRING', nullable: false },
       { name: 'message', type: 'STRING', nullable: true },
     ]
-    /** @type {import('../../src/core/cache/types.d.ts').CachePartitioningDeclaration} */
+    /** @type {CachePartitioningDeclaration} */
     const declaration = {
       source: { columns: ['conversation_id'] },
       iceberg: {
@@ -390,6 +422,91 @@ test('retention second tick reports zero newly deleted rows (no duplicate delete
   }
 })
 
+test('retention re-scans unchanged source table when cutoff advances', async () => {
+  const cacheRoot = await makeTmpDir('retention-cutoff-advance')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'ages-later', timestamp: '2026-04-28T12:00:00.000Z' },
+      { id: 2, value: 'still-new', timestamp: '2026-05-20T00:00:00.000Z' },
+    ])
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+    })
+
+    const result1 = await enforcer.tick({ now: new Date('2026-05-28T00:00:00.000Z') })
+    assert.equal(result1.sourceTableResults[0].rowsDeleted, 0)
+
+    const result2 = await enforcer.tick({ now: new Date('2026-05-29T00:00:00.000Z') })
+    assert.equal(result2.sourceTableResults[0].rowsDeleted, 1)
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.rowCount, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention uses dataset primaryTimestampColumn for source tables', async () => {
+  const cacheRoot = await makeTmpDir('retention-primary-ts')
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'event_time', type: 'STRING', nullable: true },
+      { name: 'message', type: 'STRING', nullable: true },
+    ]
+    await appendRowsToSourceTable(cacheRoot, 'event_ds', ['source=test'], columns, [
+      { id: 1, event_time: '2026-04-01T00:00:00.000Z', message: 'old' },
+      { id: 2, event_time: '2026-05-27T00:00:00.000Z', message: 'new' },
+    ])
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+      getDataset: (dataset) => dataset === 'event_ds'
+        ? { primaryTimestampColumn: 'event_time', fallbackTimestampColumns: [] }
+        : undefined,
+    })
+
+    const result = await enforcer.tick({ now: new Date('2026-05-28T00:00:00.000Z') })
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'event_ds', 'source=test')
+    const rows = await readRowsFromTable(path.join(sourceDir, 'table'))
+    assert.deepEqual(rows.map(row => row.id), [2])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention evicts source table by mtime when no timestamp column is resolvable', async () => {
+  const cacheRoot = await makeTmpDir('retention-mtime-fallback')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'message', type: 'STRING', nullable: true },
+    ], [
+      { id: 1, message: 'no timestamp' },
+    ])
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+    })
+
+    const result = await enforcer.tick({ now: new Date('2100-01-01T00:00:00.000Z') })
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    await assert.rejects(fs.stat(sourceDir), /ENOENT/)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('retention cursor stays accurate after new data arrives between ticks', async () => {
   const cacheRoot = await makeTmpDir('retention-interleave')
   try {
@@ -416,6 +533,8 @@ test('retention cursor stays accurate after new data arrives between ticks', asy
     ])
 
     const result2 = await enforcer.tick()
+    assert.equal(result2.sourceTableResults[0].rowsDeleted, 0,
+      'new recent data should not trigger duplicate deletes for prior expired rows')
     // Old expired rows are still in data files but position-deleted;
     // cursor rowCount must reflect actual visible rows, not drift.
     const sourceDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')

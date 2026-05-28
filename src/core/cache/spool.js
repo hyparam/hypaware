@@ -25,7 +25,7 @@ const LAST_FLUSH_FILE = 'last-flush.json'
 /**
  * @param {{
  *   cacheRoot: string,
- *   appendChunk(tablePath: string, columns: readonly ColumnSpec[], rows: Record<string, unknown>[]): Promise<{ bytesWritten: number }>,
+ *   appendChunk(tablePath: string, columns: readonly ColumnSpec[], rows: Record<string, unknown>[]): Promise<{ bytesWritten: number, droppedCount?: number }>,
  *   batchRowLimit?: number,
  *   batchByteLimit?: number,
  * }} args
@@ -107,13 +107,14 @@ export function createCacheSpool(args) {
 
         const files = listFlushFiles(tablePath)
         if (files.length === 0) {
-          return { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: pendingBytesSync(tablePath), malformedCount: 0, reason }
+          return { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: pendingBytesSync(tablePath), malformedCount: 0, droppedCount: 0, reason }
         }
 
         let rowCount = 0
         let chunkCount = 0
         let bytesWritten = 0
         let malformedCount = 0
+        let droppedCount = 0
         for (const filePath of files) {
           const progress = await readProgress(filePath)
           const startOffset = progress?.byteOffset ?? 0
@@ -125,6 +126,7 @@ export function createCacheSpool(args) {
             rowCount += batch.chunk.rows.length
             chunkCount += 1
             bytesWritten += written.bytesWritten
+            droppedCount += written.droppedCount ?? 0
             fileMalformed += batch.malformedCount
             await writeProgress(filePath, batch.resumeOffset)
           }
@@ -136,7 +138,7 @@ export function createCacheSpool(args) {
         if (chunkCount > 0) {
           await writeLastFlush(tablePath, { rowCount, bytesWritten })
         }
-        return { flushed: chunkCount > 0, rowCount, chunkCount, bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount, reason }
+        return { flushed: chunkCount > 0, rowCount, chunkCount, bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount, droppedCount, reason }
       })
     },
 
@@ -150,6 +152,7 @@ export function createCacheSpool(args) {
         bytesWritten: 0,
         pendingBytes: 0,
         malformedCount: 0,
+        droppedCount: 0,
         reason: opts.reason ?? 'manual',
       }
       for (const tablePath of tables) {
@@ -160,6 +163,7 @@ export function createCacheSpool(args) {
         total.bytesWritten += result.bytesWritten
         total.pendingBytes += result.pendingBytes
         total.malformedCount += result.malformedCount
+        total.droppedCount += result.droppedCount
       }
       return total
     },

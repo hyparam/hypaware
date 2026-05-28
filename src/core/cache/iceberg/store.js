@@ -23,7 +23,7 @@ import {
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration } from '../types.d.ts'
+ * @import { AppendOptions, CachePartitioningDeclaration } from '../types.d.ts'
  * @import { Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */
@@ -72,10 +72,6 @@ export function tableExists(tablePath) {
 }
 
 /**
- * @typedef {{ declaration?: CachePartitioningDeclaration, partitionSpec?: PartitionSpec }} AppendOptions
- */
-
-/**
  * Append `rows` to the Iceberg table rooted at `tablePath`, creating
  * the table on first use. Returns the byte size of the newest data
  * files written by this append so callers can populate
@@ -118,13 +114,14 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
       tableUrl: url, resolver, lister,
     })
     const existingSchema = currentSchema(existing)
+    let effectiveSchema = schema
     if (existingSchema) {
       const partitionColumns = new Set(declaration.iceberg.fields.map(f => f.column))
-      mergeFieldIdsFromTable(columns, existingSchema, partitionColumns)
+      effectiveSchema = mergeFieldIdsFromTable(columns, existingSchema, partitionColumns)
     }
     const existingSpec = currentPartitionSpec(existing)
     if (existingSpec) {
-      validatePartitionSpecStability(declaration, existingSpec)
+      validatePartitionSpecStability(declaration, existingSpec, effectiveSchema)
     }
   }
   /** @type {TableMetadata | null} */

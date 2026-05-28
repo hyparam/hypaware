@@ -9,7 +9,9 @@ import {
   icebergDelete,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
-import { findDataFileEntries } from 'icebird/src/write/stage-position-delete.js'
+import { deleteFileAppliesToDataEntry } from 'icebird/src/delete.js'
+import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
+import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { Attr, getKernelInstruments, getMeter, withSpan } from '../observability/index.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
@@ -18,19 +20,19 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
+ * @import { DatasetRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from './types.d.ts'
- * @import { Resolver } from 'icebird/src/types.js'
- * @import { TableMetadata } from 'icebird/src/types.js'
+ * @import { Manifest, ManifestEntry, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 
 export const DEFAULT_RETENTION_DAYS = 30
 const DELETE_BATCH_SIZE = 5000
-const TIMESTAMP_COLUMNS = ['timestamp', 'created_at', 'recorded_at', 'date']
+const DEFAULT_TIMESTAMP_COLUMNS = ['timestamp', 'created_at', 'recorded_at', 'date']
 
 /**
- * @param {{ cacheRoot: string, config: RetentionConfig | undefined }} args
+ * @param {{ cacheRoot: string, config: RetentionConfig | undefined, getDataset?: (dataset: string) => Pick<DatasetRegistration, 'primaryTimestampColumn' | 'fallbackTimestampColumns'> | undefined }} args
  */
-export function createRetentionEnforcer({ cacheRoot, config }) {
+export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
   const cfg = normalizeConfig(config)
   const meter = getMeter('cache')
   const rowsEvicted = meter.createCounter('hyp_rows_evicted', {
@@ -59,8 +61,9 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
         const cursor = readCursorSync(part.path)
 
         if (cursor.layout === 'source-table') {
+          const timestampColumns = retentionTimestampColumns(part.dataset)
           const result = await purgeSourceTable(
-            part, cursor, retentionDays, now, rowsEvicted
+            part, cursor, retentionDays, now, timestampColumns, rowsEvicted
           )
           if (result) sourceTableResults.push(result)
         } else {
@@ -84,10 +87,11 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
    * @param {PartitionCursor} cursor
    * @param {number} retentionDays
    * @param {Date} now
+   * @param {string[]} timestampColumns
    * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} counter
    * @returns {Promise<RetentionSourceTableResult | null>}
    */
-  async function purgeSourceTable(part, cursor, retentionDays, now, counter) {
+  async function purgeSourceTable(part, cursor, retentionDays, now, timestampColumns, counter) {
     const cutoffMs = now.getTime() - retentionDays * 24 * 60 * 60 * 1000
     const cutoffDate = new Date(cutoffMs).toISOString().slice(0, 10)
     const source = part.partition.source ?? 'unknown'
@@ -113,8 +117,11 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
 
     const currentSnapshotId = String(metadata['current-snapshot-id'])
 
-    // Skip if no new data has arrived since the last retention pass.
-    if (cursor.retention?.lastSnapshotId === currentSnapshotId) {
+    if (
+      cursor.retention?.lastSnapshotId === currentSnapshotId &&
+      typeof cursor.retention.lastCutoffMs === 'number' &&
+      cursor.retention.lastCutoffMs >= cutoffMs
+    ) {
       return {
         dataset: part.dataset,
         source,
@@ -127,6 +134,11 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
 
     const dataFileMap = await findDataFileEntries(metadata, resolver)
     if (dataFileMap.size === 0) return null
+    const tableTimestampColumns = timestampColumnsInSchema(metadata, timestampColumns)
+    if (tableTimestampColumns.length === 0) {
+      return evictSourceTableByMtime(part, cursor, tableDir, cutoffMs, cutoffDate, now, counter)
+    }
+    const deletedPositions = await loadDeletedPositions(metadata, resolver, dataFileMap)
 
     return withSpan(
       'retention.plan_deletes',
@@ -136,6 +148,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
         [Attr.DATASET]: part.dataset,
         source,
         cutoff_date: cutoffDate,
+        timestamp_columns: tableTimestampColumns.join(','),
         candidate_file_count: dataFileMap.size,
         status: 'ok',
       },
@@ -150,7 +163,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
 
         for (const [filePath] of dataFileMap) {
           const positions = await scanFileForExpiredRows(
-            filePath, cutoffMs, resolver
+            filePath, cutoffMs, resolver, tableTimestampColumns, deletedPositions.get(filePath)
           )
           if (positions.length === 0) continue
           candidateFileCount++
@@ -170,8 +183,8 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
           batchCount++
         }
 
-        // Reload metadata to capture the post-delete snapshot ID so
-        // subsequent ticks skip this partition when no new data arrives.
+        // Reload metadata to capture the post-delete snapshot ID stored
+        // alongside cutoff state for future retention planning.
         let postSnapshotId = currentSnapshotId
         let newRowCount = Math.max(0, cursor.rowCount - totalDeleted)
         if (totalDeleted > 0) {
@@ -180,7 +193,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
             postSnapshotId = String(reloaded.metadata['current-snapshot-id'])
           } catch {
             // Fall back to pre-delete snapshot; next tick will re-scan
-            // but won't double-delete because the snapshot guard catches it.
+            // but loadDeletedPositions prevents re-planning committed deletes.
           }
           // Count actual visible rows to avoid drift from re-scanning
           // positions that were already deleted in prior retention passes.
@@ -204,6 +217,7 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
           rowCount: newRowCount,
           retention: {
             lastCutoffDate: cutoffDate,
+            lastCutoffMs: cutoffMs,
             lastDeletedAt: now.toISOString(),
             rowsDeleted: totalDeleted,
             lastSnapshotId: postSnapshotId,
@@ -221,6 +235,76 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
       },
       { component: 'cache' }
     )
+  }
+
+  /**
+   * Whole-partition fallback used only when a source table has no
+   * registered or conventional timestamp column in its Iceberg schema.
+   *
+   * @param {CachePartitionMeta} part
+   * @param {PartitionCursor} cursor
+   * @param {string} tableDir
+   * @param {number} cutoffMs
+   * @param {string} cutoffDate
+   * @param {Date} now
+   * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} counter
+   * @returns {Promise<RetentionSourceTableResult | null>}
+   */
+  async function evictSourceTableByMtime(part, cursor, tableDir, cutoffMs, cutoffDate, now, counter) {
+    const source = part.partition.source ?? 'unknown'
+    if (partitionMtime(tableDir) > cutoffMs) {
+      await writeCursor(part.path, {
+        ...cursor,
+        retention: {
+          ...cursor.retention,
+          lastCutoffDate: cutoffDate,
+          lastCutoffMs: cutoffMs,
+          lastDeletedAt: now.toISOString(),
+          rowsDeleted: 0,
+        },
+      })
+      return {
+        dataset: part.dataset,
+        source,
+        cutoffDate,
+        rowsDeleted: 0,
+        batchCount: 0,
+        candidateFileCount: 0,
+      }
+    }
+
+    const rowCount = cursor.rowCount
+    await withSpan(
+      'retention.evict_source_table',
+      {
+        [Attr.COMPONENT]: 'cache',
+        [Attr.OPERATION]: 'retention.evict_source_table',
+        [Attr.DATASET]: part.dataset,
+        source,
+        cutoff_date: cutoffDate,
+        rows_evicted: rowCount,
+        status: 'ok',
+      },
+      async () => {
+        await fs.promises.rm(part.path, { recursive: true, force: true })
+        if (rowCount > 0) {
+          counter.add(rowCount, {
+            [Attr.DATASET]: part.dataset,
+            source,
+          })
+        }
+      },
+      { component: 'cache' }
+    )
+
+    return {
+      dataset: part.dataset,
+      source,
+      cutoffDate,
+      rowsDeleted: rowCount,
+      batchCount: 0,
+      candidateFileCount: 0,
+    }
   }
 
   /**
@@ -294,6 +378,22 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
 
     return { dataset: part.dataset, partition: partitionKey, rowCount }
   }
+
+  /**
+   * @param {string} dataset
+   * @returns {string[]}
+   */
+  function retentionTimestampColumns(dataset) {
+    const registration = getDataset?.(dataset)
+    /** @type {string[]} */
+    const columns = []
+    if (registration?.primaryTimestampColumn) columns.push(registration.primaryTimestampColumn)
+    for (const column of registration?.fallbackTimestampColumns ?? []) {
+      columns.push(column)
+    }
+    if (columns.length === 0) columns.push(...DEFAULT_TIMESTAMP_COLUMNS)
+    return Array.from(new Set(columns.filter((column) => typeof column === 'string' && column.length > 0)))
+  }
 }
 
 /**
@@ -303,18 +403,21 @@ export function createRetentionEnforcer({ cacheRoot, config }) {
  * @param {string} filePath
  * @param {number} cutoffMs
  * @param {Resolver} resolver
+ * @param {string[]} timestampColumns
+ * @param {Set<bigint>} [deletedPositions]
  * @returns {Promise<number[]>}
  */
-async function scanFileForExpiredRows(filePath, cutoffMs, resolver) {
+async function scanFileForExpiredRows(filePath, cutoffMs, resolver, timestampColumns, deletedPositions) {
   /** @type {number[]} */
   const positions = []
   try {
     const file = await Promise.resolve(resolver.reader(filePath))
     const rows = /** @type {Record<string, unknown>[]} */ (
-      await parquetReadObjects({ file, columns: TIMESTAMP_COLUMNS })
+      await parquetReadObjects({ file, columns: timestampColumns })
     )
     for (let i = 0; i < rows.length; i++) {
-      const ts = extractTimestampMs(rows[i])
+      if (deletedPositions?.has(BigInt(i))) continue
+      const ts = extractTimestampMs(rows[i], timestampColumns)
       if (ts !== null && ts < cutoffMs) {
         positions.push(i)
       }
@@ -329,10 +432,15 @@ async function scanFileForExpiredRows(filePath, cutoffMs, resolver) {
  * Extract a millisecond timestamp from common timestamp fields.
  *
  * @param {Record<string, unknown>} row
+ * @param {string[]} timestampColumns
  * @returns {number | null}
  */
-function extractTimestampMs(row) {
-  const raw = row.timestamp ?? row.created_at ?? row.recorded_at ?? row.date
+function extractTimestampMs(row, timestampColumns) {
+  let raw
+  for (const column of timestampColumns) {
+    raw = row[column]
+    if (raw !== undefined && raw !== null) break
+  }
   if (raw === undefined || raw === null) return null
   if (raw instanceof Date) return raw.getTime()
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
@@ -342,6 +450,58 @@ function extractTimestampMs(row) {
     return Number.isNaN(d.getTime()) ? null : d.getTime()
   }
   return null
+}
+
+/**
+ * @param {TableMetadata} metadata
+ * @param {string[]} timestampColumns
+ * @returns {string[]}
+ */
+function timestampColumnsInSchema(metadata, timestampColumns) {
+  const schemaId = metadata['current-schema-id']
+  const schema = metadata.schemas?.find(s => s['schema-id'] === schemaId) ?? metadata.schemas?.at(-1)
+  const fields = new Set(schema?.fields.map(f => f.name) ?? [])
+  return timestampColumns.filter(column => fields.has(column))
+}
+
+/**
+ * @param {TableMetadata} metadata
+ * @param {Resolver} resolver
+ * @param {Map<string, { entry: ManifestEntry }>} dataFileMap
+ * @returns {Promise<Map<string, Set<bigint>>>}
+ */
+async function loadDeletedPositions(metadata, resolver, dataFileMap) {
+  const snapshotId = metadata['current-snapshot-id']
+  const snapshot = metadata.snapshots?.find(s => String(s['snapshot-id']) === String(snapshotId))
+  if (!snapshot?.['manifest-list']) return new Map()
+  const manifests = /** @type {Manifest[]} */ (await fetchAvroRecords(snapshot['manifest-list'], resolver))
+  /** @type {ManifestEntry[]} */
+  const deleteEntries = []
+  await Promise.all(manifests.map(async (manifest) => {
+    if (manifest.content !== 1) return
+    const entries = await loadManifestEntries(manifest, resolver)
+    for (const entry of entries) {
+      if (entry.status === 2) continue
+      if (entry.data_file.content !== 1) continue
+      deleteEntries.push(entry)
+    }
+  }))
+  if (deleteEntries.length === 0) return new Map()
+  const { positionDeletesMap } = await fetchDeleteMaps(deleteEntries, resolver)
+  /** @type {Map<string, Set<bigint>>} */
+  const out = new Map()
+  for (const [filePath, groups] of positionDeletesMap) {
+    const found = dataFileMap.get(filePath)
+    if (!found) continue
+    /** @type {Set<bigint>} */
+    const positions = new Set()
+    for (const group of groups) {
+      if (!deleteFileAppliesToDataEntry(found.entry, group.deleteEntry, metadata, 'position')) continue
+      for (const pos of group.positions) positions.add(pos)
+    }
+    if (positions.size > 0) out.set(filePath, positions)
+  }
+  return out
 }
 
 /**

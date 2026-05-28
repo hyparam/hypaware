@@ -14,6 +14,7 @@ import { datasetsRoot } from './paths.js'
 
 /**
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CachePartitionMeta } from './types.d.ts'
  */
 
 /**
@@ -79,7 +80,7 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
  * tables without cursors, bare table names (`proxy_messages_v4`, `all`),
  * and the old `client=<x>/date=<y>` epoch layout — is legacy.
  *
- * @param {import('./types.d.ts').CachePartitionMeta} partition
+ * @param {CachePartitionMeta} partition
  * @returns {boolean}
  */
 function isLegacyPartition(partition) {
@@ -91,7 +92,7 @@ function isLegacyPartition(partition) {
  * Legacy partitions store Iceberg data either directly (no cursor) or
  * under `epoch=<N>/` (with cursor).  Resolve the right path.
  *
- * @param {import('./types.d.ts').CachePartitionMeta} partition
+ * @param {CachePartitionMeta} partition
  * @returns {string}
  */
 function resolveIcebergDirForLegacy(partition) {

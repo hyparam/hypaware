@@ -1,4 +1,5 @@
 import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
 
 export interface PartitionCursor {
@@ -9,6 +10,7 @@ export interface PartitionCursor {
   tableDir?: string
   retention?: {
     lastCutoffDate?: string
+    lastCutoffMs?: number
     lastDeletedAt?: string
     rowsDeleted?: number
     lastSnapshotId?: string
@@ -69,6 +71,7 @@ export interface FlushResult {
   bytesWritten: number
   pendingBytes: number
   malformedCount: number
+  droppedCount: number
   reason: string
 }
 
@@ -88,6 +91,11 @@ export interface CacheSpool {
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>
   hasPendingSync(tablePath: string): boolean
+}
+
+export interface AppendOptions {
+  declaration?: CachePartitioningDeclaration
+  partitionSpec?: PartitionSpec
 }
 
 export interface MaintenanceConfig {

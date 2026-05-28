@@ -10,6 +10,7 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 /**
  * @import { ColumnSpec, QueryScope } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CachePartitioningDeclaration, CachePartitionMeta, PartitionCursor } from './types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 const CURSOR_FILE = 'cursor.json'
@@ -150,7 +151,7 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
 
   /** @param {string} dir */
   async function walk(dir) {
-    /** @type {import('node:fs').Dirent[]} */
+    /** @type {Dirent[]} */
     let entries
     try {
       entries = await fsPromises.readdir(dir, { withFileTypes: true })

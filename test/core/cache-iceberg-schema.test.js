@@ -317,6 +317,78 @@ test('validatePartitionSpecStability rejects new partition field', () => {
   )
 })
 
+test('validatePartitionSpecStability rejects removed partition field', () => {
+  /** @type {PartitionSpec} */
+  const existingSpec = {
+    'spec-id': 0,
+    fields: [
+      { 'source-id': 1, 'field-id': 1000, name: 'conversation_id', transform: 'identity' },
+      { 'source-id': 5, 'field-id': 1001, name: 'cwd', transform: 'identity' },
+      { 'source-id': 6, 'field-id': 1002, name: 'date', transform: 'identity' },
+    ],
+  }
+  /** @type {CachePartitioningDeclaration} */
+  const changed = {
+    ...AI_GATEWAY_DECLARATION,
+    iceberg: {
+      fields: [
+        { column: 'conversation_id', transform: 'identity', required: true },
+        { column: 'date', transform: 'identity', required: true },
+      ],
+    },
+  }
+  assert.throws(
+    () => validatePartitionSpecStability(changed, existingSpec),
+    /partition field "cwd" was removed.*spec evolution/
+  )
+})
+
+test('validatePartitionSpecStability compares effective optional fields against schema', () => {
+  /** @type {CachePartitioningDeclaration} */
+  const declaration = {
+    source: { columns: ['id'] },
+    iceberg: {
+      fields: [
+        { column: 'missing_optional', transform: 'identity' },
+      ],
+    },
+  }
+  /** @type {PartitionSpec} */
+  const existingSpec = {
+    'spec-id': 0,
+    fields: [],
+  }
+  const schema = icebergSchemaForColumns([
+    { name: 'id', type: 'INT32', nullable: false },
+  ])
+  assert.doesNotThrow(() =>
+    validatePartitionSpecStability(declaration, existingSpec, schema)
+  )
+})
+
+test('validatePartitionSpecStability rejects transform changes', () => {
+  /** @type {PartitionSpec} */
+  const existingSpec = {
+    'spec-id': 0,
+    fields: [
+      { 'source-id': 1, 'field-id': 1000, name: 'ts', transform: 'day' },
+    ],
+  }
+  /** @type {CachePartitioningDeclaration} */
+  const declaration = {
+    source: { columns: ['ts'] },
+    iceberg: {
+      fields: [
+        { column: 'ts', transform: 'month' },
+      ],
+    },
+  }
+  assert.throws(
+    () => validatePartitionSpecStability(declaration, existingSpec),
+    /partition field "ts" changed transform/
+  )
+})
+
 // --- Integration: appendRowsToTable with declaration ---
 
 test('appendRowsToTable creates table with partition spec from declaration', async () => {

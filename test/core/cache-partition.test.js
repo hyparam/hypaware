@@ -25,6 +25,7 @@ import { resolveIcebergDir } from '../../src/core/cache/storage.js'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.d.ts'
  */
 
 /** @type {ColumnSpec[]} */
@@ -390,7 +391,7 @@ test('sanitizePathSegment replaces control characters', () => {
 
 // --- resolveSourceSegments ---
 
-/** @type {import('../../src/core/cache/types.d.ts').CachePartitioningDeclaration} */
+/** @type {CachePartitioningDeclaration} */
 const AI_GATEWAY_PARTITIONING = {
   source: {
     columns: ['client_name', 'conversation_source', 'provider'],

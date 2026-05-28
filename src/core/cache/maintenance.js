@@ -29,10 +29,10 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTab
  *   MaintenancePartitionReport,
  *   MaintenanceReport,
  *   PartitionCursor,
+ *   AppendOptions,
  * } from './types.d.ts'
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
- * @import { AppendOptions } from './iceberg/store.js'
  * @import { Dirent } from 'node:fs'
  */
 
@@ -441,8 +441,27 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
     totalRows += batch.length
   }
 
-  if (!columns) return null
+  if (!columns) {
+    await writeCursor(partitionDir, {
+      epoch: cursor.epoch,
+      rowCount: 0,
+      compaction: {
+        previousTableDir: oldTableDirName,
+        compactedAt: new Date().toISOString(),
+      },
+      layout: 'source-table',
+      tableDir: newTableDirName,
+      retention: cursor.retention,
+    })
+    const retiredMarker = path.join(oldTableDir, '.retired')
+    await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
+    return {
+      rowCount: 0,
+      dataFiles: 0,
+    }
+  }
   if (totalRows === 0) {
+    // Keep table directory progression deterministic even when dedup filters out all rows.
     await appendRowsToTable(newTableDir, columns, [], appendOpts)
   }
 
@@ -533,6 +552,7 @@ async function compactPartition(partitionDir, cursor, _cfg) {
 
   if (!columns) return null
   if (totalRows === 0) {
+    // Keep epoch progression deterministic even when dedup filters out all rows.
     await appendRowsToTable(newEpochDir, columns, [], appendOpts)
   }
 

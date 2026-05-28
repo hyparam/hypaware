@@ -14,6 +14,7 @@ import { readCursorSync } from '../../../src/core/cache/partition.js'
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { KernelRuntime } from '../../../src/core/runtime/activation.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 const DATASET = 'spool_rows'
@@ -297,7 +298,7 @@ async function listAllDataFiles(kernel, dataset, tablePath) {
   const storage = /** @type {ExtendedQueryStorageService} */ (kernel.storage)
   const partMetas = await storage.discoverCachePartitions({ datasets: [dataset] })
   if (partMetas.length === 0) return listDataFiles(tablePath)
-  /** @type {import('node:fs').Dirent[]} */
+  /** @type {Dirent[]} */
   const allFiles = []
   for (const m of partMetas) {
     const files = await listDataFiles(m.path)

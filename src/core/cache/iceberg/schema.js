@@ -3,7 +3,7 @@
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CachePartitioningDeclaration } from '../types.d.ts'
- * @import { Field, IcebergType, PartitionSpec, Schema } from 'icebird/src/types.js'
+ * @import { Field, IcebergType, PartitionSpec, PartitionTransform, Schema } from 'icebird/src/types.js'
  */
 
 /**
@@ -68,7 +68,7 @@ export function partitionSpecForDeclaration(declaration, schema) {
       'source-id': sf.id,
       'field-id': partitionFieldId++,
       name: pf.column,
-      transform: /** @type {import('icebird/src/types.js').PartitionTransform} */ (pf.transform),
+      transform: /** @type {PartitionTransform} */ (pf.transform),
     })
   }
   return { 'spec-id': 0, fields }
@@ -155,20 +155,45 @@ export function mergeFieldIdsFromTable(columns, existing, partitionColumns) {
 }
 
 /**
- * Validate that a `CachePartitioningDeclaration` has not added new
- * partition fields compared to an existing `PartitionSpec`. Adding a
- * new partition field is partition-spec evolution and must be a
- * deliberate migration, not an accidental side effect.
+ * Validate that a `CachePartitioningDeclaration` still describes the
+ * existing `PartitionSpec`. Adding, removing, or changing a partition
+ * field is partition-spec evolution and must be a deliberate migration,
+ * not an accidental side effect.
  *
  * @param {CachePartitioningDeclaration} declaration
  * @param {PartitionSpec} existingSpec
+ * @param {Schema} [schema]
  */
-export function validatePartitionSpecStability(declaration, existingSpec) {
-  const existingNames = new Set(existingSpec.fields.map(f => f.name))
-  for (const pf of declaration.iceberg.fields) {
-    if (!existingNames.has(pf.column)) {
+export function validatePartitionSpecStability(declaration, existingSpec, schema) {
+  const expectedSpec = schema
+    ? partitionSpecForDeclaration(declaration, schema)
+    : {
+        'spec-id': existingSpec['spec-id'],
+        fields: declaration.iceberg.fields.map((field, index) => ({
+          'source-id': 0,
+          'field-id': PARTITION_FIELD_ID_BASE + index,
+          name: field.column,
+          transform: /** @type {PartitionTransform} */ (field.transform),
+        })),
+      }
+  const expectedNames = new Set(expectedSpec.fields.map(f => f.name))
+  for (const expected of expectedSpec.fields) {
+    const existing = existingSpec.fields.find(f => f.name === expected.name)
+    if (!existing) {
       throw new Error(
-        `cache-iceberg: partition field "${pf.column}" is new — adding a partition field is spec evolution and requires an explicit migration`
+        `cache-iceberg: partition field "${expected.name}" is new — adding a partition field is spec evolution and requires an explicit migration`
+      )
+    }
+    if (existing.transform !== expected.transform) {
+      throw new Error(
+        `cache-iceberg: partition field "${expected.name}" changed transform from ${existing.transform} to ${expected.transform} — partition spec changes require an explicit migration`
+      )
+    }
+  }
+  for (const existing of existingSpec.fields) {
+    if (!expectedNames.has(existing.name)) {
+      throw new Error(
+        `cache-iceberg: partition field "${existing.name}" was removed — removing a partition field is spec evolution and requires an explicit migration`
       )
     }
   }

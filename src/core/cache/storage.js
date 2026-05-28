@@ -1,6 +1,6 @@
 // @ts-check
 
-import { Attr, getMeter, withSpan } from '../observability/index.js'
+import { Attr, getLogger, getMeter, withSpan } from '../observability/index.js'
 import {
   dataSourceForTable,
   scanRowsFromTable,
@@ -26,6 +26,7 @@ import path from 'node:path'
 /**
  * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from './types.d.ts'
+ * @import { AsyncCells } from 'squirreling'
  */
 
 /**
@@ -64,6 +65,7 @@ export function resolveIcebergDir(tablePath) {
  */
 export function createQueryStorageService({ cacheRoot, getDeclaration }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
+  const logger = getLogger('cache')
   const meter = getMeter('cache')
   const partitionDropCounter = meter.createCounter('hyp_partition_validation_drops', {
     description: 'Rows dropped due to missing required Iceberg partition fields',
@@ -76,11 +78,15 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
       let droppedCount = 0
+      /** @type {Map<string, number>} */
+      const missingFieldCounts = new Map()
       for (const row of rows) {
         if (declaration) {
           const { valid, missing } = validateIcebergPartitionFields(row, declaration)
           if (!valid) {
             droppedCount++
+            const missingKey = missing.join(',')
+            missingFieldCounts.set(missingKey, (missingFieldCounts.get(missingKey) ?? 0) + 1)
             partitionDropCounter.add(1, {
               [Attr.DATASET]: dataset,
               missing_fields: missing.join(','),
@@ -105,7 +111,17 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
         const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
         totalBytes += result.bytesWritten
       }
-      return { bytesWritten: totalBytes }
+      if (droppedCount > 0) {
+        logger.warn('cache.partition_validation_drops', {
+          [Attr.DATASET]: dataset,
+          dropped_count: droppedCount,
+          row_count: rows.length,
+          missing_fields: Array.from(missingFieldCounts.entries())
+            .map(([fields, count]) => `${fields}:${count}`)
+            .join(';'),
+        })
+      }
+      return { bytesWritten: totalBytes, droppedCount }
     },
   })
 
@@ -178,7 +194,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
                 const filteredResolved = row.resolved
                   ? Object.fromEntries(Object.entries(row.resolved).filter(([k]) => !INTERNAL_FIELDS.includes(k)))
                   : undefined
-                /** @type {import('squirreling').AsyncCells} */
+                /** @type {AsyncCells} */
                 const filteredCells = {}
                 for (const col of filteredColumns) {
                   if (row.cells && col in row.cells) filteredCells[col] = row.cells[col]
@@ -209,6 +225,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
           span.setAttribute('chunk_count', result.chunkCount)
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('pending_bytes', result.pendingBytes)
+          span.setAttribute('dropped_count', result.droppedCount)
           span.setAttribute('flushed', result.flushed)
           return result
         },
@@ -232,6 +249,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
           span.setAttribute('chunk_count', result.chunkCount)
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('pending_bytes', result.pendingBytes)
+          span.setAttribute('dropped_count', result.droppedCount)
           span.setAttribute('flushed', result.flushed)
           return result
         },

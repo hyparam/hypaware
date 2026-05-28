@@ -183,6 +183,53 @@ test('spool flush creates Iceberg table with partition spec when declaration is 
   }
 })
 
+test('spool flush reports rows dropped by required partition validation', async () => {
+  const cacheRoot = await makeTmpDir('flush-dropped')
+  try {
+    /** @type {CachePartitioningDeclaration} */
+    const declaration = {
+      source: {
+        columns: ['client_name'],
+        fallback: 'unknown',
+      },
+      iceberg: {
+        fields: [
+          { column: 'client_name', transform: 'identity', required: true },
+          { column: 'date', transform: 'identity', required: true },
+        ],
+      },
+    }
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'client_name', type: 'STRING', nullable: true },
+      { name: 'date', type: 'STRING', nullable: true },
+      { name: 'value', type: 'STRING', nullable: true },
+    ]
+
+    const storage = createQueryStorageService({
+      cacheRoot,
+      getDeclaration: (dataset) => dataset === 'declared_ds' ? declaration : undefined,
+    })
+    const tablePath = storage.cacheTablePath('declared_ds', ['proxy'])
+
+    await storage.appendRows(tablePath, columns, [
+      { id: 1, value: 'kept', client_name: 'claude', date: '2026-05-28' },
+      { id: 2, value: 'dropped', client_name: 'claude' },
+    ])
+    const result = await storage.flushTable(tablePath, { force: true })
+
+    assert.equal(result.rowCount, 2)
+    assert.equal(result.droppedCount, 1)
+
+    const claudeDir = path.join(cacheRoot, 'datasets', 'declared_ds', 'source=claude')
+    const cursor = readCursorSync(claudeDir)
+    assert.equal(cursor.rowCount, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('spool flush uses resolveSourceSegments when declaration is provided', async () => {
   const cacheRoot = await makeTmpDir('flush-source-decl')
   try {
