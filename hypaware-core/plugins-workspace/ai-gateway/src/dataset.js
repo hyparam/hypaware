@@ -1,15 +1,27 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
-import { AI_GATEWAY_MESSAGE_COLUMNS } from './message_projector.js'
+import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 
 /**
- * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializerContribution, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
  * @import { AsyncDataSource } from 'squirreling'
  */
+
+const PLUGIN_NAME = '@hypaware/ai-gateway'
+
+/**
+ * Materializer dispatch key. Backfill providers (e.g. `@hypaware/claude`,
+ * `@hypaware/codex`) yield `BackfillItem`s of this `kind` carrying an
+ * `AiGatewayProjectedExchange` as `value`; the `hyp backfill` runner
+ * resolves them to this materializer to produce `ai_gateway_messages`
+ * rows.
+ */
+export const AI_GATEWAY_PROJECTED_EXCHANGE_KIND = 'ai_gateway.projected_exchange'
 
 export const DATASET_NAME = 'ai_gateway_messages'
 export const PARTITION_LABEL = 'proxy_messages_v4'
@@ -193,7 +205,7 @@ function emptySource() {
 export function aiGatewayDatasetRegistration() {
   return {
     name: DATASET_NAME,
-    plugin: '@hypaware/ai-gateway',
+    plugin: PLUGIN_NAME,
     schema: AI_GATEWAY_SCHEMA,
     primaryTimestampColumn: 'message_created_at',
     cachePartitioning: {
@@ -213,4 +225,76 @@ export function aiGatewayDatasetRegistration() {
     refreshPartition,
     createDataSource,
   }
+}
+
+/**
+ * Backfill materializer for `ai_gateway.projected_exchange`. Registered
+ * via `ctx.backfillMaterializers.register(...)` at plugin activation.
+ *
+ * Backfill providers yield a whole conversation as a single
+ * `AiGatewayProjectedExchange` payload; this converts it into canonical
+ * `ai_gateway_messages` rows through `aiGatewayRowsFromProjectedExchange`
+ * — the exact expansion the live gateway recorder uses — so backfilled
+ * and live-captured rows are byte-identical for the same projection.
+ * The materializer is pure with respect to `item.value`: it allocates a
+ * fresh conversation state per call, so reruns and out-of-order items
+ * produce identical row identity.
+ *
+ * @returns {BackfillMaterializerContribution}
+ */
+export function aiGatewayBackfillMaterializer() {
+  return {
+    kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
+    dataset: DATASET_NAME,
+    plugin: PLUGIN_NAME,
+    materialize(item) {
+      const projection = asProjectedExchange(item.value)
+      if (!projection) return []
+      return aiGatewayRowsFromProjectedExchange(projection, {
+        gatewayAttributes: backfillGatewayAttributes(item),
+      })
+    },
+  }
+}
+
+/**
+ * Narrow a `BackfillItem.value` to an `AiGatewayProjectedExchange`. The
+ * runner already validated the envelope shape; this guards the
+ * payload's minimal contract (`provider`, `conversation_id`, and a
+ * `messages` array) so a malformed provider record yields zero rows
+ * instead of throwing mid-run.
+ *
+ * @param {unknown} value
+ * @returns {AiGatewayProjectedExchange | undefined}
+ */
+function asProjectedExchange(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (typeof v.provider !== 'string' || v.provider.length === 0) return undefined
+  if (typeof v.conversation_id !== 'string' || v.conversation_id.length === 0) return undefined
+  if (!Array.isArray(v.messages)) return undefined
+  return /** @type {AiGatewayProjectedExchange} */ (value)
+}
+
+/**
+ * Build the `gateway`-namespaced attributes stamped onto every
+ * backfilled row. Marks the row's origin (`source: 'backfill'`) and
+ * carries hashed/opaque provenance hints so imports stay attributable
+ * without recording raw local file paths in the canonical row.
+ *
+ * @param {BackfillItem} item
+ * @returns {Record<string, unknown>}
+ */
+function backfillGatewayAttributes(item) {
+  /** @type {Record<string, unknown>} */
+  const gateway = { source: 'backfill' }
+  const provenance = item.provenance
+  if (provenance?.source_path) gateway.source_path_hash = shortHash(provenance.source_path)
+  if (provenance?.native_id) gateway.native_id = provenance.native_id
+  return { gateway }
+}
+
+/** @param {string} input */
+function shortHash(input) {
+  return createHash('sha256').update(input).digest('hex').slice(0, 16)
 }

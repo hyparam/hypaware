@@ -111,14 +111,9 @@ export function createAiGatewayMessageProjector(opts) {
   const projectors = Array.isArray(opts.projectors) ? opts.projectors : []
   const log = opts.log
 
-  /** @type {Map<string, string[]>} */
-  const messageIdsByConversation = new Map()
-  /** @type {Map<string, string>} */
-  const conversationStartedAt = new Map()
-  /** @type {Set<string>} */
-  const seenMessages = new Set()
-  /** @type {Map<string, Map<string, { tool_name?: string }>>} */
-  const toolCallLookupByConversation = new Map()
+  // One persistent conversation state per listener: identity history
+  // and dedup span the whole session, matching pre-extraction behavior.
+  const state = createAiGatewayConversationState()
 
   return {
     /**
@@ -137,90 +132,154 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
-      const tsStart = stringValue(input.ts_start) ?? new Date().toISOString()
-      const conversationId = projection.conversation_id
-      if (!conversationStartedAt.has(conversationId)) {
-        conversationStartedAt.set(
-          conversationId,
-          stringValue(projection.conversation_started_at) ?? tsStart
-        )
-      }
-      const conversationStarted = conversationStartedAt.get(conversationId) ?? tsStart
-
-      let conversationLookup = toolCallLookupByConversation.get(conversationId)
-      if (!conversationLookup) {
-        conversationLookup = new Map()
-        toolCallLookupByConversation.set(conversationId, conversationLookup)
-      }
-      let conversationMessageIds = messageIdsByConversation.get(conversationId)
-      if (!conversationMessageIds) {
-        conversationMessageIds = []
-        messageIdsByConversation.set(conversationId, conversationMessageIds)
-      }
-
-      const gatewayAttributes = buildGatewayAttributes(input)
-      /** @type {Record<string, unknown>[]} */
-      const rows = []
-
-      for (let i = 0; i < projection.messages.length; i++) {
-        const message = projection.messages[i]
-        const role = stringValue(message.role)
-        if (!role) continue
-        const content = normalizeContent(message.content)
-        if (content.length === 0) continue
-
-        const identity = resolveIdentity({
-          message,
-          conversationId,
-          role,
-          content,
-          conversationMessageIds,
-        })
-
-        if (seenMessages.has(identity.messageId)) {
-          if (!conversationMessageIds.includes(identity.messageId)) {
-            conversationMessageIds.push(identity.messageId)
-          }
-          continue
-        }
-
-        const parts = expandMessageParts({
-          message,
-          role,
-          content,
-          conversationId,
-          conversationStarted,
-          messageIndex: i,
-          tsStart,
-          projection,
-          identity,
-          conversationLookup,
-        })
-
-        for (const row of parts) {
-          row.gateway_id = gatewayId
-          row.date = utcDate(row.message_created_at)
-          row.attributes = mergeJsonObjects(
-            mergeJsonObjects(/** @type {Record<string, unknown> | undefined} */ (row.attributes), projection.attributes),
-            identity.fromFallback
-              ? mergeJsonObjects(
-                gatewayAttributes,
-                { gateway: { identity_source: 'gateway_fallback' } }
-              )
-              : gatewayAttributes
-          )
-          rows.push(stripToSchema(row))
-        }
-
-        seenMessages.add(identity.messageId)
-        if (!conversationMessageIds.includes(identity.messageId)) {
-          conversationMessageIds.push(identity.messageId)
-        }
-      }
-
-      return rows
+      return aiGatewayRowsFromProjectedExchange(projection, {
+        gatewayId,
+        gatewayAttributes: buildGatewayAttributes(input),
+        tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
+        state,
+      })
     },
   }
+}
+
+/**
+ * Mutable conversation-scoped state threaded across exchanges in a live
+ * session: the started-at memo, per-conversation message-id history,
+ * the cross-exchange dedup set, and the tool-call → tool-name lookup.
+ *
+ * Live capture keeps one instance per listener so identity fallback and
+ * dedup span the whole session; backfill creates a fresh instance per
+ * provider item (each item already carries a whole conversation), so the
+ * identical expansion logic scopes naturally to that one conversation.
+ */
+export function createAiGatewayConversationState() {
+  /** @type {Map<string, string[]>} */
+  const messageIdsByConversation = new Map()
+  /** @type {Map<string, string>} */
+  const conversationStartedAt = new Map()
+  /** @type {Set<string>} */
+  const seenMessages = new Set()
+  /** @type {Map<string, Map<string, { tool_name?: string }>>} */
+  const toolCallLookupByConversation = new Map()
+  return { messageIdsByConversation, conversationStartedAt, seenMessages, toolCallLookupByConversation }
+}
+
+/**
+ * Expand one projected exchange into canonical `ai_gateway_messages`
+ * rows. This is the SINGLE row-expansion implementation shared by live
+ * capture (`createAiGatewayMessageProjector`) and backfill
+ * materialization (the `ai_gateway.projected_exchange` materializer).
+ * It owns:
+ *
+ *  - `message_id` fallback identity (hash of conversation/role/content)
+ *    and the `previous_message_id` fallback chain,
+ *  - per-part expansion (`expandMessageParts`),
+ *  - the `gateway_id`, `schema_version`, and partition-relevant
+ *    `client_name` / `date` stamping,
+ *  - the row/projection/client/gateway `attributes` merge (adding
+ *    `gateway.identity_source = 'gateway_fallback'` when identity was
+ *    synthesized), and
+ *  - stripping to the advertised `AI_GATEWAY_MESSAGE_COLUMNS` set.
+ *
+ * Cross-message dedup and identity history live on `state`, owned by the
+ * caller. Live capture passes one persistent state per listener;
+ * backfill passes a fresh state per conversation item (the default).
+ *
+ * @param {AiGatewayProjectedExchange} projection
+ * @param {{
+ *   gatewayId?: string,
+ *   gatewayAttributes?: Record<string, unknown>,
+ *   tsStart?: string,
+ *   state?: ReturnType<typeof createAiGatewayConversationState>,
+ * }} [opts]
+ * @returns {Record<string, unknown>[]}
+ */
+export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
+  const gatewayId = opts.gatewayId || 'hypaware-local'
+  const state = opts.state ?? createAiGatewayConversationState()
+  const gatewayAttributes = opts.gatewayAttributes ?? {}
+  const tsStart = opts.tsStart ?? stringValue(projection.conversation_started_at) ?? new Date().toISOString()
+
+  const conversationId = projection.conversation_id
+  if (!state.conversationStartedAt.has(conversationId)) {
+    state.conversationStartedAt.set(
+      conversationId,
+      stringValue(projection.conversation_started_at) ?? tsStart
+    )
+  }
+  const conversationStarted = state.conversationStartedAt.get(conversationId) ?? tsStart
+
+  let conversationLookup = state.toolCallLookupByConversation.get(conversationId)
+  if (!conversationLookup) {
+    conversationLookup = new Map()
+    state.toolCallLookupByConversation.set(conversationId, conversationLookup)
+  }
+  let conversationMessageIds = state.messageIdsByConversation.get(conversationId)
+  if (!conversationMessageIds) {
+    conversationMessageIds = []
+    state.messageIdsByConversation.set(conversationId, conversationMessageIds)
+  }
+
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+
+  for (let i = 0; i < projection.messages.length; i++) {
+    const message = projection.messages[i]
+    const role = stringValue(message.role)
+    if (!role) continue
+    const content = normalizeContent(message.content)
+    if (content.length === 0) continue
+
+    const identity = resolveIdentity({
+      message,
+      conversationId,
+      role,
+      content,
+      conversationMessageIds,
+    })
+
+    if (state.seenMessages.has(identity.messageId)) {
+      if (!conversationMessageIds.includes(identity.messageId)) {
+        conversationMessageIds.push(identity.messageId)
+      }
+      continue
+    }
+
+    const parts = expandMessageParts({
+      message,
+      role,
+      content,
+      conversationId,
+      conversationStarted,
+      messageIndex: i,
+      tsStart,
+      projection,
+      identity,
+      conversationLookup,
+    })
+
+    for (const row of parts) {
+      row.gateway_id = gatewayId
+      row.date = utcDate(row.message_created_at)
+      row.attributes = mergeJsonObjects(
+        mergeJsonObjects(/** @type {Record<string, unknown> | undefined} */ (row.attributes), projection.attributes),
+        identity.fromFallback
+          ? mergeJsonObjects(
+            gatewayAttributes,
+            { gateway: { identity_source: 'gateway_fallback' } }
+          )
+          : gatewayAttributes
+      )
+      rows.push(stripToSchema(row))
+    }
+
+    state.seenMessages.add(identity.messageId)
+    if (!conversationMessageIds.includes(identity.messageId)) {
+      conversationMessageIds.push(identity.messageId)
+    }
+  }
+
+  return rows
 }
 
 /**

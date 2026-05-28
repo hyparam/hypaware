@@ -14,6 +14,7 @@ import { createSourceRegistry } from '../../src/core/registry/sources.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createConfigRegistry } from '../../src/core/config/schema.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../../src/core/registry/backfills.js'
 import { materializeSinks } from '../../src/core/sinks/materialize.js'
 
 /**
@@ -128,6 +129,8 @@ function makeRuntime(overrides = {}) {
     cacheRoot,
     skills: { register() {}, list() { return [] } },
     initPresets: { register() {}, get() { return undefined }, list() { return [] } },
+    backfills: createBackfillRegistry(),
+    backfillMaterializers: createBackfillMaterializerRegistry(),
     activationContexts: overrides.activationContexts ?? new Map(),
   })
 }
@@ -155,6 +158,8 @@ function registerActivationContext(pluginName, runtime) {
     storage: runtime.storage,
     skills: runtime.skills,
     initPresets: runtime.initPresets,
+    backfills: runtime.backfills,
+    backfillMaterializers: runtime.backfillMaterializers,
     requireCapability(name) { return runtime.capabilities.require(pluginName, name) },
     provideCapability(name, version, value) { runtime.capabilities.provide(pluginName, name, version, value) },
   })

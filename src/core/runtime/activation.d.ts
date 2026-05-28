@@ -1,5 +1,7 @@
 import type {
   ActivePlugin,
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
   CommandRegistry,
   ConfigRegistry,
   InitPresetRegistry,
@@ -36,6 +38,8 @@ export interface KernelRuntime {
   cacheRoot: string
   skills: SkillRegistry
   initPresets: InitPresetRegistry
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
   activationContexts: Map<PluginName, PluginActivationContext>
 }
 
@@ -45,6 +49,8 @@ export interface CreateKernelRuntimeArgs {
   queryRegistry?: QueryRegistry
   sourceRegistry?: ExtendedSourceRegistry
   sinkRegistry?: ExtendedSinkRegistry
+  backfillRegistry?: BackfillRegistry
+  backfillMaterializerRegistry?: BackfillMaterializerRegistry
   storage?: ExtendedQueryStorageService
   cacheRoot?: string
 }
