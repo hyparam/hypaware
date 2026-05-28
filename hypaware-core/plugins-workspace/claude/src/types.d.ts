@@ -8,6 +8,8 @@ export interface SessionContextRecord {
 
 export interface TranscriptEntry {
   sessionId: string
+  role: string | undefined
+  content: unknown
   messageId: string | undefined
   contentKey: string | undefined
   provider_uuid: string | undefined

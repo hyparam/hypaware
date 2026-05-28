@@ -61,8 +61,46 @@ export async function loadTranscript(opts) {
       await readTranscriptFile(filePath, entries)
     }
   }
-  entries.sort((a, b) => (a.timestampMs ?? Number.POSITIVE_INFINITY) - (b.timestampMs ?? Number.POSITIVE_INFINITY))
+  entries.sort(byTimestampAsc)
   return entries
+}
+
+/**
+ * Walk every Claude JSONL transcript under `projectsDir`, yielding
+ * absolute file paths. `loadTranscript()` targets one live session;
+ * the backfill provider needs the full local history, so this exposes
+ * the same recursive scan without a session-id filter.
+ *
+ * @param {string} projectsDir
+ * @returns {Generator<string>}
+ */
+export function* walkTranscriptFiles(projectsDir) {
+  yield* walkJsonlFiles(projectsDir, undefined)
+}
+
+/**
+ * Load and timestamp-sort the entries in a single transcript file.
+ * Best-effort like `loadTranscript`: a missing or truncated file
+ * yields whatever parsed cleanly. The backfill provider walks files
+ * directly (one file per session) rather than resolving a session id.
+ *
+ * @param {string} filePath
+ * @returns {Promise<TranscriptEntry[]>}
+ */
+export async function loadTranscriptFile(filePath) {
+  /** @type {TranscriptEntry[]} */
+  const entries = []
+  await readTranscriptFile(filePath, entries)
+  entries.sort(byTimestampAsc)
+  return entries
+}
+
+/**
+ * @param {TranscriptEntry} a
+ * @param {TranscriptEntry} b
+ */
+function byTimestampAsc(a, b) {
+  return (a.timestampMs ?? Number.POSITIVE_INFINITY) - (b.timestampMs ?? Number.POSITIVE_INFINITY)
 }
 
 /**
@@ -109,7 +147,8 @@ export function findTranscriptMatch(index, candidate) {
 
 /**
  * @param {string} dir
- * @param {string} sessionId
+ * @param {string | undefined} sessionId  match `<sessionId>.jsonl`; when
+ *   undefined, match every `.jsonl` file (full backfill scan)
  * @returns {Generator<string>}
  */
 function* walkJsonlFiles(dir, sessionId) {
@@ -124,10 +163,19 @@ function* walkJsonlFiles(dir, sessionId) {
     const filePath = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       yield* walkJsonlFiles(filePath, sessionId)
-    } else if (entry.isFile() && entry.name === `${sessionId}.jsonl`) {
+    } else if (entry.isFile() && matchesTranscriptName(entry.name, sessionId)) {
       yield filePath
     }
   }
+}
+
+/**
+ * @param {string} name
+ * @param {string | undefined} sessionId
+ */
+function matchesTranscriptName(name, sessionId) {
+  if (sessionId === undefined) return name.endsWith('.jsonl')
+  return name === `${sessionId}.jsonl`
 }
 
 /**
@@ -172,6 +220,8 @@ function transcriptEntryFromRow(row) {
   /** @type {TranscriptEntry} */
   const entry = {
     sessionId,
+    role,
+    content,
     timestampMs: timestampMs(row.timestamp),
     messageId: stringValue(readKey(message, 'id')) ?? stringValue(row.messageId),
     contentKey: role ? contentKey(role, normalizeContent(content)) : undefined,
