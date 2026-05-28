@@ -1,7 +1,7 @@
 // @ts-check
 
 import { createAiGatewayApi, createGatewayState } from './api.js'
-import { aiGatewayDatasetRegistration } from './dataset.js'
+import { aiGatewayBackfillMaterializer, aiGatewayDatasetRegistration } from './dataset.js'
 import { createStartSource } from './source.js'
 import { setAiGatewayRuntime } from './runtime.js'
 
@@ -23,6 +23,9 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  *    and `registerExchangeContextProjector` from 1.x in favour of a
  *    single full-exchange projector hook (see api.js).
  *  - dataset `ai_gateway_messages`
+ *  - backfill materializer `ai_gateway.projected_exchange` (so client
+ *    history providers can import into `ai_gateway_messages` through the
+ *    same row expansion as live capture)
  *  - source `ai-gateway` (configSection: `ai-gateway`)
  *
  * The source listener is NOT bound at activation. The first call to
@@ -40,6 +43,7 @@ export async function activate(ctx) {
 
   ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)
   ctx.query.registerDataset(aiGatewayDatasetRegistration())
+  ctx.backfillMaterializers.register(aiGatewayBackfillMaterializer())
 
   ctx.sources.register({
     name: 'ai-gateway',

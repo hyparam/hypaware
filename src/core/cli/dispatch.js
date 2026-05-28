@@ -178,6 +178,8 @@ export async function dispatch(argv, opts = {}) {
     sources: kernel.sources,
     sinks: kernel.sinks,
     initPresets: kernel.initPresets,
+    backfills: kernel.backfills,
+    backfillMaterializers: kernel.backfillMaterializers,
   }
 
   return context.with(ROOT_CONTEXT, () =>

@@ -293,6 +293,22 @@ export interface PluginActivationContext {
   storage: QueryStorageService
   skills: SkillRegistry
   initPresets: InitPresetRegistry
+  /**
+   * Backfill provider registry (kernel-owned). Plugins register
+   * `BackfillContribution`s during activation; `hyp backfill` selects
+   * providers from this registry. The shape is intentionally narrow —
+   * provider authors keep dataset-specific behavior in their `run`
+   * implementation rather than expanding the kernel surface.
+   */
+  backfills: BackfillRegistry
+  /**
+   * Dataset materializer registry (kernel-owned). Dataset/schema owners
+   * register a materializer per `kind` they can convert into canonical
+   * rows for a target dataset. The `hyp backfill` runner asks this
+   * registry to materialize each `BackfillItem` yielded by a provider
+   * before appending to the cache.
+   */
+  backfillMaterializers: BackfillMaterializerRegistry
   requireCapability<T = unknown>(name: CapabilityName, range?: SemverRange): T
   provideCapability<T = unknown>(name: CapabilityName, version: SemverVersion, value: T): void
 }
@@ -540,6 +556,18 @@ export interface CommandRunContext {
    * `hyp init <preset>` resolves preset names through this registry.
    */
   initPresets: InitPresetRegistry
+  /**
+   * Backfill provider registry (kernel-owned). Populated by the
+   * dispatcher. `hyp backfill` reads from this registry to list, plan,
+   * and run providers.
+   */
+  backfills: BackfillRegistry
+  /**
+   * Dataset materializer registry (kernel-owned). Populated by the
+   * dispatcher. `hyp backfill` resolves each yielded `BackfillItem` to
+   * a registered materializer by `kind`.
+   */
+  backfillMaterializers: BackfillMaterializerRegistry
 }
 
 // =============================================================================
@@ -1270,3 +1298,153 @@ export interface InitPresetContribution {
   summary: string
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
+
+// =============================================================================
+// Backfill (first-class client history import)
+// =============================================================================
+
+/**
+ * Plugin-registered backfill providers. Each provider plans and yields
+ * `BackfillItem` envelopes (and optional `BackfillEvent` lifecycle
+ * signals) for one or more datasets. Core owns the runner, telemetry
+ * envelope, dry-run behavior, and dataset materialization; providers
+ * own native-format discovery, parsing, and projection.
+ */
+export interface BackfillRegistry {
+  register(contribution: BackfillContribution): void
+  get(name: string): BackfillContribution | undefined
+  list(): BackfillContribution[]
+}
+
+export interface BackfillContribution {
+  /** Stable, kebab-case provider identifier (e.g. `claude`, `codex`). */
+  name: string
+  /** Owning plugin (e.g. `@hypaware/claude`). */
+  plugin: PluginName
+  /** Datasets this provider contributes rows to. */
+  datasets: string[]
+  /** Short human-readable description for `hyp backfill list`. */
+  summary?: string
+  /**
+   * Optional planning hook. Called by `hyp backfill plan` to surface
+   * what would be scanned without committing to writes. Returning
+   * `undefined` means the provider has no planning information.
+   */
+  plan?(ctx: BackfillPlanContext): Promise<BackfillPlan | undefined>
+  /**
+   * Stream `BackfillItem` envelopes (one per scanned record) and
+   * optional `BackfillEvent` lifecycle signals. The runner consumes
+   * each `BackfillItem` by resolving its `kind` against the
+   * dataset-materializer registry.
+   */
+  run(ctx: BackfillRunContext): AsyncIterable<BackfillItem | BackfillEvent>
+}
+
+export interface BackfillPlanContext {
+  env: NodeJS.ProcessEnv
+  cacheRoot: string
+  /** Effective lower bound for record timestamps (ISO string). */
+  since?: string
+  /** Effective upper bound for record timestamps (ISO string). */
+  until?: string
+  /**
+   * Retention window resolved from CLI flag or
+   * `config.query.cache.retentionDays`. Providers should not import
+   * records older than this when no explicit `since` was supplied.
+   */
+  retentionDays?: number
+  log: PluginLogger
+  signal?: AbortSignal
+}
+
+export interface BackfillRunContext extends BackfillPlanContext {
+  storage: QueryStorageService
+  /**
+   * When true, the runner expects the provider to scan and yield items
+   * without performing irreversible side effects. The runner skips the
+   * materialize/write/flush steps in dry-run mode.
+   */
+  dryRun: boolean
+}
+
+/**
+ * A provider-yielded record. The runner does not interpret `value`
+ * itself; it resolves `kind` against the dataset-materializer registry
+ * and asks the registered materializer to produce canonical rows.
+ */
+export interface BackfillItem {
+  type?: 'item'
+  /** Target dataset (must match the materializer's `dataset`). */
+  dataset: string
+  /** Materializer dispatch key (e.g. `ai_gateway.projected_exchange`). */
+  kind: string
+  /** Materializer input. Shape is owned by the kind/materializer pair. */
+  value: Record<string, unknown>
+  /** Optional provenance hints surfaced in telemetry. */
+  provenance?: BackfillProvenance
+}
+
+export interface BackfillProvenance {
+  /** Client name attribution (e.g. `claude`, `codex`). */
+  client_name?: string
+  /** Source-file pointer (e.g. transcript path). */
+  source_path?: string
+  /** Native record identifier when available. */
+  native_id?: string
+}
+
+export interface BackfillEvent {
+  type: 'event'
+  /** Free-form event name (e.g. `scan_started`, `unsupported_location`). */
+  event: string
+  /** Optional structured attributes. */
+  attributes?: Record<string, unknown>
+}
+
+export interface BackfillPlan {
+  /** Provider-supplied estimate of records that would be scanned. */
+  estimated_items?: number
+  /** Free-form scan-location descriptors (e.g. file paths). */
+  sources?: string[]
+  /** Optional human-readable notes (`hyp backfill plan` surfaces these). */
+  notes?: string[]
+}
+
+/**
+ * Dataset-owner materializers convert `BackfillItem.value` payloads
+ * into canonical rows for a target dataset. One materializer per
+ * `kind`; the runner asks the registry to look up by `kind` and calls
+ * `materialize(item, ctx)` for each provider-yielded item.
+ */
+export interface BackfillMaterializerRegistry {
+  register(contribution: BackfillMaterializerContribution): void
+  get(kind: string): BackfillMaterializerContribution | undefined
+  list(): BackfillMaterializerContribution[]
+}
+
+export interface BackfillMaterializerContribution {
+  /** Dispatch key matched against `BackfillItem.kind`. */
+  kind: string
+  /** Target dataset (e.g. `ai_gateway_messages`). */
+  dataset: string
+  /** Owning plugin (e.g. `@hypaware/ai-gateway`). */
+  plugin: PluginName
+  /**
+   * Convert one provider-yielded item into canonical rows for `dataset`.
+   * Implementations must be pure with respect to `item.value` so reruns
+   * produce identical row identity.
+   */
+  materialize(
+    item: BackfillItem,
+    ctx: BackfillMaterializeContext,
+  ): Promise<Record<string, unknown>[]> | Record<string, unknown>[]
+}
+
+export interface BackfillMaterializeContext {
+  log: PluginLogger
+  env: NodeJS.ProcessEnv
+  storage: QueryStorageService
+  /** Stable run id propagated from the CLI runner. */
+  devRunId?: string
+}
+

@@ -16,6 +16,7 @@ import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { executeQuerySql } from '../query/sql.js'
+import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import {
   installPlugin,
   listInstalledPlugins,
@@ -103,6 +104,24 @@ function buildCoreCommands() {
       summary: 'Run cache maintenance (legacy migration, snapshot expiration, compaction)',
       usage: 'hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
       run: runQueryMaintain,
+    },
+    {
+      name: 'backfill',
+      summary: 'Import client history from registered backfill providers',
+      usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
+      run: runBackfill,
+    },
+    {
+      name: 'backfill list',
+      summary: 'List registered backfill providers',
+      usage: 'hyp backfill list [--json]',
+      run: runBackfillList,
+    },
+    {
+      name: 'backfill plan',
+      summary: 'Show what each backfill provider would scan without writing rows',
+      usage: 'hyp backfill plan [provider...] [--retention-days <n>] [--json]',
+      run: runBackfillPlan,
     },
     {
       name: 'collect',
