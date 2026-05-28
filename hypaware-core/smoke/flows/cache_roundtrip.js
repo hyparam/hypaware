@@ -272,12 +272,36 @@ const dataset = {
     ]
   },
   async createDataSource(partitions, ctx) {
-    const partition = partitions[0]
-    if (!partition || !partition.tablePath) {
-      return emptySource()
+    const partMetas = await ctx.storage.discoverCachePartitions({ datasets: [DATASET] })
+    if (partMetas.length === 0) {
+      const partition = partitions[0]
+      if (!partition || !partition.tablePath) return emptySource()
+      const source = await ctx.storage.dataSourceForTable(partition.tablePath)
+      return source ?? emptySource()
     }
-    const source = await ctx.storage.dataSourceForTable(partition.tablePath)
-    return source ?? emptySource()
+    const sources = []
+    for (const m of partMetas) {
+      const source = await ctx.storage.dataSourceForTable(m.path)
+      if (source) sources.push(source)
+    }
+    if (sources.length === 0) return emptySource()
+    if (sources.length === 1) return sources[0]
+    const columns = COLUMNS.map((c) => c.name)
+    return {
+      columns,
+      scan(opts) {
+        return {
+          appliedWhere: false,
+          appliedLimitOffset: false,
+          async *rows() {
+            for (const source of sources) {
+              const scan = source.scan(opts ?? {})
+              for await (const row of scan.rows()) yield row
+            }
+          },
+        }
+      },
+    }
   },
 }
 

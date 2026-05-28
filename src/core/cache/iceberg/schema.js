@@ -2,7 +2,8 @@
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { IcebergType, Schema } from 'icebird/src/types.js'
+ * @import { CachePartitioningDeclaration } from '../types.d.ts'
+ * @import { Field, IcebergType, PartitionSpec, PartitionTransform, Schema } from 'icebird/src/types.js'
  */
 
 /**
@@ -32,6 +33,172 @@ export function icebergSchemaForColumns(columns) {
   return { type: 'struct', 'schema-id': 0, fields }
 }
 
+const PARTITION_FIELD_ID_BASE = 1000
+
+/**
+ * Translate a dataset's `CachePartitioningDeclaration` into the Iceberg
+ * `PartitionSpec` passed to `icebergCreateTable`. Partition field IDs
+ * start at `PARTITION_FIELD_ID_BASE` (1000) to stay distinct from schema
+ * field IDs, which start at 1.
+ *
+ * @param {CachePartitioningDeclaration} declaration
+ * @param {Schema} schema
+ * @returns {PartitionSpec}
+ */
+export function partitionSpecForDeclaration(declaration, schema) {
+  /** @type {Map<string, Field>} */
+  const fieldsByName = new Map()
+  for (const f of schema.fields) {
+    fieldsByName.set(f.name, f)
+  }
+  /** @type {PartitionSpec['fields']} */
+  const fields = []
+  let partitionFieldId = PARTITION_FIELD_ID_BASE
+  for (const pf of declaration.iceberg.fields) {
+    const sf = fieldsByName.get(pf.column)
+    if (!sf) {
+      if (pf.required) {
+        throw new Error(
+          `cache-iceberg: required partition field "${pf.column}" not found in schema`
+        )
+      }
+      continue
+    }
+    fields.push({
+      'source-id': sf.id,
+      'field-id': partitionFieldId++,
+      name: pf.column,
+      transform: /** @type {PartitionTransform} */ (pf.transform),
+    })
+  }
+  return { 'spec-id': 0, fields }
+}
+
+/**
+ * Reconcile a `ColumnSpec[]` with an existing Iceberg table schema so
+ * subsequent appends keep field IDs stable. The result is the schema to
+ * use for writes — same fields as `icebergSchemaForColumns` but with IDs
+ * re-bound to the existing table.
+ *
+ * Rules:
+ * - Existing columns keep their ID; nullability may widen
+ *   (required → optional) but not tighten.
+ * - Type changes are rejected.
+ * - New nullable columns are appended with fresh IDs beyond the current
+ *   max.
+ * - New required columns are rejected (Iceberg cannot back-fill).
+ * - Column removals are rejected (V1 is append-only).
+ *
+ * When `partitionColumns` is supplied, removals and type changes on
+ * those columns produce a more specific error identifying the partition
+ * constraint.
+ *
+ * @param {readonly ColumnSpec[]} columns
+ * @param {Schema} existing
+ * @param {Set<string>} [partitionColumns]
+ * @returns {Schema}
+ */
+export function mergeFieldIdsFromTable(columns, existing, partitionColumns) {
+  /** @type {Map<string, Field>} */
+  const existingByName = new Map()
+  /** @type {Set<string>} */
+  const seen = new Set()
+  let maxId = 0
+  for (const f of existing.fields) {
+    existingByName.set(f.name, f)
+    if (typeof f.id === 'number' && f.id > maxId) maxId = f.id
+  }
+  /** @type {Field[]} */
+  const fields = []
+  for (const column of columns) {
+    const prior = existingByName.get(column.name)
+    const want = icebergTypeForBasicType(column.type)
+    if (prior) {
+      if (prior.type !== want) {
+        const prefix = partitionColumns?.has(column.name)
+          ? 'cache-iceberg: partition column'
+          : 'cache-iceberg: column'
+        throw new Error(
+          `${prefix} "${column.name}" type changed from ${prior.type} to ${want}`
+        )
+      }
+      const required = column.nullable === false
+      if (required && prior.required === false) {
+        throw new Error(
+          `cache-iceberg: column "${column.name}" cannot tighten nullable → required`
+        )
+      }
+      fields.push({ id: prior.id, name: prior.name, required, type: prior.type })
+    } else {
+      if (column.nullable === false) {
+        throw new Error(
+          `cache-iceberg: new column "${column.name}" must be nullable (Iceberg cannot back-fill required columns)`
+        )
+      }
+      maxId += 1
+      fields.push({ id: maxId, name: column.name, required: false, type: want })
+    }
+    seen.add(column.name)
+  }
+  for (const prior of existing.fields) {
+    if (!seen.has(prior.name)) {
+      const prefix = partitionColumns?.has(prior.name)
+        ? 'cache-iceberg: partition column'
+        : 'cache-iceberg: column'
+      throw new Error(
+        `${prefix} "${prior.name}" cannot be dropped`
+      )
+    }
+  }
+  const schemaId = typeof existing['schema-id'] === 'number' ? existing['schema-id'] : 0
+  return { type: 'struct', 'schema-id': schemaId, fields }
+}
+
+/**
+ * Validate that a `CachePartitioningDeclaration` still describes the
+ * existing `PartitionSpec`. Adding, removing, or changing a partition
+ * field is partition-spec evolution and must be a deliberate migration,
+ * not an accidental side effect.
+ *
+ * @param {CachePartitioningDeclaration} declaration
+ * @param {PartitionSpec} existingSpec
+ * @param {Schema} [schema]
+ */
+export function validatePartitionSpecStability(declaration, existingSpec, schema) {
+  const expectedSpec = schema
+    ? partitionSpecForDeclaration(declaration, schema)
+    : {
+        'spec-id': existingSpec['spec-id'],
+        fields: declaration.iceberg.fields.map((field, index) => ({
+          'source-id': 0,
+          'field-id': PARTITION_FIELD_ID_BASE + index,
+          name: field.column,
+          transform: /** @type {PartitionTransform} */ (field.transform),
+        })),
+      }
+  const expectedNames = new Set(expectedSpec.fields.map(f => f.name))
+  for (const expected of expectedSpec.fields) {
+    const existing = existingSpec.fields.find(f => f.name === expected.name)
+    if (!existing) {
+      throw new Error(
+        `cache-iceberg: partition field "${expected.name}" is new — adding a partition field is spec evolution and requires an explicit migration`
+      )
+    }
+    if (existing.transform !== expected.transform) {
+      throw new Error(
+        `cache-iceberg: partition field "${expected.name}" changed transform from ${existing.transform} to ${expected.transform} — partition spec changes require an explicit migration`
+      )
+    }
+  }
+  for (const existing of existingSpec.fields) {
+    if (!expectedNames.has(existing.name)) {
+      throw new Error(
+        `cache-iceberg: partition field "${existing.name}" was removed — removing a partition field is spec evolution and requires an explicit migration`
+      )
+    }
+  }
+}
+
 /**
  * Coerce each row into the Iceberg type system. The intrinsic cache
  * is strict: a `null` for a non-nullable column is a programmer
@@ -50,6 +217,47 @@ export function rowsToIcebergRecords(columns, rows) {
     }
     return out
   })
+}
+
+/**
+ * @param {IcebergType} type
+ * @returns {ColumnSpec['type']}
+ */
+export function basicTypeForIcebergType(type) {
+  switch (type) {
+    case 'string':
+      return 'STRING'
+    case 'int':
+      return 'INT32'
+    case 'long':
+      return 'INT64'
+    case 'double':
+      return 'DOUBLE'
+    case 'boolean':
+      return 'BOOLEAN'
+    case 'timestamptz':
+    case 'timestamp':
+      return 'TIMESTAMP'
+    case 'variant':
+      return 'JSON'
+    default:
+      return 'STRING'
+  }
+}
+
+/**
+ * Build a `ColumnSpec[]` from an existing Iceberg schema, preserving
+ * field types and nullability instead of inferring from row data.
+ *
+ * @param {Schema} schema
+ * @returns {ColumnSpec[]}
+ */
+export function columnsFromIcebergSchema(schema) {
+  return schema.fields.map(f => ({
+    name: f.name,
+    type: basicTypeForIcebergType(/** @type {IcebergType} */ (f.type)),
+    nullable: !f.required,
+  }))
 }
 
 /**

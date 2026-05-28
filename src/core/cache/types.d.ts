@@ -1,10 +1,36 @@
 import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
 
 export interface PartitionCursor {
   epoch: number
   rowCount: number
   compaction: unknown | null
+  layout?: 'epoch' | 'source-table'
+  tableDir?: string
+  retention?: {
+    lastCutoffDate?: string
+    lastCutoffMs?: number
+    lastDeletedAt?: string
+    rowsDeleted?: number
+    lastSnapshotId?: string
+  }
+}
+
+export interface CachePartitioningDeclaration {
+  source: {
+    columns: string[]
+    fallback?: string
+  }
+  iceberg: {
+    fields: CachePartitionField[]
+  }
+}
+
+export interface CachePartitionField {
+  column: string
+  transform: 'identity' | 'day' | 'month' | 'year' | string
+  required?: boolean
 }
 
 export interface CachePartitionMeta {
@@ -45,6 +71,7 @@ export interface FlushResult {
   bytesWritten: number
   pendingBytes: number
   malformedCount: number
+  droppedCount: number
   reason: string
 }
 
@@ -64,6 +91,11 @@ export interface CacheSpool {
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>
   hasPendingSync(tablePath: string): boolean
+}
+
+export interface AppendOptions {
+  declaration?: CachePartitioningDeclaration
+  partitionSpec?: PartitionSpec
 }
 
 export interface MaintenanceConfig {
@@ -116,12 +148,30 @@ export interface CacheStatusPartition {
   dataFileCount: number
   metadataBytes: number
   snapshotCount: number
+  source?: string
+  deleteFileCount?: number
+  lastRetentionCutoffDate?: string
+  layout?: 'epoch' | 'source-table'
 }
 
 export interface CacheStatusReport {
   cacheRoot: string
   pendingSpoolBytes: number
   partitions: CacheStatusPartition[]
+}
+
+export interface RetentionSourceTableResult {
+  dataset: string
+  source: string
+  cutoffDate: string
+  rowsDeleted: number
+  batchCount: number
+  candidateFileCount: number
+}
+
+export interface RetentionResult {
+  evicted: Array<{ dataset: string, partition: string, rowCount: number }>
+  sourceTableResults: RetentionSourceTableResult[]
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {

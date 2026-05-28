@@ -9,7 +9,8 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitionMeta, PartitionCursor } from './types.d.ts'
+ * @import { CachePartitioningDeclaration, CachePartitionMeta, PartitionCursor } from './types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 const CURSOR_FILE = 'cursor.json'
@@ -27,11 +28,22 @@ export function readCursorSync(partitionDir) {
   try {
     const raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
     const parsed = JSON.parse(raw)
-    return {
+    /** @type {PartitionCursor} */
+    const cursor = {
       epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }
+    if (parsed.layout === 'source-table' || parsed.layout === 'epoch') {
+      cursor.layout = parsed.layout
+    }
+    if (typeof parsed.tableDir === 'string') {
+      cursor.tableDir = parsed.tableDir
+    }
+    if (parsed.retention && typeof parsed.retention === 'object') {
+      cursor.retention = parsed.retention
+    }
+    return cursor
   } catch {
     return { epoch: 0, rowCount: 0, compaction: null }
   }
@@ -48,6 +60,45 @@ export async function writeCursor(partitionDir, cursor) {
   const tmp = path.join(partitionDir, `${CURSOR_FILE}.tmp.${process.pid}.${Date.now()}`)
   await fsPromises.writeFile(tmp, JSON.stringify(cursor, null, 2), 'utf8')
   await fsPromises.rename(tmp, path.join(partitionDir, CURSOR_FILE))
+}
+
+/**
+ * Append rows into the source-table layout for the resolved
+ * partition.  Creates the partition directory, Iceberg table
+ * subdirectory, and cursor on first write.
+ *
+ * The on-disk layout is:
+ *   `<cacheRoot>/datasets/<dataset>/source=<source>/table/`
+ * with a `cursor.json` at the `source=<source>/` level carrying
+ * `layout: 'source-table'`.
+ *
+ * @param {string} cacheRoot
+ * @param {string} dataset
+ * @param {string[]} sourceSegments
+ * @param {readonly ColumnSpec[]} columns
+ * @param {Record<string, unknown>[]} rows
+ * @param {{ declaration?: CachePartitioningDeclaration }} [options]
+ * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
+ */
+export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
+  if (rows.length === 0) {
+    return { tableUrl: '', appended: false, bytesWritten: 0 }
+  }
+  const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
+  const cursor = readCursorSync(partitionDir)
+  const tableDir = cursor.tableDir ?? 'table'
+  const icebergDir = path.join(partitionDir, tableDir)
+  const declaration = options?.declaration
+  const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+  await writeCursor(partitionDir, {
+    epoch: cursor.epoch,
+    rowCount: cursor.rowCount + rows.length,
+    compaction: cursor.compaction,
+    layout: 'source-table',
+    tableDir,
+    retention: cursor.retention,
+  })
+  return result
 }
 
 /**
@@ -100,7 +151,7 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
 
   /** @param {string} dir */
   async function walk(dir) {
-    /** @type {import('node:fs').Dirent[]} */
+    /** @type {Dirent[]} */
     let entries
     try {
       entries = await fsPromises.readdir(dir, { withFileTypes: true })
@@ -142,6 +193,7 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
       if (entry.name.startsWith('epoch=')) continue
+      if (entry.name.startsWith('table')) continue
       if (entry.name === SPOOL_DIR) continue
       if (entry.name === RETIRED_DIR) continue
       await walk(path.join(dir, entry.name))
@@ -150,9 +202,11 @@ export async function discoverCachePartitions(cacheRoot, scope = {}) {
 }
 
 /**
- * Resolve the `client_name` partition key for an ai_gateway_messages
- * row using the fallback chain: client_name → conversation_source →
- * provider → "unknown".
+ * Resolve the source partition key from a row using the fallback
+ * chain: client_name → conversation_source → provider → "unknown".
+ * Used as the default source resolver for all datasets when no
+ * `CachePartitioningDeclaration` is registered. Datasets without any
+ * of these fields will be grouped under "unknown".
  *
  * @param {Record<string, unknown>} row
  * @returns {string}
@@ -201,7 +255,67 @@ export function resolvePartitionSegments(row) {
   return segments
 }
 
-/** @param {unknown} value */
+/**
+ * Sanitize a value for use as a filesystem path segment.
+ * Replaces path separators, control characters, and reserved names with
+ * safe alternatives.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function sanitizePathSegment(value) {
+  let safe = value.replace(/[\x00-\x1f/\\:*?"<>|]/g, '_')
+  if (safe === '.' || safe === '..') safe = `_${safe}_`
+  if (safe.length === 0) safe = '_empty_'
+  return safe
+}
+
+/**
+ * Resolve path segments for the source table using the dataset's
+ * declared source columns. Falls back through the column list in
+ * order, then to the declaration's fallback value.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {CachePartitioningDeclaration} declaration
+ * @returns {string[]}
+ */
+export function resolveSourceSegments(row, declaration) {
+  let source = declaration.source.fallback ?? 'unknown'
+  for (const col of declaration.source.columns) {
+    const val = nonEmpty(row[col])
+    if (val) {
+      source = val
+      break
+    }
+  }
+  return [`source=${sanitizePathSegment(source)}`]
+}
+
+/**
+ * Validate that required Iceberg partition fields are present and
+ * non-empty in a row.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {CachePartitioningDeclaration} declaration
+ * @returns {{ valid: boolean, missing: string[] }}
+ */
+export function validateIcebergPartitionFields(row, declaration) {
+  /** @type {string[]} */
+  const missing = []
+  for (const field of declaration.iceberg.fields) {
+    if (field.required && nonEmpty(row[field.column]) === undefined) {
+      missing.push(field.column)
+    }
+  }
+  return { valid: missing.length === 0, missing }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
 function nonEmpty(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
+  if (value == null) return undefined
+  if (typeof value === 'string') return value.length > 0 ? value : undefined
+  return String(value)
 }
