@@ -259,6 +259,52 @@ export async function runBackfillPlan(argv, ctx) {
   )
 }
 
+/**
+ * Run a single registered backfill provider end-to-end and return a
+ * compact result. Shares the exact scan → materialize → write → flush
+ * path (and per-provider telemetry) as `hyp backfill <provider>`, so
+ * rows imported here land in the same per-source tables as live capture.
+ *
+ * Used by the onboarding finale to import a picked client's local
+ * history right after the config is written. Unknown providers resolve
+ * to a failed result (rather than throwing) so callers can render a
+ * status line without a try/catch.
+ *
+ * @param {{
+ *   ctx: CommandRunContext,
+ *   provider: string,
+ *   dryRun: boolean,
+ *   retentionDays?: number,
+ *   since?: string,
+ *   until?: string,
+ *   devRunId?: string,
+ * }} args
+ * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>}
+ */
+export async function runBackfillProvider(args) {
+  const { ctx, provider: providerName, dryRun } = args
+  const contribution = ctx.backfills.get(providerName)
+  if (!contribution) {
+    return { ok: false, scanned: 0, rowsWritten: 0, skipped: 0 }
+  }
+  const devRunId = args.devRunId ?? ctx.env.DEV_RUN_ID ?? `bf-${randomUUID()}`
+  const result = await runProvider({
+    provider: contribution,
+    ctx,
+    devRunId,
+    retentionDays: args.retentionDays,
+    since: args.since,
+    until: args.until,
+    dryRun,
+  })
+  return {
+    ok: result.status === 'ok',
+    scanned: result.items_seen,
+    rowsWritten: result.rows_written,
+    skipped: result.rows_skipped,
+  }
+}
+
 /* ------------------------------- Internals ------------------------------- */
 
 /**

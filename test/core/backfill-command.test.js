@@ -9,6 +9,7 @@ import {
   parseRunArgv,
   resolveRetentionDays,
   runBackfill,
+  runBackfillProvider,
   selectProviders,
 } from '../../src/core/commands/backfill.js'
 import {
@@ -202,4 +203,29 @@ test('runBackfill fails with exit 1 for an unknown explicit provider', async () 
   const code = await runBackfill(['ghost'], ctx)
   assert.equal(code, 1)
   assert.ok(err.join('').includes('unknown provider'))
+})
+
+/* --------------------------- runBackfillProvider -------------------------- */
+
+test('runBackfillProvider runs one provider and returns compact counts + appends', async () => {
+  const { ctx, appended, flushed } = makeCtx()
+  const result = await runBackfillProvider({ ctx, provider: 'tester', dryRun: false })
+  assert.deepEqual(result, { ok: true, scanned: 1, rowsWritten: 1, skipped: 0 })
+  assert.equal(appended.length, 1)
+  assert.equal(flushed.length, 1)
+})
+
+test('runBackfillProvider dry-run scans without appending or flushing', async () => {
+  const { ctx, appended, flushed } = makeCtx()
+  const result = await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })
+  assert.deepEqual(result, { ok: true, scanned: 1, rowsWritten: 0, skipped: 0 })
+  assert.equal(appended.length, 0, 'dry-run must not append rows')
+  assert.equal(flushed.length, 0, 'dry-run must not flush')
+})
+
+test('runBackfillProvider reports a failed result for an unknown provider', async () => {
+  const { ctx, appended } = makeCtx()
+  const result = await runBackfillProvider({ ctx, provider: 'ghost', dryRun: false })
+  assert.deepEqual(result, { ok: false, scanned: 0, rowsWritten: 0, skipped: 0 })
+  assert.equal(appended.length, 0)
 })
