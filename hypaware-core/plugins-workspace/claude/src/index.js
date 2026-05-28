@@ -9,6 +9,7 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
+import { createClaudeBackfillProvider } from './backfill.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 
@@ -80,6 +81,18 @@ export async function activate(ctx) {
       stateFile,
       clientName: CLIENT_NAME,
       logger,
+    })
+  )
+
+  // Backfill provider: imports the same local Claude transcripts the
+  // projector reads for DAG identity, but as a standalone history
+  // import into `ai_gateway_messages` via `hyp backfill claude`.
+  ctx.backfills.register(
+    createClaudeBackfillProvider({
+      homeDir,
+      stateFile,
+      clientName: CLIENT_NAME,
+      pluginName: PLUGIN_NAME,
     })
   )
 
