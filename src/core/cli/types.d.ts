@@ -12,6 +12,10 @@ import type { createCommandRegistry } from '../registry/commands.js'
 
 export type AsyncPickPrompt = (question: WalkthroughQuestion) => Promise<string[]>
 export type AsyncRetentionPrompt = (prompt: string, defaultDays: number) => Promise<number>
+export type AsyncBackfillConsentPrompt = (args: {
+  providers: string[]
+  retentionDays: number
+}) => Promise<boolean>
 
 export type PickerSource = 'claude' | 'codex' | 'raw-anthropic' | 'raw-openai' | 'otel'
 export type PickerExport = 'keep-local' | 'local-parquet' | 'configure-later'
@@ -86,8 +90,53 @@ export interface RunPickerWalkthroughOptions {
   picks?: PickerPicks
   prompt?: AsyncPickPrompt
   retentionPrompt?: AsyncRetentionPrompt
+  /**
+   * Interactive consent prompt for the onboarding backfill step. Only
+   * consulted in interactive mode (no pre-baked `picks`); non-interactive
+   * runs (`--yes` / `--dry-run`) backfill automatically. Defaults to a
+   * yes/no confirm that defaults to yes.
+   */
+  backfillConsentPrompt?: AsyncBackfillConsentPrompt
+  /**
+   * Backfill runner the finale uses to import a picked client's local
+   * history right after config is written. Injected by `hyp init` with the
+   * kernel registries; omit to skip the backfill step entirely.
+   */
+  backfill?: PickerBackfillRunner
   /** When set, run daemon install / attach / skills / restart after writing config. */
   finale?: PickerFinaleActions
+}
+
+/**
+ * One provider's onboarding backfill outcome, surfaced in the finale
+ * summary (one entry per picked client that has a registered backfill
+ * provider). `scanned` counts source items the provider yielded;
+ * `rowsWritten` / `skipped` count materialized rows. In `dryRun` the
+ * provider scans but writes nothing, so `rowsWritten` is 0.
+ */
+export interface BackfillFinaleResult {
+  provider: string
+  dryRun: boolean
+  ok: boolean
+  scanned: number
+  rowsWritten: number
+  skipped: number
+}
+
+/**
+ * Backfill runner injected into the picker finale. `available` lists the
+ * registered provider names so the finale can intersect them with the
+ * picked clients; `run` executes one provider end-to-end and returns its
+ * finale summary entry.
+ */
+export interface PickerBackfillRunner {
+  available: string[]
+  run(args: {
+    provider: string
+    dryRun: boolean
+    retentionDays: number
+    until: string
+  }): Promise<BackfillFinaleResult>
 }
 
 export interface FinaleSummary {
@@ -106,6 +155,8 @@ export interface FinaleSummary {
   attach: { client: 'claude' | 'codex'; dryRun: boolean; ok: boolean }[]
   skillsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
+  /** Per-provider onboarding backfill outcomes (empty when none ran). */
+  backfill: BackfillFinaleResult[]
 }
 
 export interface PickerWalkthroughResult {
