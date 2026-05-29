@@ -10,7 +10,8 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
-import { multiselect, text, PromptCancelledError } from './tui/index.js'
+import { multiselect, text, confirm } from './tui/index.js'
+import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
 
 /**
@@ -29,8 +30,11 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
  * @import {
+ *   AsyncBackfillConsentPrompt,
  *   AsyncPickPrompt,
  *   AsyncRetentionPrompt,
+ *   BackfillFinaleResult,
+ *   PickerBackfillRunner,
  *   PickerSource,
  *   PickerExport,
  *   PickerPicks,
@@ -481,6 +485,65 @@ function defaultRetentionPromptFactory(opts) {
 }
 
 /**
+ * Build the interactive backfill-consent prompt. Routes to the TUI
+ * yes/no confirm on a real TTY, else a legacy readline yes/no. Both
+ * default to yes so a bare enter opts in — the bead's "default backfill
+ * to enabled, but let the user choose no".
+ *
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
+ * @returns {AsyncBackfillConsentPrompt}
+ */
+function defaultBackfillConsentPromptFactory(opts) {
+  if (shouldUseTui(opts)) return tuiBackfillConsentPromptFactory(opts)
+  return legacyBackfillConsentPromptFactory(opts)
+}
+
+/**
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
+ * @returns {AsyncBackfillConsentPrompt}
+ */
+function tuiBackfillConsentPromptFactory(opts) {
+  return async function ({ providers, retentionDays }) {
+    return confirm({
+      title: backfillConsentTitle(providers, retentionDays),
+      default: true,
+      stdin: opts.stdin ?? process.stdin,
+      stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
+      env: opts.env,
+    })
+  }
+}
+
+/**
+ * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
+ * @returns {AsyncBackfillConsentPrompt}
+ */
+function legacyBackfillConsentPromptFactory(opts) {
+  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
+  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
+  return async function ({ providers, retentionDays }) {
+    const rl = readline.createInterface({ input, output, terminal: false })
+    try {
+      const answer = await rl.question(`${backfillConsentTitle(providers, retentionDays)} [Y/n]: `)
+      const trimmed = answer.trim().toLowerCase()
+      // Default yes: only an explicit no opts out.
+      return !(trimmed === 'n' || trimmed === 'no')
+    } finally {
+      rl.close()
+    }
+  }
+}
+
+/**
+ * @param {string[]} providers
+ * @param {number} retentionDays
+ * @returns {string}
+ */
+function backfillConsentTitle(providers, retentionDays) {
+  return `Import local ${providers.join(', ')} history now (last ${retentionDays} days)?`
+}
+
+/**
  * Phase 5 picker source contributions. These are the user-facing
  * inputs for the V1 npx first-run flow. Each value maps to a plugin
  * composition rule in `composePickerConfig` — they are NOT tied to
@@ -613,7 +676,7 @@ export async function runPickerWalkthrough(opts) {
       const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
       picks = { sources, exportChoice, retentionDays }
     } catch (err) {
-      if (err instanceof PromptCancelledError) {
+      if (isPromptCancelledError(err)) {
         return await cancelledResult(opts)
       }
       throw err
@@ -681,8 +744,19 @@ export async function runPickerWalkthrough(opts) {
       env,
       stdout,
       stderr: opts.stderr,
+      retentionDays: picks.retentionDays,
+      // Interactive mode is the absence of pre-baked picks: only then do
+      // we prompt for backfill consent. `--yes` / `--dry-run` carry picks
+      // and backfill runs automatically.
+      interactive: !opts.picks,
+      ...(opts.stdin ? { stdin: opts.stdin } : {}),
+      ...(opts.backfill ? { backfill: opts.backfill } : {}),
+      ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
     })
   }
+
+  const cancelled = finaleSummary?.cancelled === true
+  const exitCode = cancelled ? WALKTHROUGH_CANCEL_EXIT_CODE : 0
 
   await withSpan(
     'walkthrough.finish',
@@ -694,11 +768,14 @@ export async function runPickerWalkthrough(opts) {
       clients_picked: clientsPicked.length,
       retention_days: picks.retentionDays,
       config_path: configPath,
-      status: 'ok',
+      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
+      status: cancelled ? 'cancelled' : 'ok',
     },
     async () => {},
     { component: 'walkthrough' }
   )
+
+  if (cancelled) writeCancelledNotice(opts.stderr)
 
   stdout.write('\n')
   stdout.write(`✓ Wrote ${configPath}\n`)
@@ -724,7 +801,7 @@ export async function runPickerWalkthrough(opts) {
   stdout.write(`next: hyp query sql 'select count(*) from logs'\n`)
 
   return {
-    exitCode: 0,
+    exitCode,
     configPath,
     config,
     sourcesPicked: picks.sources,
@@ -854,6 +931,11 @@ export function composePickerConfig(args) {
  *   env: NodeJS.ProcessEnv,
  *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   retentionDays: number,
+ *   interactive: boolean,
+ *   stdin?: NodeJS.ReadableStream,
+ *   backfill?: PickerBackfillRunner,
+ *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
@@ -862,6 +944,11 @@ async function runPickerFinale(args) {
   const dryRun = finale.dryRun === true
   const homeDir = env.HOME ?? ''
 
+  // The attach/start cutoff: backfill imports history strictly before
+  // this instant so it never overlaps with live gateway capture, which
+  // takes over once clients are attached and the daemon (re)starts below.
+  const backfillUntil = new Date().toISOString()
+
   /** @type {FinaleSummary} */
   const summary = {
     daemonInstall: { skipped: !!finale.skipDaemon, dryRun },
@@ -869,6 +956,7 @@ async function runPickerFinale(args) {
     attach: [],
     skillsInstalled: [],
     daemonRestart: { skipped: true, dryRun, ok: false },
+    backfill: [],
   }
 
   if (!finale.skipDaemon) {
@@ -1002,6 +1090,26 @@ async function runPickerFinale(args) {
     )
   }
 
+  // Backfill: import each picked client's local history after the config
+  // write and before the daemon (re)start that resumes live capture.
+  // Runs independent of the daemon — `--no-daemon` still backfills, since
+  // it is a local file import — and is bounded by the retention window and
+  // the `backfillUntil` cutoff so it never double-counts live rows.
+  await runFinaleBackfill({
+    ...(args.backfill ? { backfill: args.backfill } : {}),
+    ...(args.backfillConsentPrompt ? { backfillConsentPrompt: args.backfillConsentPrompt } : {}),
+    clientsPicked,
+    interactive: args.interactive,
+    dryRun,
+    retentionDays: args.retentionDays,
+    until: backfillUntil,
+    ...(args.stdin ? { stdin: args.stdin } : {}),
+    stdout,
+    stderr,
+    env,
+    summary,
+  })
+
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     try {
       const { restartServiceDaemon } = await import('../daemon/install.js')
@@ -1018,6 +1126,113 @@ async function runPickerFinale(args) {
   }
 
   return summary
+}
+
+/**
+ * Run the onboarding backfill step. For each picked client that has a
+ * registered backfill provider (intersection of `clientsPicked` and
+ * `backfill.available`), import its local history into the query cache.
+ *
+ * Consent rules mirror the bead contract:
+ *   - interactive (no pre-baked picks): prompt, defaulting to yes;
+ *   - `--yes` / `--dry-run` (picks supplied): run automatically;
+ *   - `--dry-run`: scan and report a plan but write nothing;
+ *   - `--no-daemon`: still backfill — it is a local file import.
+ *
+ * Each provider's outcome is pushed onto `summary.backfill` and a
+ * one-line status is written to stdout. Wrapped in a `walkthrough.backfill`
+ * span so the step is observable even when no provider runs.
+ *
+ * @param {{
+ *   backfill?: PickerBackfillRunner,
+ *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
+ *   clientsPicked: ('claude'|'codex')[],
+ *   interactive: boolean,
+ *   dryRun: boolean,
+ *   retentionDays: number,
+ *   until: string,
+ *   stdin?: NodeJS.ReadableStream,
+ *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   env: NodeJS.ProcessEnv,
+ *   summary: FinaleSummary,
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function runFinaleBackfill(args) {
+  const { backfill, clientsPicked, interactive, dryRun, retentionDays, until, stdout, stderr, env, summary } = args
+  if (!backfill) return
+  const available = new Set(backfill.available)
+  const providers = clientsPicked.filter((c) => available.has(c))
+  if (providers.length === 0) return
+
+  let consent = true
+  let cancelled = false
+  if (interactive) {
+    const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
+      ...(args.stdin ? { stdin: args.stdin } : {}),
+      stdout,
+      env,
+    })
+    try {
+      consent = await ask({ providers, retentionDays })
+    } catch (err) {
+      if (!isPromptCancelledError(err)) throw err
+      cancelled = true
+      consent = false
+      summary.cancelled = true
+    }
+  }
+
+  await withSpan(
+    'walkthrough.backfill',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.backfill',
+      provider_count: providers.length,
+      providers: providers.join(','),
+      dry_run: dryRun,
+      interactive,
+      consent,
+      consent_cancelled: cancelled,
+      retention_days: retentionDays,
+      until,
+      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
+      status: cancelled ? 'cancelled' : 'ok',
+    },
+    async (span) => {
+      if (!consent) {
+        stdout.write(cancelled ? 'backfill: skipped (cancelled)\n' : 'backfill: skipped (declined)\n')
+        return
+      }
+      // Guard each provider so one failure neither aborts sibling
+      // providers nor the daemon (re)start that resumes live capture —
+      // matching the attach/restart resilience above.
+      for (const provider of providers) {
+        try {
+          const entry = await backfill.run({ provider, dryRun, retentionDays, until })
+          summary.backfill.push(entry)
+          const tag = entry.dryRun ? '(dry-run) ' : ''
+          stdout.write(
+            `${tag}backfill ${entry.provider}: ${entry.ok ? 'ok' : 'failed'} ` +
+            `(scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})\n`
+          )
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          stderr.write(`backfill ${provider} failed: ${message}\n`)
+          summary.backfill.push({ provider, dryRun, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 })
+        }
+      }
+      if (span && typeof span.setAttribute === 'function') {
+        span.setAttribute('providers_run', summary.backfill.length)
+        span.setAttribute(
+          'rows_written',
+          summary.backfill.reduce((acc, r) => acc + r.rowsWritten, 0)
+        )
+      }
+    },
+    { component: 'walkthrough' }
+  )
 }
 
 /**
@@ -1122,11 +1337,7 @@ async function cancelledResult(opts) {
     async () => {},
     { component: 'walkthrough' }
   )
-  try {
-    opts.stderr.write('hyp init: cancelled\n')
-  } catch {
-    // best-effort: stderr might be closed during cleanup
-  }
+  writeCancelledNotice(opts.stderr)
   return {
     exitCode: WALKTHROUGH_CANCEL_EXIT_CODE,
     configPath: '',
@@ -1139,6 +1350,17 @@ async function cancelledResult(opts) {
     exportPicked: 'keep-local',
     clientsPicked: [],
     retentionDays: DEFAULT_RETENTION_DAYS,
+  }
+}
+
+/**
+ * @param {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
+ */
+function writeCancelledNotice(stderr) {
+  try {
+    stderr.write('hyp init: cancelled\n')
+  } catch {
+    // best-effort: stderr might be closed during cleanup
   }
 }
 

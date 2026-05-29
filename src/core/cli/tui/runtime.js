@@ -183,3 +183,16 @@ export class PromptCancelledError extends Error {
     this.name = 'PromptCancelledError'
   }
 }
+
+/**
+ * Identify prompt cancellation across direct runtime errors and wrapped
+ * copies that preserve the established error name.
+ *
+ * @param {unknown} err
+ * @returns {err is PromptCancelledError}
+ */
+export function isPromptCancelledError(err) {
+  return err instanceof PromptCancelledError || (
+    err instanceof Error && err.name === 'PromptCancelledError'
+  )
+}

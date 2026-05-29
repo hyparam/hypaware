@@ -16,6 +16,7 @@ import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { executeQuerySql } from '../query/sql.js'
+import { runBackfill, runBackfillList, runBackfillPlan, runBackfillProvider } from '../commands/backfill.js'
 import {
   installPlugin,
   listInstalledPlugins,
@@ -37,7 +38,7 @@ import {
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
- * @import { CommandRegistryExtended, InitFlags } from './types.d.ts'
+ * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner } from './types.d.ts'
  */
 
 /**
@@ -103,6 +104,24 @@ function buildCoreCommands() {
       summary: 'Run cache maintenance (legacy migration, snapshot expiration, compaction)',
       usage: 'hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]',
       run: runQueryMaintain,
+    },
+    {
+      name: 'backfill',
+      summary: 'Import client history from registered backfill providers',
+      usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
+      run: runBackfill,
+    },
+    {
+      name: 'backfill list',
+      summary: 'List registered backfill providers',
+      usage: 'hyp backfill list [--json]',
+      run: runBackfillList,
+    },
+    {
+      name: 'backfill plan',
+      summary: 'Show what each backfill provider would scan without writing rows',
+      usage: 'hyp backfill plan [provider...] [--retention-days <n>] [--json]',
+      run: runBackfillPlan,
     },
     {
       name: 'collect',
@@ -2028,6 +2047,34 @@ async function runSinkMaintain(argv, ctx) {
 /* ---------- misc ---------- */
 
 /**
+ * Build the onboarding backfill runner the picker finale uses to import
+ * a picked client's local history right after writing config. Wraps the
+ * shared `runBackfillProvider` path so finale-imported rows land in the
+ * exact same per-source tables as `hyp backfill <provider>` and live
+ * capture. `available` lists registered provider names so the finale can
+ * intersect them with the picked clients.
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {PickerBackfillRunner}
+ */
+function buildPickerBackfillRunner(ctx) {
+  return {
+    available: ctx.backfills.list().map((p) => p.name),
+    async run({ provider, dryRun, retentionDays, until }) {
+      const result = await runBackfillProvider({ ctx, provider, dryRun, retentionDays, until })
+      return {
+        provider,
+        dryRun,
+        ok: result.ok,
+        scanned: result.scanned,
+        rowsWritten: result.rowsWritten,
+        skipped: result.skipped,
+      }
+    },
+  }
+}
+
+/**
  * `hyp init [preset]`
  *
  * Without arguments runs the interactive walkthrough (TTY only — when
@@ -2083,6 +2130,7 @@ async function runInit(argv, ctx) {
         stdout: ctx.stdout,
         stderr: ctx.stderr,
         env: ctx.env,
+        backfill: buildPickerBackfillRunner(ctx),
         finale: {},
       })
       return result.exitCode
@@ -2271,6 +2319,7 @@ async function runPickerInit(flags, ctx) {
       exportChoice,
       retentionDays: flags.retentionDays,
     },
+    backfill: buildPickerBackfillRunner(ctx),
     finale: {
       skipDaemon: flags.noDaemon,
       dryRun: flags.dryRun,

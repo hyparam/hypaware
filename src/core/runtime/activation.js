@@ -8,12 +8,13 @@ import { createConfigRegistry } from '../config/schema.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createQueryRegistry } from '../registry/datasets.js'
+import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../registry/backfills.js'
 import { createSinkRegistry } from '../registry/sinks.js'
 import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
 /**
- * @import { ActivePlugin, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { KernelRuntime } from './activation.d.ts'
  */
@@ -35,6 +36,8 @@ import { createQueryStorageService } from '../cache/storage.js'
  *   queryRegistry?: QueryRegistry,
  *   sourceRegistry?: ReturnType<typeof createSourceRegistry>,
  *   sinkRegistry?: ReturnType<typeof createSinkRegistry>,
+ *   backfillRegistry?: BackfillRegistry,
+ *   backfillMaterializerRegistry?: BackfillMaterializerRegistry,
  *   storage?: ExtendedQueryStorageService,
  *   cacheRoot?: string,
  * }} [opts]
@@ -58,6 +61,8 @@ export function createKernelRuntime(opts = {}) {
     cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
     initPresets: createInitPresetRegistry(),
+    backfills: opts.backfillRegistry ?? createBackfillRegistry(),
+    backfillMaterializers: opts.backfillMaterializerRegistry ?? createBackfillMaterializerRegistry(),
     activationContexts: new Map(),
   }
 }
@@ -109,6 +114,8 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     storage: runtime.storage,
     skills: runtime.skills,
     initPresets: runtime.initPresets,
+    backfills: runtime.backfills,
+    backfillMaterializers: runtime.backfillMaterializers,
     /**
      * @template T
      * @param {CapabilityName} name
