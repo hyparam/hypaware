@@ -7,7 +7,7 @@ import { discoverCachePartitions } from '../../../../src/core/cache/partition.js
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializerContribution, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
  * @import { AsyncDataSource } from 'squirreling'
  */
@@ -236,25 +236,175 @@ export function aiGatewayDatasetRegistration() {
  * `ai_gateway_messages` rows through `aiGatewayRowsFromProjectedExchange`
  * — the exact expansion the live gateway recorder uses — so backfilled
  * and live-captured rows are byte-identical for the same projection.
- * The materializer is pure with respect to `item.value`: it allocates a
+ * Row expansion is pure with respect to `item.value`: it allocates a
  * fresh conversation state per call, so reruns and out-of-order items
- * produce identical row identity.
+ * produce identical row identity (`part_id = <message_id>#<part_index>`).
+ *
+ * On top of that pure expansion the materializer applies a narrow
+ * PRE-WRITE dedupe: before a batch is handed back to the runner for
+ * `appendRows`, any row whose `part_id` already exists in the dataset is
+ * skipped. This is the PRIMARY rerun guarantee — rerunning a backfill
+ * re-materializes byte-identical rows, and without this guard each rerun
+ * would re-append them and lean on cache-maintenance compaction to
+ * collapse the duplicates later. Compaction's content-hash dedupe
+ * (`_hyp_cache_row_id`) stays a backup layer, not the thing correctness
+ * depends on. The dedupe is best-effort with respect to storage: when
+ * `ctx.storage` does not expose the partition-read surface (a bare test
+ * stub), every materialized row passes through unchanged.
  *
  * @returns {BackfillMaterializerContribution}
  */
 export function aiGatewayBackfillMaterializer() {
+  // The materializer instance is created once at plugin activation and
+  // reused for every `hyp backfill` invocation in the process, so the
+  // dedupe state is scoped per run id (see createBackfillDedupe).
+  const dedupe = createBackfillDedupe()
   return {
     kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
     dataset: DATASET_NAME,
     plugin: PLUGIN_NAME,
-    materialize(item) {
+    /**
+     * @param {BackfillItem} item
+     * @param {BackfillMaterializeContext} [ctx]
+     * @returns {Promise<Record<string, unknown>[]>}
+     */
+    async materialize(item, ctx) {
       const projection = asProjectedExchange(item.value)
       if (!projection) return []
-      return aiGatewayRowsFromProjectedExchange(projection, {
+      const rows = aiGatewayRowsFromProjectedExchange(projection, {
         gatewayAttributes: backfillGatewayAttributes(item),
       })
+      return dedupe.skipExisting(rows, ctx)
     },
   }
+}
+
+/**
+ * Build the per-run pre-write dedupe used by the backfill materializer.
+ *
+ * The seen-`part_id` set is rebuilt whenever `ctx.devRunId` changes: all
+ * items in one backfill run share a single scan of the already-committed
+ * partitions, and every emitted batch folds its own keys back in so two
+ * items in the same run that resolve to the same `part_id` (transitional
+ * fixtures, fallback-id collisions, a re-yielded conversation) also
+ * dedupe against each other. A later run carries a fresh run id, so it
+ * re-scans and observes the prior run's now-committed rows — which is
+ * what makes a clean rerun write zero new rows.
+ *
+ * Reads see only committed (flushed) partitions, so a run interrupted
+ * before its end-of-run flush leaves rows in the durable spool that the
+ * next run's scan cannot see; compaction's content-hash dedupe is the
+ * documented backup for that residual window.
+ *
+ * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
+ */
+function createBackfillDedupe() {
+  /** @type {{ runId: string | undefined, seen: Set<string> } | undefined} */
+  let memo
+
+  return {
+    async skipExisting(rows, ctx) {
+      const storage = ctx?.storage
+      // Feature-detect the committed-partition read surface. A bare
+      // storage stub (unit tests that only assert row shape) has neither
+      // method, so dedupe is skipped and every row passes through.
+      if (rows.length === 0 || !canScanExistingRows(storage)) return rows
+
+      const runId = ctx?.devRunId
+      if (!memo || memo.runId !== runId) {
+        memo = { runId, seen: await scanExistingPartIds(storage) }
+      }
+      const seen = memo.seen
+
+      /** @type {Record<string, unknown>[]} */
+      const fresh = []
+      for (const row of rows) {
+        const key = partIdKey(row)
+        if (key === undefined) {
+          // No usable identity to dedupe on — never drop the row.
+          fresh.push(row)
+          continue
+        }
+        if (seen.has(key)) continue
+        seen.add(key)
+        fresh.push(row)
+      }
+      return fresh
+    },
+  }
+}
+
+/**
+ * @param {QueryStorageService | undefined} storage
+ * @returns {storage is QueryStorageService}
+ */
+function canScanExistingRows(storage) {
+  return !!storage &&
+    typeof storage.discoverCachePartitions === 'function' &&
+    typeof storage.readRows === 'function'
+}
+
+/**
+ * Scan every committed `ai_gateway_messages` partition and collect the
+ * set of `part_id`s already present. Reads are projected to the three
+ * identity columns so the scan stays cheap, and every failure mode
+ * (unreadable partition, missing table) degrades to "not seen" rather
+ * than aborting the backfill — a dedupe miss only risks a duplicate that
+ * compaction will later collapse, whereas throwing would drop real rows.
+ *
+ * @param {QueryStorageService} storage
+ * @returns {Promise<Set<string>>}
+ */
+async function scanExistingPartIds(storage) {
+  /** @type {Set<string>} */
+  const seen = new Set()
+  /** @type {CachePartitionMeta[]} */
+  let partitions = []
+  try {
+    partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+  } catch {
+    return seen
+  }
+  for (const part of partitions ?? []) {
+    const tablePath = part?.path
+    if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
+    try {
+      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])) {
+        const key = partIdKey(row)
+        if (key !== undefined) seen.add(key)
+      }
+    } catch {
+      // Skip an unreadable partition; other partitions still contribute.
+      continue
+    }
+  }
+  return seen
+}
+
+/**
+ * Resolve a row's dedupe key. Prefers the deterministic `part_id` the
+ * row expansion stamps (`<message_id>#<part_index>`); for transitional
+ * fixtures that predate `part_id` it falls back to recomposing that same
+ * key from `message_id` + `part_index`, so a backfilled row and a row
+ * read back from storage compare equal regardless of which path filled
+ * `part_id`. Returns `undefined` when neither identity is available.
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {string | undefined}
+ */
+function partIdKey(row) {
+  const partId = row.part_id
+  if (typeof partId === 'string' && partId.length > 0) return partId
+  const messageId = row.message_id
+  const partIndex = row.part_index
+  if (
+    typeof messageId === 'string' &&
+    messageId.length > 0 &&
+    (typeof partIndex === 'number' || typeof partIndex === 'bigint')
+  ) {
+    return `${messageId}#${partIndex}`
+  }
+  return undefined
 }
 
 /**
