@@ -104,24 +104,40 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  * Build a minimal `CommandRunContext` stub plus spies for the storage
  * writes the runner performs. Only the fields `runBackfill` touches are
  * provided; the double-cast keeps the stub focused.
+ *
+ * @param {{
+ *   item?: { dataset: string, kind: string, value: Record<string, unknown> },
+ *   registerMaterializer?: boolean,
+ *   materializerDataset?: string,
+ *   materializeRows?: Record<string, unknown>[],
+ *   registeredDatasets?: string[],
+ * }} [options]
  */
-function makeCtx() {
+function makeCtx(options = {}) {
+  const item = options.item ?? { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
+  const registerMaterializer = options.registerMaterializer ?? true
+  const materializerDataset = options.materializerDataset ?? item.dataset
+  const materializeRows = options.materializeRows ?? [{ a: 1 }]
+  const registeredDatasets = new Set(options.registeredDatasets ?? ['ds'])
+
   const backfills = createBackfillRegistry()
   backfills.register({
     name: 'tester',
     plugin: '@test/plugin',
-    datasets: ['ds'],
+    datasets: [item.dataset],
     async *run() {
-      yield { dataset: 'ds', kind: 'test.kind', value: { x: 1 } }
+      yield item
     },
   })
   const backfillMaterializers = createBackfillMaterializerRegistry()
-  backfillMaterializers.register({
-    kind: 'test.kind',
-    dataset: 'ds',
-    plugin: '@test/plugin',
-    materialize() { return [{ a: 1 }] },
-  })
+  if (registerMaterializer) {
+    backfillMaterializers.register({
+      kind: item.kind,
+      dataset: materializerDataset,
+      plugin: '@test/plugin',
+      materialize() { return materializeRows },
+    })
+  }
 
   /** @type {Array<{ tablePath: string, rows: Record<string, unknown>[] }>} */
   const appended = []
@@ -139,9 +155,9 @@ function makeCtx() {
   const query = {
     /** @param {string} name */
     getDataset(name) {
-      if (name !== 'ds') return undefined
+      if (!registeredDatasets.has(name)) return undefined
       return {
-        name: 'ds',
+        name,
         plugin: '@test/plugin',
         schema: { columns: [{ name: 'a', type: 'INT32', nullable: true }] },
         discoverPartitions() { return [] },
@@ -197,6 +213,35 @@ test('runBackfill --json reports per-provider counts', async () => {
   assert.equal(payload.providers[0].status, 'ok')
   assert.equal(payload.providers[0].rows_written, 1)
 })
+
+for (const scenario of [
+  {
+    name: 'materializer_missing',
+    options: { registerMaterializer: false },
+  },
+  {
+    name: 'dataset_mismatch',
+    options: { materializerDataset: 'other_ds' },
+  },
+  {
+    name: 'dataset_not_registered',
+    options: {
+      item: { dataset: 'missing_ds', kind: 'test.kind', value: { x: 1 } },
+      materializerDataset: 'missing_ds',
+      registeredDatasets: [],
+    },
+  },
+]) {
+  test(`runBackfill --json marks provider failed for ${scenario.name}`, async () => {
+    const { ctx, out } = makeCtx(scenario.options)
+    const code = await runBackfill(['tester', '--json'], ctx)
+    assert.notEqual(code, 0)
+    const payload = JSON.parse(out.join(''))
+    assert.equal(payload.providers.length, 1)
+    assert.equal(payload.providers[0].provider, 'tester')
+    assert.equal(payload.providers[0].status, 'failed')
+  })
+}
 
 test('runBackfill fails with exit 1 for an unknown explicit provider', async () => {
   const { ctx, err } = makeCtx()
