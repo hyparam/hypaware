@@ -48,13 +48,10 @@ export async function executeQuerySql(args) {
       try {
         const trimmed = query.trim()
         if (trimmed.length === 0) throw new Error('SQL query is required')
-        let statement
-        try {
-          statement = parseSql({ query: trimmed })
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          throw new Error(`SQL must be a single read-only SELECT statement: ${message}`)
-        }
+        // squirreling only parses read-only SELECTs, so its own error message
+        // already points at the real problem (syntax error, unknown function,
+        // non-SELECT statement). Surface it verbatim rather than wrapping it.
+        const statement = parseSql({ query: trimmed })
 
         const tableNames = uniqueStrings(extractTables(statement))
         span.setAttribute('table_count', tableNames.length)
