@@ -232,7 +232,11 @@ test('picked clients without a registered backfill provider are skipped', async 
   const env = await tmpEnv('hypaware-bf-noprovider-')
   const stdout = makeBuf()
   const stderr = makeBuf()
-  // Only `claude` is a registered provider, but the user picks codex.
+  // The injected runner advertises only `claude`, so a codex pick has no
+  // matching provider: the finale intersects picks with the runner's
+  // `available` set and skips the rest. (In production both claude and
+  // codex are registered — see the all-available boot test in
+  // boot-installed.test.js — this exercises the empty-intersection path.)
   const backfill = makeBackfill(['claude'])
 
   const result = await runPickerWalkthrough({
@@ -299,4 +303,141 @@ test('the finale runs no backfill when no backfill runner is injected', async ()
 
   assert.equal(result.exitCode, 0)
   assert.deepEqual(result.finale?.backfill, [])
+})
+
+test('onboarding with codex selected runs the backfill step and records stats', async () => {
+  const env = await tmpEnv('hypaware-bf-codex-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['codex'], {
+    codex: { provider: 'codex', dryRun: false, ok: true, scanned: 4, rowsWritten: 6, skipped: 2 },
+  })
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    picks: { sources: ['codex'], exportChoice: 'keep-local', retentionDays: 14 },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  assert.equal(result.exitCode, 0)
+  // The finale invoked the runner exactly once, for the codex provider,
+  // bounded by the selected retention window and a valid ISO cutoff.
+  assert.equal(backfill.calls.length, 1)
+  assert.equal(backfill.calls[0].provider, 'codex')
+  assert.equal(backfill.calls[0].dryRun, false)
+  assert.equal(backfill.calls[0].retentionDays, 14)
+  assert.ok(
+    typeof backfill.calls[0].until === 'string' && !Number.isNaN(Date.parse(backfill.calls[0].until)),
+    'until must be a valid ISO timestamp (the attach/start cutoff)'
+  )
+  // Finale summary carries the per-provider codex backfill stats.
+  assert.deepEqual(result.finale?.backfill, [
+    { provider: 'codex', dryRun: false, ok: true, scanned: 4, rowsWritten: 6, skipped: 2 },
+  ])
+  assert.match(stdout.text(), /backfill codex: ok \(scanned 4, wrote 6, skipped 2\)/)
+})
+
+test('onboarding with both claude and codex selected runs both providers', async () => {
+  const env = await tmpEnv('hypaware-bf-both-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude', 'codex'], {
+    claude: { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 0 },
+    codex: { provider: 'codex', dryRun: false, ok: true, scanned: 2, rowsWritten: 4, skipped: 1 },
+  })
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    picks: { sources: ['claude', 'codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  assert.equal(result.exitCode, 0)
+  // Both providers ran, in the deterministic [claude, codex] pick order.
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['claude', 'codex'])
+  assert.deepEqual(result.finale?.backfill, [
+    { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 0 },
+    { provider: 'codex', dryRun: false, ok: true, scanned: 2, rowsWritten: 4, skipped: 1 },
+  ])
+  assert.match(stdout.text(), /backfill claude: ok/)
+  assert.match(stdout.text(), /backfill codex: ok/)
+})
+
+test('interactive onboarding prompts codex backfill consent and runs it on yes', async () => {
+  const env = await tmpEnv('hypaware-bf-codex-interactive-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['codex'])
+  /** @type {Array<{ providers: string[], retentionDays: number }>} */
+  const consentCalls = []
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    // No `picks` ⇒ interactive: the source resolver picks codex.
+    prompt: async (q) => (q.pickType === 'sources' ? ['codex'] : ['keep-local']),
+    retentionPrompt: async () => 30,
+    backfillConsentPrompt: async (args) => {
+      consentCalls.push(args)
+      return true
+    },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.clientsPicked, ['codex'])
+  assert.equal(consentCalls.length, 1, 'interactive mode prompts for codex backfill consent')
+  assert.deepEqual(consentCalls[0].providers, ['codex'])
+  assert.equal(backfill.calls.length, 1)
+  assert.equal(backfill.calls[0].provider, 'codex')
+})
+
+test('a failing provider does not abort the other selected providers', async () => {
+  const env = await tmpEnv('hypaware-bf-isolate-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  /** @type {string[]} */
+  const ran = []
+  // claude throws; codex must still run and be recorded as ok. The failing
+  // provider sits first in pick order, so this proves the loop continues
+  // past a failure rather than short-circuiting the finale.
+  const backfill = {
+    available: ['claude', 'codex'],
+    /** @param {{ provider: string, dryRun: boolean }} args */
+    async run(args) {
+      ran.push(args.provider)
+      if (args.provider === 'claude') throw new Error('claude boom')
+      return { provider: args.provider, dryRun: args.dryRun, ok: true, scanned: 1, rowsWritten: 1, skipped: 0 }
+    },
+  }
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    picks: { sources: ['claude', 'codex'], exportChoice: 'keep-local', retentionDays: 30 },
+    backfill,
+    finale: { skipDaemon: true },
+  })
+
+  assert.equal(result.exitCode, 0)
+  // The failing provider did not short-circuit the loop: codex still ran.
+  assert.deepEqual(ran, ['claude', 'codex'])
+  assert.deepEqual(result.finale?.backfill, [
+    { provider: 'claude', dryRun: false, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 },
+    { provider: 'codex', dryRun: false, ok: true, scanned: 1, rowsWritten: 1, skipped: 0 },
+  ])
+  assert.match(stderr.text(), /backfill claude failed: claude boom/)
 })

@@ -437,6 +437,42 @@ test('mergeInstalledManifestsIntoKnown does not override first-party metadata', 
   assert.deepEqual(after, originalProvides)
 })
 
+test('the all-available boot (hyp init profile) registers bundled backfill providers including codex', async () => {
+  // `hyp init` boots with bootProfile=all-available, which activates the
+  // real bundled plugin surface. The picker finale's onboarding backfill
+  // step reads ctx.backfills.list(); codex must appear there so a codex
+  // pick actually imports local history during onboarding (bead 4 provider
+  // + bead 5 onboarding integration). This is the real-wiring counterpart
+  // to the mocked runner tests in walkthrough-backfill.test.js.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-backfill-providers-'))
+  let boot
+  try {
+    boot = await bootKernel({
+      hypHome,
+      mode: 'init',
+      runId: 'test-backfill-providers',
+      bootProfile: 'all-available',
+      // Real bundled workspace (no workspaceDir override) so the actual
+      // @hypaware/codex and @hypaware/claude plugins activate.
+      env: { ...process.env, HOME: hypHome, HYP_HOME: hypHome },
+    })
+    const providerNames = boot.runtime.backfills.list().map((p) => p.name).sort()
+    assert.ok(
+      providerNames.includes('codex'),
+      `expected a codex backfill provider, got: ${providerNames.join(', ') || '(none)'}`
+    )
+    assert.ok(
+      providerNames.includes('claude'),
+      `expected a claude backfill provider, got: ${providerNames.join(', ') || '(none)'}`
+    )
+  } finally {
+    // Activation only registers contributions, but stop defensively in
+    // case a bundled plugin started anything, then remove the temp home.
+    await boot?.runtime?.sources?.stopAll?.()
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('validateConfig does not flag installed plugin names as plugin_unknown', async () => {
   const knownPlugins = mergeInstalledManifestsIntoKnown([
     {
