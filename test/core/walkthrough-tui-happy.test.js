@@ -86,7 +86,8 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     await settle()
     await feed(io.stdin, ['\x1b[B', '\x1b[B', ' ', '\r'])
 
-    // Exports prompt — empty selection falls through to keep-local.
+    // Exports prompt — local-parquet is pre-checked by default, so a bare
+    // enter accepts it (matches the documented `--yes` default).
     await settle()
     await feed(io.stdin, ['\r'])
 
@@ -97,16 +98,17 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     const result = await promise
     assert.equal(result.exitCode, 0)
     assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
-    assert.equal(result.exportPicked, 'keep-local')
+    assert.equal(result.exportPicked, 'local-parquet')
     assert.equal(result.retentionDays, 30)
     assert.deepEqual(result.clientsPicked, [])
 
-    // The config file landed at HYP_HOME and contains the expected sink
-    // shape (none configured for keep-local).
+    // The config file landed at HYP_HOME and carries the local-parquet
+    // sink that the default export pre-check produced.
     const configRaw = await fs.readFile(result.configPath, 'utf8')
     const config = JSON.parse(configRaw)
     assert.equal(config.version, 2)
-    assert.equal(config.sinks, undefined)
+    assert.equal(config.sinks?.local?.destination, '@hypaware/local-fs')
+    assert.equal(config.sinks?.local?.writer, '@hypaware/format-parquet')
     // Wire-through evidence: the TUI rendered the source list at least once.
     assert.match(io.output(), /capture raw Anthropic API traffic/)
   } finally {

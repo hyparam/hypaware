@@ -11,6 +11,7 @@ import { diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   defaultLogDir,
   platformIsSupported,
@@ -573,27 +574,11 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
   }
 }
 
-/**
- * Resolve the absolute settings-file path for a client. The manifest
- * `settings_file` is relative to `$HOME` (e.g. `.codex/config.toml`).
- * Client-specific env overrides like `CODEX_HOME` replace the first
- * directory component (`.codex` → `$CODEX_HOME`).
- *
- * @param {string} clientName
- * @param {string} settingsFile
- * @param {NodeJS.ProcessEnv | undefined} env
- * @param {string} homeDir
- * @returns {string}
- */
-export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir) {
-  const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
-  const override = env?.[envKey]
-  if (typeof override === 'string' && override.length > 0) {
-    const parts = settingsFile.split('/')
-    return path.join(override, ...parts.slice(1))
-  }
-  return path.join(homeDir, ...settingsFile.split('/'))
-}
+// `resolveClientSettingsPath` moved to ./client_settings_path.js so the
+// first-run source detector can share it without importing this module's
+// heavier graph. Imported above for internal use; re-exported here to keep
+// existing import sites (`from './status.js'`) stable.
+export { resolveClientSettingsPath }
 
 /**
  * Walk the recent telemetry directory and count log entries whose

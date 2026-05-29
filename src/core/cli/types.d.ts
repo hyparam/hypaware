@@ -27,6 +27,12 @@ export interface WalkthroughOption {
   label: string
   summary?: string
   plugin?: string
+  /**
+   * Initial checkbox state in the TUI multiselect. Used by the picker to
+   * pre-select autodetected sources and the default export. Ignored by
+   * the legacy numbered prompt, which has no preselection concept.
+   */
+  checked?: boolean
 }
 
 export interface WalkthroughQuestion {
@@ -90,6 +96,13 @@ export interface RunPickerWalkthroughOptions {
   picks?: PickerPicks
   prompt?: AsyncPickPrompt
   retentionPrompt?: AsyncRetentionPrompt
+  /**
+   * Override the system source detector. Defaults to the real
+   * filesystem-based {@link detectClientSources}. Only consulted in
+   * interactive mode (no pre-baked `picks`); tests inject a stub so the
+   * picker's preselected boxes do not depend on the dev's home dir.
+   */
+  detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   /**
    * Interactive consent prompt for the onboarding backfill step. Only
    * consulted in interactive mode (no pre-baked `picks`); non-interactive
