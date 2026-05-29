@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { createCodexBackfillProvider } from './backfill.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { attach, defaultConfigPath, detach } from './settings.js'
 
@@ -50,6 +51,19 @@ export async function activate(ctx) {
   })
 
   gateway.registerExchangeProjector(createCodexExchangeProjector({ env: ctx.env }))
+
+  // Backfill provider: imports the local Codex session rollouts the
+  // gateway never saw (history written before HypAware attached, or
+  // outside the proxy) into `ai_gateway_messages` via `hyp backfill codex`.
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  ctx.backfills.register(
+    createCodexBackfillProvider({
+      homeDir,
+      codexHome: resolveCodexHome(ctx),
+      clientName: CLIENT_NAME,
+      pluginName: PLUGIN_NAME,
+    })
+  )
 
   const logger = getLogger('plugin.codex')
 
@@ -238,6 +252,21 @@ function resolveAuthPath(ctx) {
     return path.join(codexHome, 'auth.json')
   }
   return path.join(ctx.env.HOME ?? os.homedir(), '.codex', 'auth.json')
+}
+
+/**
+ * Resolve the Codex home directory the backfill provider scans for session
+ * rollouts. Honors `CODEX_HOME` like the attach path, falling back to
+ * `~/.codex`.
+ *
+ * @param {PluginActivationContext} ctx
+ */
+function resolveCodexHome(ctx) {
+  const codexHome = ctx.env.CODEX_HOME
+  if (typeof codexHome === 'string' && codexHome.length > 0) {
+    return codexHome
+  }
+  return path.join(ctx.env.HOME ?? os.homedir(), '.codex')
 }
 
 /**
