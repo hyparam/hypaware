@@ -273,21 +273,28 @@ export async function run({ harness, expect }) {
   const partitions = await discoverCachePartitions(cacheRoot, {
     datasets: ['ai_gateway_messages'],
   })
-  const clientPartitions = partitions.filter(
-    (p) => p.partition.client && p.partition.date,
+  const sourcePartitions = partitions.filter(
+    (p) => typeof p.partition.source === 'string',
   )
   expect.that(
-    'partitions: at least one client=*/date=* partition exists for ai_gateway_messages',
-    clientPartitions,
+    'partitions: source=* partitions exist for ai_gateway_messages',
+    sourcePartitions,
     (v) => Array.isArray(v) && v.length >= 1,
   )
-  const today = new Date().toISOString().slice(0, 10)
-  const codexToday = clientPartitions.find(
-    (p) => p.partition.client === 'codex' && p.partition.date === today,
+  const apiPartition = sourcePartitions.find(
+    (p) => p.partition.source === 'api',
   )
   expect.that(
-    `partitions: client=codex/date=${today} partition exists with rows`,
-    codexToday,
+    'partitions: source=api partition exists with rows',
+    apiPartition,
+    (v) => v !== undefined && v.rowCount > 0,
+  )
+  const codexPartition = sourcePartitions.find(
+    (p) => p.partition.source === 'codex',
+  )
+  expect.that(
+    'partitions: source=codex partition exists with rows',
+    codexPartition,
     (v) => v !== undefined && v.rowCount > 0,
   )
 
