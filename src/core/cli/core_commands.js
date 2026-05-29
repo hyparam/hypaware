@@ -1,7 +1,9 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import path from 'node:path'
+import process from 'node:process'
 
 import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
@@ -285,6 +287,12 @@ function buildCoreCommands() {
       summary: 'Run export maintenance (snapshot expiration) on table-format sinks',
       usage: 'hyp sink maintain [instance] [--dry-run]',
       run: runSinkMaintain,
+    },
+    {
+      name: 'version',
+      summary: 'Print version and environment info',
+      usage: 'hyp version',
+      run: runVersion,
     },
     {
       name: 'smoke',
@@ -1841,6 +1849,23 @@ function parseDaemonRunArgs(argv) {
     return r
   }
   return r
+}
+
+/* ---------- version ---------- */
+
+/**
+ * @param {string[]} _argv
+ * @param {CommandRunContext} ctx
+ */
+async function runVersion(_argv, ctx) {
+  const require = createRequire(import.meta.url)
+  const { version } = require('../../../package.json')
+  const { hypHome } = readObservabilityEnv(ctx.env)
+  ctx.stdout.write(`hyp ${version}\n`)
+  ctx.stdout.write(`  node:     ${process.version}\n`)
+  ctx.stdout.write(`  platform: ${process.platform} ${process.arch}\n`)
+  ctx.stdout.write(`  hyp_home: ${hypHome}\n`)
+  return 0
 }
 
 /* ---------- smoke ---------- */

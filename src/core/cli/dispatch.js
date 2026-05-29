@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createRequire } from 'node:module'
 import process from 'node:process'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -29,6 +30,7 @@ import { materializeSinks } from '../sinks/materialize.js'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
+const VERSION_FLAGS = new Set(['--version', '-V'])
 
 /**
  * Boot the kernel CLI and dispatch `argv` to a registered command.
@@ -82,6 +84,12 @@ export async function dispatch(argv, opts = {}) {
 
   if (argv.length === 0 && !isInteractiveStream(stdout)) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0 })
+  }
+  if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
+    const require = createRequire(import.meta.url)
+    const { version } = require('../../../package.json')
+    stdout.write(`hyp ${version}\n`)
+    return 0
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length })
@@ -279,7 +287,7 @@ function isInteractiveStream(stream) {
 function decideBootProfile(argv) {
   if (argv.length === 0) return 'all-available'
   if (argv[0] === 'init') return 'all-available'
-  if (argv[0] === 'daemon' || argv[0] === 'status' || argv[0] === 'smoke') return { activate: [] }
+  if (argv[0] === 'daemon' || argv[0] === 'status' || argv[0] === 'smoke' || argv[0] === 'version') return { activate: [] }
   return 'config'
 }
 
