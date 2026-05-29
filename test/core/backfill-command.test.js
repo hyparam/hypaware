@@ -47,7 +47,23 @@ test('parseRunArgv reports usage errors for bad input', () => {
   assert.ok('error' in parseRunArgv(['--retention-days', 'abc']))
   assert.ok('error' in parseRunArgv(['--retention-days', '-3']))
   assert.ok('error' in parseRunArgv(['--since']))
+  assert.ok('error' in parseRunArgv(['--since', 'notadate']))
+  assert.ok('error' in parseRunArgv(['--until', 'notadate']))
+  assert.ok('error' in parseRunArgv(['--since', '2026-01-02', '--until', '2026-01-01']))
   assert.ok('error' in parseRunArgv(['--help']))
+})
+
+test('parseRunArgv accepts an equal since/until boundary', () => {
+  assert.deepEqual(parseRunArgv([
+    '--since', '2026-01-01T00:00:00.000Z',
+    '--until', '2026-01-01T00:00:00.000Z',
+  ]), {
+    providers: [],
+    since: '2026-01-01T00:00:00.000Z',
+    until: '2026-01-01T00:00:00.000Z',
+    dryRun: false,
+    json: false,
+  })
 })
 
 /* ------------------------------ parsePlanArgv ----------------------------- */
@@ -249,6 +265,31 @@ test('runBackfill fails with exit 1 for an unknown explicit provider', async () 
   assert.equal(code, 1)
   assert.ok(err.join('').includes('unknown provider'))
 })
+
+for (const scenario of [
+  {
+    name: 'invalid --since',
+    argv: ['--since', 'notadate'],
+    message: '--since expects a parseable date',
+  },
+  {
+    name: 'invalid --until',
+    argv: ['--until', 'notadate'],
+    message: '--until expects a parseable date',
+  },
+  {
+    name: '--since after --until',
+    argv: ['--since', '2026-01-02', '--until', '2026-01-01'],
+    message: '--since must be before or equal to --until',
+  },
+]) {
+  test(`runBackfill fails with exit 2 for ${scenario.name}`, async () => {
+    const { ctx, err } = makeCtx()
+    const code = await runBackfill(scenario.argv, ctx)
+    assert.equal(code, 2)
+    assert.ok(err.join('').includes(scenario.message))
+  })
+}
 
 /* --------------------------- runBackfillProvider -------------------------- */
 

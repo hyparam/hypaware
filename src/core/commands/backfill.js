@@ -869,6 +869,28 @@ export function parseRunArgv(argv) {
     providers.push(arg)
   }
 
+  /** @type {number | undefined} */
+  let sinceMs
+  if (since !== undefined) {
+    sinceMs = Date.parse(since)
+    if (Number.isNaN(sinceMs)) {
+      return { error: `--since expects a parseable date (got ${since})` }
+    }
+  }
+
+  /** @type {number | undefined} */
+  let untilMs
+  if (until !== undefined) {
+    untilMs = Date.parse(until)
+    if (Number.isNaN(untilMs)) {
+      return { error: `--until expects a parseable date (got ${until})` }
+    }
+  }
+
+  if (sinceMs !== undefined && untilMs !== undefined && sinceMs > untilMs) {
+    return { error: `--since must be before or equal to --until (got ${since} > ${until})` }
+  }
+
   /** @type {{ providers: string[], since?: string, until?: string, retentionDays?: number, dryRun: boolean, json: boolean }} */
   const result = { providers, dryRun, json }
   if (since !== undefined) result.since = since
