@@ -10,6 +10,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
+import { detectClientSources } from './detect.js'
 import { multiselect, text, confirm } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -422,6 +423,7 @@ function tuiPromptFactory(opts) {
         value: o.value,
         label: o.label,
         ...(o.summary && o.summary !== o.label ? { summary: o.summary } : {}),
+        ...(o.checked ? { checked: true } : {}),
       })),
       ...(question.bounds ? { bounds: question.bounds } : {}),
       stdin: opts.stdin ?? process.stdin,
@@ -631,6 +633,23 @@ export async function runPickerWalkthrough(opts) {
   const { capabilities, stdout, env } = opts
   const log = getLogger('walkthrough')
 
+  // Autodetect installed client tools so the picker can pre-check them.
+  // Interactive only: when `picks` are supplied (`--yes` / `--dry-run` /
+  // presets) the selection is explicit and must stay deterministic, so
+  // detection is skipped entirely. Best-effort — a detector failure
+  // leaves the set empty rather than blocking onboarding.
+  const interactive = !opts.picks
+  /** @type {Set<PickerSource>} */
+  let detected = new Set()
+  if (interactive) {
+    const detect = opts.detect ?? detectClientSources
+    try {
+      detected = await detect({ env })
+    } catch {
+      detected = new Set()
+    }
+  }
+
   await withSpan(
     'walkthrough.start',
     {
@@ -638,6 +657,8 @@ export async function runPickerWalkthrough(opts) {
       [Attr.OPERATION]: 'walkthrough.start',
       sources_available: PICKER_SOURCES.length,
       exports_available: PICKER_EXPORTS.length,
+      sources_detected: detected.size,
+      detected_sources: [...detected].join(','),
       status: 'ok',
     },
     async () => {},
@@ -658,7 +679,12 @@ export async function runPickerWalkthrough(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect? (space to toggle, enter to confirm)',
-        options: PICKER_SOURCES.map((s) => ({ value: s.value, label: s.label, summary: s.summary })),
+        options: PICKER_SOURCES.map((s) => ({
+          value: s.value,
+          label: detected.has(s.value) ? `${s.label} · detected` : s.label,
+          summary: s.summary,
+          ...(detected.has(s.value) ? { checked: true } : {}),
+        })),
       })
       const sources = /** @type {PickerSource[]} */ (
         sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
@@ -667,7 +693,15 @@ export async function runPickerWalkthrough(opts) {
       const exportRaw = await ask({
         pickType: 'sinks',
         title: 'Where should HypAware export captured data?',
-        options: PICKER_EXPORTS.map((e) => ({ value: e.value, label: e.label, summary: e.summary })),
+        options: PICKER_EXPORTS.map((e) => ({
+          value: e.value,
+          label: e.label,
+          summary: e.summary,
+          // Default export: pre-check local Parquet so the interactive
+          // picker matches the documented `--yes` default (which also
+          // defaults to local-parquet). A plain default, not autodetect.
+          ...(e.value === 'local-parquet' ? { checked: true } : {}),
+        })),
       })
       const exportChoice = /** @type {PickerExport} */ (
         PICKER_EXPORTS.find((e) => exportRaw.includes(e.value))?.value ?? 'keep-local'
