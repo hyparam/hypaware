@@ -17,6 +17,7 @@ const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
  * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BackfillProviderResult } from './types.d.ts'
  */
 
 /**
@@ -118,8 +119,7 @@ export async function runBackfill(argv, ctx) {
         error_count: results.filter((r) => r.status === 'failed').length,
       })
       renderRunResults({ results, devRunId, json: parsed.json, dryRun: parsed.dryRun, stdout: ctx.stdout })
-      const failed = results.filter((r) => r.status === 'failed').length
-      return failed > 0 ? 1 : 0
+      return deriveBackfillExitCode(results)
     },
     { component: 'backfill' }
   )
@@ -308,18 +308,21 @@ export async function runBackfillProvider(args) {
 /* ------------------------------- Internals ------------------------------- */
 
 /**
- * @typedef {{
- *   provider: string,
- *   plugin: string,
- *   datasets: string[],
- *   items_seen: number,
- *   rows_written: number,
- *   rows_skipped: number,
- *   sessions_seen: number,
- *   status: 'ok' | 'failed',
- *   error?: string,
- * }} BackfillProviderResult
+ * @param {BackfillProviderResult[]} results
+ * @returns {number}
  */
+function deriveBackfillExitCode(results) {
+  return results.some((result) => result.status === 'failed') ? 1 : 0
+}
+
+/**
+ * @param {BackfillProviderResult} result
+ * @param {string} error
+ */
+function markProviderFailed(result, error) {
+  result.status = 'failed'
+  result.error ??= error
+}
 
 /**
  * Run a single provider end-to-end: scan -> materialize -> write -> flush.
@@ -403,6 +406,7 @@ async function runProvider(args) {
               kind: yielded.kind,
               [Attr.DATASET]: yielded.dataset,
             })
+            markProviderFailed(result, `missing materializer for kind ${yielded.kind}`)
             result.rows_skipped += 1
             continue
           }
@@ -414,6 +418,10 @@ async function runProvider(args) {
               [Attr.DATASET]: yielded.dataset,
               materializer_dataset: materializer.dataset,
             })
+            markProviderFailed(
+              result,
+              `materializer for kind ${yielded.kind} targets dataset ${materializer.dataset}, not ${yielded.dataset}`
+            )
             result.rows_skipped += 1
             continue
           }
@@ -446,7 +454,10 @@ async function runProvider(args) {
             ctx,
             log,
           })
-          result.rows_written += written
+          result.rows_written += written.rowsWritten
+          if (written.status === 'failed') {
+            markProviderFailed(result, written.error ?? `failed to write dataset ${yielded.dataset}`)
+          }
         }
 
         if (!dryRun) {
@@ -456,8 +467,7 @@ async function runProvider(args) {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        result.status = 'failed'
-        result.error = message
+        markProviderFailed(result, message)
         log.error('backfill.provider_error', {
           [Attr.COMPONENT]: 'backfill',
           provider: provider.name,
@@ -544,6 +554,7 @@ async function materializeItem(args) {
  *   ctx: CommandRunContext,
  *   log: PluginLogger,
  * }} args
+ * @returns {Promise<{ rowsWritten: number, status: 'ok' | 'failed', error?: string }>}
  */
 async function writeRows(args) {
   const { rows, dataset, provider, devRunId, ctx, log } = args
@@ -566,7 +577,11 @@ async function writeRows(args) {
           provider,
           [Attr.DATASET]: dataset,
         })
-        return 0
+        return {
+          rowsWritten: 0,
+          status: 'failed',
+          error: `dataset not registered: ${dataset}`,
+        }
       }
       // `appendRows` derives the dataset from the path and re-routes
       // rows into per-source partitions via the registered
@@ -576,7 +591,7 @@ async function writeRows(args) {
       const tablePath = ctx.storage.cacheTablePath(dataset, [BACKFILL_PARTITION_SEGMENT])
       const schemaColumns = registered.schema?.columns ?? []
       await ctx.storage.appendRows(tablePath, schemaColumns, rows)
-      return rows.length
+      return { rowsWritten: rows.length, status: 'ok' }
     },
     { component: 'backfill' }
   )

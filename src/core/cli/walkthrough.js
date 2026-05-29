@@ -10,7 +10,8 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
-import { multiselect, text, confirm, PromptCancelledError } from './tui/index.js'
+import { multiselect, text, confirm } from './tui/index.js'
+import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
 
 /**
@@ -675,7 +676,7 @@ export async function runPickerWalkthrough(opts) {
       const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
       picks = { sources, exportChoice, retentionDays }
     } catch (err) {
-      if (err instanceof PromptCancelledError) {
+      if (isPromptCancelledError(err)) {
         return await cancelledResult(opts)
       }
       throw err
@@ -754,6 +755,9 @@ export async function runPickerWalkthrough(opts) {
     })
   }
 
+  const cancelled = finaleSummary?.cancelled === true
+  const exitCode = cancelled ? WALKTHROUGH_CANCEL_EXIT_CODE : 0
+
   await withSpan(
     'walkthrough.finish',
     {
@@ -764,11 +768,14 @@ export async function runPickerWalkthrough(opts) {
       clients_picked: clientsPicked.length,
       retention_days: picks.retentionDays,
       config_path: configPath,
-      status: 'ok',
+      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
+      status: cancelled ? 'cancelled' : 'ok',
     },
     async () => {},
     { component: 'walkthrough' }
   )
+
+  if (cancelled) writeCancelledNotice(opts.stderr)
 
   stdout.write('\n')
   stdout.write(`✓ Wrote ${configPath}\n`)
@@ -794,7 +801,7 @@ export async function runPickerWalkthrough(opts) {
   stdout.write(`next: hyp query sql 'select count(*) from logs'\n`)
 
   return {
-    exitCode: 0,
+    exitCode,
     configPath,
     config,
     sourcesPicked: picks.sources,
@@ -1160,13 +1167,21 @@ async function runFinaleBackfill(args) {
   if (providers.length === 0) return
 
   let consent = true
+  let cancelled = false
   if (interactive) {
     const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
       ...(args.stdin ? { stdin: args.stdin } : {}),
       stdout,
       env,
     })
-    consent = await ask({ providers, retentionDays })
+    try {
+      consent = await ask({ providers, retentionDays })
+    } catch (err) {
+      if (!isPromptCancelledError(err)) throw err
+      cancelled = true
+      consent = false
+      summary.cancelled = true
+    }
   }
 
   await withSpan(
@@ -1179,13 +1194,15 @@ async function runFinaleBackfill(args) {
       dry_run: dryRun,
       interactive,
       consent,
+      consent_cancelled: cancelled,
       retention_days: retentionDays,
       until,
-      status: 'ok',
+      ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
+      status: cancelled ? 'cancelled' : 'ok',
     },
     async (span) => {
       if (!consent) {
-        stdout.write('backfill: skipped (declined)\n')
+        stdout.write(cancelled ? 'backfill: skipped (cancelled)\n' : 'backfill: skipped (declined)\n')
         return
       }
       // Guard each provider so one failure neither aborts sibling
@@ -1320,11 +1337,7 @@ async function cancelledResult(opts) {
     async () => {},
     { component: 'walkthrough' }
   )
-  try {
-    opts.stderr.write('hyp init: cancelled\n')
-  } catch {
-    // best-effort: stderr might be closed during cleanup
-  }
+  writeCancelledNotice(opts.stderr)
   return {
     exitCode: WALKTHROUGH_CANCEL_EXIT_CODE,
     configPath: '',
@@ -1337,6 +1350,17 @@ async function cancelledResult(opts) {
     exportPicked: 'keep-local',
     clientsPicked: [],
     retentionDays: DEFAULT_RETENTION_DAYS,
+  }
+}
+
+/**
+ * @param {NodeJS.WritableStream | { write(chunk: string): unknown }} stderr
+ */
+function writeCancelledNotice(stderr) {
+  try {
+    stderr.write('hyp init: cancelled\n')
+  } catch {
+    // best-effort: stderr might be closed during cleanup
   }
 }
 

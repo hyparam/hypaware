@@ -6,7 +6,10 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
+import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
+
+/** @import { BackfillFinaleResult } from '../../src/core/cli/types.d.ts' */
 
 /**
  * Fake picker backfill runner. Records every `run` call and returns a
@@ -14,7 +17,7 @@ import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
  * the inputs the finale passed and the summary it collected.
  *
  * @param {string[]} available
- * @param {Record<string, import('../../src/core/cli/types.d.ts').BackfillFinaleResult>} [entries]
+ * @param {Record<string, BackfillFinaleResult>} [entries]
  */
 function makeBackfill(available, entries = {}) {
   /** @type {Array<{ provider: string, dryRun: boolean, retentionDays: number, until: string }>} */
@@ -226,6 +229,39 @@ test('interactive onboarding lets the user decline backfill', async () => {
   assert.equal(backfill.calls.length, 0, 'declining must skip the backfill run')
   assert.deepEqual(result.finale?.backfill, [])
   assert.match(stdout.text(), /backfill: skipped \(declined\)/)
+})
+
+test('interactive onboarding maps cancelled backfill consent to the cancel exit path', async () => {
+  const env = await tmpEnv('hypaware-bf-interactive-cancel-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude'])
+
+  const result = await runPickerWalkthrough({
+    capabilities: noGateway,
+    stdout,
+    stderr,
+    env,
+    prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
+    retentionPrompt: async () => 30,
+    backfillConsentPrompt: async () => {
+      throw new PromptCancelledError()
+    },
+    backfill,
+    finale: { dryRun: true },
+  })
+
+  assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
+  assert.deepEqual(result.sourcesPicked, ['claude'])
+  assert.deepEqual(result.clientsPicked, ['claude'])
+  assert.equal(result.retentionDays, 30)
+  assert.equal(backfill.calls.length, 0, 'cancelling consent must skip the backfill run')
+  assert.equal(result.finale?.cancelled, true)
+  assert.deepEqual(result.finale?.backfill, [])
+  assert.deepEqual(result.finale?.daemonRestart, { skipped: false, dryRun: true, ok: true })
+  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stdout.text(), /backfill: skipped \(cancelled\)/)
+  assert.match(stdout.text(), /\(dry-run\) Would restart the daemon/)
 })
 
 test('picked clients without a registered backfill provider are skipped', async () => {

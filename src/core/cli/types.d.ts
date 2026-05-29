@@ -140,6 +140,13 @@ export interface PickerBackfillRunner {
 }
 
 export interface FinaleSummary {
+  /**
+   * True when a finale prompt is cancelled after config/finale work has
+   * started. The caller returns the standard cancel exit code while
+   * preserving this real summary instead of replacing it with an empty
+   * initial-prompt cancel result.
+   */
+  cancelled?: boolean
   daemonInstall: {
     skipped: boolean
     dryRun: boolean

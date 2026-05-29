@@ -11,6 +11,7 @@ import {
   confirm,
   PromptCancelledError,
 } from '../../../../src/core/cli/tui/index.js'
+import { isPromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 
 const ENV = { NO_COLOR: '1' }
 
@@ -82,6 +83,16 @@ test('runtime: multiselect cancel via ctrl+c throws PromptCancelledError', async
   const rejection = assert.rejects(promise, (err) => err instanceof PromptCancelledError)
   await feed(io.stdin, ['\x03'])
   await rejection
+})
+
+test('runtime: prompt cancellation predicate recognizes PromptCancelledError', () => {
+  const direct = new PromptCancelledError()
+  const wrapped = new Error('wrapped cancel')
+  wrapped.name = 'PromptCancelledError'
+
+  assert.equal(isPromptCancelledError(direct), true)
+  assert.equal(isPromptCancelledError(wrapped), true)
+  assert.equal(isPromptCancelledError(new Error('other')), false)
 })
 
 test('runtime: multiselect bounds rejection retains active state until satisfied', async () => {
