@@ -11,9 +11,22 @@ import {
   confirm,
   PromptCancelledError,
 } from '../../../../src/core/cli/tui/index.js'
-import { isPromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
+import { isPromptCancelledError, countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
 
 const ENV = { NO_COLOR: '1' }
+
+/**
+ * Parse the cursor-up row count (`\x1b[<n>A`) the runtime emits at the
+ * start of a redraw frame. Returns 0 when the chunk has no cursor-up
+ * (the very first frame).
+ *
+ * @param {string} chunk
+ * @returns {number}
+ */
+function cursorUpCount(chunk) {
+  const m = /\x1b\[(\d+)A/.exec(chunk)
+  return m ? Number.parseInt(m[1], 10) : 0
+}
 
 /**
  * Build a pair of PassThrough streams that look enough like a TTY for
@@ -276,6 +289,85 @@ test('runtime: render failures during keypress reject and clean up', async () =>
 
   assert.equal(io.stdin.readableFlowing, false)
   assert.equal(/** @type {any} */ (io.stdin).isRaw, false)
+})
+
+test('countPhysicalRows: counts each logical line once when nothing wraps', () => {
+  // 'a\nb\nc\n' → three rows, trailing newline contributes none.
+  assert.equal(countPhysicalRows('a\nb\nc\n', 80), 3)
+})
+
+test('countPhysicalRows: empty lines still occupy one row', () => {
+  assert.equal(countPhysicalRows('a\n\nb\n', 80), 3)
+})
+
+test('countPhysicalRows: a line wider than the terminal counts its wrapped rows', () => {
+  // 25 visible chars at width 10 → ceil(25/10) = 3 physical rows.
+  const line = 'x'.repeat(25)
+  assert.equal(countPhysicalRows(line + '\n', 10), 3)
+})
+
+test('countPhysicalRows: a line exactly the terminal width stays one row', () => {
+  assert.equal(countPhysicalRows('x'.repeat(10) + '\n', 10), 1)
+  assert.equal(countPhysicalRows('x'.repeat(11) + '\n', 10), 2)
+})
+
+test('countPhysicalRows: ANSI style codes do not inflate the width', () => {
+  // 10 visible chars wrapped in color codes still fit one row at width 10.
+  const styled = '\x1b[36m' + 'x'.repeat(10) + '\x1b[0m'
+  assert.equal(countPhysicalRows(styled + '\n', 10), 1)
+})
+
+test('countPhysicalRows: defaults to 80 columns for non-TTY widths', () => {
+  assert.equal(countPhysicalRows('x'.repeat(81) + '\n', 0), 2)
+})
+
+test('runtime: redraw moves up by physical (wrapped) rows on a narrow terminal', async () => {
+  // Regression for the "moving the cursor duplicates the question"
+  // bug: long option summaries wrap to multiple physical rows, so the
+  // redraw must move the cursor up by the wrapped row count, not by the
+  // number of '\n' written.
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  Object.defineProperty(stdin, 'isTTY', { value: true })
+  Object.defineProperty(stdout, 'isTTY', { value: true })
+  Object.defineProperty(stdout, 'columns', { value: 24 })
+  Object.defineProperty(stdin, 'isRaw', { value: false, writable: true })
+  // @ts-expect-error — PassThrough has no setRawMode; the runtime probes for it.
+  stdin.setRawMode = (enabled) => { /** @type {any} */ (stdin).isRaw = enabled }
+  /** @type {string[]} */
+  const chunks = []
+  stdout.on('data', (chunk) => chunks.push(String(chunk)))
+
+  const promise = multiselect({
+    title: 'What do you want to collect?',
+    options: [
+      { value: 'a', label: 'capture A', summary: 'A long summary that is certainly wider than twenty-four columns.' },
+      { value: 'b', label: 'capture B', summary: 'Another summary long enough to wrap across several rows.' },
+    ],
+    stdin,
+    stdout,
+  })
+  // 'z' is ignored by the reducer but still triggers a redraw, then enter resolves.
+  await feed(stdin, ['z', '\r'])
+  await promise
+
+  // The first frame is the first chunk carrying the title; the redraw is
+  // the next chunk that begins with a cursor-up move. (The CURSOR_HIDE
+  // escape is written as its own chunk before the first frame.)
+  const firstFrame = chunks.find((c) => c.includes('What do you want'))
+  const redrawFrame = chunks.find((c) => /\x1b\[\d+A/.test(c))
+  assert.ok(firstFrame, 'first frame not captured')
+  assert.ok(redrawFrame, 'redraw frame not captured')
+  // The redraw's cursor-up count must equal the wrapped row count of the
+  // first frame — otherwise stale rows are left on screen (duplication).
+  assert.equal(cursorUpCount(redrawFrame), countPhysicalRows(firstFrame, 24))
+  // And that count must exceed the naive newline count, proving wrapping
+  // actually occurred in this fixture.
+  const newlineCount = (firstFrame.match(/\n/g) ?? []).length
+  assert.ok(
+    countPhysicalRows(firstFrame, 24) > newlineCount,
+    'fixture should wrap; otherwise the regression is not exercised',
+  )
 })
 
 test('runtime: overlapping prompts are rejected', async () => {

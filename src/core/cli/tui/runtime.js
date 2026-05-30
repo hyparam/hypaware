@@ -20,6 +20,9 @@ let activeRun = false
  * @property {NodeJS.ReadableStream} stdin
  * @property {NodeJS.WritableStream} stdout
  * @property {NodeJS.ProcessEnv} [env]
+ * @property {boolean} [clearOnResolve]  Erase the prompt's frame from the
+ *   terminal when it settles (resolve or cancel) so the next prompt
+ *   redraws in its place instead of stacking below it.
  */
 
 /**
@@ -40,6 +43,7 @@ export async function run(initialState, io) {
   activeRun = true
 
   const color = env.NO_COLOR ? false : true
+  const clearOnResolve = io.clearOnResolve === true
   /** @type {NodeJS.ReadStream} */
   const stdin = /** @type {any} */ (io.stdin)
   const stdout = io.stdout
@@ -75,6 +79,13 @@ export async function run(initialState, io) {
         stdin.pause()
       }
     } catch {}
+    if (clearOnResolve && previousLineCount > 0) {
+      // Move the cursor back to the top of the rendered frame and clear
+      // everything below it, leaving the screen as it was before the
+      // prompt drew. The next prompt then redraws in the same position.
+      try { stdout.write(`\x1b[${previousLineCount}A\r${CLEAR_TO_END}`) } catch {}
+      previousLineCount = 0
+    }
     try { stdout.write(CURSOR_SHOW) } catch {}
   }
 
@@ -85,7 +96,7 @@ export async function run(initialState, io) {
     }
     const frame = render(state, { color })
     buf += frame
-    previousLineCount = countTrailingLines(frame)
+    previousLineCount = countPhysicalRows(frame, terminalColumns(stdout))
     stdout.write(buf)
   }
 
@@ -160,17 +171,60 @@ function normalizeKey(str, key) {
 }
 
 /**
- * Count the number of newline characters in `s`. The runtime uses this
- * to know how far to move the cursor up before clearing the previous
- * frame. Frames always end with `\n`, so the value equals the number of
- * rows the frame occupied below the start point.
+ * Resolve the terminal width in columns, defaulting to 80 when the
+ * stream does not expose a usable `.columns` (non-TTY mocks, pipes).
  *
- * @param {string} s
+ * @param {NodeJS.WritableStream} stdout
+ * @returns {number}
  */
-function countTrailingLines(s) {
-  let n = 0
-  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++
-  return n
+function terminalColumns(stdout) {
+  const cols = /** @type {any} */ (stdout).columns
+  return typeof cols === 'number' && cols > 0 ? cols : 80
+}
+
+// Match ANSI SGR (color/style) sequences so they are excluded from the
+// visible-width measurement. The renderer only emits `\x1b[...m` codes.
+const ANSI_SGR = /\x1b\[[0-9;]*m/g
+
+/**
+ * Visible (printable) width of a single logical line, ignoring ANSI
+ * style codes. Measured in code units, which matches column count for
+ * the Latin/punctuation text the prompts render.
+ *
+ * @param {string} line
+ * @returns {number}
+ */
+function visibleWidth(line) {
+  return line.replace(ANSI_SGR, '').length
+}
+
+/**
+ * Count the number of *physical* terminal rows a frame occupies. The
+ * runtime uses this to know how far to move the cursor up before
+ * clearing the previous frame. A naive newline count is wrong whenever
+ * a logical line is wider than the terminal: the terminal soft-wraps it
+ * onto multiple rows, so the cursor descended further than the number of
+ * `\n` written. Undercounting here leaves stale rows on screen on every
+ * redraw — the classic "the question keeps duplicating when I move the
+ * cursor" symptom.
+ *
+ * Frames always end with a trailing `\n`; the empty segment after it
+ * contributes no row.
+ *
+ * @param {string} frame
+ * @param {number} columns
+ * @returns {number}
+ */
+export function countPhysicalRows(frame, columns) {
+  const width = columns > 0 ? columns : 80
+  const lines = frame.split('\n')
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  let rows = 0
+  for (const line of lines) {
+    const len = visibleWidth(line)
+    rows += len === 0 ? 1 : Math.ceil(len / width)
+  }
+  return rows
 }
 
 /**

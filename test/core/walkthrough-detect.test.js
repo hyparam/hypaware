@@ -50,12 +50,9 @@ test('picker pre-checks detected sources, labels them, and defaults export to lo
   assert.notEqual(codex?.checked, true)
   assert.doesNotMatch(codex?.label ?? '', /detected/)
 
-  const sinks = seen.find((q) => q.pickType === 'sinks')
-  assert.ok(sinks, 'export question asked')
-  const parquet = sinks.options.find((o) => o.value === 'local-parquet')
-  const keepLocal = sinks.options.find((o) => o.value === 'keep-local')
-  assert.equal(parquet?.checked, true)
-  assert.notEqual(keepLocal?.checked, true)
+  // The export question is no longer asked — local-parquet is the
+  // unconditional default.
+  assert.equal(seen.find((q) => q.pickType === 'sinks'), undefined, 'export question must not be asked')
 
   // The confirmed picks reflect the preselected state.
   assert.deepEqual(result.sourcesPicked, ['claude'])

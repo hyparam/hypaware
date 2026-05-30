@@ -11,7 +11,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 import { detectClientSources } from './detect.js'
-import { multiselect, text, confirm } from './tui/index.js'
+import { multiselect, select, text } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
 
@@ -426,6 +426,7 @@ function tuiPromptFactory(opts) {
         ...(o.checked ? { checked: true } : {}),
       })),
       ...(question.bounds ? { bounds: question.bounds } : {}),
+      clearOnResolve: true,
       stdin: opts.stdin ?? process.stdin,
       stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
       env: opts.env,
@@ -452,6 +453,7 @@ function tuiRetentionPromptFactory(opts) {
         const n = Number.parseInt(s.trim(), 10)
         return Number.isInteger(n) && n >= 0 ? null : 'enter a non-negative integer'
       },
+      clearOnResolve: true,
       stdin: opts.stdin ?? process.stdin,
       stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
       env: opts.env,
@@ -488,9 +490,9 @@ function defaultRetentionPromptFactory(opts) {
 
 /**
  * Build the interactive backfill-consent prompt. Routes to the TUI
- * yes/no confirm on a real TTY, else a legacy readline yes/no. Both
- * default to yes so a bare enter opts in — the bead's "default backfill
- * to enabled, but let the user choose no".
+ * arrow-navigable yes/no select on a real TTY, else a legacy readline
+ * yes/no. Both default to yes so a bare enter opts in — the bead's
+ * "default backfill to enabled, but let the user choose no".
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncBackfillConsentPrompt}
@@ -501,18 +503,28 @@ function defaultBackfillConsentPromptFactory(opts) {
 }
 
 /**
+ * Render the backfill consent as a `select` so it matches the look and
+ * feel of the source picker (arrow keys + pointer) rather than a plain
+ * y/n confirm. Cursor defaults to "Yes" so a bare enter opts in.
+ *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncBackfillConsentPrompt}
  */
 function tuiBackfillConsentPromptFactory(opts) {
   return async function ({ providers, retentionDays }) {
-    return confirm({
+    const choice = await select({
       title: backfillConsentTitle(providers, retentionDays),
-      default: true,
+      options: [
+        { value: 'yes', label: 'Yes — import it now', summary: 'Reads local transcripts into the query cache.' },
+        { value: 'no', label: 'No — skip for now', summary: 'You can import later with hyp backfill.' },
+      ],
+      default: 'yes',
+      clearOnResolve: true,
       stdin: opts.stdin ?? process.stdin,
       stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
       env: opts.env,
     })
+    return choice === 'yes'
   }
 }
 
@@ -690,22 +702,13 @@ export async function runPickerWalkthrough(opts) {
         sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
       )
 
-      const exportRaw = await ask({
-        pickType: 'sinks',
-        title: 'Where should HypAware export captured data?',
-        options: PICKER_EXPORTS.map((e) => ({
-          value: e.value,
-          label: e.label,
-          summary: e.summary,
-          // Default export: pre-check local Parquet so the interactive
-          // picker matches the documented `--yes` default (which also
-          // defaults to local-parquet). A plain default, not autodetect.
-          ...(e.value === 'local-parquet' ? { checked: true } : {}),
-        })),
-      })
-      const exportChoice = /** @type {PickerExport} */ (
-        PICKER_EXPORTS.find((e) => exportRaw.includes(e.value))?.value ?? 'keep-local'
-      )
+      // Export destination is not asked interactively. A local query
+      // cache is always kept; on top of it we default to scheduled local
+      // Parquet exports so `npx hypaware` produces durable files out of
+      // the box. Other destinations (keep-local only, configure-later,
+      // S3, …) remain available via `hyp init --export <choice>` and by
+      // editing the written config later.
+      const exportChoice = /** @type {PickerExport} */ ('local-parquet')
 
       const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
       picks = { sources, exportChoice, retentionDays }
@@ -1100,12 +1103,16 @@ async function runPickerFinale(args) {
         status: 'ok',
       },
       async (span) => {
+        let printedAny = false
         for (const skill of skills.list()) {
           for (const targetClient of skill.clients) {
             if (!clientsPicked.includes(targetClient)) continue
             const skillDir = skillDirMap.get(targetClient)
             if (!skillDir) continue
             const dest = path.join(homeDir, skillDir, skill.name)
+            // Separate the skills block from the preceding attach output.
+            if (!printedAny) stdout.write('\n')
+            printedAny = true
             if (dryRun) {
               stdout.write(`(dry-run) Would install skill '${skill.name}' → ${dest}\n`)
             } else {
@@ -1116,6 +1123,8 @@ async function runPickerFinale(args) {
             summary.skillsInstalled.push({ name: skill.name, client: targetClient, dest, dryRun })
           }
         }
+        // Trailing blank line so the next step (backfill prompt) stands apart.
+        if (printedAny) stdout.write('\n')
         if (span && typeof span.setAttribute === 'function') {
           span.setAttribute('installed_count', summary.skillsInstalled.length)
         }
@@ -1244,6 +1253,13 @@ async function runFinaleBackfill(args) {
       // matching the attach/restart resilience above.
       for (const provider of providers) {
         try {
+          // Importing local history reads and writes potentially
+          // thousands of rows with no other output. Without this line
+          // the resolved consent frame is the last thing on screen, so a
+          // multi-second import looks like the prompt is stuck. Announce
+          // the work before it starts so the wizard visibly moves on.
+          const startTag = dryRun ? '(dry-run) ' : ''
+          stdout.write(`${startTag}backfill ${provider}: importing local history…\n`)
           const entry = await backfill.run({ provider, dryRun, retentionDays, until })
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
