@@ -40,7 +40,7 @@ import {
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
- * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner } from './types.d.ts'
+ * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from './types.d.ts'
  */
 
 /**
@@ -2295,6 +2295,24 @@ function parseInitFlags(argv) {
 }
 
 /**
+ * Resolve the export choice for non-interactive `hyp init`. When
+ * `--export` is omitted the default is `local-parquet`, matching the
+ * interactive wizard so equivalent source selections produce the same
+ * durable-files-out-of-the-box config whether the operator used flags or
+ * the TUI. `origin` lets telemetry tell an explicit `--export` pick from a
+ * defaulted one. Pass `--export keep-local` for cache-only.
+ *
+ * @param {InitFlags} flags
+ * @returns {{ exportChoice: PickerExport, origin: PickerExportOrigin }}
+ */
+export function resolveInitExportChoice(flags) {
+  if (flags.exportChoice) {
+    return { exportChoice: flags.exportChoice, origin: 'user' }
+  }
+  return { exportChoice: 'local-parquet', origin: 'default' }
+}
+
+/**
  * Non-interactive Phase 5 init. Composes picks from CLI flags,
  * optionally seeds the config from a file (`--from-file`), and
  * delegates to {@link runPickerWalkthrough}.
@@ -2312,9 +2330,9 @@ async function runPickerInit(flags, ctx) {
     return runInitFromFile(flags, ctx)
   }
 
-  // Default picks when `--yes` is the only signal: capture Claude +
-  // OTEL, export to local Parquet. Matches the default V1 install
-  // documented in finish-v1.md §V1 Acceptance Criteria.
+  // Default sources when `--yes` is the only signal: capture Claude +
+  // OTEL. Matches the default V1 install documented in finish-v1.md
+  // §V1 Acceptance Criteria. (Export defaults separately, below.)
   const sources = flags.sources.slice()
   if (sources.length === 0) {
     if (flags.yes) {
@@ -2330,7 +2348,10 @@ async function runPickerInit(flags, ctx) {
     if (!sources.includes(c)) sources.push(c)
   }
 
-  const exportChoice = flags.exportChoice ?? (flags.yes ? 'local-parquet' : 'keep-local')
+  // Export defaults to local-parquet whenever `--export` is omitted, so
+  // flag-driven init matches the interactive wizard rather than diverging
+  // to a conservative keep-local default for the same source selection.
+  const { exportChoice, origin: exportOrigin } = resolveInitExportChoice(flags)
 
   const result = await runPickerWalkthrough({
     capabilities: ctx.capabilities,
@@ -2344,6 +2365,7 @@ async function runPickerInit(flags, ctx) {
       exportChoice,
       retentionDays: flags.retentionDays,
     },
+    exportOrigin,
     backfill: buildPickerBackfillRunner(ctx),
     finale: {
       skipDaemon: flags.noDaemon,

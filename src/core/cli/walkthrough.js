@@ -679,8 +679,14 @@ export async function runPickerWalkthrough(opts) {
 
   /** @type {PickerPicks} */
   let picks
+  // Provenance of the export choice, for telemetry. Export is no longer
+  // asked interactively — local-parquet is the out-of-the-box default —
+  // so the origin is `user` only when an explicit `--export` flag was
+  // threaded in on the pre-baked path; otherwise the pick was defaulted.
+  let exportOrigin = 'default'
   if (opts.picks) {
     picks = opts.picks
+    exportOrigin = opts.exportOrigin ?? 'default'
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
     const retentionAsk = opts.retentionPrompt ?? defaultRetentionPromptFactory(opts)
@@ -731,6 +737,7 @@ export async function runPickerWalkthrough(opts) {
     [Attr.COMPONENT]: 'walkthrough',
     pick_type: 'exports',
     pick_value: picks.exportChoice,
+    pick_origin: exportOrigin,
   })
 
   const hypHome = resolveHypHome(env)

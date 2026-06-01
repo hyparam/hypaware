@@ -20,6 +20,13 @@ export type AsyncBackfillConsentPrompt = (args: {
 export type PickerSource = 'claude' | 'codex' | 'raw-anthropic' | 'raw-openai' | 'otel'
 export type PickerExport = 'keep-local' | 'local-parquet' | 'configure-later'
 
+/**
+ * Provenance of a resolved export choice for telemetry. `user` means the
+ * operator picked it explicitly (an `--export` flag); `default` means the
+ * system supplied it (the interactive wizard or an omitted `--export`).
+ */
+export type PickerExportOrigin = 'default' | 'user'
+
 export interface WalkthroughOption {
   /** Stable identifier (source name, sink contribution key, client name). */
   value: string
@@ -94,6 +101,12 @@ export interface RunPickerWalkthroughOptions {
   env: NodeJS.ProcessEnv
   /** Pre-baked picks; bypass prompts when set. */
   picks?: PickerPicks
+  /**
+   * Provenance of `picks.exportChoice`, for telemetry only. Consulted
+   * solely on the pre-baked path (with `picks`); the interactive wizard
+   * always defaults export, so its origin is `default`. Omit to default.
+   */
+  exportOrigin?: PickerExportOrigin
   prompt?: AsyncPickPrompt
   retentionPrompt?: AsyncRetentionPrompt
   /**

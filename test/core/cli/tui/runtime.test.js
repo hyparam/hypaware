@@ -370,6 +370,68 @@ test('runtime: redraw moves up by physical (wrapped) rows on a narrow terminal',
   )
 })
 
+/**
+ * The settle-erase the runtime emits on cleanup is a standalone
+ * cursor-up + clear-to-end (`\x1b[<n>A\r\x1b[J`) with no frame appended.
+ * Redraw frames share the same prefix but carry rendered content after
+ * it, so an exact match isolates the cleanup erase from redraws.
+ *
+ * @param {string[]} chunks
+ * @returns {string[]}
+ */
+function settleErases(chunks) {
+  return chunks.filter((c) => /^\x1b\[\d+A\r\x1b\[J$/.test(c))
+}
+
+/**
+ * Spawn a prompt over a fresh fake TTY and capture every stdout chunk so
+ * tests can assert on the exact cleanup sequence.
+ */
+function makeChunkCapture() {
+  const io = makeTty()
+  /** @type {string[]} */
+  const chunks = []
+  io.stdout.on('data', (c) => chunks.push(String(c)))
+  return { ...io, chunks }
+}
+
+test('runtime: clearOnResolve erases the settled frame on resolve', async () => {
+  const io = makeChunkCapture()
+  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout, clearOnResolve: true })
+  await feed(io.stdin, ['y'])
+  assert.equal(await promise, true)
+
+  const erases = settleErases(io.chunks)
+  assert.equal(erases.length, 1, 'expected exactly one settle-erase on resolve')
+  // The erase moves up by the rendered frame's physical row count, and
+  // the cursor is restored afterwards.
+  assert.ok(cursorUpCount(erases[0]) > 0, 'erase must move the cursor up')
+  const eraseIdx = io.chunks.indexOf(erases[0])
+  assert.ok(
+    io.chunks.slice(eraseIdx + 1).some((c) => c.includes('\x1b[?25h')),
+    'cursor must be shown again after the erase',
+  )
+})
+
+test('runtime: clearOnResolve erases the settled frame on cancel', async () => {
+  const io = makeChunkCapture()
+  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout, clearOnResolve: true })
+  const rejection = assert.rejects(promise, (err) => err instanceof PromptCancelledError)
+  await feed(io.stdin, ['\x03'])
+  await rejection
+
+  assert.equal(settleErases(io.chunks).length, 1, 'cancel path must also erase the settled frame')
+})
+
+test('runtime: without clearOnResolve the settled frame is left in place', async () => {
+  const io = makeChunkCapture()
+  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
+  await feed(io.stdin, ['y'])
+  assert.equal(await promise, true)
+
+  assert.equal(settleErases(io.chunks).length, 0, 'no settle-erase when clearOnResolve is off')
+})
+
 test('runtime: overlapping prompts are rejected', async () => {
   const first = makeTty()
   const second = makeTty()
