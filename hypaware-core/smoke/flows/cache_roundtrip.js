@@ -32,6 +32,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
  * - stdout: the count comes back as 100
  *
  * @param {{ harness: any, expect: any }} args
+ * @ref LLP 0013#write-path-and-query [tests] — rows written to the cache come back through hyp query
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

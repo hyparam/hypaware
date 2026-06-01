@@ -29,6 +29,7 @@ import { readStatusFile } from '../../../src/core/daemon/status.js'
  *    children for every started source.
  *
  * @param {{ harness: any, expect: any }} args
+ * @ref LLP 0017#the-primary-daemon [tests] — boots the daemon, drives start/stop, asserts the lifecycle spans
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

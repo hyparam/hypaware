@@ -21,6 +21,7 @@ const COMPRESSION = 'SNAPPY'
  * for writing the encoded bytes once this encoder hands them back.
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0014#queryable-sinks [implements] — parquet encoder declares `queryable`; lights up only paired with a blob store
  */
 export async function activate(ctx) {
   /** @type {SinkEncoder} */

@@ -50,6 +50,7 @@ export function claudeSessionContextFile(ctx) {
  * `restored=true|false`.
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream preset
  */
 export async function activate(ctx) {
   /** @type {AiGatewayCapability} */
@@ -240,6 +241,7 @@ export async function activate(ctx) {
   })
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
+  // @ref LLP 0011#interactive-walkthrough [implements] — contributes client skills the first-run walkthrough installs
   for (const skillName of ['hypaware-query', 'hypaware-ignore', 'hypaware-unignore']) {
     ctx.skills.register({
       name: skillName,
