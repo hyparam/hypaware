@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import process from 'node:process'
 
-import { Attr, withSpan } from '../observability/index.js'
+import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
@@ -32,6 +32,9 @@ import {
   decideConfirmation,
   renderConfirmationSummary,
 } from '../plugin_install/confirm.js'
+import { diagnosePlugin } from '../plugin_doctor/diagnose.js'
+import { renderReport } from '../plugin_doctor/render.js'
+import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -178,6 +181,18 @@ function buildCoreCommands() {
       summary: 'Remove an installed plugin',
       usage: 'hyp plugin remove <plugin>',
       run: runPluginRemove,
+    },
+    {
+      name: 'plugin doctor',
+      summary: 'Diagnose a plugin in development (static checks + dry-run activate)',
+      usage: 'hyp plugin doctor [dir] [--json]',
+      run: runPluginDoctor,
+    },
+    {
+      name: 'plugin new',
+      summary: 'Scaffold a new plugin',
+      usage: 'hyp plugin new <name> [--kind source|sink|dataset] [--dir <path>]',
+      run: runPluginNew,
     },
     {
       name: 'config',
@@ -1390,6 +1405,147 @@ async function runPluginRemove(argv, ctx) {
   }
   ctx.stdout.write(`removed ${name}\n`)
   return 0
+}
+
+/* ---------- plugin doctor / new ---------- */
+
+/**
+ * Diagnose a plugin directory in development: static manifest/entrypoint
+ * checks plus a sandboxed dry-run `activate()` that confirms the code
+ * registers what the manifest declares. Aggregates every finding into a
+ * single report (human or `--json`). Exit 0 when there are no
+ * error-severity diagnostics (warnings allowed), 1 otherwise.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runPluginDoctor(argv, ctx) {
+  /** @type {string|undefined} */
+  let dir
+  let json = false
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--json') json = true
+    else if (token === '--help' || token === '-h') {
+      ctx.stdout.write('usage: hyp plugin doctor [dir] [--json]\n')
+      return 0
+    } else if (token.startsWith('-')) {
+      ctx.stderr.write(`hyp plugin doctor: unknown flag '${token}'\n`)
+      return 2
+    } else if (dir === undefined) {
+      dir = token
+    } else {
+      ctx.stderr.write(`hyp plugin doctor: unexpected argument '${token}'\n`)
+      return 2
+    }
+  }
+
+  const rootDir = path.resolve(ctx.cwd ?? process.cwd(), dir ?? '.')
+  const { knownPlugins } = await buildKnownPluginsForCtx(ctx)
+  const knownCapabilities = capabilitiesFromMetadata(knownPlugins)
+
+  const report = await diagnosePlugin(rootDir, { knownCapabilities })
+
+  getLogger('plugin-doctor').info('plugin.doctor', {
+    component: 'plugin-doctor',
+    operation: 'plugin.doctor',
+    status: report.ok ? 'ok' : 'error',
+    [Attr.PLUGIN]: report.pluginName ?? '',
+    error_count: report.errorCount,
+    warn_count: report.warnCount,
+  })
+
+  if (json) {
+    ctx.stdout.write(JSON.stringify(report, null, 2) + '\n')
+  } else {
+    ctx.stdout.write(renderReport(report))
+  }
+  return report.ok ? 0 : 1
+}
+
+/**
+ * Collect every capability name any known plugin provides, used to
+ * resolve a plugin's `requires.capabilities`.
+ *
+ * @param {Map<import('../../../collectivus-plugin-kernel-types.d.ts').PluginName, import('../config/types.d.ts').PluginMetadata>} knownPlugins
+ * @returns {Set<string>}
+ */
+function capabilitiesFromMetadata(knownPlugins) {
+  /** @type {Set<string>} */
+  const caps = new Set()
+  for (const meta of knownPlugins.values()) {
+    if (meta.provides) {
+      for (const name of Object.keys(meta.provides)) caps.add(name)
+    }
+  }
+  return caps
+}
+
+/**
+ * Scaffold a new plugin directory that passes `hyp plugin doctor`
+ * out of the box.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runPluginNew(argv, ctx) {
+  /** @type {string|undefined} */
+  let name
+  let kind = 'source'
+  /** @type {string|undefined} */
+  let dirFlag
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--kind') {
+      kind = argv[i + 1]
+      i += 1
+      if (!kind) {
+        ctx.stderr.write('hyp plugin new: --kind expects a value\n')
+        return 2
+      }
+    } else if (token === '--dir') {
+      dirFlag = argv[i + 1]
+      i += 1
+      if (!dirFlag) {
+        ctx.stderr.write('hyp plugin new: --dir expects a path\n')
+        return 2
+      }
+    } else if (token === '--help' || token === '-h') {
+      ctx.stdout.write('usage: hyp plugin new <name> [--kind source|sink|dataset] [--dir <path>]\n')
+      return 0
+    } else if (token.startsWith('-')) {
+      ctx.stderr.write(`hyp plugin new: unknown flag '${token}'\n`)
+      return 2
+    } else if (name === undefined) {
+      name = token
+    } else {
+      ctx.stderr.write(`hyp plugin new: unexpected argument '${token}'\n`)
+      return 2
+    }
+  }
+
+  if (!name) {
+    ctx.stderr.write('usage: hyp plugin new <name> [--kind source|sink|dataset] [--dir <path>]\n')
+    return 2
+  }
+  if (!SCAFFOLD_KINDS.includes(/** @type {any} */ (kind))) {
+    ctx.stderr.write(`hyp plugin new: unknown kind '${kind}' (expected ${SCAFFOLD_KINDS.join('|')})\n`)
+    return 2
+  }
+
+  const targetDir = path.resolve(ctx.cwd ?? process.cwd(), dirFlag ?? '.')
+  try {
+    const result = await scaffoldPlugin({ name, kind: /** @type {any} */ (kind), targetDir })
+    ctx.stdout.write(`created ${result.pluginName} (${kind}) at ${result.pluginDir}\n`)
+    for (const file of result.files) {
+      ctx.stdout.write(`  ${path.relative(targetDir, file)}\n`)
+    }
+    ctx.stdout.write(`\nnext: hyp plugin doctor ${result.pluginDir}\n`)
+    return 0
+  } catch (err) {
+    ctx.stderr.write(`hyp plugin new: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
 }
 
 /* ---------- config ---------- */
