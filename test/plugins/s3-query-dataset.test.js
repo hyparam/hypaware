@@ -11,7 +11,7 @@ import { buildS3QueryDataset } from '../../hypaware-core/plugins-workspace/s3/sr
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { BlobStore, ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /** @type {ColumnSpec[]} */
@@ -66,7 +66,7 @@ function parquetBytes(rows) {
 /**
  * Discover partitions + build the data source, then run SQL against it.
  *
- * @param {import('../../collectivus-plugin-kernel-types.d.ts').DatasetRegistration} dataset
+ * @param {DatasetRegistration} dataset
  * @param {string} query
  */
 async function runQuery(dataset, query) {
@@ -159,4 +159,69 @@ test('iceberg query source with no metadata reads as empty (no throw)', async ()
   })
   const rows = await runQuery(dataset, 'SELECT * FROM ai_gw')
   assert.deepEqual(rows, [])
+})
+
+test('parquet discovery bounds the prefix to a directory, excluding sibling namespaces', async () => {
+  // `exports/events` and `exports/events_archive` share a string prefix.
+  // S3 (and the BlobStore) match `prefix` as a bare string, so without a
+  // trailing-slash boundary the archive's part would union into `events`.
+  const objects = new Map([
+    ['exports/events/part-0.parquet', parquetBytes([{ id: 1, name: 'alice' }])],
+    ['exports/events_archive/part-0.parquet', parquetBytes([{ id: 99, name: 'archived' }])],
+  ])
+  const dataset = buildS3QueryDataset({
+    source: { name: 'events', format: 'parquet', prefix: 'exports/events' },
+    blobStore: fakeBlobStore(objects),
+    plugin: '@hypaware/s3',
+  })
+
+  const partitions = await dataset.discoverPartitions({
+    config: /** @type {any} */ ({ version: 2 }),
+    scope: { limit: 1000 },
+  })
+  assert.equal(partitions.length, 1, 'sibling namespace must not be discovered')
+  assert.equal(partitions[0].tableUrl, 'exports/events/part-0.parquet')
+
+  const rows = await runQuery(dataset, 'SELECT id FROM events')
+  assert.deepEqual(rows.map((r) => Number(r.id)), [1], 'archived row must not leak in')
+})
+
+test('parquet read rejects when a listed object disappears before read (list→read race)', async () => {
+  // listObjects advertises a key, but getObject returns null — the
+  // real list→read race. The scan must reject, not silently drop rows.
+  /** @type {BlobStore} */
+  const racyBlobStore = /** @type {BlobStore} */ ({
+    kind: 's3',
+    async getObject() {
+      return null
+    },
+    listObjects() {
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { key: 'exports/events/part-0.parquet', size: 10, lastModified: new Date(0) }
+        },
+      }
+    },
+    async putObject() {
+      throw new Error('not supported')
+    },
+    async deleteObject() {},
+  })
+  const dataset = buildS3QueryDataset({
+    source: { name: 'events', format: 'parquet', prefix: 'exports/events' },
+    blobStore: racyBlobStore,
+    plugin: '@hypaware/s3',
+  })
+
+  const partitions = await dataset.discoverPartitions({
+    config: /** @type {any} */ ({ version: 2 }),
+    scope: { limit: 1000 },
+  })
+  assert.equal(partitions.length, 1)
+  await assert.rejects(
+    async () => {
+      await dataset.createDataSource(partitions, { scope: { limit: 1000 }, storage: /** @type {any} */ ({}) })
+    },
+    /query object not found/
+  )
 })

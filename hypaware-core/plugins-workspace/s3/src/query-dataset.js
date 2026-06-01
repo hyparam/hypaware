@@ -53,9 +53,15 @@ async function discoverPartitions(source, blobStore) {
     return [{ dataset: source.name, partition: {} }]
   }
   // parquet: one partition per `.parquet` object under the prefix.
+  // List with a trailing slash so the match is bounded to the directory.
+  // S3 (and the BlobStore's `listObjects`) treats `prefix` as a bare
+  // string match, so listing `exports/events` would also pull in the
+  // sibling namespace `exports/events_archive/part.parquet` and union it
+  // into the `events` table. `source.prefix` is normalized (no trailing
+  // slash) and validated non-empty, so appending `/` is always correct.
   /** @type {QueryPartition[]} */
   const partitions = []
-  for await (const entry of blobStore.listObjects({ prefix: source.prefix })) {
+  for await (const entry of blobStore.listObjects({ prefix: `${source.prefix}/` })) {
     if (!entry.key.endsWith('.parquet')) continue
     partitions.push({ dataset: source.name, partition: {}, tableUrl: entry.key })
   }

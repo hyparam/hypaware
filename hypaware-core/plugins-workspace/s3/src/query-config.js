@@ -85,14 +85,45 @@ function parseEntry(entry, pointer, errors) {
     })
   }
 
+  // A prefix of only slashes (e.g. "/") passes the non-empty string
+  // check above but normalizes to "", which would scope the dataset at
+  // the bucket/root and silently union every `.parquet` under it. Reject
+  // it so a misconfigured read target fails at boot.
+  let normalizedPrefix
+  if (prefix !== undefined) {
+    normalizedPrefix = normalizePrefix(prefix)
+    if (normalizedPrefix.length === 0) {
+      errors.push({
+        pointer: `${pointer}/prefix`,
+        message: 'prefix must name a path within the bucket, not the bucket root',
+        errorKind: 's3_query_source_invalid',
+      })
+    }
+  }
+
   const bucket = readString(raw, 'bucket', pointer, errors)
   const region = readString(raw, 'region', pointer, errors)
   const profile = readString(raw, 'profile', pointer, errors)
   const endpointUrl = readString(raw, 'endpoint_url', pointer, errors)
+  if (endpointUrl !== undefined && !isHttpUrl(endpointUrl)) {
+    // Validate connection fields here so a bad read target surfaces at
+    // boot, not at query time — mirrors the sink config validator.
+    errors.push({
+      pointer: `${pointer}/endpoint_url`,
+      message: `endpoint_url must be a valid http(s) URL (got '${endpointUrl}')`,
+      errorKind: 's3_query_source_invalid',
+    })
+  }
   const forcePathStyle = readBoolean(raw, 'force_path_style', pointer, errors)
   const schema = readSchema(raw.schema, `${pointer}/schema`, errors)
 
-  if (name === undefined || prefix === undefined || format === undefined || !VALID_FORMATS.has(format)) {
+  if (
+    name === undefined ||
+    normalizedPrefix === undefined ||
+    normalizedPrefix.length === 0 ||
+    format === undefined ||
+    !VALID_FORMATS.has(format)
+  ) {
     return undefined
   }
 
@@ -100,7 +131,7 @@ function parseEntry(entry, pointer, errors) {
   const source = {
     name,
     format: /** @type {'parquet' | 'iceberg'} */ (format),
-    prefix: normalizePrefix(prefix),
+    prefix: normalizedPrefix,
   }
   if (bucket !== undefined) source.bucket = bucket
   if (region !== undefined) source.region = region
@@ -152,6 +183,22 @@ function readSchema(value, pointer, errors) {
     })
   }
   return columns
+}
+
+/**
+ * True when `value` parses as an http(s) URL. Used to validate
+ * per-source `endpoint_url` overrides at config-load time.
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isHttpUrl(value) {
+  try {
+    const u = new URL(value)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 /**

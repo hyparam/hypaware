@@ -13,7 +13,7 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
- * @import { ExprNode, SelectStatement } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode, SelectStatement } from 'squirreling/src/types.js'
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
  */
 
@@ -52,7 +52,7 @@ function asyncBufferFromBytes(bytes) {
  * Build an in-memory parquet file from ROWS with a small row-group size
  * so the scan exercises multi-row-group iteration (2 + 2 + 1).
  *
- * @returns {Promise<import('squirreling/src/types.js').AsyncDataSource>}
+ * @returns {Promise<AsyncDataSource>}
  */
 async function makeSource() {
   const columnData = rowsToColumnSources(COLUMNS, ROWS)
@@ -72,7 +72,7 @@ function whereOf(sql) {
 }
 
 /**
- * @param {import('squirreling/src/types.js').AsyncDataSource} source
+ * @param {AsyncDataSource} source
  * @param {string} query
  */
 async function run(source, query) {
