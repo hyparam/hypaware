@@ -13,7 +13,7 @@ import path from 'node:path'
  * to every plugin during activation; the directories are stable across
  * boots (state/cache) or scoped to the current boot (temp).
  *
- * Per the Phase 2 contract in `hypaware-implementation-plan.md`:
+ * Per LLP 0004#state-directories:
  * - `rootDir`  the plugin's installed directory (where the manifest lives).
  * - `stateDir` `<state>/plugins/<name>` — durable per-plugin state.
  * - `cacheDir` `<state>/cache/plugins/<name>` — derivable per-plugin cache.
@@ -38,6 +38,7 @@ import path from 'node:path'
  * @param {string}     args.runId       Kernel boot identifier (DEV_RUN_ID or similar).
  * @param {string}     [args.tmpRoot]   Override the OS temp root (tests).
  * @returns {Promise<PluginPaths>}
+ * @ref LLP 0004#state-directories [implements] — kernel-owned scoped per-plugin dirs; plugins never reach into each other's
  */
 export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId, tmpRoot }) {
   if (!pluginName) throw new Error('createPluginPaths: pluginName is required')
