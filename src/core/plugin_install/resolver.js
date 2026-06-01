@@ -43,6 +43,7 @@ const THIRD_PARTY_UNSCOPED_PREFIX = 'hypaware-plugin-'
  * @param {string} rawSource
  * @param {{ cwd?: string, ref?: string, subdir?: string }} [opts]
  * @returns {PluginSourceSpec}
+ * @ref LLP 0007#single-install-surface [implements] — one fixed resolution precedence across first-party and third-party name shapes
  */
 export function resolveSource(rawSource, opts = {}) {
   if (typeof rawSource !== 'string' || rawSource.length === 0) {

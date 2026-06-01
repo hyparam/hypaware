@@ -187,6 +187,7 @@ function defaultUserDomain(uid) {
  *
  * @param {PlanLaunchAgentInstallOptions} options
  * @returns {LaunchAgentInstallPlan}
+ * @ref LLP 0017#install-global-package-then-service-manager [implements] — launchd LaunchAgent pointed at the stable global binary, never an npx path
  */
 export function planLaunchAgentInstall(options) {
   const label = options.label ?? LAUNCH_LABEL
@@ -261,8 +262,8 @@ export async function installLaunchAgent(options) {
 
 /**
  * Boot out and remove a HypAware LaunchAgent. Tolerates already-unloaded
- * state and a missing plist file. Leaves config, recordings, and logs
- * untouched per finish-v1.md §Phase 4 work #6.
+ * state and a missing plist file. Removes only the service artifact —
+ * config, recordings, and logs are left untouched.
  *
  * @param {{ label?: string, plistDir?: string, homeDir?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
  * @returns {Promise<void>}

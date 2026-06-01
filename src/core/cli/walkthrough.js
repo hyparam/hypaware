@@ -640,6 +640,7 @@ const PICKER_EXPORTS = [
  *
  * @param {RunPickerWalkthroughOptions} opts
  * @returns {Promise<PickerWalkthroughResult>}
+ * @ref LLP 0011#interactive-walkthrough [implements] — canonical npx first-run; composes plugin-contributed what/where picks
  */
 export async function runPickerWalkthrough(opts) {
   const { capabilities, stdout, env } = opts
@@ -650,6 +651,7 @@ export async function runPickerWalkthrough(opts) {
   // presets) the selection is explicit and must stay deterministic, so
   // detection is skipped entirely. Best-effort — a detector failure
   // leaves the set empty rather than blocking onboarding.
+  // @ref LLP 0011#autodetect-vs-default [implements] — detection only seeds the initial checkbox; never forces a source on
   const interactive = !opts.picks
   /** @type {Set<PickerSource>} */
   let detected = new Set()
@@ -881,6 +883,7 @@ export async function runPickerWalkthrough(opts) {
  *   hypHome: string,
  * }} args
  * @returns {HypAwareV2Config}
+ * @ref LLP 0011#no-architectural-names [implements] — user picks what/where; HypAware derives the explicit plugin set, no role labels
  */
 export function composePickerConfig(args) {
   const wantsAnthropic = args.sources.includes('claude') || args.sources.includes('raw-anthropic')
