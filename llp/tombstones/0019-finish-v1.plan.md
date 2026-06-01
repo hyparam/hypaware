@@ -1,4 +1,17 @@
-# Finish V1 Plan
+# LLP 0019: Finish V1 Plan (historical)
+
+**Type:** Plan
+**Status:** Tombstoned
+**Systems:** Process
+**Author:** HypAware team
+**Date:** 2026-05-20
+**Related:** LLP 0002
+
+> **Tombstoned.** The executed V1 finishing plan. v1.0.0 has shipped. Its live
+> `## Decisions` were lifted into [LLP 0002](../0002-v1-scope.decision.md); this
+> file is kept for historical phasing only. Original body follows verbatim.
+
+---
 
 This replaces the old phase 10-13 path in
 [`hypaware-implementation-plan.md`](hypaware-implementation-plan.md).

@@ -18,6 +18,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  *
  * @returns {ExtendedSourceRegistry}
  */
+// @ref LLP 0012 — Source subsystem: registration + kernel-driven lifecycle
 export function createSourceRegistry() {
   /** @type {Map<string, SourceContribution>} */
   const contributions = new Map()
@@ -26,6 +27,7 @@ export function createSourceRegistry() {
   const log = getLogger('sources')
   const instruments = getKernelInstruments()
 
+  // @ref LLP 0012#contribution-surface [implements] — name/plugin/start required, unique source names
   /** @param {SourceContribution} contribution */
   function register(contribution) {
     if (!contribution || typeof contribution !== 'object') {
@@ -64,6 +66,7 @@ export function createSourceRegistry() {
    * @param {string} name
    * @param {PluginActivationContext} ctx
    * @returns {Promise<StartedSource>}
+   * @ref LLP 0012#observable-lifecycle [implements] — start wraps a source.start span and ticks hyp_sources_started
    */
   async function start(name, ctx) {
     const contribution = contributions.get(name)
@@ -125,6 +128,7 @@ export function createSourceRegistry() {
   /**
    * @param {string} name
    * @param {PluginActivationContext} ctx
+   * @ref LLP 0012#reload-context [constrained-by] — reload shares start's ActivationContext; unsupported reload still emits a skipped span
    */
   async function reload(name, ctx) {
     const handle = started.get(name)

@@ -270,7 +270,15 @@ bin/
 
 ## Project documents
 
-- [`hypaware-design.md`](./hypaware-design.md) — architecture and decisions
-- [`finish-v1.md`](./finish-v1.md) — the V1 plan of record
-- [`hypaware-implementation-plan.md`](./hypaware-implementation-plan.md) — the longer-term phased plan
+Design rationale lives in numbered **LLP documents** under [`llp/`](./llp/)
+(Linked Literate Programming). Start here:
+
+- [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md) — root overview and subsystem map
+- [`llp/0002-v1-scope.decision.md`](./llp/0002-v1-scope.decision.md) — what actually shipped in V1
+- [`llp/0001-adopting-llp.plan.md`](./llp/0001-adopting-llp.plan.md) — how this docs system was set up
+
+The former monolithic docs (`hypaware-design.md`, `finish-v1.md`,
+`hypaware-implementation-plan.md`) were decomposed into the LLP corpus and are
+preserved under [`llp/tombstones/`](./llp/tombstones/).
+
 - [`collectivus-plugin-kernel-types.d.ts`](./collectivus-plugin-kernel-types.d.ts) — public plugin interfaces
