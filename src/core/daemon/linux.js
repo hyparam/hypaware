@@ -175,6 +175,7 @@ export function unitPathFor(unitDir, label = SYSTEMD_UNIT_BASE) {
  *
  * @param {PlanSystemdInstallOptions} options
  * @returns {SystemdInstallPlan}
+ * @ref LLP 0017#install-global-package-then-service-manager [implements] — systemd user unit pointed at the stable global binary, never an npx path
  */
 export function planSystemdInstall(options) {
   const label = options.label ?? SYSTEMD_UNIT_BASE
@@ -264,8 +265,8 @@ export async function installSystemdUnit(options) {
 /**
  * Stop, disable, and remove a HypAware systemd unit. Tolerates
  * already-stopped / already-disabled state and a missing unit file.
- * Leaves config, recordings, and logs untouched per finish-v1.md
- * §Phase 4 work #6.
+ * Removes only the service artifact — config, recordings, and logs are
+ * left untouched.
  *
  * @param {{ label?: string, unitDir?: string, homeDir?: string, systemctl?: SystemctlAdapter }} options
  * @returns {Promise<void>}

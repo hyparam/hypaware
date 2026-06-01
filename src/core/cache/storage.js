@@ -62,6 +62,7 @@ export function resolveIcebergDir(tablePath) {
  *
  * @param {{ cacheRoot: string, getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined }} args
  * @returns {ExtendedQueryStorageService}
+ * @ref LLP 0013#write-path-and-query [implements] — kernel-owned cache write path; every source row lands here
  */
 export function createQueryStorageService({ cacheRoot, getDeclaration }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')

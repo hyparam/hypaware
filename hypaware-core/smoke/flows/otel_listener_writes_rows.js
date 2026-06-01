@@ -32,6 +32,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
  * - traces: at least one `cache.append` for `hyp_dataset=logs`
  *
  * @param {{ harness: any, expect: any }} args
+ * @ref LLP 0012#source-kinds [tests] — OTLP receiver source ingests a signal and writes cache rows
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

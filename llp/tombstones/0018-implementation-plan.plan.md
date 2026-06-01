@@ -1,4 +1,19 @@
-# HypAware Implementation Plan
+# LLP 0018: HypAware Implementation Plan (historical)
+
+**Type:** Plan
+**Status:** Tombstoned
+**Systems:** Process
+**Author:** HypAware team
+**Date:** 2026-05-22
+**Related:** LLP 0002
+
+> **Tombstoned.** This is the original phased build plan. V1.0.0 has shipped, so
+> it is executed history, not live guidance — kept for migration and archaeology
+> only. Live V1 decisions are in [LLP 0002](../0002-v1-scope.decision.md); the
+> phase 10–13 path here was superseded by `finish-v1`
+> ([LLP 0019](./0019-finish-v1.plan.md)). Original body follows verbatim.
+
+---
 
 Companion to [`hypaware-design.md`](hypaware-design.md) and
 [`collectivus-plugin-kernel-types.d.ts`](collectivus-plugin-kernel-types.d.ts).

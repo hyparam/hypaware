@@ -5,6 +5,32 @@ HypAware is the active codebase. Prefer files under `src/`, `hypaware-core/`,
 repo; do not assume its tests, package scripts, or agent notes are available
 unless a task explicitly provides that context.
 
+## Design docs (LLP)
+
+Design rationale lives in numbered **LLP documents** under `llp/`, following
+Linked Literate Programming. Start at [`llp/0000-hypaware.explainer.md`](llp/0000-hypaware.explainer.md)
+for the subsystem map, and [LLP 0002](llp/0002-v1-scope.decision.md) for what
+actually shipped in V1.
+
+- **Read before you change.** Before modifying a subsystem, read the LLP tagged
+  with its `Systems` value (e.g. `Sources`, `Sinks`, `Plugins`, `Config`).
+- **Annotate non-obvious decisions.** When you implement or change code that
+  realizes a documented, non-obvious design decision, add an annotation:
+  `// @ref LLP NNNN#anchor — short gloss` (optional relation:
+  `[implements]`, `[constrained-by]`, `[tests]`). Attach it directly above the
+  construct — a blank line breaks attachment. Don't annotate mechanically; a
+  ref must tell you something the code and filename don't.
+- **Keep refs honest.** When you touch annotated code, check the referenced
+  section still applies; update or remove the `@ref` if not.
+- **Living docs.** Update the LLP when the design changes — land the doc edit in
+  the same commit as the code. Mark retired docs `Superseded` or move them to
+  `llp/tombstones/` with `Status: Tombstoned`; don't leave stale guidance.
+- **Tooling lives in-repo** under `.claude/skills/` (so every clone has it):
+  `/ref-check [path]` validates `@ref`s; `/ref-story <file>` shows a file's
+  rationale-order view; `/llp-create <title>` scaffolds a new doc; `/llp-list`
+  surveys the corpus; `/llp-grill` stress-tests a plan against the LLP corpus
+  before you write code.
+
 ## Code Style
 
 - JavaScript, no semicolons.
