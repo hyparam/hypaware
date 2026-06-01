@@ -86,11 +86,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     await settle()
     await feed(io.stdin, ['\x1b[B', '\x1b[B', ' ', '\r'])
 
-    // Exports prompt — local-parquet is pre-checked by default, so a bare
-    // enter accepts it (matches the documented `--yes` default).
-    await settle()
-    await feed(io.stdin, ['\r'])
-
+    // No export prompt: the picker always defaults to local-parquet now.
     // Retention prompt — empty buffer + enter accepts the 30-day default.
     await settle()
     await feed(io.stdin, ['\r'])
@@ -177,9 +173,10 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   const input = new PassThrough()
   // Mark BOTH ends as TTYs so the only signal that flips the router is
   // the HYP_NO_TUI escape. This proves the env override wins over the
-  // TTY probe.
+  // TTY probe. Answers: source '3' (raw-anthropic), then retention
+  // default — the export question is no longer asked.
   Object.defineProperty(input, 'isTTY', { value: true })
-  const stdout = answerDrivenOutput(input, ['3\n', '1\n', '\n'], true)
+  const stdout = answerDrivenOutput(input, ['3\n', '\n'], true)
   const stderr = makeBuf()
 
   // HYP_NO_TUI flows through opts.env — the same channel real callers
@@ -197,7 +194,7 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   })
   assert.equal(result.exitCode, 0)
   assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
-  assert.equal(result.exportPicked, 'keep-local')
+  assert.equal(result.exportPicked, 'local-parquet')
   // The legacy prompt prints the numbered-list signature.
   assert.match(stdout.text(), /select \(e\.g\. 1,3 or "all"\):/)
 })

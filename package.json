@@ -38,14 +38,14 @@
     "hyparquet": "1.26.0",
     "hyparquet-compressors": "1.1.1",
     "icebird": "0.8.5",
-    "squirreling": "0.12.22"
+    "squirreling": "0.12.23"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.15.4"
+    "hyparquet-writer": "0.15.6"
   },
   "overrides": {
-    "hyparquet-writer": "0.15.4",
-    "squirreling": "0.12.22"
+    "hyparquet-writer": "0.15.6",
+    "squirreling": "0.12.23"
   },
   "devDependencies": {
     "@types/node": "25.9.1",

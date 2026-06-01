@@ -9,10 +9,12 @@ import { PassThrough } from 'node:stream'
 
 import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
 
-test('picker prompt prints context under source and export options', async () => {
+test('picker prompt prints context under source options and defaults export to local-parquet', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-prompt-'))
   const input = new PassThrough()
-  const stdout = answerDrivenOutput(input, ['3\n', '1\n', '\n'])
+  // Only the source question and the retention prompt are asked; the
+  // export question was removed in favour of the local-parquet default.
+  const stdout = answerDrivenOutput(input, ['3\n', '\n'])
   const stderr = makeBuf()
 
   const result = await runPickerWalkthrough({
@@ -28,11 +30,13 @@ test('picker prompt prints context under source and export options', async () =>
 
   assert.equal(result.exitCode, 0)
   assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
-  assert.equal(result.exportPicked, 'keep-local')
+  assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
   assert.match(text, /3\) capture raw Anthropic API traffic\n     Advanced API proxy mode/)
-  assert.match(text, /1\) keep local query cache only\n     Stores recent rows locally/)
+  // The export question is no longer rendered.
+  assert.doesNotMatch(text, /keep local query cache only/)
+  assert.doesNotMatch(text, /Where should HypAware export/)
   assert.equal(stderr.text(), '')
 })
 
