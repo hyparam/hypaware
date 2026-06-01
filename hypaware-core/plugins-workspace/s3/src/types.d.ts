@@ -1,3 +1,5 @@
+import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+
 export type CredentialSourceKind =
   | 'profile'
   | 'env'
@@ -6,6 +8,46 @@ export type CredentialSourceKind =
   | 'process'
   | 'metadata'
   | 'injected'
+
+/**
+ * One queryable S3-backed dataset, declared under the `@hypaware/s3`
+ * plugin config as `query_sources[]`. `prefix` is the path to the data
+ * (a directory of `.parquet` objects for `format: 'parquet'`, or an
+ * Iceberg table root for `format: 'iceberg'`) relative to the BlobStore
+ * root — the plugin-level `prefix` when reading the plugin's own bucket,
+ * matching where the sink writes; the full in-bucket path when `bucket`
+ * is overridden. Connection fields default to plugin-level config.
+ */
+export interface S3QuerySourceConfig {
+  /** SQL table / dataset name. Must be unique across query sources. */
+  name: string
+  format: 'parquet' | 'iceberg'
+  /** Dataset path relative to the BlobStore root (no leading/trailing slash). */
+  prefix: string
+  /** Source bucket. Defaults to the plugin-level `bucket`. */
+  bucket?: string
+  /** AWS region. Defaults to the plugin-level `region`. */
+  region?: string
+  /** Named AWS profile. Defaults to the plugin-level `profile`. */
+  profile?: string
+  /** S3-compatible custom endpoint. Defaults to the plugin-level value. */
+  endpoint_url?: string
+  /** Path-style addressing. Defaults to the plugin-level value. */
+  force_path_style?: boolean
+  /** Optional declared schema; resolved from the data at query time when omitted. */
+  schema?: ColumnSpec[]
+}
+
+export interface S3QuerySourceValidationError {
+  /** JSON pointer into the `query_sources` array. */
+  pointer: string
+  message: string
+  errorKind: 's3_query_source_invalid'
+}
+
+export type S3QuerySourcesValidationResult =
+  | { ok: true; sources: S3QuerySourceConfig[] }
+  | { ok: false; errors: S3QuerySourceValidationError[] }
 
 export interface S3PutObjectInput {
   Bucket: string
