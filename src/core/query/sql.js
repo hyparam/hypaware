@@ -25,6 +25,7 @@ import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
  *
  * @param {ExecuteSqlOptions} args
  * @returns {Promise<ExecuteSqlResult>}
+ * @ref LLP 0015#query-is-intrinsic [implements] — core-owned read-only SQL over the registry; IO only via the storage service
  */
 export async function executeQuerySql(args) {
   const { query, registry, storage } = args
