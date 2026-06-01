@@ -13,7 +13,7 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
  * Install a NodeTracerProvider with the exporter strategy described in
- * the Phase 0 contract:
+ * LLP 0021#exporter-selection:
  *
  * - With `HYP_DEV_TELEMETRY=1`: install a JSONL exporter under
  *   `<state>/dev-telemetry/traces-<pid>.jsonl` so smoke flows can
@@ -27,6 +27,7 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  * @param {ObservabilityEnv} args.env
  * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
  * @returns {{ provider: TracerProvider|null, exporters: object[] }}
+ * @ref LLP 0021#exporter-selection [implements] — three-state JSONL / OTLP / no-op exporter choice
  */
 export function installTracerProvider({ env, resource }) {
   /** @type {object[]} */
@@ -38,6 +39,7 @@ export function installTracerProvider({ env, resource }) {
     exporters.push(jsonlExporter)
   }
 
+  // @ref LLP 0021#self-loop-guard [constrained-by] — OTLP only when dev telemetry off; never both exporters at once
   if (!env.devTelemetry && env.otlpEndpoint) {
     const otlpExporter = new OtlpSpanExporter({
       url: env.otlpEndpoint.replace(/\/$/, '') + '/v1/traces',
