@@ -273,4 +273,5 @@ bin/
 - [`hypaware-design.md`](./hypaware-design.md) — architecture and decisions
 - [`finish-v1.md`](./finish-v1.md) — the V1 plan of record
 - [`hypaware-implementation-plan.md`](./hypaware-implementation-plan.md) — the longer-term phased plan
+- [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md) — how to write a plugin (`hyp plugin new` / `hyp plugin doctor`)
 - [`collectivus-plugin-kernel-types.d.ts`](./collectivus-plugin-kernel-types.d.ts) — public plugin interfaces

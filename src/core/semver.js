@@ -62,6 +62,43 @@ export function matchesSemverRange(version, range) {
 }
 
 /**
+ * True when `version` is a well-formed `X.Y.Z` semantic version
+ * (optionally with a pre-release tag). Used by the plugin doctor to
+ * validate manifest `version` fields.
+ *
+ * @param {unknown} version
+ * @returns {boolean}
+ */
+export function isValidSemver(version) {
+  return typeof version === 'string' && parseSemver(version) !== null
+}
+
+/**
+ * True when `range` is a range this matcher understands: `*`/`x`, an
+ * exact/`=` version, or one of the `^ ~ >= <= > <` operators applied to
+ * a parseable `X.Y.Z`. Mirrors the operator set in `matchesSemverRange`
+ * so the doctor rejects manifest `hypaware_api` ranges the kernel could
+ * never satisfy.
+ *
+ * @param {unknown} range
+ * @returns {boolean}
+ */
+export function isValidRange(range) {
+  if (typeof range !== 'string') return false
+  const trimmed = range.trim()
+  if (trimmed === '') return false
+  if (trimmed === '*' || trimmed === 'x' || trimmed === 'X') return true
+  const body = /^[\^~]/.test(trimmed)
+    ? trimmed.slice(1)
+    : /^(>=|<=)/.test(trimmed)
+      ? trimmed.slice(2)
+      : /^[<>=]/.test(trimmed)
+        ? trimmed.slice(1)
+        : trimmed
+  return parseSemver(body) !== null
+}
+
+/**
  * @param {string} s
  * @returns {{ major: number, minor: number, patch: number, pre: string }|null}
  */
