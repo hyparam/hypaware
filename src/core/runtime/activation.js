@@ -42,6 +42,7 @@ import { createQueryStorageService } from '../cache/storage.js'
  *   cacheRoot?: string,
  * }} [opts]
  * @returns {KernelRuntime}
+ * @ref LLP 0003#intrinsic-not-plugin-provided [implements] — query + storage are wired in as intrinsic services, not plugin contributions
  */
 export function createKernelRuntime(opts = {}) {
   const cacheRoot = opts.cacheRoot ?? opts.storage?.cacheRoot ?? defaultCacheRoot()

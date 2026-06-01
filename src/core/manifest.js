@@ -105,6 +105,7 @@ export async function loadManifests(rootDirs) {
  *
  * @param {unknown} value
  * @returns {{ ok: true, manifest: PluginManifest } | { ok: false, errorKind: ManifestErrorKind, message: string }}
+ * @ref LLP 0005#declarative [implements] — one manifest shape declares requires/provides/contributes; category is emergent, not a variant
  */
 export function validateManifest(value) {
   if (!isPlainObject(value)) {
