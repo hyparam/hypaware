@@ -8,10 +8,15 @@ hyp plugin new @yourorg/my-thing --kind source   # scaffold
 hyp plugin doctor ./my-thing                      # validate
 ```
 
-`hyp plugin doctor` runs static checks **and** a sandboxed dry-run of
-your `activate()` function, then prints every problem at once with a fix
-for each. Run it after every change. It also accepts `--json` for use by
+`hyp plugin doctor` runs static checks **and** a dry-run of your
+`activate()` function, then prints every problem at once with a fix for
+each. Run it after every change. It also accepts `--json` for use by
 agents and scripts.
+
+> The dry-run imports and runs your entrypoint **in-process**, isolating
+> only its state/cache/temp paths to a throwaway directory — it is not a
+> security sandbox. Run the doctor only on plugin code you trust, just as
+> you would before installing it.
 
 A plugin is two things:
 
@@ -318,7 +323,7 @@ and how to fix it:
 | `activate_threw` | `activate(ctx)` threw during the dry run | Only register in `activate()`; defer work to `start()`/`create()` |
 | `contribution_not_registered` | Manifest declares something `activate()` never registered | Add the matching `ctx.<registry>.register(...)` call |
 | `contribution_undeclared` (warn) | `activate()` registered something the manifest doesn't declare | Add it to `contributes.*` so it appears in help/discovery |
-| `capability_unresolved` | A required capability has no provider | Install a provider, or drop the requirement |
+| `capability_unresolved` | A required capability has no provider, or none in the required version range | Install a provider matching the range, widen the range, or drop the requirement |
 | `capability_unprovided` (warn) | Manifest says it provides a capability `activate()` never provided | Call `ctx.provideCapability(...)` |
 
 ---

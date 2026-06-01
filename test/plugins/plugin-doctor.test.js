@@ -94,7 +94,7 @@ test('unresolved required capability is an error', async () => {
     manifest: baseManifest({ requires: { capabilities: { 'hypaware.nonexistent': '^1.0.0' } } }),
     index: `export async function activate() {}\n`,
   })
-  const report = await diagnosePlugin(root, { knownCapabilities: new Set(['hypaware.blob-store']) })
+  const report = await diagnosePlugin(root, { knownCapabilities: new Map([['hypaware.blob-store', ['1.0.0']]]) })
   assert.equal(report.ok, false)
   assert.ok(report.diagnostics.some((d) => d.kind === 'capability_unresolved'))
 })
@@ -104,8 +104,104 @@ test('required capability resolves when a provider is known', async () => {
     manifest: baseManifest({ requires: { capabilities: { 'hypaware.blob-store': '^1.0.0' } } }),
     index: `export async function activate() {}\n`,
   })
-  const report = await diagnosePlugin(root, { knownCapabilities: new Set(['hypaware.blob-store']) })
+  const report = await diagnosePlugin(root, { knownCapabilities: new Map([['hypaware.blob-store', ['1.2.0']]]) })
   assert.ok(!report.diagnostics.some((d) => d.kind === 'capability_unresolved'))
+})
+
+test('required capability with a known name but unsatisfied range is unresolved', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ requires: { capabilities: { 'hypaware.blob-store': '^9.0.0' } } }),
+    index: `export async function activate() {}\n`,
+  })
+  const report = await diagnosePlugin(root, { knownCapabilities: new Map([['hypaware.blob-store', ['1.0.0']]]) })
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'capability_unresolved')
+  assert.ok(finding)
+  assert.match(finding.message, /\^9\.0\.0/)
+  assert.match(finding.message, /1\.0\.0/)
+})
+
+test('requireCapability and using its handle during activate does not false-fail', async () => {
+  // Mirrors the real adapter pattern: fetch the capability handle, then
+  // call methods on it during activate() (e.g. gateway.registerClient).
+  // The seeded stub must absorb those calls so the source still registers.
+  const root = await fixture({
+    manifest: baseManifest({
+      requires: { capabilities: { 'hypaware.ai-gateway': '^2.0.0' } },
+      contributes: { sources: [{ name: 'demo' }] },
+    }),
+    index:
+      `export async function activate(ctx) {\n` +
+      `  const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')\n` +
+      `  gateway.registerUpstreamPreset({ name: 'x' })\n` +
+      `  gateway.registerClient({ name: 'y' }).whatever()\n` +
+      `  ctx.sources.register({ name: 'demo', plugin: '@test/example', async start() { return { async stop() {} } } })\n` +
+      `}\n`,
+  })
+  const report = await diagnosePlugin(root, { knownCapabilities: new Map([['hypaware.ai-gateway', ['2.1.0']]]) })
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  assert.ok(!report.diagnostics.some((d) => d.kind === 'activate_threw'))
+  assert.ok(!report.diagnostics.some((d) => d.kind === 'contribution_not_registered'))
+})
+
+test('malformed contributes entry is flagged as contributes_malformed', async () => {
+  const missingName = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ summary: 'x' }] } }),
+    index: `export async function activate() {}\n`,
+  })
+  const r1 = await diagnosePlugin(missingName)
+  assert.equal(r1.ok, false)
+  const f1 = r1.diagnostics.find((d) => d.kind === 'contributes_malformed')
+  assert.ok(f1)
+  assert.equal(f1.location, '/contributes/sources/0')
+
+  const notArray = await fixture({
+    manifest: baseManifest({ contributes: { sources: {} } }),
+    index: `export async function activate() {}\n`,
+  })
+  const r2 = await diagnosePlugin(notArray)
+  assert.equal(r2.ok, false)
+  const f2 = r2.diagnostics.find((d) => d.kind === 'contributes_malformed')
+  assert.ok(f2)
+  assert.equal(f2.location, '/contributes/sources')
+})
+
+test('malformed config_sections entry is flagged as contributes_malformed', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { config_sections: [{ summary: 'no section' }] } }),
+    index: `export async function activate() {}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'contributes_malformed')
+  assert.ok(finding)
+  assert.equal(finding.location, '/contributes/config_sections/0')
+  assert.match(finding.message, /section/)
+})
+
+test('declared-but-never-provided capability is a warning', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ provides: { capabilities: { 'hypaware.thing': '1.0.0' } } }),
+    index: `export async function activate() { /* never calls provideCapability */ }\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+  const warn = report.diagnostics.find((d) => d.kind === 'capability_unprovided')
+  assert.ok(warn)
+  assert.equal(warn.severity, 'warn')
+  assert.match(warn.message, /hypaware\.thing/)
+})
+
+test('a syntax error in the entrypoint surfaces as entrypoint_import_failed', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `export async function activate(ctx) { this is not valid javascript }\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'entrypoint_import_failed')
+  assert.ok(finding)
+  assert.equal(finding.location, '/entrypoint')
 })
 
 test('invalid semver and missing entrypoint are caught statically', async () => {

@@ -4,12 +4,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { loadManifest } from '../manifest.js'
-import { isValidRange, isValidSemver } from '../semver.js'
+import { isValidRange, isValidSemver, matchesSemverRange } from '../semver.js'
 import { dryRunActivate } from './dry_run.js'
 
 /**
  * @import { PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { DoctorReport, PluginDiagnostic, RegisteredSnapshot } from './types.d.ts'
+ * @import { DoctorReport, DryRunResult, PluginDiagnostic, RegisteredSnapshot } from './types.d.ts'
  */
 
 const GUIDE = 'docs/PLUGIN_AUTHORING.md'
@@ -41,15 +41,16 @@ const CONTRIBUTIONS = [
  * stops at the first), so an author sees the full picture in one pass.
  *
  * @param {string} rootDir Absolute path to the plugin directory.
- * @param {{ knownCapabilities?: Set<string> }} [opts]
- *   `knownCapabilities` is the set of capability names any
- *   bundled/installed plugin provides — used to resolve
- *   `requires.capabilities`. Defaults to empty (every required
- *   capability is then flagged), so callers should pass the catalog set.
+ * @param {{ knownCapabilities?: Map<string, string[]> }} [opts]
+ *   `knownCapabilities` maps each capability name any bundled/installed
+ *   plugin provides to the versions it provides — used to resolve
+ *   `requires.capabilities` against their declared semver ranges, and to
+ *   pre-seed the dry run. Defaults to empty (every required capability is
+ *   then flagged), so callers should pass the catalog map.
  * @returns {Promise<DoctorReport>}
  */
 export async function diagnosePlugin(rootDir, opts = {}) {
-  const knownCapabilities = opts.knownCapabilities ?? new Set()
+  const knownCapabilities = opts.knownCapabilities ?? new Map()
   /** @type {PluginDiagnostic[]} */
   const diagnostics = []
 
@@ -71,7 +72,7 @@ export async function diagnosePlugin(rootDir, opts = {}) {
   const manifest = loaded.manifest
   await checkStatic(manifest, rootDir, diagnostics)
 
-  const dry = await dryRunActivate(manifest, rootDir)
+  const dry = await dryRunActivate(manifest, rootDir, { knownCapabilities })
   if (dry.error) {
     diagnostics.push(diagnoseDryRunError(manifest, dry.error))
   }
@@ -148,6 +149,20 @@ async function checkStatic(manifest, rootDir, out) {
 }
 
 /**
+ * Categories validated for *shape* only: each entry must be an object
+ * with a non-empty name field. A superset of CONTRIBUTIONS — it also
+ * covers `config_sections` (keyed on `section`), which is excluded from
+ * the declared-vs-registered diff but still must be well-formed, as the
+ * authoring guide promises.
+ *
+ * @type {Array<{ key: string, nameField: 'name' | 'section', label: string }>}
+ */
+const SHAPE_CHECKS = [
+  ...CONTRIBUTIONS.map(({ key, nameField, label }) => ({ key, nameField, label })),
+  { key: 'config_sections', nameField: 'section', label: 'config section' },
+]
+
+/**
  * Each `contributes.<category>` entry must be an object with a non-empty
  * name (or `section` for config sections). Malformed entries are
  * reported and excluded from the registration diff.
@@ -158,7 +173,7 @@ async function checkStatic(manifest, rootDir, out) {
 function checkContributesShape(manifest, out) {
   const contributes = manifest.contributes
   if (!contributes) return
-  for (const { key, nameField, label } of CONTRIBUTIONS) {
+  for (const { key, nameField, label } of SHAPE_CHECKS) {
     const entries = /** @type {unknown} */ (contributes[/** @type {keyof typeof contributes} */ (key)])
     if (entries === undefined) continue
     if (!Array.isArray(entries)) {
@@ -190,7 +205,7 @@ function checkContributesShape(manifest, out) {
 
 /**
  * @param {PluginManifest} manifest
- * @param {NonNullable<import('./types.d.ts').DryRunResult['error']>} error
+ * @param {NonNullable<DryRunResult['error']>} error
  * @returns {PluginDiagnostic}
  */
 function diagnoseDryRunError(manifest, error) {
@@ -303,15 +318,22 @@ function checkProvidedCapabilities(manifest, registered, out) {
 }
 
 /**
+ * `requires.capabilities` is a name → semver-range contract, so a
+ * provider satisfies it only when one of its provided versions falls in
+ * the required range. A name with no provider at all, and a name whose
+ * providers all fall outside the range, are both `capability_unresolved`
+ * — runtime resolution would reject either.
+ *
  * @param {PluginManifest} manifest
- * @param {Set<string>} knownCapabilities
+ * @param {Map<string, string[]>} knownCapabilities
  * @param {PluginDiagnostic[]} out
  */
 function checkRequiredCapabilities(manifest, knownCapabilities, out) {
   const requires = manifest.requires?.capabilities
   if (!requires) return
-  for (const name of Object.keys(requires)) {
-    if (!knownCapabilities.has(name)) {
+  for (const [name, range] of Object.entries(requires)) {
+    const provided = knownCapabilities.get(name)
+    if (!provided || provided.length === 0) {
       out.push({
         kind: 'capability_unresolved',
         severity: 'error',
@@ -319,6 +341,19 @@ function checkRequiredCapabilities(manifest, knownCapabilities, out) {
         message: `requires capability '${name}', but no bundled or installed plugin provides it`,
         repair: [
           `Install a plugin that provides '${name}', or remove the requirement`,
+          `List providers with: hyp plugin list`,
+        ],
+      })
+      continue
+    }
+    if (!provided.some((version) => matchesSemverRange(version, range))) {
+      out.push({
+        kind: 'capability_unresolved',
+        severity: 'error',
+        location: '/requires/capabilities',
+        message: `requires capability '${name}' '${range}', but the only provider(s) offer ${provided.join(', ')}`,
+        repair: [
+          `Widen the required range, or install a provider of '${name}' matching '${range}'`,
           `List providers with: hyp plugin list`,
         ],
       })

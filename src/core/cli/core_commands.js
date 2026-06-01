@@ -37,8 +37,9 @@ import { renderReport } from '../plugin_doctor/render.js'
 import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 
 /**
- * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
+ * @import { PluginMetadata } from '../config/types.d.ts'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
@@ -1464,18 +1465,23 @@ async function runPluginDoctor(argv, ctx) {
 }
 
 /**
- * Collect every capability name any known plugin provides, used to
- * resolve a plugin's `requires.capabilities`.
+ * Map every capability name any known plugin provides to the versions
+ * provided, used to resolve a plugin's `requires.capabilities` against
+ * their declared semver ranges (not just by name).
  *
- * @param {Map<import('../../../collectivus-plugin-kernel-types.d.ts').PluginName, import('../config/types.d.ts').PluginMetadata>} knownPlugins
- * @returns {Set<string>}
+ * @param {Map<PluginName, PluginMetadata>} knownPlugins
+ * @returns {Map<string, string[]>}
  */
 function capabilitiesFromMetadata(knownPlugins) {
-  /** @type {Set<string>} */
-  const caps = new Set()
+  /** @type {Map<string, string[]>} */
+  const caps = new Map()
   for (const meta of knownPlugins.values()) {
-    if (meta.provides) {
-      for (const name of Object.keys(meta.provides)) caps.add(name)
+    if (!meta.provides) continue
+    for (const [name, version] of Object.entries(meta.provides)) {
+      if (typeof version !== 'string') continue
+      const versions = caps.get(name)
+      if (versions) versions.push(version)
+      else caps.set(name, [version])
     }
   }
   return caps
