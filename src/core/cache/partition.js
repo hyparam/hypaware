@@ -25,8 +25,29 @@ const RETIRED_DIR = '.retired'
  * @returns {PartitionCursor}
  */
 export function readCursorSync(partitionDir) {
+  return tryReadCursorSync(partitionDir) ?? { epoch: 0, rowCount: 0, compaction: null }
+}
+
+/**
+ * Like {@link readCursorSync}, but distinguishes "no cursor" / "cursor
+ * unreadable" from a real cursor: returns `null` when the file is
+ * missing OR cannot be read/parsed, instead of synthesizing a default
+ * epoch-0 cursor. Callers that take destructive action based on the
+ * cursor (e.g. the orphan-generation sweep) must use this so a corrupt
+ * `cursor.json` is never mistaken for "the live generation is epoch 0".
+ *
+ * @param {string} partitionDir
+ * @returns {PartitionCursor | null}
+ */
+export function tryReadCursorSync(partitionDir) {
+  /** @type {string} */
+  let raw
   try {
-    const raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
+    raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
+  } catch {
+    return null
+  }
+  try {
     const parsed = JSON.parse(raw)
     /** @type {PartitionCursor} */
     const cursor = {
@@ -45,7 +66,7 @@ export function readCursorSync(partitionDir) {
     }
     return cursor
   } catch {
-    return { epoch: 0, rowCount: 0, compaction: null }
+    return null
   }
 }
 
