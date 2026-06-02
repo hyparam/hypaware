@@ -23,6 +23,16 @@ async function makeTmpDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), `hyp-retention-maint-${prefix}-`))
 }
 
+/** @param {string} p @returns {Promise<boolean>} */
+async function pathExists(p) {
+  try {
+    await fs.access(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** @type {ColumnSpec[]} */
 const COLUMNS = [
   { name: 'id', type: 'INT32', nullable: false },
@@ -566,6 +576,115 @@ test('source-table directory remains intact after retention', async () => {
     const stat = await fs.stat(sourceDir)
     assert.ok(stat.isDirectory())
     assert.ok(tableExists(tableDir))
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- memory-safe compaction (byte-aware batching) ---
+
+test('normalizeMaintenanceConfig fills compact_batch_bytes default', () => {
+  const cfg = normalizeMaintenanceConfig(undefined)
+  assert.equal(cfg.compact_batch_bytes, 32 * 1024 * 1024)
+})
+
+test('normalizeMaintenanceConfig honours an explicit compact_batch_bytes', () => {
+  const cfg = normalizeMaintenanceConfig({ compact_batch_bytes: 1234 })
+  assert.equal(cfg.compact_batch_bytes, 1234)
+})
+
+test('compaction flushes by byte budget so a fat column cannot blow up one batch', async () => {
+  const cacheRoot = await makeTmpDir('maint-bytecap')
+  try {
+    // 20 rows, each carrying a ~80KB (UTF-16) value blob.
+    const blob = 'x'.repeat(40_000)
+    for (let i = 0; i < 20; i++) {
+      await appendRowsToSourceTable(cacheRoot, 'ds1', ['source=test'], COLUMNS, [
+        { id: i, value: blob, timestamp: new Date().toISOString() },
+      ])
+    }
+
+    // A 150KB byte budget forces a flush roughly every two rows, so the
+    // compacted output spans many data files instead of one giant batch.
+    const report = await maintainCache({
+      cacheRoot,
+      force: true,
+      compactOnly: true,
+      config: { compact_batch_bytes: 150_000 },
+    })
+
+    assert.ok(report.totalCompacted > 0)
+    const p = report.partitions[0]
+    assert.ok(p.dataFilesAfter > 1, `expected multiple flushed files, got ${p.dataFilesAfter}`)
+
+    // All rows survive the split, and the data round-trips intact.
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const cursor = readCursorSync(sourceDir)
+    assert.equal(cursor.rowCount, 20)
+    const liveDir = path.join(sourceDir, cursor.tableDir ?? 'table')
+    const rows = await readRowsFromTable(liveDir)
+    assert.equal(rows.length, 20)
+    assert.equal(rows.every((r) => r.value === blob), true)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a generous byte budget compacts the same input into a single file', async () => {
+  const cacheRoot = await makeTmpDir('maint-bigcap')
+  try {
+    const blob = 'x'.repeat(40_000)
+    for (let i = 0; i < 20; i++) {
+      await appendRowsToSourceTable(cacheRoot, 'ds1', ['source=test'], COLUMNS, [
+        { id: i, value: blob, timestamp: new Date().toISOString() },
+      ])
+    }
+
+    const report = await maintainCache({
+      cacheRoot,
+      force: true,
+      compactOnly: true,
+      config: { compact_batch_bytes: 256 * 1024 * 1024 },
+    })
+
+    const p = report.partitions[0]
+    assert.equal(p.dataFilesAfter, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- orphan generation cleanup ---
+
+test('maintenance reclaims a stale cursor-orphaned table dir with no .retired marker', async () => {
+  const cacheRoot = await makeTmpDir('maint-orphan')
+  try {
+    // A live source table whose cursor points at `table`.
+    await appendRowsToSourceTable(cacheRoot, 'ds1', ['source=test'], COLUMNS, [
+      { id: 1, value: 'live', timestamp: new Date().toISOString() },
+    ])
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    assert.equal(readCursorSync(sourceDir).tableDir ?? 'table', 'table')
+
+    // A leaked generation from a crashed compaction: table-prefixed,
+    // unreferenced by the cursor, no `.retired` marker, aged past grace.
+    const orphan = path.join(sourceDir, 'table-1700000000000')
+    await fs.mkdir(path.join(orphan, 'data'), { recursive: true })
+    await fs.writeFile(path.join(orphan, 'data', 'leak.parquet'), 'garbage')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(orphan, stale, stale)
+
+    // A second generation that is still fresh — must be treated as a
+    // possibly-in-flight compaction and left alone.
+    const fresh = path.join(sourceDir, 'table-1800000000000')
+    await fs.mkdir(path.join(fresh, 'data'), { recursive: true })
+    await fs.writeFile(path.join(fresh, 'data', 'inflight.parquet'), 'wip')
+
+    await maintainCache({ cacheRoot, expireOnly: true })
+
+    assert.equal(await pathExists(orphan), false, 'stale orphan should be reclaimed')
+    assert.equal(await pathExists(fresh), true, 'fresh generation must be preserved')
+    assert.ok(tableExists(path.join(sourceDir, 'table')), 'live table must remain')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

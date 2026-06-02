@@ -106,6 +106,14 @@ export interface MaintenanceConfig {
   max_snapshot_age_hours: number
   compact_file_count: number
   compact_avg_file_bytes: number
+  /**
+   * Upper bound on the estimated in-memory bytes a single compaction
+   * batch may accumulate before it is flushed to a data file. Caps peak
+   * heap during compaction so a fat per-row column (e.g. denormalized
+   * tool definitions) cannot push a 10k-row batch to gigabytes and OOM
+   * the daemon. Within-batch dedup still collapses repeated values.
+   */
+  compact_batch_bytes: number
   max_tick_ms: number
 }
 
