@@ -465,6 +465,7 @@ export interface QueryCacheMaintenanceConfig {
   max_snapshot_age_hours?: number
   compact_file_count?: number
   compact_avg_file_bytes?: number
+  compact_batch_bytes?: number
   max_tick_ms?: number
 }
 

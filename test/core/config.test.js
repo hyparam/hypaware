@@ -91,6 +91,39 @@ test('parseConfigShape reports stable pointers for malformed config', () => {
   )
 })
 
+test('parseConfigShape preserves query.cache.maintenance.compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: {
+      cache: {
+        maintenance: {
+          compact_batch_bytes: 16 * 1024 * 1024,
+          compact_file_count: 8,
+        },
+      },
+    },
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.ok && result.config.query?.cache?.maintenance?.compact_batch_bytes, 16 * 1024 * 1024)
+})
+
+test('parseConfigShape rejects a negative compact_batch_bytes', () => {
+  const result = parseConfigShape({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    query: { cache: { maintenance: { compact_batch_bytes: -1 } } },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(
+    result.ok === false &&
+      result.errors.some((e) => e.pointer.endsWith('/cache/maintenance/compact_batch_bytes')),
+    true
+  )
+})
+
 test('validateConfig catches cross-plugin and schedule errors', async () => {
   const result = await validateConfig({
     version: 2,

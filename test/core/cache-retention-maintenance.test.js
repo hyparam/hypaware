@@ -689,3 +689,58 @@ test('maintenance reclaims a stale cursor-orphaned table dir with no .retired ma
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('orphan sweep never deletes the live table when cursor.json is unreadable', async () => {
+  const cacheRoot = await makeTmpDir('maint-corrupt-cursor')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'ds1', ['source=test'], COLUMNS, [
+      { id: 1, value: 'live', timestamp: new Date().toISOString() },
+    ])
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const liveTable = path.join(sourceDir, 'table')
+    assert.ok(tableExists(liveTable))
+
+    // Corrupt the cursor and age the live table past the orphan grace.
+    // A corrupt cursor must NOT be read as the default {epoch:0}, which
+    // would otherwise make the live `table` dir an orphan-delete target.
+    await fs.writeFile(path.join(sourceDir, 'cursor.json'), '{ this is not valid json', 'utf8')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(liveTable, stale, stale)
+
+    await maintainCache({ cacheRoot, expireOnly: true })
+
+    assert.ok(tableExists(liveTable), 'live table must survive an unreadable cursor')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('orphan sweep reclaims a stale epoch generation and keeps the live one', async () => {
+  const cacheRoot = await makeTmpDir('maint-epoch-orphan')
+  try {
+    const sourceDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const live = path.join(sourceDir, 'epoch=1')
+    await appendRowsToTable(live, COLUMNS, [
+      { id: 1, value: 'live', timestamp: new Date().toISOString() },
+    ])
+    await writeCursor(sourceDir, {
+      epoch: 1,
+      rowCount: 1,
+      compaction: null,
+      layout: 'epoch',
+    })
+
+    const orphan = path.join(sourceDir, 'epoch=0')
+    await fs.mkdir(path.join(orphan, 'data'), { recursive: true })
+    await fs.writeFile(path.join(orphan, 'data', 'leak.parquet'), 'garbage')
+    const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await fs.utimes(orphan, stale, stale)
+
+    await maintainCache({ cacheRoot, expireOnly: true })
+
+    assert.equal(await pathExists(orphan), false, 'stale epoch orphan should be reclaimed')
+    assert.ok(tableExists(live), 'live epoch generation must remain')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

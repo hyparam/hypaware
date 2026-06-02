@@ -12,7 +12,7 @@ import {
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
 import { inferColumnType } from './migrate.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
+import { discoverCachePartitions, readCursorSync, tryReadCursorSync, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
@@ -694,8 +694,11 @@ async function walkForRetired(dir) {
     return
   }
 
-  const hasCursor = entries.some((e) => e.isFile() && e.name === 'cursor.json')
-  const liveDirName = hasCursor ? liveGenerationDir(readCursorSync(dir)) : null
+  // Use the strict reader: a missing OR unreadable cursor yields null, so
+  // we never synthesize a default live generation and orphan-delete the
+  // real one. The orphan branch below only runs when liveDirName is known.
+  const cursor = tryReadCursorSync(dir)
+  const liveDirName = cursor ? liveGenerationDir(cursor) : null
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
@@ -743,6 +746,9 @@ async function walkForRetired(dir) {
  */
 function liveGenerationDir(cursor) {
   if (cursor.tableDir) return cursor.tableDir
+  // A source-table cursor without an explicit tableDir lives in `table`;
+  // never fall through to an `epoch=*` name for source-table layout.
+  if (cursor.layout === 'source-table') return 'table'
   if (typeof cursor.epoch === 'number') return `epoch=${cursor.epoch}`
   return null
 }
