@@ -263,9 +263,9 @@ function openAiChatMessageToProjected(message) {
 function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = responsesInputMessages(reqBody.input)
-  const assistant = responsesAssistantFromBody(responseBody)
-    ?? responsesAssistantFromStream(streamEvents)
-  if (assistant) messages.push(assistant)
+  let assistant = responsesAssistantMessagesFromBody(responseBody)
+  if (assistant.length === 0) assistant = responsesAssistantMessagesFromStream(streamEvents)
+  for (const msg of assistant) messages.push(msg)
   return messages
 }
 
@@ -323,51 +323,59 @@ function openAiContentBlocks(content) {
 }
 
 /**
+ * Fan out response `output[]` items so each becomes its own assistant
+ * message — same per-item shape `responsesInputMessages` produces for
+ * replayed input items, so turn-1 response rows hash equal to turn-2
+ * input rows in the kernel's content-hash dedupe.
+ *
  * @param {unknown} responseBody
- * @returns {AiGatewayProjectedMessage | undefined}
+ * @returns {AiGatewayProjectedMessage[]}
  */
-function responsesAssistantFromBody(responseBody) {
-  if (!isPlainObject(responseBody)) return undefined
-  /** @type {JsonObject[]} */
-  const content = []
+function responsesAssistantMessagesFromBody(responseBody) {
+  if (!isPlainObject(responseBody)) return []
+  /** @type {AiGatewayProjectedMessage[]} */
+  const out = []
+  let sawMessage = false
   const output = Array.isArray(responseBody.output) ? responseBody.output : []
   for (const item of output) {
     if (!isPlainObject(item)) continue
     const itemType = stringValue(item.type)
     if (itemType === 'function_call' || itemType === 'custom_tool_call') {
       const block = toolUseBlockFromPayload(item)
-      if (block) content.push(block)
+      if (block) out.push({ role: 'assistant', content: [block] })
     } else if (itemType === 'message' || item.role === 'assistant') {
-      content.push(...openAiContentBlocks(item.content))
+      const blocks = openAiContentBlocks(item.content)
+      if (blocks.length > 0) {
+        out.push({ role: 'assistant', content: blocks })
+        sawMessage = true
+      }
     }
   }
-  // Fall back to `output_text` only when output[] gave us no message text.
-  const hasText = content.some((block) => stringValue(block.type) === 'text')
-  if (!hasText) {
+  if (!sawMessage) {
     const outputText = stringValue(responseBody.output_text)
-    if (outputText) content.unshift({ type: 'text', text: outputText })
+    if (outputText) out.unshift({ role: 'assistant', content: [{ type: 'text', text: outputText }] })
   }
-  if (content.length === 0) return undefined
-  return { role: 'assistant', content }
+  return out
 }
 
 /**
- * Stitch a streamed Responses assistant message from SSE events. When
- * `response.completed` arrives, its body is preferred for text and tool
- * calls; any streamed tool_use not present in that body is appended so a
- * truncated completed body cannot silently drop a captured call.
+ * Stitch streamed Responses assistant messages from SSE events. When
+ * `response.completed` arrives, its body is preferred (already per-item
+ * via `responsesAssistantMessagesFromBody`); streamed text and tool_uses
+ * not represented there are merged in so a truncated completed body
+ * cannot silently drop captured content.
  *
  * @param {Array<{ event: string, data: string }>} streamEvents
- * @returns {AiGatewayProjectedMessage | undefined}
+ * @returns {AiGatewayProjectedMessage[]}
  */
-function responsesAssistantFromStream(streamEvents) {
+function responsesAssistantMessagesFromStream(streamEvents) {
   let text = ''
   /** @type {string | undefined} */
   let responseId
   /** @type {Map<string, JsonObject>} */
   const toolUsesByCallId = new Map()
-  /** @type {AiGatewayProjectedMessage | undefined} */
-  let completedMessage
+  /** @type {AiGatewayProjectedMessage[]} */
+  let completedMessages = []
   for (const row of streamEvents) {
     const payload = parseEventData(row.data)
     if (!isPlainObject(payload)) continue
@@ -386,7 +394,7 @@ function responsesAssistantFromStream(streamEvents) {
       }
     } else if (type === 'response.completed') {
       const response = isPlainObject(payload.response) ? payload.response : payload
-      completedMessage = responsesAssistantFromBody(response)
+      completedMessages = responsesAssistantMessagesFromBody(response)
       const maybeId = stringValue(payload.id) ?? stringValue(/** @type {Record<string, unknown>} */ (response).id)
       if (maybeId) responseId = maybeId
     } else if (type === 'response.created' && !responseId) {
@@ -395,31 +403,41 @@ function responsesAssistantFromStream(streamEvents) {
       if (maybeId) responseId = maybeId
     }
   }
-  /** @type {JsonObject[]} */
-  let content
-  if (completedMessage && Array.isArray(completedMessage.content) && completedMessage.content.length > 0) {
-    content = [.../** @type {JsonObject[]} */ (completedMessage.content)]
+  /** @type {AiGatewayProjectedMessage[]} */
+  let messages
+  if (completedMessages.length > 0) {
+    messages = [...completedMessages]
     /** @type {Set<string>} */
-    const seenIds = new Set()
-    for (const block of content) {
-      if (stringValue(block.type) !== 'tool_use') continue
-      const id = stringValue(block.id)
-      if (id) seenIds.add(id)
+    const seenCallIds = new Set()
+    let hasTextMessage = false
+    for (const msg of messages) {
+      if (!Array.isArray(msg.content)) continue
+      for (const block of msg.content) {
+        const blockType = stringValue(block.type)
+        if (blockType === 'text') hasTextMessage = true
+        if (blockType === 'tool_use') {
+          const id = stringValue(block.id)
+          if (id) seenCallIds.add(id)
+        }
+      }
+    }
+    if (!hasTextMessage && text) {
+      messages.unshift({ role: 'assistant', content: [{ type: 'text', text }] })
     }
     for (const block of toolUsesByCallId.values()) {
       const id = stringValue(block.id)
-      if (id && !seenIds.has(id)) content.push(block)
+      if (id && !seenCallIds.has(id)) messages.push({ role: 'assistant', content: [block] })
     }
   } else {
-    content = []
-    if (text) content.push({ type: 'text', text })
-    for (const block of toolUsesByCallId.values()) content.push(block)
+    messages = []
+    if (text) messages.push({ role: 'assistant', content: [{ type: 'text', text }] })
+    for (const block of toolUsesByCallId.values()) messages.push({ role: 'assistant', content: [block] })
   }
-  if (content.length === 0) return undefined
-  /** @type {AiGatewayProjectedMessage} */
-  const message = { role: 'assistant', content }
-  if (responseId) message.raw_frame = { response_id: responseId }
-  return message
+  if (messages.length === 0) return []
+  if (responseId) {
+    for (const msg of messages) msg.raw_frame = { ...msg.raw_frame, response_id: responseId }
+  }
+  return messages
 }
 
 // ---------------------------------------------------------------------
