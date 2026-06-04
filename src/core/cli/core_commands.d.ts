@@ -26,3 +26,8 @@ export declare function parseQuerySqlArgv(
       maxBytes: number
     }
   | { ok: false; error: string }
+
+export declare function buildQuerySqlOutput(
+  full: { columns: string[]; rows: Record<string, unknown>[] },
+  opts: { format: QueryFormat; output: string | undefined; maxCell: number; maxBytes: number }
+): { stdout: string; stderr: string; file?: { path: string; content: string } }

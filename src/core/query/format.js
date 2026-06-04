@@ -14,8 +14,13 @@
  *      numbers/booleans/null pass through unchanged, so `--format json`
  *      output stays valid and same-typed.
  *   2. row budget — drop trailing rows once the cumulative serialized
- *      size exceeds `maxBytes`, so a wide or long result cannot flood
- *      the caller's context. At least one row is always kept.
+ *      *row-data* size (compact JSON per row, i.e. the jsonl payload)
+ *      exceeds `maxBytes`, so a wide or long result cannot flood the
+ *      caller's context. This measures the underlying data — the
+ *      dominant, format-independent context cost — not the final
+ *      rendered output, which adds modest per-format overhead (JSON
+ *      array syntax and indentation, table padding, markdown escaping).
+ *      At least one row is always kept.
  *
  * Returns the capped result plus an optional one-line `notice` (meant
  * for stderr, so it never corrupts stdout output) naming exactly what
@@ -49,8 +54,8 @@ export function applyContextControls(result, controls) {
   const dropped = truncated.length - kept.length
   const notice =
     dropped > 0
-      ? `notice: showing ${kept.length} of ${truncated.length} rows (${maxBytes}B context budget); ` +
-        `use --output <file> for the full result, --max-bytes 0 to disable, or aggregate/LIMIT`
+      ? `notice: showing ${kept.length} of ${truncated.length} rows (${maxBytes}B row-data budget; ` +
+        `rendered output may be larger); use --output <file> for the full result, --max-bytes 0 to disable, or aggregate/LIMIT`
       : undefined
   return { result: { columns: result.columns, rows: kept }, notice }
 }

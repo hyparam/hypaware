@@ -759,27 +759,11 @@ async function runQuerySql(argv, ctx) {
     for (const message of result.freshnessMessages ?? []) {
       ctx.stderr.write(`${message}\n`)
     }
-    const full = { columns: result.columns, rows: result.rows }
 
-    // Spill mode: write the full, un-capped result to a file and print
-    // only a compact receipt to stdout, so a large result set never
-    // lands in the caller's context. Context controls do not apply to
-    // the file — it is the lossless escape hatch.
-    if (parsed.output) {
-      await fs.writeFile(parsed.output, renderResult(full, parsed.format))
-      ctx.stdout.write(renderSpillReceipt(parsed.output, full, parsed.format))
-      return 0
-    }
-
-    // Inline mode: bound the context footprint (cell truncation + row
-    // budget), render the capped result to stdout, and route the "rows
-    // withheld" notice to stderr so stdout stays valid in every format.
-    const { result: capped, notice } = applyContextControls(full, {
-      maxCell: parsed.maxCell,
-      maxBytes: parsed.maxBytes,
-    })
-    if (notice) ctx.stderr.write(`${notice}\n`)
-    ctx.stdout.write(renderResult(capped, parsed.format))
+    const out = buildQuerySqlOutput({ columns: result.columns, rows: result.rows }, parsed)
+    if (out.file) await fs.writeFile(out.file.path, out.file.content)
+    if (out.stderr) ctx.stderr.write(out.stderr)
+    ctx.stdout.write(out.stdout)
     return 0
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -912,6 +896,39 @@ export function parseQuerySqlArgv(argv) {
   }
   const sql = positional.join(' ')
   return { ok: true, sql, refresh, format, output, maxCell, maxBytes }
+}
+
+/**
+ * Decide what `hyp query sql` emits for a completed result, without doing
+ * any IO — so the spill-vs-inline behavior is unit-testable. The caller
+ * (`runQuerySql`) performs the actual file write and stream writes.
+ *
+ * - Spill mode (`output` set): the full, un-capped result is rendered for
+ *   the file (lossless), and stdout gets only a compact receipt.
+ * - Inline mode: context controls cap the result; stdout gets the capped
+ *   render and the "rows withheld" notice (if any) goes to stderr, so
+ *   stdout stays valid in every format.
+ *
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
+ * @param {{ format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number }} opts
+ * @returns {{ stdout: string, stderr: string, file?: { path: string, content: string } }}
+ */
+export function buildQuerySqlOutput(full, opts) {
+  if (opts.output) {
+    return {
+      stdout: renderSpillReceipt(opts.output, full, opts.format),
+      stderr: '',
+      file: { path: opts.output, content: renderResult(full, opts.format) },
+    }
+  }
+  const { result: capped, notice } = applyContextControls(full, {
+    maxCell: opts.maxCell,
+    maxBytes: opts.maxBytes,
+  })
+  return {
+    stdout: renderResult(capped, opts.format),
+    stderr: notice ? `${notice}\n` : '',
+  }
 }
 
 /**
