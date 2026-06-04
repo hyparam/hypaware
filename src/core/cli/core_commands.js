@@ -915,10 +915,14 @@ export function parseQuerySqlArgv(argv) {
  */
 export function buildQuerySqlOutput(full, opts) {
   if (opts.output) {
+    // Render the file content once and reuse it for both the file and the
+    // receipt's byte count — large dumps are exactly the `--output` case,
+    // so a second full serialization is wasted work and peak memory.
+    const content = renderResult(full, opts.format)
     return {
-      stdout: renderSpillReceipt(opts.output, full, opts.format),
+      stdout: renderSpillReceipt(opts.output, full, content),
       stderr: '',
-      file: { path: opts.output, content: renderResult(full, opts.format) },
+      file: { path: opts.output, content },
     }
   }
   const { result: capped, notice } = applyContextControls(full, {
@@ -938,11 +942,11 @@ export function buildQuerySqlOutput(full, opts) {
  *
  * @param {string} outputPath
  * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
- * @param {QueryFormat} format
+ * @param {string} content  the already-rendered file content (sized for the receipt)
  * @returns {string}
  */
-function renderSpillReceipt(outputPath, full, format) {
-  const bytes = Buffer.byteLength(renderResult(full, format))
+function renderSpillReceipt(outputPath, full, content) {
+  const bytes = Buffer.byteLength(content)
   const cols = full.columns.length > 0 ? full.columns : Object.keys(full.rows[0] ?? {})
   const lines = [
     `wrote ${full.rows.length} rows · ${cols.length} cols · ${bytes}B → ${outputPath}`,

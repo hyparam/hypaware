@@ -34,27 +34,31 @@
 export function applyContextControls(result, controls) {
   const maxCell = controls.maxCell > 0 ? controls.maxCell : 0
   const maxBytes = controls.maxBytes > 0 ? controls.maxBytes : 0
+  const clip = (/** @type {Record<string, unknown>} */ row) => (maxCell ? truncateRow(row, maxCell) : row)
 
-  const truncated = maxCell ? result.rows.map((row) => truncateRow(row, maxCell)) : result.rows
-
+  // No budget: every row is emitted, so all of them must be truncated.
   if (!maxBytes) {
-    return { result: { columns: result.columns, rows: truncated }, notice: undefined }
+    const rows = maxCell ? result.rows.map(clip) : result.rows
+    return { result: { columns: result.columns, rows }, notice: undefined }
   }
 
+  // Budget: truncate lazily, one source row at a time, and stop as soon as
+  // the budget is exceeded — so a broad query never pays to truncate rows
+  // that would be dropped anyway. Always emit at least one row.
   /** @type {Record<string, unknown>[]} */
   const kept = []
   let bytes = 0
-  for (const row of truncated) {
-    bytes += rowBytes(row)
-    // Always emit at least one row; stop once the budget is exceeded.
+  for (const row of result.rows) {
+    const clipped = clip(row)
+    bytes += rowBytes(clipped)
     if (bytes > maxBytes && kept.length > 0) break
-    kept.push(row)
+    kept.push(clipped)
   }
 
-  const dropped = truncated.length - kept.length
+  const dropped = result.rows.length - kept.length
   const notice =
     dropped > 0
-      ? `notice: showing ${kept.length} of ${truncated.length} rows (${maxBytes}B row-data budget; ` +
+      ? `notice: showing ${kept.length} of ${result.rows.length} rows (${maxBytes}B row-data budget; ` +
         `rendered output may be larger); use --output <file> for the full result, --max-bytes 0 to disable, or aggregate/LIMIT`
       : undefined
   return { result: { columns: result.columns, rows: kept }, notice }

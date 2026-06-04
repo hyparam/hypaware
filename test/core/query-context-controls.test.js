@@ -73,3 +73,20 @@ test('input result is not mutated', () => {
   assert.equal(input.rows[0].c, 'x'.repeat(300))
   assert.equal(input.rows.length, 1)
 })
+
+test('truncation is lazy: rows past the budget are never touched', () => {
+  // A row whose field throws on access — clipping or serializing it would
+  // throw. It sits past the cutoff (row 0 fills the budget, row 1 triggers
+  // the break), so a lazy implementation must never reach row 2.
+  const r0 = { a: 'small' }
+  const r1 = { a: 'small' }
+  const r2 = { a: 'small' }
+  Object.defineProperty(r2, 'boom', {
+    enumerable: true,
+    get() { throw new Error('row past budget was truncated') },
+  })
+  // Row 0 alone exceeds the 3-byte budget, so only it is kept.
+  const { result } = applyContextControls({ columns: ['a'], rows: [r0, r1, r2] }, { maxCell: 10, maxBytes: 3 })
+  assert.equal(result.rows.length, 1)
+  assert.equal(result.rows[0].a, 'small')
+})

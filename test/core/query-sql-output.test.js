@@ -24,6 +24,8 @@ test('spill mode: file content is the full lossless result, stdout is a receipt'
   assert.doesNotMatch(out.file.content, /…\(\+/)
   // Receipt on stdout names the shape; stderr stays empty.
   assert.match(out.stdout, /wrote 2 rows · 2 cols · \d+B → \/tmp\/spill\.jsonl/)
+  // The receipt's byte count reflects the actual file content (single render).
+  assert.match(out.stdout, new RegExp(`· ${Buffer.byteLength(out.file.content)}B →`))
   assert.match(out.stdout, /schema: id, content/)
   assert.match(out.stdout, /preview \(first 2, cells clipped\):/)
   assert.equal(out.stderr, '')
