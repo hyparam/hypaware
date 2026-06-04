@@ -1,17 +1,91 @@
 // @ts-check
 
+import zlib from 'node:zlib'
+
 import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 /**
- * @import { ColumnSpec, PluginActivationContext, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec, JsonObject, PluginActivationContext, PluginLogger, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/format-parquet'
 const PLUGIN_VERSION = '1.0.0'
 const FORMAT = 'parquet'
 const EXTENSION = 'parquet'
-const COMPRESSION = 'SNAPPY'
+const DEFAULT_CODEC = 'SNAPPY'
+const DEFAULT_ZSTD_LEVEL = 3
+
+// Codecs this encoder can emit. SNAPPY is supplied by hyparquet-writer's
+// own default compressors; ZSTD is wired here via Node's built-in zlib
+// (Node >= 22.15 / 23.8). Reads are covered by `hyparquet-compressors`,
+// which the query path already wires (see query/parquet-source.js).
+const ZSTD_AVAILABLE = typeof zlib.zstdCompressSync === 'function'
+
+/**
+ * Resolve the encode settings from the plugin's validated config slice.
+ * `codec` defaults to SNAPPY; `ZSTD` is honoured only when the runtime
+ * exposes `zlib.zstdCompressSync`, otherwise it degrades to SNAPPY with a
+ * warning so an old-Node install never hard-fails on a config it can't
+ * satisfy. `page_size` (bytes) is passed through to control the writer's
+ * dictionary/page split; leaving it unset uses the hyparquet-writer
+ * default (1 MiB).
+ *
+ * @param {JsonObject | undefined} config
+ * @param {PluginLogger} log
+ * @returns {{ codec: 'SNAPPY' | 'ZSTD', compressors: Record<string, (bytes: Uint8Array) => Uint8Array> | undefined, pageSize: number | undefined }}
+ */
+export function resolveEncodeSettings(config, log) {
+  const requested = String(config?.codec ?? DEFAULT_CODEC).toUpperCase()
+  const pageSizeRaw = config?.page_size
+  const pageSize =
+    typeof pageSizeRaw === 'number' && Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
+      ? Math.floor(pageSizeRaw)
+      : undefined
+
+  if (requested === 'ZSTD') {
+    if (!ZSTD_AVAILABLE) {
+      log.warn('encoder.codec_unavailable', {
+        hyp_plugin: PLUGIN_NAME,
+        requested_codec: 'ZSTD',
+        fallback_codec: DEFAULT_CODEC,
+        message: 'zlib.zstdCompressSync not available on this Node runtime; falling back to SNAPPY',
+      })
+      return { codec: DEFAULT_CODEC, compressors: undefined, pageSize }
+    }
+    const levelRaw = config?.zstd_level
+    const level =
+      typeof levelRaw === 'number' && Number.isFinite(levelRaw) ? Math.floor(levelRaw) : DEFAULT_ZSTD_LEVEL
+    return { codec: 'ZSTD', compressors: { ZSTD: makeZstdCompressor(level) }, pageSize }
+  }
+
+  if (requested !== 'SNAPPY') {
+    log.warn('encoder.codec_unknown', {
+      hyp_plugin: PLUGIN_NAME,
+      requested_codec: requested,
+      fallback_codec: DEFAULT_CODEC,
+      message: `unknown codec '${requested}'; falling back to SNAPPY`,
+    })
+  }
+  // SNAPPY: hyparquet-writer provides its own snappy compressor by default.
+  return { codec: DEFAULT_CODEC, compressors: undefined, pageSize }
+}
+
+/**
+ * Build a page compressor that runs Node's synchronous zstd at the given
+ * level. Returns a `Uint8Array` view of the compressed page so the value
+ * matches the writer's `compressors[codec](bytes) => Uint8Array` contract.
+ *
+ * @param {number} level
+ * @returns {(bytes: Uint8Array) => Uint8Array}
+ */
+function makeZstdCompressor(level) {
+  const params = { [zlib.constants.ZSTD_c_compressionLevel]: level }
+  return (bytes) => {
+    const out = zlib.zstdCompressSync(bytes, { params })
+    return new Uint8Array(out.buffer, out.byteOffset, out.byteLength)
+  }
+}
 
 /**
  * Activate `@hypaware/format-parquet`. Registers the `hypaware.encoder@1`
@@ -23,12 +97,18 @@ const COMPRESSION = 'SNAPPY'
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {
+  const settings = resolveEncodeSettings(ctx.config, ctx.log)
+  ctx.log.info('encoder.activated', {
+    hyp_plugin: PLUGIN_NAME,
+    codec: settings.codec,
+    page_size: settings.pageSize ?? null,
+  })
   /** @type {SinkEncoder} */
   const encoder = {
     format: FORMAT,
     extension: EXTENSION,
     supports: ['queryable'],
-    encodePartition,
+    encodePartition: (partition, encodeCtx) => encodePartition(partition, encodeCtx, settings),
   }
   ctx.provideCapability('hypaware.encoder', PLUGIN_VERSION, encoder)
 }
@@ -41,9 +121,10 @@ export async function activate(ctx) {
  *
  * @param {QueryPartition} partition
  * @param {SinkEncodeContext} ctx
+ * @param {{ codec: 'SNAPPY' | 'ZSTD', compressors: Record<string, (bytes: Uint8Array) => Uint8Array> | undefined, pageSize: number | undefined }} settings
  * @returns {Promise<SinkEncodedBlob>}
  */
-async function encodePartition(partition, ctx) {
+async function encodePartition(partition, ctx, settings) {
   const tracer = getTracer('plugin.format-parquet')
   return tracer.startActiveSpan(
     'encoder.encode_parquet',
@@ -54,7 +135,7 @@ async function encodePartition(partition, ctx) {
         'hyp_dataset': partition.dataset,
         'hyp_sink_format': FORMAT,
         'hyp_sink_extension': EXTENSION,
-        compression: COMPRESSION,
+        compression: settings.codec,
         status: 'ok',
       },
     },
@@ -76,7 +157,11 @@ async function encodePartition(partition, ctx) {
         const columnData = rowsToColumnSources(ctx.columns, rows)
 
         const { parquetWriteBuffer } = await import('hyparquet-writer')
-        const arrayBuffer = parquetWriteBuffer({ columnData, codec: COMPRESSION })
+        /** @type {{ columnData: any, codec: 'SNAPPY' | 'ZSTD', compressors?: Record<string, (bytes: Uint8Array) => Uint8Array>, pageSize?: number }} */
+        const writeOpts = { columnData, codec: settings.codec }
+        if (settings.compressors) writeOpts.compressors = settings.compressors
+        if (settings.pageSize) writeOpts.pageSize = settings.pageSize
+        const arrayBuffer = parquetWriteBuffer(writeOpts)
         const bytes = new Uint8Array(arrayBuffer)
 
         const filename = `${partitionFilename(partition)}.${EXTENSION}`
