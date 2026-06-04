@@ -15,7 +15,7 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
-import { renderResult } from '../query/format.js'
+import { applyContextControls, renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { executeQuerySql } from '../query/sql.js'
 import { runBackfill, runBackfillList, runBackfillPlan, runBackfillProvider } from '../commands/backfill.js'
@@ -96,7 +96,7 @@ function buildCoreCommands() {
     {
       name: 'query sql',
       summary: 'Run a SQL query against registered datasets',
-      usage: 'hyp query sql <sql> [--refresh <mode>] [--format <fmt>]',
+      usage: 'hyp query sql <sql> [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]',
       run: runQuerySql,
     },
     {
@@ -759,7 +759,11 @@ async function runQuerySql(argv, ctx) {
     for (const message of result.freshnessMessages ?? []) {
       ctx.stderr.write(`${message}\n`)
     }
-    ctx.stdout.write(renderResult({ columns: result.columns, rows: result.rows }, parsed.format))
+
+    const out = buildQuerySqlOutput({ columns: result.columns, rows: result.rows }, parsed)
+    if (out.file) await fs.writeFile(out.file.path, out.file.content)
+    if (out.stderr) ctx.stderr.write(out.stderr)
+    ctx.stdout.write(out.stdout)
     return 0
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -813,19 +817,42 @@ async function runQueryRefresh(argv, ctx) {
 
 
 /**
+ * Default per-cell truncation cap (code points) for inline output. Keeps
+ * fat JSON/text columns to a peek while leaving scalar columns whole.
+ */
+export const DEFAULT_QUERY_MAX_CELL = 200
+
+/**
+ * Default context byte budget for inline output. Bounds the total result
+ * a query can push into a caller's context; `--output` or `--max-bytes 0`
+ * lift it.
+ */
+export const DEFAULT_QUERY_MAX_BYTES = 32_768
+
+/**
  * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
- * `--refresh` / `--format` flags in any order.
+ * `--refresh` / `--format` / `--output` / `--max-cell` / `--max-bytes`
+ * flags in any order.
+ *
+ * `--output <file>` spills the full result to a file and prints a receipt;
+ * `--max-cell <n>` caps each string cell (0 = off); `--max-bytes <n>` caps
+ * the inline byte budget (0 = off). The cap flags are ignored under
+ * `--output`, which is always lossless.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, sql: string, refresh: RefreshMode, format: QueryFormat } | { ok: false, error: string }}
+ * @returns {{ ok: true, sql: string, refresh: RefreshMode, format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number } | { ok: false, error: string }}
  */
-function parseQuerySqlArgv(argv) {
+export function parseQuerySqlArgv(argv) {
   /** @type {string[]} */
   const positional = []
   /** @type {RefreshMode} */
   let refresh = 'auto'
   /** @type {QueryFormat} */
   let format = 'table'
+  /** @type {string | undefined} */
+  let output
+  let maxCell = DEFAULT_QUERY_MAX_CELL
+  let maxBytes = DEFAULT_QUERY_MAX_BYTES
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
@@ -843,16 +870,98 @@ function parseQuerySqlArgv(argv) {
       }
       format = value
       i += 1
+    } else if (token === '--output' || token === '-o') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) {
+        return { ok: false, error: 'hyp query sql: --output expects a file path' }
+      }
+      output = value
+      i += 1
+    } else if (token === '--max-cell' || token === '--max-bytes') {
+      const value = argv[i + 1]
+      const n = Number(value)
+      if (value === undefined || !Number.isInteger(n) || n < 0) {
+        return { ok: false, error: `hyp query sql: ${token} expects a non-negative integer (got ${value ?? '<missing>'})` }
+      }
+      if (token === '--max-cell') maxCell = n
+      else maxBytes = n
+      i += 1
     } else {
       positional.push(token)
     }
   }
 
   if (positional.length === 0) {
-    return { ok: false, error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>]' }
+    return { ok: false, error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]' }
   }
   const sql = positional.join(' ')
-  return { ok: true, sql, refresh, format }
+  return { ok: true, sql, refresh, format, output, maxCell, maxBytes }
+}
+
+/**
+ * Decide what `hyp query sql` emits for a completed result, without doing
+ * any IO — so the spill-vs-inline behavior is unit-testable. The caller
+ * (`runQuerySql`) performs the actual file write and stream writes.
+ *
+ * - Spill mode (`output` set): the full, un-capped result is rendered for
+ *   the file (lossless), and stdout gets only a compact receipt.
+ * - Inline mode: context controls cap the result; stdout gets the capped
+ *   render and the "rows withheld" notice (if any) goes to stderr, so
+ *   stdout stays valid in every format.
+ *
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
+ * @param {{ format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number }} opts
+ * @returns {{ stdout: string, stderr: string, file?: { path: string, content: string } }}
+ */
+export function buildQuerySqlOutput(full, opts) {
+  if (opts.output) {
+    // Render the file content once and reuse it for both the file and the
+    // receipt's byte count — large dumps are exactly the `--output` case,
+    // so a second full serialization is wasted work and peak memory.
+    const content = renderResult(full, opts.format)
+    return {
+      stdout: renderSpillReceipt(opts.output, full, content),
+      stderr: '',
+      file: { path: opts.output, content },
+    }
+  }
+  const { result: capped, notice } = applyContextControls(full, {
+    maxCell: opts.maxCell,
+    maxBytes: opts.maxBytes,
+  })
+  return {
+    stdout: renderResult(capped, opts.format),
+    stderr: notice ? `${notice}\n` : '',
+  }
+}
+
+/**
+ * Render the stdout receipt for `--output` spill mode: where the full
+ * result went, its shape, and a small truncated preview so the caller
+ * can sanity-check without ingesting the file.
+ *
+ * @param {string} outputPath
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
+ * @param {string} content  the already-rendered file content (sized for the receipt)
+ * @returns {string}
+ */
+function renderSpillReceipt(outputPath, full, content) {
+  const bytes = Buffer.byteLength(content)
+  const cols = full.columns.length > 0 ? full.columns : Object.keys(full.rows[0] ?? {})
+  const lines = [
+    `wrote ${full.rows.length} rows · ${cols.length} cols · ${bytes}B → ${outputPath}`,
+  ]
+  if (cols.length > 0) lines.push(`schema: ${cols.join(', ')}`)
+  const previewRows = full.rows.slice(0, 3)
+  if (previewRows.length > 0) {
+    const { result: preview } = applyContextControls(
+      { columns: full.columns, rows: previewRows },
+      { maxCell: 80, maxBytes: 0 }
+    )
+    lines.push(`preview (first ${previewRows.length}, cells clipped):`)
+    lines.push(renderResult(preview, 'jsonl').trimEnd())
+  }
+  return lines.join('\n') + '\n'
 }
 
 /**
