@@ -50,4 +50,38 @@ try {
   await obs.shutdown()
 }
 
+// `process.exit()` terminates synchronously and drops whatever is still
+// buffered in stdout/stderr — for a pipe that means output past the
+// ~64KiB pipe buffer is silently truncated (large `query sql` results,
+// JSON dumps). Flush both streams before exiting so every byte reaches
+// the OS first. (Writing to a file never hit this because file writes
+// complete synchronously.)
+await Promise.all([flushStream(process.stdout), flushStream(process.stderr)])
 process.exit(exitCode)
+
+/**
+ * Resolve once a writable stream has drained its buffered output. Resolves
+ * immediately when nothing is pending, and on `error` (e.g. EPIPE when the
+ * reader has gone away) so exit is never blocked.
+ *
+ * @param {import('node:stream').Writable} stream
+ * @returns {Promise<void>}
+ */
+function flushStream(stream) {
+  return new Promise((resolve) => {
+    if (stream.writableLength === 0) {
+      resolve()
+      return
+    }
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      resolve()
+    }
+    stream.once('error', finish)
+    // The write callback fires after this (empty) chunk and all preceding
+    // buffered writes have been handed to the OS.
+    stream.write('', finish)
+  })
+}
