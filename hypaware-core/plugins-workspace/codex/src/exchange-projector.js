@@ -270,6 +270,9 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
 }
 
 /**
+ * Mirror `codex/src/backfill.js`: fan items out so each `function_call` /
+ * `function_call_output` becomes its own projected message.
+ *
  * @param {unknown} input
  * @returns {AiGatewayProjectedMessage[]}
  */
@@ -283,6 +286,17 @@ function responsesInputMessages(input) {
   const out = []
   for (const item of input) {
     if (!isPlainObject(item)) continue
+    const itemType = stringValue(item.type)
+    if (itemType === 'function_call' || itemType === 'custom_tool_call') {
+      const block = toolUseBlockFromPayload(item)
+      if (block) out.push({ role: 'assistant', content: [block] })
+      continue
+    }
+    if (itemType === 'function_call_output' || itemType === 'custom_tool_call_output') {
+      const block = toolResultBlockFromPayload(item)
+      if (block) out.push({ role: 'tool', content: [block] })
+      continue
+    }
     const role = stringValue(item.role) ?? 'user'
     const blocks = openAiContentBlocks(item.content)
     if (blocks.length === 0) continue
@@ -314,29 +328,34 @@ function openAiContentBlocks(content) {
  */
 function responsesAssistantFromBody(responseBody) {
   if (!isPlainObject(responseBody)) return undefined
-  const outputText = stringValue(responseBody.output_text)
-  if (outputText) {
-    return { role: 'assistant', content: [{ type: 'text', text: outputText }] }
-  }
-  const output = Array.isArray(responseBody.output) ? responseBody.output : []
   /** @type {JsonObject[]} */
   const content = []
+  const output = Array.isArray(responseBody.output) ? responseBody.output : []
   for (const item of output) {
     if (!isPlainObject(item)) continue
-    if (item.type === 'message' || item.role === 'assistant') {
+    const itemType = stringValue(item.type)
+    if (itemType === 'function_call' || itemType === 'custom_tool_call') {
+      const block = toolUseBlockFromPayload(item)
+      if (block) content.push(block)
+    } else if (itemType === 'message' || item.role === 'assistant') {
       content.push(...openAiContentBlocks(item.content))
     }
+  }
+  // Fall back to `output_text` only when output[] gave us no message text.
+  const hasText = content.some((block) => stringValue(block.type) === 'text')
+  if (!hasText) {
+    const outputText = stringValue(responseBody.output_text)
+    if (outputText) content.unshift({ type: 'text', text: outputText })
   }
   if (content.length === 0) return undefined
   return { role: 'assistant', content }
 }
 
 /**
- * Stitch a streamed OpenAI Responses assistant message back together
- * from the captured SSE events. Each `response.output_text.delta`
- * carries a `delta` token; `response.completed` may also carry the
- * full final text as a snapshot, which we treat as a fallback when no
- * deltas arrived.
+ * Stitch a streamed Responses assistant message from SSE events. When
+ * `response.completed` arrives, its body is preferred for text and tool
+ * calls; any streamed tool_use not present in that body is appended so a
+ * truncated completed body cannot silently drop a captured call.
  *
  * @param {Array<{ event: string, data: string }>} streamEvents
  * @returns {AiGatewayProjectedMessage | undefined}
@@ -345,6 +364,10 @@ function responsesAssistantFromStream(streamEvents) {
   let text = ''
   /** @type {string | undefined} */
   let responseId
+  /** @type {Map<string, JsonObject>} */
+  const toolUsesByCallId = new Map()
+  /** @type {AiGatewayProjectedMessage | undefined} */
+  let completedMessage
   for (const row of streamEvents) {
     const payload = parseEventData(row.data)
     if (!isPlainObject(payload)) continue
@@ -352,15 +375,18 @@ function responsesAssistantFromStream(streamEvents) {
     if (type === 'response.output_text.delta' || type === 'response.output_text.annotation.added') {
       const delta = stringValue(payload.delta)
       if (delta) text += delta
+    } else if (type === 'response.output_item.done') {
+      const item = isPlainObject(payload.item) ? payload.item : undefined
+      if (item) {
+        const block = toolUseBlockFromPayload(item)
+        if (block) {
+          const id = stringValue(block.id)
+          if (id && !toolUsesByCallId.has(id)) toolUsesByCallId.set(id, block)
+        }
+      }
     } else if (type === 'response.completed') {
       const response = isPlainObject(payload.response) ? payload.response : payload
-      const completed = responsesAssistantFromBody(response)
-      if (!text && completed) {
-        const completedText = textFromBlocks(/** @type {JsonObject[]} */ (
-          Array.isArray(completed.content) ? completed.content : []
-        ))
-        if (completedText) text = completedText
-      }
+      completedMessage = responsesAssistantFromBody(response)
       const maybeId = stringValue(payload.id) ?? stringValue(/** @type {Record<string, unknown>} */ (response).id)
       if (maybeId) responseId = maybeId
     } else if (type === 'response.created' && !responseId) {
@@ -369,12 +395,30 @@ function responsesAssistantFromStream(streamEvents) {
       if (maybeId) responseId = maybeId
     }
   }
-  if (!text) return undefined
-  /** @type {AiGatewayProjectedMessage} */
-  const message = { role: 'assistant', content: [{ type: 'text', text }] }
-  if (responseId) {
-    message.raw_frame = { response_id: responseId }
+  /** @type {JsonObject[]} */
+  let content
+  if (completedMessage && Array.isArray(completedMessage.content) && completedMessage.content.length > 0) {
+    content = [.../** @type {JsonObject[]} */ (completedMessage.content)]
+    /** @type {Set<string>} */
+    const seenIds = new Set()
+    for (const block of content) {
+      if (stringValue(block.type) !== 'tool_use') continue
+      const id = stringValue(block.id)
+      if (id) seenIds.add(id)
+    }
+    for (const block of toolUsesByCallId.values()) {
+      const id = stringValue(block.id)
+      if (id && !seenIds.has(id)) content.push(block)
+    }
+  } else {
+    content = []
+    if (text) content.push({ type: 'text', text })
+    for (const block of toolUsesByCallId.values()) content.push(block)
   }
+  if (content.length === 0) return undefined
+  /** @type {AiGatewayProjectedMessage} */
+  const message = { role: 'assistant', content }
+  if (responseId) message.raw_frame = { response_id: responseId }
   return message
 }
 
@@ -694,6 +738,63 @@ function firstChoice(responseBody) {
   if (!isPlainObject(responseBody) || !Array.isArray(responseBody.choices)) return undefined
   const choice = responseBody.choices.find(isPlainObject)
   return isPlainObject(choice) ? choice : undefined
+}
+
+/**
+ * Mirror `codex/src/backfill.js` so live-captured tool calls land in the
+ * same shape as backfilled ones.
+ *
+ * @param {Record<string, unknown>} payload
+ * @returns {JsonObject | undefined}
+ */
+function toolUseBlockFromPayload(payload) {
+  const name = stringValue(payload.name)
+  const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
+  if (!name || !callId) return undefined
+  const rawArgs = payload.arguments !== undefined ? payload.arguments : payload.input
+  return { type: 'tool_use', id: callId, name, input: normalizeToolInput(rawArgs) }
+}
+
+/**
+ * @param {Record<string, unknown>} payload
+ * @returns {JsonObject | undefined}
+ */
+function toolResultBlockFromPayload(payload) {
+  const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
+  if (!callId) return undefined
+  const text = toolOutputText(payload.output)
+  /** @type {JsonObject} */
+  const block = { type: 'tool_result', tool_use_id: callId }
+  if (text !== undefined) block.content = text
+  return block
+}
+
+/** @param {unknown} value */
+function normalizeToolInput(value) {
+  if (typeof value === 'string') {
+    const parsed = parseMaybeJson(value)
+    return parsed === value ? value : /** @type {any} */ (parsed)
+  }
+  if (value === undefined) return null
+  return /** @type {any} */ (value)
+}
+
+/**
+ * Codex tool output can arrive as a string, a `{ output | content | text }`
+ * wrapper, or a structured payload — fall back to JSON.stringify so the
+ * row keeps a faithful trace.
+ *
+ * @param {unknown} output
+ * @returns {string | undefined}
+ */
+function toolOutputText(output) {
+  if (typeof output === 'string') return output.length > 0 ? output : undefined
+  if (isPlainObject(output)) {
+    const inner = stringValue(output.output) ?? stringValue(output.content) ?? stringValue(output.text)
+    return inner ?? JSON.stringify(output)
+  }
+  if (output === undefined || output === null) return undefined
+  return JSON.stringify(output)
 }
 
 /** @param {JsonObject[]} blocks */
