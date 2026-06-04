@@ -1,8 +1,125 @@
 // @ts-check
 
 /**
- * @import { QueryFormat, QueryResultSet } from './types.d.ts'
+ * @import { ContextControls, ContextControlsResult, QueryFormat, QueryResultSet } from './types.d.ts'
  */
+
+/**
+ * Bound a result set's context footprint before it is rendered to a
+ * model or terminal. Two independent axes:
+ *
+ *   1. per-cell truncation — recursively clip every string value to
+ *      `maxCell` code points, appending a greppable `…(+N)` marker so
+ *      the elision is visible and its size known. Only strings shrink;
+ *      numbers/booleans/null pass through unchanged, so `--format json`
+ *      output stays valid and same-typed.
+ *   2. row budget — drop trailing rows once the cumulative serialized
+ *      size exceeds `maxBytes`, so a wide or long result cannot flood
+ *      the caller's context. At least one row is always kept.
+ *
+ * Returns the capped result plus an optional one-line `notice` (meant
+ * for stderr, so it never corrupts stdout output) naming exactly what
+ * was withheld and how to retrieve the full set. A control of `0`
+ * disables that axis. Pure: the input result is not mutated.
+ *
+ * @param {QueryResultSet} result
+ * @param {ContextControls} controls
+ * @returns {ContextControlsResult}
+ */
+export function applyContextControls(result, controls) {
+  const maxCell = controls.maxCell > 0 ? controls.maxCell : 0
+  const maxBytes = controls.maxBytes > 0 ? controls.maxBytes : 0
+
+  const truncated = maxCell ? result.rows.map((row) => truncateRow(row, maxCell)) : result.rows
+
+  if (!maxBytes) {
+    return { result: { columns: result.columns, rows: truncated }, notice: undefined }
+  }
+
+  /** @type {Record<string, unknown>[]} */
+  const kept = []
+  let bytes = 0
+  for (const row of truncated) {
+    bytes += rowBytes(row)
+    // Always emit at least one row; stop once the budget is exceeded.
+    if (bytes > maxBytes && kept.length > 0) break
+    kept.push(row)
+  }
+
+  const dropped = truncated.length - kept.length
+  const notice =
+    dropped > 0
+      ? `notice: showing ${kept.length} of ${truncated.length} rows (${maxBytes}B context budget); ` +
+        `use --output <file> for the full result, --max-bytes 0 to disable, or aggregate/LIMIT`
+      : undefined
+  return { result: { columns: result.columns, rows: kept }, notice }
+}
+
+/**
+ * Truncate every value of one row, returning a new row object.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {number} maxCell
+ * @returns {Record<string, unknown>}
+ */
+function truncateRow(row, maxCell) {
+  /** @type {Record<string, unknown>} */
+  const out = {}
+  for (const key of Object.keys(row)) out[key] = truncateValue(row[key], maxCell)
+  return out
+}
+
+/**
+ * Recursively clip string leaves to `maxCell` code points. Objects and
+ * arrays are rebuilt (not mutated); `Date` is treated as a scalar leaf
+ * so it round-trips through `jsonReplacer` unchanged.
+ *
+ * @param {unknown} value
+ * @param {number} maxCell
+ * @returns {unknown}
+ */
+function truncateValue(value, maxCell) {
+  if (typeof value === 'string') return clipString(value, maxCell)
+  if (Array.isArray(value)) return value.map((v) => truncateValue(v, maxCell))
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    /** @type {Record<string, unknown>} */
+    const out = {}
+    for (const key of Object.keys(value)) out[key] = truncateValue(/** @type {Record<string, unknown>} */ (value)[key], maxCell)
+    return out
+  }
+  return value
+}
+
+/**
+ * Clip a string to `maxCell` code points (never splitting a multibyte
+ * character) and append `…(+N)` where N is the number of code points
+ * removed. Returns the input unchanged when it already fits.
+ *
+ * @param {string} value
+ * @param {number} maxCell
+ * @returns {string}
+ */
+function clipString(value, maxCell) {
+  const points = Array.from(value)
+  if (points.length <= maxCell) return value
+  return points.slice(0, maxCell).join('') + `…(+${points.length - maxCell})`
+}
+
+/**
+ * Serialized byte size of one row, used for the context budget. Mirrors
+ * the `jsonl` encoding so the budget tracks what a JSON-consuming caller
+ * actually receives.
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {number}
+ */
+function rowBytes(row) {
+  try {
+    return Buffer.byteLength(JSON.stringify(row, jsonReplacer))
+  } catch {
+    return Buffer.byteLength(String(row))
+  }
+}
 
 /**
  * Render a query result set into the requested output format.
