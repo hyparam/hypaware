@@ -55,6 +55,7 @@ export interface RegisteredSnapshot {
   datasets: string[]
   commands: string[]
   skills: string[]
+  agents: string[]
   init_presets: string[]
   capabilities: string[]
 }

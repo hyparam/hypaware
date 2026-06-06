@@ -251,6 +251,14 @@ export async function activate(ctx) {
     })
   }
 
+  const agentsRoot = path.resolve(skillsRootDir(), 'agents')
+  ctx.agents.register({
+    name: 'hypaware-analyst',
+    plugin: PLUGIN_NAME,
+    clients: ['claude'],
+    sourceFile: path.join(agentsRoot, 'hypaware-analyst.md'),
+  })
+
   ctx.initPresets.register({
     name: 'claude-and-otel-local',
     plugin: PLUGIN_NAME,

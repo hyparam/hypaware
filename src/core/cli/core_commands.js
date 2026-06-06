@@ -38,6 +38,7 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ClientDescriptor } from '../plugin_catalog.js'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { PluginMetadata } from '../config/types.d.ts'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
@@ -237,6 +238,12 @@ function buildCoreCommands() {
       summary: 'Install registered skills into AI client directories',
       usage: 'hyp skills install [--client <name>]',
       run: runSkillsInstall,
+    },
+    {
+      name: 'agents install',
+      summary: 'Install registered subagents into AI client directories',
+      usage: 'hyp agents install [--client <name>]',
+      run: runAgentsInstall,
     },
     {
       name: 'daemon',
@@ -2423,6 +2430,7 @@ async function runInit(argv, ctx) {
         capabilities: ctx.capabilities,
         sources: /** @type {any} */ (ctx.sources),
         skills: /** @type {any} */ (ctx.skills),
+        agents: /** @type {any} */ (ctx.agents),
         stdout: ctx.stdout,
         stderr: ctx.stderr,
         env: ctx.env,
@@ -2630,6 +2638,7 @@ async function runPickerInit(flags, ctx) {
     capabilities: ctx.capabilities,
     sources: /** @type {any} */ (ctx.sources),
     skills: /** @type {any} */ (ctx.skills),
+    agents: /** @type {any} */ (ctx.agents),
     stdout: ctx.stdout,
     stderr: ctx.stderr,
     env: ctx.env,
@@ -3045,13 +3054,13 @@ async function runSkillsInstall(argv, ctx) {
     return 1
   }
 
-  const skillDirMap = await buildSkillDirMap()
+  const descriptorMap = await buildClientDescriptorMap()
 
   let count = 0
   for (const skill of skills) {
     for (const targetClient of skill.clients) {
       if (parsed.client !== 'all' && parsed.client !== targetClient) continue
-      const skillDir = skillDirMap.get(targetClient)
+      const skillDir = descriptorMap.get(targetClient)?.skillDir
       if (!skillDir) {
         ctx.stderr.write(`warning: skill '${skill.name}' targets unknown client '${targetClient}'\n`)
         continue
@@ -3073,22 +3082,80 @@ async function runSkillsInstall(argv, ctx) {
 }
 
 /**
- * Build a map from client name to skill directory by reading plugin
- * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
- * in core.
+ * `hyp agents install [--client <name>]`
  *
- * @returns {Promise<Map<string, string>>}
+ * Mirrors `hyp skills install` for subagent contributions. Each agent
+ * is a single markdown definition file materialized flat into the
+ * per-client agent directory as `<agent_dir>/<name>.md`; existing
+ * installations are replaced (idempotent). Clients without an
+ * `agent_dir` in their manifest are skipped with a warning.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
  */
-async function buildSkillDirMap() {
-  /** @type {Map<string, string>} */
+async function runAgentsInstall(argv, ctx) {
+  const parsed = parseSkillsArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+
+  const agents = ctx.agents.list()
+  if (agents.length === 0) {
+    ctx.stdout.write('(no agents registered)\n')
+    return 0
+  }
+
+  const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
+  if (!homeDir) {
+    ctx.stderr.write('error: HOME is not set; cannot resolve agent install paths\n')
+    return 1
+  }
+
+  const descriptorMap = await buildClientDescriptorMap()
+
+  let count = 0
+  for (const agent of agents) {
+    for (const targetClient of agent.clients) {
+      if (parsed.client !== 'all' && parsed.client !== targetClient) continue
+      const agentDir = descriptorMap.get(targetClient)?.agentDir
+      if (!agentDir) {
+        ctx.stderr.write(`warning: agent '${agent.name}' targets client '${targetClient}' without an agent directory\n`)
+        continue
+      }
+      const dest = path.join(homeDir, agentDir, `${agent.name}.md`)
+      try {
+        await fs.mkdir(path.dirname(dest), { recursive: true })
+        await fs.copyFile(agent.sourceFile, dest)
+        ctx.stdout.write(`installed agent '${agent.name}' → ${dest}\n`)
+        count += 1
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`warning: agent '${agent.name}' for ${targetClient} failed: ${message}\n`)
+      }
+    }
+  }
+  ctx.stdout.write(`installed ${count} agent copy(ies)\n`)
+  return 0
+}
+
+/**
+ * Build a map from client name to client descriptor by reading plugin
+ * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
+ * / `.claude/agents` in core.
+ *
+ * @returns {Promise<Map<string, ClientDescriptor>>}
+ */
+async function buildClientDescriptorMap() {
+  /** @type {Map<string, ClientDescriptor>} */
   const map = new Map()
   try {
     const bundled = await discoverBundledPlugins()
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
     for (const [clientName, descriptor] of catalog.clientDescriptors) {
-      map.set(clientName, descriptor.skillDir)
+      map.set(clientName, descriptor)
     }
-  } catch { /* discovery failure → empty map → warnings per skill */ }
+  } catch { /* discovery failure → empty map → warnings per contribution */ }
   return map
 }
 

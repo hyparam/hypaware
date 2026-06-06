@@ -183,6 +183,7 @@ export async function dispatch(argv, opts = {}) {
     query: kernel.query,
     storage: kernel.storage,
     skills: kernel.skills,
+    agents: kernel.agents,
     sources: kernel.sources,
     sinks: kernel.sinks,
     initPresets: kernel.initPresets,

@@ -19,6 +19,7 @@
  * @property {PluginName} plugin
  * @property {string} name
  * @property {string} skillDir
+ * @property {string} [agentDir]
  * @property {PluginAttachProbeManifest} [attachProbe]
  * @property {string[]} [requiredUpstreams]
  */
@@ -92,6 +93,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
             name: client.name,
             skillDir: client.skill_dir,
           }
+          if (typeof client.agent_dir === 'string') descriptor.agentDir = client.agent_dir
           if (client.attach_probe) descriptor.attachProbe = client.attach_probe
           if (Array.isArray(client.required_upstreams)) {
             descriptor.requiredUpstreams = client.required_upstreams

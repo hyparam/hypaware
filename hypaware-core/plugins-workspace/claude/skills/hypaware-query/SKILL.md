@@ -16,25 +16,27 @@ Use `hyp query` to inspect local HypAware recordings. It reads local JSONL recor
    - **Missing partitions still error.** Run the exact `hyp query refresh …` command the CLI prints, or rerun the target query with `--refresh always`.
    - Broad manual refreshes are explicit: `hyp query refresh --all [dataset]`. Do not run a broad refresh when the printed file-targeted command is enough.
 4. Prefer structured output for analysis: use `--format json` for follow-up reasoning and `--format markdown` when showing a table to the user. Inline output is context-budgeted, not row-capped: each string cell is truncated to ~200 code points (a `…(+N)` marker shows how much was elided) and rows are dropped once a row-data byte budget (~32KB) is hit, with a `notice: showing X of Y rows …` line on stderr. To get a full, untruncated result, spill it to a file with `--output <file>` (prints only a receipt to stdout — the data never floods context) and post-process the file. Override the caps with `--max-cell <n>` / `--max-bytes <n>` (`0` disables either).
-5. Use high-level query commands before custom SQL. Switch to `hyp query sql` only when the built-in commands cannot answer the question.
-6. For unfamiliar SQL tables, run `hyp query schema <table> --format json` before querying.
+5. For unfamiliar SQL tables, run `hyp query schema <table> --format json` before querying. Registered datasets can have different column sets even when they share a logical shape (e.g., per-user `agent_logs_*` S3 datasets) — check each table's schema before writing cross-table SQL. If `schema` reports `columns: 0` for a dataset that is still queryable, fall back to `SELECT * FROM <table> LIMIT 1`; failed queries also list the available columns in their error message.
 
 ## Common Commands
 
 ```bash
 hyp query status
-hyp query catalog --format json
-hyp query logs --since 1h --format json
-hyp query traces slow --limit 20 --format json
-hyp query metrics list --format json
-hyp query metrics series <metric-name> --format json
 hyp query schema <table> --format json
 hyp query sql "<sql>" --format json
+hyp query sql "<sql>" --format jsonl --output <file>   # full result, lossless
 hyp query refresh <file.jsonl>
 hyp query refresh --all logs
-hyp collect <file.jsonl> --name <name>
-hyp collect --glob '<pattern>' --name <name>
+hyp collect list
+hyp collect remove <name>
 ```
+
+These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain; `hyp collect`: list, remove). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
+
+## SQL dialect notes
+
+- `json_extract_scalar()` does not exist. `JSON_EXTRACT` does, but it errors on rows where a JSON-typed column (notably `tool_args`) holds a plain string instead of a JSON object ("first argument must be JSON string or object, got string").
+- The robust pattern for extracting fields from `tool_args` is a regex over the raw text, e.g. `regexp_extract(CAST(tool_args AS VARCHAR), '"command":"([^"]+)', 1)`.
 
 ## AI gateway message model
 
@@ -54,6 +56,6 @@ Run `hyp query schema ai_gateway_messages --format markdown` for the authoritati
 ## Guardrails
 
 - Do not assume the cache auto-refreshes. Query commands default to `--refresh never`.
-- Always read stderr. A successful exit code does not mean the cache is current.
-- Keep SQL read-only and use only query tables from `hyp query catalog`.
+- Always read stderr, and never pipe it to /dev/null (especially in shell loops over multiple datasets) — errors and staleness warnings land there, and an empty stdout is indistinguishable from zero rows. A successful exit code does not mean the cache is current.
+- Keep SQL read-only and use only datasets listed by `hyp query status`.
 - `hyp query sql` inline output is context-budgeted (cells truncated to ~200 chars, rows dropped past a ~32KB row-data budget) and emits a `notice:` on stderr when it withholds rows — it is not a fixed row cap. Prefer aggregates/filters for analysis; use `--output <file>` for a complete, untruncated result and read it back from the file rather than from stdout.

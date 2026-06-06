@@ -1,5 +1,6 @@
 import type {
   ActivePlugin,
+  AgentRegistry,
   BackfillMaterializerRegistry,
   BackfillRegistry,
   CommandRegistry,
@@ -37,6 +38,7 @@ export interface KernelRuntime {
   storage: ExtendedQueryStorageService
   cacheRoot: string
   skills: SkillRegistry
+  agents: AgentRegistry
   initPresets: InitPresetRegistry
   backfills: BackfillRegistry
   backfillMaterializers: BackfillMaterializerRegistry

@@ -14,7 +14,7 @@ import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
 
 /**
- * @import { ActivePlugin, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { KernelRuntime } from './activation.d.ts'
  */
@@ -61,6 +61,7 @@ export function createKernelRuntime(opts = {}) {
     storage,
     cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
+    agents: createAgentRegistry(),
     initPresets: createInitPresetRegistry(),
     backfills: opts.backfillRegistry ?? createBackfillRegistry(),
     backfillMaterializers: opts.backfillMaterializerRegistry ?? createBackfillMaterializerRegistry(),
@@ -115,6 +116,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     query: runtime.query,
     storage: runtime.storage,
     skills: runtime.skills,
+    agents: runtime.agents,
     initPresets: runtime.initPresets,
     backfills: runtime.backfills,
     backfillMaterializers: runtime.backfillMaterializers,
@@ -253,6 +255,43 @@ function createPhase2SkillRegistry() {
         clients: [...skill.clients],
         sourceDir: skill.sourceDir,
         ...(skill.projectLocal !== undefined ? { projectLocal: skill.projectLocal } : {}),
+      })
+    },
+    list() { return items.slice() },
+  }
+}
+
+/**
+ * Agent registry. Stores subagent contributions from client-adapter
+ * plugins so `hyp agents install` (and the walkthrough finale) can
+ * enumerate what each plugin wants materialized into the per-client
+ * agent directories. Mirrors the skill registry, but each contribution
+ * points at a single markdown definition file rather than a directory.
+ *
+ * @returns {AgentRegistry}
+ */
+function createAgentRegistry() {
+  /** @type {AgentContribution[]} */
+  const items = []
+  return {
+    register(agent) {
+      if (!agent || typeof agent.name !== 'string' || agent.name.length === 0) {
+        throw new TypeError('agents.register: name is required')
+      }
+      if (typeof agent.plugin !== 'string' || agent.plugin.length === 0) {
+        throw new TypeError(`agents.register '${agent.name}': plugin is required`)
+      }
+      if (!Array.isArray(agent.clients) || agent.clients.length === 0) {
+        throw new TypeError(`agents.register '${agent.name}': clients must be a non-empty array`)
+      }
+      if (typeof agent.sourceFile !== 'string' || agent.sourceFile.length === 0) {
+        throw new TypeError(`agents.register '${agent.name}': sourceFile is required`)
+      }
+      items.push({
+        name: agent.name,
+        plugin: agent.plugin,
+        clients: [...agent.clients],
+        sourceFile: agent.sourceFile,
       })
     },
     list() { return items.slice() },

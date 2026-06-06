@@ -95,6 +95,9 @@ export interface RunPickerWalkthroughOptions {
   skills?: {
     list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[]
   }
+  agents?: {
+    list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[]
+  }
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -187,6 +190,7 @@ export interface FinaleSummary {
   }
   attach: { client: 'claude' | 'codex'; dryRun: boolean; ok: boolean }[]
   skillsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
+  agentsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]
