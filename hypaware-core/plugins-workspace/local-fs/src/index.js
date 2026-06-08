@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-import { encodePartition } from 'hypaware/core/sinks'
+import { encodePartition, clusterColumnsForDataset } from 'hypaware/core/sinks'
 
 import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
 
@@ -107,6 +107,7 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage }) {
             tempDir: sinkCtx.paths.tempDir,
             columns,
             rows,
+            clusterColumns: clusterColumnsForDataset(query, partition.dataset),
             sinkInstance: sinkCtx.name,
             plugin: PLUGIN_NAME,
           })

@@ -12,4 +12,4 @@
  * ```
  */
 
-export { encodePartition } from './encoder.js'
+export { encodePartition, clusterColumnsForDataset } from './encoder.js'
