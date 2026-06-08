@@ -104,6 +104,39 @@ test('OpenAI Responses with output_text in the body produces an assistant messag
   assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'because' }])
 })
 
+test('OpenAI Responses captures top-level instructions into system_text', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      instructions: 'You are Codex, a coding agent.',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'how' }] }],
+    }),
+    response_body: JSON.stringify({ id: 'resp_1', output_text: 'because' }),
+  }), context()))
+
+  assert.equal(projection.system_text, 'You are Codex, a coding agent.')
+})
+
+test('OpenAI Chat system field still wins over instructions', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/chat/completions',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      system: 'chat-system',
+      instructions: 'responses-instructions',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'yo' } }] }),
+  }), context()))
+
+  assert.equal(projection.system_text, 'chat-system')
+})
+
 test('OpenAI Responses SSE deltas reconstruct the assistant body', () => {
   const projector = createCodexExchangeProjector({ env: {} })
   const projection = /** @type {any} */ (projector.project(exchange({
