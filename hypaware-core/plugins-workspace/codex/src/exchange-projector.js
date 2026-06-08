@@ -98,7 +98,7 @@ export function createCodexExchangeProjector(opts = {}) {
         request_id: resolveRequestId(input),
         prompt_id: codexContext?.turn_id,
         model: resolveModel(reqBody, responseBody),
-        system_text: extractSystemText(reqBody.system),
+        system_text: extractSystemText(reqBody.system ?? reqBody.instructions),
         tools: /** @type {any} */ (reqBody.tools),
         attributes: projectionAttributes,
         messages,
@@ -701,7 +701,14 @@ function resolveModel(reqBody, responseBody) {
   return stringValue(reqBody.model) ?? stringValue(readKey(responseBody, 'model'))
 }
 
-/** @param {unknown} system */
+/**
+ * Accepts the Chat Completions `system` field (string or content blocks)
+ * or the Responses API top-level `instructions` string. Codex traffic
+ * uses the latter, so without it `system_text` is empty for every
+ * Responses-shaped exchange.
+ *
+ * @param {unknown} system
+ */
 function extractSystemText(system) {
   if (typeof system === 'string' && system.length > 0) return system
   if (Array.isArray(system)) {
