@@ -1,6 +1,7 @@
 // @ts-check
 
 import { randomBytes } from 'node:crypto'
+import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib'
 
 import { isSseHeaders, SseParser } from './sse.js'
 
@@ -116,6 +117,12 @@ export class Exchange {
     this.requestBytes = 0
     /** @type {ResponseStart | undefined} */
     this.response = undefined
+    /**
+     * Raw upstream `content-encoding`, captured before header redaction so
+     * body decoding still works when an operator redacts that header.
+     * @type {string | string[] | undefined}
+     */
+    this.responseContentEncoding = undefined
     /** @type {Buffer[]} */
     this.responseChunks = []
     /** @type {number} */
@@ -178,6 +185,7 @@ export class Exchange {
       status: init.status,
       headers: redactHeaders(init.headers, this.redactSet),
     }
+    this.responseContentEncoding = headerValue(init.headers, 'content-encoding')
     this.isSse = isSseHeaders(init.headers)
   }
 
@@ -256,10 +264,17 @@ export class Exchange {
     this.finished = true
 
     const tsEndMs = Date.now()
-    const requestBody = Buffer.concat(this.requestChunks).toString('utf8')
+    // The proxy is a pass-through, so a body carries whatever
+    // `content-encoding` the upstream (or client) applied. Decode it
+    // before stringifying or a gzip/br/deflate body lands in the cache
+    // as mojibake that no downstream projector can parse as JSON.
+    const requestBody = decodeBody(
+      Buffer.concat(this.requestChunks),
+      headerValue(this._rawRequestHeaders, 'content-encoding')
+    )
     const responseBody = this.isSse
       ? null
-      : Buffer.concat(this.responseChunks).toString('utf8')
+      : decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
     const devRunId = this.devRunIdFromHeaders()
     /** @type {Record<string, unknown>} */
     const metadata = {}
@@ -292,6 +307,68 @@ export class Exchange {
     this._resolveFinished()
     return row
   }
+}
+
+/**
+ * Reverse the `content-encoding` applied to a captured body and decode
+ * it as UTF-8. Best-effort: an empty buffer yields `''`, an unknown or
+ * undecodable encoding falls back to the raw bytes so a (possibly
+ * garbled) row is still written rather than the exchange being dropped.
+ *
+ * @param {Buffer} buf
+ * @param {string | string[] | undefined} encodingHeader
+ * @returns {string}
+ */
+function decodeBody(buf, encodingHeader) {
+  if (buf.byteLength === 0) return ''
+  const encodings = parseEncodings(encodingHeader)
+  if (encodings.length === 0) return buf.toString('utf8')
+  let current = buf
+  // `content-encoding` lists transforms in the order they were applied;
+  // decode in reverse to undo them.
+  for (let i = encodings.length - 1; i >= 0; i--) {
+    const enc = encodings[i]
+    try {
+      if (enc === 'gzip' || enc === 'x-gzip') current = gunzipSync(current)
+      else if (enc === 'br') current = brotliDecompressSync(current)
+      else if (enc === 'deflate') current = inflateOrRaw(current)
+      else return current.toString('utf8') // unknown codec — stop, keep what we have
+    } catch {
+      return buf.toString('utf8') // undecodable — fall back to the raw bytes
+    }
+  }
+  return current.toString('utf8')
+}
+
+/**
+ * Some servers emit raw DEFLATE without the zlib header. Try the
+ * conformant decoder first, then the headerless variant.
+ *
+ * @param {Buffer} buf
+ * @returns {Buffer}
+ */
+function inflateOrRaw(buf) {
+  try {
+    return inflateSync(buf)
+  } catch {
+    return inflateRawSync(buf)
+  }
+}
+
+/**
+ * Normalize a `content-encoding` header into an ordered list of lowercase
+ * codec tokens, dropping `identity` and empties.
+ *
+ * @param {string | string[] | undefined} header
+ * @returns {string[]}
+ */
+function parseEncodings(header) {
+  if (header === undefined) return []
+  const raw = Array.isArray(header) ? header.join(',') : header
+  return raw
+    .split(',')
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length > 0 && token !== 'identity')
 }
 
 /**
