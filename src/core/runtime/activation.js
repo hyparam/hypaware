@@ -12,6 +12,7 @@ import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../r
 import { createSinkRegistry } from '../registry/sinks.js'
 import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
+import { isSafeContributionName } from './contribution_names.js'
 
 /**
  * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -240,6 +241,11 @@ function createPhase2SkillRegistry() {
       if (!skill || typeof skill.name !== 'string' || skill.name.length === 0) {
         throw new TypeError('skills.register: name is required')
       }
+      // @ref LLP 0003#principle [constrained-by] — name is interpolated into
+      // `<skill_dir>/<name>`; reject traversal before it reaches the filesystem.
+      if (!isSafeContributionName(skill.name)) {
+        throw new TypeError(`skills.register '${skill.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
+      }
       if (typeof skill.plugin !== 'string' || skill.plugin.length === 0) {
         throw new TypeError(`skills.register '${skill.name}': plugin is required`)
       }
@@ -277,6 +283,11 @@ function createAgentRegistry() {
     register(agent) {
       if (!agent || typeof agent.name !== 'string' || agent.name.length === 0) {
         throw new TypeError('agents.register: name is required')
+      }
+      // @ref LLP 0003#principle [constrained-by] — name is interpolated into
+      // `<agent_dir>/<name>.md`; reject traversal before it reaches the filesystem.
+      if (!isSafeContributionName(agent.name)) {
+        throw new TypeError(`agents.register '${agent.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
       }
       if (typeof agent.plugin !== 'string' || agent.plugin.length === 0) {
         throw new TypeError(`agents.register '${agent.name}': plugin is required`)

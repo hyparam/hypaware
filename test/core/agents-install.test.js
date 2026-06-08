@@ -53,6 +53,42 @@ test('agents.register validates contribution shape', () => {
   })
 })
 
+test('agents.register rejects path-traversal names', () => {
+  const { kernel } = agentsKernelAndRegistry()
+
+  for (const name of ['../evil', '../../etc/cron.d/x', 'a/b', '/abs', '..', '.']) {
+    assert.throws(
+      () => kernel.agents.register(/** @type {any} */ ({
+        name,
+        plugin: 'p',
+        clients: ['claude'],
+        sourceFile: '/abs/a.md',
+      })),
+      /name must be a safe basename/,
+      `expected ${JSON.stringify(name)} to be rejected`
+    )
+  }
+  assert.equal(kernel.agents.list().length, 0)
+})
+
+test('skills.register rejects path-traversal names', () => {
+  const { kernel } = agentsKernelAndRegistry()
+
+  for (const name of ['../evil', 'a/b', '/abs', '..']) {
+    assert.throws(
+      () => kernel.skills.register(/** @type {any} */ ({
+        name,
+        plugin: 'p',
+        clients: ['claude'],
+        sourceDir: '/abs/skill',
+      })),
+      /name must be a safe basename/,
+      `expected ${JSON.stringify(name)} to be rejected`
+    )
+  }
+  assert.equal(kernel.skills.list().length, 0)
+})
+
 test('hyp agents install copies registered agent files into the client agent dir', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-agents-'))
   const sourceFile = path.join(home, 'src-agent.md')

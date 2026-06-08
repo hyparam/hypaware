@@ -13,6 +13,7 @@ import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { applyContextControls, renderResult } from '../query/format.js'
@@ -3123,7 +3124,14 @@ async function runAgentsInstall(argv, ctx) {
         ctx.stderr.write(`warning: agent '${agent.name}' targets client '${targetClient}' without an agent directory\n`)
         continue
       }
-      const dest = path.join(homeDir, agentDir, `${agent.name}.md`)
+      const baseDir = path.join(homeDir, agentDir)
+      const dest = path.join(baseDir, `${agent.name}.md`)
+      // Defense in depth: registration rejects traversal names, but the
+      // agent dir comes from a plugin manifest, so re-check containment.
+      if (!isWithinDir(dest, baseDir)) {
+        ctx.stderr.write(`warning: agent '${agent.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
+        continue
+      }
       try {
         await fs.mkdir(path.dirname(dest), { recursive: true })
         await fs.copyFile(agent.sourceFile, dest)

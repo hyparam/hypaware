@@ -8,6 +8,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 import { detectClientSources } from './detect.js'
@@ -1131,7 +1132,14 @@ async function runPickerFinale(args) {
             if (!clientsPicked.includes(targetClient)) continue
             const skillDir = descriptorMap.get(targetClient)?.skillDir
             if (!skillDir) continue
-            const dest = path.join(homeDir, skillDir, skill.name)
+            const baseDir = path.join(homeDir, skillDir)
+            const dest = path.join(baseDir, skill.name)
+            // Defense in depth: registration rejects traversal names, but the
+            // skill dir comes from a plugin manifest, so re-check containment.
+            if (!isWithinDir(dest, baseDir)) {
+              stderr.write(`warning: skill '${skill.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
+              continue
+            }
             // Separate the skills block from the preceding attach output.
             if (!printedAny) stdout.write('\n')
             printedAny = true
@@ -1172,7 +1180,14 @@ async function runPickerFinale(args) {
             if (!clientsPicked.includes(targetClient)) continue
             const agentDir = descriptorMap.get(targetClient)?.agentDir
             if (!agentDir) continue
-            const dest = path.join(homeDir, agentDir, `${agent.name}.md`)
+            const baseDir = path.join(homeDir, agentDir)
+            const dest = path.join(baseDir, `${agent.name}.md`)
+            // Defense in depth: registration rejects traversal names, but the
+            // agent dir comes from a plugin manifest, so re-check containment.
+            if (!isWithinDir(dest, baseDir)) {
+              stderr.write(`warning: agent '${agent.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
+              continue
+            }
             if (!printedAny) stdout.write('\n')
             printedAny = true
             if (dryRun) {
