@@ -128,6 +128,262 @@ test('OpenAI Responses SSE deltas reconstruct the assistant body', () => {
   assert.deepEqual(projection.messages[1].raw_frame, { response_id: 'resp_2' })
 })
 
+test('OpenAI Responses function_call in input becomes an assistant tool_use message', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'ls please' }] },
+        {
+          type: 'function_call',
+          call_id: 'call_abc',
+          name: 'exec_command',
+          arguments: '{"cmd":"ls"}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_abc',
+          output: 'a.txt\nb.txt',
+        },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_1', output_text: 'done' }),
+  }), context()))
+
+  assert.deepEqual(
+    projection.messages.map((/** @type {any} */ m) => m.role),
+    ['user', 'assistant', 'tool', 'assistant']
+  )
+  const toolUse = projection.messages[1].content[0]
+  assert.equal(toolUse.type, 'tool_use')
+  assert.equal(toolUse.id, 'call_abc')
+  assert.equal(toolUse.name, 'exec_command')
+  assert.deepEqual(toolUse.input, { cmd: 'ls' })
+  const toolResult = projection.messages[2].content[0]
+  assert.equal(toolResult.type, 'tool_result')
+  assert.equal(toolResult.tool_use_id, 'call_abc')
+  assert.equal(toolResult.content, 'a.txt\nb.txt')
+})
+
+test('OpenAI Responses custom_tool_call uses payload.input when arguments is missing', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        {
+          type: 'custom_tool_call',
+          call_id: 'call_x',
+          name: 'spawn_agent',
+          input: 'raw-string-input',
+        },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_2', output_text: 'k' }),
+  }), context()))
+
+  const toolUse = projection.messages[0].content[0]
+  assert.equal(toolUse.type, 'tool_use')
+  assert.equal(toolUse.id, 'call_x')
+  assert.equal(toolUse.name, 'spawn_agent')
+  assert.equal(toolUse.input, 'raw-string-input')
+})
+
+test('OpenAI Responses fans out response.output items into per-item assistant messages', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'list files' }] }],
+    }),
+    response_body: JSON.stringify({
+      id: 'resp_3',
+      output: [
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'on it' }] },
+        {
+          type: 'function_call',
+          call_id: 'call_42',
+          name: 'exec_command',
+          arguments: '{"cmd":"ls"}',
+        },
+      ],
+    }),
+  }), context()))
+
+  // Each output[] item becomes its own assistant message so it hashes the
+  // same as a turn-2 replay (where input items are fanned out too).
+  assert.deepEqual(
+    projection.messages.map((/** @type {any} */ m) => m.role),
+    ['user', 'assistant', 'assistant']
+  )
+  assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'on it' }])
+  const toolUse = projection.messages[2].content[0]
+  assert.equal(toolUse.type, 'tool_use')
+  assert.equal(toolUse.id, 'call_42')
+  assert.equal(toolUse.name, 'exec_command')
+  assert.deepEqual(toolUse.input, { cmd: 'ls' })
+})
+
+test('OpenAI Responses turn-1 response shape matches turn-2 input replay shape (dedupe)', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  // Turn 1: assistant emits text + a function_call as response output.
+  const turn1 = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    }),
+    response_body: JSON.stringify({
+      id: 'resp_a',
+      output: [
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'on it' }] },
+        { type: 'function_call', call_id: 'call_z', name: 'exec', arguments: '{"x":1}' },
+      ],
+    }),
+  }), context()))
+
+  // Turn 2: same output items now arrive as input replay (plus a tool result and follow-up).
+  const turn2 = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'on it' }] },
+        { type: 'function_call', call_id: 'call_z', name: 'exec', arguments: '{"x":1}' },
+        { type: 'function_call_output', call_id: 'call_z', output: 'ok' },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_b', output_text: 'done' }),
+  }), context()))
+
+  // Turn 1's assistant text + tool_use must match turn 2's replayed input items
+  // block-for-block — that's what makes content-hash dedupe collapse them.
+  assert.deepEqual(turn1.messages[1].content, turn2.messages[1].content)
+  assert.deepEqual(turn1.messages[2].content, turn2.messages[2].content)
+})
+
+test('OpenAI Responses SSE captures tool_use from response.output_item.done', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    is_sse: true,
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'go' }] }],
+    }),
+    response_body: '',
+    stream_events: [
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 0, event: 'response.created', data: JSON.stringify({ id: 'resp_4', type: 'response.created' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 1, event: 'response.output_text.delta', data: JSON.stringify({ type: 'response.output_text.delta', delta: 'sure' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 2, event: 'response.output_item.done', data: JSON.stringify({
+        type: 'response.output_item.done',
+        item: { type: 'function_call', call_id: 'call_stream', name: 'exec_command', arguments: '{"cmd":"pwd"}' },
+      }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 3, event: 'response.completed', data: JSON.stringify({ type: 'response.completed', id: 'resp_4', status: 'completed' }) },
+    ],
+  }), context()))
+
+  // No body in response.completed → use streamed accumulators, fanned out.
+  assert.deepEqual(
+    projection.messages.map((/** @type {any} */ m) => m.role),
+    ['user', 'assistant', 'assistant']
+  )
+  assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'sure' }])
+  const toolUse = projection.messages[2].content[0]
+  assert.equal(toolUse.type, 'tool_use')
+  assert.equal(toolUse.id, 'call_stream')
+  assert.equal(toolUse.name, 'exec_command')
+  assert.deepEqual(toolUse.input, { cmd: 'pwd' })
+  assert.deepEqual(projection.messages[1].raw_frame, { response_id: 'resp_4' })
+  assert.deepEqual(projection.messages[2].raw_frame, { response_id: 'resp_4' })
+})
+
+test('OpenAI Responses SSE prefers full response.completed body when present', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    is_sse: true,
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'go' }] }],
+    }),
+    response_body: '',
+    stream_events: [
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 0, event: 'response.created', data: JSON.stringify({ id: 'resp_5', type: 'response.created' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 1, event: 'response.output_text.delta', data: JSON.stringify({ type: 'response.output_text.delta', delta: 'ignored' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 2, event: 'response.completed', data: JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_5',
+          output: [
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'final' }] },
+            { type: 'function_call', call_id: 'call_body', name: 'apply_patch', arguments: '{"path":"x"}' },
+          ],
+        },
+      }) },
+    ],
+  }), context()))
+
+  // Completed body is authoritative and is already fanned out per-item;
+  // streamed 'ignored' text is dropped because the message item supplied text.
+  assert.deepEqual(
+    projection.messages.map((/** @type {any} */ m) => m.role),
+    ['user', 'assistant', 'assistant']
+  )
+  assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'final' }])
+  const toolUse = projection.messages[2].content[0]
+  assert.equal(toolUse.type, 'tool_use')
+  assert.equal(toolUse.id, 'call_body')
+  assert.equal(toolUse.name, 'apply_patch')
+  assert.deepEqual(toolUse.input, { path: 'x' })
+})
+
+test('OpenAI Responses SSE merges streamed text into a tool-only completed body', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    is_sse: true,
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'go' }] }],
+    }),
+    response_body: '',
+    stream_events: [
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 0, event: 'response.created', data: JSON.stringify({ id: 'resp_6', type: 'response.created' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 1, event: 'response.output_text.delta', data: JSON.stringify({ type: 'response.output_text.delta', delta: 'thinking out loud' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 2, event: 'response.completed', data: JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_6',
+          output: [
+            { type: 'function_call', call_id: 'call_only', name: 'apply_patch', arguments: '{"path":"x"}' },
+          ],
+        },
+      }) },
+    ],
+  }), context()))
+
+  // Completed body had only a function_call; streamed text is preserved as
+  // its own message so dedupe matches a future replay.
+  assert.deepEqual(
+    projection.messages.map((/** @type {any} */ m) => m.role),
+    ['user', 'assistant', 'assistant']
+  )
+  assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'thinking out loud' }])
+  assert.equal(projection.messages[2].content[0].type, 'tool_use')
+  assert.equal(projection.messages[2].content[0].id, 'call_only')
+})
+
 test('Codex turn metadata + headers project into first-class columns and codex.* attributes', () => {
   const projector = createCodexExchangeProjector({ env: {} })
   const workspace = '/home/me/workspace'

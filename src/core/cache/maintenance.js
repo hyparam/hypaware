@@ -12,7 +12,7 @@ import {
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
 import { inferColumnType } from './migrate.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
+import { discoverCachePartitions, readCursorSync, tryReadCursorSync, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
@@ -49,10 +49,20 @@ const DEFAULTS = {
   ...SNAPSHOT_RETENTION_DEFAULTS,
   compact_file_count: 32,
   compact_avg_file_bytes: 32 * 1024 * 1024,
+  compact_batch_bytes: 32 * 1024 * 1024,
   max_tick_ms: 30_000,
 }
 
 const GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
+
+/**
+ * How long an unreferenced (cursor-orphaned) table generation must sit
+ * untouched before the orphan sweep reclaims it. Long enough that an
+ * in-flight compaction writing a new generation is never mistaken for
+ * garbage; short enough that a crashed compaction's leak is reclaimed
+ * on the next maintenance tick that finds it stale.
+ */
+const ORPHAN_GRACE_MS = 60 * 60 * 1000
 
 /**
  * @param {Partial<MaintenanceConfig> | undefined} config
@@ -67,6 +77,7 @@ export function normalizeMaintenanceConfig(config) {
     max_snapshot_age_hours: config?.max_snapshot_age_hours ?? DEFAULTS.max_snapshot_age_hours,
     compact_file_count: config?.compact_file_count ?? DEFAULTS.compact_file_count,
     compact_avg_file_bytes: config?.compact_avg_file_bytes ?? DEFAULTS.compact_avg_file_bytes,
+    compact_batch_bytes: config?.compact_batch_bytes ?? DEFAULTS.compact_batch_bytes,
     max_tick_ms: config?.max_tick_ms ?? DEFAULTS.max_tick_ms,
   }
 }
@@ -370,20 +381,76 @@ function needsCompaction(tableDir, cfg) {
   return false
 }
 
+const COMPACT_BATCH_SIZE = 10_000
+
+/**
+ * Cheap, allocation-free estimate of a row's in-memory footprint in
+ * bytes. Used only to bound how much a compaction batch accumulates
+ * before flushing, so precision matters less than never under-counting
+ * a fat blob. Walks nested structures without building strings.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+function estimateValueBytes(value) {
+  if (value === null || value === undefined) return 0
+  switch (typeof value) {
+    case 'string':
+      // JS strings are UTF-16 internally; 2 bytes/char is the honest upper bound.
+      return value.length * 2
+    case 'number':
+      return 8
+    case 'bigint':
+      return 16
+    case 'boolean':
+      return 4
+    case 'object': {
+      if (value instanceof Date) return 8
+      if (value instanceof Uint8Array) return value.byteLength
+      let total = 0
+      if (Array.isArray(value)) {
+        for (const item of value) total += estimateValueBytes(item)
+        return total
+      }
+      for (const [k, v] of Object.entries(value)) {
+        total += k.length * 2 + estimateValueBytes(v)
+      }
+      return total
+    }
+    default:
+      return 0
+  }
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @returns {number}
+ */
+function estimateRowBytes(row) {
+  let total = 0
+  for (const value of Object.values(row)) total += estimateValueBytes(value)
+  return total
+}
+
 /**
  * Compact a source-table partition by rewriting into a fresh table
  * directory. Iceberg metadata stores absolute `file://` URLs, so we
  * cannot rename directories after writing — we write to a new dir
  * name and update the cursor to point to it.
  *
+ * Rows are flushed to a data file whenever the batch reaches either
+ * `COMPACT_BATCH_SIZE` rows or `cfg.compact_batch_bytes` estimated
+ * bytes, whichever comes first. The byte cap keeps peak heap bounded
+ * regardless of per-row payload size — without it, a fat denormalized
+ * column (e.g. tool definitions repeated on every row) pushes a
+ * 10k-row batch into the gigabytes and OOMs the daemon mid-compaction.
+ *
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
- * @param {MaintenanceConfig} _cfg
+ * @param {MaintenanceConfig} cfg
  * @returns {Promise<{ rowCount: number, dataFiles: number } | null>}
  */
-const COMPACT_BATCH_SIZE = 10_000
-
-async function compactSourceTable(partitionDir, cursor, _cfg) {
+async function compactSourceTable(partitionDir, cursor, cfg) {
   const oldTableDirName = cursor.tableDir ?? 'table'
   const oldTableDir = path.join(partitionDir, oldTableDirName)
   if (!tableExists(oldTableDir)) return null
@@ -412,7 +479,9 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
   let columns = schemaColumns
   /** @type {Record<string, unknown>[]} */
   let batch = []
+  let batchBytes = 0
   let totalRows = 0
+  const maxBatchBytes = cfg.compact_batch_bytes
   /** @type {AppendOptions | undefined} */
   const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
@@ -428,17 +497,21 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
     if (typeof rowId === 'string' && seen.has(rowId)) continue
     if (typeof rowId === 'string') seen.add(rowId)
     batch.push(row)
+    batchBytes += estimateRowBytes(row)
 
-    if (batch.length >= COMPACT_BATCH_SIZE) {
+    if (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes) {
       await appendRowsToTable(newTableDir, columns, batch, appendOpts)
       totalRows += batch.length
       batch = []
+      batchBytes = 0
     }
   }
 
   if (batch.length > 0 && columns) {
     await appendRowsToTable(newTableDir, columns, batch, appendOpts)
     totalRows += batch.length
+    batch = []
+    batchBytes = 0
   }
 
   if (!columns) {
@@ -491,10 +564,10 @@ async function compactSourceTable(partitionDir, cursor, _cfg) {
  *
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
- * @param {MaintenanceConfig} _cfg
+ * @param {MaintenanceConfig} cfg
  * @returns {Promise<{ newEpoch: number, rowCount: number, dataFiles: number } | null>}
  */
-async function compactPartition(partitionDir, cursor, _cfg) {
+async function compactPartition(partitionDir, cursor, cfg) {
   const oldEpochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
   if (!tableExists(oldEpochDir)) return null
 
@@ -521,7 +594,9 @@ async function compactPartition(partitionDir, cursor, _cfg) {
   let columns = schemaColumns
   /** @type {Record<string, unknown>[]} */
   let batch = []
+  let batchBytes = 0
   let totalRows = 0
+  const maxBatchBytes = cfg.compact_batch_bytes
   /** @type {AppendOptions | undefined} */
   const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
@@ -537,11 +612,13 @@ async function compactPartition(partitionDir, cursor, _cfg) {
     if (typeof rowId === 'string' && seen.has(rowId)) continue
     if (typeof rowId === 'string') seen.add(rowId)
     batch.push(row)
+    batchBytes += estimateRowBytes(row)
 
-    if (batch.length >= COMPACT_BATCH_SIZE) {
+    if (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes) {
       await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
       totalRows += batch.length
       batch = []
+      batchBytes = 0
     }
   }
 
@@ -589,6 +666,23 @@ async function cleanRetiredEpochs(cacheRoot) {
 }
 
 /**
+ * Recursively reclaim retired and orphaned table generations.
+ *
+ * Two cases are removed:
+ *  1. A generation that carries a `.retired` marker older than the grace
+ *     period — the normal "compaction succeeded, the previous generation
+ *     can go" path.
+ *  2. A generation that is NOT the live one named by the partition cursor
+ *     and is older than {@link ORPHAN_GRACE_MS}, even without a `.retired`
+ *     marker. A compaction that OOMs (or is killed) part-way leaves a
+ *     half-written `table-<seq>` dir with no marker; case 1 never reclaims
+ *     it, so it leaks forever. Case 2 sweeps it once it is safely stale.
+ *
+ * Orphan reclamation (case 2) only runs for partition dirs that actually
+ * have a `cursor.json`, so we always know which generation is live before
+ * deleting any of its siblings. The mtime grace keeps an in-flight
+ * compaction's freshly created (not-yet-committed) dir safe.
+ *
  * @param {string} dir
  */
 async function walkForRetired(dir) {
@@ -599,24 +693,64 @@ async function walkForRetired(dir) {
   } catch {
     return
   }
+
+  // Use the strict reader: a missing OR unreadable cursor yields null, so
+  // we never synthesize a default live generation and orphan-delete the
+  // real one. The orphan branch below only runs when liveDirName is known.
+  const cursor = tryReadCursorSync(dir)
+  const liveDirName = cursor ? liveGenerationDir(cursor) : null
+
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const full = path.join(dir, entry.name)
     if (entry.name.startsWith('epoch=') || entry.name.startsWith('table')) {
+      if (entry.name === liveDirName) continue
+
       const retiredMarker = path.join(full, '.retired')
+      let removed = false
       try {
         const content = await fsPromises.readFile(retiredMarker, 'utf8')
         const retiredAt = new Date(content.trim()).getTime()
         if (Date.now() - retiredAt > GRACE_PERIOD_MS) {
           fs.rmSync(full, { recursive: true, force: true })
+          removed = true
         }
       } catch {
-        // no .retired marker or parse error — skip
+        // no .retired marker or parse error — fall through to orphan check
+      }
+
+      // Orphan sweep: a generation the cursor does not reference and that
+      // has aged past the grace window is garbage regardless of markers.
+      if (!removed && liveDirName !== null) {
+        try {
+          const { mtimeMs } = fs.statSync(full)
+          if (Date.now() - mtimeMs > ORPHAN_GRACE_MS) {
+            fs.rmSync(full, { recursive: true, force: true })
+          }
+        } catch {
+          // stat/remove race — skip, a later tick will retry
+        }
       }
     } else {
       await walkForRetired(full)
     }
   }
+}
+
+/**
+ * Name of the table/epoch directory the cursor currently points at, or
+ * null when it cannot be determined.
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {string | null}
+ */
+function liveGenerationDir(cursor) {
+  if (cursor.tableDir) return cursor.tableDir
+  // A source-table cursor without an explicit tableDir lives in `table`;
+  // never fall through to an `epoch=*` name for source-table layout.
+  if (cursor.layout === 'source-table') return 'table'
+  if (typeof cursor.epoch === 'number') return `epoch=${cursor.epoch}`
+  return null
 }
 
 /**

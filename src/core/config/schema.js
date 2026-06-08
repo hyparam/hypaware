@@ -495,7 +495,8 @@ function parseQueryConfig(obj, pointer, errors) {
       }
       for (const key of /** @type {const} */ ([
         'interval_minutes', 'target_file_bytes', 'min_snapshots_to_keep',
-        'max_snapshot_age_hours', 'compact_file_count', 'compact_avg_file_bytes', 'max_tick_ms',
+        'max_snapshot_age_hours', 'compact_file_count', 'compact_avg_file_bytes',
+        'compact_batch_bytes', 'max_tick_ms',
       ])) {
         if (m[key] !== undefined) {
           if (typeof m[key] !== 'number' || !Number.isFinite(/** @type {number} */ (m[key])) || /** @type {number} */ (m[key]) < 0) {

@@ -10,13 +10,15 @@ import {
   defaultS3BlobStoreClientFactory,
 } from './blob-store.js'
 import { validateS3SinkConfig } from './config.js'
+import { validateS3QuerySources } from './query-config.js'
+import { buildS3QueryDataset } from './query-dataset.js'
 import { defaultClientFactory } from './client.js'
 import { classifyAwsError, describeS3ErrorKind } from './errors.js'
 import { keyIsWithinPrefix, renderObjectKey } from './keys.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { S3BlobStoreClientFactory, S3ClientFactory, S3ClientHandle, S3ErrorKind, S3SinkConfig } from './types.d.ts'
+ * @import { BlobStore, ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { S3BlobStoreClientFactory, S3ClientFactory, S3ClientHandle, S3ErrorKind, S3QuerySourceConfig, S3SinkConfig } from './types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/s3'
@@ -110,6 +112,104 @@ export async function activate(ctx) {
       })
     },
   })
+
+  await registerQuerySources(ctx)
+}
+
+/**
+ * Register a kernel query dataset for each configured `query_sources`
+ * entry, so `hyp query sql` can read parquet / Iceberg data back from
+ * S3. No-op when the plugin config carries no `query_sources`. Invalid
+ * `query_sources` config fails activation — a misconfigured read target
+ * should surface at boot, not at query time.
+ *
+ * @param {PluginActivationContext} ctx
+ */
+async function registerQuerySources(ctx) {
+  const config = /** @type {Record<string, unknown> | undefined} */ (ctx.config)
+  const raw = config?.query_sources
+  if (raw === undefined) return
+
+  const validation = validateS3QuerySources(raw)
+  if (!validation.ok) {
+    const first = validation.errors[0]
+    ctx.log.error('s3.query_source.config_invalid', {
+      hyp_plugin: PLUGIN_NAME,
+      error_kind: first.errorKind,
+      pointer: first.pointer,
+      message: first.message,
+    })
+    throw new Error(`${PLUGIN_NAME}: ${first.errorKind} at ${first.pointer || '/query_sources'}: ${first.message}`)
+  }
+
+  for (const source of validation.sources) {
+    const blobStore = await buildQuerySourceBlobStore(ctx, source)
+    ctx.query.registerDataset(buildS3QueryDataset({ source, blobStore, plugin: PLUGIN_NAME }))
+    ctx.log.info('s3.query_source.registered', {
+      hyp_plugin: PLUGIN_NAME,
+      hyp_dataset: source.name,
+      hyp_sink_format: source.format,
+      prefix: source.prefix,
+    })
+  }
+}
+
+/**
+ * Build a `BlobStore` for a query source. It is rooted exactly where the
+ * sink writes — the plugin-level `prefix` when reading the plugin's own
+ * bucket — and `source.prefix` names the dataset path relative to that
+ * root. This matters for Iceberg: its manifests embed data-file paths
+ * relative to the writer's table URL base, so the reader must reproduce
+ * the same (bucket, root-prefix) split or the data files won't resolve.
+ * When a source overrides `bucket`, the BlobStore is rooted at that
+ * bucket and `source.prefix` is the full in-bucket path.
+ *
+ * Connection fields fall back to plugin-level config and the
+ * `__blobStoreClientFactory` test seam is honored.
+ *
+ * @param {PluginActivationContext} ctx
+ * @param {S3QuerySourceConfig} source
+ * @returns {Promise<BlobStore>}
+ */
+async function buildQuerySourceBlobStore(ctx, source) {
+  const config = /** @type {Record<string, unknown>} */ (ctx.config ?? {})
+  const bucket = source.bucket ?? optString(config.bucket)
+  if (!bucket) {
+    throw new Error(
+      `${PLUGIN_NAME}: query_source '${source.name}' has no bucket — set query_sources[].bucket or a plugin-level bucket`
+    )
+  }
+  // Same bucket as the plugin → inherit the plugin prefix as the root so
+  // sink-written tables/files line up. Overridden bucket → root at the
+  // bucket and treat source.prefix as the full path.
+  const rootPrefix = source.bucket ? '' : (optString(config.prefix) ?? '')
+  const factory = /** @type {{ __blobStoreClientFactory?: S3BlobStoreClientFactory }} */ (
+    /** @type {unknown} */ (config)
+  ).__blobStoreClientFactory ?? defaultS3BlobStoreClientFactory
+  const client = await factory({
+    region: source.region ?? optString(config.region),
+    profile: source.profile ?? optString(config.profile),
+    endpoint_url: source.endpoint_url ?? optString(config.endpoint_url),
+    force_path_style: source.force_path_style ?? optBoolean(config.force_path_style),
+    env: ctx.env,
+  })
+  return createS3BlobStore({ bucket, prefix: rootPrefix, client })
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function optString(value) {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * @param {unknown} value
+ * @returns {boolean | undefined}
+ */
+function optBoolean(value) {
+  return typeof value === 'boolean' ? value : undefined
 }
 
 /**

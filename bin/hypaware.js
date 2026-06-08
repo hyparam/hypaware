@@ -37,6 +37,7 @@ if (argv[0] === '__smoke_internal') {
 
 const { dispatch } = await import('../src/core/cli/dispatch.js')
 const { installObservability } = await import('../src/core/observability/index.js')
+const { flushStream } = await import('../src/core/cli/flush-streams.js')
 
 const obs = installObservability()
 let exitCode = 1
@@ -50,4 +51,7 @@ try {
   await obs.shutdown()
 }
 
+// Flush stdout/stderr before exiting: `process.exit()` is synchronous and
+// would drop output still buffered in a pipe (the >64KiB truncation).
+await Promise.all([flushStream(process.stdout), flushStream(process.stderr)])
 process.exit(exitCode)

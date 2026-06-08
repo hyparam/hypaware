@@ -281,4 +281,5 @@ The former monolithic docs (`hypaware-design.md`, `finish-v1.md`,
 `hypaware-implementation-plan.md`) were decomposed into the LLP corpus and are
 preserved under [`llp/tombstones/`](./llp/tombstones/).
 
+- [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md) — how to write a plugin (`hyp plugin new` / `hyp plugin doctor`)
 - [`collectivus-plugin-kernel-types.d.ts`](./collectivus-plugin-kernel-types.d.ts) — public plugin interfaces
