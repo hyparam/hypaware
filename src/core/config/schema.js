@@ -135,6 +135,7 @@ export async function loadConfigFile(configPath) {
  *
  * @param {unknown} value
  * @returns {{ ok: true, config: HypAwareV2Config } | { ok: false, errors: ValidationError[] }}
+ * @ref LLP 0010#no-mode-field [implements] — v2 shape: version must be 2, explicit plugins[], no mode/role label
  */
 export function parseConfigShape(value) {
   /** @type {ValidationError[]} */
@@ -249,6 +250,7 @@ const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'di
  *   list: () => ConfigSectionRegistration[],
  *   getDefaults: (plugin: PluginName) => JsonObject|undefined,
  * }}
+ * @ref LLP 0010#validation [implements] — each plugin validates its own config section through this registry
  */
 export function createConfigRegistry() {
   /** @type {Map<PluginName, ConfigSectionRegistration>} */
@@ -353,6 +355,7 @@ function parsePluginEntry(entry, pointer, errors) {
  * @param {string} pointer
  * @param {ValidationError[]} errors
  * @returns {SinkConfigInstance|undefined}
+ * @ref LLP 0014#config-two-shapes [implements] — blob sink = writer+destination; request sink = one-piece plugin; never both
  */
 function parseSinkEntry(entry, pointer, errors) {
   if (!isPlainObject(entry)) {

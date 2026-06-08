@@ -42,6 +42,7 @@ import { createQueryStorageService } from '../cache/storage.js'
  *   cacheRoot?: string,
  * }} [opts]
  * @returns {KernelRuntime}
+ * @ref LLP 0003#intrinsic-not-plugin-provided [implements] — query + storage are wired in as intrinsic services, not plugin contributions
  */
 export function createKernelRuntime(opts = {}) {
   const cacheRoot = opts.cacheRoot ?? opts.storage?.cacheRoot ?? defaultCacheRoot()
@@ -90,6 +91,7 @@ function defaultCacheRoot() {
  * @param {JsonObject}       [args.config]
  * @param {NodeJS.ProcessEnv} [args.env]
  * @returns {PluginActivationContext}
+ * @ref LLP 0004#the-activation-context [implements] — per-plugin ctx: config slice, registry facades, scoped logger, requireCapability
  */
 export function createActivationContext({ runtime, plugin, paths, config, env }) {
   const pluginName = plugin.name
@@ -197,6 +199,7 @@ function createPermissionContext(pluginName, granted) {
  * @param {PluginName} pluginName
  * @param {ReturnType<typeof createCapabilityRegistry>} registry
  * @returns {CapabilityRegistry}
+ * @ref LLP 0006#resolution-rules [constrained-by] — facade pins the activating plugin's identity; can't impersonate a provider
  */
 function createCapabilitiesFacade(pluginName, registry) {
   return {

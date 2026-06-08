@@ -22,6 +22,7 @@ import { startOtelSource } from './source.js'
  * `source.start` span (or via `kernel.sources.status('otlp')`).
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0012#source-kinds [implements] — OTLP HTTP receiver registered as a source; owns logs/traces/metrics tables
  */
 export async function activate(ctx) {
   ctx.sources.register({

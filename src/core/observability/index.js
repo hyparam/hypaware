@@ -21,6 +21,7 @@ let installed = null
  * order. Idempotent — a second call returns the existing handle.
  *
  * @param {{ env?: ObservabilityEnv }} [opts]
+ * @ref LLP 0021#otel-is-the-substrate [implements] — idempotent install over one shared Resource; safe-by-default tracer
  */
 export function installObservability(opts = {}) {
   if (installed) return installed
@@ -43,6 +44,7 @@ export function installObservability(opts = {}) {
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter }) {
+  // @ref LLP 0021#shutdown-and-flush [implements] — close exporters reverse order; dev gets 5s budget + forceFlush
   async function shutdown() {
     const timeoutMs = env.devTelemetry ? 5_000 : 500
     for (const reader of meter.readers ?? []) {

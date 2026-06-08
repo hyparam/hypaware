@@ -32,6 +32,7 @@ const CHATGPT_UPSTREAM_NAME = 'chatgpt'
  * `restored=true|false`.
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream presets
  */
 export async function activate(ctx) {
   /** @type {AiGatewayCapability} */

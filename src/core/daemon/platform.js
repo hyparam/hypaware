@@ -14,14 +14,12 @@ export const LAUNCH_LABEL = 'com.hyperparam.hypaware'
  * Stable basename for the systemd user unit. The unit file is written
  * as `<basename>.service` under `~/.config/systemd/user/`. macOS uses
  * the reverse-DNS `LAUNCH_LABEL` instead; Linux follows the systemd
- * convention of a short, human-friendly unit name. finish-v1.md
- * §Phase 4 pins this filename explicitly.
+ * convention of a short, human-friendly unit name.
  */
 export const SYSTEMD_UNIT_BASE = 'hypaware'
 
 /**
- * Default directory for daemon stdout/stderr logs.
- * Matches finish-v1.md §Phase 4: `~/.hyp/hypaware/logs`.
+ * Default directory for daemon stdout/stderr logs: `~/.hyp/hypaware/logs`.
  *
  * @param {string} [homeDir]
  * @returns {string}
@@ -103,6 +101,7 @@ export function daemonKindLabel(platform = process.platform) {
 /**
  * @param {NodeJS.Platform} [platform]
  * @returns {boolean}
+ * @ref LLP 0017#install-global-package-then-service-manager [constrained-by] — V1 service install targets macOS launchd + Linux systemd only
  */
 export function platformIsSupported(platform = process.platform) {
   return platform === 'darwin' || platform === 'linux'

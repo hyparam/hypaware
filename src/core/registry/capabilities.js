@@ -48,6 +48,7 @@ export function createCapabilityRegistry() {
    * @param {string} name
    * @param {string} [range]
    * @returns {T}
+   * @ref LLP 0006#resolution-rules [implements] — the single sanctioned cross-plugin channel; missing capability fails early
    */
   function requireCapability(requester, name, range) {
     const matches = findMatches(registrations, name, range)
@@ -127,6 +128,7 @@ export function createCapabilityRegistry() {
  * @param {InternalRegistration[]} registrations
  * @param {string} name
  * @param {string} [range]
+ * @ref LLP 0006#two-kinds-of-dependency [implements] — version range travels with the require, never baked into the capability name
  */
 function findMatches(registrations, name, range) {
   return registrations.filter((r) => r.name === name && matchesSemverRange(r.version, range))

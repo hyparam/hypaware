@@ -28,6 +28,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *    carries `error_kind=sink_pair_incompatible`.
  *
  * @param {{ harness: any, expect: any }} args
+ * @ref LLP 0010#validation [tests] — config load + cross-plugin validation, incl. incompatible sink pairing
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

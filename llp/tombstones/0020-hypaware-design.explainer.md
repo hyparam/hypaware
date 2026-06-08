@@ -1,4 +1,26 @@
-# HypAware Design
+# LLP 0020: HypAware Design (decomposed)
+
+**Type:** Explainer
+**Status:** Tombstoned
+**Systems:** Core
+**Author:** HypAware team
+**Date:** 2026-05-20
+**Related:** LLP 0000
+
+> **Tombstoned.** This monolithic design doc was decomposed into the active LLP
+> corpus and is kept for provenance only. Its content now lives in:
+> Mission/Summary → [LLP 0000](../0000-hypaware.explainer.md); Design Decisions →
+> LLP 0003–0017 (see the [subsystem map](../0000-hypaware.explainer.md#subsystem-map)).
+> Where this doc and the active LLPs disagree, **the LLPs win** — and note this
+> doc describes a target architecture that V1 deliberately diverged from
+> ([LLP 0002](../0002-v1-scope.decision.md)).
+>
+> **Not fully lifted:** the appendix (V1 Parity Table, Interface Definitions,
+> Migration Strategy) and the gascity example plugin walkthrough remain here as
+> reference; pull them into dedicated LLPs if they become load-bearing again.
+> Original body follows verbatim.
+
+---
 
 ## Mission
 

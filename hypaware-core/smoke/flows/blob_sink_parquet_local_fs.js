@@ -48,6 +48,7 @@ const ROW_COUNT = 50
  * sink driver, encoder, and destination paths.
  *
  * @param {{ harness: any, expect: any }} args
+ * @ref LLP 0014#queryable-sinks [tests] — parquet-on-local-fs export through the production writer/destination path
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

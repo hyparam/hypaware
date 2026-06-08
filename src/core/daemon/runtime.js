@@ -81,6 +81,7 @@ const MIN_TICK_INTERVAL_MS = 25
  *
  * @param {RunDaemonOptions} [opts]
  * @returns {Promise<DaemonHandle>}
+ * @ref LLP 0017#the-primary-daemon [implements] — boots kernel, starts sources, runs the sink tick loop, reloads on SIGHUP
  */
 export async function runDaemon(opts = {}) {
   const env = opts.env ?? process.env

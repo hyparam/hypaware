@@ -5,9 +5,10 @@
  * intentionally expressed as .d.ts because these shapes would become the
  * reusable public API exposed to bundled and external plugins.
  *
- * The companion design document is
- * [`hypaware-design.md`](./hypaware-design.md). When the two disagree the
- * design document wins; this file is updated to follow.
+ * The companion design rationale lives in the LLP corpus under `llp/`; start at
+ * [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md) and the
+ * per-subsystem LLPs (e.g. plugin manifest LLP 0005, capabilities LLP 0006).
+ * When the two disagree the LLPs win; this file is updated to follow.
  *
  * Filename is `collectivus-plugin-kernel-types.d.ts` only because the
  * project rename to HypAware is still pending; the contents already

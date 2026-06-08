@@ -35,6 +35,7 @@ const PLUGIN_VERSION = '1.0.0'
  * `sink.encode_partition` helper.
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] — provides hypaware.blob-store; never knows its bytes' format
  */
 export async function activate(ctx) {
   const baseDir = resolveExportsBaseDir({ pluginConfig: ctx.config, env: ctx.env })

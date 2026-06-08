@@ -36,6 +36,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  * but `localEndpoint()` throws — the contract documented in api.js.
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — owns the gateway capability + ai_gateway_messages; no client specifics
  */
 export async function activate(ctx) {
   const state = createGatewayState()

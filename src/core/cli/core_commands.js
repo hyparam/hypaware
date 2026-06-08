@@ -2575,6 +2575,7 @@ function parseInitFlags(argv) {
  *
  * @param {InitFlags} flags
  * @returns {{ exportChoice: PickerExport, origin: PickerExportOrigin }}
+ * @ref LLP 0011#autodetect-vs-default [implements] — export defaults to local Parquet, a fixed pick not derived from system state
  */
 export function resolveInitExportChoice(flags) {
   if (flags.exportChoice) {
@@ -2591,6 +2592,7 @@ export function resolveInitExportChoice(flags) {
  * @param {InitFlags} flags
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
+ * @ref LLP 0011#non-interactive-entry [implements] — flags / preset / --from-file path that bypasses the interactive TUI
  */
 async function runPickerInit(flags, ctx) {
   // --from-file short-circuits the picker entirely. The supplied
@@ -2602,8 +2604,8 @@ async function runPickerInit(flags, ctx) {
   }
 
   // Default sources when `--yes` is the only signal: capture Claude +
-  // OTEL. Matches the default V1 install documented in finish-v1.md
-  // §V1 Acceptance Criteria. (Export defaults separately, below.)
+  // OTEL. (Export defaults separately, below.)
+  // @ref LLP 0002#v1-acceptance-criteria-summary [implements] — --yes default install captures Claude + OTEL
   const sources = flags.sources.slice()
   if (sources.length === 0) {
     if (flags.yes) {
