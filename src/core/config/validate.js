@@ -617,6 +617,7 @@ function firstPartyClientDescriptors() {
       plugin: /** @type {PluginName} */ ('@hypaware/claude'),
       name: 'claude',
       skillDir: '.claude/skills',
+      agentDir: '.claude/agents',
       attachProbe: {
         format: 'json',
         settings_file: '.claude/settings.json',

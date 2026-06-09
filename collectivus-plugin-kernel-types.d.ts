@@ -133,12 +133,18 @@ export interface PluginContributionManifest {
   sinks?: PluginSinkManifest[]
   datasets?: PluginDatasetManifest[]
   skills?: PluginSkillManifest[]
+  agents?: PluginAgentManifest[]
   init_presets?: PluginInitPresetManifest[]
 }
 
 export interface PluginClientManifest {
   name: string
   skill_dir: string
+  /**
+   * Per-client subagent directory relative to the user's home (e.g.
+   * `.claude/agents`). Absent for clients without a subagent concept.
+   */
+  agent_dir?: string
   attach_probe?: PluginAttachProbeManifest
   required_upstreams?: string[]
 }
@@ -190,6 +196,12 @@ export interface PluginSkillManifest {
   name: string
   clients: PluginSkillClient[]
   source_dir?: string
+}
+
+export interface PluginAgentManifest {
+  name: string
+  clients: PluginSkillClient[]
+  source_file?: string
 }
 
 export interface PluginInitPresetManifest {
@@ -293,6 +305,7 @@ export interface PluginActivationContext {
    */
   storage: QueryStorageService
   skills: SkillRegistry
+  agents: AgentRegistry
   initPresets: InitPresetRegistry
   /**
    * Backfill provider registry (kernel-owned). Plugins register
@@ -541,6 +554,12 @@ export interface CommandRunContext {
    * to materialize plugin-contributed skills under per-client paths.
    */
   skills: SkillRegistry
+  /**
+   * Agent registry (kernel-owned). Populated by the dispatcher.
+   * `hyp agents install` and the walkthrough enumerate this to
+   * materialize plugin-contributed subagents under per-client paths.
+   */
+  agents: AgentRegistry
   /**
    * Source registry (kernel-owned). Populated by the dispatcher.
    * `hyp status` and the Phase 9 walkthrough enumerate this to render
@@ -1286,6 +1305,24 @@ export interface SkillContribution {
    * the user-global location.
    */
   projectLocal?: boolean
+}
+
+export interface AgentRegistry {
+  register(agent: AgentContribution): void
+  list(): AgentContribution[]
+}
+
+/**
+ * A custom subagent contributed by a client-adapter plugin. Unlike
+ * skills (a directory tree around a `SKILL.md`), an agent is a single
+ * markdown definition file installed flat into the per-client agent
+ * directory as `<agent_dir>/<name>.md`.
+ */
+export interface AgentContribution {
+  name: string
+  plugin: PluginName
+  clients: PluginSkillClient[]
+  sourceFile: string
 }
 
 export interface InitPresetRegistry {

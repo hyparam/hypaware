@@ -138,6 +138,7 @@ function snapshotRegistry(runtime) {
     datasets: runtime.query.listDatasets().map((d) => d.name),
     commands: runtime.commands.list().map((c) => c.name),
     skills: runtime.skills.list().map((s) => s.name),
+    agents: runtime.agents.list().map((a) => a.name),
     init_presets: runtime.initPresets.list().map((p) => p.name),
     capabilities: runtime.capabilities
       .list()
@@ -185,6 +186,7 @@ function emptySnapshot() {
     datasets: [],
     commands: [],
     skills: [],
+    agents: [],
     init_presets: [],
     capabilities: [],
   }

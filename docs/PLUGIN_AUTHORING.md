@@ -65,9 +65,9 @@ fields (validated by `src/core/manifest.js`):
 | `permissions` | no | String array, e.g. `["network", "read_env"]`. |
 | `requires` | no | `{ plugins?, capabilities? }` — see [Capabilities](#capabilities). |
 | `provides` | no | `{ capabilities? }` — see [Capabilities](#capabilities). |
-| `contributes` | no | What the plugin adds: `sources`, `sinks`, `datasets`, `commands`, `skills`, `init_presets`, `config_sections`, `client`. |
+| `contributes` | no | What the plugin adds: `sources`, `sinks`, `datasets`, `commands`, `skills`, `agents`, `init_presets`, `config_sections`, `client`. |
 
-Each entry under `contributes.{sources,sinks,datasets,commands,skills,init_presets}`
+Each entry under `contributes.{sources,sinks,datasets,commands,skills,agents,init_presets}`
 needs a non-empty `name`; `config_sections` entries use `section`.
 
 ---
@@ -97,7 +97,7 @@ on the registries hanging off `ctx`. The kernel handles dependency
 order, paths, logging, and lifecycle. `ctx` gives you:
 
 - `ctx.sources`, `ctx.sinks`, `ctx.query`, `ctx.commands`, `ctx.skills`,
-  `ctx.initPresets`, `ctx.configRegistry` — the registries.
+  `ctx.agents`, `ctx.initPresets`, `ctx.configRegistry` — the registries.
 - `ctx.requireCapability(name, range)` / `ctx.provideCapability(name, version, value)`.
 - `ctx.config` — the validated config slice for this plugin.
 - `ctx.paths` — `{ rootDir, stateDir, cacheDir, tempDir }`, created for you.
@@ -207,6 +207,26 @@ ctx.skills.register({
   sourceDir: '/abs/path/to/skill/dir',
 })
 ```
+
+### Agents
+
+Materialize a custom subagent into client agent directories (e.g.
+`.claude/agents/`). Unlike a skill, an agent is a single markdown
+definition file installed flat as `<agent_dir>/<name>.md`. Declare
+`contributes.agents: [{ name, clients }]` and register:
+
+```js
+ctx.agents.register({
+  name: 'hypaware-widget-analyst',
+  plugin: PLUGIN_NAME,
+  clients: ['claude'],
+  sourceFile: '/abs/path/to/agents/hypaware-widget-analyst.md',
+})
+```
+
+Only clients whose manifest declares `contributes.client.agent_dir`
+receive agents; targets without one are skipped with a warning by
+`hyp agents install`.
 
 ### Init presets
 

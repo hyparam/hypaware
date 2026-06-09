@@ -32,6 +32,7 @@ const CONTRIBUTIONS = [
   { key: 'datasets', nameField: 'name', label: 'dataset', register: "ctx.query.registerDataset({ name: '%s', ... })", anchor: 'registering-datasets' },
   { key: 'commands', nameField: 'name', label: 'command', register: "ctx.commands.register({ name: '%s', plugin, run })", anchor: 'registering-commands' },
   { key: 'skills', nameField: 'name', label: 'skill', register: "ctx.skills.register({ name: '%s', plugin, clients, sourceDir })", anchor: 'skills' },
+  { key: 'agents', nameField: 'name', label: 'agent', register: "ctx.agents.register({ name: '%s', plugin, clients, sourceFile })", anchor: 'agents' },
   { key: 'init_presets', nameField: 'name', label: 'init preset', register: "ctx.initPresets.register({ name: '%s', plugin, summary, run })", anchor: 'init-presets' },
 ]
 

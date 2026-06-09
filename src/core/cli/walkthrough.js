@@ -8,6 +8,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
 import { detectClientSources } from './detect.js'
@@ -25,6 +26,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ClientDescriptor } from '../plugin_catalog.js'
  * @import { DaemonInstallOptions } from '../daemon/types.d.ts'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  */
@@ -785,6 +787,7 @@ export async function runPickerWalkthrough(opts) {
       capabilities,
       sources: opts.sources,
       skills: opts.skills,
+      agents: opts.agents,
       config,
       configPath,
       env,
@@ -843,6 +846,10 @@ export async function runPickerWalkthrough(opts) {
   if (finaleSummary?.skillsInstalled && finaleSummary.skillsInstalled.length > 0) {
     const tag = finaleSummary.skillsInstalled[0].dryRun ? '(dry-run) ' : ''
     stdout.write(`${tag}skills: ${finaleSummary.skillsInstalled.length} copied\n`)
+  }
+  if (finaleSummary?.agentsInstalled && finaleSummary.agentsInstalled.length > 0) {
+    const tag = finaleSummary.agentsInstalled[0].dryRun ? '(dry-run) ' : ''
+    stdout.write(`${tag}agents: ${finaleSummary.agentsInstalled.length} copied\n`)
   }
   stdout.write(`next: hyp query sql 'select count(*) from logs'\n`)
 
@@ -964,8 +971,9 @@ export function composePickerConfig(args) {
 
 /**
  * Run the picker finale: daemon install, attach, skills install,
- * daemon restart. Each step emits its own span (`daemon.install`,
- * `client.attach` (via the adapter), `skills.install`).
+ * agents install, daemon restart. Each step emits its own span
+ * (`daemon.install`, `client.attach` (via the adapter),
+ * `skills.install`, `agents.install`).
  *
  * @param {{
  *   finale: PickerFinaleActions,
@@ -973,6 +981,7 @@ export function composePickerConfig(args) {
  *   capabilities: CapabilityRegistry,
  *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: ('claude'|'codex')[], sourceDir: string }[] },
+ *   agents?: { list(): { name: string, clients: ('claude'|'codex')[], sourceFile: string }[] },
  *   config: HypAwareV2Config,
  *   configPath: string,
  *   env: NodeJS.ProcessEnv,
@@ -987,7 +996,7 @@ export function composePickerConfig(args) {
  * @returns {Promise<FinaleSummary>}
  */
 async function runPickerFinale(args) {
-  const { finale, clientsPicked, capabilities, sources, skills, config, configPath, env, stdout, stderr } = args
+  const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
   const homeDir = env.HOME ?? ''
 
@@ -1002,6 +1011,7 @@ async function runPickerFinale(args) {
     globalInstall: { skipped: true, installed: false },
     attach: [],
     skillsInstalled: [],
+    agentsInstalled: [],
     daemonRestart: { skipped: true, dryRun, ok: false },
     backfill: [],
   }
@@ -1101,8 +1111,11 @@ async function runPickerFinale(args) {
     }
   }
 
+  const descriptorMap = clientsPicked.length > 0 && (skills || agents)
+    ? await buildWalkthroughClientDescriptorMap()
+    : new Map()
+
   if (clientsPicked.length > 0 && skills) {
-    const skillDirMap = await buildWalkthroughSkillDirMap()
     await withSpan(
       'skills.install',
       {
@@ -1117,9 +1130,16 @@ async function runPickerFinale(args) {
         for (const skill of skills.list()) {
           for (const targetClient of skill.clients) {
             if (!clientsPicked.includes(targetClient)) continue
-            const skillDir = skillDirMap.get(targetClient)
+            const skillDir = descriptorMap.get(targetClient)?.skillDir
             if (!skillDir) continue
-            const dest = path.join(homeDir, skillDir, skill.name)
+            const baseDir = path.join(homeDir, skillDir)
+            const dest = path.join(baseDir, skill.name)
+            // Defense in depth: registration rejects traversal names, but the
+            // skill dir comes from a plugin manifest, so re-check containment.
+            if (!isWithinDir(dest, baseDir)) {
+              stderr.write(`warning: skill '${skill.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
+              continue
+            }
             // Separate the skills block from the preceding attach output.
             if (!printedAny) stdout.write('\n')
             printedAny = true
@@ -1137,6 +1157,52 @@ async function runPickerFinale(args) {
         if (printedAny) stdout.write('\n')
         if (span && typeof span.setAttribute === 'function') {
           span.setAttribute('installed_count', summary.skillsInstalled.length)
+        }
+      },
+      { component: 'walkthrough' }
+    )
+  }
+
+  if (clientsPicked.length > 0 && agents) {
+    await withSpan(
+      'agents.install',
+      {
+        [Attr.COMPONENT]: 'walkthrough',
+        [Attr.OPERATION]: 'agents.install',
+        dry_run: dryRun,
+        client_count: clientsPicked.length,
+        status: 'ok',
+      },
+      async (span) => {
+        let printedAny = false
+        for (const agent of agents.list()) {
+          for (const targetClient of agent.clients) {
+            if (!clientsPicked.includes(targetClient)) continue
+            const agentDir = descriptorMap.get(targetClient)?.agentDir
+            if (!agentDir) continue
+            const baseDir = path.join(homeDir, agentDir)
+            const dest = path.join(baseDir, `${agent.name}.md`)
+            // Defense in depth: registration rejects traversal names, but the
+            // agent dir comes from a plugin manifest, so re-check containment.
+            if (!isWithinDir(dest, baseDir)) {
+              stderr.write(`warning: agent '${agent.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
+              continue
+            }
+            if (!printedAny) stdout.write('\n')
+            printedAny = true
+            if (dryRun) {
+              stdout.write(`(dry-run) Would install agent '${agent.name}' → ${dest}\n`)
+            } else {
+              await fs.mkdir(path.dirname(dest), { recursive: true })
+              await fs.copyFile(agent.sourceFile, dest)
+              stdout.write(`installed agent '${agent.name}' → ${dest}\n`)
+            }
+            summary.agentsInstalled.push({ name: agent.name, client: targetClient, dest, dryRun })
+          }
+        }
+        if (printedAny) stdout.write('\n')
+        if (span && typeof span.setAttribute === 'function') {
+          span.setAttribute('installed_count', summary.agentsInstalled.length)
         }
       },
       { component: 'walkthrough' }
@@ -1352,16 +1418,16 @@ function endpointFromListen(listen) {
 }
 
 /**
- * @returns {Promise<Map<string, string>>}
+ * @returns {Promise<Map<string, ClientDescriptor>>}
  */
-async function buildWalkthroughSkillDirMap() {
-  /** @type {Map<string, string>} */
+async function buildWalkthroughClientDescriptorMap() {
+  /** @type {Map<string, ClientDescriptor>} */
   const map = new Map()
   try {
     const bundled = await discoverBundledPlugins()
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
     for (const [clientName, descriptor] of catalog.clientDescriptors) {
-      map.set(clientName, descriptor.skillDir)
+      map.set(clientName, descriptor)
     }
   } catch { /* discovery failure → empty map */ }
   return map
