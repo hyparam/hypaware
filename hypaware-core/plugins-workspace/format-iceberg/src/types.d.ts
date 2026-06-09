@@ -1,11 +1,30 @@
 import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
-import type { TableMetadata, Resolver, Lister } from 'icebird/src/types.js'
+import type { TableMetadata, Resolver, Lister, PartitionSpec, SortOrder } from 'icebird/src/types.js'
+import type { CachePartitioningDeclaration } from '../../../../src/core/iceberg/types.d.ts'
 
 export interface TableState {
   /** True when at least one metadata file is visible. */
   exists: boolean
   metadata: TableMetadata | null
   currentSnapshotId: string | undefined
+}
+
+/**
+ * Writer-owned export layout for one dataset (LLP 0022): a day-grain partition
+ * derived from `primaryTimestampColumn`, plus a within-partition sort on the
+ * dataset's declared identity (lookup) columns.
+ */
+export interface DatasetPartitioning {
+  /** Synthesized day-grain declaration — kept for the on-append drift check. */
+  declaration: CachePartitioningDeclaration
+  /** Iceberg partition spec passed to `icebergCreateTable`. */
+  partitionSpec: PartitionSpec
+  /** Within-partition sort order; an empty order means unsorted (no-op). */
+  sortOrder: SortOrder
+  /** Span label, e.g. `day(message_created_at)`. */
+  partitionSpecLabel: string
+  /** Span label, e.g. `conversation_id,cwd,date` (empty when unsorted). */
+  sortOrderLabel: string
 }
 
 export interface CommitInput {
@@ -17,6 +36,8 @@ export interface CommitInput {
   rows: readonly Record<string, unknown>[]
   resolver: Resolver
   lister: Lister
+  /** Day-grain partition + sort layout; absent ⇒ unpartitioned table. */
+  partitioning?: DatasetPartitioning | null
 }
 
 export interface CommitResult {

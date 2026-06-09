@@ -16,7 +16,7 @@
  */
 
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
-import type { CachePartitioningDeclaration } from './src/core/cache/types.d.ts'
+import type { CachePartitioningDeclaration } from './src/core/iceberg/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 

@@ -1,6 +1,11 @@
 import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
+// Partitioning declaration promoted to a neutral core home
+// (LLP 0003 / LLP 0022#shared-core-helpers). Re-exported here so existing
+// cache importers keep their `../types.d.ts` path.
+import type { CachePartitioningDeclaration, CachePartitionField } from '../iceberg/types.d.ts'
+export type { CachePartitioningDeclaration, CachePartitionField }
 
 export interface PartitionCursor {
   epoch: number
@@ -15,22 +20,6 @@ export interface PartitionCursor {
     rowsDeleted?: number
     lastSnapshotId?: string
   }
-}
-
-export interface CachePartitioningDeclaration {
-  source: {
-    columns: string[]
-    fallback?: string
-  }
-  iceberg: {
-    fields: CachePartitionField[]
-  }
-}
-
-export interface CachePartitionField {
-  column: string
-  transform: 'identity' | 'day' | 'month' | 'year' | string
-  required?: boolean
 }
 
 export interface CachePartitionMeta {

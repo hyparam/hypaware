@@ -16,10 +16,12 @@ import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import {
   icebergSchemaForColumns,
   mergeFieldIdsFromTable,
-  partitionSpecForDeclaration,
   rowsToIcebergRecords,
-  validatePartitionSpecStability,
 } from './schema.js'
+import {
+  partitionSpecForDeclaration,
+  validatePartitionSpecStability,
+} from '../../iceberg/partition-spec.js'
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'

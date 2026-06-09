@@ -272,7 +272,7 @@ export async function run({ harness, expect }) {
     (ds) => Array.isArray(ds) && ds.some((d) => d.dataset === DATASET)
   )
   expect.that(
-    'maintain: compactionSupported is false (icebird V1 limitation)',
+    'maintain: compactionSupported is false (not run by this sink — out-of-band only, LLP 0022)',
     maintainReport.compactionSupported,
     (v) => v === false
   )

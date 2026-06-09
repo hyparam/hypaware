@@ -5,6 +5,7 @@ import { getTracer, SpanStatusCode } from '../../../../src/core/observability/in
 import { createBlobStoreIO, pathToKey, tableUrlForBlobPrefix } from './blob-io.js'
 import { commitBatch, commitRowStream, probeTable } from './commit.js'
 import { expireExportSnapshots, normalizeExportRetentionConfig } from './maintenance.js'
+import { derivePartitioning } from './partitioning.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'
 
 /**
@@ -195,6 +196,11 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
     return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
   }
 
+  // @ref LLP 0022#partition-derivation — derived per dataset at commit time
+  // because `createSink` runs once for a sink that exports many datasets, so
+  // the spec cannot be resolved up front. [implements]
+  const partitioning = derivePartitioning(ctx.query.getDataset(dataset), columns)
+
   const blobPrefix = joinKeys(pathToKey(prefix), sanitizeDataset(dataset))
   const tableUrl = tableUrlForBlobPrefix(blobPrefix)
   // Track the most recent metadata.json write so the commit span can
@@ -283,6 +289,10 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
         hyp_dataset: dataset,
         hyp_batch_id: batch.batchId,
         encoder_format: ctx.encoder.format,
+        // @ref LLP 0022#observability — surface the resolved layout so a smoke
+        // can assert what was written, not just that rows landed.
+        hyp_partition_spec: partitioning?.partitionSpecLabel ?? 'unpartitioned',
+        hyp_sort_order: partitioning?.sortOrderLabel ?? '',
         status: 'ok',
         ...destinationAttrs,
       },
@@ -290,7 +300,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
     async (span) => {
       try {
         const result = await commitRowStream(
-          { tableUrl, columns, rows: rowStream(), resolver, lister },
+          { tableUrl, columns, rows: rowStream(), resolver, lister, partitioning },
           { exists: priorState.exists, metadata: priorState.metadata }
         )
         span.setAttribute('snapshot_id', result.snapshotId)
