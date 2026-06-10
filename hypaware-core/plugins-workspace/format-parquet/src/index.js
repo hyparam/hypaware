@@ -2,6 +2,8 @@
 
 import zlib from 'node:zlib'
 
+import { ByteWriter, ParquetWriter, schemaFromColumnData } from 'hyparquet-writer'
+
 import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
@@ -176,7 +178,6 @@ async function encodePartition(partition, ctx, settings) {
         }
         const columns = ctx.columns
         const sourceRows = ctx.rows
-        const { ByteWriter, ParquetWriter, schemaFromColumnData } = await import('hyparquet-writer')
 
         // Derive a stable schema from the declared column types (not from the
         // data) so we can write row groups incrementally — never holding more
