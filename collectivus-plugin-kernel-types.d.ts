@@ -702,6 +702,15 @@ export interface SinkEncodeContext {
    * destination opens this stream from the kernel storage service.
    */
   rows?: AsyncIterable<Record<string, unknown>>
+  /**
+   * Column names that group rows sharing identical wide, repeated values
+   * (e.g. the dataset's Iceberg partition fields like `conversation_id`).
+   * Encoders that build columnar files may use these to keep each row
+   * group low-cardinality so heavily-repeated columns stay dictionary-
+   * encoded instead of falling back to PLAIN. Optional; encoders that do
+   * not partition row groups ignore it. Empty/absent disables clustering.
+   */
+  clusterColumns?: readonly string[]
 }
 
 export interface SinkEncodedBlob {

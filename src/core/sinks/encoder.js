@@ -3,8 +3,33 @@
 import { Attr, withSpan } from '../observability/index.js'
 
 /**
- * @import { ColumnSpec, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec, QueryPartition, QueryRegistry, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
+
+/**
+ * Derive the cluster columns for a dataset from its Iceberg partition fields
+ * (e.g. `conversation_id`/`cwd`/`date`). Blob destinations pass these into the
+ * encode context so columnar encoders can keep each row group low-cardinality
+ * — which keeps wide, heavily-repeated columns (`tools`, `system_text`)
+ * dictionary-encoded instead of falling back to PLAIN. Returns undefined for
+ * datasets without a partition declaration (encoders then use default row
+ * grouping). Shared by the `local-fs` and `s3` blob destinations.
+ *
+ * @param {QueryRegistry} query
+ * @param {string} dataset
+ * @returns {string[] | undefined}
+ */
+export function clusterColumnsForDataset(query, dataset) {
+  const reg = /** @type {{ cachePartitioning?: { iceberg?: { fields?: Array<{ column?: unknown }> } } }} */ (
+    query.getDataset(dataset)
+  )
+  const fields = reg?.cachePartitioning?.iceberg?.fields
+  if (!Array.isArray(fields)) return undefined
+  const cols = fields
+    .map((f) => f.column)
+    .filter(/** @returns {c is string} */ (c) => typeof c === 'string' && c.length > 0)
+  return cols.length > 0 ? cols : undefined
+}
 
 /**
  * Wrap a single `encoder.encodePartition` call in a
@@ -48,6 +73,7 @@ export async function encodePartition(encoder, partition, ctx) {
         tempDir: ctx.tempDir,
         columns: ctx.columns,
         rows: ctx.rows,
+        clusterColumns: ctx.clusterColumns,
       })
       const rowCount = blob.rowCount ?? 0
       const bytesWritten = blob.bytesWritten ?? bytesLengthOf(blob.bytes)

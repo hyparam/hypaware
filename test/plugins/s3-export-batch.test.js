@@ -131,6 +131,65 @@ test('exportBatch partial failure: retryPartitions has only the failed partition
   await sink.close()
 })
 
+test('exportBatch forwards dataset cluster columns to the encoder', async () => {
+  // The s3 sink must derive cluster columns from the dataset's Iceberg
+  // partition fields and pass them to the encoder — same as local-fs — so the
+  // Parquet encoder keeps wide repeated columns dictionary-encoded.
+  /** @type {any} */
+  let registered
+  /** @type {any} */
+  const ctx = {
+    provideCapability() {},
+    sinks: { register(/** @type {any} */ d) { registered = d } },
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    query: {
+      getDataset: (/** @type {string} */ name) =>
+        name === 'ai_gateway_messages'
+          ? { cachePartitioning: { iceberg: { fields: [{ column: 'conversation_id' }, { column: 'date' }] } } }
+          : undefined,
+      listDatasets: () => [],
+    },
+    storage: {
+      tableExists: () => false,
+      readRows: () => ({ async *[Symbol.asyncIterator]() {} }),
+    },
+  }
+  await activate(ctx)
+
+  /** @type {any} */
+  let seenCtx
+  const spyEncoder = {
+    format: 'parquet',
+    extension: 'parquet',
+    supports: ['queryable'],
+    async encodePartition(/** @type {any} */ _p, /** @type {any} */ encodeCtx) {
+      seenCtx = encodeCtx
+      const bytes = new TextEncoder().encode('x')
+      return { filename: 'f.parquet', bytes, bytesWritten: 1, rowCount: 0 }
+    },
+  }
+  const fakeClient = { async putObject() { return {} }, destroy() {} }
+  const sinkCtx = {
+    name: 'test',
+    config: {
+      bucket: 'b',
+      prefix: 'p',
+      __clientFactory: async () => ({ client: fakeClient, credential_source_kind: 'injected' }),
+    },
+    encoder: spyEncoder,
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    paths: { tempDir: '/tmp' },
+  }
+  const sink = await registered.create(sinkCtx)
+  await sink.exportBatch(
+    { batchId: 'b1', partitions: [{ dataset: 'ai_gateway_messages', partition: {}, tablePath: '' }] },
+    {}
+  )
+  assert.deepEqual(seenCtx?.clusterColumns, ['conversation_id', 'date'],
+    's3 sink must forward derived cluster columns to the encoder')
+  await sink.close()
+})
+
 test('exportBatch all-success: no retryPartitions field', async () => {
   const registration = await activatePlugin()
   const fakeClient = {

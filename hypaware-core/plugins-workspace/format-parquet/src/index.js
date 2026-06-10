@@ -2,6 +2,8 @@
 
 import zlib from 'node:zlib'
 
+import { ByteWriter, ParquetWriter, schemaFromColumnData } from 'hyparquet-writer'
+
 import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
@@ -15,6 +17,27 @@ const FORMAT = 'parquet'
 const EXTENSION = 'parquet'
 const DEFAULT_CODEC = 'SNAPPY'
 const DEFAULT_ZSTD_LEVEL = 3
+
+// Row-group clustering. hyparquet-writer keeps a column dictionary-encoded
+// only while a row group's DISTINCT values fit under its ~1 MiB dictionary-
+// page cap. Columns denormalized onto every row but constant per conversation
+// (e.g. `tools`, `system_text`) explode to PLAIN — re-storing every copy in
+// full — once a single row group spans the whole partition's distinct values.
+// Bounding each row group to a small number of distinct cluster keys (and a
+// max row count) keeps the dictionary alive. The dictionary decision depends
+// on the distinct-value COUNT, not row order, and the source rows already
+// arrive grouped by conversation, so no sort is needed.
+const DEFAULT_MAX_CLUSTER_KEYS = 16
+const DEFAULT_MAX_ROWS_PER_GROUP = 50_000
+// Hard ceiling on how many estimated row bytes accumulate in one in-memory
+// group before it is written out as a row group and freed. This is the knob
+// that bounds peak heap during a sink force: the encoder never holds more than
+// ~one group (plus its columnar copy) at once, instead of materializing the
+// whole partition. Independent of blob size, so a fat-`tools` partition cannot
+// push a group into the gigabytes.
+const DEFAULT_MAX_GROUP_BYTES = 32 * 1024 * 1024
+// Mirrors hyparquet-writer's own default page size (1 MiB).
+const DEFAULT_PAGE_SIZE = 1024 * 1024
 
 // Codecs this encoder can emit. SNAPPY is supplied by hyparquet-writer's
 // own default compressors; ZSTD is wired here via Node's built-in zlib
@@ -154,19 +177,74 @@ async function encodePartition(partition, ctx, settings) {
             'format-parquet: SinkEncodeContext.rows must be provided by the blob destination'
           )
         }
-        const rows = await collectRows(ctx.rows)
-        const columnData = rowsToColumnSources(ctx.columns, rows)
+        const columns = ctx.columns
+        const sourceRows = ctx.rows
 
-        const { parquetWriteBuffer } = await import('hyparquet-writer')
-        /** @type {{ columnData: any, codec: 'SNAPPY' | 'ZSTD', compressors?: Record<string, (bytes: Uint8Array) => Uint8Array>, pageSize?: number }} */
-        const writeOpts = { columnData, codec: settings.codec }
-        if (settings.compressors) writeOpts.compressors = settings.compressors
-        if (settings.pageSize) writeOpts.pageSize = settings.pageSize
-        const arrayBuffer = parquetWriteBuffer(writeOpts)
-        const bytes = new Uint8Array(arrayBuffer)
+        // Derive a stable schema from the declared column types (not from the
+        // data) so we can write row groups incrementally — never holding more
+        // than one cluster group of rows (plus its columnar copy) in memory.
+        // This is what stops `hyp sink force` on a large partition from OOMing
+        // while materializing the whole partition at once.
+        const schema = schemaFromColumnData({ columnData: rowsToColumnSources(columns, []) })
+        const writer = new ByteWriter()
+        const pq = new ParquetWriter({
+          writer,
+          schema,
+          codec: settings.codec,
+          compressors: settings.compressors,
+        })
+        const pageSize = settings.pageSize ?? DEFAULT_PAGE_SIZE
+        const clusterColumns = ctx.clusterColumns && ctx.clusterColumns.length > 0 ? ctx.clusterColumns : null
+
+        let rowCount = 0
+        let rowGroupCount = 0
+        /** @type {Record<string, unknown>[]} */
+        let group = []
+        let groupBytes = 0
+        /** @type {Set<string> | null} */
+        let groupKeys = clusterColumns ? new Set() : null
+
+        // Each flush is exactly one Parquet row group. useDictionary runs per
+        // row group, so a low-cardinality group keeps wide repeated columns
+        // (`tools`, `system_text`) dictionary-encoded rather than PLAIN.
+        const flushGroup = () => {
+          if (group.length === 0) return
+          pq.write({ columnData: rowsToColumnSources(columns, group), rowGroupSize: group.length, pageSize })
+          rowCount += group.length
+          rowGroupCount++
+          group = []
+          groupBytes = 0
+          if (groupKeys) groupKeys = new Set()
+        }
+
+        for await (const row of sourceRows) {
+          // Estimate the row up front so the byte cap is checked *before* the
+          // row is added. Otherwise groupBytes only reflects rows already in the
+          // group, and a fat blob (20-30 MB) can push the group an entire row
+          // past DEFAULT_MAX_GROUP_BYTES before the next iteration flushes.
+          const rowBytes = estimateRowBytes(row)
+          const wouldOverflowBytes = group.length > 0 && groupBytes + rowBytes > DEFAULT_MAX_GROUP_BYTES
+          if (clusterColumns && groupKeys) {
+            const key = clusterKeyOf(row, clusterColumns)
+            const overflowKeys = !groupKeys.has(key) && groupKeys.size >= DEFAULT_MAX_CLUSTER_KEYS
+            if (group.length > 0 && (overflowKeys || group.length >= DEFAULT_MAX_ROWS_PER_GROUP || wouldOverflowBytes)) {
+              flushGroup()
+            }
+            groupKeys.add(key)
+          } else if (group.length > 0 && (group.length >= DEFAULT_MAX_ROWS_PER_GROUP || wouldOverflowBytes)) {
+            flushGroup()
+          }
+          group.push(row)
+          groupBytes += rowBytes
+        }
+        flushGroup()
+
+        pq.finish()
+        const bytes = new Uint8Array(writer.getBuffer())
 
         const filename = `${partitionFilename(partition)}.${EXTENSION}`
-        span.setAttribute('row_count', rows.length)
+        span.setAttribute('row_count', rowCount)
+        span.setAttribute('row_group_count', rowGroupCount)
         span.setAttribute('bytes_written', bytes.byteLength)
         span.setAttribute('hyp_sink_filename', filename)
         span.setStatus({ code: SpanStatusCode.OK })
@@ -175,7 +253,7 @@ async function encodePartition(partition, ctx, settings) {
           filename,
           bytes,
           bytesWritten: bytes.byteLength,
-          rowCount: rows.length,
+          rowCount,
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -198,18 +276,72 @@ async function encodePartition(partition, ctx, settings) {
 }
 
 /**
- * Drain an async iterable of rows into an in-memory array. The Phase 8.3
- * smoke writes 50 rows, so a single-array buffer is fine; larger
- * deployments lean on the row-group splitting inside hyparquet-writer.
+ * Cheap, allocation-free estimate of a row's in-memory footprint in bytes.
+ * Used only to bound how much a group accumulates before it is flushed as a
+ * row group, so precision matters less than never under-counting a fat blob.
+ * Mirrors the cache compactor's estimator.
  *
- * @param {AsyncIterable<Record<string, unknown>>} source
- * @returns {Promise<Record<string, unknown>[]>}
+ * @param {Record<string, unknown>} row
+ * @returns {number}
  */
-async function collectRows(source) {
-  /** @type {Record<string, unknown>[]} */
-  const rows = []
-  for await (const row of source) rows.push(row)
-  return rows
+function estimateRowBytes(row) {
+  let total = 0
+  for (const value of Object.values(row)) total += estimateValueBytes(value)
+  return total
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number}
+ */
+function estimateValueBytes(value) {
+  if (value === null || value === undefined) return 0
+  switch (typeof value) {
+    case 'string':
+      return value.length * 2 // JS strings are UTF-16 internally
+    case 'number':
+      return 8
+    case 'bigint':
+      return 16
+    case 'boolean':
+      return 4
+    case 'object': {
+      if (value instanceof Uint8Array) return value.byteLength
+      let total = 0
+      if (Array.isArray(value)) {
+        for (const item of value) total += estimateValueBytes(item)
+        return total
+      }
+      for (const [k, v] of Object.entries(value)) {
+        total += k.length * 2 + estimateValueBytes(v)
+      }
+      return total
+    }
+    default:
+      return 0
+  }
+}
+
+/**
+ * Stable grouping key from a row's cluster columns. Consistent for equal
+ * tuples; never persisted. NUL-separated to keep distinct tuples distinct.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {readonly string[]} clusterColumns
+ * @returns {string}
+ */
+function clusterKeyOf(row, clusterColumns) {
+  let key = ''
+  for (const col of clusterColumns) {
+    const v = row[col]
+    const part = typeof v === 'string'
+      ? v
+      : typeof v === 'bigint'
+        ? v.toString()
+        : JSON.stringify(v ?? null)
+    key += part + '\u0000'
+  }
+  return key
 }
 
 /**

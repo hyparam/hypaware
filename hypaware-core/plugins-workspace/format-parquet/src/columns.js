@@ -23,12 +23,53 @@
  * @returns {ColumnSource[]}
  */
 export function rowsToColumnSources(columns, rows) {
-  return columns.map((spec) => ({
-    name: spec.name,
-    type: spec.type,
-    nullable: spec.nullable,
-    data: rows.map((row) => coerce(spec, row[spec.name])),
-  }))
+  return columns.map((spec) => {
+    const data = rows.map((row) => coerce(spec, row[spec.name]))
+    // JSON columns arrive from the cache (Iceberg `variant`) as parsed
+    // objects/arrays. hyparquet-writer keys its dictionary by reference, so
+    // structurally-identical objects are otherwise distinct entries and the
+    // column collapses to PLAIN — re-storing the (denormalized) blob on every
+    // row. Interning by canonical content makes identical values share one
+    // reference so they dictionary-encode (stored once), while the JSON
+    // logical type still round-trips the original object to readers.
+    if (spec.type === 'JSON') internJsonValues(data)
+    return { name: spec.name, type: spec.type, nullable: spec.nullable, data }
+  })
+}
+
+/**
+ * Replace structurally-identical object/array values in `data` with a single
+ * shared reference, in place. Primitive values (already-stringified JSON,
+ * numbers, null) are left untouched — they dedupe by value already.
+ *
+ * The interning key is a plain `JSON.stringify` of the value, which is a
+ * faithful, injective rendering of what the JSON writer will emit (numbers
+ * vs strings stay distinct, no sentinel that real data could forge). Values
+ * that cannot be serialized — a nested BigInt is the only realistic case —
+ * throw and are simply left un-interned: keeping their own reference means a
+ * distinct value is never merged into another, at the cost of not deduping
+ * that one value. Such values do not occur in these columns in practice
+ * (they originate from `JSON.parse`, which never yields BigInt), so this
+ * costs no real dedup while staying correct if one ever does.
+ *
+ * @param {unknown[]} data
+ */
+function internJsonValues(data) {
+  /** @type {Map<string, unknown>} */
+  const seen = new Map()
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i]
+    if (v === null || v === undefined || typeof v !== 'object') continue
+    let key
+    try {
+      key = JSON.stringify(v)
+    } catch {
+      continue // non-serializable (e.g. nested BigInt) — do not intern
+    }
+    const existing = seen.get(key)
+    if (existing !== undefined) data[i] = existing
+    else seen.set(key, v)
+  }
 }
 
 /**
@@ -57,6 +98,10 @@ function coerce(spec, value) {
     case 'TIMESTAMP':
       return toTimestamp(value, spec.name)
     case 'JSON':
+      // Pass JSON objects/arrays through unchanged so the writer's JSON
+      // logical type round-trips them back to readers as objects. Dedup is
+      // handled by interning identical values (see internJsonValues) rather
+      // than by stringifying, which would double-encode (object -> JSON text).
       return value
     default:
       return value
