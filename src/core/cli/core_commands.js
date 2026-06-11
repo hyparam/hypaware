@@ -308,8 +308,8 @@ function buildCoreCommands() {
     },
     {
       name: 'sink maintain',
-      summary: 'Run export maintenance (snapshot expiration) on table-format sinks',
-      usage: 'hyp sink maintain [instance] [--dry-run]',
+      summary: 'Run export maintenance (snapshot expiration; data-file compaction with --compact) on table-format sinks',
+      usage: 'hyp sink maintain [instance] [--compact] [--dry-run]',
       run: runSinkMaintain,
     },
     {
@@ -2253,13 +2253,15 @@ async function runSinkForce(argv, ctx) {
 }
 
 /**
- * `hyp sink maintain [instance] [--dry-run]`
+ * `hyp sink maintain [instance] [--compact] [--dry-run]`
  *
  * Runs export maintenance on table-format (Iceberg) sink instances:
- * snapshot expiration on exported tables.  Data-file compaction is not
- * run by this sink — icebird exposes it via `icebergRewrite`, but rewrites
- * are out-of-band only (LLP 0022); the command reports
- * `compaction_out_of_band` for each dataset.
+ * snapshot expiration on exported tables, and — only with `--compact` —
+ * a data-file rewrite via icebird's `icebergRewrite`.
+ *
+ * @ref LLP 0022#compaction — rewrites are out-of-band only: this manual
+ * CLI invocation is the one place they may run. The daemon loop and the
+ * sink tick never compact.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -2267,10 +2269,12 @@ async function runSinkForce(argv, ctx) {
 async function runSinkMaintain(argv, ctx) {
   let instance = /** @type {string | undefined} */ (undefined)
   let dryRun = false
+  let compact = false
   for (const arg of argv) {
     if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--compact') { compact = true; continue }
     if (arg === '--help' || arg === '-h') {
-      ctx.stdout.write('usage: hyp sink maintain [instance] [--dry-run]\n')
+      ctx.stdout.write('usage: hyp sink maintain [instance] [--compact] [--dry-run]\n')
       return 0
     }
     if (arg.startsWith('--')) {
@@ -2316,6 +2320,7 @@ async function runSinkMaintain(argv, ctx) {
   if (dryRun) ctx.stdout.write('[dry-run]\n')
 
   let totalExpired = 0
+  let totalCompacted = 0
   for (const handle of targets) {
     const config = handle.config ?? {}
     const prefix = typeof config.prefix === 'string' && config.prefix.length > 0
@@ -2326,16 +2331,20 @@ async function runSinkMaintain(argv, ctx) {
       blobStore: handle.blobStore,
       prefix,
       config: typeof config.maintenance === 'object' ? config.maintenance : undefined,
+      compact,
       dryRun,
     })
 
     for (const d of report.datasets) {
       const actions = []
       if (d.snapshotsExpired > 0) actions.push(`expired ${d.snapshotsExpired} snapshots (was ${d.snapshotsBefore})`)
-      if (!d.compactionSupported) actions.push('compaction_out_of_band')
+      if (d.compacted) actions.push(`compacted ${d.dataFilesBefore} -> ${d.dataFilesAfter} data files`)
+      else if (compact) actions.push('compaction_skipped (below compact_file_count)')
+      if (actions.length === 0) actions.push('nothing to do')
       ctx.stdout.write(`  ${handle.instanceName}/${d.dataset}: ${actions.join(', ')}\n`)
     }
     totalExpired += report.totalSnapshotsExpired
+    totalCompacted += report.totalTablesCompacted
 
     if (report.datasets.length === 0) {
       ctx.stdout.write(`  ${handle.instanceName}: no exported datasets found\n`)
@@ -2343,8 +2352,10 @@ async function runSinkMaintain(argv, ctx) {
   }
 
   ctx.stdout.write(
-    `sink maintain: ${totalExpired} snapshots expired` +
-    ' (compaction not run by this sink — out-of-band only, see LLP 0022)\n'
+    compact
+      ? `sink maintain: ${totalExpired} snapshots expired, ${totalCompacted} tables compacted\n`
+      : `sink maintain: ${totalExpired} snapshots expired` +
+        ' (data-file compaction is out-of-band: re-run with --compact, see LLP 0022)\n'
   )
   return 0
 }

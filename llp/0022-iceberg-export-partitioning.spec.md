@@ -203,13 +203,22 @@ for free — a bonus beyond this spec's scope.
 icebird now exposes `icebergRewrite` (reads live rows, sorts globally under the
 target spec, writes consolidated files, commits a replace snapshot). So
 compaction is **available**, reframing the prior
-`format-iceberg/src/maintenance.js:120` "blocked by icebird" status. But for a
+`format-iceberg/src/maintenance.js` "blocked by icebird" status. But for a
 day-partitioned archive it is **not needed** (partitions already hold large
 files), and it is **not run in the daemon** — a full read-rewrite risks the
 OOM/blocking failure already seen with the parquet sink (the encoder OOMed/blocked
-the daemon; exports run manually with a large heap). V1 leaves it as an out-of-band tool that
-would tighten the local-vs-global sort, nothing more. The maintenance report
-should say "not needed / out-of-band," not "blocked."
+the daemon; exports run manually with a large heap).
+
+The out-of-band tool now exists: `hyp sink maintain --compact` runs
+`compactExportTable` (icebird `icebergRewrite`) from the manual CLI process,
+gated on a `compact_file_count` threshold (default 32, via the sink's
+`maintenance` config). The flag is the only path to a rewrite — `maintain`
+without it, the daemon loop, and the sink tick never compact. A rewrite is
+**not retried** on a concurrent-commit conflict (it only rewrote the rows it
+read; a blind retry could drop rows another writer appended); the next manual
+run starts from fresh metadata. The icebird pin sits at `0.8.10`, which
+preserves v3 row lineage across rewrites — export tables are
+`formatVersion: 3`, so the earlier `0.8.9` rewrite was not safe for them.
 
 ## Observability
 

@@ -84,19 +84,32 @@ export type BlobIOWriteObserver = (event: BlobIOWriteEvent) => void
 export interface ExportRetentionConfig {
   min_snapshots_to_keep: number
   max_snapshot_age_hours: number
+  /**
+   * Rewrite a table once its live data-file count reaches this threshold.
+   * Only consulted by the out-of-band compaction path (LLP 0022).
+   */
+  compact_file_count: number
 }
 
 export interface ExportMaintenanceDatasetReport {
   dataset: string
   snapshotsExpired: number
   snapshotsBefore: number
-  compactionSupported: false
+  /** icebird >= 0.8.9 exposes `icebergRewrite`; out-of-band only (LLP 0022). */
+  compactionSupported: true
+  /** True when an opt-in rewrite committed (or would have, under dryRun). */
+  compacted: boolean
+  /** Present only when compaction was requested. */
+  dataFilesBefore?: number
+  /** Present only when compaction was requested. */
+  dataFilesAfter?: number
 }
 
 export interface ExportMaintenanceReport {
   datasets: ExportMaintenanceDatasetReport[]
   totalSnapshotsExpired: number
-  compactionSupported: false
+  totalTablesCompacted: number
+  compactionSupported: true
   dryRun: boolean
   elapsedMs: number
 }
