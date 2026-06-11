@@ -43,6 +43,7 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { PluginMetadata } from '../config/types.d.ts'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
+ * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
  * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
@@ -2321,6 +2322,7 @@ async function runSinkMaintain(argv, ctx) {
 
   let totalExpired = 0
   let totalCompacted = 0
+  let rewriteErrors = 0
   for (const handle of targets) {
     const config = handle.config ?? {}
     const prefix = typeof config.prefix === 'string' && config.prefix.length > 0
@@ -2339,9 +2341,10 @@ async function runSinkMaintain(argv, ctx) {
       const actions = []
       if (d.snapshotsExpired > 0) actions.push(`expired ${d.snapshotsExpired} snapshots (was ${d.snapshotsBefore})`)
       if (d.compacted) actions.push(`compacted ${d.dataFilesBefore} -> ${d.dataFilesAfter} data files`)
-      else if (compact) actions.push('compaction_skipped (below compact_file_count)')
+      else if (compact) actions.push(describeCompactionSkip(d))
       if (actions.length === 0) actions.push('nothing to do')
       ctx.stdout.write(`  ${handle.instanceName}/${d.dataset}: ${actions.join(', ')}\n`)
+      if (d.compactionReason === 'error') rewriteErrors += 1
     }
     totalExpired += report.totalSnapshotsExpired
     totalCompacted += report.totalTablesCompacted
@@ -2357,7 +2360,36 @@ async function runSinkMaintain(argv, ctx) {
       : `sink maintain: ${totalExpired} snapshots expired` +
         ' (data-file compaction is out-of-band: re-run with --compact, see LLP 0022)\n'
   )
+  if (rewriteErrors > 0) {
+    ctx.stderr.write(`sink maintain: ${rewriteErrors} rewrite(s) failed\n`)
+    return 1
+  }
   return 0
+}
+
+/**
+ * Render the precise reason a requested compaction did not commit, so the
+ * operator can tell an idle table from a failed rewrite (LLP 0022). The
+ * `compactionReason` discriminant comes from `compactExportTable`.
+ *
+ * @param {ExportMaintenanceDatasetReport} d
+ * @returns {string}
+ */
+function describeCompactionSkip(d) {
+  switch (d.compactionReason) {
+    case 'below-threshold':
+      return 'compaction_skipped (below compact_file_count)'
+    case 'above-byte-cap':
+      return 'compaction_skipped (table exceeds compact_max_bytes; raise the cap and the heap to rewrite)'
+    case 'no-table':
+      return 'compaction_skipped (no table metadata)'
+    case 'conflict':
+      return 'compaction_conflict (concurrent commit won the race; staged files cleaned up — re-run to retry from fresh metadata)'
+    case 'error':
+      return `compaction_failed (${d.compactionError ?? 'unknown error'})`
+    default:
+      return 'compaction_skipped'
+  }
 }
 
 /* ---------- misc ---------- */

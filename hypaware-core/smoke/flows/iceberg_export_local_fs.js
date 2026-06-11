@@ -317,12 +317,34 @@ export async function run({ harness, expect }) {
     (v) => v === 1
   )
 
-  // After maintenance the table is still readable.
+  // After maintenance the table holds exactly the rows both batches
+  // committed — batch-1 and batch-2 each appended the same ROW_COUNT
+  // fixture rows, so every id 0..ROW_COUNT-1 must appear exactly twice.
+  // An exact check here is the smoke-tier guard against the rewrite's
+  // central risk (LLP 0022): a compaction that silently drops rows.
   const { readTableRows: postMaintainRows } = await readIcebergTable(tableUrl, blobStore)
   expect.that(
-    'maintain: table still readable after maintenance',
+    'maintain: exact row count survives compaction (2 batches x ROW_COUNT)',
     postMaintainRows,
-    (rows) => Array.isArray(rows) && rows.length >= ROW_COUNT
+    (rows) => Array.isArray(rows) && rows.length === 2 * ROW_COUNT
+  )
+  expect.that(
+    'maintain: every fixture id survives compaction exactly twice',
+    postMaintainRows,
+    (rows) => {
+      if (!Array.isArray(rows)) return false
+      /** @type {Map<string, number>} */
+      const counts = new Map()
+      for (const row of rows) {
+        const key = String(row.id)
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+      if (counts.size !== ROW_COUNT) return false
+      for (let i = 0; i < ROW_COUNT; i++) {
+        if (counts.get(String(i)) !== 2) return false
+      }
+      return true
+    }
   )
 
   await obs.shutdown()

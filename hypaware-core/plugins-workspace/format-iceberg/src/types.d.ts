@@ -89,6 +89,41 @@ export interface ExportRetentionConfig {
    * Only consulted by the out-of-band compaction path (LLP 0022).
    */
   compact_file_count: number
+  /**
+   * Skip the rewrite when the current snapshot's `total-files-size`
+   * exceeds this many bytes: icebird's rewrite materializes every live
+   * row in memory, so an unbounded table would OOM the manual CLI run.
+   */
+  compact_max_bytes: number
+}
+
+/**
+ * Why a requested compaction did not commit a rewrite.
+ * - `no-table`: table metadata missing or unreadable.
+ * - `below-threshold`: live data-file count under `compact_file_count`.
+ * - `above-byte-cap`: `total-files-size` over `compact_max_bytes`; raise the
+ *   cap (and the heap) to rewrite anyway.
+ * - `conflict`: another writer committed between read and rewrite-commit;
+ *   staged files were cleaned up, re-run to retry from fresh metadata.
+ * - `error`: the rewrite itself failed (IO, auth, ...); see `error`.
+ */
+export type ExportCompactionSkipReason =
+  | 'no-table'
+  | 'below-threshold'
+  | 'above-byte-cap'
+  | 'conflict'
+  | 'error'
+
+export interface ExportCompactionResult {
+  compacted: boolean
+  /** Present iff `compacted` is false. */
+  reason?: ExportCompactionSkipReason
+  /** Error message when `reason` is 'conflict' or 'error'. */
+  error?: string
+  /** Current snapshot's `total-files-size`, when the byte cap rejected it. */
+  totalBytes?: number
+  dataFilesBefore: number
+  dataFilesAfter: number
 }
 
 export interface ExportMaintenanceDatasetReport {
@@ -99,6 +134,10 @@ export interface ExportMaintenanceDatasetReport {
   compactionSupported: true
   /** True when an opt-in rewrite committed (or would have, under dryRun). */
   compacted: boolean
+  /** Present when compaction was requested but did not commit. */
+  compactionReason?: ExportCompactionSkipReason
+  /** Present when the rewrite conflicted or failed. */
+  compactionError?: string
   /** Present only when compaction was requested. */
   dataFilesBefore?: number
   /** Present only when compaction was requested. */

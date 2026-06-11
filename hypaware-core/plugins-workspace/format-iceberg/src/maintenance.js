@@ -3,9 +3,10 @@
 import {
   fileCatalog,
   icebergExpireSnapshots,
-  icebergRewrite,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
+import { fileCatalogCommit } from 'icebird/src/write/commit.js'
+import { icebergStageRewrite } from 'icebird/src/write/rewrite.js'
 
 import { SNAPSHOT_RETENTION_DEFAULTS } from '../../../../src/core/cache/maintenance.js'
 import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
@@ -13,7 +14,7 @@ import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
 /**
  * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { Resolver, Lister, TableMetadata } from 'icebird/src/types.js'
- * @import { ExportRetentionConfig, ExportMaintenanceDatasetReport, ExportMaintenanceReport } from './types.d.ts'
+ * @import { ExportCompactionResult, ExportRetentionConfig, ExportMaintenanceDatasetReport, ExportMaintenanceReport } from './types.d.ts'
  */
 
 /** @type {ExportRetentionConfig} */
@@ -22,6 +23,14 @@ const DEFAULTS = Object.freeze({
   // Mirrors the local-cache `compact_file_count` trigger: rewrite once a
   // table's live data-file count crosses this threshold.
   compact_file_count: 32,
+  // icebird's rewrite materializes every live row in memory before writing
+  // (no streaming path yet), so an unbounded table would re-create the
+  // parquet-encoder OOM this repo already hit twice (#82 local cache,
+  // #90 parquet exports). Skip the rewrite when the current snapshot's
+  // `total-files-size` exceeds this. 128 MB matches the cache's
+  // `target_file_bytes`: compressed parquet expands ~10x into JS objects,
+  // keeping the rewrite around a gigabyte of heap under a default node heap.
+  compact_max_bytes: 128 * 1024 * 1024,
 })
 
 /**
@@ -33,6 +42,7 @@ export function normalizeExportRetentionConfig(config) {
     min_snapshots_to_keep: config?.min_snapshots_to_keep ?? DEFAULTS.min_snapshots_to_keep,
     max_snapshot_age_hours: config?.max_snapshot_age_hours ?? DEFAULTS.max_snapshot_age_hours,
     compact_file_count: config?.compact_file_count ?? DEFAULTS.compact_file_count,
+    compact_max_bytes: config?.compact_max_bytes ?? DEFAULTS.compact_max_bytes,
   }
 }
 
@@ -134,47 +144,102 @@ export async function discoverExportDatasets(blobStore, prefix) {
  *
  * The rewrite is skipped while the table's live data-file count is below
  * `compactFileCount` — for a day-partitioned archive the files are
- * already large, so most tables never reach the threshold.
+ * already large, so most tables never reach the threshold — and when the
+ * current snapshot's `total-files-size` exceeds `compactMaxBytes`
+ * (icebird's rewrite holds every live row in memory; see DEFAULTS).
  *
  * A rewrite commit is intentionally NOT retried on a concurrent-commit
  * conflict: it only rewrote the rows it read, so a blind retry could drop
- * rows another writer appended in the meantime. On conflict we report
- * `compacted: false` and let the next manual run start from fresh
- * metadata.
+ * rows another writer appended in the meantime. On conflict the staged
+ * data/manifest files are deleted best-effort (icebird's `icebergRewrite`
+ * leaves them orphaned, which is why this stages and commits explicitly),
+ * the result carries `reason: 'conflict'`, and the next manual run starts
+ * from fresh metadata.
+ *
+ * Every non-compaction outcome is discriminated by `reason` so the CLI
+ * can tell an idle table from a failed rewrite (a swallowed failure here
+ * would misreport as "below threshold" — the one manual compaction tool
+ * misdiagnosing itself).
  *
  * @param {{
  *   tableUrl: string
  *   resolver: Resolver
  *   lister: Lister
  *   compactFileCount: number
+ *   compactMaxBytes?: number
  *   dryRun?: boolean
  * }} opts
- * @returns {Promise<{ compacted: boolean, dataFilesBefore: number, dataFilesAfter: number }>}
+ * @returns {Promise<ExportCompactionResult>}
  */
-export async function compactExportTable({ tableUrl, resolver, lister, compactFileCount, dryRun }) {
-  /** @type {TableMetadata} */
-  let metadata
+export async function compactExportTable({ tableUrl, resolver, lister, compactFileCount, compactMaxBytes, dryRun }) {
+  /** @type {Awaited<ReturnType<typeof loadLatestFileCatalogMetadata>>} */
+  let loaded
   try {
-    const loaded = await loadLatestFileCatalogMetadata({ tableUrl, resolver, lister })
-    metadata = loaded.metadata
+    loaded = await loadLatestFileCatalogMetadata({ tableUrl, resolver, lister })
   } catch {
-    return { compacted: false, dataFilesBefore: 0, dataFilesAfter: 0 }
+    return { compacted: false, reason: 'no-table', dataFilesBefore: 0, dataFilesAfter: 0 }
   }
+  const metadata = loaded.metadata
 
   const dataFilesBefore = currentDataFileCount(metadata)
   if (dataFilesBefore < compactFileCount) {
-    return { compacted: false, dataFilesBefore, dataFilesAfter: dataFilesBefore }
+    return { compacted: false, reason: 'below-threshold', dataFilesBefore, dataFilesAfter: dataFilesBefore }
+  }
+  const totalBytes = currentSummaryNumber(metadata, 'total-files-size')
+  if (compactMaxBytes !== undefined && totalBytes !== undefined && totalBytes > compactMaxBytes) {
+    return {
+      compacted: false,
+      reason: 'above-byte-cap',
+      totalBytes,
+      dataFilesBefore,
+      dataFilesAfter: dataFilesBefore,
+    }
   }
   if (dryRun) {
     return { compacted: true, dataFilesBefore, dataFilesAfter: dataFilesBefore }
   }
 
-  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+  // Stage and commit explicitly (the same load → stage → single-attempt
+  // commit `icebergRewrite` performs for a conditional-commit file
+  // catalog) so a failed commit can clean up `staged.writtenFiles`
+  // instead of leaving a full rewritten copy of the table orphaned in
+  // the blob store on every lost race.
+  /** @type {Awaited<ReturnType<typeof icebergStageRewrite>>} */
+  let staged
   try {
-    const post = await icebergRewrite({ catalog, tableUrl, resolver })
+    staged = await icebergStageRewrite({ tableUrl, metadata, resolver })
+  } catch (err) {
+    return {
+      compacted: false,
+      reason: 'error',
+      error: describeError(err),
+      dataFilesBefore,
+      dataFilesAfter: dataFilesBefore,
+    }
+  }
+  try {
+    const post = await fileCatalogCommit({
+      tableUrl,
+      metadata,
+      metadataFileName: loaded.metadataFileName,
+      currentVersion: loaded.version,
+      staged,
+      resolver,
+      conditionalCommits: true,
+    })
     return { compacted: true, dataFilesBefore, dataFilesAfter: currentDataFileCount(post) }
-  } catch {
-    return { compacted: false, dataFilesBefore, dataFilesAfter: dataFilesBefore }
+  } catch (err) {
+    if (resolver.deleter) {
+      const { deleter } = resolver
+      await Promise.allSettled(staged.writtenFiles.map((p) => deleter(p)))
+    }
+    return {
+      compacted: false,
+      reason: isCommitConflict(err) ? 'conflict' : 'error',
+      error: describeError(err),
+      dataFilesBefore,
+      dataFilesAfter: dataFilesBefore,
+    }
   }
 }
 
@@ -185,12 +250,51 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
  * @returns {number}
  */
 function currentDataFileCount(metadata) {
+  return currentSummaryNumber(metadata, 'total-data-files') ?? 0
+}
+
+/**
+ * Numeric field from the current snapshot's summary, or undefined when
+ * there is no current snapshot or the field is absent/non-numeric.
+ *
+ * @param {TableMetadata} metadata
+ * @param {string} key
+ * @returns {number | undefined}
+ */
+function currentSummaryNumber(metadata, key) {
   const currentId = metadata['current-snapshot-id']
-  if (currentId === undefined) return 0
+  if (currentId === undefined) return undefined
   const snapshot = metadata.snapshots?.find((s) => String(s['snapshot-id']) === String(currentId))
-  const raw = snapshot?.summary?.['total-data-files']
-  const value = raw === undefined ? 0 : Number(raw)
-  return Number.isFinite(value) ? value : 0
+  const raw = snapshot?.summary?.[key]
+  if (raw === undefined) return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * Concurrent-commit conflict detection, mirroring icebird's internal
+ * `isCommitConflict`: the blob-io writer surfaces a conditional-write
+ * collision as a 412 (and tags it `iceberg_commit_conflict`); REST-shaped
+ * catalogs use 409.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isCommitConflict(err) {
+  if (!err || typeof err !== 'object') return false
+  const record = /** @type {Record<string, unknown>} */ (err)
+  if (record.hypErrorKind === 'iceberg_commit_conflict') return true
+  const status = record.status ?? record.statusCode
+  return status === 412 || status === 409
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string}
+ */
+function describeError(err) {
+  if (err instanceof Error) return err.message
+  return String(err)
 }
 
 /**
@@ -251,9 +355,12 @@ export async function maintainExportTables(opts) {
         resolver,
         lister,
         compactFileCount: cfg.compact_file_count,
+        compactMaxBytes: cfg.compact_max_bytes,
         dryRun,
       })
       report.compacted = compaction.compacted
+      report.compactionReason = compaction.reason
+      report.compactionError = compaction.error
       report.dataFilesBefore = compaction.dataFilesBefore
       report.dataFilesAfter = compaction.dataFilesAfter
       if (compaction.compacted) totalTablesCompacted += 1

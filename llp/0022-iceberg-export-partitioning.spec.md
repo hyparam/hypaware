@@ -210,15 +210,35 @@ OOM/blocking failure already seen with the parquet sink (the encoder OOMed/block
 the daemon; exports run manually with a large heap).
 
 The out-of-band tool now exists: `hyp sink maintain --compact` runs
-`compactExportTable` (icebird `icebergRewrite`) from the manual CLI process,
-gated on a `compact_file_count` threshold (default 32, via the sink's
-`maintenance` config). The flag is the only path to a rewrite — `maintain`
-without it, the daemon loop, and the sink tick never compact. A rewrite is
-**not retried** on a concurrent-commit conflict (it only rewrote the rows it
-read; a blind retry could drop rows another writer appended); the next manual
-run starts from fresh metadata. The icebird pin sits at `0.8.10`, which
-preserves v3 row lineage across rewrites — export tables are
-`formatVersion: 3`, so the earlier `0.8.9` rewrite was not safe for them.
+`compactExportTable` from the manual CLI process, gated on a
+`compact_file_count` threshold (default 32, via the sink's `maintenance`
+config) **and** a `compact_max_bytes` cap (default 128 MB): icebird's rewrite
+materializes every live row in memory, so a table whose current snapshot's
+`total-files-size` exceeds the cap is skipped with `above-byte-cap` rather
+than re-creating the parquet-encoder OOM in the manual process — raise the
+cap and the heap together to rewrite a bigger table. The flag is the only
+path to a rewrite — `maintain` without it, the daemon loop, and the sink
+tick never compact.
+
+`compactExportTable` stages and commits explicitly (icebird's
+`icebergStageRewrite` + `fileCatalogCommit`, the same single-attempt sequence
+`icebergRewrite` performs) rather than calling `icebergRewrite`, for two
+reasons. First, a rewrite is **not retried** on a concurrent-commit conflict
+(it only rewrote the rows it read; a blind retry could drop rows another
+writer appended); the next manual run starts from fresh metadata. Second,
+because the daemon keeps appending concurrently, lost races are *expected* —
+and `icebergRewrite` leaves the staged files (a full rewritten copy of the
+table) orphaned in the blob store on a failed commit. Holding the
+`StagedUpdate` lets a failed commit delete `writtenFiles` best-effort, the
+same orphan-leak class the local cache fixed in #82. Every non-compaction
+outcome carries a `reason` discriminant (`below-threshold` / `above-byte-cap`
+/ `no-table` / `conflict` / `error`) so the CLI reports the real cause instead
+of folding failures into the threshold skip; unexpected rewrite errors exit
+nonzero.
+
+The icebird pin sits at `0.8.10`, which preserves v3 row lineage across
+rewrites — export tables are `formatVersion: 3`, so the earlier `0.8.9`
+rewrite was not safe for them.
 
 ## Observability
 
@@ -275,6 +295,7 @@ of icebird `master`; the pin is updated to the published version before merge.
   (`partitionSpecForDeclaration`, `validatePartitionSpecStability`),
   `format-iceberg/src/commit.js:81-107` (export create+append),
   `format-iceberg/src/table-format.js:184` (per-dataset `exportDataset`),
-  `format-iceberg/src/maintenance.js:120` (compaction framing).
+  `format-iceberg/src/maintenance.js` (`compactExportTable` /
+  `maintainExportTables`, the out-of-band compaction path).
 - icebird `master` `3edb15b` — `src/write/sort.js`, `src/write/stage.js`,
   `src/prune.js`, `src/write/rewrite.js`.
