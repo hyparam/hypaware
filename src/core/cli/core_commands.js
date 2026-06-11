@@ -2249,8 +2249,9 @@ async function runSinkForce(argv, ctx) {
  *
  * Runs export maintenance on table-format (Iceberg) sink instances:
  * snapshot expiration on exported tables.  Data-file compaction is not
- * yet supported by the underlying icebird library; the command reports
- * `compaction_unsupported` when this is the case.
+ * run by this sink — icebird exposes it via `icebergRewrite`, but rewrites
+ * are out-of-band only (LLP 0022); the command reports
+ * `compaction_out_of_band` for each dataset.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -2323,7 +2324,7 @@ async function runSinkMaintain(argv, ctx) {
     for (const d of report.datasets) {
       const actions = []
       if (d.snapshotsExpired > 0) actions.push(`expired ${d.snapshotsExpired} snapshots (was ${d.snapshotsBefore})`)
-      if (!d.compactionSupported) actions.push('compaction_unsupported')
+      if (!d.compactionSupported) actions.push('compaction_out_of_band')
       ctx.stdout.write(`  ${handle.instanceName}/${d.dataset}: ${actions.join(', ')}\n`)
     }
     totalExpired += report.totalSnapshotsExpired
@@ -2335,7 +2336,7 @@ async function runSinkMaintain(argv, ctx) {
 
   ctx.stdout.write(
     `sink maintain: ${totalExpired} snapshots expired` +
-    ' (compaction not supported by icebird — data-file rewriting will be available in a future release)\n'
+    ' (compaction not run by this sink — out-of-band only, see LLP 0022)\n'
   )
   return 0
 }

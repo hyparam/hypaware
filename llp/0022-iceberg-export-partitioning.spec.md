@@ -158,9 +158,11 @@ it keeps its name in V1 to avoid churning the dataset-registration surface.
 On append to an existing table, the export validates that the dataset's derived
 day-grain spec still matches the table's current `PartitionSpec` via
 `validatePartitionSpecStability(declaration, existingSpec, schema)`, mirroring the
-cache (`src/core/cache/iceberg/store.js:122-125`). A mismatch (a dataset that
-gained/changed `primaryTimestampColumn`, or a table written before this spec)
-fails with the stable `error_kind` **`iceberg_partition_spec_drift`**. V1
+cache (`src/core/cache/iceberg/store.js:122-125`). A mismatch in **either
+direction** — a dataset that gained/changed `primaryTimestampColumn` against a
+table written before this spec, or one that stopped deriving partitioning
+(lost its timestamp column) against an already-partitioned table — fails with
+the stable `error_kind` **`iceberg_partition_spec_drift`**. V1
 **rejects** drift; partition *evolution* is unsupported. The operator path is to
 export to a new table prefix; auto-roll is a possible future increment. (Sort-
 order changes are not drift — see [§Within-partition sort](#within-partition-sort).)
@@ -267,4 +269,3 @@ of icebird `master`; the pin is updated to the published version before merge.
   `format-iceberg/src/maintenance.js:120` (compaction framing).
 - icebird `master` `3edb15b` — `src/write/sort.js`, `src/write/stage.js`,
   `src/prune.js`, `src/write/rewrite.js`.
-</content>

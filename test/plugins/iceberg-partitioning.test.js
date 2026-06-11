@@ -7,6 +7,8 @@ import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet'
+
 import { derivePartitioning } from '../../hypaware-core/plugins-workspace/format-iceberg/src/partitioning.js'
 import { commitBatch, probeTable } from '../../hypaware-core/plugins-workspace/format-iceberg/src/commit.js'
 import {
@@ -173,6 +175,20 @@ test('commitBatch creates a day-partitioned, conversation-sorted table and bucke
     const dataDir = path.join(fixture.baseDir, 'iceberg', 'datasets', 'ai_gateway_messages', 'data')
     const dataFiles = fsSync.readdirSync(dataDir).filter((f) => f.endsWith('.parquet'))
     assert.equal(dataFiles.length, 2, `expected 2 day-partition files, got ${dataFiles.length}`)
+
+    // The sort must be real on disk, not just recorded metadata: each day
+    // file holds cB-then-cA input, so sorted output reads back cA, cB.
+    for (const file of dataFiles) {
+      const rows = await parquetReadObjects({
+        file: await asyncBufferFromFile(path.join(dataDir, file)),
+        columns: ['conversation_id'],
+      })
+      assert.deepEqual(
+        rows.map((r) => r.conversation_id),
+        ['cA', 'cB'],
+        `rows in ${file} must be sorted by conversation_id`
+      )
+    }
   } finally {
     await fixture.cleanup()
   }
@@ -199,6 +215,36 @@ test('commitBatch rejects partition-spec drift on a previously-unpartitioned tab
       () =>
         commitBatch(
           { tableUrl, columns: AI_GATEWAY_COLUMNS, rows: [ROWS[1]], resolver, lister, partitioning },
+          { exists: existing.exists, metadata: existing.metadata }
+        ),
+      (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_partition_spec_drift'
+    )
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('commitBatch rejects reverse drift: null partitioning onto a partitioned table', async () => {
+  const fixture = await freshLocalFsStore()
+  try {
+    const { resolver, lister } = await createBlobStoreIO(fixture.blobStore)
+    const tableUrl = tableUrlForBlobPrefix('iceberg/datasets/ai_gateway_messages')
+
+    // First commit creates the table WITH the day-grain partitioning.
+    const partitioning = derivePartitioning(AI_GATEWAY_REG, AI_GATEWAY_COLUMNS)
+    const initial = await probeTable(tableUrl, resolver, lister)
+    await commitBatch(
+      { tableUrl, columns: AI_GATEWAY_COLUMNS, rows: [ROWS[0]], resolver, lister, partitioning },
+      { exists: initial.exists, metadata: initial.metadata }
+    )
+
+    // Second commit derives no partitioning (e.g. the dataset dropped its
+    // primaryTimestampColumn) ⇒ reverse drift, must be rejected.
+    const existing = await probeTable(tableUrl, resolver, lister)
+    await assert.rejects(
+      () =>
+        commitBatch(
+          { tableUrl, columns: AI_GATEWAY_COLUMNS, rows: [ROWS[1]], resolver, lister, partitioning: null },
           { exists: existing.exists, metadata: existing.metadata }
         ),
       (err) => /** @type {HypError} */ (err).hypErrorKind === 'iceberg_partition_spec_drift'

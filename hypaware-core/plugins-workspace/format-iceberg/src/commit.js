@@ -96,18 +96,30 @@ export async function commitBatch(input, priorState) {
     } catch (err) {
       throw wrapCommitError(err, 'iceberg_commit_failed', `create table failed at '${input.tableUrl}'`)
     }
-  } else if (input.partitioning && priorState.metadata) {
+  } else if (priorState.metadata) {
     // @ref LLP 0022#drift-rejection — an existing table whose partition spec no
     // longer matches the dataset's derived day grain is rejected; the export
     // cannot retroactively repartition object-store data files. [constrained-by]
     const existingSpec = currentPartitionSpec(priorState.metadata) ?? { 'spec-id': 0, fields: [] }
-    try {
-      validatePartitionSpecStability(input.partitioning.declaration, existingSpec, targetSchema)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+    if (input.partitioning) {
+      try {
+        validatePartitionSpecStability(input.partitioning.declaration, existingSpec, targetSchema)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        throw newError(
+          'iceberg_partition_spec_drift',
+          `iceberg-format: partition spec drift at '${input.tableUrl}': ${message}`
+        )
+      }
+    } else if (existingSpec.fields.length > 0) {
+      // Reverse drift: the dataset stopped deriving partitioning but the
+      // table on disk is partitioned. The append itself would succeed (icebird
+      // keeps routing rows through the existing spec) while the sink reports
+      // `unpartitioned` — reject rather than let layout and telemetry diverge.
+      const existingLabel = existingSpec.fields.map((f) => `${f.transform}(${f.name})`).join(',')
       throw newError(
         'iceberg_partition_spec_drift',
-        `iceberg-format: partition spec drift at '${input.tableUrl}': ${message}`
+        `iceberg-format: partition spec drift at '${input.tableUrl}': dataset derives no partitioning but the existing table is partitioned (${existingLabel})`
       )
     }
   }

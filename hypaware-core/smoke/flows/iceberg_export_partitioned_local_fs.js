@@ -5,6 +5,7 @@ import fsSync from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet'
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
 import {
@@ -59,6 +60,8 @@ const ROWS = [
  *  - the committed metadata carries a `day(message_created_at)` partition
  *    spec and a `conversation_id`-led sort order.
  *  - the 4 rows land in exactly 2 data files — one per day partition.
+ *  - each data file's rows read back ordered by `conversation_id` (the
+ *    sort happened on write, not just in metadata).
  *  - the `iceberg.table.create` span carries `hyp_partition_spec` and
  *    `hyp_sort_order` so the layout is observable, not just inferred.
  *
@@ -198,6 +201,20 @@ export async function run({ harness, expect }) {
   const dataDir = path.join(destinationDir, 'iceberg', 'datasets', DATASET, 'data')
   const dataFiles = fsSync.readdirSync(dataDir).filter((f) => f.endsWith('.parquet'))
   expect.that('layout: 4 rows landed in 2 day-partition files', dataFiles.length, (v) => v === 2)
+
+  // The sort must be real on disk, not just recorded metadata: each day
+  // file holds cB-then-cA input, so sorted output reads back cA, cB.
+  for (const file of dataFiles) {
+    const fileRows = await parquetReadObjects({
+      file: await asyncBufferFromFile(path.join(dataDir, file)),
+      columns: ['conversation_id'],
+    })
+    expect.that(
+      `layout: ${file} rows are sorted by conversation_id`,
+      fileRows.map((r) => r.conversation_id).join(','),
+      (v) => v === 'cA,cB'
+    )
+  }
 
   await obs.shutdown()
 
