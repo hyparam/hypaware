@@ -7,12 +7,14 @@ import {
   loadLatestFileCatalogMetadata,
 } from 'icebird'
 
+import { validatePartitionSpecStability } from '../../../../src/core/iceberg/partition-spec.js'
+
 import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords } from './schema.js'
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CommitInput, CommitResult, TableState } from './types.d.ts'
- * @import { Lister, Resolver, Snapshot, TableMetadata } from 'icebird/src/types.js'
+ * @import { CommitInput, CommitResult, DatasetPartitioning, TableState } from './types.d.ts'
+ * @import { Lister, PartitionSpec, Resolver, Snapshot, TableMetadata } from 'icebird/src/types.js'
  */
 
 /**
@@ -80,14 +82,45 @@ export async function commitBatch(input, priorState) {
 
   if (!priorState.exists) {
     try {
+      // @ref LLP 0022#partition-derivation — create with the writer-owned
+      // day-grain partitionSpec + conversation sort order. Both default to
+      // unpartitioned/unsorted in icebird when `partitioning` is absent.
       await icebergCreateTable({
         catalog,
         tableUrl: input.tableUrl,
         schema: targetSchema,
         formatVersion: 3,
+        partitionSpec: input.partitioning?.partitionSpec,
+        sortOrder: input.partitioning?.sortOrder,
       })
     } catch (err) {
       throw wrapCommitError(err, 'iceberg_commit_failed', `create table failed at '${input.tableUrl}'`)
+    }
+  } else if (priorState.metadata) {
+    // @ref LLP 0022#drift-rejection — an existing table whose partition spec no
+    // longer matches the dataset's derived day grain is rejected; the export
+    // cannot retroactively repartition object-store data files. [constrained-by]
+    const existingSpec = currentPartitionSpec(priorState.metadata) ?? { 'spec-id': 0, fields: [] }
+    if (input.partitioning) {
+      try {
+        validatePartitionSpecStability(input.partitioning.declaration, existingSpec, targetSchema)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        throw newError(
+          'iceberg_partition_spec_drift',
+          `iceberg-format: partition spec drift at '${input.tableUrl}': ${message}`
+        )
+      }
+    } else if (existingSpec.fields.length > 0) {
+      // Reverse drift: the dataset stopped deriving partitioning but the
+      // table on disk is partitioned. The append itself would succeed (icebird
+      // keeps routing rows through the existing spec) while the sink reports
+      // `unpartitioned` — reject rather than let layout and telemetry diverge.
+      const existingLabel = existingSpec.fields.map((f) => `${f.transform}(${f.name})`).join(',')
+      throw newError(
+        'iceberg_partition_spec_drift',
+        `iceberg-format: partition spec drift at '${input.tableUrl}': dataset derives no partitioning but the existing table is partitioned (${existingLabel})`
+      )
     }
   }
 
@@ -142,6 +175,7 @@ const DEFAULT_STREAM_ROW_LIMIT = 100_000
  *   rows: AsyncIterable<Record<string, unknown>>,
  *   resolver: Resolver,
  *   lister: Lister,
+ *   partitioning?: DatasetPartitioning | null,
  * }} input
  * @param {{ exists: boolean, metadata: TableMetadata | null }} priorState
  * @param {{ batchByteLimit?: number, batchRowLimit?: number }} [opts]
@@ -167,7 +201,7 @@ export async function commitRowStream(input, priorState, opts = {}) {
   async function flushBatch() {
     if (batch.length === 0) return
     const result = await commitBatch(
-      { tableUrl: input.tableUrl, columns: input.columns, rows: batch, resolver: input.resolver, lister: input.lister },
+      { tableUrl: input.tableUrl, columns: input.columns, rows: batch, resolver: input.resolver, lister: input.lister, partitioning: input.partitioning },
       state
     )
     state = { exists: true, metadata: result.metadata }
@@ -223,6 +257,23 @@ function schemaFromExistingMetadata(columns, metadata) {
     return icebergSchemaForColumns(columns)
   }
   return mergeFieldIdsFromTable(columns, existing)
+}
+
+/**
+ * Resolve the table's current `PartitionSpec` from metadata (the default spec,
+ * falling back to the last). Used for the on-append drift check.
+ *
+ * @param {TableMetadata} metadata
+ * @returns {PartitionSpec | undefined}
+ */
+function currentPartitionSpec(metadata) {
+  const specId = metadata['default-spec-id']
+  const specs = metadata['partition-specs']
+  if (specs?.length) {
+    const match = specs.find((s) => s['spec-id'] === specId)
+    return match ?? specs[specs.length - 1]
+  }
+  return undefined
 }
 
 /**

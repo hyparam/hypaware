@@ -15,3 +15,7 @@ export type {
   PluginPermission,
   PluginRuntime,
 } from '../../collectivus-plugin-kernel-types.d.ts'
+
+// Iceberg partitioning declaration — core surface consumed by the cache and the
+// @hypaware/format-iceberg export (LLP 0003 / LLP 0022#shared-core-helpers).
+export type { CachePartitioningDeclaration, CachePartitionField } from './iceberg/types.d.ts'

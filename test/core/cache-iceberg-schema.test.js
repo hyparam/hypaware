@@ -12,9 +12,11 @@ import {
   columnsFromIcebergSchema,
   icebergSchemaForColumns,
   mergeFieldIdsFromTable,
+} from '../../src/core/cache/iceberg/schema.js'
+import {
   partitionSpecForDeclaration,
   validatePartitionSpecStability,
-} from '../../src/core/cache/iceberg/schema.js'
+} from '../../src/core/iceberg/partition-spec.js'
 import { appendRowsToTable, tableExists } from '../../src/core/cache/iceberg/store.js'
 
 /**

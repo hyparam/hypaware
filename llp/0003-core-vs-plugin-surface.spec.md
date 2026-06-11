@@ -37,6 +37,19 @@ dataset gets the same query and formatting behavior for free. The local query
 cache ([LLP 0013](./0013-local-query-cache.decision.md)) is not a plugin and
 never appears in `plugins[]`.
 
+**Partition-spec derivation is core surface.** The helpers that turn a dataset's
+partitioning declaration into an Iceberg `PartitionSpec` and guard its stability
+— `partitionSpecForDeclaration` and `validatePartitionSpecStability`, with the
+declaration type — began life under `src/core/cache/iceberg/` but are pure
+functions of `(declaration, schema)` consumed across the boundary: the dataset
+registry validates declarations, the public plugin surface types them
+(`DatasetRegistration.cachePartitioning`), the intrinsic cache derives its spec,
+and the `@hypaware/format-iceberg` export derives its own
+([LLP 0022](./0022-iceberg-export-partitioning.spec.md#shared-core-helpers)).
+They are therefore promoted to a neutral core home re-exported from
+`src/core/index.js`, not buried in the cache — the cache is one consumer, not the
+owner.
+
 ## Plugins own
 
 Domain behavior only, expressed through what they `require`, `provide`, and

@@ -47,6 +47,15 @@ plugin doesn't know whether it holds Parquet, JSONL, or an Iceberg manifest.
 Iceberg-on-S3 and Parquet-on-S3 share one S3 plugin. Adding GCS later is one
 plugin and every existing writer works.
 
+## Export layout is the writer's, not the cache's
+
+A table-format writer lays data out for the **archive's** job, which is not the
+cache's job. The `@hypaware/format-iceberg` writer partitions exported tables by
+a writer-owned **day grain** and sorts each partition by the dataset's lookup
+key — deliberately *not* inheriting the cache's `cachePartitioning`, which is
+tuned for recent-query lookups and would impose an unbounded per-conversation
+file count on an archive. See [LLP 0022](./0022-iceberg-export-partitioning.spec.md).
+
 ## Export contract
 
 A sink implements an export contract — not a per-row writer:

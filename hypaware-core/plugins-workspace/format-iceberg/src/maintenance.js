@@ -117,9 +117,12 @@ export async function discoverExportDatasets(blobStore, prefix) {
  * Run export maintenance on all datasets under a prefix: snapshot
  * expiration per dataset, plus a compaction status report.
  *
- * icebird V1 does not expose `rewrite-data-files` or `delete-data-files`,
- * so compaction is not supported.  The report signals
- * `compactionSupported: false` so the CLI can surface a clear message.
+ * @ref LLP 0022#compaction — icebird now exposes `icebergRewrite`
+ * (read-rewrite compaction), but the export deliberately does not run it:
+ * day-grain partitioning already yields large files, and an in-daemon
+ * read-rewrite risks the OOM/blocking failure seen with the parquet sink.
+ * `compactionSupported: false` here means "not run by this sink" (out-of-band
+ * only), not "impossible".
  *
  * @param {{
  *   blobStore: BlobStore
