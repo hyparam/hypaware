@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
 import test from 'node:test'
 
 import {
@@ -46,13 +47,16 @@ function makeMemoryBlobStore() {
         err.errorKind = 'blob_precondition_failed'
         throw err
       }
+      if (!(input.body instanceof Uint8Array)) {
+        throw new Error(`memory blob store expects Uint8Array bodies, got stream at '${input.key}'`)
+      }
       objects.set(input.key, input.body)
       return { key: input.key }
     },
     async getObject(input) {
       const bytes = objects.get(input.key)
       if (!bytes) return null
-      return { body: bytes, contentLength: bytes.byteLength }
+      return { body: Readable.from([bytes]), contentLength: bytes.byteLength }
     },
     listObjects(input) {
       const prefix = input?.prefix ?? ''
@@ -63,7 +67,7 @@ function makeMemoryBlobStore() {
         async *[Symbol.asyncIterator]() {
           for (const key of keys) {
             const bytes = objects.get(key)
-            yield { key, size: bytes?.byteLength ?? 0 }
+            yield { key, size: bytes?.byteLength ?? 0, lastModified: new Date() }
           }
         },
       }

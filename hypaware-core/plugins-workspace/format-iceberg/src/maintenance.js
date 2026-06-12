@@ -230,11 +230,15 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
   // when staging dies mid-flight.
   /** @type {string[]} */
   const stagedPaths = []
+  // `Resolver.writer` is optional; a resolver without one can't stage
+  // anything, so there's nothing to track — let icebergStageRewrite
+  // surface its own failure through the catch below.
+  const baseWriter = resolver.writer
   /** @type {Resolver} */
-  const trackingResolver = {
+  const trackingResolver = baseWriter === undefined ? resolver : {
     ...resolver,
     writer(url, options) {
-      const writer = resolver.writer(url, options)
+      const writer = baseWriter(url, options)
       const finish = writer.finish.bind(writer)
       writer.finish = async () => {
         await finish()
