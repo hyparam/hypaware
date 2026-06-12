@@ -23,8 +23,9 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *   - **Native DAG identity (transcript present)**: for the session
  *     whose JSONL transcript is staged under
  *     `<HOME>/.claude/projects/`, the projector pulls
- *     `message_id = provider_uuid = uuid` and
- *     `previous_message_id = [parentUuid]` (root → `[]`).
+ *     `message_id = provider_uuid = uuid`; `previous_message_id` is
+ *     the gateway-filled full prior-message chain (root → `[]`, the
+ *     assistant here → `[u-user-1]`).
  *   - **Fallback identity (transcript missing)**: for a different
  *     session with no transcript file, the row carries
  *     `attributes.claude.identity_source = "gateway_fallback"` and the

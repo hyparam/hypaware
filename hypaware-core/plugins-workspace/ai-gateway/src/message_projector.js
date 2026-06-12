@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -39,6 +39,7 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'user_type', type: 'STRING', nullable: true },
   { name: 'permission_mode', type: 'STRING', nullable: true },
   { name: 'is_sidechain', type: 'BOOLEAN', nullable: true },
+  { name: 'agent_id', type: 'STRING', nullable: true },
   { name: 'message_id', type: 'STRING', nullable: false },
   { name: 'previous_message_id', type: 'JSON', nullable: true },
   { name: 'provider_uuid', type: 'STRING', nullable: true },
@@ -88,9 +89,13 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     successful, non-empty projection wins. Projectors that throw,
  *     return `undefined`, or return an invalid shape are warned and
  *     skipped.
- *  4. Applies fallback identity (hash `message_id`, linear
- *     `previous_message_id`) ONLY when the chosen projection omitted
- *     identity — projector-supplied IDs and history are authoritative.
+ *  4. Applies fallback identity (hash `message_id`) ONLY when the
+ *     chosen projection omitted identity — projector-supplied IDs are
+ *     authoritative. `previous_message_id` is gateway-owned either
+ *     way: unless the projector supplied explicit history, every row
+ *     gets the full ordered chain of prior message ids in the
+ *     conversation, so enriched and fallback rows stay
+ *     query-compatible.
  *  5. Expands each projected message into the per-part rows the
  *     `ai_gateway_messages` schema advertises, merges
  *     `attributes.gateway.*` provenance, and strips to schema columns.
@@ -371,24 +376,26 @@ function isValidProjection(value) {
  * }} ctx
  */
 function resolveIdentity(ctx) {
-  const supplied = stringValue(ctx.message.message_id)
-  if (supplied) {
-    const previous = Array.isArray(ctx.message.previous_message_id)
-      ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
-      : undefined
-    return {
-      messageId: supplied,
-      previousMessageId: previous,
-      fromFallback: false,
-    }
-  }
-  const messageId = computeMessageId(ctx.conversationId, ctx.role, ctx.content)
+  // `previous_message_id` always carries the full ordered chain of
+  // prior message ids in the conversation, whether `message_id` was
+  // projector-supplied (transcript uuid) or hash-synthesized here —
+  // a native DAG parent lives in `parent_uuid`, not in this column.
+  // Projector-supplied history still wins when present.
   const previousFromMessage = Array.isArray(ctx.message.previous_message_id)
     ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
     : undefined
+  const previousMessageId = previousFromMessage ?? [...ctx.conversationMessageIds]
+  const supplied = stringValue(ctx.message.message_id)
+  if (supplied) {
+    return {
+      messageId: supplied,
+      previousMessageId,
+      fromFallback: false,
+    }
+  }
   return {
-    messageId,
-    previousMessageId: previousFromMessage ?? [...ctx.conversationMessageIds],
+    messageId: computeMessageId(ctx.conversationId, ctx.role, ctx.content),
+    previousMessageId,
     fromFallback: true,
   }
 }
@@ -410,7 +417,7 @@ function resolveIdentity(ctx) {
  *   messageIndex: number,
  *   tsStart: string,
  *   projection: AiGatewayProjectedExchange,
- *   identity: { messageId: string, previousMessageId: string[] | undefined, fromFallback: boolean },
+ *   identity: { messageId: string, previousMessageId: string[], fromFallback: boolean },
  *   conversationLookup: Map<string, { tool_name?: string }>,
  * }} ctx
  * @returns {Record<string, unknown>[]}
@@ -445,6 +452,7 @@ function expandMessageParts(ctx) {
     is_sidechain: typeof ctx.message.is_sidechain === 'boolean'
       ? ctx.message.is_sidechain
       : ctx.projection.is_sidechain,
+    agent_id: stringValue(ctx.message.agent_id) ?? stringValue(ctx.projection.agent_id),
     message_id: ctx.identity.messageId,
     previous_message_id: ctx.identity.previousMessageId,
     provider_uuid: stringValue(ctx.message.provider_uuid),
@@ -507,12 +515,34 @@ function expandMessageParts(ctx) {
 }
 
 /**
+ * Fallback identity hash. Volatile wire-only fields are stripped
+ * before hashing: clients move the `cache_control` prompt-cache
+ * breakpoint between exchanges, so hashing it would give the same
+ * logical message a new id on every replay where the breakpoint
+ * shifted — each one a duplicate row the seen-set cannot catch.
+ *
  * @param {string} conversation_id
  * @param {string} role
  * @param {unknown} content
  */
 export function computeMessageId(conversation_id, role, content) {
-  return sha256Hex(`${conversation_id}:${role}:${canonicalJson(content)}`).slice(0, 16)
+  return sha256Hex(`${conversation_id}:${role}:${canonicalJson(stripVolatileBlockFields(content))}`).slice(0, 16)
+}
+
+/**
+ * Drop per-block fields that vary across replays of the same logical
+ * message without changing its meaning. Only block-level keys are
+ * stripped; block payloads are otherwise untouched.
+ *
+ * @param {unknown} content
+ */
+function stripVolatileBlockFields(content) {
+  if (!Array.isArray(content)) return content
+  return content.map((block) => {
+    if (!isPlainObject(block) || !('cache_control' in block)) return block
+    const { cache_control: _cache_control, ...rest } = block
+    return rest
+  })
 }
 
 /** @param {string | undefined | null} stopReason */

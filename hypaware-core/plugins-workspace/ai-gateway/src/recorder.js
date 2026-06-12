@@ -1,7 +1,13 @@
 // @ts-check
 
 import { randomBytes } from 'node:crypto'
-import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib'
+import zlib, { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib'
+
+// zstd landed in node 22.15 / 23.8; feature-detect so older runtimes
+// fall through to decodeBody's unknown-codec path instead of crashing.
+const zstdDecompress = /** @type {((buf: Buffer) => Buffer) | undefined} */ (
+  /** @type {Record<string, unknown>} */ (zlib).zstdDecompressSync
+)
 
 import { isSseHeaders, SseParser } from './sse.js'
 
@@ -207,11 +213,21 @@ export class Exchange {
    * counted toward `response_bytes` so the size metric on the
    * finalized row matches what flowed over the wire.
    *
+   * The proxy is a pass-through, so when the upstream compressed the
+   * stream (`content-encoding: gzip` et al.) these chunks are the
+   * compressed bytes — feeding them to the text parser yields zero
+   * events and the whole response is silently lost. Compressed streams
+   * are buffered raw here and decoded + parsed once, at `finalize()`.
+   *
    * @param {Buffer | Uint8Array} chunk
    */
   consumeStreamChunk(chunk) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     this.responseBytes += buf.byteLength
+    if (parseEncodings(this.responseContentEncoding).length > 0) {
+      this.responseChunks.push(buf)
+      return
+    }
     const events = this.sseParser.feed(buf)
     this.streamEventCount += events.length
     for (const event of events) {
@@ -264,6 +280,26 @@ export class Exchange {
     this.finished = true
 
     const tsEndMs = Date.now()
+    // Compressed SSE stream: the raw bytes were buffered (see
+    // consumeStreamChunk); decode the whole stream now and parse every
+    // event in one pass. Event `t_ms` is stamped at finalize — the
+    // per-chunk arrival times are not recoverable after deferred
+    // decoding, and nothing downstream depends on them being exact.
+    if (this.isSse && this.responseChunks.length > 0 && this.streamEvents.length === 0) {
+      const decoded = decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
+      const events = new SseParser().feed(decoded)
+      this.streamEventCount = events.length
+      for (const event of events) {
+        this.streamEvents.push({
+          kind: 'stream_event',
+          exchange_id: this.id,
+          t_ms: tsEndMs - this.tsStartMs,
+          event: event.event,
+          data: event.data,
+          ...(event.id !== undefined ? { id: event.id } : {}),
+        })
+      }
+    }
     // The proxy is a pass-through, so a body carries whatever
     // `content-encoding` the upstream (or client) applied. Decode it
     // before stringifying or a gzip/br/deflate body lands in the cache
@@ -332,6 +368,7 @@ function decodeBody(buf, encodingHeader) {
       if (enc === 'gzip' || enc === 'x-gzip') current = gunzipSync(current)
       else if (enc === 'br') current = brotliDecompressSync(current)
       else if (enc === 'deflate') current = inflateOrRaw(current)
+      else if (enc === 'zstd' && zstdDecompress) current = zstdDecompress(current)
       else return current.toString('utf8') // unknown codec — stop, keep what we have
     } catch {
       return buf.toString('utf8') // undecodable — fall back to the raw bytes

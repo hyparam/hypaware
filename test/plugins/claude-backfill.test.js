@@ -279,22 +279,26 @@ test('native DAG identity is preserved verbatim', async () => {
     assert.ok(item)
     const [userMsg, asstMsg] = value(item).messages
 
-    // uuid -> message_id / provider_uuid; parentUuid -> previous_message_id / parent_uuid.
+    // uuid -> message_id / provider_uuid; parentUuid -> parent_uuid.
+    // previous_message_id is left to the gateway expansion, which
+    // fills the full prior-message chain on the materialized rows.
     assert.equal(userMsg.message_id, 'u-user-1')
     assert.equal(userMsg.provider_uuid, 'u-user-1')
-    assert.deepEqual(userMsg.previous_message_id, [])
+    assert.equal(userMsg.previous_message_id, undefined)
     assert.equal(userMsg.parent_uuid, undefined)
 
     assert.equal(asstMsg.message_id, 'u-asst-1')
     assert.equal(asstMsg.provider_uuid, 'u-asst-1')
-    assert.deepEqual(asstMsg.previous_message_id, ['u-user-1'])
+    assert.equal(asstMsg.previous_message_id, undefined)
     assert.equal(asstMsg.parent_uuid, 'u-user-1')
 
-    // Identity survives materialization into canonical rows.
+    // Identity survives materialization into canonical rows, and the
+    // gateway stamps the full prior-chain previous_message_id.
     const rows = await materialize(item)
     const userRow = rowsByRole(rows, 'user')[0]
     assert.equal(userRow.message_id, 'u-user-1')
     assert.equal(userRow.provider_uuid, 'u-user-1')
+    assert.deepEqual(userRow.previous_message_id, [])
     const asstRow = rowsByRole(rows, 'assistant')[0]
     assert.equal(asstRow.message_id, 'u-asst-1')
     assert.equal(asstRow.parent_uuid, 'u-user-1')

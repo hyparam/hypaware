@@ -1314,6 +1314,8 @@ export interface AiGatewayProjectedExchange {
   user_type?: string
   permission_mode?: string
   is_sidechain?: boolean
+  /** Subagent id when the whole exchange belongs to one (e.g. Claude's x-claude-code-agent-id header). */
+  agent_id?: string
   model?: string
   system_text?: string
   tools?: JsonValue
@@ -1361,6 +1363,8 @@ export interface AiGatewayProjectedMessage {
   user_type?: string
   permission_mode?: string
   is_sidechain?: boolean
+  /** Subagent id from the provider's native log (e.g. Claude transcript `agentId`). */
+  agent_id?: string
   attachment_type?: string
   hook_event?: string
   is_compact_summary?: boolean

@@ -113,3 +113,58 @@ test('falls back to raw bytes when a gzip body is corrupt', () => {
   })
   assert.equal(row.response_body, corrupt.toString('utf8'))
 })
+
+test('parses SSE events from a gzip-encoded stream at finalize', () => {
+  const sse = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_s1","role":"assistant"}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join('')
+  const compressed = gzipSync(Buffer.from(sse))
+
+  const recorder = createRecorder({})
+  const exchange = recorder.startExchange({
+    upstream: 'test',
+    provider: 'test',
+    method: 'POST',
+    path: '/v1/messages',
+    requestHeaders: {},
+  })
+  exchange.setResponseStart({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' },
+  })
+  // Split mid-gzip-frame: compressed chunks are NOT independently
+  // decodable, which is exactly why parsing must defer to finalize.
+  exchange.consumeStreamChunk(compressed.subarray(0, 20))
+  exchange.consumeStreamChunk(compressed.subarray(20))
+  const row = exchange.finalize()
+
+  assert.equal(row.is_sse, true)
+  assert.equal(row.stream_event_count, 4)
+  assert.equal(row.stream_events.length, 4)
+  assert.equal(row.stream_events[0].event, 'message_start')
+  assert.equal(row.stream_events[3].event, 'message_stop')
+  assert.equal(row.response_bytes, compressed.byteLength, 'response_bytes counts wire (compressed) bytes')
+})
+
+test('uncompressed SSE streams still parse incrementally per chunk', () => {
+  const recorder = createRecorder({})
+  const exchange = recorder.startExchange({
+    upstream: 'test',
+    provider: 'test',
+    method: 'POST',
+    path: '/v1/messages',
+    requestHeaders: {},
+  })
+  exchange.setResponseStart({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+  exchange.consumeStreamChunk(Buffer.from('event: message_start\ndata: {"type":"message_start"}\n\n'))
+  exchange.consumeStreamChunk(Buffer.from('event: message_stop\ndata: {"type":"message_stop"}\n\n'))
+  const row = exchange.finalize()
+  assert.equal(row.stream_event_count, 2)
+  assert.equal(row.stream_events[1].event, 'message_stop')
+})

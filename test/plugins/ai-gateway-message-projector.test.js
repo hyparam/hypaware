@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
-import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { computeMessageId, createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -29,6 +29,7 @@ const EXPECTED_COLUMNS = [
   ['user_type', 'STRING', true],
   ['permission_mode', 'STRING', true],
   ['is_sidechain', 'BOOLEAN', true],
+  ['agent_id', 'STRING', true],
   ['message_id', 'STRING', false],
   ['previous_message_id', 'JSON', true],
   ['provider_uuid', 'STRING', true],
@@ -254,6 +255,42 @@ test('projector-supplied message_id and previous_message_id are preserved', asyn
   )
 })
 
+test('supplied message_id without history still gets the full previous_message_id chain', async () => {
+  // Adapter projectors (Claude transcripts, Codex native ids) supply
+  // message_id but never previous_message_id — the gateway must fill
+  // the full prior-id chain so enriched rows match fallback rows.
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native-no-history', {
+        project: () => ({
+          provider: 'native',
+          conversation_id: 'conv-native',
+          messages: [
+            { role: 'user', content: 'one', message_id: 'uuid-1' },
+            { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+            { role: 'user', content: 'three', message_id: 'uuid-3' },
+          ],
+        }),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 3)
+  assert.deepEqual(rows[0].previous_message_id, [])
+  assert.deepEqual(rows[1].previous_message_id, ['uuid-1'])
+  assert.deepEqual(rows[2].previous_message_id, ['uuid-1', 'uuid-2'])
+  for (const row of rows) {
+    assert.equal(
+      isPlainObject(row.attributes) && isPlainObject(row.attributes.gateway)
+        ? row.attributes.gateway.identity_source
+        : undefined,
+      undefined,
+      'supplied ids must not be marked as fallback'
+    )
+  }
+})
+
 test('fallback identity stamps gateway.identity_source and a linear previous_message_id chain', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -284,6 +321,28 @@ test('fallback identity stamps gateway.identity_source and a linear previous_mes
       'fallback rows must mark attributes.gateway.identity_source'
     )
   }
+})
+
+test('fallback message_id ignores cache_control so identity is stable across replays', () => {
+  const blocks = [
+    { type: 'text', text: 'reminder' },
+    { type: 'text', text: 'the actual prompt' },
+  ]
+  const withBreakpoint = [
+    blocks[0],
+    { ...blocks[1], cache_control: { type: 'ephemeral' } },
+  ]
+  const plain = computeMessageId('conv-1', 'user', blocks)
+  assert.equal(
+    computeMessageId('conv-1', 'user', withBreakpoint),
+    plain,
+    'moving the prompt-cache breakpoint must not change the fallback message_id'
+  )
+  // Real content changes still change identity.
+  assert.notEqual(
+    computeMessageId('conv-1', 'user', [blocks[0], { type: 'text', text: 'different prompt' }]),
+    plain
+  )
 })
 
 test('attributes.gateway carries exchange provenance and dev_run_id', async () => {

@@ -28,7 +28,10 @@ import { pickLatestMatching, readSessionContext } from './session_context.js'
  * Native DAG identity is preserved verbatim (the gateway never
  * recomputes ids when the projector supplies them):
  *   - `uuid`       -> `message_id` / `provider_uuid`
- *   - `parentUuid` -> `previous_message_id` (array) / `parent_uuid`
+ *   - `parentUuid` -> `parent_uuid`
+ * `previous_message_id` is NOT supplied here — the gateway expansion
+ * always fills it with the full prior-message-id chain, the same
+ * shape live capture rows get.
  * Reruns are deterministic: ids, parents, and timestamps come straight
  * from the immutable transcript, and the materializer is pure.
  */
@@ -311,9 +314,11 @@ function projectedMessageFromEntry(entry) {
     content: /** @type {any} */ (entry.content),
   }
   if (entry.provider_uuid) {
+    // Native id only — like the live projector, `previous_message_id`
+    // is left to the gateway expansion, which fills the full
+    // prior-message chain; the native DAG parent rides `parent_uuid`.
     message.message_id = entry.provider_uuid
     message.provider_uuid = entry.provider_uuid
-    message.previous_message_id = entry.parent_uuid ? [entry.parent_uuid] : []
   }
   if (entry.parent_uuid) message.parent_uuid = entry.parent_uuid
   if (entry.logical_parent_uuid) message.logical_parent_uuid = entry.logical_parent_uuid
@@ -326,6 +331,7 @@ function projectedMessageFromEntry(entry) {
   if (entry.user_type) message.user_type = entry.user_type
   if (entry.permission_mode) message.permission_mode = entry.permission_mode
   if (entry.is_sidechain !== undefined) message.is_sidechain = entry.is_sidechain
+  if (entry.agent_id) message.agent_id = entry.agent_id
   if (entry.attachment_type) message.attachment_type = entry.attachment_type
   if (entry.hook_event) message.hook_event = entry.hook_event
   if (entry.is_compact_summary !== undefined) message.is_compact_summary = entry.is_compact_summary

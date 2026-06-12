@@ -64,8 +64,11 @@ test('native DAG identity: uuid from JSONL transcript becomes message_id and pro
     assert.equal(assistantRows[0].part_type, 'text')
     assert.equal(assistantRows[0].provider_type, 'assistant')
 
-    // Native DAG: assistant.previous_message_id is the parent's uuid.
+    // previous_message_id is the gateway-filled full prior-message
+    // chain (here a single prior message); the native DAG parent
+    // rides parent_uuid.
     assert.deepEqual(assistantRows[0].previous_message_id, ['u-user-1'])
+    assert.equal(assistantRows[0].parent_uuid, 'u-user-1')
 
     // Gateway must NOT stamp identity_source when the projector
     // supplied message_id — the assertion guards the projector against
@@ -107,6 +110,474 @@ test('root message gets previous_message_id = [] when parentUuid is null', async
     assert.equal(rows.length, 1)
     assert.equal(rows[0].message_id, 'u-root')
     assert.deepEqual(rows[0].previous_message_id, [], 'root message must carry an empty previous_message_id array')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('transcript-enriched previous_message_id carries the full prior chain, not just the parent', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-chain', [
+      jsonlRow({
+        sessionId: 'sess-chain',
+        uuid: 'u-1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'first question' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-chain',
+        uuid: 'a-1',
+        parentUuid: 'u-1',
+        type: 'assistant',
+        message: { role: 'assistant', id: 'msg_1', content: [{ type: 'text', text: 'first answer' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-chain',
+        uuid: 'u-2',
+        parentUuid: 'a-1',
+        type: 'user',
+        message: { role: 'user', content: 'second question' },
+        timestamp: '2026-05-22T10:00:02.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-chain',
+        uuid: 'a-2',
+        parentUuid: 'u-2',
+        type: 'assistant',
+        message: { role: 'assistant', id: 'msg_2', content: [{ type: 'text', text: 'second answer' }] },
+        timestamp: '2026-05-22T10:00:03.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-chain' }) },
+        messages: [
+          { role: 'user', content: 'first question' },
+          { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
+          { role: 'user', content: 'second question' },
+        ],
+      },
+      responseBody: { id: 'msg_2', role: 'assistant', content: [{ type: 'text', text: 'second answer' }], stop_reason: 'end_turn' },
+    })
+
+    assert.equal(rows.length, 4)
+    const byId = new Map(rows.map((r) => [r.message_id, r]))
+    // Enriched rows must carry the SAME previous_message_id shape the
+    // gateway fallback produces: every prior message id in order —
+    // not the [parentUuid] singleton. The singleton's information
+    // survives on parent_uuid.
+    assert.deepEqual(byId.get('u-1')?.previous_message_id, [])
+    assert.deepEqual(byId.get('a-1')?.previous_message_id, ['u-1'])
+    assert.deepEqual(byId.get('u-2')?.previous_message_id, ['u-1', 'a-1'])
+    assert.deepEqual(byId.get('a-2')?.previous_message_id, ['u-1', 'a-1', 'u-2'])
+    assert.equal(byId.get('a-2')?.parent_uuid, 'u-2')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('subagent transcript under <sessionId>/subagents supplies sidechain identity', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    // Main session file exists but holds none of the subagent messages.
+    await writeTranscript(env, 'sess-side', [
+      jsonlRow({
+        sessionId: 'sess-side',
+        uuid: 'u-main-1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'main loop prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    // The CLI writes sidechain entries to a per-agent file in a
+    // directory named for the session, still carrying the parent
+    // sessionId on each entry.
+    await writeSubagentTranscript(env, 'sess-side', 'agent-abc123.jsonl', [
+      jsonlRow({
+        sessionId: 'sess-side',
+        agentId: 'abc123',
+        isSidechain: true,
+        uuid: 'u-side-user',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'run the subtask' },
+        timestamp: '2026-05-22T10:00:02.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-side',
+        agentId: 'abc123',
+        isSidechain: true,
+        uuid: 'u-side-assistant',
+        parentUuid: 'u-side-user',
+        type: 'assistant',
+        message: { role: 'assistant', id: 'msg_side', content: [{ type: 'text', text: 'done' }] },
+        timestamp: '2026-05-22T10:00:03.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-side' }) },
+        messages: [{ role: 'user', content: 'run the subtask' }],
+      },
+      responseBody: { id: 'msg_side', role: 'assistant', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' },
+    })
+
+    assert.equal(rows.length, 2)
+    const userRow = rows.find((r) => r.role === 'user')
+    const assistantRow = rows.find((r) => r.role === 'assistant')
+    assert.ok(userRow && assistantRow)
+    assert.equal(userRow.message_id, 'u-side-user')
+    assert.equal(assistantRow.message_id, 'u-side-assistant')
+    assert.equal(userRow.is_sidechain, true)
+    assert.equal(assistantRow.is_sidechain, true)
+    assert.equal(userRow.agent_id, 'abc123', 'transcript agentId lands on the agent_id column')
+    assert.equal(assistantRow.agent_id, 'abc123')
+    for (const row of rows) {
+      const gateway = readAttrPath(row, ['attributes', 'gateway'])
+      assert.notEqual(gateway?.identity_source, 'gateway_fallback', 'sidechain rows must carry native transcript identity')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('transcript_path from session context also loads sibling subagent files', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    // Non-standard location only reachable through transcript_path —
+    // the projects-dir scan can never find it, so a uuid match proves
+    // the sibling <sessionId>/ directory walk ran.
+    const altDir = path.join(env.homeDir, 'alt-transcripts')
+    const transcriptPath = path.join(altDir, 'sess-hook.jsonl')
+    const subagentsDir = path.join(altDir, 'sess-hook', 'subagents')
+    await fs.mkdir(subagentsDir, { recursive: true })
+    await fs.writeFile(transcriptPath, jsonlRow({
+      sessionId: 'sess-hook',
+      uuid: 'u-hook-main',
+      parentUuid: null,
+      type: 'user',
+      message: { role: 'user', content: 'main prompt' },
+      timestamp: '2026-05-22T10:00:00.000Z',
+    }) + '\n', 'utf8')
+    await fs.writeFile(path.join(subagentsDir, 'agent-zzz.jsonl'), jsonlRow({
+      sessionId: 'sess-hook',
+      agentId: 'zzz',
+      isSidechain: true,
+      uuid: 'u-hook-side',
+      parentUuid: null,
+      type: 'user',
+      message: { role: 'user', content: 'side prompt' },
+      timestamp: '2026-05-22T10:00:01.000Z',
+    }) + '\n', 'utf8')
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-hook',
+        transcript_path: transcriptPath,
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-hook' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].message_id, 'u-hook-side')
+    assert.equal(rows[0].is_sidechain, true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('cache_control on wire blocks and caller on transcript blocks do not break matching', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-cc', [
+      jsonlRow({
+        sessionId: 'sess-cc',
+        uuid: 'u-cc-user',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'hello' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-cc',
+        uuid: 'u-cc-assistant',
+        parentUuid: 'u-cc-user',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            // Transcripts annotate tool_use blocks with `caller`; the
+            // wire replay has no such field.
+            { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/tmp/x' }, caller: { type: 'direct' } },
+          ],
+        },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-cc' }) },
+        messages: [
+          // The wire carries a prompt-cache breakpoint the transcript
+          // never sees.
+          { role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }] },
+          { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/tmp/x' } }] },
+        ],
+      },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 2)
+    const userRow = rows.find((r) => r.role === 'user')
+    const assistantRow = rows.find((r) => r.role === 'assistant')
+    assert.ok(userRow && assistantRow)
+    assert.equal(userRow.message_id, 'u-cc-user', 'cache_control on the wire block must not defeat the content match')
+    assert.equal(assistantRow.message_id, 'u-cc-assistant', 'caller on the transcript block must not defeat the content match')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('multi-block assistant turn splits into per-line uuid messages (LLP 0023)', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-split', [
+      jsonlRow({
+        sessionId: 'sess-split',
+        uuid: 'u-s-user',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'go' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-split',
+        uuid: 'u-s-text',
+        parentUuid: 'u-s-user',
+        type: 'assistant',
+        message: { id: 'msg_split', role: 'assistant', content: [{ type: 'text', text: 'working on it' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-split',
+        uuid: 'u-s-tool',
+        parentUuid: 'u-s-text',
+        type: 'assistant',
+        message: {
+          id: 'msg_split',
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_9', name: 'Bash', input: { command: 'ls' }, caller: { type: 'direct' } }],
+        },
+        timestamp: '2026-05-22T10:00:02.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-split' }) },
+        messages: [{ role: 'user', content: 'go' }],
+      },
+      responseBody: {
+        id: 'msg_split',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'working on it' },
+          { type: 'tool_use', id: 'toolu_9', name: 'Bash', input: { command: 'ls' } },
+        ],
+        stop_reason: 'tool_use',
+      },
+    })
+
+    // One row per transcript line: user, assistant text, assistant tool_use —
+    // each its own message with a single part.
+    assert.equal(rows.length, 3)
+    const textRow = rows.find((r) => r.message_id === 'u-s-text')
+    const toolRow = rows.find((r) => r.message_id === 'u-s-tool')
+    assert.ok(textRow && toolRow, 'each assistant block must become its own uuid message')
+    assert.equal(textRow.part_index, 0)
+    assert.equal(toolRow.part_index, 0)
+    assert.equal(textRow.part_type, 'text')
+    assert.equal(toolRow.part_type, 'tool_call')
+    assert.equal(toolRow.tool_name, 'Bash')
+    // The native chain rides parent_uuid; previous_message_id is
+    // gateway-owned (full prior chain) for enriched and fallback rows
+    // alike.
+    assert.equal(toolRow.parent_uuid, 'u-s-text')
+    assert.ok(Array.isArray(toolRow.previous_message_id))
+    assert.ok(/** @type {string[]} */ (toolRow.previous_message_id).includes('u-s-text'))
+    // finish_reason rides the LAST block's message only.
+    assert.equal(readAttrPath(toolRow, ['status'])?.finish_reason, 'tool_use')
+    assert.equal(textRow.status, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('parallel tool_results split one message per result, joined by tool_use_id', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-par', [
+      jsonlRow({
+        sessionId: 'sess-par',
+        uuid: 'u-p-r1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_a', content: 'one' }] },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-par',
+        uuid: 'u-p-r2',
+        parentUuid: 'u-p-r1',
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: 'two' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-par' }) },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_a', content: 'one' },
+            { type: 'tool_result', tool_use_id: 'toolu_b', content: 'two' },
+          ],
+        }],
+      },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 2)
+    assert.deepEqual(
+      rows.map((r) => r.message_id).sort(),
+      ['u-p-r1', 'u-p-r2'],
+      'each tool_result must match its own transcript line via tool_use_id'
+    )
+    for (const row of rows) {
+      assert.equal(row.part_type, 'tool_result')
+      assert.equal(row.part_index, 0)
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('reminder-wrapped prompt canonicalizes to transcript content + wire_only extra', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-rem', [
+      jsonlRow({
+        sessionId: 'sess-rem',
+        uuid: 'u-r-prompt',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'do the thing' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-rem' }) },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ninjected banner\n</system-reminder>' },
+            { type: 'text', text: 'do the thing' },
+          ],
+        }],
+      },
+      responseBody: undefined,
+    })
+
+    const matched = rows.filter((r) => r.message_id === 'u-r-prompt')
+    assert.equal(matched.length, 1, 'the logical prompt must match its transcript line')
+    assert.equal(matched[0].content_text, 'do the thing', 'matched row carries the TRANSCRIPT content, not the wire blocks')
+    const wireOnly = rows.filter((r) => readAttrPath(r, ['attributes', 'claude'])?.wire_only === true)
+    assert.equal(wireOnly.length, 1, 'injected reminder blocks become a separate wire_only message')
+    assert.match(String(wireOnly[0].content_text), /system-reminder/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('x-claude-code-agent-id header stamps is_sidechain even without a transcript', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-agent-hdr' }) },
+        messages: [{ role: 'user', content: 'subagent prompt' }],
+      },
+      responseBody: undefined,
+      requestHeaders: { 'x-claude-code-agent-id': 'a1b2c3' },
+    })
+
+    assert.ok(rows.length >= 1)
+    for (const row of rows) {
+      assert.equal(row.is_sidechain, true, 'agent-id header must mark the exchange sidechain')
+      assert.equal(row.agent_id, 'a1b2c3', 'agent id from the header lands on the agent_id column')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('unmatched multi-block assistant turn still splits, with stable per-block fallback ids', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    // No transcript at all for this session.
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-nofile' }) },
+        messages: [],
+      },
+      responseBody: {
+        id: 'msg_nofile',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'thinking out loud' },
+          { type: 'tool_use', id: 'toolu_x', name: 'Read', input: { file_path: '/tmp/y' } },
+        ],
+        stop_reason: 'tool_use',
+      },
+    })
+
+    assert.equal(rows.length, 2)
+    const [a, b] = rows
+    assert.notEqual(a.message_id, b.message_id, 'each block gets its own fallback identity')
+    for (const row of rows) {
+      assert.equal(row.part_index, 0, 'split rows are single-part')
+      assert.match(String(row.message_id), /^[0-9a-f]{16}$/)
+    }
   } finally {
     await env.cleanup()
   }
@@ -321,6 +792,25 @@ async function writeTranscript(env, sessionId, lines) {
 }
 
 /**
+ * Write a subagent transcript file at the path the Claude CLI uses:
+ * `<projectsDir>/<repo>/<sessionId>/subagents/<agentFileName>`.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {string} sessionId
+ * @param {string} agentFileName
+ * @param {string[]} lines
+ */
+async function writeSubagentTranscript(env, sessionId, agentFileName, lines) {
+  const subagentsDir = path.join(env.homeDir, '.claude', 'projects', 'some-repo', sessionId, 'subagents')
+  await fs.mkdir(subagentsDir, { recursive: true })
+  await fs.writeFile(
+    path.join(subagentsDir, agentFileName),
+    lines.join('\n') + '\n',
+    'utf8'
+  )
+}
+
+/**
  * @param {Record<string, unknown>} obj
  */
 function jsonlRow(obj) {
@@ -333,7 +823,7 @@ function jsonlRow(obj) {
  * and project one synthetic exchange.
  *
  * @param {{ homeDir: string, stateFile: string }} env
- * @param {{ reqBody: Record<string, unknown>, responseBody: unknown, streamEvents?: Array<{ data: string, event?: string }> }} call
+ * @param {{ reqBody: Record<string, unknown>, responseBody: unknown, streamEvents?: Array<{ data: string, event?: string }>, requestHeaders?: Record<string, string> }} call
  */
 async function projectViaGateway(env, call) {
   const projector = createClaudeExchangeProjector({
@@ -359,7 +849,11 @@ async function projectViaGateway(env, call) {
     response_bytes: 200,
     is_sse: false,
     stream_event_count: 0,
-    request_headers: JSON.stringify({ 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/1.0' }),
+    request_headers: JSON.stringify({
+      'anthropic-version': '2023-06-01',
+      'user-agent': 'claude-cli/1.0',
+      ...(call.requestHeaders ?? {}),
+    }),
     request_body: JSON.stringify(call.reqBody),
     response_headers: JSON.stringify({ 'content-type': 'application/json' }),
     response_body: call.responseBody === undefined ? null : JSON.stringify(call.responseBody),

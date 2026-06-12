@@ -441,7 +441,7 @@ function parseHeaders(raw) {
  * @param {string} name
  * @returns {string | undefined}
  */
-function headerValue(headers, name) {
+export function headerValue(headers, name) {
   if (!headers) return undefined
   const wanted = name.toLowerCase()
   for (const [key, value] of Object.entries(headers)) {

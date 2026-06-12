@@ -10,6 +10,7 @@ import {
   anthropicMessages,
   claudeClientVersion,
   hasAnthropicHeaderSignature,
+  headerValue,
   isAnthropicExchange,
   isAnthropicPath,
   resolveAnthropicConversationId,
@@ -18,6 +19,7 @@ import {
 } from './anthropic.js'
 import {
   defaultClaudeProjectsDir,
+  entryBlockType,
   findTranscriptMatch,
   indexTranscriptEntries,
   loadTranscript,
@@ -30,6 +32,7 @@ import {
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { TranscriptEntry } from './types.d.ts'
  */
 
 /**
@@ -48,13 +51,24 @@ import {
  *     `metadata.user_id.session_id` / `x-claude-code-session-id`, reads
  *     the latest matching session-context record off
  *     `<stateDir>/session-context.jsonl` for `cwd` / `git_branch`,
- *     and walks the JSONL transcript for native DAG identity. When the
- *     transcript supplies a matching `uuid`:
- *       - `message_id = provider_uuid = uuid`
- *       - `previous_message_id = parentUuid ? [parentUuid] : []`
+ *     and walks the JSONL transcript (session file plus its
+ *     `<sessionId>/subagents/agent-*.jsonl` files) for native DAG
+ *     identity. Wire messages are decomposed to the transcript's
+ *     granularity (LLP 0023): assistant messages split one projected
+ *     message per content block, user tool_results split one per
+ *     result (joined by `tool_use_id`), prompts stay whole. When a
+ *     transcript line matches:
+ *       - `message_id = provider_uuid = uuid`, native parent on
+ *         `parent_uuid` — `previous_message_id` is never supplied;
+ *         the gateway always fills it with the full prior-message
+ *         chain so enriched and fallback rows share one shape.
  *     On a miss, messages are returned without `message_id` so the
  *     gateway computes its fallback hash identity and stamps
  *     `attributes.gateway.identity_source = "gateway_fallback"`.
+ *     Subagent exchanges (`x-claude-code-agent-id` header) stamp
+ *     `is_sidechain` and the `agent_id` column regardless of
+ *     transcript availability; transcript-matched rows also carry the
+ *     entry's native `agentId`.
  *
  * @param {{
  *   homeDir: string,
@@ -139,63 +153,43 @@ export function createClaudeExchangeProjector(opts) {
         responseBody,
         input.duration_ms
       )
+      // @ref LLP 0023#decision — decompose each wire message into the
+      // transcript's native units (one per assistant block, one per
+      // tool_result) so message_id is the transcript-line uuid and
+      // live rows converge with backfill.
       /** @type {AiGatewayProjectedMessage[]} */
       const projectedMessages = []
       const responseMessageId = isPlainObject(responseBody)
         ? stringValue(responseBody.id)
         : undefined
-      for (const message of messages) {
+      for (let m = 0; m < messages.length; m++) {
+        const message = messages[m]
         const role = stringValue(message.role)
         if (!role) continue
-        const messageIdHint = role === 'assistant'
-          ? stringValue(message.id) ?? responseMessageId
-          : undefined
-        const transcriptMatch = identityFromTranscript
-          ? findTranscriptMatch(transcriptIndex, {
-            role,
-            content: message.content,
-            messageId: messageIdHint,
-          })
-          : undefined
-        /** @type {AiGatewayProjectedMessage} */
-        const projected = {
-          role,
-          content: /** @type {any} */ (message.content),
+        if (role === 'assistant') {
+          projectedMessages.push(...projectAssistantMessage({
+            message,
+            // The response carries its API id only on the message
+            // envelope; replayed history messages must NOT inherit it
+            // or they'd mis-group against the current response's lines.
+            apiMessageId: stringValue(message.id) ??
+              (m === messages.length - 1 ? responseMessageId : undefined),
+            transcriptIndex,
+            matchEnabled: identityFromTranscript,
+          }))
+        } else if (role === 'user') {
+          projectedMessages.push(...projectUserMessage({
+            message,
+            transcriptIndex,
+            matchEnabled: identityFromTranscript,
+          }))
+        } else {
+          const projected = wholeMessageProjection(role, message)
+          if (identityFromTranscript) {
+            applyTranscriptMatch(projected, findTranscriptMatch(transcriptIndex, { role, content: message.content }))
+          }
+          projectedMessages.push(projected)
         }
-        if (transcriptMatch?.provider_uuid) {
-          projected.message_id = transcriptMatch.provider_uuid
-          projected.provider_uuid = transcriptMatch.provider_uuid
-          projected.previous_message_id = transcriptMatch.parent_uuid
-            ? [transcriptMatch.parent_uuid]
-            : []
-        }
-        if (transcriptMatch) {
-          if (transcriptMatch.parent_uuid) projected.parent_uuid = transcriptMatch.parent_uuid
-          if (transcriptMatch.logical_parent_uuid) projected.logical_parent_uuid = transcriptMatch.logical_parent_uuid
-          if (transcriptMatch.source_tool_assistant_uuid) projected.source_tool_assistant_uuid = transcriptMatch.source_tool_assistant_uuid
-          if (transcriptMatch.request_id) projected.request_id = transcriptMatch.request_id
-          if (transcriptMatch.prompt_id) projected.prompt_id = transcriptMatch.prompt_id
-          if (transcriptMatch.provider_type) projected.provider_type = transcriptMatch.provider_type
-          if (transcriptMatch.provider_subtype) projected.provider_subtype = transcriptMatch.provider_subtype
-          if (transcriptMatch.entrypoint) projected.entrypoint = transcriptMatch.entrypoint
-          if (transcriptMatch.user_type) projected.user_type = transcriptMatch.user_type
-          if (transcriptMatch.permission_mode) projected.permission_mode = transcriptMatch.permission_mode
-          if (transcriptMatch.is_sidechain !== undefined) projected.is_sidechain = transcriptMatch.is_sidechain
-          if (transcriptMatch.attachment_type) projected.attachment_type = transcriptMatch.attachment_type
-          if (transcriptMatch.hook_event) projected.hook_event = transcriptMatch.hook_event
-          if (transcriptMatch.is_compact_summary !== undefined) projected.is_compact_summary = transcriptMatch.is_compact_summary
-          if (transcriptMatch.compact_metadata !== undefined) projected.compact_metadata = /** @type {any} */ (transcriptMatch.compact_metadata)
-          if (isPlainObject(transcriptMatch.raw_frame)) projected.raw_frame = /** @type {any} */ (transcriptMatch.raw_frame)
-        }
-        const messageAttrs = anthropicMessageAttributes(message)
-        if (messageAttrs) projected.attributes = messageAttrs
-        if (typeof message.stop_reason === 'string') {
-          // The gateway core reads `stop_reason` off the projected
-          // message; the projector contract keeps it on the message
-          // (not on the exchange) so per-message status mapping works.
-          projected.stop_reason = message.stop_reason
-        }
-        projectedMessages.push(projected)
       }
 
       if (projectedMessages.length === 0) return undefined
@@ -219,10 +213,20 @@ export function createClaudeExchangeProjector(opts) {
       if (exchangeAttrs) projection.attributes = exchangeAttrs
       if (input.ts_start) projection.conversation_started_at = input.ts_start
 
+      // @ref LLP 0023#decision — subagent exchanges identify themselves
+      // on the wire; sidechain provenance must not depend on winning the
+      // transcript race, so it is stamped from the header here and only
+      // refined (never cleared) by per-message transcript matches.
+      const agentId = headerValue(headers, 'x-claude-code-agent-id')
+      if (agentId) {
+        projection.is_sidechain = true
+        projection.agent_id = agentId
+      }
+
       // Claude-side identity provenance. Per the phase 2 spec, only
       // the missing-log case stamps an explicit marker — when the
       // transcript supplied uuids the projection's `message_id` /
-      // `previous_message_id` already encode the native DAG and no
+      // `parent_uuid` already encode the native DAG and no
       // extra marker is needed. The gateway still stamps its own
       // `attributes.gateway.identity_source = "gateway_fallback"`
       // automatically when `message_id` is omitted, which is what
@@ -249,6 +253,224 @@ export function createClaudeExchangeProjector(opts) {
       return projection
     },
   }
+}
+
+/**
+ * Split one wire assistant message into per-block projected messages,
+ * mirroring Claude Code's one-transcript-line-per-block representation.
+ *
+ * // @ref LLP 0023#decision — alignment: the lines of one API message
+ * // share `message.id` in block order, so when the counts agree each
+ * // block takes its positional line (type-checked); otherwise each
+ * // block falls back to its own content key. Cardinality is recorded
+ * // nowhere in the transcript, so a partially-written turn degrades
+ * // per block instead of poisoning the whole message.
+ *
+ * @param {{
+ *   message: Record<string, unknown>,
+ *   apiMessageId: string | undefined,
+ *   transcriptIndex: ReturnType<typeof indexTranscriptEntries>,
+ *   matchEnabled: boolean,
+ * }} args
+ * @returns {AiGatewayProjectedMessage[]}
+ */
+function projectAssistantMessage(args) {
+  const { message, apiMessageId, transcriptIndex, matchEnabled } = args
+  const content = message.content
+  const blocks = Array.isArray(content) ? content : undefined
+  const stopReason = typeof message.stop_reason === 'string' ? message.stop_reason : undefined
+  const messageAttrs = anthropicMessageAttributes(message)
+  const unitCount = blocks ? blocks.length : 1
+  const lines = matchEnabled && apiMessageId
+    ? transcriptIndex.byMessageId.get(apiMessageId) ?? []
+    : []
+
+  /** @type {AiGatewayProjectedMessage[]} */
+  const out = []
+  for (let i = 0; i < unitCount; i++) {
+    const unitContent = blocks ? [blocks[i]] : content
+    /** @type {AiGatewayProjectedMessage} */
+    const projected = { role: 'assistant', content: /** @type {any} */ (unitContent) }
+    /** @type {TranscriptEntry | undefined} */
+    let match
+    if (lines.length === unitCount) {
+      const block = blocks?.[i]
+      const wireType = isPlainObject(block) ? stringValue(block.type) ?? 'text' : 'text'
+      if (entryBlockType(lines[i]) === wireType) match = lines[i]
+    }
+    if (!match && matchEnabled) {
+      match = findTranscriptMatch(transcriptIndex, { role: 'assistant', content: unitContent })
+    }
+    applyTranscriptMatch(projected, match)
+    if (messageAttrs) projected.attributes = messageAttrs
+    if (stopReason && i === unitCount - 1) {
+      // The gateway core reads `stop_reason` off the projected message;
+      // on a split turn it rides the last block's message so
+      // `status.finish_reason` lands exactly once per API message.
+      projected.stop_reason = stopReason
+    }
+    out.push(projected)
+  }
+  return out
+}
+
+/**
+ * Project one wire user message into the transcript's units.
+ *
+ * // @ref LLP 0023#decision — tool_results split one message per
+ * // block (the transcript writes one line per result; `tool_use_id`
+ * // is the join key). Prompt-style messages stay whole, matched with
+ * // a wire-injected-reminder-stripped retry; on that match the
+ * // projected content is the TRANSCRIPT's (else live `uuid#0` — a
+ * // reminder — would collide with backfill `uuid#0` — the prompt),
+ * // and the injected blocks become a separate `wire_only` message.
+ *
+ * @param {{
+ *   message: Record<string, unknown>,
+ *   transcriptIndex: ReturnType<typeof indexTranscriptEntries>,
+ *   matchEnabled: boolean,
+ * }} args
+ * @returns {AiGatewayProjectedMessage[]}
+ */
+function projectUserMessage(args) {
+  const { message, transcriptIndex, matchEnabled } = args
+  const content = message.content
+  const blocks = Array.isArray(content) ? content : undefined
+  const messageAttrs = anthropicMessageAttributes(message)
+
+  /** @type {AiGatewayProjectedMessage[]} */
+  const out = []
+  const toolResults = blocks
+    ? blocks.filter((b) => isPlainObject(b) && b.type === 'tool_result')
+    : []
+  if (blocks && toolResults.length > 0) {
+    for (const block of toolResults) {
+      /** @type {AiGatewayProjectedMessage} */
+      const projected = { role: 'user', content: /** @type {any} */ ([block]) }
+      const toolUseId = isPlainObject(block) ? stringValue(block.tool_use_id) : undefined
+      let match = matchEnabled && toolUseId
+        ? transcriptIndex.byToolUseId.get(toolUseId)
+        : undefined
+      if (!match && matchEnabled) {
+        match = findTranscriptMatch(transcriptIndex, { role: 'user', content: [block] })
+      }
+      applyTranscriptMatch(projected, match)
+      if (messageAttrs) projected.attributes = messageAttrs
+      out.push(projected)
+    }
+    const rest = blocks.filter((b) => !(isPlainObject(b) && b.type === 'tool_result'))
+    if (rest.length > 0) out.push(wireOnlyMessage('user', rest, messageAttrs))
+    return out
+  }
+
+  let match = matchEnabled
+    ? findTranscriptMatch(transcriptIndex, { role: 'user', content })
+    : undefined
+  if (!match && matchEnabled && blocks) {
+    const injected = blocks.filter(isInjectedReminderBlock)
+    if (injected.length > 0 && injected.length < blocks.length) {
+      const core = blocks.filter((b) => !isInjectedReminderBlock(b))
+      const coreMatch = findTranscriptMatch(transcriptIndex, { role: 'user', content: core })
+      if (coreMatch) {
+        /** @type {AiGatewayProjectedMessage} */
+        const projected = { role: 'user', content: /** @type {any} */ (coreMatch.content) }
+        applyTranscriptMatch(projected, coreMatch)
+        if (messageAttrs) projected.attributes = messageAttrs
+        out.push(projected)
+        out.push(wireOnlyMessage('user', injected, messageAttrs))
+        return out
+      }
+    }
+  }
+  /** @type {AiGatewayProjectedMessage} */
+  const projected = { role: 'user', content: /** @type {any} */ (content) }
+  applyTranscriptMatch(projected, match)
+  if (messageAttrs) projected.attributes = messageAttrs
+  out.push(projected)
+  return out
+}
+
+/**
+ * Generic single-message projection for roles the splitter has no
+ * native mapping for (anything other than user/assistant).
+ *
+ * @param {string} role
+ * @param {Record<string, unknown>} message
+ * @returns {AiGatewayProjectedMessage}
+ */
+function wholeMessageProjection(role, message) {
+  /** @type {AiGatewayProjectedMessage} */
+  const projected = { role, content: /** @type {any} */ (message.content) }
+  const messageAttrs = anthropicMessageAttributes(message)
+  if (messageAttrs) projected.attributes = messageAttrs
+  if (typeof message.stop_reason === 'string') projected.stop_reason = message.stop_reason
+  return projected
+}
+
+/**
+ * Copy a transcript line's native identity and provenance onto a
+ * projected message. No-op when there is no match — the gateway then
+ * computes fallback hash identity for the message.
+ *
+ * @param {AiGatewayProjectedMessage} projected
+ * @param {TranscriptEntry | undefined} match
+ */
+function applyTranscriptMatch(projected, match) {
+  if (!match) return
+  if (match.provider_uuid) {
+    // Native id only — `previous_message_id` is deliberately NOT
+    // supplied. The gateway fills the full prior-message chain for
+    // every row; a [parentUuid] singleton here would make enriched
+    // rows shaped differently from fallback rows. The native DAG
+    // parent still lands in `parent_uuid` below.
+    projected.message_id = match.provider_uuid
+    projected.provider_uuid = match.provider_uuid
+  }
+  if (match.parent_uuid) projected.parent_uuid = match.parent_uuid
+  if (match.logical_parent_uuid) projected.logical_parent_uuid = match.logical_parent_uuid
+  if (match.source_tool_assistant_uuid) projected.source_tool_assistant_uuid = match.source_tool_assistant_uuid
+  if (match.request_id) projected.request_id = match.request_id
+  if (match.prompt_id) projected.prompt_id = match.prompt_id
+  if (match.provider_type) projected.provider_type = match.provider_type
+  if (match.provider_subtype) projected.provider_subtype = match.provider_subtype
+  if (match.entrypoint) projected.entrypoint = match.entrypoint
+  if (match.user_type) projected.user_type = match.user_type
+  if (match.permission_mode) projected.permission_mode = match.permission_mode
+  if (match.is_sidechain !== undefined) projected.is_sidechain = match.is_sidechain
+  if (match.agent_id) projected.agent_id = match.agent_id
+  if (match.attachment_type) projected.attachment_type = match.attachment_type
+  if (match.hook_event) projected.hook_event = match.hook_event
+  if (match.is_compact_summary !== undefined) projected.is_compact_summary = match.is_compact_summary
+  if (match.compact_metadata !== undefined) projected.compact_metadata = /** @type {any} */ (match.compact_metadata)
+  if (isPlainObject(match.raw_frame)) projected.raw_frame = /** @type {any} */ (match.raw_frame)
+}
+
+/**
+ * Wire-injected blocks the harness adds at request-build time and the
+ * transcript never records as message content (`<system-reminder>`
+ * banners). They are projected as their own fallback message, marked
+ * so queries can exclude them from logical-conversation views.
+ *
+ * @param {string} role
+ * @param {unknown[]} blocksContent
+ * @param {JsonObject | undefined} messageAttrs
+ * @returns {AiGatewayProjectedMessage}
+ */
+function wireOnlyMessage(role, blocksContent, messageAttrs) {
+  /** @type {AiGatewayProjectedMessage} */
+  const projected = { role, content: /** @type {any} */ (blocksContent) }
+  projected.attributes = mergeAttrs(messageAttrs, { claude: { wire_only: true } })
+  return projected
+}
+
+/**
+ * @param {unknown} block
+ */
+function isInjectedReminderBlock(block) {
+  return isPlainObject(block) &&
+    block.type === 'text' &&
+    typeof block.text === 'string' &&
+    block.text.trimStart().startsWith('<system-reminder>')
 }
 
 /**
