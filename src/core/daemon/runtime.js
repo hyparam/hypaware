@@ -12,7 +12,9 @@ import {
 } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { loadConfigFile } from '../config/schema.js'
-import { bootKernel } from '../runtime/boot.js'
+import { createConfigControl } from '../config/apply.js'
+import { buildConfigApplyDeps } from '../config/apply_deps.js'
+import { bootKernel, resolveConfigPath } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import {
@@ -44,6 +46,16 @@ import { statusFilePath, writeStatusFile } from './status.js'
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000
 const MIN_TICK_INTERVAL_MS = 25
+
+/**
+ * Exit code a foreground daemon uses to request its own relaunch after
+ * a staged config apply or rollback (EX_TEMPFAIL — "try again"). The
+ * service managers relaunch on any exit (`KeepAlive` /
+ * `Restart=always`); foreground invokers (smoke harness, dev shells)
+ * loop on this specific code.
+ * @ref LLP 0017#staged-restart-for-config-replacement [implements] — a foreground daemon cannot relaunch itself; the invoker loops on this code
+ */
+export const DAEMON_RESTART_EXIT_CODE = 75
 
 /**
  * Boot the kernel, start every configured source, and run sink ticks
@@ -114,7 +126,7 @@ export async function runDaemon(opts = {}) {
   const sinkSnapshots = new Map()
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
-  /** @type {((reason: 'signal'|'manual') => Promise<number>) | null} */
+  /** @type {((reason: 'signal'|'manual'|'restart') => Promise<number>) | null} */
   let triggerShutdown = null
   let shutdownInFlight = false
   /** @type {((value: number) => void) | null} */
@@ -137,6 +149,37 @@ export async function runDaemon(opts = {}) {
   })
   writeStatusFile(stateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
+
+  // ----- Config apply engine (LLP 0023) -----
+  // Created before bootKernel so probation expiry is evaluated before
+  // any plugin activates: a kernel-killing-but-valid config that
+  // crashloops under the service manager may never live long enough
+  // for an in-process timer to fire.
+  const operativeConfigPath = resolveConfigPath({
+    ...(opts.configPath !== undefined ? { explicit: opts.configPath } : {}),
+    env,
+    hypHome,
+  })
+  // An apply can land while the daemon is still wiring up (the pull
+  // loop's immediate pull races the tail of runDaemon), so a restart
+  // request before triggerShutdown exists is parked, not dropped.
+  let pendingRestart = false
+  const configControl = createConfigControl({
+    stateRoot,
+    configPath: operativeConfigPath,
+    requestRestart: (reason) => {
+      fileLog.info('daemon.restart_requested', { hyp_reason: reason })
+      if (triggerShutdown) {
+        void triggerShutdown('restart')
+      } else {
+        pendingRestart = true
+      }
+    },
+  })
+  const bootEval = await configControl.evaluateAtBoot()
+  if (bootEval.action !== 'none') {
+    fileLog.warn('daemon.config_probation_boot_action', { action: bootEval.action })
+  }
 
   /**
    * Persist the status snapshot to disk and update the gauge.
@@ -173,6 +216,7 @@ export async function runDaemon(opts = {}) {
           mode: 'daemon',
           runId,
           env,
+          configControl,
         })
         /** @type {Map<string, string>} */
         const sourcePluginByName = new Map()
@@ -212,6 +256,13 @@ export async function runDaemon(opts = {}) {
     healthyAtMs = Date.now()
     status.healthyAt = new Date(healthyAtMs).toISOString()
   }
+
+  // Attach apply-time deps before any sink materializes: the central
+  // sink's pull loop may deliver a document immediately after its
+  // bootstrap, and `stage()` refuses to run without a validator. The
+  // watchdog re-arms here on every relaunch that boots mid-probation.
+  configControl.attachApplyDeps(buildConfigApplyDeps({ stateRoot }))
+  configControl.armProbationWatchdog()
 
   // ----- Materialize config-backed sinks -----
   const sinkResult = await materializeSinks(boot.runtime, boot.config, {
@@ -328,10 +379,11 @@ export async function runDaemon(opts = {}) {
   }
 
   // ----- Shutdown -----
-  /** @param {'signal'|'manual'} reason */
+  /** @param {'signal'|'manual'|'restart'} reason */
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
+    configControl.disarmProbationWatchdog()
     if (tickHandle) {
       clearInterval(tickHandle)
       tickHandle = null
@@ -366,6 +418,7 @@ export async function runDaemon(opts = {}) {
         for (const snap of status.sources) {
           snap.state = 'stopped'
         }
+        await closeAllSinks({ runtime: boot.runtime, fileLog })
       },
       { component: 'daemon' }
     ).catch((err) => {
@@ -382,7 +435,8 @@ export async function runDaemon(opts = {}) {
     if (installSignals) {
       removeSignalHandlers()
     }
-    resolveDone?.(0)
+    // @ref LLP 0017#staged-restart-for-config-replacement [implements] — the daemon exits and the service manager (or looping invoker) relaunches it
+    resolveDone?.(reason === 'restart' ? DAEMON_RESTART_EXIT_CODE : 0)
     return done
   }
   triggerShutdown = shutdown
@@ -456,6 +510,10 @@ export async function runDaemon(opts = {}) {
     process.on('SIGTERM', sigTermHandler)
     process.on('SIGINT', sigIntHandler)
     process.on('SIGHUP', sigHupHandler)
+  }
+
+  if (pendingRestart) {
+    void shutdown('restart')
   }
 
   return {
@@ -547,6 +605,23 @@ async function startConfiguredSources({ runtime, log, fileLog, sourcePluginByNam
     }
   }
   return snapshots
+}
+
+/**
+ * Close every materialized sink instance. The central plugin's config
+ * pull and identity refresh timers stop in its `close()`, so shutdown
+ * must reach it even though sinks have no started/stopped lifecycle of
+ * their own.
+ *
+ * @param {{ runtime: KernelRuntime, fileLog: ReturnType<typeof openDaemonLog> }} args
+ */
+async function closeAllSinks({ runtime, fileLog }) {
+  try {
+    await runtime.sinks.closeAll()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    fileLog.error('daemon.sink_close_failed', { message })
+  }
 }
 
 /**

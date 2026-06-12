@@ -58,10 +58,6 @@ export function validateCentralConfig(value) {
     }
   }
 
-  if (cfg.config_etag_path !== undefined && typeof cfg.config_etag_path !== 'string') {
-    return invalid('central.config_etag_path must be a string when set')
-  }
-
   return { ok: true, config: /** @type {CentralSinkConfig} */ (/** @type {unknown} */ (cfg)) }
 }
 

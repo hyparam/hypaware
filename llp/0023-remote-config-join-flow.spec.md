@@ -53,10 +53,16 @@ the LLP 0014 sink contract.
 `@hypaware/central`'s `src/sink.js` notes that refresh and config pull "live
 on their own timers when wired in" — this spec wires the config pull:
 
-- Pull **immediately on bootstrap success**, then on a steady timer (minutes;
-  304s are cheap — the server ETag is a content hash of the served revision).
-- The `proto.md` ETag/304/404/429 semantics are unchanged. The etag sidecar
-  (`config-etag.json`) behavior stands.
+- Pull **immediately on bootstrap success**, then on a steady timer
+  (`poll_interval_seconds`, default **300 s** — 304s are cheap; the server
+  ETag is a content hash of the served revision).
+- The `proto.md` ETag/304/404/429 semantics are unchanged. The running
+  config's etag persists across restarts so a relaunch short-circuits to
+  304; it is kernel-managed state read through the facade (below).
+- A pulled 200 body above **1 MiB** is dropped — enforced at both the
+  transport (before buffering completes its way into a parse) and the apply
+  engine. Wholesale-replace means an authenticated 200 goes straight into
+  memory and onto disk; the stated cap is one line of defense-in-depth.
 - **`If-None-Match` must reflect the *running* config, never a
   downloaded-but-not-yet-applied one.** The server reads this header to track
   fleet convergence (it lands in the queryable `gateways` dataset), so a
@@ -110,15 +116,23 @@ Recommended persistence idiom: **A/B slots** — write each config to its own
 path and flip an atomic pointer (symlink or one-line file) as the last step
 before exit. Same semantics as "file swap," but a crash between persist and
 restart can never leave an ambiguous operative config, and last-known-good
-is crash-safe by construction.
+is crash-safe by construction. As implemented: slot files live under
+`<state>/config-control/`, the operative config path becomes a relative
+symlink to the active slot (replaced atomically via tmp + rename), and each
+slot carries its served etag in a per-slot sidecar written before the flip —
+so the document and its etag commit on the same rename, in both directions.
 
 ### Apply engine is kernel surface
 
 The central plugin is **transport only**: pull, ETag bookkeeping, auth. It
-hands a downloaded document to a narrow kernel facade (shape TBD at
-implementation, e.g. `ctx.configControl.stage(document)`); the **kernel**
-owns validate → install pinned plugins → persist last-known-good → swap →
-restart, and the rollback bookkeeping. Recorded in
+hands a downloaded document to a narrow kernel facade —
+`ctx.configControl.stage(document, etag)`, plus `confirmPoll()` (poll
+liveness) and `runningEtag()` (for `If-None-Match`); the **kernel** owns
+validate → install pinned plugins → persist last-known-good → swap →
+restart, and the rollback bookkeeping. The facade exists only where an
+apply engine runs (the daemon); plain CLI boots leave `ctx.configControl`
+undefined and the plugin keeps its pull loop off — `hyp status` must not
+fire config polls as a side effect. Recorded in
 [LLP 0003](./0003-core-vs-plugin-surface.spec.md#core-owns).
 
 Why kernel-side: rollback state must survive the restart and pairs with the
@@ -129,14 +143,15 @@ future second management channel reuses it. Consequently
 state** ([LLP 0004](./0004-activation-and-paths.spec.md#state-directories)),
 not the central plugin's state dir.
 
-The `config-etag.json` sidecar must transition **atomically with the
-operative config, in both directions**: it carries the etag of the *running*
-config, so apply moves it forward and rollback reverts it (otherwise a
-rolled-back gateway would present a converged etag while running
-last-known-good). Since every sidecar change coincides with an apply or
-rollback, the facade takes the etag alongside the document and the **apply
-engine stages the sidecar with the swap**; the central plugin only reads it
-(at boot, to populate `If-None-Match`).
+The etag sidecar must transition **atomically with the operative config, in
+both directions**: it carries the etag of the *running* config, so apply
+moves it forward and rollback reverts it (otherwise a rolled-back gateway
+would present a converged etag while running last-known-good). Since every
+sidecar change coincides with an apply or rollback, the facade takes the
+etag alongside the document and the **apply engine stages the sidecar with
+the swap** (realized as the per-slot etag files above — flipping the
+pointer flips the etag); the central plugin only reads it, through
+`configControl.runningEtag()`, to populate `If-None-Match`.
 
 Identity state (`identity.json`, JWT, gateway id) is **not config** and is
 never touched by config application.
@@ -227,9 +242,14 @@ A probation-clearing poll may itself return 200 with a newer revision; that
 triggers an immediate next apply, with its own probation. This chaining is
 correct — do not serialize or suppress it.
 
-W must comfortably exceed one poll interval plus retry backoff (e.g.
-`max(3 × poll_interval_seconds, floor)` rather than a fixed constant), so a
-slow operator-chosen poll cadence cannot make every apply roll back.
+W must comfortably exceed one poll interval plus retry backoff:
+`W = max(3 × poll_interval_seconds, 120 s)` — a formula, not a fixed
+constant, so a slow operator-chosen poll cadence cannot make every apply
+roll back, and the 120 s floor leaves room for relaunch + identity refresh
++ one retry even at the fastest cadence. The interval is taken from the
+*staged* document's central sink block (that is the sink that will, or
+won't, confirm the poll); the kernel falls back to the 300 s default when
+the block doesn't set one.
 
 Rollback from the **first** applied config lands back on the seed config —
 fine by construction: seed-config mode is a legitimate polling steady state,
@@ -269,17 +289,18 @@ mint-requires-config, serving, convergence columns) and ships dark.
 Nothing server-side is blocked on the client; nothing client-side is blocked
 on the server except end-to-end testing.
 
+## Settled at implementation (2026-06-12)
+
+Three knobs the draft left open were fixed when the client landed:
+
+- **Poll cadence default: 300 s** (5 minutes). Validated range stays
+  5–3600 s.
+- **Maximum config document size: 1 MiB**, enforced at both the transport
+  and the apply engine.
+- **Probation floor: 120 s** (`W = max(3 × poll_interval_seconds, 120 s)`).
+
 ## Open questions
 
-- Exact poll cadence default (the spec says "minutes"; pick a number when
-  wiring the timer).
-- Maximum accepted config document size. Wholesale-replace means an
-  authenticated 200 of arbitrary size goes straight into memory and onto
-  disk; a stated cap is one line of defense-in-depth. Pick a generous bound
-  when wiring the pull.
-- Exact probation window formula (the *signal* and the
-  `max(3 × poll_interval_seconds, floor)` shape are decided; pick the floor
-  when wiring).
 - **Strict version pins for bundled plugins vs rolling kernel upgrades.**
   The strict check (above) means a kernel upgrade that bumps bundled plugin
   versions de-converges the fleet until the central config's pins are

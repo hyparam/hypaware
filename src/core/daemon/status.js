@@ -6,6 +6,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { readConfigControlStatus } from '../config/apply.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -32,7 +33,7 @@ import {
 
 /**
  * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
+ * @import { ConfigControlStatus, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  * @import { ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
@@ -404,6 +405,21 @@ export async function collectHypAwareStatus(opts = {}) {
   const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
   const cache = await measureCacheStats(cacheRoot)
 
+  // ----- remote config apply state (LLP 0023) -----
+  /** @type {ConfigControlStatus | null} */
+  let remoteConfig = null
+  try {
+    remoteConfig = readConfigControlStatus({ stateRoot, configPath })
+  } catch { /* best-effort probe */ }
+  if (remoteConfig?.lastRollback) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'remote_config_rolled_back',
+      message: `remote config ${remoteConfig.lastRollback.etag} rolled back at ${remoteConfig.lastRollback.at} (${remoteConfig.lastRollback.reason})`,
+      repair: ['fix the central config revision; the gateway re-applies when the served etag changes'],
+    })
+  }
+
   // ----- recent errors -----
   const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
   if (recentErrorCount > 0) {
@@ -441,6 +457,7 @@ export async function collectHypAwareStatus(opts = {}) {
     recentErrorCount,
     diagnostics,
     overall,
+    remoteConfig,
   }
 }
 

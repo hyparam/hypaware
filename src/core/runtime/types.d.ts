@@ -1,5 +1,6 @@
 import type {
   ActivePlugin,
+  ConfigControlFacade,
   HypAwareV2Config,
   PluginLockEntry,
   PluginName,
@@ -47,6 +48,8 @@ export interface BootKernelOptions {
   env?: NodeJS.ProcessEnv
   /** Override OS temp root (tests). */
   tmpRoot?: string
+  /** Apply-engine facade to expose on activation contexts (daemon only). */
+  configControl?: ConfigControlFacade
 }
 
 export interface BootKernelResult {

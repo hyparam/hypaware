@@ -102,8 +102,10 @@ artifact content hash**; the gateway verifies the artifact hash on
 install and treats a mismatch as an apply failure (LLP 0023).
 
 `ETag: <hex>` accompanies every 200 response. Clients persist the etag
-in a sidecar (`<plugin.stateDir>/config-etag.json`) so a restart
-short-circuits to 304 instead of re-pulling and re-validating.
+of the *running* config in kernel-managed state (it transitions
+atomically with the operative config on apply and rollback — LLP 0023)
+so a restart short-circuits to 304 instead of re-pulling and
+re-validating.
 
 Response 304: no body. The gateway keeps its current config.
 

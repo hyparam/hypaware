@@ -48,7 +48,9 @@ Consequences:
   (`KeepAlive` / `Restart=always`). This is now a requirement of the
   installers, not a nicety.
 - A foreground (non-service) daemon cannot relaunch itself: it exits with a
-  distinct restart exit code and the invoker (smoke harness, dev shell) loops.
+  distinct restart exit code — **75** (`EX_TEMPFAIL`,
+  `DAEMON_RESTART_EXIT_CODE`) — and the invoker (smoke harness, dev shell)
+  loops on that code.
 - Same-shape reload ([LLP 0004](./0004-activation-and-paths.spec.md#same-shape-reload))
   remains the path for in-place source config changes; there are exactly two
   paths, distinguished by whether the plugin set / plugin code changed.
