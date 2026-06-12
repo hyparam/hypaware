@@ -109,11 +109,13 @@ export function createConfigPullLoop(args) {
   async function pollOnce() {
     const controller = new AbortController()
     activeController = controller
+    // Not unref'd (matching the loop's no-unref policy): the deadline
+    // must be able to fire while a wedged poll is the only live
+    // handle, and it is cleared as soon as the poll settles.
     const deadline = setTimeout(
       () => controller.abort(new Error(`config poll exceeded ${requestTimeoutSeconds}s`)),
       requestTimeoutSeconds * 1000
     )
-    if (typeof deadline.unref === 'function') deadline.unref()
     let nextDelay = pollIntervalSeconds
     try {
       const outcome = await pull(controller.signal)
@@ -312,10 +314,12 @@ export function createConfigPullLoop(args) {
         timer = null
       }
       if (inFlight) {
+        // Not unref'd: against a fetch wedged on the last live handle,
+        // an unref'd grace timer would let the event loop drain before
+        // it ever fired, leaving stop() hanging on the poll forever.
         const grace = setTimeout(() => {
           activeController?.abort(new Error('config pull loop stopped'))
         }, stopGraceSeconds * 1000)
-        if (typeof grace.unref === 'function') grace.unref()
         try {
           await inFlight
         } finally {
