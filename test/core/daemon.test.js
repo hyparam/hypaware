@@ -196,7 +196,9 @@ test('installers default to relaunch-on-exit (staged restart requirement, LLP 00
 test('the staged-restart exit code is distinct from success and error exits', async () => {
   const { DAEMON_RESTART_EXIT_CODE } = await import('../../src/core/daemon/runtime.js')
   assert.equal(typeof DAEMON_RESTART_EXIT_CODE, 'number')
-  assert.ok(DAEMON_RESTART_EXIT_CODE !== 0 && DAEMON_RESTART_EXIT_CODE !== 1 && DAEMON_RESTART_EXIT_CODE !== 2)
+  /** @type {number} */
+  const code = DAEMON_RESTART_EXIT_CODE
+  assert.ok(code !== 0 && code !== 1 && code !== 2)
 })
 
 test('runDaemon reload refreshes plugin config before source.reload', async () => {

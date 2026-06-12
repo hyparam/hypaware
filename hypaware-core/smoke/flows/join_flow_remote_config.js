@@ -12,6 +12,10 @@ import { DAEMON_RESTART_EXIT_CODE, runDaemon } from '../../../src/core/daemon/ru
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
+ * @import { AddressInfo } from 'node:net'
+ */
+
+/**
  * Join-flow smoke (LLP 0023): drives the full remote-config lifecycle
  * against a stub central server —
  *
@@ -327,7 +331,7 @@ async function startStubCentralServer() {
   })
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
-  const address = /** @type {import('node:net').AddressInfo} */ (server.address())
+  const address = /** @type {AddressInfo} */ (server.address())
 
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,

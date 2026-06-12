@@ -609,9 +609,9 @@ async function startConfiguredSources({ runtime, log, fileLog, sourcePluginByNam
 
 /**
  * Close every materialized sink instance. The central plugin's config
- * pull and identity refresh timers stop in its `close()`, so shutdown
- * must reach it even though sinks have no started/stopped lifecycle of
- * their own.
+ * pull loop stops in its `close()` (identity refresh is lazy and has
+ * no timer), so shutdown must reach it even though sinks have no
+ * started/stopped lifecycle of their own.
  *
  * @param {{ runtime: KernelRuntime, fileLog: ReturnType<typeof openDaemonLog> }} args
  */

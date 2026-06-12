@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import {
   MAX_CONFIG_DOCUMENT_BYTES,
   createConfigPullLoop,
+  parseRetryAfter,
 } from '../../hypaware-core/plugins-workspace/central/src/config_client.js'
 
 function makeLog() {
@@ -42,7 +43,12 @@ function makeControl(opts = {}) {
   }
 }
 
-/** @param {Array<{ status: number, headers?: Record<string, string>, body?: string }>} responses */
+/**
+ * Real `Response` objects so the transport path under test (streamed
+ * body reads, abort signals) matches what `fetch` actually returns.
+ *
+ * @param {Array<{ status: number, headers?: Record<string, string>, body?: string }>} responses
+ */
 function makeFetch(responses) {
   /** @type {Array<{ url: string, headers: Record<string, string> }>} */
   const requests = []
@@ -53,13 +59,9 @@ function makeFetch(responses) {
       headers: /** @type {Record<string, string>} */ (init?.headers ?? {}),
     })
     const next = responses.shift() ?? { status: 500 }
-    const headers = new Headers(next.headers ?? {})
-    return /** @type {Response} */ (/** @type {unknown} */ ({
-      status: next.status,
-      ok: next.status >= 200 && next.status < 300,
-      headers,
-      async text() { return next.body ?? '' },
-    }))
+    // Response forbids a body on null-body statuses (204/304).
+    const body = next.status === 204 || next.status === 304 ? null : next.body ?? null
+    return new Response(body, { status: next.status, headers: next.headers ?? {} })
   }
   return { fetchFn, requests }
 }
@@ -230,4 +232,139 @@ test('transport errors back off and keep the loop alive', async () => {
   await loop.stop()
   assert.equal(calls, 1)
   assert.ok(log.rows.some((r) => r.message === 'central.config.poll_failed'))
+})
+
+test('an oversized Content-Length is rejected without reading the body', async () => {
+  const control = makeControl()
+  /** @type {typeof fetch} */
+  const fetchFn = async () => {
+    // A stream that never produces and never closes: only the
+    // Content-Length pre-reject can finish this poll promptly — the
+    // streaming counter would wait on it until the deadline.
+    const stream = new ReadableStream({ pull() {} })
+    const response = new Response(stream, { status: 200, headers: { etag: 'rev-huge' } })
+    response.headers.set('content-length', String(MAX_CONFIG_DOCUMENT_BYTES + 1))
+    return response
+  }
+  const { loop, log } = makeLoop({ configControl: control, fetchFn, requestTimeoutSeconds: 600 })
+  loop.start()
+  await loop.stop()
+  assert.deepEqual(control.staged, [])
+  const row = log.rows.find((r) => r.fields.error_kind === 'config_document_too_large')
+  assert.ok(row, 'expected the Content-Length pre-reject to fire')
+  // body_bytes reports the declared length — the streaming path could
+  // never have observed this number from an empty stream.
+  assert.equal(row?.fields.body_bytes, MAX_CONFIG_DOCUMENT_BYTES + 1)
+})
+
+test('a chunked oversized body is cancelled at the cap, not buffered whole', async () => {
+  const control = makeControl()
+  const chunk = new TextEncoder().encode('x'.repeat(64 * 1024))
+  let chunksServed = 0
+  /** @type {typeof fetch} */
+  const fetchFn = async () => {
+    // Endless chunked stream with no Content-Length: only the byte
+    // counter can stop this one.
+    const stream = new ReadableStream({
+      pull(controller) {
+        chunksServed += 1
+        controller.enqueue(chunk)
+      },
+    })
+    return new Response(stream, { status: 200, headers: { etag: 'rev-endless' } })
+  }
+  const { loop, log } = makeLoop({ configControl: control, fetchFn })
+  loop.start()
+  await loop.stop()
+  assert.deepEqual(control.staged, [])
+  assert.ok(log.rows.some((r) => r.fields.error_kind === 'config_document_too_large'))
+  // Reads stop within one chunk of the cap instead of draining forever.
+  assert.ok(
+    chunksServed <= MAX_CONFIG_DOCUMENT_BYTES / chunk.byteLength + 2,
+    `expected the read to stop at the cap, served ${chunksServed} chunks`
+  )
+})
+
+test('stop() aborts a poll stuck on a never-resolving fetch after the drain grace', async () => {
+  const control = makeControl()
+  /** @type {typeof fetch} */
+  const fetchFn = () => new Promise(() => {})
+  // Long request timeout: the stop-grace abort, not the deadline, is
+  // what must unblock shutdown here.
+  const { loop } = makeLoop({
+    configControl: control,
+    fetchFn,
+    requestTimeoutSeconds: 600,
+    stopGraceSeconds: 0.02,
+  })
+  loop.start()
+  const before = Date.now()
+  await loop.stop()
+  assert.ok(Date.now() - before < 5000, 'stop() must not wait out the request timeout')
+  assert.deepEqual(control.staged, [])
+})
+
+test('the request deadline aborts a stalled poll and the loop stays alive', async () => {
+  const control = makeControl()
+  let aborted = false
+  /** @type {typeof fetch} */
+  const fetchFn = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true
+        reject(init.signal?.reason ?? new Error('aborted'))
+      })
+    })
+  const { loop, log } = makeLoop({
+    configControl: control,
+    fetchFn,
+    requestTimeoutSeconds: 0.02,
+  })
+  loop.start()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await loop.stop()
+  assert.equal(aborted, true)
+  const row = log.rows.find((r) => r.fields.error_kind === 'config_poll_error')
+  assert.ok(row, 'expected the timed-out poll to log a failure')
+  assert.match(String(row?.fields.message), /exceeded/)
+})
+
+test('429 with Retry-After schedules from the header without confirming the poll', async () => {
+  const control = makeControl()
+  const { fetchFn } = makeFetch([{ status: 429, headers: { 'retry-after': '7' } }])
+  const { loop, log } = makeLoop({ configControl: control, fetchFn })
+  loop.start()
+  await loop.stop()
+  assert.equal(control.confirms, 0)
+  assert.deepEqual(control.staged, [])
+  const row = log.rows.find((r) => r.fields.error_kind === 'config_poll_throttled')
+  assert.ok(row)
+  assert.equal(row?.fields.http_status, 429)
+  assert.equal(row?.fields.retry_after_seconds, 7)
+})
+
+test('503 with a garbage Retry-After falls back to the backoff ladder', async () => {
+  const control = makeControl()
+  const { fetchFn } = makeFetch([{ status: 503, headers: { 'retry-after': 'soonish' } }])
+  const { loop, log } = makeLoop({ configControl: control, fetchFn })
+  loop.start()
+  await loop.stop()
+  assert.equal(control.confirms, 0)
+  const row = log.rows.find((r) => r.fields.error_kind === 'config_poll_throttled')
+  assert.ok(row)
+  assert.equal(row?.fields.http_status, 503)
+  assert.equal('retry_after_seconds' in (row?.fields ?? {}), false)
+})
+
+test('parseRetryAfter: delta-seconds, HTTP-date, and garbage', () => {
+  assert.equal(parseRetryAfter('7'), 7)
+  assert.equal(parseRetryAfter('0'), 0)
+  // An HTTP-date resolves to a non-negative whole-second delay.
+  const future = parseRetryAfter(new Date(Date.now() + 30_000).toUTCString())
+  assert.ok(typeof future === 'number' && future >= 28 && future <= 31, `got ${future}`)
+  // A past date clamps to zero rather than going negative.
+  assert.equal(parseRetryAfter(new Date(Date.now() - 60_000).toUTCString()), 0)
+  assert.equal(parseRetryAfter('soonish'), undefined)
+  assert.equal(parseRetryAfter(''), undefined)
+  assert.equal(parseRetryAfter(null), undefined)
 })

@@ -60,9 +60,17 @@ on their own timers when wired in" — this spec wires the config pull:
   config's etag persists across restarts so a relaunch short-circuits to
   304; it is kernel-managed state read through the facade (below).
 - A pulled 200 body above **1 MiB** is dropped — enforced at both the
-  transport (before buffering completes its way into a parse) and the apply
-  engine. Wholesale-replace means an authenticated 200 goes straight into
-  memory and onto disk; the stated cap is one line of defense-in-depth.
+  transport and the apply engine. The transport check is a genuine memory
+  bound, not a post-hoc one: an oversized `Content-Length` is rejected
+  without reading, and a chunked body is streamed through a byte counter
+  that cancels the moment it crosses the cap. Wholesale-replace means an
+  authenticated 200 goes straight into memory and onto disk; the stated cap
+  is one line of defense-in-depth.
+- Every poll runs under its own abort controller with a **hard request
+  deadline (30 s)** covering the request and the body read, and the loop's
+  `stop()` aborts an in-flight poll after a short drain grace (1 s) — a
+  stalled config GET must not be able to wedge daemon shutdown or a staged
+  restart behind it.
 - **`If-None-Match` must reflect the *running* config, never a
   downloaded-but-not-yet-applied one.** The server reads this header to track
   fleet convergence (it lands in the queryable `gateways` dataset), so a
@@ -128,8 +136,8 @@ The central plugin is **transport only**: pull, ETag bookkeeping, auth. It
 hands a downloaded document to a narrow kernel facade —
 `ctx.configControl.stage(document, etag)`, plus `confirmPoll()` (poll
 liveness) and `runningEtag()` (for `If-None-Match`); the **kernel** owns
-validate → install pinned plugins → persist last-known-good → swap →
-restart, and the rollback bookkeeping. The facade exists only where an
+shape-check → install pinned plugins → validate → persist last-known-good →
+swap → restart, and the rollback bookkeeping. The facade exists only where an
 apply engine runs (the daemon); plain CLI boots leave `ctx.configControl`
 undefined and the plugin keeps its pull loop off — `hyp status` must not
 fire config polls as a side effect. Recorded in
@@ -168,6 +176,17 @@ hash** (the server's save pipeline guarantees this); the client must verify
 the artifact hash and treat a mismatch as an apply failure (→ rollback,
 below). The config names exactly one artifact; nothing may substitute code
 after authoring.
+
+Install runs **before full validation**: catalog-backed validation can only
+know a plugin once it is installed, so validating first would reject the
+very config that names a not-yet-installed plugin. The apply engine instead
+shape-checks the document (including the pin fields' types), installs the
+pinned plugins it names, and only then runs full validation against the
+freshly rebuilt catalog. Acting on a not-yet-fully-validated document is
+bounded by the shape gate and the hash pin — an install can only bring in
+the exact artifact the config authored — and plugin trees installed for a
+config that then fails validation stay on disk by the same rule as rollback
+(the lock records what is installed, not what is active).
 
 ### Bundled first-party plugins
 
@@ -298,6 +317,8 @@ Three knobs the draft left open were fixed when the client landed:
 - **Maximum config document size: 1 MiB**, enforced at both the transport
   and the apply engine.
 - **Probation floor: 120 s** (`W = max(3 × poll_interval_seconds, 120 s)`).
+- **Poll request deadline: 30 s** per poll (request + body read), with a
+  **1 s drain grace** before `stop()` aborts an in-flight poll.
 
 ## Open questions
 

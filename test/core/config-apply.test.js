@@ -17,7 +17,8 @@ import {
 import { parseConfigShape } from '../../src/core/config/schema.js'
 
 /**
- * @import { ConfigApplyDeps } from '../../src/core/config/types.d.ts'
+ * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigApplyDeps, PinnedInstallResult } from '../../src/core/config/types.d.ts'
  */
 
 const SEED_CONFIG = {
@@ -52,23 +53,27 @@ async function makeFixture() {
 }
 
 /**
- * @param {{ validateOk?: boolean, installResult?: import('../../src/core/config/types.d.ts').PinnedInstallResult }} [opts]
- * @returns {ConfigApplyDeps & { validateCalls: number, installCalls: number }}
+ * @param {{ validateOk?: boolean, installResult?: PinnedInstallResult }} [opts]
+ * @returns {ConfigApplyDeps & { validateCalls: number, installCalls: number, calls: string[] }}
  */
 function makeDeps(opts = {}) {
   const deps = {
     validateCalls: 0,
     installCalls: 0,
+    /** @type {string[]} */
+    calls: [],
     /** @param {unknown} _document */
     async validateDocument(_document) {
       deps.validateCalls += 1
+      deps.calls.push('validate')
       return opts.validateOk === false
         ? { ok: false, errors: [{ pointer: '/plugins/0', message: 'nope' }] }
         : { ok: true, errors: [] }
     },
-    /** @param {import('../../../collectivus-plugin-kernel-types.d.ts').PluginConfigInstance[]} _entries */
+    /** @param {PluginConfigInstance[]} _entries */
     async installPinnedPlugins(_entries) {
       deps.installCalls += 1
+      deps.calls.push('install')
       return opts.installResult ?? { ok: true }
     },
   }
@@ -180,6 +185,34 @@ test('validation failure remembers the bad etag and leaves the config untouched'
   assert.equal(status.badEtag?.etag, 'etag-bad')
   assert.equal(status.badEtag?.reason, 'validation_failed')
   assert.equal(status.runningEtag, null)
+})
+
+test('pinned plugins install before full validation, so a config can name a not-yet-installed plugin', async () => {
+  // Catalog-backed validation only knows a plugin once it is installed;
+  // install-on-config breaks if validation runs first (LLP 0023
+  // install-on-config). The shape gate runs before install instead.
+  const { stateRoot, configPath } = await makeFixture()
+  const { control } = makeControl({ stateRoot, configPath })
+  const deps = makeDeps()
+  control.attachApplyDeps(deps)
+
+  const result = await control.stage(REMOTE_CONFIG, 'etag-order')
+  assert.equal(result.ok, true)
+  assert.deepEqual(deps.calls, ['install', 'validate'])
+})
+
+test('a shape-invalid document is rejected before any install runs', async () => {
+  const { stateRoot, configPath } = await makeFixture()
+  const { control } = makeControl({ stateRoot, configPath })
+  const deps = makeDeps()
+  control.attachApplyDeps(deps)
+
+  const result = await control.stage({ version: 1 }, 'etag-shape')
+  assert.equal(result.ok, false)
+  assert.equal(!result.ok && result.errorKind, 'config_invalid')
+  assert.equal(deps.installCalls, 0)
+  const status = await control.status()
+  assert.equal(status.badEtag?.reason, 'validation_failed')
 })
 
 test('a remembered bad etag backs off re-apply until the etag changes', async () => {

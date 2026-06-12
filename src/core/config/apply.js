@@ -4,9 +4,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { parseConfigShape } from './schema.js'
 
 /**
- * @import { ConfigControlFacade, ConfigStageResult, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigApplyErrorKind, ConfigControlFacade, ConfigStageResult, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import {
  *   ConfigApplyDeps,
  *   ConfigControl,
@@ -48,9 +49,10 @@ const CONTROL_DIRNAME = 'config-control'
 const STATE_BASENAME = 'state.json'
 
 /**
- * Build the kernel config apply engine: validate → install pinned
- * plugins → persist to an A/B slot → flip the operative pointer →
- * staged restart, plus probation and last-known-good rollback.
+ * Build the kernel config apply engine: shape-check → install pinned
+ * plugins → validate against the post-install catalog → persist to an
+ * A/B slot → flip the operative pointer → staged restart, plus
+ * probation and last-known-good rollback.
  *
  * Persistence idiom: each applied config is written to its own slot
  * file under `<stateRoot>/config-control/`, with the served ETag in a
@@ -262,7 +264,7 @@ export function createConfigControl(opts) {
         status: 'ok',
       },
       async (span) => {
-        /** @param {import('../../../collectivus-plugin-kernel-types.d.ts').ConfigApplyErrorKind} errorKind @param {string} message */
+        /** @param {ConfigApplyErrorKind} errorKind @param {string} message */
         function fail(errorKind, message) {
           span.setAttribute('status', 'failed')
           span.setAttribute('error_kind', errorKind)
@@ -308,16 +310,24 @@ export function createConfigControl(opts) {
           return fail('document_too_large', `config document exceeds ${MAX_CONFIG_DOCUMENT_BYTES} bytes`)
         }
 
-        const validation = await applyDeps.validateDocument(document)
-        if (!validation.ok) {
-          const first = validation.errors[0]
+        // Shape-gate, then install, then full validation. Catalog-backed
+        // validation can only know a plugin once it is installed, so a
+        // served config naming a not-yet-installed plugin must install
+        // first — but install must not act on an arbitrary document, so
+        // the shape (including the pin fields' types) is checked before
+        // anything is fetched, and the hash pin bounds what an install
+        // can bring in.
+        // @ref LLP 0023#install-on-config-hash-pinned [implements] — shape-gate → install pinned plugins → validate against the post-install catalog
+        const shape = parseConfigShape(document)
+        if (!shape.ok) {
+          const first = shape.errors[0]
           rememberBadEtag(etag, 'validation_failed')
           return fail(
             'config_invalid',
-            first ? `${first.pointer || '<root>'}: ${first.message}` : 'config validation failed'
+            first ? `${first.pointer || '<root>'}: ${first.message}` : 'config shape invalid'
           )
         }
-        const config = /** @type {HypAwareV2Config} */ (document)
+        const config = shape.config
 
         const install = await applyDeps.installPinnedPlugins(config.plugins ?? [])
         if (!install.ok) {
@@ -330,6 +340,16 @@ export function createConfigControl(opts) {
                 : 'plugin_install_failed'
           )
           return fail(install.errorKind, install.message)
+        }
+
+        const validation = await applyDeps.validateDocument(document)
+        if (!validation.ok) {
+          const first = validation.errors[0]
+          rememberBadEtag(etag, 'validation_failed')
+          return fail(
+            'config_invalid',
+            first ? `${first.pointer || '<root>'}: ${first.message}` : 'config validation failed'
+          )
         }
 
         try {
