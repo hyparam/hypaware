@@ -1,12 +1,22 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
+
 /**
  * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { IdentityClient } from './identity_client.js'
- * @import { CentralSinkConfig, IngestSignal } from './types.d.ts'
+ * @import { CentralSinkConfig } from './types.d.ts'
  */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
+
+// A partition is streamed to the server in bounded chunks so a large
+// backlog never materializes in memory (a gateway joining with months
+// of cache would otherwise OOM serializing the whole table into one
+// NDJSON string). Flush a chunk when either bound trips; both stay far
+// under the server's default 64 MB max body.
+const MAX_CHUNK_ROWS = 5000
+const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 /**
  * Build the `forward` Sink. The sink's `exportBatch` groups the driver's
@@ -43,8 +53,6 @@ export function createForwardSink(args) {
         return { status: 'exported', partitionsExported: 0, bytesWritten: 0 }
       }
 
-      const grouped = await groupBySignal(batch.partitions, query, storage, log)
-
       let bytesWritten = 0
       let partitionsExported = 0
       /** @type {QueryPartition[]} */
@@ -52,26 +60,25 @@ export function createForwardSink(args) {
       /** @type {string | undefined} */
       let firstError
 
-      for (const group of grouped) {
-        const body = group.rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
-        const bytes = Buffer.byteLength(body, 'utf8')
+      // Each partition is forwarded independently so one transport
+      // failure retries just that partition, matching the driver's
+      // partition-granular outbox. Streaming-per-partition (rather than
+      // grouping every partition's rows up front) is what keeps memory
+      // bounded on a large backlog.
+      for (const partition of batch.partitions) {
+        const signal = signalForPartition(query, partition)
         try {
-          await postNdjson({
-            centralUrl: config.url,
-            signal: group.signal,
-            body,
-            identityClient,
-            fetchFn,
+          bytesWritten += await forwardPartition({
+            partition, signal, config, identityClient, storage, fetchFn, log,
           })
-          bytesWritten += bytes
-          partitionsExported += group.partitions.length
+          partitionsExported += 1
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           firstError = firstError ?? message
-          retry.push(...group.partitions)
+          retry.push(partition)
           log.warn('central.forward.failed', {
-            hyp_sink_signal: group.signal,
-            partitions_count: group.partitions.length,
+            hyp_sink_signal: signal,
+            hyp_dataset: partition.dataset,
             message,
           })
         }
@@ -107,43 +114,92 @@ export function createForwardSink(args) {
 }
 
 /**
- * Group partitions by signal, materializing rows from each table.
+ * The ingest signal a partition forwards under: each dataset declares
+ * its `sourceSignal`, defaulting to the dataset name.
  *
- * @param {QueryPartition[]} partitions
  * @param {QueryRegistry} query
- * @param {QueryStorageService} storage
- * @param {PluginLogger} log
- * @returns {Promise<Array<{ signal: IngestSignal | string, partitions: QueryPartition[], rows: Record<string, unknown>[] }>>}
+ * @param {QueryPartition} partition
+ * @returns {string}
  */
-async function groupBySignal(partitions, query, storage, log) {
-  /** @type {Map<string, { partitions: QueryPartition[], rows: Record<string, unknown>[] }>} */
-  const groups = new Map()
+function signalForPartition(query, partition) {
+  const dataset = query.getDataset(partition.dataset)
+  return dataset?.sourceSignal ?? partition.dataset
+}
 
-  for (const partition of partitions) {
-    const dataset = query.getDataset(partition.dataset)
-    const signal = dataset?.sourceSignal ?? partition.dataset
-    if (!groups.has(signal)) {
-      groups.set(signal, { partitions: [], rows: [] })
-    }
-    const bucket = /** @type {{ partitions: QueryPartition[], rows: Record<string, unknown>[] }} */ (groups.get(signal))
-    bucket.partitions.push(partition)
-    if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
-      log.warn('central.forward.skip_missing_partition', {
-        hyp_dataset: partition.dataset,
-      })
-      continue
-    }
-    await flushPartition(storage, partition.tablePath, 'sink_export')
-    for await (const row of storage.readRows(partition.tablePath)) {
-      bucket.rows.push(serializeRow(row))
-    }
+/**
+ * Stream one partition's rows to `/v1/ingest/{signal}` in bounded
+ * chunks, never materializing the whole table. Each chunk POSTs with a
+ * content-derived `X-Hyp-Batch-Id`: when the driver re-hands a partition
+ * after a transport failure, the unchanged prefix chunks hash to the
+ * same ids and the server (LLP 0001 idempotency ledger) drops them as
+ * 202s, so a partial-then-retried partition converges to exactly-once
+ * instead of duplicating every already-delivered row.
+ *
+ * @param {{
+ *   partition: QueryPartition,
+ *   signal: string,
+ *   config: CentralSinkConfig,
+ *   identityClient: IdentityClient,
+ *   storage: QueryStorageService,
+ *   fetchFn: typeof fetch,
+ *   log: PluginLogger,
+ * }} args
+ * @returns {Promise<number>} bytes successfully POSTed for this partition
+ */
+async function forwardPartition({ partition, signal, config, identityClient, storage, fetchFn, log }) {
+  if (!KNOWN_SIGNALS.has(signal)) {
+    throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
+  }
+  if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
+    log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
+    return 0
+  }
+  await flushPartition(storage, partition.tablePath, 'sink_export')
+
+  let bytesWritten = 0
+  /** @type {string[]} */
+  let lines = []
+  let pendingBytes = 0
+
+  const flushChunk = async () => {
+    if (lines.length === 0) return
+    const body = lines.join('\n') + '\n'
+    await postNdjson({
+      centralUrl: config.url,
+      signal,
+      body,
+      batchId: batchIdForBody(signal, body),
+      identityClient,
+      fetchFn,
+    })
+    bytesWritten += Buffer.byteLength(body, 'utf8')
+    lines = []
+    pendingBytes = 0
   }
 
-  return Array.from(groups.entries()).map(([signal, bucket]) => ({
-    signal,
-    partitions: bucket.partitions,
-    rows: bucket.rows,
-  }))
+  for await (const row of storage.readRows(partition.tablePath)) {
+    const line = JSON.stringify(serializeRow(row))
+    lines.push(line)
+    pendingBytes += line.length + 1
+    if (lines.length >= MAX_CHUNK_ROWS || pendingBytes >= MAX_CHUNK_BYTES) {
+      await flushChunk()
+    }
+  }
+  await flushChunk()
+  return bytesWritten
+}
+
+/**
+ * Deterministic idempotency key for a chunk: a hash of its exact bytes
+ * (namespaced by signal). Identical content always yields the same id,
+ * so a re-sent chunk is deduped; distinct content yields a distinct id.
+ *
+ * @param {string} signal
+ * @param {string} body
+ * @returns {string}
+ */
+function batchIdForBody(signal, body) {
+  return createHash('sha256').update(signal).update('\0').update(body).digest('hex').slice(0, 32)
 }
 
 /**
@@ -196,45 +252,43 @@ function serializeValue(value) {
 }
 
 /**
- * POST one NDJSON body to `/v1/ingest/{signal}`. Refreshes the JWT and
- * retries once on 401; throws on transport errors or non-2xx response.
+ * POST one NDJSON chunk to `/v1/ingest/{signal}`, carrying its
+ * idempotency key as `X-Hyp-Batch-Id`. Refreshes the JWT and retries
+ * once on 401 (re-sending the same body + key, so the retry stays
+ * idempotent); throws on transport errors or non-2xx response.
  *
  * @param {{
  *   centralUrl: string,
  *   signal: string,
  *   body: string,
+ *   batchId: string,
  *   identityClient: IdentityClient,
  *   fetchFn: typeof fetch,
  * }} args
  */
 async function postNdjson(args) {
-  const { centralUrl, signal, body, identityClient, fetchFn } = args
+  const { centralUrl, signal, body, batchId, identityClient, fetchFn } = args
   if (!KNOWN_SIGNALS.has(signal)) {
     throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
   }
   const url = joinUrl(centralUrl, `/v1/ingest/${signal}`)
 
-  let jwt = await identityClient.getCurrentJwt()
-  let response = await fetchFn(url, {
+  /** @param {string} jwt */
+  const send = (jwt) => fetchFn(url, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${jwt}`,
       'content-type': 'application/x-ndjson',
+      'x-hyp-batch-id': batchId,
     },
     body,
   })
 
+  let response = await send(await identityClient.getCurrentJwt())
+
   if (response.status === 401) {
     await identityClient.refresh()
-    jwt = await identityClient.getCurrentJwt()
-    response = await fetchFn(url, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        'content-type': 'application/x-ndjson',
-      },
-      body,
-    })
+    response = await send(await identityClient.getCurrentJwt())
   }
 
   if (response.status === 202 || response.ok) return

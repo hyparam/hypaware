@@ -141,6 +141,10 @@ Headers (request):
 
 - `Authorization: Bearer <jwt>`
 - `Content-Type: application/x-ndjson`
+- `X-Hyp-Batch-Id: <hash>` — idempotency key for this chunk (a hash of
+  its exact bytes). The server keeps a bounded per-gateway ledger and
+  acks a repeated key `202` without re-storing it, so a re-sent chunk is
+  deduped rather than duplicated.
 
 Response 202: batch accepted for processing. Body is empty.
 
@@ -160,10 +164,16 @@ exponential backoff capped at 5 minutes.
 
 ### Batch boundaries
 
-The kernel sink driver decides batch boundaries by cron schedule and
-partition discovery. The central plugin does not split, merge, or
-reorder partitions inside a batch — each partition's rows are
-serialized in dataset-iteration order, one JSON document per line.
+The kernel sink driver decides which partitions enter a batch (by cron
+schedule and partition discovery). Within a partition the central plugin
+streams rows in dataset-iteration order, one JSON document per line, and
+splits them into bounded chunks (a row-count and a byte budget, both far
+under the server's max body) so a large backlog never materializes in
+memory. Each chunk is an independent POST carrying its own
+`X-Hyp-Batch-Id`. Because the id is content-derived, re-sending a
+partition after a transport failure deduplicates the chunks already
+delivered (the driver retries at partition granularity), so a
+partial-then-retried partition converges to exactly-once.
 
 ### Row shape
 
