@@ -47,17 +47,12 @@ export interface CentralSinkConfig {
     persisted_path?: string
   }
   /**
-   * Override the etag sidecar path used by the config-pull loop. Defaults
-   * to `<plugin.stateDir>/config-etag.json`. The loop itself is opt-in.
+   * Poll cadence (seconds) for the config-pull loop. Default 300s
+   * (5 minutes) — 304s are cheap, and propagation latency equals this
+   * cadence (no push channel in V1). The running config's etag is
+   * kernel-managed (LLP 0025); the plugin reads it through the
+   * `configControl` facade, so there is no plugin-side sidecar path.
    */
-  config_etag_path?: string
-  /** Poll cadence (seconds) for the config-pull loop. Default 30s. */
   poll_interval_seconds?: number
 }
 
-/** Payload of the `config-changed` event emitted by `ConfigClient`. */
-export interface ConfigChangedEvent {
-  newConfig: unknown
-  etag: string
-  fetchedAt: string
-}

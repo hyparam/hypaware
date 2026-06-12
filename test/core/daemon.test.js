@@ -173,6 +173,34 @@ test('renderDaemonInstall renders a deterministic LaunchAgent dry-run payload', 
   ])
 })
 
+test('installers default to relaunch-on-exit (staged restart requirement, LLP 0017)', () => {
+  // Defaults — no keepAlive/restart override. The service manager MUST
+  // relaunch the daemon after a staged config-apply exit.
+  const launchd = renderDaemonInstall({
+    platform: 'darwin',
+    homeDir: '/Users/hyp',
+    binPath: '/opt/hypaware/bin/hypaware.js',
+    nodePath: '/usr/local/bin/node',
+  })
+  assert.match(launchd.content, /<key>KeepAlive<\/key>\n  <true\/>/)
+
+  const systemd = renderDaemonInstall({
+    platform: 'linux',
+    homeDir: '/home/hyp',
+    binPath: '/opt/hypaware/bin/hypaware.js',
+    nodePath: '/usr/local/bin/node',
+  })
+  assert.match(systemd.content, /^Restart=always$/m)
+})
+
+test('the staged-restart exit code is distinct from success and error exits', async () => {
+  const { DAEMON_RESTART_EXIT_CODE } = await import('../../src/core/daemon/runtime.js')
+  assert.equal(typeof DAEMON_RESTART_EXIT_CODE, 'number')
+  /** @type {number} */
+  const code = DAEMON_RESTART_EXIT_CODE
+  assert.ok(code !== 0 && code !== 1 && code !== 2)
+})
+
 test('runDaemon reload refreshes plugin config before source.reload', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-reload-config-'))
   let handle

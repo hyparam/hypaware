@@ -4,6 +4,7 @@ import type {
   BackfillMaterializerRegistry,
   BackfillRegistry,
   CommandRegistry,
+  ConfigControlFacade,
   ConfigRegistry,
   InitPresetRegistry,
   JsonObject,
@@ -43,6 +44,12 @@ export interface KernelRuntime {
   backfills: BackfillRegistry
   backfillMaterializers: BackfillMaterializerRegistry
   activationContexts: Map<PluginName, PluginActivationContext>
+  /**
+   * Plugin-facing facade of the daemon's config apply engine. Set only
+   * when the host process runs one (daemon mode); CLI boots leave it
+   * undefined so transport plugins skip their pull loops.
+   */
+  configControl?: ConfigControlFacade
 }
 
 export interface CreateKernelRuntimeArgs {
@@ -55,6 +62,7 @@ export interface CreateKernelRuntimeArgs {
   backfillMaterializerRegistry?: BackfillMaterializerRegistry
   storage?: ExtendedQueryStorageService
   cacheRoot?: string
+  configControl?: ConfigControlFacade
 }
 
 export interface CreateActivationContextArgs {

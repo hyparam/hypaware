@@ -77,7 +77,11 @@ export async function bootKernel(opts = {}) {
     },
     async (span) => {
       const commandRegistry = opts.commandRegistry ?? createCommandRegistry()
-      const runtime = createKernelRuntime({ commandRegistry, cacheRoot })
+      const runtime = createKernelRuntime({
+        commandRegistry,
+        cacheRoot,
+        ...(opts.configControl ? { configControl: opts.configControl } : {}),
+      })
 
       const discovered = await discoverBundledPlugins({ workspaceDir: opts.workspaceDir })
       span.setAttribute('bundled_available', discovered.loaded.length)
@@ -250,10 +254,13 @@ export async function bootKernel(opts = {}) {
  *  2. `env.HYP_CONFIG`
  *  3. `<HYP_HOME>/hypaware-config.json`
  *
+ * Exported so the daemon can resolve the same operative path for the
+ * config apply engine before `bootKernel` runs.
+ *
  * @param {{ explicit?: string, env: NodeJS.ProcessEnv, hypHome: string }} args
  * @returns {string}
  */
-function resolveConfigPath({ explicit, env, hypHome }) {
+export function resolveConfigPath({ explicit, env, hypHome }) {
   if (explicit) return path.resolve(explicit)
   if (env.HYP_CONFIG) return path.resolve(env.HYP_CONFIG)
   return defaultConfigPath(hypHome)
