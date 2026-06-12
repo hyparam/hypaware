@@ -260,10 +260,14 @@ export async function run({ harness, expect }) {
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_activated),
     (rows) => Array.isArray(rows) && rows.some((n) => n === 6)
   )
+  // Skipped = allowlist plugins this flow's config does not name (the
+  // excluded-from-default set never reaches the skip loop). Bumps
+  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST — most
+  // recently @hypaware/context-graph (3 -> 4).
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=3',
+    'traces: at least one config-profile boot reports plugins_skipped=4',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 3)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 4)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
