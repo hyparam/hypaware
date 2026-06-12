@@ -1,7 +1,7 @@
 # LLP 0023: Remote Config and Join Flow
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Active
 **Systems:** Config, Sinks, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-06-12
