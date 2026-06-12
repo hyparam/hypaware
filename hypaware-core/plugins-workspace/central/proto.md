@@ -30,8 +30,9 @@ atomic tmp+rename).
 ### POST `/v1/identity/bootstrap`
 
 Exchange an operator-issued bootstrap token for a long-lived JWT.
-Bootstrap tokens are single-use; a successful bootstrap response also
-invalidates the bootstrap token server-side.
+Bootstrap tokens are **policy tokens** (server LLP 0008): multi-use, so
+one token can be deployed fleet-wide via MDM, and every token references
+a config at mint (see "Config pull" below).
 
 Request:
 
@@ -78,6 +79,12 @@ Headers (request):
 - `Authorization: Bearer <jwt>`
 - `If-None-Match: <etag>` (optional)
 
+`If-None-Match` reflects the **running** config, never a
+downloaded-but-not-yet-applied one. The server reads this header to
+track fleet convergence, so a gateway mid-install/mid-apply keeps
+presenting its old etag until the new config has taken effect
+(LLP 0022).
+
 Response 200:
 
 ```json
@@ -89,15 +96,21 @@ Response 200:
 }
 ```
 
+The body is a full HypAware v2 config and replaces the gateway's
+operative config wholesale. Plugin entries are pinned by **version +
+artifact content hash**; the gateway verifies the artifact hash on
+install and treats a mismatch as an apply failure (LLP 0022).
+
 `ETag: <hex>` accompanies every 200 response. Clients persist the etag
 in a sidecar (`<plugin.stateDir>/config-etag.json`) so a restart
 short-circuits to 304 instead of re-pulling and re-validating.
 
 Response 304: no body. The gateway keeps its current config.
 
-Response 404: the operator has not registered a config for this
-gateway. Gateways back off to 5 minutes and log once until the state
-clears.
+Response 404: legacy-only branch — every token now references a config
+at mint (server LLP 0009), so gateways enrolled under that flow always
+resolve. Kept for conformance against older servers: back off to
+5 minutes and log once until the state clears.
 
 Response 401: see "Refresh window" above.
 

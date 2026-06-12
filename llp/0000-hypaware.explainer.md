@@ -70,6 +70,7 @@ plugin that registers a dataset gets query and formatting for free.
 | AI gateway as a plugin | [0016](./0016-ai-gateway.decision.md) | Decision |
 | Daemon runtime & installers | [0017](./0017-daemon-runtime.decision.md) | Decision |
 | Observability & self-instrumentation | [0021](./0021-observability.spec.md) | Spec |
+| Remote config & join flow | [0022](./0022-remote-config-join-flow.spec.md) | Spec |
 
 ## Where to start
 

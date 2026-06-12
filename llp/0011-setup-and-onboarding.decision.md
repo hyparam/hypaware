@@ -55,3 +55,9 @@ For scripted installs (CI, fleet provisioning), `hypaware init <preset>` accepts
 named presets contributed by plugins, and `hypaware init --from-file ./team.json`
 provisions a fleet of identical installs. Presets are named after what they are
 *for*, never after an architectural role.
+
+For centrally-managed gateways, `hypaware join <url> <token>` writes a seed
+config (central plugin only) and performs the non-interactive daemon install;
+the full config arrives from the server at join. It is sugar over "write the
+config file + install the daemon", not a separate path. See
+[LLP 0022](./0022-remote-config-join-flow.spec.md#seed-config-mode).
