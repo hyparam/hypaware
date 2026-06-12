@@ -189,7 +189,7 @@ test('validation failure remembers the bad etag and leaves the config untouched'
 
 test('pinned plugins install before full validation, so a config can name a not-yet-installed plugin', async () => {
   // Catalog-backed validation only knows a plugin once it is installed;
-  // install-on-config breaks if validation runs first (LLP 0024
+  // install-on-config breaks if validation runs first (LLP 0025
   // install-on-config). The shape gate runs before install instead.
   const { stateRoot, configPath } = await makeFixture()
   const { control } = makeControl({ stateRoot, configPath })

@@ -83,7 +83,7 @@ Headers (request):
 downloaded-but-not-yet-applied one. The server reads this header to
 track fleet convergence, so a gateway mid-install/mid-apply keeps
 presenting its old etag until the new config has taken effect
-(LLP 0024).
+(LLP 0025).
 
 Response 200:
 
@@ -99,11 +99,11 @@ Response 200:
 The body is a full HypAware v2 config and replaces the gateway's
 operative config wholesale. Plugin entries are pinned by **version +
 artifact content hash**; the gateway verifies the artifact hash on
-install and treats a mismatch as an apply failure (LLP 0024).
+install and treats a mismatch as an apply failure (LLP 0025).
 
 `ETag: <hex>` accompanies every 200 response. Clients persist the etag
 of the *running* config in kernel-managed state (it transitions
-atomically with the operative config on apply and rollback — LLP 0024)
+atomically with the operative config on apply and rollback — LLP 0025)
 so a restart short-circuits to 304 instead of re-pulling and
 re-validating.
 

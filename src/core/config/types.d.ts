@@ -94,7 +94,7 @@ export interface ValidateResult {
 }
 
 // =============================================================================
-// Config apply engine (LLP 0024)
+// Config apply engine (LLP 0025)
 // =============================================================================
 
 /** Structured rollback reason recorded by the apply engine. */

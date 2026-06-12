@@ -78,7 +78,7 @@ const LEGACY_404_BACKOFF_SECONDS = 300
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
  * }} args
- * @ref LLP 0024#config-pull-loop [implements] — immediate pull on bootstrap success, then a steady plugin-internal timer
+ * @ref LLP 0025#config-pull-loop [implements] — immediate pull on bootstrap success, then a steady plugin-internal timer
  */
 export function createConfigPullLoop(args) {
   const { centralUrl, identityClient, configControl, log } = args

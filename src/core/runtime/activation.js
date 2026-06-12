@@ -123,7 +123,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     initPresets: runtime.initPresets,
     backfills: runtime.backfills,
     backfillMaterializers: runtime.backfillMaterializers,
-    // @ref LLP 0024#apply-engine-is-kernel-surface [implements] — plugins reach the apply engine only through this narrow facade; absent outside the daemon
+    // @ref LLP 0025#apply-engine-is-kernel-surface [implements] — plugins reach the apply engine only through this narrow facade; absent outside the daemon
     ...(runtime.configControl ? { configControl: runtime.configControl } : {}),
     /**
      * @template T

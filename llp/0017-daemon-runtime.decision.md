@@ -5,7 +5,7 @@
 **Systems:** Daemon
 **Author:** Phil / Claude
 **Date:** 2026-06-01
-**Related:** LLP 0002, LLP 0011, LLP 0012, LLP 0014, LLP 0024
+**Related:** LLP 0002, LLP 0011, LLP 0012, LLP 0014, LLP 0025
 
 > The primary daemon and how it is installed. Decomposed from the V1 finishing
 > plan (`finish-v1` Phases 3–4, now tombstoned) and `hypaware-design.md`.
@@ -31,7 +31,7 @@ long-lived host that drives them together.
 ## Staged restart for config replacement
 
 When the operative config is **replaced wholesale** — remote config apply
-([LLP 0024](./0024-remote-config-join-flow.spec.md#apply-semantics-staged-restart)),
+([LLP 0025](./0025-remote-config-join-flow.spec.md#apply-semantics-staged-restart)),
 or any change to the plugin set or installed plugin code — the daemon does
 **not** reload in place. It persists the new config and **exits; the service
 manager relaunches it** onto the new config.

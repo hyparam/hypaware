@@ -17,7 +17,7 @@ import { getEntry, writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
  * Pin enforcement is the apply path's core security property — nothing
- * may substitute code after the config was authored (LLP 0024
+ * may substitute code after the config was authored (LLP 0025
  * install-on-config). The apply-engine tests mock these deps away, so
  * the real decisions are exercised here against real fixtures: a
  * fixture bundled workspace, a lock-backed installed plugin, and a
@@ -82,7 +82,7 @@ test('bundled plugin: matching version pin is satisfied without an install; hash
     const deps = buildConfigApplyDeps({ stateRoot: fx.stateRoot, workspaceDir: fx.workspaceDir })
     // The artifact_hash refers to a git release artifact that
     // legitimately differs from the npm-bundled tree — a garbage hash
-    // must not fail a bundled pin (LLP 0024 bundled-first-party).
+    // must not fail a bundled pin (LLP 0025 bundled-first-party).
     const result = await deps.installPinnedPlugins([
       { name: '@hypaware/otel', version: '9.9.9', artifact_hash: 'f'.repeat(64) },
     ])

@@ -511,7 +511,7 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       oldest_partition_date: report.cache.oldestDate,
     },
     recent_error_count: report.recentErrorCount,
-    // Remote-config apply state (LLP 0024). All-null until the gateway
+    // Remote-config apply state (LLP 0025). All-null until the gateway
     // applies its first centrally-served config.
     remote_config: report.remoteConfig
       ? {
@@ -2849,7 +2849,7 @@ async function runInitFromFile(flags, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0024#seed-config-mode [implements] — join = write-seed-config + daemon install; a wrapper, not a second code path
+ * @ref LLP 0025#seed-config-mode [implements] — join = write-seed-config + daemon install; a wrapper, not a second code path
  */
 async function runJoin(argv, ctx) {
   const parsed = parseJoinArgs(argv)

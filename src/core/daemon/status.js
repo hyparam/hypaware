@@ -405,7 +405,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
   const cache = await measureCacheStats(cacheRoot)
 
-  // ----- remote config apply state (LLP 0024) -----
+  // ----- remote config apply state (LLP 0025) -----
   /** @type {ConfigControlStatus | null} */
   let remoteConfig = null
   try {

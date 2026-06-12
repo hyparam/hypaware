@@ -72,7 +72,7 @@ plugin that registers a dataset gets query and formatting for free.
 | Observability & self-instrumentation | [0021](./0021-observability.spec.md) | Spec |
 | Iceberg export partitioning | [0022](./0022-iceberg-export-partitioning.spec.md) | Spec |
 | Context-graph T0 projection | [0023](./0023-context-graph-projection.decision.md) | Decision |
-| Remote config & join flow | [0024](./0024-remote-config-join-flow.spec.md) | Spec |
+| Remote config & join flow | [0025](./0025-remote-config-join-flow.spec.md) | Spec |
 
 ## Where to start
 
