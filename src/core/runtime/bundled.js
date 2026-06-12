@@ -33,6 +33,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/format-parquet',
   '@hypaware/format-jsonl',
   '@hypaware/format-iceberg',
+  '@hypaware/context-graph',
 ]))
 
 /**

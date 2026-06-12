@@ -70,6 +70,8 @@ plugin that registers a dataset gets query and formatting for free.
 | AI gateway as a plugin | [0016](./0016-ai-gateway.decision.md) | Decision |
 | Daemon runtime & installers | [0017](./0017-daemon-runtime.decision.md) | Decision |
 | Observability & self-instrumentation | [0021](./0021-observability.spec.md) | Spec |
+| Iceberg export partitioning | [0022](./0022-iceberg-export-partitioning.spec.md) | Spec |
+| Context-graph T0 projection | [0023](./0023-context-graph-projection.decision.md) | Decision |
 
 ## Where to start
 

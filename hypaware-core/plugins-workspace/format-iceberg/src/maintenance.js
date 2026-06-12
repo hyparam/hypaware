@@ -9,10 +9,12 @@ import { fileCatalogCommit } from 'icebird/src/write/commit.js'
 import { icebergStageRewrite } from 'icebird/src/write/rewrite.js'
 
 import { SNAPSHOT_RETENTION_DEFAULTS } from '../../../../src/core/cache/maintenance.js'
+import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
 
 /**
  * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Span } from '../../../../src/core/observability/runtime.js'
  * @import { Resolver, Lister, TableMetadata } from 'icebird/src/types.js'
  * @import { ExportCompactionResult, ExportRetentionConfig, ExportMaintenanceDatasetReport, ExportMaintenanceReport } from './types.d.ts'
  */
@@ -179,7 +181,52 @@ export async function discoverExportDatasets(blobStore, prefix) {
  * }} opts
  * @returns {Promise<ExportCompactionResult>}
  */
-export async function compactExportTable({ tableUrl, resolver, lister, compactFileCount, compactMaxBytes, dryRun }) {
+export async function compactExportTable(opts) {
+  // The rewrite makes corruption-relevant decisions (verify-then-delete
+  // of staged files, generation-sized deletes); every outcome must be
+  // attributable from telemetry alone, not just the CLI report.
+  return withSpan(
+    'sink.export.compact',
+    {
+      [Attr.COMPONENT]: 'plugin',
+      [Attr.OPERATION]: 'sink.export.compact',
+      table_url: opts.tableUrl,
+      dry_run: opts.dryRun === true,
+      status: 'ok',
+    },
+    async (span) => {
+      const result = await compactExportTableInner(opts, span)
+      span.setAttribute('compacted', result.compacted)
+      span.setAttribute('data_files_before', result.dataFilesBefore)
+      span.setAttribute('data_files_after', result.dataFilesAfter)
+      if (result.reason) span.setAttribute('reason', result.reason)
+      if (result.reason === 'error' || result.reason === 'conflict') {
+        span.setAttribute('status', 'error')
+        span.setAttribute(
+          Attr.ERROR_KIND,
+          result.reason === 'conflict' ? 'iceberg_commit_conflict' : 'export_compact_failed'
+        )
+        if (result.error) span.setAttribute('error_message', result.error)
+      }
+      return result
+    },
+    { component: 'plugin' }
+  )
+}
+
+/**
+ * @param {{
+ *   tableUrl: string
+ *   resolver: Resolver
+ *   lister: Lister
+ *   compactFileCount: number
+ *   compactMaxBytes?: number
+ *   dryRun?: boolean
+ * }} opts
+ * @param {Span} span
+ * @returns {Promise<ExportCompactionResult>}
+ */
+async function compactExportTableInner({ tableUrl, resolver, lister, compactFileCount, compactMaxBytes, dryRun }, span) {
   /** @type {Awaited<ReturnType<typeof loadLatestFileCatalogMetadata>>} */
   let loaded
   try {
@@ -252,6 +299,7 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
   try {
     staged = await icebergStageRewrite({ tableUrl, metadata, resolver: trackingResolver })
   } catch (err) {
+    span.setAttribute('staged_files_reclaimed', stagedPaths.length)
     await deleteFilesBestEffort(resolver, stagedPaths)
     return {
       compacted: false,
@@ -294,6 +342,7 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
       // Reload failed: the commit outcome is unverifiable. Fall through
       // to the conservative no-delete path below.
     }
+    span.setAttribute('commit_outcome', outcome)
     if (outcome === 'landed' && postMetadata) {
       return { compacted: true, dataFilesBefore, dataFilesAfter: currentDataFileCount(postMetadata) }
     }
@@ -303,6 +352,7 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
     // still be an in-flight commit — leave the bounded orphans rather
     // than risk deleting data files a landed commit references.
     if (outcome === 'lost' && isCommitConflict(err)) {
+      span.setAttribute('staged_files_reclaimed', staged.writtenFiles.length)
       await deleteFilesBestEffort(resolver, staged.writtenFiles)
       return {
         compacted: false,
