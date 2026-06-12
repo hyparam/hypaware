@@ -1,4 +1,4 @@
-# LLP 0023: Remote Config and Join Flow
+# LLP 0024: Remote Config and Join Flow
 
 **Type:** Spec
 **Status:** Active

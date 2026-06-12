@@ -16,7 +16,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  */
 
 /**
- * Join-flow smoke (LLP 0023): drives the full remote-config lifecycle
+ * Join-flow smoke (LLP 0024): drives the full remote-config lifecycle
  * against a stub central server —
  *
  *   join (seed write) → seed boot → identity bootstrap → config pull
@@ -37,7 +37,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *    `config.probation_cleared` log rows, `join.run` span.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0023#the-join-sequence [tests] — seed → bootstrap → pull → apply → restart → operational, end to end against a stub server
+ * @ref LLP 0024#the-join-sequence [tests] — seed → bootstrap → pull → apply → restart → operational, end to end against a stub server
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

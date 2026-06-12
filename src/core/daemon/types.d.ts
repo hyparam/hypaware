@@ -141,7 +141,7 @@ export interface HypAwareStatusReport {
   diagnostics: StatusDiagnostic[]
   overall: 'healthy' | 'degraded'
   /**
-   * Remote-config apply state (LLP 0023): probation, last rollback +
+   * Remote-config apply state (LLP 0024): probation, last rollback +
    * structured reason, remembered bad etag, and the running config's
    * etag. Null only when the probe itself failed; a gateway that has
    * never applied a remote config reports all-null fields.

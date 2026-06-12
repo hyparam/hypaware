@@ -25,7 +25,7 @@ import { parseConfigShape } from './schema.js'
  * parsed and persisted wholesale, so a stated cap bounds memory and
  * disk regardless of what an authenticated server sends. 1 MiB is
  * orders of magnitude above any real config.
- * @ref LLP 0023#config-pull-loop [implements] — max accepted config document size, settled at 1 MiB
+ * @ref LLP 0024#config-pull-loop [implements] — max accepted config document size, settled at 1 MiB
  */
 export const MAX_CONFIG_DOCUMENT_BYTES = 1024 * 1024
 
@@ -41,7 +41,7 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 300
  * Probation window floor (seconds). The window is
  * `max(3 × poll_interval_seconds, floor)` so a fast poll cadence still
  * leaves room for daemon relaunch + identity refresh + one retry.
- * @ref LLP 0023#post-apply-probation [implements] — window formula with the floor settled at 120s
+ * @ref LLP 0024#post-apply-probation [implements] — window formula with the floor settled at 120s
  */
 export const PROBATION_FLOOR_SECONDS = 120
 
@@ -64,7 +64,7 @@ const STATE_BASENAME = 'state.json'
  *
  * @param {CreateConfigControlOptions} opts
  * @returns {ConfigControl}
- * @ref LLP 0023#apply-engine-is-kernel-surface [implements] — the engine is kernel-owned; plugins only see the narrow facade
+ * @ref LLP 0024#apply-engine-is-kernel-surface [implements] — the engine is kernel-owned; plugins only see the narrow facade
  */
 export function createConfigControl(opts) {
   const { stateRoot, configPath, requestRestart } = opts
@@ -135,7 +135,7 @@ export function createConfigControl(opts) {
    * @param {ProbationMarker} marker
    * @param {ConfigRollbackReason} reason
    * @param {string} [detail]
-   * @ref LLP 0023#last-known-good-rollback [implements] — flip back + remembered bad etag + structured reason, recorded client-side from day one
+   * @ref LLP 0024#last-known-good-rollback [implements] — flip back + remembered bad etag + structured reason, recorded client-side from day one
    */
   function rollback(marker, reason, detail) {
     if (marker.previous_slot) {
@@ -175,7 +175,7 @@ export function createConfigControl(opts) {
    * Expiry rolls back and requests a staged restart onto
    * last-known-good. The kernel owns this timer — a wedged central
    * sink is exactly the failure probation must catch.
-   * @ref LLP 0023#post-apply-probation [implements] — kernel-owned watchdog, independent of the central plugin functioning
+   * @ref LLP 0024#post-apply-probation [implements] — kernel-owned watchdog, independent of the central plugin functioning
    */
   function armProbationWatchdog() {
     disarmProbationWatchdog()
@@ -205,7 +205,7 @@ export function createConfigControl(opts) {
    * kernel-killing-but-valid config can crashloop under the service
    * manager faster than any in-process timer fires, so each relaunch
    * checks the marker first.
-   * @ref LLP 0023#post-apply-probation [implements] — probation expiry is evaluated at boot, before plugin activation
+   * @ref LLP 0024#post-apply-probation [implements] — probation expiry is evaluated at boot, before plugin activation
    */
   async function evaluateAtBoot() {
     const state = readState()
@@ -317,7 +317,7 @@ export function createConfigControl(opts) {
         // the shape (including the pin fields' types) is checked before
         // anything is fetched, and the hash pin bounds what an install
         // can bring in.
-        // @ref LLP 0023#install-on-config-hash-pinned [implements] — shape-gate → install pinned plugins → validate against the post-install catalog
+        // @ref LLP 0024#install-on-config-hash-pinned [implements] — shape-gate → install pinned plugins → validate against the post-install catalog
         const shape = parseConfigShape(document)
         if (!shape.ok) {
           const first = shape.errors[0]
@@ -400,7 +400,7 @@ export function createConfigControl(opts) {
    * @param {HypAwareV2Config} config
    * @param {string} serialized
    * @param {string} etag
-   * @ref LLP 0023#apply-semantics-staged-restart [implements] — A/B slots with an atomic pointer; never live-mutate; restart does the activation
+   * @ref LLP 0024#apply-semantics-staged-restart [implements] — A/B slots with an atomic pointer; never live-mutate; restart does the activation
    */
   function commit(config, serialized, etag) {
     fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
@@ -525,7 +525,7 @@ function readRunningEtag(controlDir, configPath) {
  *
  * @param {{ stateRoot: string, configPath: string }} args
  * @returns {ConfigControlStatus}
- * @ref LLP 0023#last-known-good-rollback [implements] — operator-visible probation/rollback/bad-etag state without log spelunking
+ * @ref LLP 0024#last-known-good-rollback [implements] — operator-visible probation/rollback/bad-etag state without log spelunking
  */
 export function readConfigControlStatus({ stateRoot, configPath }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)

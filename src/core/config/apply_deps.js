@@ -69,7 +69,7 @@ export function buildConfigApplyDeps(opts) {
    *
    * @param {PluginConfigInstance[]} entries
    * @returns {Promise<PinnedInstallResult>}
-   * @ref LLP 0023#install-on-config-hash-pinned [implements] — existing LLP 0007 install path; hash mismatch is an apply failure
+   * @ref LLP 0024#install-on-config-hash-pinned [implements] — existing LLP 0007 install path; hash mismatch is an apply failure
    */
   async function installPinnedPlugins(entries) {
     const { bundled, installed } = await discover()
@@ -86,7 +86,7 @@ export function buildConfigApplyDeps(opts) {
 
       const bundledVersion = bundledVersions.get(entry.name)
       if (bundledVersion !== undefined) {
-        // @ref LLP 0023#bundled-first-party-plugins [implements] — version checked strictly, artifact hash not checked for bundled plugins
+        // @ref LLP 0024#bundled-first-party-plugins [implements] — version checked strictly, artifact hash not checked for bundled plugins
         if (entry.version !== undefined && entry.version !== bundledVersion) {
           return {
             ok: false,

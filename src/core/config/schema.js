@@ -343,7 +343,7 @@ function parsePluginEntry(entry, pointer, errors) {
   if (obj.config !== undefined && !isPlainObject(obj.config)) {
     errors.push({ pointer: `${pointer}/config`, message: 'config must be an object when present' })
   }
-  // Pin fields set by centrally-served configs (LLP 0023). Optional in
+  // Pin fields set by centrally-served configs (LLP 0024). Optional in
   // hand-written configs; the apply engine enforces them when present.
   for (const key of /** @type {const} */ (['version', 'artifact_hash', 'source'])) {
     if (obj[key] !== undefined && !isNonEmptyString(obj[key])) {

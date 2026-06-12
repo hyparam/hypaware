@@ -16,7 +16,7 @@ import { discoverCachePartitions, readCursorSync, tryReadCursorSync, writeCursor
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
-import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, tableExists } from './iceberg/store.js'
+import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 
 /**
  * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.d.ts'
@@ -459,6 +459,8 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
   let existingSpec
   /** @type {ColumnSpec[] | null} */
   let schemaColumns = null
+  /** @type {{ column: string, direction: 'asc' | 'desc' }[] | undefined} */
+  let sortColumns
   try {
     const { resolver, lister } = await createLocalIcebergIO()
     const url = tableUrlForDir(oldTableDir)
@@ -466,6 +468,9 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
     const schema = currentSchema(metadata)
     if (schema) schemaColumns = columnsFromIcebergSchema(schema)
     existingSpec = currentPartitionSpec(metadata)
+    // Carry the table's declared sort order into the replacement table,
+    // or the generation swap would silently drop it.
+    sortColumns = sortColumnsFromMetadata(metadata)
   } catch {
     // Fall back to inference if metadata is unreadable
   }
@@ -483,7 +488,9 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
   let totalRows = 0
   const maxBatchBytes = cfg.compact_batch_bytes
   /** @type {AppendOptions | undefined} */
-  const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
+  const appendOpts = existingSpec || sortColumns
+    ? { partitionSpec: existingSpec, sortOrder: sortColumns }
+    : undefined
 
   for await (const row of scanRowsFromTable(oldTableDir)) {
     if (!columns) {

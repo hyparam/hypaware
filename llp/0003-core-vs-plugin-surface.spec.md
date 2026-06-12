@@ -32,7 +32,7 @@ copy-pasted into every plugin, it belongs in core.
   install pinned plugins, persist last-known-good, swap, staged restart,
   rollback bookkeeping. Exposed to plugins as a narrow context facade; the
   document's *transport* (e.g. `@hypaware/central`'s pull loop) is plugin
-  domain. See [LLP 0023](./0023-remote-config-join-flow.spec.md#apply-engine-is-kernel-surface).
+  domain. See [LLP 0024](./0024-remote-config-join-flow.spec.md#apply-engine-is-kernel-surface).
 
 ## Intrinsic, not plugin-provided
 

@@ -85,6 +85,13 @@ export interface CacheSpool {
 export interface AppendOptions {
   declaration?: CachePartitioningDeclaration
   partitionSpec?: PartitionSpec
+  /**
+   * Declarative write sort order, applied when the table is created.
+   * icebird (>= 0.8.9) sorts every appended/rewritten data file by the
+   * table's default sort order, so this makes the table self-sorting.
+   * Ignored for tables that already exist.
+   */
+  sortOrder?: readonly { column: string, direction?: 'asc' | 'desc' }[]
 }
 
 export interface MaintenanceConfig {

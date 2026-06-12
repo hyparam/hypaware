@@ -150,7 +150,7 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(stateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
-  // ----- Config apply engine (LLP 0023) -----
+  // ----- Config apply engine (LLP 0024) -----
   // Created before bootKernel so probation expiry is evaluated before
   // any plugin activates: a kernel-killing-but-valid config that
   // crashloops under the service manager may never live long enough

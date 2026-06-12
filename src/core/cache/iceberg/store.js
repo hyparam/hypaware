@@ -110,6 +110,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
       schema,
       formatVersion: 3,
       partitionSpec,
+      sortOrder: options?.sortOrder ? sortOrderForColumns(options.sortOrder, schema) : undefined,
     })
   } else if (declaration) {
     const { metadata: existing } = await loadLatestFileCatalogMetadata({
@@ -210,6 +211,62 @@ async function resolveAsyncRow(row, columns) {
     out[column] = await row.cells[column]?.()
   }
   return out
+}
+
+/**
+ * Recover the column-name sort declaration from a table's default sort
+ * order, so a rewrite into a fresh table directory (the cache's
+ * compaction generation swap) can re-declare it. Returns `undefined`
+ * when the table has no default sort order or uses non-identity
+ * transforms the declaration can't express.
+ *
+ * @param {TableMetadata} metadata
+ * @returns {{ column: string, direction: 'asc' | 'desc' }[] | undefined}
+ */
+export function sortColumnsFromMetadata(metadata) {
+  const orderId = metadata['default-sort-order-id']
+  const order = metadata['sort-orders']?.find((o) => o['order-id'] === orderId)
+  if (!order || order.fields.length === 0) return undefined
+  const schema = currentSchema(metadata)
+  if (!schema) return undefined
+  /** @type {{ column: string, direction: 'asc' | 'desc' }[]} */
+  const columns = []
+  for (const field of order.fields) {
+    if (field.transform !== 'identity') return undefined
+    const source = schema.fields.find((f) => f.id === field['source-id'])
+    if (!source) return undefined
+    columns.push({ column: source.name, direction: field.direction })
+  }
+  return columns
+}
+
+/**
+ * Translate a column-name sort declaration into the Iceberg `SortOrder`
+ * passed to `icebergCreateTable`. Sorting is by identity transform;
+ * null ordering follows the Iceberg defaults (nulls-first for asc,
+ * nulls-last for desc).
+ *
+ * (icebird does not export its `SortOrder` interface, so the type is
+ * reached through `TableMetadata['sort-orders']`.)
+ *
+ * @param {readonly { column: string, direction?: 'asc' | 'desc' }[]} spec
+ * @param {Schema} schema
+ * @returns {TableMetadata['sort-orders'][number]}
+ */
+function sortOrderForColumns(spec, schema) {
+  /** @type {TableMetadata['sort-orders'][number]['fields']} */
+  const fields = []
+  for (const { column, direction = 'asc' } of spec) {
+    const field = schema.fields.find((f) => f.name === column)
+    if (!field) throw new Error(`cache: sortOrder column '${column}' is not in the table schema`)
+    fields.push({
+      transform: 'identity',
+      'source-id': field.id,
+      direction,
+      'null-order': direction === 'asc' ? 'nulls-first' : 'nulls-last',
+    })
+  }
+  return { 'order-id': 1, fields }
 }
 
 /**

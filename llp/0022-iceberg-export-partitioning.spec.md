@@ -130,8 +130,9 @@ and time-pruneable.
 **Files are locally, not globally, sorted.** Each append sorts only its own
 rows, so a day partition touched by N export batches holds N internally-sorted
 files whose `conversation_id` ranges may overlap. Row-group pruning still skips
-most of them; a tighter global sort is available out-of-band via `icebergRewrite`
-([§Compaction](#compaction)), not run in V1.
+most of them; a tighter global sort is available out-of-band via
+`hyp sink maintain --compact` ([§Compaction](#compaction)) — never from the
+daemon loop or the sink tick.
 
 Sort order is mutable table metadata, **not** partition spec, so introducing or
 evolving it later is not partition-spec drift
@@ -203,13 +204,58 @@ for free — a bonus beyond this spec's scope.
 icebird now exposes `icebergRewrite` (reads live rows, sorts globally under the
 target spec, writes consolidated files, commits a replace snapshot). So
 compaction is **available**, reframing the prior
-`format-iceberg/src/maintenance.js:120` "blocked by icebird" status. But for a
+`format-iceberg/src/maintenance.js` "blocked by icebird" status. But for a
 day-partitioned archive it is **not needed** (partitions already hold large
 files), and it is **not run in the daemon** — a full read-rewrite risks the
 OOM/blocking failure already seen with the parquet sink (the encoder OOMed/blocked
-the daemon; exports run manually with a large heap). V1 leaves it as an out-of-band tool that
-would tighten the local-vs-global sort, nothing more. The maintenance report
-should say "not needed / out-of-band," not "blocked."
+the daemon; exports run manually with a large heap).
+
+The out-of-band tool now exists: `hyp sink maintain --compact` runs
+`compactExportTable` from the manual CLI process, gated on a
+`compact_file_count` threshold (default 32, via the sink's `maintenance`
+config) **and** a `compact_max_bytes` cap (default 128 MB): icebird's rewrite
+materializes every live row in memory, so a table whose current snapshot's
+`total-files-size` exceeds the cap is skipped with `above-byte-cap` rather
+than re-creating the parquet-encoder OOM in the manual process — raise the
+cap and the heap together to rewrite a bigger table. The flag is the only
+path to a rewrite — `maintain` without it, the daemon loop, and the sink
+tick never compact.
+
+`compactExportTable` stages and commits explicitly (icebird's
+`icebergStageRewrite` + `fileCatalogCommit`, the same single-attempt sequence
+`icebergRewrite` performs) rather than calling `icebergRewrite`, for two
+reasons. First, a rewrite is **not retried** on a concurrent-commit conflict
+(it only rewrote the rows it read; a blind retry could drop rows another
+writer appended); the next manual run starts from fresh metadata. Second,
+because the daemon keeps appending concurrently, lost races are *expected* —
+and `icebergRewrite` leaves the staged files (a full rewritten copy of the
+table) orphaned in the blob store on a failed commit. Holding the
+`StagedUpdate` lets a failed commit reclaim its staged output, the same
+orphan-leak class the local cache fixed in #82. A mid-stage failure is
+covered too: a tracking resolver records every write that finished so a
+rewrite that dies between its first data file and the manifest list still
+cleans up.
+
+Cleanup is **verify-then-delete**, not delete-on-error. A failed commit's
+error alone cannot prove the commit missed — a timeout after the conditional
+PUT durably landed, or an SDK-internal retry of its own successful write
+surfacing 412, both leave the staged rewrite as the table's current snapshot,
+and deleting its data files then would corrupt the export. So the catch
+re-loads the latest metadata first: if the staged snapshot landed, the run
+reports success; only a confirmed-lost conflict deletes the staged files; an
+unverifiable outcome leaves the bounded orphans in place and says so in the
+error message.
+
+Every non-compaction outcome carries a `reason` discriminant
+(`below-threshold` / `above-byte-cap` / `no-table` / `conflict` / `error`) so
+the CLI reports the real cause instead of folding failures into the threshold
+skip. `no-table` is reserved for a verifiably absent table (no metadata
+files); a metadata *load* failure (auth, corrupt metadata, transient IO)
+reports `error`. Unexpected rewrite errors exit nonzero; a lost race exits 0.
+
+The icebird pin sits at `0.8.10`, which preserves v3 row lineage across
+rewrites — export tables are `formatVersion: 3`, so the earlier `0.8.9`
+rewrite was not safe for them.
 
 ## Observability
 
@@ -222,9 +268,9 @@ Emit the resolved partition spec and sort order on the iceberg sink's
 
 ## icebird dependency
 
-All three enablers are implemented in icebird `master` (commit `3edb15b`,
-"Scan pruning and sort-on-write (#20, #21, #22)"), **as yet unpublished** (npm
-tops out at `0.8.5` pinned / `0.8.8` latest):
+The committed `package.json` pin is **`0.8.10`**. All three enablers landed
+in icebird commit `3edb15b` ("Scan pruning and sort-on-write (#20, #21,
+#22)"), first published as `0.8.9`:
 
 - **#20** data-file pruning via partition values + manifest bounds — `prune.js`
   `partitionMightMatch` / `fileMightMatch`.
@@ -233,13 +279,17 @@ tops out at `0.8.5` pinned / `0.8.8` latest):
 - **#22** sort-on-append — `prepareAppend` sorts each partition group by the
   table's `default-sort-order-id`; `icebergRewrite` for global compaction.
 
-**Landing requirement:** this work depends on a published icebird containing
-`3edb15b` (e.g. `0.8.9`/`0.9.0`); the committed `package.json` pin moves from
-`0.8.5` to that version. The bump is a **shared-engine** change — the cache rides
-the same icebird — so the cache's tests and hermetic smokes must be re-run to
-confirm no regression across the changed `create.js` / `commit.js` / `read.js` /
-`transform.js`. During development this worktree builds against a local checkout
-of icebird `master`; the pin is updated to the published version before merge.
+`0.8.10` additionally preserves v3 row lineage across rewrites; export tables
+are `formatVersion: 3`, so `0.8.9`'s rewrite was not safe for them and the
+pin must not regress below `0.8.10` while compaction exists
+([§Compaction](#compaction)).
+
+*(Historical: this spec originally landed while `3edb15b` was unpublished —
+npm topped out at `0.8.5` pinned / `0.8.8` latest — and development built
+against a local icebird `master` checkout.)* The bump was a **shared-engine**
+change — the cache rides the same icebird — so any future pin move re-runs
+the cache's tests and hermetic smokes to confirm no regression across the
+shared `create.js` / `commit.js` / `read.js` / `transform.js`.
 
 ## Out of scope
 
@@ -266,6 +316,7 @@ of icebird `master`; the pin is updated to the published version before merge.
   (`partitionSpecForDeclaration`, `validatePartitionSpecStability`),
   `format-iceberg/src/commit.js:81-107` (export create+append),
   `format-iceberg/src/table-format.js:184` (per-dataset `exportDataset`),
-  `format-iceberg/src/maintenance.js:120` (compaction framing).
+  `format-iceberg/src/maintenance.js` (`compactExportTable` /
+  `maintainExportTables`, the out-of-band compaction path).
 - icebird `master` `3edb15b` — `src/write/sort.js`, `src/write/stage.js`,
   `src/prune.js`, `src/write/rewrite.js`.

@@ -70,7 +70,7 @@ export async function activate(ctx) {
 
       if (!configControl) return sink
 
-      // @ref LLP 0023#config-pull-loop [implements] — pull immediately on bootstrap success, then on the steady timer
+      // @ref LLP 0024#config-pull-loop [implements] — pull immediately on bootstrap success, then on the steady timer
       const pullLoop = createConfigPullLoop({
         centralUrl: config.url,
         identityClient,

@@ -60,4 +60,4 @@ For centrally-managed gateways, `hypaware join <url> <token>` writes a seed
 config (central plugin only) and performs the non-interactive daemon install;
 the full config arrives from the server at join. It is sugar over "write the
 config file + install the daemon", not a separate path. See
-[LLP 0023](./0023-remote-config-join-flow.spec.md#seed-config-mode).
+[LLP 0024](./0024-remote-config-join-flow.spec.md#seed-config-mode).
