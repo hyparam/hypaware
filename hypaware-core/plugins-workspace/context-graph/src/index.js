@@ -25,10 +25,10 @@ import {
  *    rewrites affected partitions into sorted tables
  *
  * Registration only; the projection runs on demand via the command (no
- * snapshot/commit hook exists, and eventual freshness is acceptable —
- * see the design notes).
+ * snapshot/commit hook exists, and eventual freshness is acceptable).
  *
  * @param {PluginActivationContext} ctx
+ * @ref LLP 0023#on-demand-projection [implements] — command-only projection keeps the plugin out of the daemon loop
  */
 export async function activate(ctx) {
   ctx.query.registerDataset(graphDatasetRegistration(NODE_DATASET))

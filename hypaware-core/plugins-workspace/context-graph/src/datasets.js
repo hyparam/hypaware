@@ -24,6 +24,7 @@ export const EDGE_DATASET = 'edge'
  * provenance-table design.
  *
  * @type {ReadonlyArray<ColumnSpec>}
+ * @ref LLP 0023#inline-provenance — first sighting's keys as exemplar; a join table waits for a consumer that needs full lineage
  */
 export const NODE_COLUMNS = Object.freeze([
   { name: 'node_id',           type: 'STRING',    nullable: false },
@@ -150,10 +151,13 @@ async function createDataSource(partitions, ctx, dataset) {
 }
 
 /**
+ * Concatenate sub-sources into one AsyncDataSource. Exported for tests.
+ *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}
+ * @ref LLP 0023#derived-datasets [constrained-by] — the union must not forward limit/offset or offsets apply twice
  */
-function unionSources(sources) {
+export function unionSources(sources) {
   /** @type {Set<string>} */
   const allColumns = new Set()
   let totalRows = 0
@@ -165,12 +169,17 @@ function unionSources(sources) {
     columns: Array.from(allColumns),
     numRows: totalRows,
     scan(options) {
+      // The union reports appliedLimitOffset: false (the engine applies
+      // limit/offset to the concatenated stream), so the hints must not
+      // reach the sub-sources — an iceberg sub-source would push the
+      // offset down per partition and rows would be skipped twice.
+      const subOptions = options ? { ...options, limit: undefined, offset: undefined } : options
       return {
         appliedWhere: false,
         appliedLimitOffset: false,
         async *rows() {
           for (const source of sources) {
-            const scan = source.scan(options)
+            const scan = source.scan(subOptions)
             for await (const row of scan.rows()) {
               yield row
             }

@@ -8,11 +8,12 @@ import test from 'node:test'
 
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
-import { compactGraphTables } from '../../hypaware-core/plugins-workspace/context-graph/src/maintenance.js'
+import { compactGraphTables, rewritePartition } from '../../hypaware-core/plugins-workspace/context-graph/src/maintenance.js'
+import { runGraphCompact } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
 import { NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
-import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
+import { appendRowsToSourceTable, readCursorSync, tryReadCursorSync } from '../../src/core/cache/partition.js'
 
 /** @param {Partial<Record<string, unknown>>} overrides */
 function nodeRow(overrides) {
@@ -120,6 +121,107 @@ test('compactGraphTables is a no-op on an empty cache', async () => {
     assert.equal(d.duplicateIds, 0)
     assert.equal(d.rowsMerged, 0)
     assert.equal(d.partitionsRewritten, 0)
+    assert.deepEqual(d.partitionsSkipped, [])
   }
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('compactGraphTables refuses to touch a partition whose cursor is corrupt', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
+
+  await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [
+    nodeRow({ node_id: 'n-x', first_seen: '2026-06-01T00:00:00Z' }),
+  ])
+  await appendRowsToSourceTable(cacheRoot, 'node', ['source=b'], NODE_COLUMNS, [
+    nodeRow({ node_id: 'n-x', first_seen: '2026-06-03T00:00:00Z' }),
+  ])
+
+  const partB = path.join(cacheRoot, 'datasets', 'node', 'source=b')
+  const corrupt = '{ not json'
+  await fs.writeFile(path.join(partB, 'cursor.json'), corrupt, 'utf8')
+
+  const report = await compactGraphTables({ storage: /** @type {any} */ ({ cacheRoot }) })
+  const nodeReport = report.datasets.find((d) => d.dataset === 'node')
+
+  // Partition b was never scanned, so the duplicate is invisible — but
+  // crucially nothing was rewritten or retired from the stale 'table'
+  // dir a synthesized epoch-0 cursor would have pointed at.
+  assert.deepEqual(nodeReport?.partitionsSkipped, [{ path: partB, reason: 'unreadable-cursor' }])
+  assert.equal(nodeReport?.duplicateIds, 0)
+  assert.equal(nodeReport?.partitionsRewritten, 0)
+  assert.equal(await fs.readFile(path.join(partB, 'cursor.json'), 'utf8'), corrupt, 'cursor left as-is')
+  await assert.rejects(fs.access(path.join(partB, 'table', '.retired')), 'old generation not retired')
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  for await (const row of scanRowsFromTable(path.join(partB, 'table'))) rows.push(row)
+  assert.equal(rows.length, 1, 'rows in the unreadable partition survive')
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('rewritePartition aborts the swap when the cursor changed during the rewrite window', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
+
+  await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [
+    nodeRow({ node_id: 'n-1' }),
+    nodeRow({ node_id: 'n-2', natural_key: 'session:2' }),
+  ])
+  const partitionDir = path.join(cacheRoot, 'datasets', 'node', 'source=a')
+  const expectedCursor = tryReadCursorSync(partitionDir)
+  assert.ok(expectedCursor)
+
+  // A writer lands an append after the compaction scan read the cursor.
+  await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [
+    nodeRow({ node_id: 'n-3', natural_key: 'session:3' }),
+  ])
+
+  const result = await rewritePartition({
+    partitionDir,
+    idCol: 'node_id',
+    dropIds: new Set(['n-1']),
+    extraRows: [],
+    expectedCursor,
+    fallbackColumns: NODE_COLUMNS,
+    sortOrder: [{ column: 'node_type' }, { column: 'node_id' }],
+  })
+
+  assert.deepEqual(result, { status: 'skipped', reason: 'concurrent-write' })
+
+  // The live generation is untouched: cursor still points at the old
+  // table, nothing retired, the staged replacement removed, and every
+  // row (including the concurrent append) still readable.
+  const cursor = tryReadCursorSync(partitionDir)
+  assert.equal(cursor?.tableDir ?? 'table', 'table')
+  assert.equal(cursor?.rowCount, 3)
+  await assert.rejects(fs.access(path.join(partitionDir, 'table', '.retired')))
+  const leftovers = (await fs.readdir(partitionDir)).filter((name) => name.startsWith('table-'))
+  assert.deepEqual(leftovers, [], 'staged replacement table cleaned up')
+  /** @type {string[]} */
+  const ids = []
+  for await (const row of scanRowsFromTable(path.join(partitionDir, 'table'))) ids.push(String(row.node_id))
+  assert.deepEqual(ids.sort(), ['n-1', 'n-2', 'n-3'])
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('graph compact CLI surfaces skipped partitions on stderr and exits nonzero for unreadable cursors', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-maint-'))
+  await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [nodeRow({})])
+  const partA = path.join(cacheRoot, 'datasets', 'node', 'source=a')
+  await fs.writeFile(path.join(partA, 'cursor.json'), '{ not json', 'utf8')
+
+  /** @type {string[]} */
+  const out = []
+  /** @type {string[]} */
+  const errs = []
+  const ctx = /** @type {any} */ ({
+    storage: { cacheRoot },
+    stdout: { write: (/** @type {string} */ s) => out.push(s) },
+    stderr: { write: (/** @type {string} */ s) => errs.push(s) },
+  })
+  const code = await runGraphCompact([], ctx)
+  assert.equal(code, 1)
+  assert.ok(errs.join('').includes('unreadable-cursor'), 'skip reason reported on stderr')
+
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })

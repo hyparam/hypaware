@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
-import { Attr, runRoot } from '../../../src/core/observability/index.js'
+import { Attr, installObservability, runRoot } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
@@ -26,10 +26,13 @@ import {
  * - `select count(*) from edge` = 6 (via, used_model, 2× used, 2× touched)
  * - node_type breakdown matches the fixture
  * - re-running `graph project` leaves the counts unchanged (idempotent)
+ * - a `graph.project` span carries the write counts — the internal signal
+ *   that the projection path (not just the CLI wrapper) actually ran
  *
  * @param {{ harness: any, expect: any }} args
  */
 export async function run({ harness, expect }) {
+  const obs = installObservability()
   const cacheRoot = path.join(harness.stateDir, 'cache')
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
@@ -118,6 +121,34 @@ export async function run({ harness, expect }) {
   )
   const nodeCount3 = await sqlCount('node')
   expect.that('node count unchanged after compaction', nodeCount3, (v) => v === 7)
+
+  // The internal signal: assert the projection path emitted its span with
+  // the same counts the SQL assertions saw, per the log-driven-development
+  // policy (a silent span break should fail this smoke, not pass it).
+  await obs.shutdown()
+  const traces = await expect.traces()
+  const projectSpans = traces.filter((/** @type {any} */ t) => t.name === 'graph.project')
+  expect.that(
+    'traces: graph.project span for the writing run records 7 nodes / 6 edges, status ok',
+    projectSpans,
+    (/** @type {any[]} */ rows) => rows.some((t) =>
+      t.attributes?.nodes_written === 7 &&
+      t.attributes?.edges_written === 6 &&
+      t.attributes?.status === 'ok'
+    )
+  )
+  expect.that(
+    'traces: graph.project span for the idempotent re-run wrote nothing',
+    projectSpans,
+    (/** @type {any[]} */ rows) => rows.some((t) =>
+      t.attributes?.nodes_written === 0 && t.attributes?.edges_written === 0
+    )
+  )
+  expect.that(
+    'traces: graph.compact span emitted with nothing skipped',
+    traces.filter((/** @type {any} */ t) => t.name === 'graph.compact'),
+    (/** @type {any[]} */ rows) => rows.length >= 1 && rows.every((t) => t.attributes?.partitions_skipped === 0)
+  )
 
   /**
    * @param {string} dataset

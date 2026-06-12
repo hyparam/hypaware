@@ -111,6 +111,7 @@ export async function projectGraph({ query, storage, config, dryRun = false }) {
  * @param {ExtendedQueryStorageService} storage
  * @param {HypAwareV2Config | undefined} config
  * @returns {Promise<GraphRow[]>}
+ * @ref LLP 0023#pre-write-dedup [implements] — only a missing dataset is benign; real failures abort instead of duplicating
  */
 async function dedupExisting(rows, idCol, dataset, query, storage, config) {
   if (rows.length === 0) return rows
@@ -128,31 +129,106 @@ async function dedupExisting(rows, idCol, dataset, query, storage, config) {
       const v = r[idCol]
       if (typeof v === 'string') seen.add(v)
     }
-  } catch {
-    // Dataset has no committed partitions yet — nothing to dedup against.
+  } catch (err) {
+    // Only "the dataset isn't there yet" is benign (nothing to dedup
+    // against). A real query/storage failure must abort the projection:
+    // treating it as an empty id set would append duplicates and report
+    // success while the cache is unreadable.
+    if (!isMissingDatasetError(err)) throw err
   }
   return rows.filter((r) => !seen.has(/** @type {string} */ (r[idCol])))
 }
 
 /**
+ * True when a dedup query failed because the dataset is not queryable
+ * yet (unregistered, or its backing path is absent) rather than because
+ * the query itself failed.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isMissingDatasetError(err) {
+  if (!err || typeof err !== 'object') return false
+  if (/** @type {Record<string, unknown>} */ (err).code === 'ENOENT') return true
+  return err instanceof Error && err.message.includes('unknown dataset')
+}
+
+/**
+ * Per-accumulated-row provenance for props conflict resolution: props key
+ * → `first_seen` time of the row that supplied the current value. Kept
+ * out-of-band (never serialized) so merged rows stay plain GraphRows.
+ *
+ * @type {WeakMap<GraphRow, Map<string, number | undefined>>}
+ */
+const propsProvenance = new WeakMap()
+
+/**
  * Merge a duplicate row into the accumulated one: keep the earliest
- * `first_seen` and union props. Order-independent so a re-run is stable.
- * Shared with the dedup compaction in maintenance.js so projection-time
- * and compaction-time merges agree.
+ * `first_seen` and union props. On a props key conflict the value from
+ * the earliest-seen row wins; equal (or unknown) times fall back to a
+ * value comparison — so the result is independent of merge order, which
+ * matters because the projection's source SELECTs have no stable
+ * ordering. Shared with the dedup compaction in maintenance.js so
+ * projection-time and compaction-time merges agree.
  *
  * @param {GraphRow} existing
  * @param {GraphRow} incoming
+ * @ref LLP 0023#merge-policy [implements] — order-independent merge shared by projection and compaction
  */
 export function mergeRow(existing, incoming) {
-  const a = firstSeenTime(existing.first_seen)
-  const b = firstSeenTime(incoming.first_seen)
-  if (b !== undefined && (a === undefined || b < a)) existing.first_seen = incoming.first_seen
-  const ep = existing.props
+  const existingTime = firstSeenTime(existing.first_seen)
+  const incomingTime = firstSeenTime(incoming.first_seen)
   const ip = incoming.props
   if (ip && typeof ip === 'object') {
-    const merged = { ...(ep && typeof ep === 'object' ? ep : {}), ...ip }
+    let times = propsProvenance.get(existing)
+    if (!times) {
+      times = new Map()
+      if (existing.props && typeof existing.props === 'object') {
+        for (const key of Object.keys(existing.props)) times.set(key, existingTime)
+      }
+      propsProvenance.set(existing, times)
+    }
+    /** @type {Record<string, unknown>} */
+    const merged = existing.props && typeof existing.props === 'object' ? { ...existing.props } : {}
+    for (const [key, value] of Object.entries(ip)) {
+      if (!(key in merged) || propsValueWins(incomingTime, value, times.get(key), merged[key])) {
+        merged[key] = value
+        times.set(key, incomingTime)
+      }
+    }
     existing.props = merged
   }
+  if (incomingTime !== undefined && (existingTime === undefined || incomingTime < existingTime)) {
+    existing.first_seen = incoming.first_seen
+  }
+}
+
+/**
+ * Deterministic props conflict policy: the value seen earliest wins; a
+ * value with a known time beats one without; equal times tie-break on
+ * the JSON encoding so merge order can never influence the result.
+ *
+ * @param {number | undefined} incomingTime
+ * @param {unknown} incomingValue
+ * @param {number | undefined} currentTime
+ * @param {unknown} currentValue
+ * @returns {boolean}
+ */
+function propsValueWins(incomingTime, incomingValue, currentTime, currentValue) {
+  if (incomingTime !== currentTime) {
+    if (incomingTime === undefined) return false
+    if (currentTime === undefined) return true
+    return incomingTime < currentTime
+  }
+  return stableJson(incomingValue) < stableJson(currentValue)
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function stableJson(value) {
+  return JSON.stringify(value) ?? 'undefined'
 }
 
 /**

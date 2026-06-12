@@ -63,8 +63,15 @@ export async function runGraphCompact(argv, ctx) {
           `graph compact: ${d.dataset} — merged ${d.rowsMerged} duplicate row(s) (${d.duplicateIds} id(s)), rewrote ${d.partitionsRewritten} partition(s)\n`
         )
       }
+      for (const skip of d.partitionsSkipped) {
+        ctx.stderr.write(`hyp graph compact: skipped ${skip.path} (${skip.reason})\n`)
+      }
     }
-    return 0
+    // A concurrent-write skip is a benign retry-later; an unreadable
+    // cursor needs operator attention — exit nonzero so it can't pass
+    // silently in scripts.
+    const unreadable = r.datasets.some((d) => d.partitionsSkipped.some((s) => s.reason === 'unreadable-cursor'))
+    return unreadable ? 1 : 0
   } catch (err) {
     ctx.stderr.write(`hyp graph compact: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

@@ -70,6 +70,7 @@ function buildEdge(spec) {
  * The T0 rules. Node rules first, then edge rules.
  *
  * @type {ReadonlyArray<ContractRule>}
+ * @ref LLP 0023#t0-contract [implements] — hand-authored rule list; a declarative-contract compiler is a deliberate later slice
  */
 export const CONTRACT_RULES = Object.freeze([
   // --- nodes ---

@@ -15,16 +15,16 @@ import {
   scanRowsFromTable,
   tableExists,
 } from '../../../../src/core/cache/iceberg/store.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from '../../../../src/core/cache/partition.js'
+import { discoverCachePartitions, tryReadCursorSync, writeCursor } from '../../../../src/core/cache/partition.js'
 
 import { EDGE_COLUMNS, EDGE_DATASET, NODE_COLUMNS, NODE_DATASET } from './datasets.js'
 import { firstSeenTime, mergeRow } from './project.js'
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AppendOptions, ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+ * @import { AppendOptions, ExtendedQueryStorageService, PartitionCursor } from '../../../../src/core/cache/types.d.ts'
  * @import { PartitionSpec } from 'icebird/src/types.js'
- * @import { GraphRow } from './types.d.ts'
+ * @import { GraphRow, SkippedPartition } from './types.d.ts'
  */
 
 /** Rows per append batch while rewriting; graph rows are skinny. */
@@ -64,7 +64,8 @@ const GRAPH_DATASETS = [NODE_DATASET, EDGE_DATASET]
  * kernel cache-maintenance's job; this pass only owns graph semantics.
  *
  * @param {{ storage: ExtendedQueryStorageService, dryRun?: boolean }} args
- * @returns {Promise<{ datasets: { dataset: string, duplicateIds: number, rowsMerged: number, partitionsRewritten: number }[] }>}
+ * @returns {Promise<{ datasets: { dataset: string, duplicateIds: number, rowsMerged: number, partitionsRewritten: number, partitionsSkipped: SkippedPartition[] }[] }>}
+ * @ref LLP 0023#graph-compaction [implements] — graph semantics only; file-count/snapshot compaction stays with the kernel
  */
 export async function compactGraphTables({ storage, dryRun = false }) {
   return withSpan(
@@ -83,6 +84,9 @@ export async function compactGraphTables({ storage, dryRun = false }) {
       span.setAttribute('duplicate_ids', datasets.reduce((n, d) => n + d.duplicateIds, 0))
       span.setAttribute('rows_merged', datasets.reduce((n, d) => n + d.rowsMerged, 0))
       span.setAttribute('partitions_rewritten', datasets.reduce((n, d) => n + d.partitionsRewritten, 0))
+      const skipped = datasets.reduce((n, d) => n + d.partitionsSkipped.length, 0)
+      span.setAttribute('partitions_skipped', skipped)
+      if (skipped > 0) span.setAttribute('status', 'partial')
       return { datasets }
     },
     { component: 'plugin' }
@@ -91,19 +95,40 @@ export async function compactGraphTables({ storage, dryRun = false }) {
 
 /**
  * @param {{ storage: ExtendedQueryStorageService, dataset: 'node' | 'edge', dryRun: boolean }} args
- * @returns {Promise<{ dataset: string, duplicateIds: number, rowsMerged: number, partitionsRewritten: number }>}
+ * @returns {Promise<{ dataset: string, duplicateIds: number, rowsMerged: number, partitionsRewritten: number, partitionsSkipped: SkippedPartition[] }>}
  */
 async function compactGraphDataset({ storage, dataset, dryRun }) {
   const idCol = ID_COLUMNS[dataset]
   const partitions = await discoverCachePartitions(storage.cacheRoot, { datasets: [dataset] })
 
+  /** @type {SkippedPartition[]} */
+  const partitionsSkipped = []
+
   // Pass 1: count id occurrences and remember which partitions hold them.
-  // Only ids and partition paths are kept in memory, not rows.
+  // Only ids and partition paths are kept in memory, not rows. The cursor
+  // read here is positive (tryReadCursorSync) and remembered per partition:
+  // the eventual generation swap is conditional on the cursor still
+  // matching it, and a partition whose cursor cannot be positively read is
+  // never rewritten — a corrupt cursor.json must not be mistaken for the
+  // epoch-0 default when the old generation is about to be retired.
   /** @type {Map<string, { count: number, parts: Set<string> }>} */
   const occurrences = new Map()
+  /** @type {Map<string, { cursor: PartitionCursor, tableDir: string }>} */
+  const liveByPart = new Map()
   for (const part of partitions) {
-    const tableDir = liveTableDir(part.path)
+    if (part.legacy) continue // bare table without a cursor; not a graph source-table
+    const cursor = tryReadCursorSync(part.path)
+    if (!cursor) {
+      partitionsSkipped.push({ path: part.path, reason: 'unreadable-cursor' })
+      continue
+    }
+    if (cursor.layout !== 'source-table') {
+      partitionsSkipped.push({ path: part.path, reason: 'unexpected-layout' })
+      continue
+    }
+    const tableDir = path.join(part.path, cursor.tableDir ?? 'table')
     if (!tableExists(tableDir)) continue
+    liveByPart.set(part.path, { cursor, tableDir })
     for await (const row of scanRowsFromTable(tableDir, [idCol])) {
       const id = row[idCol]
       if (typeof id !== 'string') continue
@@ -133,6 +158,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
       duplicateIds: duplicateIds.size,
       rowsMerged: 0,
       partitionsRewritten: dryRun ? affectedParts.size : 0,
+      partitionsSkipped,
     }
   }
 
@@ -140,8 +166,9 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   /** @type {Map<string, { row: GraphRow, part: string }[]>} */
   const dupRows = new Map()
   for (const part of affectedParts) {
-    const tableDir = liveTableDir(part)
-    for await (const row of scanRowsFromTable(tableDir)) {
+    const live = liveByPart.get(part)
+    if (!live) continue
+    for await (const row of scanRowsFromTable(live.tableDir)) {
       const id = row[idCol]
       if (typeof id !== 'string' || !duplicateIds.has(id)) continue
       const group = dupRows.get(id) ?? []
@@ -155,36 +182,75 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   // The canonical partition is the earliest-seen row's home.
   /** @type {Map<string, GraphRow[]>} */
   const mergedByPart = new Map()
-  let rowsMerged = 0
-  for (const [, group] of dupRows) {
+  /** @type {Map<string, string>} */
+  const homeById = new Map()
+  for (const [id, group] of dupRows) {
     group.sort(compareDupRows)
     const canonical = { ...group[0].row }
     for (let i = 1; i < group.length; i++) mergeRow(canonical, group[i].row)
     const home = group[0].part
+    homeById.set(id, home)
     const rows = mergedByPart.get(home) ?? []
     rows.push(canonical)
     mergedByPart.set(home, rows)
-    rowsMerged += group.length - 1
   }
 
   // Pass 2b: rewrite each affected partition — duplicate rows dropped,
   // this partition's merged rows appended, sorted replacement table.
-  for (const part of affectedParts) {
-    await rewritePartition({
+  //
+  // Home partitions (the ones that receive merged rows) go first, and a
+  // duplicate's copies are only dropped from other partitions once its
+  // merged row verifiably landed: if the home rewrite is skipped, dropping
+  // the copies elsewhere would lose the props that were folded into the
+  // never-written merged row. A skipped partition just leaves duplicates
+  // in place for the next run.
+  /** @type {Set<string>} */
+  const landedIds = new Set()
+  let rowsMerged = 0
+  let partitionsRewritten = 0
+  const ordered = [...affectedParts].sort((a, b) => {
+    const ha = mergedByPart.has(a) ? 0 : 1
+    const hb = mergedByPart.has(b) ? 0 : 1
+    return ha !== hb ? ha - hb : a < b ? -1 : a > b ? 1 : 0
+  })
+  for (const part of ordered) {
+    const live = liveByPart.get(part)
+    if (!live) continue
+    const extraRows = mergedByPart.get(part) ?? []
+    /** @type {Set<string>} */
+    const dropIds = new Set()
+    for (const id of duplicateIds) {
+      const home = homeById.get(id)
+      if (home === part || (home !== undefined && landedIds.has(id))) dropIds.add(id)
+    }
+    if (dropIds.size === 0 && extraRows.length === 0) continue
+    const result = await rewritePartition({
       partitionDir: part,
       idCol,
-      duplicateIds,
-      extraRows: mergedByPart.get(part) ?? [],
+      dropIds,
+      extraRows,
+      expectedCursor: live.cursor,
       fallbackColumns: FALLBACK_COLUMNS[dataset],
       sortOrder: SORT_ORDERS[dataset],
     })
+    if (result.status === 'skipped') {
+      partitionsSkipped.push({ path: part, reason: result.reason })
+      continue
+    }
+    partitionsRewritten += 1
+    rowsMerged += result.dropped - extraRows.length
+    for (const row of extraRows) {
+      const id = row[idCol]
+      if (typeof id === 'string') landedIds.add(id)
+    }
   }
 
   return {
     dataset,
     duplicateIds: duplicateIds.size,
     rowsMerged,
-    partitionsRewritten: affectedParts.size,
+    partitionsRewritten,
+    partitionsSkipped,
   }
 }
 
@@ -195,20 +261,34 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
  * `table-<seq>` dir, the cursor repoints, and the old generation gets a
  * `.retired` marker for the kernel's grace-period sweep to reclaim.
  *
+ * The swap is conditional: writers (`appendRowsToSourceTable`) keep
+ * appending to the old generation while it is being scanned, so before
+ * repointing, the cursor is re-read and compared against the one the
+ * compaction scan started from. Any change — a bumped rowCount from a
+ * concurrent append, a different tableDir from another compactor, or a
+ * cursor that can no longer be positively read — aborts the swap: the
+ * staged replacement table is removed and the partition is reported
+ * skipped, because retiring the old generation at that point would lose
+ * the rows appended during the rewrite window. (A small write window
+ * between the re-read and the cursor write remains; closing it needs a
+ * partition-level lock, which graph compaction doesn't take — reruns are
+ * cheap and duplicates are benign.)
+ *
  * @param {{
  *   partitionDir: string
  *   idCol: 'node_id' | 'edge_id'
- *   duplicateIds: Set<string>
+ *   dropIds: Set<string>
  *   extraRows: GraphRow[]
+ *   expectedCursor: PartitionCursor
  *   fallbackColumns: readonly ColumnSpec[]
  *   sortOrder: readonly { column: string, direction?: 'asc' | 'desc' }[]
  * }} args
+ * @returns {Promise<{ status: 'rewritten', dropped: number } | { status: 'skipped', reason: 'unreadable-cursor' | 'concurrent-write' }>}
+ * @ref LLP 0023#graph-compaction [constrained-by] — conditional swap: on any cursor change, skip and report; never retire
  */
-async function rewritePartition({ partitionDir, idCol, duplicateIds, extraRows, fallbackColumns, sortOrder }) {
-  const cursor = readCursorSync(partitionDir)
-  const oldTableDirName = cursor.tableDir ?? 'table'
+export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows, expectedCursor, fallbackColumns, sortOrder }) {
+  const oldTableDirName = expectedCursor.tableDir ?? 'table'
   const oldTableDir = path.join(partitionDir, oldTableDirName)
-  if (!tableExists(oldTableDir)) return
 
   /** @type {ColumnSpec[]} */
   let columns = [...fallbackColumns]
@@ -241,6 +321,7 @@ async function rewritePartition({ partitionDir, idCol, duplicateIds, extraRows, 
   /** @type {Record<string, unknown>[]} */
   let batch = []
   let totalRows = 0
+  let dropped = 0
   const flush = async () => {
     if (batch.length === 0) return
     await appendRowsToTable(newTableDir, columns, batch, appendOpts)
@@ -250,7 +331,10 @@ async function rewritePartition({ partitionDir, idCol, duplicateIds, extraRows, 
 
   for await (const row of scanRowsFromTable(oldTableDir)) {
     const id = row[idCol]
-    if (typeof id === 'string' && duplicateIds.has(id)) continue
+    if (typeof id === 'string' && dropIds.has(id)) {
+      dropped += 1
+      continue
+    }
     batch.push(row)
     if (batch.length >= REWRITE_BATCH_ROWS) await flush()
   }
@@ -264,8 +348,23 @@ async function rewritePartition({ partitionDir, idCol, duplicateIds, extraRows, 
     await appendRowsToTable(newTableDir, columns, [], appendOpts)
   }
 
+  const current = tryReadCursorSync(partitionDir)
+  if (!current) {
+    await removeStagedTable(newTableDir)
+    return { status: 'skipped', reason: 'unreadable-cursor' }
+  }
+  if (
+    current.epoch !== expectedCursor.epoch ||
+    current.rowCount !== expectedCursor.rowCount ||
+    (current.tableDir ?? 'table') !== oldTableDirName ||
+    current.layout !== 'source-table'
+  ) {
+    await removeStagedTable(newTableDir)
+    return { status: 'skipped', reason: 'concurrent-write' }
+  }
+
   await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
+    epoch: current.epoch,
     rowCount: totalRows,
     compaction: {
       previousTableDir: oldTableDirName,
@@ -273,17 +372,25 @@ async function rewritePartition({ partitionDir, idCol, duplicateIds, extraRows, 
     },
     layout: 'source-table',
     tableDir: newTableDirName,
-    retention: cursor.retention,
+    retention: current.retention,
   })
   await fsPromises.writeFile(path.join(oldTableDir, '.retired'), new Date().toISOString(), 'utf8')
+  return { status: 'rewritten', dropped }
 }
 
 /**
- * @param {string} partitionDir
+ * Remove a staged replacement table whose swap was aborted. Best-effort:
+ * nothing references the directory, so a leftover is only wasted disk,
+ * and the caller is already on a skip path.
+ *
+ * @param {string} tableDir
  */
-function liveTableDir(partitionDir) {
-  const cursor = readCursorSync(partitionDir)
-  return path.join(partitionDir, cursor.tableDir ?? 'table')
+async function removeStagedTable(tableDir) {
+  try {
+    await fsPromises.rm(tableDir, { recursive: true, force: true })
+  } catch {
+    // Leave the unreferenced directory behind rather than mask the skip.
+  }
 }
 
 /**
