@@ -44,6 +44,13 @@ export type PluginName = string
  *   The capability VALUE is a `TableFormatProvider`.
  * - `hypaware.http-endpoint` — request destination capability, provided
  *   by request sinks (`@hypaware/central`, future `@hypaware/webhook`).
+ * - `hypaware.embedder` — text embedding production, provided by
+ *   embedder plugins (`@hypaware/embedder-openai`, future local
+ *   embedders). The capability VALUE is an `EmbedderCapability`.
+ *   Consumed by `@hypaware/vector-search`.
+ * - `hypaware.vector-search` — vector similarity search over cached
+ *   datasets, provided by `@hypaware/vector-search`. The capability
+ *   VALUE is a `VectorSearchCapability`.
  *
  * Plugins are free to define new capability names; the kernel does not
  * gate registration on an enum.
@@ -1292,6 +1299,116 @@ export interface AiGatewayProjectedMessage {
   attributes?: JsonObject
   /** Provider-supplied finish/stop reason for the message; consumed by the gateway to derive `finish_reason`. */
   stop_reason?: string
+}
+
+// =============================================================================
+// Embedder capability (`hypaware.embedder@1.0.0`)
+// =============================================================================
+
+/**
+ * Text-embedding production, provided by embedder plugins (the first is
+ * `@hypaware/embedder-openai`; a local embedder is the intended
+ * follow-up). Consumers (`@hypaware/vector-search`) require this
+ * capability rather than binding to a specific provider, so swapping
+ * embedders is a config change, not a refactor.
+ *
+ * The same `model` MUST be used at index-build and query time; index
+ * consumers store `model` and `dimension` alongside their artifacts and
+ * treat a mismatch as staleness (rebuild) or a hard error, never a
+ * silent degraded result.
+ */
+export interface EmbedderCapability {
+  /** Stable provider identifier (e.g. `"openai-compatible"`). */
+  provider: string
+  /** Model identifier sent with every request (e.g. `"text-embedding-3-small"`). */
+  model: string
+  /**
+   * Embed a batch of texts. Returns one vector per input text, in input
+   * order. Implementations chunk into provider-sized requests
+   * internally; callers hand over whatever batch they have.
+   */
+  embed(texts: string[], opts?: EmbedOptions): Promise<EmbedResult>
+}
+
+export interface EmbedOptions {
+  signal?: AbortSignal
+}
+
+export interface EmbedResult {
+  /** One vector per input text, aligned with the input order. */
+  vectors: Float32Array[]
+  /** Vector length; identical across the batch. */
+  dimension: number
+  /** Model that actually produced the vectors. */
+  model: string
+  usage?: EmbedUsage
+}
+
+export interface EmbedUsage {
+  prompt_tokens?: number
+  total_tokens?: number
+}
+
+// =============================================================================
+// Vector search capability (`hypaware.vector-search@1.0.0`)
+// =============================================================================
+
+/**
+ * Vector similarity search over cached datasets, provided by
+ * `@hypaware/vector-search`. Indexes are declared in config; artifacts
+ * are per-host plugin state sharded one file per cache partition.
+ */
+export interface VectorSearchCapability {
+  /** Embed the query text and return the merged top-K across shards. */
+  search(opts: VectorSearchOptions): Promise<VectorSearchHit[]>
+  /** Per-index, per-partition shard coverage and staleness. */
+  status(): Promise<VectorIndexStatus[]>
+}
+
+export interface VectorSearchOptions {
+  query: string
+  /** Restrict to one configured index (default: all indexes). */
+  index?: string
+  /** Restrict to indexes over one dataset (default: all datasets). */
+  dataset?: string
+  topK?: number
+  /**
+   * `auto` (default) refreshes missing/stale shards before searching;
+   * `never` searches existing shards only and hard-errors on an
+   * embedder-model mismatch.
+   */
+  refresh?: 'auto' | 'never'
+  signal?: AbortSignal
+}
+
+export interface VectorSearchHit {
+  index: string
+  dataset: string
+  partition: Record<string, string>
+  /** Shard row id (content hash by default, or the index's `id_column` value). */
+  id: string
+  /** Similarity score; higher is better (cosine over normalized vectors). */
+  score: number
+  /** Source column text for the hit, when resolvable from the cache. */
+  text?: string
+}
+
+export interface VectorIndexStatus {
+  index: string
+  dataset: string
+  column: string
+  model: string
+  shards: VectorShardStatus[]
+}
+
+export interface VectorShardStatus {
+  partition: Record<string, string>
+  state: 'fresh' | 'stale_rows' | 'stale_model' | 'missing' | 'orphan'
+  /** Embedded (deduplicated) vector count in the shard, when built. */
+  rows?: number
+  model?: string
+  dimension?: number
+  built_at?: string
 }
 
 // =============================================================================

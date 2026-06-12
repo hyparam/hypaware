@@ -37,6 +37,13 @@ dataset gets the same query and formatting behavior for free. The local query
 cache ([LLP 0013](./0013-local-query-cache.decision.md)) is not a plugin and
 never appears in `plugins[]`.
 
+"Query is intrinsic" means the **SQL/dataset surface** specifically: the
+dataset registry, SQL execution, cursors, freshness, and formatting. Other
+query modalities (e.g. vector similarity search) are **plugin capabilities**
+that build on the intrinsic surface, not kernel surface — decided 2026-06-12
+when scoping `@hypaware/vector-search`
+([LLP 0024](./0024-vector-search-plugin.decision.md#plugin-not-kernel)).
+
 **Partition-spec derivation is core surface.** The helpers that turn a dataset's
 partitioning declaration into an Iceberg `PartitionSpec` and guard its stability
 — `partitionSpecForDeclaration` and `validatePartitionSpecStability`, with the

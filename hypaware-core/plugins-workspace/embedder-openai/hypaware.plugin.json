@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/embedder-openai",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "OpenAI-compatible text embedder for HypAware. Speaks POST /v1/embeddings against a configurable base_url, so one plugin covers OpenAI, compatible proxies, and local servers (Ollama, LM Studio). Provides hypaware.embedder for @hypaware/vector-search.",
+  "permissions": ["network", "read_env"],
+  "provides": {
+    "capabilities": {
+      "hypaware.embedder": "1.0.0"
+    }
+  },
+  "contributes": {
+    "config_sections": [{ "section": "embedder-openai" }]
+  }
+}

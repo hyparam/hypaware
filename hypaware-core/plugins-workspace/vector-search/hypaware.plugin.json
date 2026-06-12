@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/vector-search",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "Vector similarity search over cached datasets via hypvector. Indexes are declared in config, sharded one file per cache partition under plugin state, and kept fresh by a daemon timer plus search-time refresh.",
+  "permissions": ["read_state", "write_state"],
+  "requires": {
+    "capabilities": {
+      "hypaware.embedder": "^1.0.0"
+    }
+  },
+  "provides": {
+    "capabilities": {
+      "hypaware.vector-search": "1.0.0"
+    }
+  },
+  "contributes": {
+    "commands": [
+      { "name": "vector" },
+      { "name": "vector search" },
+      { "name": "vector status" }
+    ],
+    "sources": [{ "name": "vector-search-refresh" }],
+    "config_sections": [{ "section": "vector-search" }]
+  }
+}
