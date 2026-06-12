@@ -1,4 +1,4 @@
-# Review of LLP 0022: Remote Config and Join Flow
+# Review of LLP 0023: Remote Config and Join Flow
 
 **Reviewer:** Claude (Fable 5)
 **Date:** 2026-06-12
