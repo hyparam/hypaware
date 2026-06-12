@@ -150,16 +150,24 @@ export async function discoverExportDatasets(blobStore, prefix) {
  *
  * A rewrite commit is intentionally NOT retried on a concurrent-commit
  * conflict: it only rewrote the rows it read, so a blind retry could drop
- * rows another writer appended in the meantime. On conflict the staged
- * data/manifest files are deleted best-effort (icebird's `icebergRewrite`
- * leaves them orphaned, which is why this stages and commits explicitly),
- * the result carries `reason: 'conflict'`, and the next manual run starts
- * from fresh metadata.
+ * rows another writer appended in the meantime. On a failed commit the
+ * latest metadata is re-loaded BEFORE any cleanup: a timeout after the
+ * conditional PUT durably landed, or an SDK-internal retry of its own
+ * successful write surfacing 412, both leave the staged rewrite as the
+ * table's current snapshot — deleting its data files then would corrupt
+ * the export. Only when the reload confirms the staged snapshot did not
+ * land is a conflict's staged output deleted best-effort (icebird's
+ * `icebergRewrite` leaves it orphaned, which is why this stages and
+ * commits explicitly); an unverifiable outcome leaves the bounded
+ * orphans in place and says so in the error.
  *
  * Every non-compaction outcome is discriminated by `reason` so the CLI
  * can tell an idle table from a failed rewrite (a swallowed failure here
  * would misreport as "below threshold" — the one manual compaction tool
- * misdiagnosing itself).
+ * misdiagnosing itself). A metadata *load* failure is only reported as
+ * `no-table` when the table verifiably does not exist; auth/IO failures
+ * surface as `error` so the CLI exits nonzero instead of printing an
+ * idle-table skip.
  *
  * @param {{
  *   tableUrl: string
@@ -176,8 +184,17 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
   let loaded
   try {
     loaded = await loadLatestFileCatalogMetadata({ tableUrl, resolver, lister })
-  } catch {
-    return { compacted: false, reason: 'no-table', dataFilesBefore: 0, dataFilesAfter: 0 }
+  } catch (err) {
+    if (isMissingTableError(err)) {
+      return { compacted: false, reason: 'no-table', dataFilesBefore: 0, dataFilesAfter: 0 }
+    }
+    return {
+      compacted: false,
+      reason: 'error',
+      error: describeError(err),
+      dataFilesBefore: 0,
+      dataFilesAfter: 0,
+    }
   }
   const metadata = loaded.metadata
 
@@ -204,11 +221,34 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
   // catalog) so a failed commit can clean up `staged.writtenFiles`
   // instead of leaving a full rewritten copy of the table orphaned in
   // the blob store on every lost race.
+  //
+  // The stage phase itself writes data files, a manifest, and a
+  // manifest list one by one, and icebird only reports `writtenFiles`
+  // on a StagedUpdate that completed — so a failure after the first
+  // write would leak everything written before it. Track every path
+  // whose write finished through a wrapped resolver and reclaim them
+  // when staging dies mid-flight.
+  /** @type {string[]} */
+  const stagedPaths = []
+  /** @type {Resolver} */
+  const trackingResolver = {
+    ...resolver,
+    writer(url, options) {
+      const writer = resolver.writer(url, options)
+      const finish = writer.finish.bind(writer)
+      writer.finish = async () => {
+        await finish()
+        stagedPaths.push(url)
+      }
+      return writer
+    },
+  }
   /** @type {Awaited<ReturnType<typeof icebergStageRewrite>>} */
   let staged
   try {
-    staged = await icebergStageRewrite({ tableUrl, metadata, resolver })
+    staged = await icebergStageRewrite({ tableUrl, metadata, resolver: trackingResolver })
   } catch (err) {
+    await deleteFilesBestEffort(resolver, stagedPaths)
     return {
       compacted: false,
       reason: 'error',
@@ -229,18 +269,89 @@ export async function compactExportTable({ tableUrl, resolver, lister, compactFi
     })
     return { compacted: true, dataFilesBefore, dataFilesAfter: currentDataFileCount(post) }
   } catch (err) {
-    if (resolver.deleter) {
-      const { deleter } = resolver
-      await Promise.allSettled(staged.writtenFiles.map((p) => deleter(p)))
+    // The thrown error alone cannot prove the commit missed: a timeout
+    // after the conditional PUT durably landed, or an SDK-internal
+    // retry of its own successful write surfacing 412, both leave the
+    // staged rewrite committed and referencing the files this catch
+    // would delete. Re-load and check before any cleanup.
+    /** @type {'landed' | 'lost' | 'unknown'} */
+    let outcome = 'unknown'
+    /** @type {TableMetadata | undefined} */
+    let postMetadata
+    try {
+      const reloaded = await loadLatestFileCatalogMetadata({ tableUrl, resolver, lister })
+      const stagedId = staged.snapshot['snapshot-id']
+      const present = (reloaded.metadata.snapshots ?? []).some(
+        (s) => String(s['snapshot-id']) === String(stagedId)
+      )
+      outcome = present ? 'landed' : 'lost'
+      postMetadata = reloaded.metadata
+    } catch {
+      // Reload failed: the commit outcome is unverifiable. Fall through
+      // to the conservative no-delete path below.
+    }
+    if (outcome === 'landed' && postMetadata) {
+      return { compacted: true, dataFilesBefore, dataFilesAfter: currentDataFileCount(postMetadata) }
+    }
+    // A 412 means the conditional write was rejected, so once the reload
+    // confirms the staged snapshot is absent the staged files are safe
+    // to reclaim. Any other shape (network error, reload failure) could
+    // still be an in-flight commit — leave the bounded orphans rather
+    // than risk deleting data files a landed commit references.
+    if (outcome === 'lost' && isCommitConflict(err)) {
+      await deleteFilesBestEffort(resolver, staged.writtenFiles)
+      return {
+        compacted: false,
+        reason: 'conflict',
+        error: describeError(err),
+        dataFilesBefore,
+        dataFilesAfter: dataFilesBefore,
+      }
     }
     return {
       compacted: false,
-      reason: isCommitConflict(err) ? 'conflict' : 'error',
-      error: describeError(err),
+      reason: 'error',
+      error:
+        `${describeError(err)}; commit outcome unverified — ` +
+        `${staged.writtenFiles.length} staged rewrite file(s) left under the table ` +
+        '(deleting them could corrupt the table if the commit actually landed)',
       dataFilesBefore,
       dataFilesAfter: dataFilesBefore,
     }
   }
+}
+
+/**
+ * Best-effort reclamation of staged rewrite output. Failures are
+ * swallowed: the caller is already on an error path and a stuck delete
+ * must not mask the original failure.
+ *
+ * @param {Resolver} resolver
+ * @param {string[]} paths
+ */
+async function deleteFilesBestEffort(resolver, paths) {
+  if (!resolver.deleter || paths.length === 0) return
+  const { deleter } = resolver
+  await Promise.allSettled(paths.map((p) => deleter(p)))
+}
+
+/**
+ * True when a metadata-load failure means "this table does not exist"
+ * rather than "the load itself failed". Local-fs surfaces a missing
+ * table as ENOENT; a blob lister returns an empty listing for a
+ * missing prefix, which icebird reports as 'no metadata files found'.
+ * Anything else (auth, corrupt metadata, transient IO) must NOT fold
+ * into `no-table`: the CLI exits 0 for a missing table but nonzero
+ * for a failed load.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isMissingTableError(err) {
+  if (!err || typeof err !== 'object') return false
+  const record = /** @type {Record<string, unknown>} */ (err)
+  if (record.code === 'ENOENT' || record.code === 'NoSuchKey') return true
+  return err instanceof Error && err.message.includes('no metadata files found')
 }
 
 /**

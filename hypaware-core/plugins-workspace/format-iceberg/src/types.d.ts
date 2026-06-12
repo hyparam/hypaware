@@ -99,13 +99,16 @@ export interface ExportRetentionConfig {
 
 /**
  * Why a requested compaction did not commit a rewrite.
- * - `no-table`: table metadata missing or unreadable.
+ * - `no-table`: the table verifiably does not exist (no metadata files).
  * - `below-threshold`: live data-file count under `compact_file_count`.
  * - `above-byte-cap`: `total-files-size` over `compact_max_bytes`; raise the
  *   cap (and the heap) to rewrite anyway.
- * - `conflict`: another writer committed between read and rewrite-commit;
+ * - `conflict`: another writer's commit was confirmed to have won the race;
  *   staged files were cleaned up, re-run to retry from fresh metadata.
- * - `error`: the rewrite itself failed (IO, auth, ...); see `error`.
+ * - `error`: the metadata load or the rewrite failed (IO, auth, ...); see
+ *   `error`. A failed commit whose outcome could not be verified also lands
+ *   here, with its staged files deliberately left in place (deleting them
+ *   could corrupt the table if the commit actually landed).
  */
 export type ExportCompactionSkipReason =
   | 'no-table'

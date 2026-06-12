@@ -48,6 +48,27 @@ test('compactExportTable reports no compaction for a missing table', async () =>
   await fs.rm(dir, { recursive: true, force: true })
 })
 
+test('compactExportTable reports a metadata load failure as reason=error, not no-table', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maint-'))
+  const { resolver } = await createLocalIcebergIO()
+  // An auth/IO-shaped listing failure (not ENOENT, not an empty listing)
+  // must not be folded into the idle-table skip: the CLI exits 0 for
+  // 'no-table' but must exit nonzero for a load that actually failed.
+  const failingLister = async () => {
+    throw new Error('access denied: s3:ListBucket')
+  }
+  const result = await compactExportTable({
+    tableUrl: tableUrlForDir(path.join(dir, 'missing')),
+    resolver,
+    lister: failingLister,
+    compactFileCount: 2,
+  })
+  assert.equal(result.compacted, false)
+  assert.equal(result.reason, 'error')
+  assert.match(result.error ?? '', /access denied/)
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
 /**
  * Create a 2-data-file, 3-row v3 table for the compaction tests.
  *
@@ -187,10 +208,12 @@ test('compactExportTable reports a commit conflict and cleans up the staged file
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('compactExportTable reports a non-conflict rewrite failure as reason=error', async () => {
+test('compactExportTable reports a non-conflict commit failure as reason=error and leaves staged files', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maint-'))
   const { tableUrl, resolver, lister } = await createTwoFileTable(dir)
 
+  /** @type {string[]} */
+  const deleted = []
   const failingResolver = {
     ...resolver,
     /** @param {string} url @param {{ ifNoneMatch?: string }} [options] */
@@ -200,6 +223,11 @@ test('compactExportTable reports a non-conflict rewrite failure as reason=error'
       }
       return resolver.writer(url, options)
     },
+    /** @param {string} url */
+    async deleter(url) {
+      deleted.push(url)
+      await resolver.deleter(url)
+    },
   }
 
   const result = await compactExportTable({
@@ -208,6 +236,105 @@ test('compactExportTable reports a non-conflict rewrite failure as reason=error'
   assert.equal(result.compacted, false)
   assert.equal(result.reason, 'error')
   assert.match(result.error ?? '', /disk full/)
+  // A non-conflict failure cannot prove the commit missed (e.g. a
+  // timeout after the PUT landed), so staged files must NOT be deleted.
+  assert.deepEqual(deleted, [], 'no staged files reclaimed on an unverifiable commit failure')
+  assert.match(result.error ?? '', /left under the table/, 'error explains the deliberate orphans')
+
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('compactExportTable cleans up partial output when staging fails mid-flight', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maint-'))
+  const { tableUrl, resolver, lister, rows } = await createTwoFileTable(dir)
+
+  // Fail the manifest write — by then the consolidated data file(s)
+  // already landed, so without tracked cleanup they would leak (icebird
+  // only reports writtenFiles on a StagedUpdate that completed).
+  /** @type {string[]} */
+  const written = []
+  /** @type {string[]} */
+  const deleted = []
+  const midStageFailingResolver = {
+    ...resolver,
+    /** @param {string} url @param {{ ifNoneMatch?: string }} [options] */
+    writer(url, options) {
+      if (url.endsWith('-m0.avro')) throw new Error('stage IO failure')
+      const writer = resolver.writer(url, options)
+      const finish = writer.finish.bind(writer)
+      writer.finish = async () => {
+        await finish()
+        written.push(url)
+      }
+      return writer
+    },
+    /** @param {string} url */
+    async deleter(url) {
+      deleted.push(url)
+      await resolver.deleter(url)
+    },
+  }
+
+  const result = await compactExportTable({
+    tableUrl, resolver: midStageFailingResolver, lister, compactFileCount: 2,
+  })
+  assert.equal(result.compacted, false)
+  assert.equal(result.reason, 'error')
+  assert.match(result.error ?? '', /stage IO failure/)
+
+  const stagedDataFiles = written.filter((url) => url.includes('/data/'))
+  assert.ok(stagedDataFiles.length >= 1, 'staging wrote at least one data file before failing')
+  for (const url of stagedDataFiles) {
+    assert.ok(deleted.includes(url), `partial stage output reclaimed: ${url}`)
+    await assert.rejects(fs.access(new URL(url).pathname), 'deleted file is gone from disk')
+  }
+  assert.deepEqual(await readUserRows({ tableUrl, resolver, lister }), rows, 'original rows intact')
+
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('compactExportTable reports success when the commit landed despite a thrown 412', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maint-'))
+  const { tableUrl, resolver, lister, rows } = await createTwoFileTable(dir)
+
+  // The S3 conditional-write hazard: the SDK retries its own successful
+  // PUT and surfaces PreconditionFailed even though v<N+1> is ours.
+  // Cleanup keyed on the error alone would delete the data files the
+  // landed commit references, corrupting the table.
+  /** @type {string[]} */
+  const deleted = []
+  const landedButThrowingResolver = {
+    ...resolver,
+    /** @param {string} url @param {{ ifNoneMatch?: string }} [options] */
+    writer(url, options) {
+      const writer = resolver.writer(url, options)
+      if (options?.ifNoneMatch === '*' && url.endsWith('.metadata.json')) {
+        const finish = writer.finish.bind(writer)
+        writer.finish = async () => {
+          await finish()
+          const err = /** @type {Error & { statusCode: number }} */ (
+            new Error('PreconditionFailed: retried own successful write')
+          )
+          err.statusCode = 412
+          throw err
+        }
+      }
+      return writer
+    },
+    /** @param {string} url */
+    async deleter(url) {
+      deleted.push(url)
+      await resolver.deleter(url)
+    },
+  }
+
+  const result = await compactExportTable({
+    tableUrl, resolver: landedButThrowingResolver, lister, compactFileCount: 2,
+  })
+  assert.equal(result.compacted, true, 'landed commit reported as success, not conflict')
+  assert.equal(result.dataFilesAfter, 1, 'post-commit metadata reflects the rewrite')
+  assert.deepEqual(deleted, [], 'no files of the landed commit were deleted')
+  assert.deepEqual(await readUserRows({ tableUrl, resolver, lister }), rows, 'rows readable after the rewrite')
 
   await fs.rm(dir, { recursive: true, force: true })
 })

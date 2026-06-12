@@ -130,8 +130,9 @@ and time-pruneable.
 **Files are locally, not globally, sorted.** Each append sorts only its own
 rows, so a day partition touched by N export batches holds N internally-sorted
 files whose `conversation_id` ranges may overlap. Row-group pruning still skips
-most of them; a tighter global sort is available out-of-band via `icebergRewrite`
-([§Compaction](#compaction)), not run in V1.
+most of them; a tighter global sort is available out-of-band via
+`hyp sink maintain --compact` ([§Compaction](#compaction)) — never from the
+daemon loop or the sink tick.
 
 Sort order is mutable table metadata, **not** partition spec, so introducing or
 evolving it later is not partition-spec drift
@@ -229,12 +230,28 @@ writer appended); the next manual run starts from fresh metadata. Second,
 because the daemon keeps appending concurrently, lost races are *expected* —
 and `icebergRewrite` leaves the staged files (a full rewritten copy of the
 table) orphaned in the blob store on a failed commit. Holding the
-`StagedUpdate` lets a failed commit delete `writtenFiles` best-effort, the
-same orphan-leak class the local cache fixed in #82. Every non-compaction
-outcome carries a `reason` discriminant (`below-threshold` / `above-byte-cap`
-/ `no-table` / `conflict` / `error`) so the CLI reports the real cause instead
-of folding failures into the threshold skip; unexpected rewrite errors exit
-nonzero.
+`StagedUpdate` lets a failed commit reclaim its staged output, the same
+orphan-leak class the local cache fixed in #82. A mid-stage failure is
+covered too: a tracking resolver records every write that finished so a
+rewrite that dies between its first data file and the manifest list still
+cleans up.
+
+Cleanup is **verify-then-delete**, not delete-on-error. A failed commit's
+error alone cannot prove the commit missed — a timeout after the conditional
+PUT durably landed, or an SDK-internal retry of its own successful write
+surfacing 412, both leave the staged rewrite as the table's current snapshot,
+and deleting its data files then would corrupt the export. So the catch
+re-loads the latest metadata first: if the staged snapshot landed, the run
+reports success; only a confirmed-lost conflict deletes the staged files; an
+unverifiable outcome leaves the bounded orphans in place and says so in the
+error message.
+
+Every non-compaction outcome carries a `reason` discriminant
+(`below-threshold` / `above-byte-cap` / `no-table` / `conflict` / `error`) so
+the CLI reports the real cause instead of folding failures into the threshold
+skip. `no-table` is reserved for a verifiably absent table (no metadata
+files); a metadata *load* failure (auth, corrupt metadata, transient IO)
+reports `error`. Unexpected rewrite errors exit nonzero; a lost race exits 0.
 
 The icebird pin sits at `0.8.10`, which preserves v3 row lineage across
 rewrites — export tables are `formatVersion: 3`, so the earlier `0.8.9`
@@ -251,9 +268,9 @@ Emit the resolved partition spec and sort order on the iceberg sink's
 
 ## icebird dependency
 
-All three enablers are implemented in icebird `master` (commit `3edb15b`,
-"Scan pruning and sort-on-write (#20, #21, #22)"), **as yet unpublished** (npm
-tops out at `0.8.5` pinned / `0.8.8` latest):
+The committed `package.json` pin is **`0.8.10`**. All three enablers landed
+in icebird commit `3edb15b` ("Scan pruning and sort-on-write (#20, #21,
+#22)"), first published as `0.8.9`:
 
 - **#20** data-file pruning via partition values + manifest bounds — `prune.js`
   `partitionMightMatch` / `fileMightMatch`.
@@ -262,13 +279,17 @@ tops out at `0.8.5` pinned / `0.8.8` latest):
 - **#22** sort-on-append — `prepareAppend` sorts each partition group by the
   table's `default-sort-order-id`; `icebergRewrite` for global compaction.
 
-**Landing requirement:** this work depends on a published icebird containing
-`3edb15b` (e.g. `0.8.9`/`0.9.0`); the committed `package.json` pin moves from
-`0.8.5` to that version. The bump is a **shared-engine** change — the cache rides
-the same icebird — so the cache's tests and hermetic smokes must be re-run to
-confirm no regression across the changed `create.js` / `commit.js` / `read.js` /
-`transform.js`. During development this worktree builds against a local checkout
-of icebird `master`; the pin is updated to the published version before merge.
+`0.8.10` additionally preserves v3 row lineage across rewrites; export tables
+are `formatVersion: 3`, so `0.8.9`'s rewrite was not safe for them and the
+pin must not regress below `0.8.10` while compaction exists
+([§Compaction](#compaction)).
+
+*(Historical: this spec originally landed while `3edb15b` was unpublished —
+npm topped out at `0.8.5` pinned / `0.8.8` latest — and development built
+against a local icebird `master` checkout.)* The bump was a **shared-engine**
+change — the cache rides the same icebird — so any future pin move re-runs
+the cache's tests and hermetic smokes to confirm no regression across the
+shared `create.js` / `commit.js` / `read.js` / `transform.js`.
 
 ## Out of scope
 
