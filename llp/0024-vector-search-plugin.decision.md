@@ -32,8 +32,10 @@ pre-bundling rule applies to separately installed plugins.
 ## Index files are plugin state
 
 Vector index parquet files live under the plugin's managed state directory
-([LLP 0004](./0004-activation-and-paths.spec.md)), one index per indexed
-dataset — e.g. `<recording-root>/plugins/vector-search/<dataset>/`. They are
+([LLP 0004](./0004-activation-and-paths.spec.md)), keyed by **index name**
+(not dataset — several indexes may cover one dataset):
+`<plugin stateDir>/indexes/<index>/<partition fileBase>.parquet`, each with a
+`<partition fileBase>.meta.json` sidecar. They are
 **derived artifacts**: rebuildable from the cache, never the system of record.
 This deliberately does *not* touch the intrinsic cache layout
 ([LLP 0013](./0013-local-query-cache.decision.md) — layout is fixed, not
@@ -42,8 +44,11 @@ exports).
 
 ## Indexes are declared in config, sharded per partition
 
-Index definitions (`dataset` + `column`, plus embedder model) live in the
-**v2 config** under the plugin's section — not per-host state. Unlike
+Index definitions (`dataset` + `column`, plus an optional `name` and
+`id_column`) live in the **v2 config** under the plugin's section — not
+per-host state. The embedder model is deliberately *not* part of the
+declaration: it comes from the required `hypaware.embedder` capability, so
+swapping embedders is one config change, not an edit to every index. Unlike
 `collect` collections ([LLP 0015](./0015-query-and-datasets.spec.md#collections-are-per-host-state)),
 which point at host-only paths, an index definition is portable: every host
 has its own cache of the same registered datasets, and centrally managed
@@ -52,11 +57,22 @@ policy org-wide. The built **artifacts** stay per-host plugin state.
 
 The index is **sharded one hypvector file per cache partition**. Search
 discovers partitions through the dataset registry (never hard-coded names),
-fans out across shards, and merges top-K. Shards record the embedder model
-and dimension; a shard built with a different model than config declares is
-*stale*, not an error — it re-embeds through the normal refresh path below.
-A query-time/index-time model mismatch that can't be resolved by refresh is
-a hard error, never a silent degraded search.
+fans out across shards, and merges top-K. Shard file names are a sanitized
+human label **plus a short hash of the canonical partition JSON** — the
+sanitizer alone is lossy (`source=a/b` vs `source=a_b`), so the hash, not
+the label, is what guarantees distinct partitions get distinct files.
+
+Each shard's sidecar records its full identity (index, dataset, column,
+id_column, exact partition) alongside the embedder model and dimension, and
+freshness checks *all of it*: a declaration changed under a reused index
+name (`stale_config`), a model change (`stale_model`), and a dimension
+change for the same model (`stale_dimension` — a changed embedder
+`dimensions` setting, or a different server behind the same model name) are
+all *staleness*, not errors — they re-embed through the normal refresh path
+below. Search embeds the query before refreshing so the query's own
+dimension feeds that staleness check. A mismatch that can't be resolved by
+refresh — under `--no-refresh`, or an embedder returning inconsistent
+dimensions — is a hard error, never a silent degraded search.
 
 ## Freshness rides the cache-maintenance pattern
 
@@ -74,6 +90,12 @@ Two refresh paths, both incremental (only missing/stale shards):
   refreshes stale shards with progress and an upfront row/token estimate;
   `--no-refresh` searches existing shards only. Per-shard writes are durable,
   so an interrupted cold build resumes.
+
+Because both paths can target the same shard concurrently, builds of one
+shard **serialize through an in-process lock**, and temp files carry
+pid + UUID so concurrent *processes* (CLI search vs daemon tick) never
+share a temp path; the final rename stays atomic, so the worst cross-process
+case is a redundant last-writer-wins build of identical content.
 
 Retention coupling dissolves: when cache retention evicts a partition, its
 shard is an orphan and the next tick sweeps it. There is no
@@ -103,9 +125,11 @@ inference, and tension with [LLP 0008](./0008-plugin-runtime-dependencies.decisi
 pure-JS rule via ONNX runtimes). A local embedder remains the intended
 follow-up; the capability split means it's a config swap, not a refactor.
 
-The index stores the embedder's **model name and dimension** in the hypvector
-file metadata; query-time embedding must match, and a mismatch is a hard
-error, not a silent degraded search.
+The index stores the embedder's **model name and dimension** in each shard's
+JSON sidecar (the hypvector parquet's KV metadata cannot carry them);
+query-time drift from either classifies the shard stale and re-embeds, and
+only a mismatch refresh cannot fix is a hard error, not a silent degraded
+search.
 
 ## Embedder speaks OpenAI-compatible, base_url configurable
 
@@ -131,7 +155,11 @@ Credential handling follows the `@hypaware/s3` precedent: config carries only
 non-secret references (the **env var name**, default `OPENAI_API_KEY`), the
 key resolves from the environment at call time, the manifest declares
 `permissions: ["network", "read_env"]`, and credential material never reaches
-logs or telemetry.
+logs or telemetry. The same posture covers the response direction:
+**provider error bodies are never copied into errors or logs** — a provider
+or proxy may echo the input texts (captured content) or credentials back in
+its error detail, so failures surface as status + endpoint + error kind
+only, every part of which comes from config.
 
 ## Open questions
 

@@ -22,7 +22,13 @@ export async function collectIndexStatus(runtime) {
   for (const decl of runtime.config.indexes) {
     const partitions = await runtime.storage.discoverCachePartitions({ datasets: [decl.dataset] })
     const metas = readShardMetas(runtime.indexesDir, decl.name)
-    const states = computeShardStates({ partitions, metas, model: runtime.embedder.model })
+    const states = computeShardStates({
+      partitions,
+      metas,
+      decl,
+      model: runtime.embedder.model,
+      dimension: runtime.embedder.dimensions,
+    })
     out.push({
       index: decl.name,
       dataset: decl.dataset,

@@ -31,6 +31,7 @@ export function createOpenAiEmbedder(opts) {
   return {
     provider: 'openai-compatible',
     model: config.model,
+    ...(config.dimensions !== undefined ? { dimensions: config.dimensions } : {}),
 
     async embed(texts, embedOpts) {
       if (!Array.isArray(texts) || texts.length === 0) {
@@ -166,14 +167,18 @@ async function requestEmbeddings({ batch, config, env, endpoint, fetchImpl, sign
   }
 
   if (!response.ok) {
-    const detail = await safeErrorDetail(response)
+    // The response body is deliberately not read into the error: error
+    // messages get logged, and a provider or proxy may echo the input
+    // texts (captured content) or credential material back in its error
+    // detail. Status, endpoint, and error kind are enough to diagnose;
+    // every value here comes from config, never from the provider.
     const hint =
       (response.status === 401 || response.status === 403) && !apiKey
         ? ` (no API key sent: env var ${config.api_key_env} is unset)`
         : ''
     const err = newEmbedderError(
       `embedder_http_${response.status}`,
-      `embeddings request to ${endpoint} failed with HTTP ${response.status}${hint}${detail ? `: ${detail}` : ''}`
+      `embeddings request to ${endpoint} failed with HTTP ${response.status}${hint}`
     )
     err.status = response.status
     throw err
@@ -225,27 +230,6 @@ export function parseEmbeddingsPayload(payload, expectedCount, endpoint) {
     }
   }
   return { vectors, usage: data.usage }
-}
-
-/**
- * Body excerpt for failed responses: the provider's `error.message`
- * when present, else a short prefix of the body. Bounded so a huge
- * HTML error page cannot flood logs.
- *
- * @param {Awaited<ReturnType<FetchLike>>} response
- * @returns {Promise<string>}
- */
-async function safeErrorDetail(response) {
-  try {
-    const text = await response.text()
-    try {
-      const parsed = /** @type {{ error?: { message?: string } }} */ (JSON.parse(text))
-      if (typeof parsed?.error?.message === 'string') return parsed.error.message.slice(0, 256)
-    } catch { /* not JSON — fall through */ }
-    return text.slice(0, 256)
-  } catch {
-    return ''
-  }
 }
 
 /**

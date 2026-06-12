@@ -12,6 +12,8 @@ import type {
   PluginLogger,
 } from '../../../../collectivus-plugin-kernel-types.d.ts'
 import type { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+import type { searchVectors, writeVectors } from 'hypvector'
+import type { fileWriter } from 'hyparquet-writer'
 
 export interface VectorIndexDeclaration {
   /** Dataset to index (resolved through the dataset registry at refresh time). */
@@ -59,6 +61,8 @@ export interface ShardMeta {
   index: string
   dataset: string
   column: string
+  /** Row-id column the shard was built with; absent for content-hash ids. */
+  id_column?: string
   partition: Record<string, string>
   /** Embedder model the vectors were produced with. */
   model: string
@@ -70,7 +74,7 @@ export interface ShardMeta {
   built_at: string
 }
 
-export type ShardStateKind = 'fresh' | 'stale_rows' | 'stale_model' | 'missing' | 'orphan'
+export type ShardStateKind = 'fresh' | 'stale_rows' | 'stale_model' | 'stale_dimension' | 'stale_config' | 'missing' | 'orphan'
 
 export interface ShardState {
   /** Filename-safe partition rendering; shard file base name. */
@@ -117,9 +121,9 @@ export interface VectorSearchRuntime {
 
 export interface HypvectorModule {
   ok: true
-  searchVectors: typeof import('hypvector').searchVectors
-  writeVectors: typeof import('hypvector').writeVectors
-  fileWriter: typeof import('hyparquet-writer').fileWriter
+  searchVectors: typeof searchVectors
+  writeVectors: typeof writeVectors
+  fileWriter: typeof fileWriter
 }
 
 export type HypvectorLoadResult = HypvectorModule | { ok: false, message: string }

@@ -140,6 +140,42 @@ test('embed error messages never contain the API key', async () => {
   )
 })
 
+test('embed errors and logs never contain the provider error body', async () => {
+  // A provider/proxy may echo the input texts or credentials back in
+  // its error detail; the client must not copy any of the body into
+  // the thrown (and therefore logged) message.
+  const echoed = 'PROVIDER_ECHOED_INPUT_TEXT sk-leaked-key'
+  const { fetchImpl } = makeFakeFetch({ status: 400, body: { error: { message: echoed } } })
+  /** @type {string[]} */
+  const loggedMessages = []
+  const log = {
+    debug() {},
+    info() {},
+    warn() {},
+    /** @param {string} _event @param {Record<string, unknown>} fields */
+    error(_event, fields) { loggedMessages.push(JSON.stringify(fields)) },
+  }
+  const embedder = createOpenAiEmbedder({
+    config: baseConfig(),
+    env: { TEST_EMBED_KEY: SECRET },
+    log,
+    fetchImpl,
+  })
+  await assert.rejects(
+    () => embedder.embed(['a']),
+    (/** @type {Error & { hypErrorKind?: string, status?: number }} */ err) => {
+      assert.equal(err.hypErrorKind, 'embedder_http_400')
+      assert.equal(err.status, 400)
+      assert.ok(!err.message.includes('PROVIDER_ECHOED'), 'provider body must not reach the error message')
+      assert.match(err.message, /HTTP 400/)
+      return true
+    }
+  )
+  assert.equal(loggedMessages.length, 1)
+  assert.ok(!loggedMessages[0].includes('PROVIDER_ECHOED'), 'provider body must not reach logs')
+  assert.ok(!loggedMessages[0].includes(SECRET), 'key must not reach logs')
+})
+
 test('embed rejects an empty input batch', async () => {
   const { fetchImpl } = makeFakeFetch()
   const embedder = createOpenAiEmbedder({

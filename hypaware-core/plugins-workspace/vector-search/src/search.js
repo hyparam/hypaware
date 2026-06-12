@@ -15,19 +15,26 @@ const DEFAULT_TOP_K = 10
 
 /**
  * Embed the query, fan out across every shard of the matching indexes,
- * and merge the global top-K. Two refresh modes, mirroring `hyp query
- * sql --refresh`:
+ * and merge the global top-K. The query embeds *before* any refresh:
+ * its dimension is the staleness signal that catches dimension drift
+ * (same model, different vector length — a changed embedder
+ * `dimensions` config, or a different server behind the same model
+ * name) so auto-refresh re-embeds instead of hard-failing on shards it
+ * just declared fresh.
+ *
+ * Two refresh modes, mirroring `hyp query sql --refresh`:
  *
  *  - `auto` (default): missing/stale shards rebuild first. `onProgress`
  *    receives an upfront row estimate and one line per shard so an
  *    interactive caller sees where embedding spend goes.
  *  - `never`: search existing shards as-is. A shard built with a
- *    different model than the live embedder is a hard error here —
- *    cross-model scores are meaningless and must not silently degrade.
+ *    different model or dimension than the live embedder is a hard
+ *    error here — cross-model scores are meaningless and must not
+ *    silently degrade.
  *
  * @param {{ runtime: VectorSearchRuntime, opts: VectorSearchOptions, onProgress?: (line: string) => void }} args
  * @returns {Promise<VectorSearchHit[]>}
- * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — partition discovery via the registry-backed cache, fan-out, top-K merge; model mismatch is never a silent degraded search
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — partition discovery via the registry-backed cache, fan-out, top-K merge; model/dimension mismatch is never a silent degraded search
  */
 export async function searchVectorIndexes({ runtime, opts, onProgress }) {
   const decls = selectIndexes(runtime.config.indexes, opts)
@@ -57,8 +64,11 @@ export async function searchVectorIndexes({ runtime, opts, onProgress }) {
       const hv = await loadHypvector()
       if (!hv.ok) throw newVectorError('vector_dependency_missing', hv.message)
 
+      const queryEmbed = await runtime.embedder.embed([opts.query], { signal: opts.signal })
+      const queryVector = queryEmbed.vectors[0]
+
       if (refresh === 'auto') {
-        await refreshForSearch({ runtime, decls, onProgress })
+        await refreshForSearch({ runtime, decls, dimension: queryEmbed.dimension, onProgress })
       }
 
       /** @type {Array<{ decl: VectorIndexDeclaration, state: ShardState }>} */
@@ -66,7 +76,13 @@ export async function searchVectorIndexes({ runtime, opts, onProgress }) {
       for (const decl of decls) {
         const partitions = await runtime.storage.discoverCachePartitions({ datasets: [decl.dataset] })
         const metas = readShardMetas(runtime.indexesDir, decl.name)
-        const states = computeShardStates({ partitions, metas, model: runtime.embedder.model })
+        const states = computeShardStates({
+          partitions,
+          metas,
+          decl,
+          model: runtime.embedder.model,
+          dimension: queryEmbed.dimension,
+        })
         for (const state of states) {
           if (!state.meta || state.meta.row_count === 0) continue
           if (state.state === 'orphan') continue
@@ -77,6 +93,17 @@ export async function searchVectorIndexes({ runtime, opts, onProgress }) {
               `shard ${decl.name}/${state.fileBase} was built with model '${state.meta.model}' but the configured embedder is '${runtime.embedder.model}'; rerun without --no-refresh to re-embed`
             )
           }
+          if (state.meta.dimension !== queryEmbed.dimension) {
+            // Under refresh=never this is dimension drift the rebuild
+            // would fix; under auto the shard was just rebuilt, so a
+            // mismatch means the embedder itself is non-deterministic.
+            throw newVectorError(
+              'vector_dimension_mismatch',
+              refresh === 'never'
+                ? `shard ${decl.name}/${state.fileBase} has dimension ${state.meta.dimension} but the query embedded to ${queryEmbed.dimension}; rerun without --no-refresh to re-embed`
+                : `shard ${decl.name}/${state.fileBase} was just rebuilt at dimension ${state.meta.dimension} but the query embedded to ${queryEmbed.dimension} — the embedder is returning inconsistent dimensions for model '${runtime.embedder.model}'`
+            )
+          }
           searchable.push({ decl, state })
         }
       }
@@ -84,18 +111,6 @@ export async function searchVectorIndexes({ runtime, opts, onProgress }) {
       if (searchable.length === 0) {
         span.setAttribute('row_count', 0)
         return []
-      }
-
-      const queryEmbed = await runtime.embedder.embed([opts.query], { signal: opts.signal })
-      const queryVector = queryEmbed.vectors[0]
-      for (const { decl, state } of searchable) {
-        const meta = /** @type {NonNullable<ShardState['meta']>} */ (state.meta)
-        if (meta.dimension !== queryEmbed.dimension) {
-          throw newVectorError(
-            'vector_dimension_mismatch',
-            `shard ${decl.name}/${state.fileBase} has dimension ${meta.dimension} but the query embedded to ${queryEmbed.dimension}; rerun without --no-refresh to re-embed`
-          )
-        }
       }
 
       const hitLists = await Promise.all(
@@ -142,17 +157,19 @@ function selectIndexes(indexes, opts) {
 /**
  * Search-time refresh: report the pending work upfront (so the caller
  * sees the embedding spend before it happens), then rebuild with no row
- * budget — an interactive search wants a complete answer.
+ * budget — an interactive search wants a complete answer. `dimension`
+ * is the length the query embedded to, so dimension drift classifies
+ * stale here even when the embedder has no configured `dimensions`.
  *
- * @param {{ runtime: VectorSearchRuntime, decls: VectorIndexDeclaration[], onProgress?: (line: string) => void }} args
+ * @param {{ runtime: VectorSearchRuntime, decls: VectorIndexDeclaration[], dimension: number, onProgress?: (line: string) => void }} args
  */
-async function refreshForSearch({ runtime, decls, onProgress }) {
+async function refreshForSearch({ runtime, decls, dimension, onProgress }) {
   let pendingShards = 0
   let pendingRows = 0
   for (const decl of decls) {
     const partitions = await runtime.storage.discoverCachePartitions({ datasets: [decl.dataset] })
     const metas = readShardMetas(runtime.indexesDir, decl.name)
-    const states = computeShardStates({ partitions, metas, model: runtime.embedder.model })
+    const states = computeShardStates({ partitions, metas, decl, model: runtime.embedder.model, dimension })
     const estimate = estimatePendingWork(states)
     pendingShards += estimate.shards
     pendingRows += estimate.rows
@@ -166,6 +183,7 @@ async function refreshForSearch({ runtime, decls, onProgress }) {
     storage: runtime.storage,
     indexesDir: runtime.indexesDir,
     log: runtime.log,
+    dimension,
     onShard: (info) => {
       onProgress?.(`vector: built ${info.index}/${info.fileBase} (${info.rowsEmbedded} embedded, was ${info.state})`)
     },

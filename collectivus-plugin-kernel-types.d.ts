@@ -1323,6 +1323,13 @@ export interface EmbedderCapability {
   /** Model identifier sent with every request (e.g. `"text-embedding-3-small"`). */
   model: string
   /**
+   * Requested output dimension, when the provider is configured to
+   * shorten vectors (e.g. OpenAI v3 models' `dimensions` parameter).
+   * Index consumers treat drift between this and a stored artifact's
+   * dimension as staleness, exactly like a model change.
+   */
+  dimensions?: number
+  /**
    * Embed a batch of texts. Returns one vector per input text, in input
    * order. Implementations chunk into provider-sized requests
    * internally; callers hand over whatever batch they have.
@@ -1373,9 +1380,10 @@ export interface VectorSearchOptions {
   dataset?: string
   topK?: number
   /**
-   * `auto` (default) refreshes missing/stale shards before searching;
+   * `auto` (default) refreshes missing/stale shards before searching
+   * (declaration, model, and dimension drift all classify stale);
    * `never` searches existing shards only and hard-errors on an
-   * embedder-model mismatch.
+   * embedder model or dimension mismatch.
    */
   refresh?: 'auto' | 'never'
   signal?: AbortSignal
@@ -1403,7 +1411,7 @@ export interface VectorIndexStatus {
 
 export interface VectorShardStatus {
   partition: Record<string, string>
-  state: 'fresh' | 'stale_rows' | 'stale_model' | 'missing' | 'orphan'
+  state: 'fresh' | 'stale_rows' | 'stale_model' | 'stale_dimension' | 'stale_config' | 'missing' | 'orphan'
   /** Embedded (deduplicated) vector count in the shard, when built. */
   rows?: number
   model?: string

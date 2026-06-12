@@ -17,6 +17,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
+ * @import { AddressInfo } from 'node:net'
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
  */
@@ -86,7 +87,7 @@ export async function run({ harness, expect }) {
     })
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
-  const address = /** @type {import('node:net').AddressInfo} */ (server.address())
+  const address = /** @type {AddressInfo} */ (server.address())
   const baseUrl = `http://127.0.0.1:${address.port}`
 
   try {

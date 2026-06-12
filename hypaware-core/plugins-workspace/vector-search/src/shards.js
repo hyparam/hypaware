@@ -5,8 +5,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * @import { CachePartitionMeta, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { RawShardHit, ShardMeta, ShardState } from './types.d.ts'
+ * @import { CachePartitionMeta } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { RawShardHit, ShardMeta, ShardState, VectorIndexDeclaration } from './types.d.ts'
  */
 
 /**
@@ -23,21 +23,37 @@ import path from 'node:path'
  */
 
 /**
- * Render a partition kv-bag into a stable, filename-safe base name.
- * Keys are sorted so discovery order can never produce two names for
- * one partition. Mirrors the format-parquet filename convention,
- * including the `all` fallback for partition-less datasets.
+ * @param {Record<string, string>} partition
+ * @returns {[string, string][]}
+ */
+function sortedEntries(partition) {
+  return Object.entries(partition ?? {}).sort(([a], [b]) => a.localeCompare(b))
+}
+
+/**
+ * Render a partition kv-bag into a stable, filename-safe base name:
+ * a human-readable label plus a short hash of the canonical partition
+ * JSON. The sanitized label alone is lossy (`source=a/b` and
+ * `source=a_b` both render `source=a_b`, and a value containing `,`
+ * or `=` can mimic another partition's entry list), so the hash —
+ * not the label — is what makes distinct partitions map to distinct
+ * shard files. Keys are sorted so discovery order can never produce
+ * two names for one partition; `all` covers partition-less datasets.
  *
  * @param {Record<string, string>} partition
  * @returns {string}
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — shard file names are label + partition hash so sanitization can never collide two partitions
  */
 export function shardFileBase(partition) {
-  const entries = Object.entries(partition ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  const entries = sortedEntries(partition)
   if (entries.length === 0) return 'all'
-  return entries
+  const label = entries
     .map(([k, v]) => `${k}=${v}`)
     .join(',')
     .replace(/[^A-Za-z0-9._=,-]/g, '_')
+    .slice(0, 80)
+  const hash = createHash('sha256').update(JSON.stringify(entries)).digest('hex').slice(0, 8)
+  return `${label}-${hash}`
 }
 
 /**
@@ -105,12 +121,45 @@ export function readShardMetas(indexesDir, indexName) {
 }
 
 /**
+ * States that the refresh path resolves by rebuilding the shard.
+ * Everything here re-embeds through the same build; `orphan` deletes
+ * instead, and `fresh` is left alone.
+ *
+ * @type {ReadonlySet<string>}
+ */
+export const REBUILD_STATES = new Set(['missing', 'stale_config', 'stale_model', 'stale_dimension', 'stale_rows'])
+
+/**
+ * @param {ShardMeta} meta
+ * @param {VectorIndexDeclaration} decl
+ * @param {Record<string, string>} partition
+ * @returns {boolean}
+ */
+function matchesDeclaration(meta, decl, partition) {
+  return (
+    meta.index === decl.name &&
+    meta.dataset === decl.dataset &&
+    meta.column === decl.column &&
+    (meta.id_column ?? null) === (decl.id_column ?? null) &&
+    JSON.stringify(sortedEntries(meta.partition)) === JSON.stringify(sortedEntries(partition))
+  )
+}
+
+/**
  * Classify every shard of one index against the live cache partitions.
  * Pure over its inputs so the staleness rules are unit-testable:
  *
  *  - no shard for a live partition            → `missing`
+ *  - sidecar identity (dataset, column, id_column, exact partition)
+ *    differs from the live declaration         → `stale_config`
+ *    (an index name reused over a different dataset/column must never
+ *    pass row-count + model checks and serve the old vectors)
  *  - sidecar model differs from config model  → `stale_model`
  *    (stale, not an error — the refresh path re-embeds)
+ *  - sidecar dimension differs from the expected dimension, when the
+ *    caller knows one                          → `stale_dimension`
+ *    (the embedder's configured `dimensions`, or the dimension the
+ *    query embedded to — same model, different vector length)
  *  - sidecar source_row_count differs from the partition's current
  *    rowCount                                  → `stale_rows`
  *    (compaction dedup can shrink rowCount without new content; the
@@ -120,11 +169,11 @@ export function readShardMetas(indexesDir, indexName) {
  *    so there is no index-over-deleted-rows staleness class)
  *  - otherwise                                 → `fresh`
  *
- * @param {{ partitions: CachePartitionMeta[], metas: Map<string, ShardMeta>, model: string }} args
+ * @param {{ partitions: CachePartitionMeta[], metas: Map<string, ShardMeta>, decl: VectorIndexDeclaration, model: string, dimension?: number }} args
  * @returns {ShardState[]}
- * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — model mismatch is staleness; retention coupling dissolves into orphan sweep
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — declaration, model, and dimension drift are all staleness; retention coupling dissolves into orphan sweep
  */
-export function computeShardStates({ partitions, metas, model }) {
+export function computeShardStates({ partitions, metas, decl, model, dimension }) {
   /** @type {ShardState[]} */
   const states = []
   const liveBases = new Set()
@@ -135,8 +184,12 @@ export function computeShardStates({ partitions, metas, model }) {
     const meta = metas.get(fileBase)
     if (!meta) {
       states.push({ fileBase, state: 'missing', partition })
+    } else if (!matchesDeclaration(meta, decl, partition.partition)) {
+      states.push({ fileBase, state: 'stale_config', partition, meta })
     } else if (meta.model !== model) {
       states.push({ fileBase, state: 'stale_model', partition, meta })
+    } else if (dimension !== undefined && meta.row_count > 0 && meta.dimension !== dimension) {
+      states.push({ fileBase, state: 'stale_dimension', partition, meta })
     } else if (meta.source_row_count !== partition.rowCount) {
       states.push({ fileBase, state: 'stale_rows', partition, meta })
     } else {
@@ -172,11 +225,15 @@ export function mergeTopK(hitLists, topK) {
 }
 
 /**
- * Render a hit's partition for display (`source=claude`, or `all`).
+ * Render a partition for display (`source=claude`, or `all`). Unlike
+ * {@link shardFileBase} this is unsanitized and unhashed — display
+ * strings don't need to be collision-free file names.
  *
- * @param {VectorSearchHit} hit
+ * @param {Record<string, string>} partition
  * @returns {string}
  */
-export function partitionLabel(hit) {
-  return shardFileBase(hit.partition)
+export function partitionLabel(partition) {
+  const entries = sortedEntries(partition)
+  if (entries.length === 0) return 'all'
+  return entries.map(([k, v]) => `${k}=${v}`).join(',')
 }

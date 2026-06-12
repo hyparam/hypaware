@@ -58,7 +58,7 @@ export async function runVectorSearch(argv, ctx) {
     const rows = hits.map((hit) => ({
       score: Math.round(hit.score * 10_000) / 10_000,
       index: hit.index,
-      partition: partitionLabel(hit),
+      partition: partitionLabel(hit.partition),
       id: hit.id,
       text: hit.text ?? null,
     }))
@@ -101,7 +101,7 @@ export async function runVectorStatus(argv, ctx) {
         continue
       }
       for (const shard of status.shards) {
-        const partition = Object.entries(shard.partition).map(([k, v]) => `${k}=${v}`).join(',') || 'all'
+        const partition = partitionLabel(shard.partition)
         const extras = []
         if (shard.rows !== undefined) extras.push(`rows=${shard.rows}`)
         if (shard.dimension) extras.push(`dim=${shard.dimension}`)

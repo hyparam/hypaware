@@ -1,5 +1,6 @@
 // @ts-check
 
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
@@ -7,7 +8,7 @@ import process from 'node:process'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { loadHypvector } from './hypvector.js'
-import { computeShardStates, contentId, readShardMetas, shardPaths } from './shards.js'
+import { computeShardStates, contentId, readShardMetas, REBUILD_STATES, shardPaths } from './shards.js'
 
 /**
  * @import { CachePartitionMeta, EmbedderCapability, HypError, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -35,12 +36,13 @@ const PLUGIN_NAME = '@hypaware/vector-search'
  *   indexesDir: string,
  *   log: PluginLogger,
  *   budget?: RefreshBudget,
+ *   dimension?: number,
  *   onShard?: (info: { index: string, fileBase: string, state: string, rowsEmbedded: number }) => void,
  * }} args
  * @returns {Promise<RefreshReport>}
  * @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements] — incremental per-partition shard builds under a tick budget; per-shard writes are durable
  */
-export async function refreshIndexes({ decls, embedder, storage, indexesDir, log, budget, onShard }) {
+export async function refreshIndexes({ decls, embedder, storage, indexesDir, log, budget, dimension, onShard }) {
   /** @type {RefreshReport} */
   const report = {
     shardsBuilt: 0,
@@ -53,7 +55,16 @@ export async function refreshIndexes({ decls, embedder, storage, indexesDir, log
   for (const decl of decls) {
     const partitions = await storage.discoverCachePartitions({ datasets: [decl.dataset] })
     const metas = readShardMetas(indexesDir, decl.name)
-    const states = computeShardStates({ partitions, metas, model: embedder.model })
+    const states = computeShardStates({
+      partitions,
+      metas,
+      decl,
+      model: embedder.model,
+      // Without a configured dimension the daemon cannot detect
+      // dimension drift; the search path closes that gap with the
+      // dimension the query embedded to.
+      dimension: embedder.dimensions ?? dimension,
+    })
 
     // Orphans sweep even on an exhausted budget — deletion is cheap and
     // never spends embedding tokens.
@@ -64,7 +75,7 @@ export async function refreshIndexes({ decls, embedder, storage, indexesDir, log
       }
     }
 
-    const pending = states.filter((s) => s.state === 'missing' || s.state === 'stale_rows' || s.state === 'stale_model')
+    const pending = states.filter((s) => REBUILD_STATES.has(s.state))
     for (let i = 0; i < pending.length; i++) {
       if (budgetSpent(budget, report)) {
         report.shardsSkipped += pending.length - i
@@ -108,7 +119,7 @@ export function estimatePendingWork(states) {
   let shards = 0
   let rows = 0
   for (const s of states) {
-    if (s.state === 'missing' || s.state === 'stale_rows' || s.state === 'stale_model') {
+    if (REBUILD_STATES.has(s.state)) {
       shards++
       rows += s.partition?.rowCount ?? 0
     }
@@ -117,8 +128,40 @@ export function estimatePendingWork(states) {
 }
 
 /**
+ * In-process per-shard build serialization. Search-time refresh and the
+ * daemon tick share a process when search runs through the capability,
+ * so two builds of the same shard can otherwise interleave their
+ * parquet/sidecar writes. Keyed by the shard's final file path; entries
+ * are dropped once the tail build settles.
+ *
+ * @type {Map<string, Promise<unknown>>}
+ */
+const shardBuildLocks = new Map()
+
+/**
+ * @template T
+ * @param {string} key
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withShardBuildLock(key, fn) {
+  const tail = shardBuildLocks.get(key) ?? Promise.resolve()
+  const run = tail.then(fn, fn)
+  const settled = run.catch(() => {})
+  shardBuildLocks.set(key, settled)
+  settled.then(() => {
+    if (shardBuildLocks.get(key) === settled) shardBuildLocks.delete(key)
+  })
+  return run
+}
+
+/**
  * Build one shard: read the partition's rows from the cache, dedup by
- * id, embed, and write the hypvector file + sidecar atomically.
+ * id, embed, and write the hypvector file + sidecar atomically. Builds
+ * of the same shard serialize in-process; temp names carry pid + a
+ * UUID so concurrent processes (CLI search vs daemon tick) can never
+ * write the same temp file, and the final rename stays atomic —
+ * last-writer-wins on identical inputs.
  *
  * @param {{
  *   decl: VectorIndexDeclaration,
@@ -133,6 +176,23 @@ export function estimatePendingWork(states) {
  * @ref LLP 0024#index-files-are-plugin-state [implements] — shards are derived artifacts under plugin state, rebuilt from the cache
  */
 async function buildShard({ decl, partition, state, embedder, storage, indexesDir, log }) {
+  const { file } = shardPaths(indexesDir, decl.name, state.fileBase)
+  return withShardBuildLock(file, () => buildShardLocked({ decl, partition, state, embedder, storage, indexesDir, log }))
+}
+
+/**
+ * @param {{
+ *   decl: VectorIndexDeclaration,
+ *   partition: CachePartitionMeta,
+ *   state: ShardState,
+ *   embedder: EmbedderCapability,
+ *   storage: ExtendedQueryStorageService,
+ *   indexesDir: string,
+ *   log: PluginLogger,
+ * }} args
+ * @returns {Promise<{ rowsEmbedded: number }>}
+ */
+async function buildShardLocked({ decl, partition, state, embedder, storage, indexesDir, log }) {
   return withSpan(
     'vector.build_shard',
     {
@@ -163,7 +223,7 @@ async function buildShard({ decl, partition, state, embedder, storage, indexesDi
         dimension = result.dimension
         rowsEmbedded = result.vectors.length
 
-        const tmpFile = `${file}.tmp-${process.pid}`
+        const tmpFile = `${file}.tmp-${process.pid}-${randomUUID()}`
         try {
           await hv.writeVectors({
             writer: hv.fileWriter(tmpFile),
@@ -190,6 +250,7 @@ async function buildShard({ decl, partition, state, embedder, storage, indexesDi
         index: decl.name,
         dataset: decl.dataset,
         column: decl.column,
+        ...(decl.id_column !== undefined ? { id_column: decl.id_column } : {}),
         partition: partition.partition,
         model: embedder.model,
         dimension,
@@ -197,7 +258,7 @@ async function buildShard({ decl, partition, state, embedder, storage, indexesDi
         source_row_count: partition.rowCount,
         built_at: new Date().toISOString(),
       }
-      const tmpMeta = `${meta}.tmp-${process.pid}`
+      const tmpMeta = `${meta}.tmp-${process.pid}-${randomUUID()}`
       await fsPromises.writeFile(tmpMeta, JSON.stringify(shardMeta, null, 2) + '\n', 'utf8')
       await fsPromises.rename(tmpMeta, meta)
 
