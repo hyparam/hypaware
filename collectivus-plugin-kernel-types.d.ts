@@ -330,9 +330,59 @@ export interface PluginActivationContext {
    * before appending to the cache.
    */
   backfillMaterializers: BackfillMaterializerRegistry
+  /**
+   * Narrow facade over the kernel config apply engine (LLP 0023). Only
+   * present when the host process runs an apply engine (the daemon);
+   * absent in plain CLI boots, so transport plugins must treat it as
+   * optional and skip their pull loops when it is missing. The facade
+   * is the only channel a plugin has into config application — the
+   * kernel owns validation, install, persistence, restart, probation,
+   * and rollback.
+   */
+  configControl?: ConfigControlFacade
   requireCapability<T = unknown>(name: CapabilityName, range?: SemverRange): T
   provideCapability<T = unknown>(name: CapabilityName, version: SemverVersion, value: T): void
 }
+
+/**
+ * Plugin-facing surface of the kernel config apply engine. Handed to
+ * transport plugins (e.g. `@hypaware/central`) so they can deliver a
+ * downloaded config document and report poll liveness. Deliberately
+ * narrow: plugins never see probation state, slot paths, or rollback
+ * bookkeeping.
+ */
+export interface ConfigControlFacade {
+  /**
+   * Deliver a downloaded config document (parsed JSON) plus the ETag it
+   * was served under. The kernel validates, installs pinned plugins,
+   * persists, swaps, and requests a staged restart. Resolves before the
+   * restart happens; callers should treat `{ ok: true }` as "apply
+   * committed, restart pending".
+   */
+  stage(document: unknown, etag: string): Promise<ConfigStageResult>
+  /**
+   * Report a successful authenticated config poll (200 or 304). Clears
+   * the post-apply probation window when one is active; a no-op
+   * otherwise.
+   */
+  confirmPoll(): void
+  /** ETag of the *running* config, for `If-None-Match`. Undefined when the operative config was never applied from the server (e.g. seed). */
+  runningEtag(): string | undefined
+}
+
+export type ConfigStageResult =
+  | { ok: true, action: 'applied' | 'noop_same_etag' | 'skipped_bad_etag' }
+  | { ok: false, errorKind: ConfigApplyErrorKind, message: string }
+
+export type ConfigApplyErrorKind =
+  | 'config_invalid'
+  | 'plugin_install_failed'
+  | 'artifact_hash_mismatch'
+  | 'bundled_version_mismatch'
+  | 'document_too_large'
+  | 'apply_engine_not_ready'
+  | 'restart_pending'
+  | 'apply_io_error'
 
 export interface PluginDeactivationContext {
   plugin: ActivePlugin
@@ -412,6 +462,26 @@ export interface PluginConfigInstance {
   name: PluginName
   enabled?: boolean
   config?: JsonObject
+  /**
+   * Pinned plugin version. Set by centrally-served configs (LLP 0023):
+   * the apply engine refuses a config whose pins it cannot satisfy.
+   * For bundled first-party plugins the pin is checked strictly against
+   * the bundled version; for fetched plugins it selects the artifact.
+   */
+  version?: SemverVersion
+  /**
+   * Pinned artifact content hash for fetched plugins. The apply engine
+   * verifies the fetched artifact against this before committing the
+   * install; a mismatch is an apply failure. Ignored (not checked) for
+   * plugins bundled with the running kernel.
+   */
+  artifact_hash?: string
+  /**
+   * Optional explicit install source (raw source string accepted by the
+   * plugin installer). Defaults to the plugin name, which the resolver
+   * maps to its canonical git source.
+   */
+  source?: string
 }
 
 /**

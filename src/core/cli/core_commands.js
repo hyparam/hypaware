@@ -217,6 +217,12 @@ function buildCoreCommands() {
       run: runInit,
     },
     {
+      name: 'join',
+      summary: 'Join a centrally-managed fleet (write seed config + install daemon)',
+      usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]',
+      run: runJoin,
+    },
+    {
       name: 'attach',
       summary: 'Attach an AI client to the local gateway',
       usage: 'hyp attach [client] [--client <name>] [--dry-run] [--json] [--yes]',
@@ -505,6 +511,22 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       oldest_partition_date: report.cache.oldestDate,
     },
     recent_error_count: report.recentErrorCount,
+    // Remote-config apply state (LLP 0025). All-null until the gateway
+    // applies its first centrally-served config.
+    remote_config: report.remoteConfig
+      ? {
+        running_etag: report.remoteConfig.runningEtag,
+        probation: report.remoteConfig.probation
+          ? {
+            etag: report.remoteConfig.probation.etag,
+            applied_at: report.remoteConfig.probation.applied_at,
+            until: report.remoteConfig.probation.until,
+          }
+          : null,
+        last_rollback: report.remoteConfig.lastRollback,
+        bad_etag: report.remoteConfig.badEtag,
+      }
+      : null,
     diagnostics: report.diagnostics.map((d) => ({
       severity: d.severity,
       kind: d.kind,
@@ -596,6 +618,23 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
   stdout.write(`  cache size:      ${report.cache.totalBytes} bytes\n`)
   stdout.write(`  datasets:        ${datasets.length}\n`)
   stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
+
+  // Remote-config section appears only once the gateway has state to
+  // show — a never-joined install keeps the V1 status surface.
+  const rc = report.remoteConfig
+  if (rc && (rc.runningEtag || rc.probation || rc.lastRollback || rc.badEtag)) {
+    stdout.write('  remote config:\n')
+    if (rc.runningEtag) stdout.write(`    running etag:  ${rc.runningEtag}\n`)
+    if (rc.probation) {
+      stdout.write(`    probation:     ${rc.probation.etag} until ${rc.probation.until}\n`)
+    }
+    if (rc.lastRollback) {
+      stdout.write(`    last rollback: ${rc.lastRollback.etag} at ${rc.lastRollback.at} (${rc.lastRollback.reason})\n`)
+    }
+    if (rc.badEtag) {
+      stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+    }
+  }
 
   if (report.diagnostics.length > 0) {
     stdout.write('  diagnostics:\n')
@@ -2794,6 +2833,193 @@ async function runInitFromFile(flags, ctx) {
 
   ctx.stdout.write(`✓ Wrote ${targetPath}\n`)
   return 0
+}
+
+/**
+ * `hyp join <url> [token]` — join a centrally-managed fleet. Pure
+ * sugar over two existing steps: write the seed config (an ordinary v2
+ * config containing exactly the central plugin) and run the
+ * non-interactive daemon install. Doing those two steps by hand is
+ * specified to be exactly equivalent.
+ *
+ * Because a policy token is a multi-use fleet-wide credential, the
+ * token can (and for MDM scripts, should) arrive via `--token-file`
+ * or stdin instead of argv — a bare argv token lands in shell history
+ * and process listings. The seed config is written mode 0600.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @ref LLP 0025#seed-config-mode [implements] — join = write-seed-config + daemon install; a wrapper, not a second code path
+ */
+async function runJoin(argv, ctx) {
+  const parsed = parseJoinArgs(argv)
+  if (parsed.help) {
+    ctx.stdout.write('usage: hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]\n')
+    ctx.stdout.write('  token sources (pick one): positional argument, --token-file, or stdin\n')
+    return 0
+  }
+  if (parsed.error) {
+    ctx.stderr.write(`hyp join: ${parsed.error}\n`)
+    return 2
+  }
+
+  try {
+    const url = new URL(/** @type {string} */ (parsed.url))
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      ctx.stderr.write(`hyp join: url must be http(s); got ${url.protocol}\n`)
+      return 2
+    }
+  } catch {
+    ctx.stderr.write(`hyp join: not a valid URL: ${parsed.url}\n`)
+    return 2
+  }
+
+  /** @type {string | undefined} */
+  let token = parsed.token
+  if (token === undefined && parsed.tokenFile !== undefined) {
+    try {
+      token = (await fs.readFile(parsed.tokenFile, 'utf8')).trim()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      ctx.stderr.write(`hyp join: --token-file: ${message}\n`)
+      return 1
+    }
+  }
+  if (token === undefined) {
+    if (isTty(ctx.stdin)) {
+      ctx.stderr.write('hyp join: no token given — pass it as an argument, via --token-file, or on stdin\n')
+      return 2
+    }
+    token = (await readAllStdin(ctx.stdin)).trim()
+  }
+  if (token.length === 0) {
+    ctx.stderr.write('hyp join: token is empty\n')
+    return 2
+  }
+
+  /** @type {HypAwareV2Config} */
+  const seed = {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: {
+      central: {
+        plugin: '@hypaware/central',
+        config: {
+          url: /** @type {string} */ (parsed.url),
+          identity: { bootstrap_token: token },
+        },
+      },
+    },
+  }
+
+  const catalogCtx = await buildKnownPluginsForCtx(ctx)
+  const validation = await validateConfig(seed, {
+    knownPlugins: catalogCtx.knownPlugins,
+    knownDatasets: catalogCtx.knownDatasets,
+  })
+  if (!validation.ok) {
+    for (const err of validation.errors) {
+      ctx.stderr.write(`hyp join: [${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}\n`)
+    }
+    return 1
+  }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const targetPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+
+  return withSpan(
+    'join.run',
+    {
+      [Attr.COMPONENT]: 'join',
+      [Attr.OPERATION]: 'join.run',
+      config_path: targetPath,
+      install_daemon: !parsed.noDaemon,
+      status: 'ok',
+    },
+    async (span) => {
+      // The token is the only credential on disk until the first
+      // bootstrap, so the seed write is atomic and mode 0600.
+      await fs.mkdir(path.dirname(targetPath), { recursive: true })
+      const tmp = `${targetPath}.tmp.${process.pid}.${Date.now()}`
+      await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
+      await fs.rename(tmp, targetPath)
+      ctx.stdout.write(`✓ Wrote seed config ${targetPath}\n`)
+
+      if (parsed.noDaemon) {
+        ctx.stdout.write('  daemon install skipped (--no-daemon); run `hyp daemon install` to finish joining\n')
+        return 0
+      }
+
+      const installArgv = parsed.binPath !== undefined ? ['--bin', parsed.binPath] : []
+      const code = await runDaemonInstall(installArgv, ctx)
+      if (code !== 0) {
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', 'daemon_install_failed')
+        return code
+      }
+      ctx.stdout.write('✓ Joined — the daemon will pull its configuration from the server\n')
+      return 0
+    },
+    { component: 'join' }
+  )
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }}
+ */
+function parseJoinArgs(argv) {
+  /** @type {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }} */
+  const r = {}
+  /** @type {string[]} */
+  const positional = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--help' || token === '-h') { r.help = true; return r }
+    if (token === '--no-daemon') { r.noDaemon = true; continue }
+    if (token === '--token-file' || token.startsWith('--token-file=')) {
+      const value = token === '--token-file' ? argv[++i] : token.slice('--token-file='.length)
+      if (!value) return { error: '--token-file: requires a path' }
+      r.tokenFile = value
+      continue
+    }
+    if (token === '--bin' || token.startsWith('--bin=')) {
+      const value = token === '--bin' ? argv[++i] : token.slice('--bin='.length)
+      if (!value) return { error: '--bin: requires a path' }
+      r.binPath = value
+      continue
+    }
+    if (token.startsWith('-') && token !== '-') {
+      return { error: `unknown argument: ${token}` }
+    }
+    positional.push(token)
+  }
+  if (positional.length === 0) return { error: 'missing <url> (see hyp join --help)' }
+  if (positional.length > 2) return { error: `unexpected argument: ${positional[2]}` }
+  r.url = positional[0]
+  // '-' as the token positional means "read from stdin", same as
+  // omitting it on a piped invocation.
+  if (positional.length === 2 && positional[1] !== '-') r.token = positional[1]
+  if (r.token !== undefined && r.tokenFile !== undefined) {
+    return { error: 'pass the token either as an argument or via --token-file, not both' }
+  }
+  return r
+}
+
+/**
+ * @param {unknown} stdin
+ * @returns {Promise<string>}
+ */
+async function readAllStdin(stdin) {
+  const stream = /** @type {AsyncIterable<Buffer | string> | undefined} */ (stdin)
+  if (!stream || typeof (/** @type {any} */ (stream))[Symbol.asyncIterator] !== 'function') return ''
+  let out = ''
+  for await (const chunk of stream) {
+    out += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+  }
+  return out
 }
 
 /** @param {unknown} stream */

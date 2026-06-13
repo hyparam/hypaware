@@ -15,7 +15,7 @@ import { createQueryStorageService } from '../cache/storage.js'
 import { isSafeContributionName } from './contribution_names.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { KernelRuntime } from './activation.d.ts'
  */
@@ -41,6 +41,7 @@ import { isSafeContributionName } from './contribution_names.js'
  *   backfillMaterializerRegistry?: BackfillMaterializerRegistry,
  *   storage?: ExtendedQueryStorageService,
  *   cacheRoot?: string,
+ *   configControl?: ConfigControlFacade,
  * }} [opts]
  * @returns {KernelRuntime}
  * @ref LLP 0003#intrinsic-not-plugin-provided [implements] — query + storage are wired in as intrinsic services, not plugin contributions
@@ -53,6 +54,7 @@ export function createKernelRuntime(opts = {}) {
     getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
   })
   return {
+    ...(opts.configControl ? { configControl: opts.configControl } : {}),
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
     commands: opts.commandRegistry ?? createCommandRegistry(),
     configRegistry: createConfigRegistry(),
@@ -121,6 +123,8 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     initPresets: runtime.initPresets,
     backfills: runtime.backfills,
     backfillMaterializers: runtime.backfillMaterializers,
+    // @ref LLP 0025#apply-engine-is-kernel-surface [implements] — plugins reach the apply engine only through this narrow facade; absent outside the daemon
+    ...(runtime.configControl ? { configControl: runtime.configControl } : {}),
     /**
      * @template T
      * @param {CapabilityName} name

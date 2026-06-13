@@ -343,10 +343,20 @@ function parsePluginEntry(entry, pointer, errors) {
   if (obj.config !== undefined && !isPlainObject(obj.config)) {
     errors.push({ pointer: `${pointer}/config`, message: 'config must be an object when present' })
   }
+  // Pin fields set by centrally-served configs (LLP 0025). Optional in
+  // hand-written configs; the apply engine enforces them when present.
+  for (const key of /** @type {const} */ (['version', 'artifact_hash', 'source'])) {
+    if (obj[key] !== undefined && !isNonEmptyString(obj[key])) {
+      errors.push({ pointer: `${pointer}/${key}`, message: `${key} must be a non-empty string when present` })
+    }
+  }
   /** @type {PluginConfigInstance} */
   const out = { name: obj.name }
   if (typeof obj.enabled === 'boolean') out.enabled = obj.enabled
   if (isPlainObject(obj.config)) out.config = /** @type {JsonObject} */ (obj.config)
+  if (isNonEmptyString(obj.version)) out.version = obj.version
+  if (isNonEmptyString(obj.artifact_hash)) out.artifact_hash = obj.artifact_hash
+  if (isNonEmptyString(obj.source)) out.source = obj.source
   return out
 }
 

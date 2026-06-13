@@ -28,6 +28,11 @@ copy-pasted into every plugin, it belongs in core.
 - the Iceberg-backed cache/storage implementation and freshness checks
 - result formatting (table / json / jsonl / markdown)
 - managed state directories, lock files, permission prompts
+- the **config apply engine** — staging a replacement config: validate,
+  install pinned plugins, persist last-known-good, swap, staged restart,
+  rollback bookkeeping. Exposed to plugins as a narrow context facade; the
+  document's *transport* (e.g. `@hypaware/central`'s pull loop) is plugin
+  domain. See [LLP 0025](./0025-remote-config-join-flow.spec.md#apply-engine-is-kernel-surface).
 
 ## Intrinsic, not plugin-provided
 
@@ -56,6 +61,12 @@ and the `@hypaware/format-iceberg` export derives its own
 They are therefore promoted to a neutral core home re-exported from
 `src/core/index.js`, not buried in the cache — the cache is one consumer, not the
 owner.
+
+"Query is intrinsic" means the **SQL/dataset surface** specifically: the
+dataset registry, SQL execution, cursors, freshness, and formatting. Other
+query modalities (e.g. vector similarity search) are **plugin capabilities**
+that build on the intrinsic surface, not kernel surface — decided 2026-06-12
+when scoping `@hypaware/vector-search`.
 
 ## Plugins own
 

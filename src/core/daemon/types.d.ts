@@ -3,7 +3,7 @@ import type {
   CapabilityRegistry,
   QueryRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
-import type { V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
+import type { ConfigControlStatus, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
 import type { ExtendedSourceRegistry } from '../registry/sources.js'
 import type { ExtendedSinkRegistry } from '../registry/sinks.js'
 import type { KernelRuntime } from '../runtime/activation.js'
@@ -71,6 +71,7 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'recent_errors'
+  | 'remote_config_rolled_back'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -139,6 +140,13 @@ export interface HypAwareStatusReport {
   recentErrorCount: number
   diagnostics: StatusDiagnostic[]
   overall: 'healthy' | 'degraded'
+  /**
+   * Remote-config apply state (LLP 0025): probation, last rollback +
+   * structured reason, remembered bad etag, and the running config's
+   * etag. Null only when the probe itself failed; a gateway that has
+   * never applied a remote config reports all-null fields.
+   */
+  remoteConfig: ConfigControlStatus | null
 }
 
 export interface CollectStatusOptions {

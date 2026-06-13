@@ -73,6 +73,7 @@ plugin that registers a dataset gets query and formatting for free.
 | Iceberg export partitioning | [0022](./0022-iceberg-export-partitioning.spec.md) | Spec |
 | Context-graph T0 projection | [0023](./0023-context-graph-projection.decision.md) | Decision |
 | Vector search plugin | [0024](./0024-vector-search-plugin.decision.md) | Decision |
+| Remote config & join flow | [0025](./0025-remote-config-join-flow.spec.md) | Spec |
 
 ## Where to start
 

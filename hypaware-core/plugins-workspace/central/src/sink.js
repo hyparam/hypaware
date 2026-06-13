@@ -99,8 +99,9 @@ export function createForwardSink(args) {
     },
 
     async close() {
-      // No background loops to stop in the V1 forward sink; identity
-      // refresh and config pull live on their own timers when wired in.
+      // No background loops to stop here: the config pull loop wraps
+      // this sink's close() in index.js, and identity refresh is lazy
+      // (every authenticated call refreshes inside the 24h window).
     },
   }
 }

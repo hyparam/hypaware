@@ -3,6 +3,7 @@
 import path from 'node:path'
 
 import { validateCentralConfig } from './src/config.js'
+import { createConfigPullLoop } from './src/config_client.js'
 import { IdentityClient } from './src/identity_client.js'
 import { createForwardSink } from './src/sink.js'
 
@@ -26,6 +27,10 @@ import { createForwardSink } from './src/sink.js'
 export async function activate(ctx) {
   const query = ctx.query
   const storage = ctx.storage
+  // Present only in daemon mode. Without an apply engine there is no
+  // one to hand a pulled document to, so the pull loop stays off (CLI
+  // boots must not fire config polls as a side effect of `hyp status`).
+  const configControl = ctx.configControl
 
   ctx.sinks.register({
     name: 'forward',
@@ -55,13 +60,35 @@ export async function activate(ctx) {
         hyp_identity_source: source,
       })
 
-      return createForwardSink({
+      const sink = createForwardSink({
         config,
         identityClient,
         query,
         storage,
         log: sinkCtx.log,
       })
+
+      if (!configControl) return sink
+
+      // @ref LLP 0025#config-pull-loop [implements] — pull immediately on bootstrap success, then on the steady timer
+      const pullLoop = createConfigPullLoop({
+        centralUrl: config.url,
+        identityClient,
+        configControl,
+        ...(config.poll_interval_seconds !== undefined
+          ? { pollIntervalSeconds: config.poll_interval_seconds }
+          : {}),
+        log: sinkCtx.log,
+      })
+      pullLoop.start()
+
+      return {
+        ...sink,
+        async close() {
+          await pullLoop.stop()
+          await sink.close()
+        },
+      }
     },
   })
 }
