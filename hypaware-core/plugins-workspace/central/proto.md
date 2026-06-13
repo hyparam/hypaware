@@ -124,9 +124,11 @@ backs off linearly (30s → 60s → 120s → 300s).
 ### POST `/v1/ingest/{signal}`
 
 Bearer-authenticated. Body is NDJSON (one row per line, terminated by
-`\n`). One request carries one signal; the kernel groups partitions by
-the dataset's `sourceSignal` (defaulting to the dataset name) before
-posting.
+`\n`). One request carries one signal. The kernel forwards each cache
+partition independently, resolving its signal from the dataset's
+`sourceSignal` (defaulting to the dataset name) and streaming the
+partition's rows as one or more bounded chunks — one POST per chunk (see
+"Batch boundaries").
 
 `{signal}` is one of:
 
@@ -141,6 +143,15 @@ Headers (request):
 
 - `Authorization: Bearer <jwt>`
 - `Content-Type: application/x-ndjson`
+- `X-Hyp-Batch-Id: <hash>` — idempotency key for this chunk. The client
+  derives it from the signal, the partition identity, the chunk's
+  position within the partition, and the chunk's exact bytes: a re-sent
+  chunk reproduces the same key, but two byte-identical chunks at
+  different positions (or in different partitions) get distinct keys.
+  The server keeps a bounded per-gateway ledger and acks a repeated key
+  `202` without re-storing it, so a re-sent chunk is deduped while a
+  genuinely distinct chunk that merely shares bytes is never dropped
+  (server LLP 0001).
 
 Response 202: batch accepted for processing. Body is empty.
 
@@ -158,12 +169,33 @@ honored when present.
 Response 5xx (other): transient transport failure. Client retries with
 exponential backoff capped at 5 minutes.
 
+> **Client status (v1.4.x):** the per-status handling above is the
+> **target** contract; it is not yet what `@hypaware/central` does. The
+> current sink treats *any* non-2xx response uniformly: it throws, and
+> the kernel sink driver re-spools the whole partition for the next
+> tick. So poison (400/422) is **not** dropped — it retries forever — and
+> `Retry-After` on 429/503 is **not** honored (no client-side pacing).
+> Bulk backfill that trips the server's per-gateway `byte_rate` 429 is
+> the known consequence; closing this gap (poison-drop + `Retry-After`
+> backoff) is tracked as follow-up. New post-join traffic is small and
+> unaffected.
+
 ### Batch boundaries
 
-The kernel sink driver decides batch boundaries by cron schedule and
-partition discovery. The central plugin does not split, merge, or
-reorder partitions inside a batch — each partition's rows are
-serialized in dataset-iteration order, one JSON document per line.
+The kernel sink driver decides which partitions enter a batch (by cron
+schedule and partition discovery). Within a partition the central plugin
+streams rows in dataset-iteration order, one JSON document per line, and
+splits them into bounded chunks (a row-count and a byte budget, both far
+under the server's max body) so a large backlog never materializes in
+memory. Each chunk is an independent POST carrying its own
+`X-Hyp-Batch-Id`, derived from the signal, the partition identity, the
+chunk's position, and its bytes. Because re-streaming a partition
+reproduces the same chunk boundaries in the same order, re-sending it
+after a transport failure reproduces the same ids for the chunks already
+delivered (the driver retries at partition granularity), so the server
+dedupes them and a partial-then-retried partition converges to
+exactly-once. Keying on position as well as content means two
+byte-identical chunks never alias onto one ledger entry.
 
 ### Row shape
 

@@ -51,6 +51,17 @@ test('ai-gateway registers cache partitioning for source columns and iceberg fie
   assert.equal(dataset.cachePartitioning.iceberg.fields[2].required, true)
 })
 
+test('ai-gateway registers sourceSignal proxy so rows forward under a known ingest signal', () => {
+  // Load-bearing for the @hypaware/central forward sink: without this the
+  // sink falls back to the dataset name ('ai_gateway_messages'), which is
+  // not a known signal, and AI-gateway rows never leave the gateway.
+  const registry = createQueryRegistry()
+  registry.registerDataset(aiGatewayDatasetRegistration())
+  const dataset = registry.getDataset(DATASET_NAME)
+  assert.ok(dataset)
+  assert.equal(dataset.sourceSignal, 'proxy')
+})
+
 test('registry rejects cachePartitioning with source column absent from schema', () => {
   const registry = createQueryRegistry()
   assert.throws(
