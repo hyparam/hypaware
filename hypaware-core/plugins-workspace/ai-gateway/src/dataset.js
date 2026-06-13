@@ -207,6 +207,11 @@ export function aiGatewayDatasetRegistration() {
     name: DATASET_NAME,
     plugin: PLUGIN_NAME,
     schema: AI_GATEWAY_SCHEMA,
+    // Forward under the `proxy` ingest signal: the central server maps
+    // `proxy` -> ai_gateway_messages. Without this the central forward
+    // sink falls back to the dataset name, which is not a known signal,
+    // and AI-gateway rows never leave the gateway.
+    sourceSignal: 'proxy',
     primaryTimestampColumn: 'message_created_at',
     cachePartitioning: {
       source: {
