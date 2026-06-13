@@ -19,10 +19,12 @@ const MAX_CHUNK_ROWS = 5000
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 /**
- * Build the `forward` Sink. The sink's `exportBatch` groups the driver's
- * partitions by signal (via each dataset's `sourceSignal`, defaulting to
- * the dataset name), serializes each group as NDJSON, and POSTs to
- * `/v1/ingest/{signal}`. Auth comes from the supplied IdentityClient.
+ * Build the `forward` Sink. The sink's `exportBatch` forwards each
+ * driver partition independently: it resolves the partition's ingest
+ * signal (via the dataset's `sourceSignal`, defaulting to the dataset
+ * name), streams the partition's rows as NDJSON in bounded chunks, and
+ * POSTs each chunk to `/v1/ingest/{signal}`. One POST carries one
+ * signal. Auth comes from the supplied IdentityClient.
  *
  * The kernel's sink driver owns retry-via-outbox; this sink reports
  * `failed` / `retryPartitions` on transport failure and the driver
@@ -76,10 +78,16 @@ export function createForwardSink(args) {
           const message = err instanceof Error ? err.message : String(err)
           firstError = firstError ?? message
           retry.push(partition)
+          // `forwardPartition` annotates the error with the failing
+          // chunk's id and the count that already landed (undefined for
+          // pre-stream failures like an unknown signal).
+          const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err ?? {})
           log.warn('central.forward.failed', {
             hyp_sink_signal: signal,
             hyp_dataset: partition.dataset,
             message,
+            batch_id: e.hyp_batch_id,
+            chunks_sent: e.hyp_chunks_sent,
           })
         }
       }
@@ -128,12 +136,16 @@ function signalForPartition(query, partition) {
 
 /**
  * Stream one partition's rows to `/v1/ingest/{signal}` in bounded
- * chunks, never materializing the whole table. Each chunk POSTs with a
- * content-derived `X-Hyp-Batch-Id`: when the driver re-hands a partition
- * after a transport failure, the unchanged prefix chunks hash to the
- * same ids and the server (LLP 0001 idempotency ledger) drops them as
- * 202s, so a partial-then-retried partition converges to exactly-once
- * instead of duplicating every already-delivered row.
+ * chunks, never materializing the whole table. Each chunk POSTs with an
+ * `X-Hyp-Batch-Id` derived from the signal, the partition identity, the
+ * chunk's position, and its bytes (see {@link batchIdForChunk}): stable
+ * across retries of that exact chunk, yet distinct for any other chunk —
+ * so two byte-identical chunks never collide. When the driver re-hands a
+ * partition after a transport failure, re-streaming reproduces the same
+ * chunk boundaries, so the unchanged prefix chunks hash to the same ids
+ * and the server's idempotency ledger (server LLP 0001) acks them `202`
+ * without re-storing. A partial-then-retried partition thus converges to
+ * exactly-once instead of duplicating every already-delivered row.
  *
  * @param {{
  *   partition: QueryPartition,
@@ -154,9 +166,11 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
   }
-  await flushPartition(storage, partition.tablePath, 'sink_export')
+  const tablePath = partition.tablePath
+  await flushPartition(storage, tablePath, 'sink_export')
 
   let bytesWritten = 0
+  let chunkIndex = 0
   /** @type {string[]} */
   let lines = []
   let pendingBytes = 0
@@ -164,23 +178,42 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const flushChunk = async () => {
     if (lines.length === 0) return
     const body = lines.join('\n') + '\n'
-    await postNdjson({
-      centralUrl: config.url,
-      signal,
-      body,
-      batchId: batchIdForBody(signal, body),
-      identityClient,
-      fetchFn,
+    const batchId = batchIdForChunk(signal, tablePath, chunkIndex, body)
+    const bytes = Buffer.byteLength(body, 'utf8')
+    const rows = lines.length
+    try {
+      await postNdjson({ centralUrl: config.url, signal, body, batchId, identityClient, fetchFn })
+    } catch (err) {
+      // Annotate so the partition-level failure log (exportBatch) can
+      // name the failing chunk and how many already landed — the new
+      // chunk loop is otherwise invisible against the server ledger.
+      if (err && typeof err === 'object') {
+        const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err)
+        e.hyp_batch_id = batchId
+        e.hyp_chunks_sent = chunkIndex
+      }
+      throw err
+    }
+    log.debug('central.forward.chunk', {
+      hyp_sink_signal: signal,
+      hyp_dataset: partition.dataset,
+      batch_id: batchId,
+      chunk_index: chunkIndex,
+      rows,
+      bytes,
     })
-    bytesWritten += Buffer.byteLength(body, 'utf8')
+    bytesWritten += bytes
+    chunkIndex += 1
     lines = []
     pendingBytes = 0
   }
 
-  for await (const row of storage.readRows(partition.tablePath)) {
+  for await (const row of storage.readRows(tablePath)) {
     const line = JSON.stringify(serializeRow(row))
     lines.push(line)
-    pendingBytes += line.length + 1
+    // Count UTF-8 bytes (not UTF-16 code units) so the budget bounds the
+    // actual wire size for multibyte payloads, e.g. CJK `content_text`.
+    pendingBytes += Buffer.byteLength(line, 'utf8') + 1
     if (lines.length >= MAX_CHUNK_ROWS || pendingBytes >= MAX_CHUNK_BYTES) {
       await flushChunk()
     }
@@ -190,16 +223,26 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
 }
 
 /**
- * Deterministic idempotency key for a chunk: a hash of its exact bytes
- * (namespaced by signal). Identical content always yields the same id,
- * so a re-sent chunk is deduped; distinct content yields a distinct id.
+ * Deterministic idempotency key for one chunk. Hashes the signal, the
+ * partition identity (`tablePath`), the chunk's ordinal position, and
+ * its exact bytes. Re-streaming a partition reproduces the same chunk
+ * boundaries and order, so a re-sent chunk hashes to the same id (the
+ * server dedupes it); two byte-identical chunks at different positions —
+ * or in different partitions — get distinct ids and are both stored.
  *
  * @param {string} signal
+ * @param {string} tablePath
+ * @param {number} chunkIndex
  * @param {string} body
  * @returns {string}
  */
-function batchIdForBody(signal, body) {
-  return createHash('sha256').update(signal).update('\0').update(body).digest('hex').slice(0, 32)
+function batchIdForChunk(signal, tablePath, chunkIndex, body) {
+  return createHash('sha256')
+    .update(signal).update('\0')
+    .update(tablePath).update('\0')
+    .update(String(chunkIndex)).update('\0')
+    .update(body)
+    .digest('hex').slice(0, 32)
 }
 
 /**
