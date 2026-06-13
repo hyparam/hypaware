@@ -44,11 +44,21 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * Activation requires explicit config (`{ name: '@hypaware/gascity' }`)
  * or an init preset — the picker and default boot profiles skip them.
  *
+ * The embedder/vector-search pair is excluded because enabling an
+ * API-backed embedder is the explicit opt-in that lets captured text
+ * leave the machine — it must be a deliberate `plugins[]` decision,
+ * never a default. `@hypaware/vector-search` follows it: its manifest
+ * requires `hypaware.embedder`, which no default-activated plugin
+ * provides.
+ *
  * @type {ReadonlySet<PluginName>}
+ * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by] — the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  */
 export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/central',
   '@hypaware/gascity',
+  '@hypaware/embedder-openai',
+  '@hypaware/vector-search',
 ]))
 
 /**

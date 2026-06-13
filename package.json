@@ -42,7 +42,8 @@
     "squirreling": "0.12.23"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.15.6"
+    "hyparquet-writer": "0.15.6",
+    "hypvector": "0.1.1"
   },
   "overrides": {
     "hyparquet-writer": "0.15.6",
