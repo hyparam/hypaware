@@ -125,7 +125,7 @@ export function createClaudeExchangeProjector(opts) {
       const headers = parseHeaders(input.request_headers)
       // The exchange's subagent id (absent → main loop). Scopes
       // transcript matching to this thread so a subagent block can't
-      // match a main-session or other-agent entry. @ref LLP 0023#decision
+      // match a main-session or other-agent entry. @ref LLP 0026#decision
       const agentId = headerValue(headers, 'x-claude-code-agent-id')
       const sessionId = resolveClaudeSessionId(reqBody, headers)
       const messages = anthropicMessages(
@@ -173,7 +173,7 @@ export function createClaudeExchangeProjector(opts) {
         responseBody,
         input.duration_ms
       )
-      // @ref LLP 0023#decision — decompose each wire message into the
+      // @ref LLP 0026#decision — decompose each wire message into the
       // transcript's native units (one per assistant block, one per
       // tool_result) so message_id is the transcript-line uuid and
       // live rows converge with backfill.
@@ -216,7 +216,7 @@ export function createClaudeExchangeProjector(opts) {
 
       if (projectedMessages.length === 0) return undefined
 
-      // @ref LLP 0024#decision — a message that came out fallback (no
+      // @ref LLP 0027#decision — a message that came out fallback (no
       // transcript line on disk yet — the finalize race) carries the
       // content match-key so flush-time settlement can re-match it by
       // pure lookup once the line lands, without reconstructing the
@@ -249,7 +249,7 @@ export function createClaudeExchangeProjector(opts) {
       if (exchangeAttrs) projection.attributes = exchangeAttrs
       if (input.ts_start) projection.conversation_started_at = input.ts_start
 
-      // @ref LLP 0023#decision — subagent exchanges identify themselves
+      // @ref LLP 0026#decision — subagent exchanges identify themselves
       // on the wire; sidechain provenance must not depend on winning the
       // transcript race, so it is stamped from the header (resolved
       // above, and used to scope transcript matching to this thread).
@@ -307,7 +307,7 @@ export function createClaudeExchangeProjector(opts) {
  * Split one wire assistant message into per-block projected messages,
  * mirroring Claude Code's one-transcript-line-per-block representation.
  *
- * // @ref LLP 0023#decision — alignment: the lines of one API message
+ * // @ref LLP 0026#decision — alignment: the lines of one API message
  * // share `message.id` in block order, so when the counts agree each
  * // block takes its positional line (type-checked); otherwise each
  * // block falls back to its own content key. Cardinality is recorded
@@ -366,7 +366,7 @@ function projectAssistantMessage(args) {
 /**
  * Project one wire user message into the transcript's units.
  *
- * // @ref LLP 0023#decision — tool_results split one message per
+ * // @ref LLP 0026#decision — tool_results split one message per
  * // block (the transcript writes one line per result; `tool_use_id`
  * // is the join key). Prompt-style messages stay whole, matched with
  * // a wire-injected-reminder-stripped retry; on that match the

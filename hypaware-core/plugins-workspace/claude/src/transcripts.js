@@ -184,7 +184,7 @@ function byTimestampAsc(a, b) {
 /**
  * Index transcript entries for the projector's wire→line matching.
  *
- * // @ref LLP 0023#decision — one line per native DAG node: an API
+ * // @ref LLP 0026#decision — one line per native DAG node: an API
  * // message spans SEVERAL lines (one per assistant block), so the
  * // message-id index must keep the ordered list, not last-wins.
  *
@@ -232,7 +232,7 @@ export function indexTranscriptEntries(entries) {
  * `agent_id` empty/undefined is the main loop; ids and content keys are
  * hex, so `:` is an unambiguous separator.
  *
- * // @ref LLP 0023#decision — match within a thread, not across the session.
+ * // @ref LLP 0026#decision — match within a thread, not across the session.
  *
  * @param {string | undefined} agentId
  * @param {string} contentKey
@@ -292,7 +292,7 @@ export function findTranscriptMatch(index, candidate) {
  * flush-time settlement can re-match by pure lookup once the transcript
  * line lands — without reconstructing the lost content array.
  *
- * // @ref LLP 0024#decision — match-key at projection enables flush-time settlement.
+ * // @ref LLP 0027#decision — match-key at projection enables flush-time settlement.
  *
  * @param {string} role
  * @param {unknown} content
@@ -311,7 +311,7 @@ export function matchKey(role, content) {
  * to the gateway (full prior-message chain) so enriched and fallback
  * rows stay one shape.
  *
- * // @ref LLP 0024#decision — one identity-copy core for projection and settlement.
+ * // @ref LLP 0027#decision — one identity-copy core for projection and settlement.
  *
  * @param {Record<string, unknown>} target
  * @param {TranscriptEntry} match

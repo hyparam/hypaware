@@ -551,7 +551,7 @@ function expandMessageParts(ctx) {
  * logical message a new id on every replay where the breakpoint
  * shifted — each one a duplicate row the seen-set cannot catch.
  *
- * // @ref LLP 0023#decision — conversation_id is a session id for Claude;
+ * // @ref LLP 0026#decision — conversation_id is a session id for Claude;
  * // agent_id separates a subagent thread from the main loop so two
  * // agents with identical content in one session don't collide on one
  * // fallback id. Omitted from the hash when absent (main loop / Codex)

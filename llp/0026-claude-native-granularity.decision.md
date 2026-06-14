@@ -1,4 +1,4 @@
-# LLP 0023: Claude native transcript granularity for ai_gateway_messages
+# LLP 0026: Claude native transcript granularity for ai_gateway_messages
 
 **Type:** Decision
 **Status:** Draft

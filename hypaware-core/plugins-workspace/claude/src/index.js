@@ -86,7 +86,7 @@ export async function activate(ctx) {
     })
   )
 
-  // @ref LLP 0024#decision — flush-time settlement: upgrade fallback rows
+  // @ref LLP 0027#decision — flush-time settlement: upgrade fallback rows
   // (transcript line not yet on disk when captured) to native identity
   // once the line has landed, so race duplicates collapse at flush.
   gateway.registerSettlementEnricher(

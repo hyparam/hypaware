@@ -1,11 +1,11 @@
-# LLP 0024: Flush-time identity settlement for ai_gateway_messages
+# LLP 0027: Flush-time identity settlement for ai_gateway_messages
 
 **Type:** Decision
 **Status:** Draft
 **Systems:** Gateway, Cache
 **Author:** Brendan / Claude
 **Date:** 2026-06-13
-**Related:** LLP 0013, LLP 0016, LLP 0023
+**Related:** LLP 0013, LLP 0016, LLP 0026
 
 ## Summary
 
@@ -13,7 +13,7 @@ Fallback-identity rows in `ai_gateway_messages` are **provisional**. At cache-fl
 time the owning dataset may run a `settleBatch` pass that upgrades a fallback row to
 its native transcript identity (once the Claude Code transcript line has landed on
 disk) and dedupes the upgraded row against the uuid copy already written by a later
-replay. This collapses the finalize-vs-transcript race duplicates that LLP 0023's
+replay. This collapses the finalize-vs-transcript race duplicates that LLP 0026's
 granularity convergence reduced to clean 1:1 pairs.
 
 ## Context
@@ -28,7 +28,7 @@ vs 36-char uuid), so no id-keyed dedup layer (`seenMessages`, the backfill `part
 scan, compaction's `_hyp_cache_row_id` content hash) can see they are the same
 message.
 
-Post-LLP-0023 these are clean 1:1 pairs (one fallback row, one uuid row, identical
+Post-LLP-0026 these are clean 1:1 pairs (one fallback row, one uuid row, identical
 single-block content), which makes a deterministic upgrade-and-dedupe tractable.
 
 ## Options considered
@@ -104,7 +104,7 @@ the match key is fragile.
 
 - [LLP 0013](./0013-local-query-cache.decision.md) — cache write path / spool
 - [LLP 0016](./0016-ai-gateway.decision.md) — gateway owns schema; adapters contribute
-- [LLP 0023](./0023-claude-native-granularity.decision.md) — granularity convergence
+- [LLP 0026](./0026-claude-native-granularity.decision.md) — granularity convergence
 - `src/core/cache/storage.js` — `appendChunk` flush hook point
 - `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` — `settleBatch`, dedup
 - `hypaware-core/plugins-workspace/claude/src/settle.js` — the enricher

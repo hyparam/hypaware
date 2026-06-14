@@ -79,7 +79,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
-      // @ref LLP 0024#decision — flush-time settlement: the owning dataset
+      // @ref LLP 0027#decision — flush-time settlement: the owning dataset
       // may upgrade provisional (fallback) row identity and dedupe before
       // the batch is committed. Generic and optional; the hook itself
       // short-circuits cheaply when a batch has nothing to settle.
