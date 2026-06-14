@@ -30,6 +30,7 @@ const EXPECTED_COLUMNS = [
   ['permission_mode', 'STRING', true],
   ['is_sidechain', 'BOOLEAN', true],
   ['agent_id', 'STRING', true],
+  ['parent_thread_id', 'STRING', true],
   ['message_id', 'STRING', false],
   ['previous_message_id', 'JSON', true],
   ['provider_uuid', 'STRING', true],

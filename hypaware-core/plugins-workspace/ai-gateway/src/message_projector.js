@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -40,6 +40,7 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'permission_mode', type: 'STRING', nullable: true },
   { name: 'is_sidechain', type: 'BOOLEAN', nullable: true },
   { name: 'agent_id', type: 'STRING', nullable: true },
+  { name: 'parent_thread_id', type: 'STRING', nullable: true },
   { name: 'message_id', type: 'STRING', nullable: false },
   { name: 'previous_message_id', type: 'JSON', nullable: true },
   { name: 'provider_uuid', type: 'STRING', nullable: true },
@@ -481,6 +482,7 @@ function expandMessageParts(ctx) {
       ? ctx.message.is_sidechain
       : ctx.projection.is_sidechain,
     agent_id: stringValue(ctx.message.agent_id) ?? stringValue(ctx.projection.agent_id),
+    parent_thread_id: stringValue(ctx.message.parent_thread_id) ?? stringValue(ctx.projection.parent_thread_id),
     message_id: ctx.identity.messageId,
     previous_message_id: ctx.identity.previousMessageId,
     provider_uuid: stringValue(ctx.message.provider_uuid),
