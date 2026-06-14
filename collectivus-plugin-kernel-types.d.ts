@@ -998,6 +998,18 @@ export interface DatasetRegistration {
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
   createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  /**
+   * Optional flush-time settlement pass. The kernel calls this once per
+   * flush batch (before partition write) with the batch's rows; the
+   * dataset may upgrade provisional row identity and/or drop duplicates,
+   * returning the rows to commit. Must be cheap when there is nothing to
+   * settle. See LLP 0024.
+   */
+  settleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
+}
+
+export interface DatasetSettleContext {
+  storage: QueryStorageService
 }
 
 export interface DatasetSchema {
@@ -1128,6 +1140,14 @@ export interface AiGatewayCapability {
   registerUpstreamPreset(preset: AiGatewayUpstreamPreset): void
   registerClient(client: AiGatewayClientRegistration): void
   registerExchangeProjector(projector: AiGatewayExchangeProjector): void
+  /**
+   * Register a flush-time settlement enricher. The gateway's dataset
+   * `settleBatch` hook dispatches fallback rows to the enricher whose
+   * `clientName` matches the row's `client_name`, letting an adapter
+   * upgrade provisional identity once its native log has caught up. See
+   * LLP 0024.
+   */
+  registerSettlementEnricher(enricher: AiGatewaySettlementEnricher): void
   localEndpoint(opts?: AiGatewayEndpointOptions): string
   /**
    * Look up a registered client by name. Returns `undefined` when no
@@ -1141,6 +1161,19 @@ export interface AiGatewayCapability {
    * and the walkthrough to list available adapters.
    */
   listClients(): AiGatewayClientRegistration[]
+}
+
+/**
+ * Adapter-contributed flush-time enricher. Given the fallback rows of a
+ * flush batch (already filtered to this enricher's `clientName`), it
+ * returns those rows with native identity applied where the adapter's
+ * log now supplies it. Rows it cannot match are returned unchanged. The
+ * gateway, not the enricher, performs the subsequent `part_id` dedupe.
+ */
+export interface AiGatewaySettlementEnricher {
+  name: string
+  clientName: string
+  settle(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
 
 /**

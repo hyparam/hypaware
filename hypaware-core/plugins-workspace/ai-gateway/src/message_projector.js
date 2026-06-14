@@ -93,9 +93,10 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     chosen projection omitted identity — projector-supplied IDs are
  *     authoritative. `previous_message_id` is gateway-owned either
  *     way: unless the projector supplied explicit history, every row
- *     gets the full ordered chain of prior message ids in the
- *     conversation, so enriched and fallback rows stay
- *     query-compatible.
+ *     gets the full ordered chain of prior message ids in its THREAD
+ *     — scoped to `(conversation_id, agent_id)` so a subagent's chain
+ *     and fallback hash stay separate from the main loop's — so
+ *     enriched and fallback rows stay query-compatible.
  *  5. Expands each projected message into the per-part rows the
  *     `ai_gateway_messages` schema advertises, merges
  *     `attributes.gateway.*` provenance, and strips to schema columns.
@@ -170,6 +171,27 @@ export function createAiGatewayConversationState() {
 }
 
 /**
+ * Lazily fetch the per-thread ordered message-id chain. Keyed by
+ * `(conversation_id, agent_id)`: a subagent (agent_id set) gets its own
+ * chain, separate from the main loop, while agent_id null reuses the
+ * plain conversation key so main-loop and Codex behavior is unchanged.
+ *
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @param {string} conversationId
+ * @param {string | undefined} agentId
+ * @returns {string[]}
+ */
+function threadMessageIds(state, conversationId, agentId) {
+  const key = agentId ? `${conversationId}\u0000${agentId}` : conversationId
+  let list = state.messageIdsByConversation.get(key)
+  if (!list) {
+    list = []
+    state.messageIdsByConversation.set(key, list)
+  }
+  return list
+}
+
+/**
  * Expand one projected exchange into canonical `ai_gateway_messages`
  * rows. This is the SINGLE row-expansion implementation shared by live
  * capture (`createAiGatewayMessageProjector`) and backfill
@@ -219,11 +241,6 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     conversationLookup = new Map()
     state.toolCallLookupByConversation.set(conversationId, conversationLookup)
   }
-  let conversationMessageIds = state.messageIdsByConversation.get(conversationId)
-  if (!conversationMessageIds) {
-    conversationMessageIds = []
-    state.messageIdsByConversation.set(conversationId, conversationMessageIds)
-  }
 
   /** @type {Record<string, unknown>[]} */
   const rows = []
@@ -235,9 +252,18 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     const content = normalizeContent(message.content)
     if (content.length === 0) continue
 
+    // conversation_id is a session id for Claude; a session holds the
+    // main loop plus subagents. Scope the prior-message chain (and the
+    // fallback hash) to (conversation_id, agent_id) so a subagent's
+    // history and identity stay separate from the main loop's. agent_id
+    // null (main loop / Codex) keeps the original conversation-only key.
+    const agentId = stringValue(message.agent_id) ?? stringValue(projection.agent_id)
+    const conversationMessageIds = threadMessageIds(state, conversationId, agentId)
+
     const identity = resolveIdentity({
       message,
       conversationId,
+      agentId,
       role,
       content,
       conversationMessageIds,
@@ -370,16 +396,18 @@ function isValidProjection(value) {
  * @param {{
  *   message: AiGatewayProjectedMessage,
  *   conversationId: string,
+ *   agentId: string | undefined,
  *   role: string,
  *   content: Array<Record<string, unknown>>,
  *   conversationMessageIds: string[],
  * }} ctx
  */
 function resolveIdentity(ctx) {
-  // `previous_message_id` always carries the full ordered chain of
-  // prior message ids in the conversation, whether `message_id` was
-  // projector-supplied (transcript uuid) or hash-synthesized here —
-  // a native DAG parent lives in `parent_uuid`, not in this column.
+  // `previous_message_id` carries the full ordered chain of prior
+  // message ids in this THREAD — scoped to (conversation_id, agent_id)
+  // by the caller's `conversationMessageIds` — whether `message_id` was
+  // projector-supplied (transcript uuid) or hash-synthesized here. A
+  // native DAG parent lives in `parent_uuid`, not in this column.
   // Projector-supplied history still wins when present.
   const previousFromMessage = Array.isArray(ctx.message.previous_message_id)
     ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
@@ -394,7 +422,7 @@ function resolveIdentity(ctx) {
     }
   }
   return {
-    messageId: computeMessageId(ctx.conversationId, ctx.role, ctx.content),
+    messageId: computeMessageId(ctx.conversationId, ctx.role, ctx.content, ctx.agentId),
     previousMessageId,
     fromFallback: true,
   }
@@ -521,12 +549,20 @@ function expandMessageParts(ctx) {
  * logical message a new id on every replay where the breakpoint
  * shifted — each one a duplicate row the seen-set cannot catch.
  *
+ * // @ref LLP 0023#decision — conversation_id is a session id for Claude;
+ * // agent_id separates a subagent thread from the main loop so two
+ * // agents with identical content in one session don't collide on one
+ * // fallback id. Omitted from the hash when absent (main loop / Codex)
+ * // so those ids are unchanged.
+ *
  * @param {string} conversation_id
  * @param {string} role
  * @param {unknown} content
+ * @param {string} [agentId]
  */
-export function computeMessageId(conversation_id, role, content) {
-  return sha256Hex(`${conversation_id}:${role}:${canonicalJson(stripVolatileBlockFields(content))}`).slice(0, 16)
+export function computeMessageId(conversation_id, role, content, agentId) {
+  const scope = agentId ? `${conversation_id}:${agentId}` : conversation_id
+  return sha256Hex(`${scope}:${role}:${canonicalJson(stripVolatileBlockFields(content))}`).slice(0, 16)
 }
 
 /**

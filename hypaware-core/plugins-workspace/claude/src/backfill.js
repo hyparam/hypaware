@@ -2,6 +2,7 @@
 
 import {
   defaultClaudeProjectsDir,
+  loadAgentMeta,
   loadTranscriptFile,
   walkTranscriptFiles,
 } from './transcripts.js'
@@ -112,6 +113,11 @@ async function* runClaudeBackfill(args) {
   })
 
   const sessionRecords = await readSessionContextSafe(stateFile, log)
+  // Subagent → spawning tool call: one scan of the projects tree builds
+  // the agent-id → toolUseId map from the `agent-<id>.meta.json` sidecars,
+  // so backfilled subagent rows carry the same `spawned_by_tool_use_id`
+  // provenance live capture stamps.
+  const agentMeta = loadAgentMeta({ projectsDir })
 
   let filesSeen = 0
   let sessionsProjected = 0
@@ -142,6 +148,7 @@ async function* runClaudeBackfill(args) {
         entries: windowed,
         clientName,
         record: pickLatestMatching(sessionRecords, { sessionId, transcriptPath: filePath }),
+        agentMeta,
       })
       if (!exchange) continue
 
@@ -252,11 +259,12 @@ function groupBySession(entries) {
  *   entries: TranscriptEntry[],
  *   clientName: string,
  *   record: SessionContextRecord | undefined,
+ *   agentMeta: Map<string, { tool_use_id: string }>,
  * }} args
  * @returns {AiGatewayProjectedExchange | undefined}
  */
 function projectedExchangeFromEntries(args) {
-  const { sessionId, entries, clientName, record } = args
+  const { sessionId, entries, clientName, record, agentMeta } = args
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   /** @type {string | undefined} */
@@ -264,7 +272,7 @@ function projectedExchangeFromEntries(args) {
   /** @type {number | undefined} */
   let startedAtMs
   for (const entry of entries) {
-    const message = projectedMessageFromEntry(entry)
+    const message = projectedMessageFromEntry(entry, agentMeta)
     if (!message) continue
     messages.push(message)
     if (!clientVersion && entry.client_version) clientVersion = entry.client_version
@@ -302,9 +310,10 @@ function projectedExchangeFromEntries(args) {
  * minimized native-identity stub — never the full transcript line.
  *
  * @param {TranscriptEntry} entry
+ * @param {Map<string, { tool_use_id: string }>} agentMeta
  * @returns {AiGatewayProjectedMessage | undefined}
  */
-function projectedMessageFromEntry(entry) {
+function projectedMessageFromEntry(entry, agentMeta) {
   const role = entry.role
   if (!role) return undefined
 
@@ -331,7 +340,15 @@ function projectedMessageFromEntry(entry) {
   if (entry.user_type) message.user_type = entry.user_type
   if (entry.permission_mode) message.permission_mode = entry.permission_mode
   if (entry.is_sidechain !== undefined) message.is_sidechain = entry.is_sidechain
-  if (entry.agent_id) message.agent_id = entry.agent_id
+  if (entry.agent_id) {
+    message.agent_id = entry.agent_id
+    // Mirror live capture: a subagent row carries the parent-thread tool
+    // call that spawned it, read from the agent's `.meta.json` sidecar.
+    const spawnedByToolUseId = agentMeta.get(entry.agent_id)?.tool_use_id
+    if (spawnedByToolUseId) {
+      message.attributes = { claude: { spawned_by_tool_use_id: spawnedByToolUseId } }
+    }
+  }
   if (entry.attachment_type) message.attachment_type = entry.attachment_type
   if (entry.hook_event) message.hook_event = entry.hook_event
   if (entry.is_compact_summary !== undefined) message.is_compact_summary = entry.is_compact_summary

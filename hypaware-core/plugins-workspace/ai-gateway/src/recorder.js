@@ -280,14 +280,33 @@ export class Exchange {
     this.finished = true
 
     const tsEndMs = Date.now()
-    // Compressed SSE stream: the raw bytes were buffered (see
-    // consumeStreamChunk); decode the whole stream now and parse every
-    // event in one pass. Event `t_ms` is stamped at finalize — the
-    // per-chunk arrival times are not recoverable after deferred
-    // decoding, and nothing downstream depends on them being exact.
-    if (this.isSse && this.responseChunks.length > 0 && this.streamEvents.length === 0) {
-      const decoded = decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
-      const events = new SseParser().feed(decoded)
+    // The proxy is a pass-through, so a body carries whatever
+    // `content-encoding` the upstream applied; decode it before parsing
+    // or a gzip/br/deflate body lands as mojibake.
+    const decodedResponse = this.responseChunks.length > 0
+      ? decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
+      : ''
+
+    // Header-blind SSE detection. Some upstreams stream Server-Sent
+    // Events WITHOUT a `content-type: text/event-stream` header — e.g.
+    // ChatGPT's `/backend-api/codex/responses` sends no content-type at
+    // all — so `setResponseStart` couldn't flag it and the body was
+    // buffered like a normal response. Sniff the decoded body: if it
+    // opens like an event stream, treat it as SSE so the response is
+    // parsed into events instead of stored as an opaque, unprojectable
+    // blob (which is how Codex agent responses were being lost).
+    if (!this.isSse && looksLikeSse(decodedResponse)) {
+      this.isSse = true
+    }
+
+    // SSE whose bytes were buffered rather than parsed live — a
+    // compressed stream (see consumeStreamChunk) or a header-blind one
+    // just detected above. Decode-and-parse the whole stream in one
+    // pass. Event `t_ms` is stamped at finalize; per-chunk arrival times
+    // aren't recoverable after deferred decoding and nothing depends on
+    // them being exact.
+    if (this.isSse && decodedResponse.length > 0 && this.streamEvents.length === 0) {
+      const events = new SseParser().feed(decodedResponse)
       this.streamEventCount = events.length
       for (const event of events) {
         this.streamEvents.push({
@@ -300,17 +319,13 @@ export class Exchange {
         })
       }
     }
-    // The proxy is a pass-through, so a body carries whatever
-    // `content-encoding` the upstream (or client) applied. Decode it
-    // before stringifying or a gzip/br/deflate body lands in the cache
-    // as mojibake that no downstream projector can parse as JSON.
     const requestBody = decodeBody(
       Buffer.concat(this.requestChunks),
       headerValue(this._rawRequestHeaders, 'content-encoding')
     )
     const responseBody = this.isSse
       ? null
-      : decodeBody(Buffer.concat(this.responseChunks), this.responseContentEncoding)
+      : (decodedResponse.length > 0 ? decodedResponse : null)
     const devRunId = this.devRunIdFromHeaders()
     /** @type {Record<string, unknown>} */
     const metadata = {}
@@ -343,6 +358,23 @@ export class Exchange {
     this._resolveFinished()
     return row
   }
+}
+
+/**
+ * Heuristic: does this body look like a Server-Sent Events stream?
+ * Catches SSE responses that arrive without a
+ * `content-type: text/event-stream` header (e.g. ChatGPT's codex
+ * endpoint sends no content-type), so the recorder can still parse them
+ * into events. The first non-blank content of an SSE stream opens with
+ * an event field (`event:`/`data:`/`id:`/`retry:`) or a comment (`:`);
+ * JSON and plain-text bodies never do.
+ *
+ * @param {string} body
+ */
+function looksLikeSse(body) {
+  if (typeof body !== 'string' || body.length === 0) return false
+  const head = body.slice(0, 256).replace(/^\uFEFF/, '').trimStart()
+  return /^(?:event|data|id|retry):/.test(head) || head.startsWith(':')
 }
 
 /**

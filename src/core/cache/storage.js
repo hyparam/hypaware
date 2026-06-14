@@ -60,11 +60,15 @@ export function resolveIcebergDir(tablePath) {
  * Phase 4 smoke (and the SQL assertion in the implementation plan)
  * exercise.
  *
- * @param {{ cacheRoot: string, getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined }} args
+ * @param {{
+ *   cacheRoot: string,
+ *   getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined,
+ *   getSettleHook?: (dataset: string) => ((rows: Record<string, unknown>[], ctx: { storage: ExtendedQueryStorageService }) => Promise<Record<string, unknown>[]>) | undefined,
+ * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements] — kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const meter = getMeter('cache')
@@ -75,6 +79,14 @@ export function createQueryStorageService({ cacheRoot, getDeclaration }) {
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
+      // @ref LLP 0024#decision — flush-time settlement: the owning dataset
+      // may upgrade provisional (fallback) row identity and dedupe before
+      // the batch is committed. Generic and optional; the hook itself
+      // short-circuits cheaply when a batch has nothing to settle.
+      const settle = getSettleHook?.(dataset)
+      if (settle) {
+        rows = await settle(rows, { storage: service })
+      }
       const declaration = getDeclaration?.(dataset)
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()

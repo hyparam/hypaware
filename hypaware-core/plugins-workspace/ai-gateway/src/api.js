@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewaySettlementEnricher, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { GatewayState, RegisteredProjector } from './types.d.ts'
  */
 
@@ -13,6 +13,7 @@ export function createGatewayState() {
     presets: new Map(),
     clients: new Map(),
     projectors: [],
+    enrichers: new Map(),
     listen: undefined,
   }
 }
@@ -73,6 +74,19 @@ export function createAiGatewayApi(state) {
         throw new TypeError(`registerExchangeProjector '${projector.name}': project() is required`)
       }
       state.projectors.push({ ...projector, _seq: projectorSeq++ })
+    },
+
+    registerSettlementEnricher(enricher) {
+      if (!enricher || typeof enricher.name !== 'string' || enricher.name.length === 0) {
+        throw new TypeError('registerSettlementEnricher: name is required')
+      }
+      if (typeof enricher.clientName !== 'string' || enricher.clientName.length === 0) {
+        throw new TypeError(`registerSettlementEnricher '${enricher.name}': clientName is required`)
+      }
+      if (typeof enricher.settle !== 'function') {
+        throw new TypeError(`registerSettlementEnricher '${enricher.name}': settle() is required`)
+      }
+      state.enrichers.set(enricher.clientName, enricher)
     },
 
     /**

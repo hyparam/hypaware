@@ -11,6 +11,7 @@ import {
   claudeClientVersion,
   hasAnthropicHeaderSignature,
   headerValue,
+  isClaudeAuxRequest,
   isAnthropicExchange,
   isAnthropicPath,
   resolveAnthropicConversationId,
@@ -18,11 +19,14 @@ import {
   resolveClaudeSessionId,
 } from './anthropic.js'
 import {
+  assignTranscriptIdentity,
   defaultClaudeProjectsDir,
   entryBlockType,
   findTranscriptMatch,
   indexTranscriptEntries,
+  loadAgentMeta,
   loadTranscript,
+  matchKey,
 } from './transcripts.js'
 import {
   defaultSessionContextFile,
@@ -105,8 +109,24 @@ export function createClaudeExchangeProjector(opts) {
         return undefined
       }
 
+      // Harness-internal aux traffic (e.g. the autonomous security
+      // monitor) is not the user's conversation and has no transcript
+      // line; skip it so it doesn't bury real rows. ~88% of rows in an
+      // autonomous session were security-monitor calls before this.
+      if (isClaudeAuxRequest(reqBody)) {
+        ctx.log.debug?.('plugin.claude.projector_skip', {
+          reason: 'aux_request',
+          exchange_id: input.exchange_id,
+        })
+        return undefined
+      }
+
       const responseBody = parseMaybeJson(input.response_body)
       const headers = parseHeaders(input.request_headers)
+      // The exchange's subagent id (absent → main loop). Scopes
+      // transcript matching to this thread so a subagent block can't
+      // match a main-session or other-agent entry. @ref LLP 0023#decision
+      const agentId = headerValue(headers, 'x-claude-code-agent-id')
       const sessionId = resolveClaudeSessionId(reqBody, headers)
       const messages = anthropicMessages(
         reqBody,
@@ -174,25 +194,41 @@ export function createClaudeExchangeProjector(opts) {
             // or they'd mis-group against the current response's lines.
             apiMessageId: stringValue(message.id) ??
               (m === messages.length - 1 ? responseMessageId : undefined),
+            agentId,
             transcriptIndex,
             matchEnabled: identityFromTranscript,
           }))
         } else if (role === 'user') {
           projectedMessages.push(...projectUserMessage({
             message,
+            agentId,
             transcriptIndex,
             matchEnabled: identityFromTranscript,
           }))
         } else {
           const projected = wholeMessageProjection(role, message)
           if (identityFromTranscript) {
-            applyTranscriptMatch(projected, findTranscriptMatch(transcriptIndex, { role, content: message.content }))
+            applyTranscriptMatch(projected, findTranscriptMatch(transcriptIndex, { role, content: message.content, agentId }))
           }
           projectedMessages.push(projected)
         }
       }
 
       if (projectedMessages.length === 0) return undefined
+
+      // @ref LLP 0024#decision — a message that came out fallback (no
+      // transcript line on disk yet — the finalize race) carries the
+      // content match-key so flush-time settlement can re-match it by
+      // pure lookup once the line lands, without reconstructing the
+      // content array that per-part expansion discards.
+      for (const projected of projectedMessages) {
+        if (projected.message_id) continue
+        const role = stringValue(projected.role)
+        if (!role) continue
+        projected.attributes = mergeAttrs(projected.attributes, {
+          claude: { match_key: matchKey(role, projected.content) },
+        })
+      }
 
       /** @type {AiGatewayProjectedExchange} */
       const projection = {
@@ -215,12 +251,24 @@ export function createClaudeExchangeProjector(opts) {
 
       // @ref LLP 0023#decision — subagent exchanges identify themselves
       // on the wire; sidechain provenance must not depend on winning the
-      // transcript race, so it is stamped from the header here and only
-      // refined (never cleared) by per-message transcript matches.
-      const agentId = headerValue(headers, 'x-claude-code-agent-id')
+      // transcript race, so it is stamped from the header (resolved
+      // above, and used to scope transcript matching to this thread).
       if (agentId) {
         projection.is_sidechain = true
         projection.agent_id = agentId
+        // The exchange tells us WHICH subagent this is, but not which
+        // tool call launched it: that link lives only in the
+        // `agent-<id>.meta.json` sidecar Claude writes next to the
+        // subagent transcript. Stamp its `toolUseId` so a subagent's
+        // rows point back at the parent-thread Agent/Task tool_call_id.
+        const spawnedByToolUseId = sessionContextRecord?.transcript_path
+          ? loadAgentMeta({ transcriptPath: sessionContextRecord.transcript_path }).get(agentId)?.tool_use_id
+          : undefined
+        if (spawnedByToolUseId) {
+          projection.attributes = mergeAttrs(projection.attributes, {
+            claude: { spawned_by_tool_use_id: spawnedByToolUseId },
+          })
+        }
       }
 
       // Claude-side identity provenance. Per the phase 2 spec, only
@@ -269,13 +317,14 @@ export function createClaudeExchangeProjector(opts) {
  * @param {{
  *   message: Record<string, unknown>,
  *   apiMessageId: string | undefined,
+ *   agentId: string | undefined,
  *   transcriptIndex: ReturnType<typeof indexTranscriptEntries>,
  *   matchEnabled: boolean,
  * }} args
  * @returns {AiGatewayProjectedMessage[]}
  */
 function projectAssistantMessage(args) {
-  const { message, apiMessageId, transcriptIndex, matchEnabled } = args
+  const { message, apiMessageId, agentId, transcriptIndex, matchEnabled } = args
   const content = message.content
   const blocks = Array.isArray(content) ? content : undefined
   const stopReason = typeof message.stop_reason === 'string' ? message.stop_reason : undefined
@@ -299,7 +348,7 @@ function projectAssistantMessage(args) {
       if (entryBlockType(lines[i]) === wireType) match = lines[i]
     }
     if (!match && matchEnabled) {
-      match = findTranscriptMatch(transcriptIndex, { role: 'assistant', content: unitContent })
+      match = findTranscriptMatch(transcriptIndex, { role: 'assistant', content: unitContent, agentId })
     }
     applyTranscriptMatch(projected, match)
     if (messageAttrs) projected.attributes = messageAttrs
@@ -327,13 +376,14 @@ function projectAssistantMessage(args) {
  *
  * @param {{
  *   message: Record<string, unknown>,
+ *   agentId: string | undefined,
  *   transcriptIndex: ReturnType<typeof indexTranscriptEntries>,
  *   matchEnabled: boolean,
  * }} args
  * @returns {AiGatewayProjectedMessage[]}
  */
 function projectUserMessage(args) {
-  const { message, transcriptIndex, matchEnabled } = args
+  const { message, agentId, transcriptIndex, matchEnabled } = args
   const content = message.content
   const blocks = Array.isArray(content) ? content : undefined
   const messageAttrs = anthropicMessageAttributes(message)
@@ -352,7 +402,7 @@ function projectUserMessage(args) {
         ? transcriptIndex.byToolUseId.get(toolUseId)
         : undefined
       if (!match && matchEnabled) {
-        match = findTranscriptMatch(transcriptIndex, { role: 'user', content: [block] })
+        match = findTranscriptMatch(transcriptIndex, { role: 'user', content: [block], agentId })
       }
       applyTranscriptMatch(projected, match)
       if (messageAttrs) projected.attributes = messageAttrs
@@ -364,13 +414,13 @@ function projectUserMessage(args) {
   }
 
   let match = matchEnabled
-    ? findTranscriptMatch(transcriptIndex, { role: 'user', content })
+    ? findTranscriptMatch(transcriptIndex, { role: 'user', content, agentId })
     : undefined
   if (!match && matchEnabled && blocks) {
     const injected = blocks.filter(isInjectedReminderBlock)
     if (injected.length > 0 && injected.length < blocks.length) {
       const core = blocks.filter((b) => !isInjectedReminderBlock(b))
-      const coreMatch = findTranscriptMatch(transcriptIndex, { role: 'user', content: core })
+      const coreMatch = findTranscriptMatch(transcriptIndex, { role: 'user', content: core, agentId })
       if (coreMatch) {
         /** @type {AiGatewayProjectedMessage} */
         const projected = { role: 'user', content: /** @type {any} */ (coreMatch.content) }
@@ -417,32 +467,12 @@ function wholeMessageProjection(role, message) {
  */
 function applyTranscriptMatch(projected, match) {
   if (!match) return
-  if (match.provider_uuid) {
-    // Native id only — `previous_message_id` is deliberately NOT
-    // supplied. The gateway fills the full prior-message chain for
-    // every row; a [parentUuid] singleton here would make enriched
-    // rows shaped differently from fallback rows. The native DAG
-    // parent still lands in `parent_uuid` below.
-    projected.message_id = match.provider_uuid
-    projected.provider_uuid = match.provider_uuid
-  }
-  if (match.parent_uuid) projected.parent_uuid = match.parent_uuid
-  if (match.logical_parent_uuid) projected.logical_parent_uuid = match.logical_parent_uuid
-  if (match.source_tool_assistant_uuid) projected.source_tool_assistant_uuid = match.source_tool_assistant_uuid
-  if (match.request_id) projected.request_id = match.request_id
-  if (match.prompt_id) projected.prompt_id = match.prompt_id
-  if (match.provider_type) projected.provider_type = match.provider_type
-  if (match.provider_subtype) projected.provider_subtype = match.provider_subtype
-  if (match.entrypoint) projected.entrypoint = match.entrypoint
-  if (match.user_type) projected.user_type = match.user_type
-  if (match.permission_mode) projected.permission_mode = match.permission_mode
-  if (match.is_sidechain !== undefined) projected.is_sidechain = match.is_sidechain
-  if (match.agent_id) projected.agent_id = match.agent_id
-  if (match.attachment_type) projected.attachment_type = match.attachment_type
-  if (match.hook_event) projected.hook_event = match.hook_event
-  if (match.is_compact_summary !== undefined) projected.is_compact_summary = match.is_compact_summary
-  if (match.compact_metadata !== undefined) projected.compact_metadata = /** @type {any} */ (match.compact_metadata)
-  if (isPlainObject(match.raw_frame)) projected.raw_frame = /** @type {any} */ (match.raw_frame)
+  // Native id only — `previous_message_id` is deliberately NOT supplied.
+  // The gateway fills the full prior-message chain for every row; a
+  // [parentUuid] singleton here would make enriched rows shaped
+  // differently from fallback rows. The native DAG parent lands in
+  // `parent_uuid` via the shared identity copy.
+  assignTranscriptIdentity(/** @type {any} */ (projected), match)
 }
 
 /**

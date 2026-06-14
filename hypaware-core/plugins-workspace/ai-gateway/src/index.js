@@ -43,7 +43,7 @@ export async function activate(ctx) {
   const api = createAiGatewayApi(state)
 
   ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)
-  ctx.query.registerDataset(aiGatewayDatasetRegistration())
+  ctx.query.registerDataset(aiGatewayDatasetRegistration(state))
   ctx.backfillMaterializers.register(aiGatewayBackfillMaterializer())
 
   ctx.sources.register({

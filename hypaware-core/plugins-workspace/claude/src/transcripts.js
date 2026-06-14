@@ -96,6 +96,67 @@ export function* walkTranscriptFiles(projectsDir) {
 }
 
 /**
+ * Read the subagent metadata sidecars Claude Code writes beside each
+ * subagent transcript: `<sessionDir>/subagents/agent-<agentId>.meta.json`.
+ * The sidecar's `toolUseId` is the parent-thread `Agent`/`Task` tool call
+ * that spawned the subagent — provenance that lives in neither the
+ * subagent's own `.jsonl` (its first line has null parent/source uuids)
+ * nor the wire exchange. Returns a map keyed by the agent id parsed from
+ * each filename.
+ *
+ * Resolution mirrors `loadTranscript`: a `transcriptPath` scans just that
+ * session's directory (cheap — the live path); otherwise `projectsDir`
+ * is scanned recursively (the backfill path). Best-effort — a missing
+ * directory or an unparseable sidecar is skipped, never thrown.
+ *
+ * @param {{ transcriptPath?: string, projectsDir?: string }} opts
+ * @returns {Map<string, { tool_use_id: string }>}
+ */
+export function loadAgentMeta(opts) {
+  /** @type {Map<string, { tool_use_id: string }>} */
+  const meta = new Map()
+  const rootDir = opts.transcriptPath
+    ? path.join(path.dirname(opts.transcriptPath), path.basename(opts.transcriptPath, '.jsonl'))
+    : opts.projectsDir
+  if (!rootDir) return meta
+  for (const { agentId, filePath } of walkAgentMetaFiles(rootDir)) {
+    let parsed
+    try { parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) } catch { continue }
+    if (!isPlainObject(parsed)) continue
+    const toolUseId = stringValue(parsed.toolUseId)
+    if (toolUseId) meta.set(agentId, { tool_use_id: toolUseId })
+  }
+  return meta
+}
+
+/**
+ * Yield `{ agentId, filePath }` for every `agent-<id>.meta.json` sidecar
+ * under `dir`, recursing into subdirectories (the sidecars live in
+ * `<sessionDir>/subagents/`). The agent id is parsed from the filename.
+ *
+ * @param {string} dir
+ * @returns {Generator<{ agentId: string, filePath: string }>}
+ */
+function* walkAgentMetaFiles(dir) {
+  /** @type {fs.Dirent[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    const filePath = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      yield* walkAgentMetaFiles(filePath)
+    } else if (entry.isFile()) {
+      const match = /^agent-(.+)\.meta\.json$/.exec(entry.name)
+      if (match) yield { agentId: match[1], filePath }
+    }
+  }
+}
+
+/**
  * Load and timestamp-sort the entries in a single transcript file.
  * Best-effort like `loadTranscript`: a missing or truncated file
  * yields whatever parsed cleanly. The backfill provider walks files
@@ -154,11 +215,30 @@ export function indexTranscriptEntries(entries) {
       if (list) list.push(entry)
       else byMessageId.set(entry.messageId, [entry])
     }
-    if (entry.contentKey) byContentKey.set(entry.contentKey, entry)
+    if (entry.contentKey) byContentKey.set(agentScopedKey(entry.agent_id, entry.contentKey), entry)
     const toolUseId = entryToolUseId(entry)
     if (toolUseId) byToolUseId.set(toolUseId, entry)
   }
   return { byUuid, byContentKey, byMessageId, byToolUseId, ordered: entries }
+}
+
+/**
+ * Namespace a content key by agent so the main loop and each subagent
+ * occupy separate key-spaces. A session's transcript holds the main
+ * loop AND every subagent, and content can repeat across them; without
+ * this a subagent block could match a main-session (or other-agent)
+ * entry and inherit the wrong uuid / `is_sidechain`. `byMessageId` and
+ * `byToolUseId` need no scoping — those ids are globally unique.
+ * `agent_id` empty/undefined is the main loop; ids and content keys are
+ * hex, so `:` is an unambiguous separator.
+ *
+ * // @ref LLP 0023#decision — match within a thread, not across the session.
+ *
+ * @param {string | undefined} agentId
+ * @param {string} contentKey
+ */
+export function agentScopedKey(agentId, contentKey) {
+  return `${agentId ?? ''}:${contentKey}`
 }
 
 /**
@@ -189,16 +269,75 @@ function entryToolUseId(entry) {
  * message split across several lines is ambiguous at message
  * granularity — the splitter aligns those per block instead).
  *
+ * The content-key lookup is scoped to `candidate.agentId` (the
+ * exchange's `x-claude-code-agent-id`, empty for the main loop) so a
+ * block only matches entries from its own thread. The `message.id`
+ * shortcut needs no scoping (API ids are globally unique).
+ *
  * @param {ReturnType<typeof indexTranscriptEntries>} index
- * @param {{ role: string, content: unknown, messageId?: string }} candidate
+ * @param {{ role: string, content: unknown, messageId?: string, agentId?: string }} candidate
  */
 export function findTranscriptMatch(index, candidate) {
   if (candidate.messageId) {
     const byId = index.byMessageId.get(candidate.messageId)
     if (byId && byId.length === 1) return byId[0]
   }
-  const key = contentKey(candidate.role, normalizeContent(candidate.content))
-  return index.byContentKey.get(key)
+  return index.byContentKey.get(agentScopedKey(candidate.agentId, matchKey(candidate.role, candidate.content)))
+}
+
+/**
+ * The canonical role+content lookup key for matching a wire message to
+ * its transcript line. Exported so the projector can stamp it on a
+ * fallback row at projection time (when wire content is in hand) and
+ * flush-time settlement can re-match by pure lookup once the transcript
+ * line lands — without reconstructing the lost content array.
+ *
+ * // @ref LLP 0024#decision — match-key at projection enables flush-time settlement.
+ *
+ * @param {string} role
+ * @param {unknown} content
+ */
+export function matchKey(role, content) {
+  return contentKey(role, normalizeContent(content))
+}
+
+/**
+ * Copy a transcript line's native identity and provenance onto a target
+ * object keyed by the canonical `ai_gateway_messages` field names. The
+ * single source of truth shared by the live projector
+ * (`applyTranscriptMatch`, target = projected message) and flush-time
+ * settlement (target = a stored row). Sets `message_id`/`provider_uuid`
+ * only when the entry has a native uuid; `previous_message_id` is left
+ * to the gateway (full prior-message chain) so enriched and fallback
+ * rows stay one shape.
+ *
+ * // @ref LLP 0024#decision — one identity-copy core for projection and settlement.
+ *
+ * @param {Record<string, unknown>} target
+ * @param {TranscriptEntry} match
+ */
+export function assignTranscriptIdentity(target, match) {
+  if (match.provider_uuid) {
+    target.message_id = match.provider_uuid
+    target.provider_uuid = match.provider_uuid
+  }
+  if (match.parent_uuid) target.parent_uuid = match.parent_uuid
+  if (match.logical_parent_uuid) target.logical_parent_uuid = match.logical_parent_uuid
+  if (match.source_tool_assistant_uuid) target.source_tool_assistant_uuid = match.source_tool_assistant_uuid
+  if (match.request_id) target.request_id = match.request_id
+  if (match.prompt_id) target.prompt_id = match.prompt_id
+  if (match.provider_type) target.provider_type = match.provider_type
+  if (match.provider_subtype) target.provider_subtype = match.provider_subtype
+  if (match.entrypoint) target.entrypoint = match.entrypoint
+  if (match.user_type) target.user_type = match.user_type
+  if (match.permission_mode) target.permission_mode = match.permission_mode
+  if (match.is_sidechain !== undefined) target.is_sidechain = match.is_sidechain
+  if (match.agent_id) target.agent_id = match.agent_id
+  if (match.attachment_type) target.attachment_type = match.attachment_type
+  if (match.hook_event) target.hook_event = match.hook_event
+  if (match.is_compact_summary !== undefined) target.is_compact_summary = match.is_compact_summary
+  if (match.compact_metadata !== undefined) target.compact_metadata = match.compact_metadata
+  if (isPlainObject(match.raw_frame)) target.raw_frame = match.raw_frame
 }
 
 /**

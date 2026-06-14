@@ -228,6 +228,9 @@ test('subagent transcript under <sessionId>/subagents supplies sidechain identit
         metadata: { user_id: JSON.stringify({ session_id: 'sess-side' }) },
         messages: [{ role: 'user', content: 'run the subtask' }],
       },
+      // Subagent exchanges carry the agent-id header; matching is scoped
+      // to this agent's transcript entries.
+      requestHeaders: { 'x-claude-code-agent-id': 'abc123' },
       responseBody: { id: 'msg_side', role: 'assistant', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' },
     })
 
@@ -294,12 +297,77 @@ test('transcript_path from session context also loads sibling subagent files', a
         metadata: { user_id: JSON.stringify({ session_id: 'sess-hook' }) },
         messages: [{ role: 'user', content: 'side prompt' }],
       },
+      requestHeaders: { 'x-claude-code-agent-id': 'zzz' },
       responseBody: undefined,
     })
 
     assert.equal(rows.length, 1)
     assert.equal(rows[0].message_id, 'u-hook-side')
     assert.equal(rows[0].is_sidechain, true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('subagent exchange stamps spawned_by_tool_use_id from the meta sidecar', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-spawn', [
+      jsonlRow({
+        sessionId: 'sess-spawn',
+        uuid: 'u-main',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'main prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    await writeSubagentTranscript(env, 'sess-spawn', 'agent-sa1.jsonl', [
+      jsonlRow({
+        sessionId: 'sess-spawn',
+        agentId: 'sa1',
+        isSidechain: true,
+        uuid: 'u-side',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'side prompt' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    // The sidecar Claude writes next to the subagent transcript records
+    // the parent-thread Agent/Task tool call that spawned this agent.
+    await fs.writeFile(
+      path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-spawn', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ agentType: 'Explore', description: 'do a thing', toolUseId: 'toolu_parent' }),
+      'utf8'
+    )
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-spawn',
+        transcript_path: path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-spawn.jsonl'),
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-spawn' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      requestHeaders: { 'x-claude-code-agent-id': 'sa1' },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].agent_id, 'sa1')
+    assert.equal(rows[0].is_sidechain, true)
+    assert.equal(
+      /** @type {any} */ (rows[0].attributes).claude.spawned_by_tool_use_id,
+      'toolu_parent'
+    )
   } finally {
     await env.cleanup()
   }
@@ -613,7 +681,53 @@ test('missing transcript → gateway fallback identity + claude.identity_source 
       const gateway = readAttrPath(row, ['attributes', 'gateway'])
       assert.equal(claude?.identity_source, 'gateway_fallback')
       assert.equal(gateway?.identity_source, 'gateway_fallback')
+      // LLP 0024: fallback rows carry the content match-key so flush-time
+      // settlement can re-match them once the transcript lands.
+      assert.equal(typeof claude?.match_key, 'string')
+      assert.ok(String(claude.match_key).length > 0)
     }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('transcript-matched rows do NOT carry a settlement match_key', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-nokey', [
+      jsonlRow({
+        sessionId: 'sess-nokey', uuid: 'u-nk', parentUuid: null, type: 'user',
+        message: { role: 'user', content: 'hello' }, timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-nokey' }) },
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      responseBody: undefined,
+    })
+    assert.equal(rows[0].message_id, 'u-nk')
+    assert.equal(readAttrPath(rows[0], ['attributes', 'claude'])?.match_key, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('harness aux traffic (security monitor) is skipped — no rows written', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-aux' }) },
+        system: 'You are a security monitor for autonomous AI coding agents.\n\n## Context\n…',
+        messages: [{ role: 'user', content: '<transcript>…</transcript> judge this action' }],
+      },
+      responseBody: { id: 'm', role: 'assistant', content: [{ type: 'text', text: 'allow' }], stop_reason: 'end_turn' },
+    })
+    assert.equal(rows.length, 0, 'security-monitor requests must produce zero rows')
   } finally {
     await env.cleanup()
   }
