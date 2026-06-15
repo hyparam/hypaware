@@ -256,10 +256,11 @@ test('projector-supplied message_id and previous_message_id are preserved', asyn
   )
 })
 
-test('supplied message_id without history still gets the full previous_message_id chain', async () => {
+test('supplied message_id without history gets the immediate predecessor as previous_message_id', async () => {
   // Adapter projectors (Claude transcripts, Codex native ids) supply
-  // message_id but never previous_message_id — the gateway must fill
-  // the full prior-id chain so enriched rows match fallback rows.
+  // message_id but never previous_message_id — the gateway fills the
+  // immediate predecessor (0/1-element) so enriched rows match fallback
+  // rows. Full ancestry is the transitive closure of these links.
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [
@@ -280,7 +281,7 @@ test('supplied message_id without history still gets the full previous_message_i
   assert.equal(rows.length, 3)
   assert.deepEqual(rows[0].previous_message_id, [])
   assert.deepEqual(rows[1].previous_message_id, ['uuid-1'])
-  assert.deepEqual(rows[2].previous_message_id, ['uuid-1', 'uuid-2'])
+  assert.deepEqual(rows[2].previous_message_id, ['uuid-2'])
   for (const row of rows) {
     assert.equal(
       isPlainObject(row.attributes) && isPlainObject(row.attributes.gateway)

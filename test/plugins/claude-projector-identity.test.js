@@ -64,9 +64,9 @@ test('native DAG identity: uuid from JSONL transcript becomes message_id and pro
     assert.equal(assistantRows[0].part_type, 'text')
     assert.equal(assistantRows[0].provider_type, 'assistant')
 
-    // previous_message_id is the gateway-filled full prior-message
-    // chain (here a single prior message); the native DAG parent
-    // rides parent_uuid.
+    // previous_message_id is the gateway-filled immediate predecessor
+    // (here the single prior message); the native DAG parent rides
+    // parent_uuid.
     assert.deepEqual(assistantRows[0].previous_message_id, ['u-user-1'])
     assert.equal(assistantRows[0].parent_uuid, 'u-user-1')
 
@@ -115,7 +115,7 @@ test('root message gets previous_message_id = [] when parentUuid is null', async
   }
 })
 
-test('transcript-enriched previous_message_id carries the full prior chain, not just the parent', async () => {
+test('transcript-enriched previous_message_id carries the immediate predecessor, scoped per thread', async () => {
   const env = await stageClaudeEnv()
   try {
     await writeTranscript(env, 'sess-chain', [
@@ -168,14 +168,14 @@ test('transcript-enriched previous_message_id carries the full prior chain, not 
 
     assert.equal(rows.length, 4)
     const byId = new Map(rows.map((r) => [r.message_id, r]))
-    // Enriched rows must carry the SAME previous_message_id shape the
-    // gateway fallback produces: every prior message id in order —
-    // not the [parentUuid] singleton. The singleton's information
-    // survives on parent_uuid.
+    // Enriched rows carry the SAME previous_message_id shape the gateway
+    // fallback produces: the immediate predecessor only (a 0/1-element
+    // array). Full ancestry is the transitive closure of these links;
+    // the native parent also survives on parent_uuid.
     assert.deepEqual(byId.get('u-1')?.previous_message_id, [])
     assert.deepEqual(byId.get('a-1')?.previous_message_id, ['u-1'])
-    assert.deepEqual(byId.get('u-2')?.previous_message_id, ['u-1', 'a-1'])
-    assert.deepEqual(byId.get('a-2')?.previous_message_id, ['u-1', 'a-1', 'u-2'])
+    assert.deepEqual(byId.get('u-2')?.previous_message_id, ['a-1'])
+    assert.deepEqual(byId.get('a-2')?.previous_message_id, ['u-2'])
     assert.equal(byId.get('a-2')?.parent_uuid, 'u-2')
   } finally {
     await env.cleanup()
@@ -490,8 +490,8 @@ test('multi-block assistant turn splits into per-line uuid messages (LLP 0023)',
     assert.equal(toolRow.part_type, 'tool_call')
     assert.equal(toolRow.tool_name, 'Bash')
     // The native chain rides parent_uuid; previous_message_id is
-    // gateway-owned (full prior chain) for enriched and fallback rows
-    // alike.
+    // gateway-owned (immediate predecessor) for enriched and fallback
+    // rows alike — here the text block that precedes this tool block.
     assert.equal(toolRow.parent_uuid, 'u-s-text')
     assert.ok(Array.isArray(toolRow.previous_message_id))
     assert.ok(/** @type {string[]} */ (toolRow.previous_message_id).includes('u-s-text'))

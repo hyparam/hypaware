@@ -94,10 +94,12 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     chosen projection omitted identity — projector-supplied IDs are
  *     authoritative. `previous_message_id` is gateway-owned either
  *     way: unless the projector supplied explicit history, every row
- *     gets the full ordered chain of prior message ids in its THREAD
- *     — scoped to `(conversation_id, agent_id)` so a subagent's chain
- *     and fallback hash stay separate from the main loop's — so
- *     enriched and fallback rows stay query-compatible.
+ *     gets its IMMEDIATE predecessor in the THREAD (a 0/1-element
+ *     array) — scoped to `(conversation_id, agent_id)` so a subagent's
+ *     chain and fallback hash stay separate from the main loop's — so
+ *     enriched and fallback rows stay query-compatible. The full
+ *     ancestry is the transitive closure of these links (storing it per
+ *     row was quadratic).
  *  5. Expands each projected message into the per-part rows the
  *     `ai_gateway_messages` schema advertises, merges
  *     `attributes.gateway.*` provenance, and strips to schema columns.
@@ -403,17 +405,24 @@ function isValidProjection(value) {
  *   conversationMessageIds: string[],
  * }} ctx
  */
+// @ref LLP 0026#consequences [implements] — store only the immediate
+// predecessor, not the full ancestry; full chain is reconstructable by
+// walking links, and the prior O(N) chain made the column quadratic.
 function resolveIdentity(ctx) {
-  // `previous_message_id` carries the full ordered chain of prior
-  // message ids in this THREAD — scoped to (conversation_id, agent_id)
-  // by the caller's `conversationMessageIds` — whether `message_id` was
-  // projector-supplied (transcript uuid) or hash-synthesized here. A
-  // native DAG parent lives in `parent_uuid`, not in this column.
+  // `previous_message_id` carries the IMMEDIATE predecessor in this
+  // THREAD (a 0- or 1-element array) — scoped to (conversation_id,
+  // agent_id) by the caller's `conversationMessageIds`, whether
+  // `message_id` was projector-supplied (transcript uuid) or
+  // hash-synthesized here. The full ancestry is the transitive closure
+  // of this link; the native DAG parent lives in `parent_uuid`. Storing
+  // the whole chain per row was O(N) per message → O(N²) per thread and
+  // dominated the cache (defeats hyparquet's dictionary encoding once
+  // the growing strings pass its cardinality/page-size guards).
   // Projector-supplied history still wins when present.
   const previousFromMessage = Array.isArray(ctx.message.previous_message_id)
     ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
     : undefined
-  const previousMessageId = previousFromMessage ?? [...ctx.conversationMessageIds]
+  const previousMessageId = previousFromMessage ?? ctx.conversationMessageIds.slice(-1)
   const supplied = stringValue(ctx.message.message_id)
   if (supplied) {
     return {

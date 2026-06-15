@@ -11,11 +11,11 @@ import { pickLatestMatching, readSessionContext } from './session_context.js'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SessionContextRecord } from './types.d.ts'
+ * @import { SessionContextRecord, TranscriptEntry } from './types.d.ts'
  */
 
 /**
- * `@hypaware/claude` flush-time settlement enricher (LLP 0024).
+ * `@hypaware/claude` flush-time settlement enricher (LLP 0027).
  *
  * The live projector writes a Claude message under a fallback hash id
  * when its transcript line hasn't landed on disk yet (the
@@ -105,7 +105,7 @@ export function createClaudeSettlementEnricher(opts) {
  * (fallback marker and the now-spent match_key removed).
  *
  * @param {Record<string, unknown>} row
- * @param {import('./types.d.ts').TranscriptEntry} match
+ * @param {TranscriptEntry} match
  * @returns {Record<string, unknown>}
  */
 function upgradeRow(row, match) {

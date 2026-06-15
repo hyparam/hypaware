@@ -138,6 +138,15 @@ user tool_result batches have no API message id, so backfill would have to
   usage must dedupe by API message id, not by row.**
 - `stop_reason`-derived `status.finish_reason` lands on the last block's
   message of a group.
+- `previous_message_id` stores only the **immediate predecessor** (a 0/1-element
+  array), not the full ancestry. The split multiplies the rows carrying this
+  column, and a full per-row chain is O(N) per message → O(N²) per thread; as a
+  growing, mostly-distinct JSON string it also defeats hyparquet's dictionary
+  encoding (it trips the >50%-distinct sample guard and the per-page dictionary
+  budget, falling back to plain bytes). Storing just the predecessor keeps the
+  column O(1) per row and dictionary-friendly; the full ancestry is the
+  transitive closure of the links, and the native DAG parent still rides
+  `parent_uuid`.
 - Remaining known gaps (out of scope here): durable live dedup across daemon
   restarts (seed the seen-set from committed `part_id`s), and id-upgrade
   reconciliation when a fallback row's uuid arrives later.
@@ -147,9 +156,6 @@ user tool_result batches have no API message id, so backfill would have to
 - Should the API message id be promoted from `raw_frame.message_id` to a
   first-class `api_message_id` column so the wire view is a cheap group-by?
   (Leaning yes; requires a schema addition.)
-- Whether the fallback `previous_message_id` full-history chain should be
-  capped — it grows quadratically over a conversation and the split
-  multiplies rows carrying it.
 - Whether Codex has an analogous native-granularity source worth adopting.
 
 ## References

@@ -316,7 +316,7 @@ test('native DAG identity is preserved verbatim', async () => {
     assert.equal(asstMsg.parent_uuid, 'u-user-1')
 
     // Identity survives materialization into canonical rows, and the
-    // gateway stamps the full prior-chain previous_message_id.
+    // gateway stamps the immediate-predecessor previous_message_id.
     const rows = await materialize(item)
     const userRow = rowsByRole(rows, 'user')[0]
     assert.equal(userRow.message_id, 'u-user-1')
