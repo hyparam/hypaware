@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/ai-gateway-graph",
+  "version": "0.1.0",
+  "description": "Connector: contributes the T0 projection contract mapping ai_gateway_messages into the context-graph node/edge activity graph. Joins @hypaware/ai-gateway (the source) to @hypaware/context-graph (the engine); neither plugin depends on the other.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [],
+  "requires": {
+    "plugins": {
+      "@hypaware/ai-gateway": "^2.0.0",
+      "@hypaware/context-graph": "^0.1.0"
+    },
+    "capabilities": { "hypaware.context-graph": "^1.0.0" }
+  }
+}
