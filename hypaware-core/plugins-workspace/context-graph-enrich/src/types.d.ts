@@ -91,11 +91,45 @@ export interface EnrichConfig {
   text_column: string
   timestamp_column: string
   id_column: string
+  /** Per-row unique column; the propose watermark is (timestamp_column, this). */
+  tiebreak_column: string
   anchor_type: string
   anchor_key_column: string
   recall_index?: string
   propose: ProposeConfig
   curate: CurateConfig
+}
+
+/**
+ * Propose watermark cursor: a keyset tuple over the part-level source. `ts`
+ * is the source timestamp as **epoch milliseconds** (the query engine surfaces
+ * a TIMESTAMP column as a Date and only compares it correctly against a
+ * numeric literal — string/`=` comparisons match nothing), `id` the row-unique
+ * tiebreak. "Rows processed up to (ts, id)"; the next tick reads strictly past
+ * it. The same-`ts` boundary is handled in JS, not SQL (see propose.js).
+ */
+export interface ProposeCursor {
+  ts: number
+  id: string
+}
+
+/** The persisted propose watermark sidecar (see state.js). */
+export interface EnrichStateFile {
+  schema_version: 2
+  propose_cursor: ProposeCursor | null
+}
+
+/** One parsed T2 decision for a prospect, keyed by its 1-based `index`. */
+export interface CurateDecision {
+  index: number
+  decision: string
+  item_type?: string
+  item_key?: string
+  label?: string
+  summary?: string
+  confidence?: number
+  merge_into?: string
+  note?: string
 }
 
 export interface EnrichConfigError {

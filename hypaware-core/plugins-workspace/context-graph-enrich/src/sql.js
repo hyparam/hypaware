@@ -39,7 +39,7 @@ export async function runSql(runtime, query) {
  * @param {unknown} err
  * @returns {boolean}
  */
-function isMissingDatasetError(err) {
+export function isMissingDatasetError(err) {
   if (!err || typeof err !== 'object') return false
   if (/** @type {Record<string, unknown>} */ (err).code === 'ENOENT') return true
   return err instanceof Error && err.message.includes('unknown dataset')

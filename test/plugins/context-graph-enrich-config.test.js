@@ -10,7 +10,8 @@ test('validateEnrichConfig fills source + tier defaults', () => {
   assert.equal(result.ok, true)
   if (!result.ok) return
   assert.equal(result.config.source_dataset, 'ai_gateway_messages')
-  assert.equal(result.config.text_column, 'content')
+  assert.equal(result.config.text_column, 'content_text')
+  assert.equal(result.config.tiebreak_column, 'part_id')
   assert.equal(result.config.anchor_type, 'Session')
   assert.equal(result.config.propose.t1_model, 'claude-haiku-4-5')
   assert.equal(result.config.propose.enabled, true)
@@ -54,4 +55,19 @@ test('validateEnrichConfig rejects a non-positive interval', () => {
   assert.equal(result.ok, false)
   if (result.ok) return
   assert.equal(result.errors[0].pointer, '/curate/interval_minutes')
+})
+
+test('validateEnrichConfig rejects a column name that is not a SQL identifier', () => {
+  const result = validateEnrichConfig({ text_column: 'content; DROP TABLE node' })
+  assert.equal(result.ok, false)
+  if (result.ok) return
+  assert.equal(result.errors[0].pointer, '/text_column')
+  assert.match(result.errors[0].message, /valid SQL identifier/)
+})
+
+test('validateEnrichConfig accepts a custom tiebreak_column', () => {
+  const result = validateEnrichConfig({ tiebreak_column: 'row_uid' })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.equal(result.config.tiebreak_column, 'row_uid')
 })

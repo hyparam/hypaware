@@ -10,34 +10,52 @@ function toolResult(name, input) {
   return { message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name, input }] }, model: 'm', stopReason: 'tool_use' }
 }
 
-test('buildProposeRequest forces the emit_prospects tool', () => {
+test('buildProposeRequest forces the emit_prospects tool via the neutral toolChoice', () => {
   const req = buildProposeRequest({ text: 'hi', model: 'claude-haiku-4-5', maxTokens: 1024, maxCandidates: 8 })
   assert.equal(req.model, 'claude-haiku-4-5')
   assert.equal(req.tools?.[0].name, 'emit_prospects')
-  assert.deepEqual(req.params?.tool_choice, { type: 'tool', name: 'emit_prospects' })
+  // Provider-neutral: no Anthropic-specific params, so it works on OpenAI too.
+  assert.deepEqual(req.toolChoice, { name: 'emit_prospects' })
+  assert.equal(req.params, undefined)
 })
 
-test('buildCurateBatchRequest batches prospects, shares source/neighborhood, no forced tool', () => {
-  const req = buildCurateBatchRequest({
+/** @param {string} provider */
+function curateReq(provider) {
+  return buildCurateBatchRequest({
     prospects: [
       { type: 'Decision', label: 'a', summary: 'sa', recall: 'ra' },
       { type: 'Concept', label: 'b', summary: 'sb' },
     ],
     neighborhood: 'n',
     source: 's',
-    model: 'claude-opus-4-8',
+    model: 'm',
     maxTokens: 4096,
+    provider,
   })
+}
+
+test('buildCurateBatchRequest batches prospects and shares source/neighborhood once', () => {
+  const req = curateReq('anthropic')
   assert.equal(req.tools?.[0].name, 'curate_decisions')
-  // Adaptive thinking forbids tool_choice:{type:'tool'} (400), so it stays at auto.
-  assert.equal(req.params?.tool_choice, undefined)
-  assert.deepEqual(req.params?.thinking, { type: 'adaptive' })
-  assert.deepEqual(req.params?.output_config, { effort: 'high' })
   // Both prospects are numbered in one prompt; source appears once.
   const text = /** @type {string} */ (req.messages[0].content)
   assert.match(text, /\[1\] type: Decision/)
   assert.match(text, /\[2\] type: Concept/)
   assert.equal(text.split('SHARED SOURCE EXCERPT').length - 1, 1)
+})
+
+test('buildCurateBatchRequest on Anthropic uses thinking + high effort, no forced tool', () => {
+  const req = curateReq('anthropic')
+  // Adaptive thinking forbids tool_choice:{type:'tool'} (400), so it stays at auto.
+  assert.equal(req.toolChoice, undefined)
+  assert.deepEqual(req.params?.thinking, { type: 'adaptive' })
+  assert.deepEqual(req.params?.output_config, { effort: 'high' })
+})
+
+test('buildCurateBatchRequest on a non-Anthropic provider forces the tool, no thinking params', () => {
+  const req = curateReq('openai-compatible')
+  assert.deepEqual(req.toolChoice, { name: 'curate_decisions' })
+  assert.equal(req.params, undefined)
 })
 
 test('parseProspects keeps valid candidates and drops unknown types / missing labels', () => {

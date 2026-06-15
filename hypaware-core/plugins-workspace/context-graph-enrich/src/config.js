@@ -12,9 +12,15 @@
 
 export const SOURCE_DEFAULTS = Object.freeze({
   source_dataset: 'ai_gateway_messages',
-  text_column: 'content',
+  // schema v5 exposes the per-part text as `content_text`; there is no bare
+  // `content` column (see ai-gateway/src/message_projector.js).
+  text_column: 'content_text',
   timestamp_column: 'message_created_at',
   id_column: 'message_id',
+  // Row-unique tiebreak for the propose watermark. `ai_gateway_messages` is
+  // part-level (many parts share one `message_created_at`), so the cursor is
+  // the tuple (timestamp_column, tiebreak_column); `part_id` is the per-row id.
+  tiebreak_column: 'part_id',
   anchor_type: 'Session',
   anchor_key_column: 'conversation_id',
 })
@@ -57,12 +63,18 @@ export function validateEnrichConfig(value) {
   }
   const raw = /** @type {Record<string, unknown>} */ (value ?? {})
 
-  const source_dataset = readString(raw, 'source_dataset', errors) ?? SOURCE_DEFAULTS.source_dataset
-  const text_column = readString(raw, 'text_column', errors) ?? SOURCE_DEFAULTS.text_column
-  const timestamp_column = readString(raw, 'timestamp_column', errors) ?? SOURCE_DEFAULTS.timestamp_column
-  const id_column = readString(raw, 'id_column', errors) ?? SOURCE_DEFAULTS.id_column
+  // Dataset/column fields are interpolated as SQL identifiers in the
+  // propose/curate queries, so they must be strict identifiers — a typo
+  // becomes a runtime SQL failure, and an unvalidated string would let
+  // crafted config alter the generated query. (`anchor_type` and
+  // `recall_index` are used as values / index names, not SQL identifiers.)
+  const source_dataset = readIdentifier(raw, 'source_dataset', errors) ?? SOURCE_DEFAULTS.source_dataset
+  const text_column = readIdentifier(raw, 'text_column', errors) ?? SOURCE_DEFAULTS.text_column
+  const timestamp_column = readIdentifier(raw, 'timestamp_column', errors) ?? SOURCE_DEFAULTS.timestamp_column
+  const id_column = readIdentifier(raw, 'id_column', errors) ?? SOURCE_DEFAULTS.id_column
+  const tiebreak_column = readIdentifier(raw, 'tiebreak_column', errors) ?? SOURCE_DEFAULTS.tiebreak_column
   const anchor_type = readString(raw, 'anchor_type', errors) ?? SOURCE_DEFAULTS.anchor_type
-  const anchor_key_column = readString(raw, 'anchor_key_column', errors) ?? SOURCE_DEFAULTS.anchor_key_column
+  const anchor_key_column = readIdentifier(raw, 'anchor_key_column', errors) ?? SOURCE_DEFAULTS.anchor_key_column
   const recall_index = readString(raw, 'recall_index', errors)
 
   const propose = readPropose(raw.propose, errors)
@@ -77,6 +89,7 @@ export function validateEnrichConfig(value) {
       text_column,
       timestamp_column,
       id_column,
+      tiebreak_column,
       anchor_type,
       anchor_key_column,
       ...(recall_index !== undefined ? { recall_index } : {}),
@@ -84,6 +97,28 @@ export function validateEnrichConfig(value) {
       curate,
     },
   }
+}
+
+/** A strict SQL identifier: a letter/underscore start, then word chars. */
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Like {@link readString}, but additionally requires a strict SQL identifier
+ * so the value is safe to interpolate as a dataset/column name.
+ *
+ * @param {Record<string, unknown>} raw
+ * @param {string} key
+ * @param {EnrichConfigError[]} errors
+ * @returns {string | undefined}
+ */
+function readIdentifier(raw, key, errors) {
+  const v = readString(raw, key, errors)
+  if (v === undefined) return undefined
+  if (!IDENTIFIER.test(v)) {
+    errors.push(invalid(`/${key}`, `${key} must be a valid SQL identifier (letters, digits, underscore)`))
+    return undefined
+  }
+  return v
 }
 
 /**

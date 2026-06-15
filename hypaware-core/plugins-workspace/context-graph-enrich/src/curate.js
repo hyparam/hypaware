@@ -8,7 +8,7 @@ import { getCompletion, getVector, requireEnrichRuntime } from './runtime.js'
 import { runSql, sqlQuote } from './sql.js'
 
 /**
- * @import { EnrichRuntime } from './types.d.ts'
+ * @import { CurateDecision, EnrichRuntime } from './types.d.ts'
  * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
@@ -97,13 +97,15 @@ export async function runCurateTick(runtime, opts = {}) {
         const source = await safeDeref(runtime, [...idSet])
 
         const maxTokens = Math.min(16_000, 2048 + group.length * 512)
-        const result = await getCompletion(runtime).complete(
+        const completion = getCompletion(runtime)
+        const result = await completion.complete(
           buildCurateBatchRequest({
             prospects: views.map((v) => ({ ...v.view, recall: v.recall })),
             neighborhood,
             source,
             model: c.t2_model,
             maxTokens,
+            provider: completion.provider,
           }),
           { signal: opts.signal }
         )
@@ -119,44 +121,11 @@ export async function runCurateTick(runtime, opts = {}) {
         const byIndex = new Map(decisions.map((d) => [d.index, d]))
 
         for (let i = 0; i < group.length; i++) {
-          const prospect = group[i]
-          const view = views[i].view
-          const pid = strField(prospect.prospect_id)
-          const decision = byIndex.get(i + 1)
           processed++
-
-          // Omitted from the batch response = implicit reject (the model saw
-          // it and chose not to decide); keeps the queue finite and draining.
-          if (!decision || decision.decision === 'reject') {
-            rejected++
-            resolutionRows.push(resolution(pid, 'reject', null, decision?.note ?? (decision ? null : 'omitted by curator'), at))
-            continue
-          }
-          if (decision.decision === 'merge') {
-            const into = decision.merge_into || decision.item_key || null
-            resolutionRows.push(resolution(pid, 'merge', into ? [into] : null, decision.note ?? null, at))
-            continue
-          }
-          // commit | deepen → write a committed item
-          const itemType = decision.item_type || view.type
-          const itemKey = decision.item_key || view.label
-          const label = decision.label || view.label
-          const summary = decision.summary || view.summary
-          committedRows.push({
-            item_id: itemKey,
-            item_type: itemType,
-            label,
-            props: summary ? { summary } : null,
-            confidence: decision.confidence ?? view.confidence ?? null,
-            anchor_type: strField(prospect.anchor_type),
-            anchor_key: strField(prospect.anchor_key),
-            source_dataset: strField(prospect.source_dataset),
-            source_keys: asObject(prospect.source_keys),
-            curator: CURATOR,
-            curator_version: CURATOR_VERSION,
-            committed_at: at,
-          })
-          resolutionRows.push(resolution(pid, decision.decision, [itemKey], decision.note ?? null, at))
+          const routed = routeDecision(group[i], views[i].view, byIndex.get(i + 1), at)
+          if (routed.rejected) rejected++
+          if (routed.committed) committedRows.push(routed.committed)
+          resolutionRows.push(routed.resolution)
         }
       }
 
@@ -292,6 +261,52 @@ async function safeDeref(runtime, ids) {
   } catch {
     return ''
   }
+}
+
+/**
+ * Route one curator decision into the rows it produces: always a resolution
+ * row (so the prospect leaves the pending queue), plus a committed row for
+ * `commit`/`deepen`. A `reject` — or a prospect the curator omitted from the
+ * batch response (implicit reject) — commits nothing: that is exactly how a
+ * rejected prospect never reaches `enrichment_committed`, hence never the
+ * graph. Pure: no I/O, so the reject/merge/commit/deepen routing is testable.
+ *
+ * @param {Record<string, unknown>} prospect
+ * @param {{ type: string, label: string, summary: string, confidence: number | undefined }} view
+ * @param {CurateDecision | undefined} decision
+ * @param {string} at
+ * @returns {{ committed: Record<string, unknown> | null, resolution: Record<string, unknown>, rejected: boolean }}
+ */
+export function routeDecision(prospect, view, decision, at) {
+  const pid = strField(prospect.prospect_id)
+
+  // Omitted from the batch response = implicit reject (the model saw it and
+  // chose not to decide); keeps the queue finite and draining.
+  if (!decision || decision.decision === 'reject') {
+    const note = decision?.note ?? (decision ? null : 'omitted by curator')
+    return { committed: null, rejected: true, resolution: resolution(pid, 'reject', null, note, at) }
+  }
+  if (decision.decision === 'merge') {
+    const into = decision.merge_into || decision.item_key || null
+    return { committed: null, rejected: false, resolution: resolution(pid, 'merge', into ? [into] : null, decision.note ?? null, at) }
+  }
+  // commit | deepen → write a committed item
+  const itemKey = decision.item_key || view.label
+  const committed = {
+    item_id: itemKey,
+    item_type: decision.item_type || view.type,
+    label: decision.label || view.label,
+    props: decision.summary || view.summary ? { summary: decision.summary || view.summary } : null,
+    confidence: decision.confidence ?? view.confidence ?? null,
+    anchor_type: strField(prospect.anchor_type),
+    anchor_key: strField(prospect.anchor_key),
+    source_dataset: strField(prospect.source_dataset),
+    source_keys: asObject(prospect.source_keys),
+    curator: CURATOR,
+    curator_version: CURATOR_VERSION,
+    committed_at: at,
+  }
+  return { committed, rejected: false, resolution: resolution(pid, decision.decision, [itemKey], decision.note ?? null, at) }
 }
 
 /**

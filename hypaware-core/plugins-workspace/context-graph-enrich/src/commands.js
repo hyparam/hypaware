@@ -9,6 +9,7 @@ import { readState } from './state.js'
 
 /**
  * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { EnrichRuntime } from './types.d.ts'
  */
 
 /**
@@ -72,12 +73,13 @@ export async function runEnrichStatus(_argv, ctx) {
   try {
     const runtime = requireEnrichRuntime()
     const state = readState(runtime.stateDir)
+    const cursor = state.propose_cursor
     const prospects = await count(runtime, PROSPECTS_DATASET)
     const resolutions = await count(runtime, RESOLUTIONS_DATASET)
     const committed = await count(runtime, COMMITTED_DATASET)
     ctx.stdout.write(
       `enrich status\n` +
-        `  propose cursor: ${state.propose_cursor ?? '(none)'}\n` +
+        `  propose cursor: ${cursor ? `${new Date(cursor.ts).toISOString()} (${cursor.id})` : '(none)'}\n` +
         `  prospects:      ${prospects}\n` +
         `  resolutions:    ${resolutions} (pending: ${Math.max(0, prospects - resolutions)})\n` +
         `  committed:      ${committed}\n`
@@ -90,7 +92,7 @@ export async function runEnrichStatus(_argv, ctx) {
 }
 
 /**
- * @param {import('./types.d.ts').EnrichRuntime} runtime
+ * @param {EnrichRuntime} runtime
  * @param {string} dataset
  * @returns {Promise<number>}
  */

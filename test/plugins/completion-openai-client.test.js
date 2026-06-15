@@ -119,6 +119,23 @@ test('complete passes responseFormat and params (tool_choice) through', async ()
   assert.equal(requests[0].body.temperature, 0)
 })
 
+test('complete translates the neutral toolChoice to OpenAI shape (wins over params)', async () => {
+  const { requests, fetchImpl } = makeFakeFetch()
+  const completion = createOpenAiCompletion({ config: baseConfig(), env: { TEST_OAI_KEY: SECRET }, log: noopLog(), fetchImpl })
+  await completion.complete({
+    messages: [{ role: 'user', content: 'x' }],
+    max_tokens: 64,
+    toolChoice: { name: 'emit' },
+    params: { tool_choice: 'auto' },
+  })
+  assert.deepEqual(requests[0].body.tool_choice, { type: 'function', function: { name: 'emit' } })
+
+  const required = makeFakeFetch()
+  const c2 = createOpenAiCompletion({ config: baseConfig(), env: { TEST_OAI_KEY: SECRET }, log: noopLog(), fetchImpl: required.fetchImpl })
+  await c2.complete({ messages: [{ role: 'user', content: 'x' }], max_tokens: 64, toolChoice: 'required' })
+  assert.equal(required.requests[0].body.tool_choice, 'required')
+})
+
 test('complete without the env var sends no Authorization (localhost servers)', async () => {
   const { requests, fetchImpl } = makeFakeFetch()
   const completion = createOpenAiCompletion({ config: baseConfig(), env: {}, log: noopLog(), fetchImpl })

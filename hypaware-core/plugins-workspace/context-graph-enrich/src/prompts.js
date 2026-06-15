@@ -6,6 +6,7 @@
  * the structured-extraction channel of `hypaware.completion`.
  *
  * @import { CompletionRequest, CompletionResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CurateDecision } from './types.d.ts'
  */
 
 /** Enrichment node types the proposer may emit. Small + closed for v1. */
@@ -96,7 +97,10 @@ export function buildProposeRequest({ text, model, maxTokens, maxCandidates }) {
     messages: [{ role: 'user', content: text }],
     max_tokens: maxTokens,
     tools: [EMIT_PROSPECTS_TOOL],
-    params: { tool_choice: { type: 'tool', name: 'emit_prospects' } },
+    // Provider-neutral forced tool: each provider translates `toolChoice` to
+    // its native shape, so the proposer is portable across Anthropic and
+    // OpenAI-compatible providers (Ollama, LM Studio, …).
+    toolChoice: { name: 'emit_prospects' },
   }
 }
 
@@ -107,10 +111,18 @@ export function buildProposeRequest({ text, model, maxTokens, maxCandidates }) {
  * prospect — the win over a per-prospect call. The model returns one
  * decision per prospect, keyed by 1-based index.
  *
- * @param {{ prospects: Array<{ type: string, label: string, summary?: string, confidence?: number, recall?: string }>, neighborhood: string, source: string, model: string, maxTokens: number }} args
+ * The request is provider-aware: on Anthropic, adaptive thinking + high
+ * effort buy curation quality but forbid forcing a tool (the API returns 400
+ * for `tool_choice:{type:'tool'}` with thinking on), so the tool choice stays
+ * `auto` and the system prompt requires one `curate_decisions` call. On other
+ * providers (OpenAI-compatible) there is no such restriction and no portable
+ * thinking knob, so the tool is forced for reliable structured output.
+ * `parseDecisions` treats a missing call as "no decisions" either way.
+ *
+ * @param {{ prospects: Array<{ type: string, label: string, summary?: string, confidence?: number, recall?: string }>, neighborhood: string, source: string, model: string, maxTokens: number, provider: string }} args
  * @returns {CompletionRequest}
  */
-export function buildCurateBatchRequest({ prospects, neighborhood, source, model, maxTokens }) {
+export function buildCurateBatchRequest({ prospects, neighborhood, source, model, maxTokens, provider }) {
   const lines = prospects
     .map((p, i) =>
       `[${i + 1}] type: ${p.type} | label: ${p.label} | confidence: ${p.confidence ?? ''}\n` +
@@ -122,21 +134,20 @@ export function buildCurateBatchRequest({ prospects, neighborhood, source, model
     `SHARED GRAPH NEIGHBORHOOD (around the session anchor)\n${neighborhood || '(none)'}\n\n` +
     `SHARED SOURCE EXCERPT\n${source || '(unavailable)'}\n\n` +
     `PROSPECTS — decide on each by index:\n${lines}\n`
-  return {
+  /** @type {CompletionRequest} */
+  const req = {
     model,
     system: T2_SYSTEM,
     messages: [{ role: 'user', content: user }],
     max_tokens: maxTokens,
     tools: [CURATE_DECISIONS_TOOL],
-    params: {
-      // Adaptive thinking forbids forcing a tool (Anthropic returns 400 for
-      // tool_choice:{type:'tool'} with thinking on), so tool_choice stays at
-      // the default `auto` and the system prompt requires one curate_decisions
-      // call. parseDecisions treats a missing call as "no decisions".
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'high' },
-    },
   }
+  if (provider === 'anthropic') {
+    req.params = { thinking: { type: 'adaptive' }, output_config: { effort: 'high' } }
+  } else {
+    req.toolChoice = { name: 'curate_decisions' }
+  }
+  return req
 }
 
 /**
@@ -182,10 +193,6 @@ export function parseProspects(result) {
   }
   return out
 }
-
-/**
- * @typedef {{ index: number, decision: string, item_type?: string, item_key?: string, label?: string, summary?: string, confidence?: number, merge_into?: string, note?: string }} CurateDecision
- */
 
 /**
  * Parse the batched `curate_decisions` tool call into per-prospect decisions

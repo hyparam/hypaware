@@ -7,14 +7,16 @@ import { randomUUID } from 'node:crypto'
 /**
  * Per-host watermark state for the enrichment sources, persisted as a single
  * sidecar JSON under the plugin's state dir (the same approach vector-search
- * uses for shard metadata). The propose cursor is a monotonic source
- * timestamp ("rows processed up to here"); curate has no cursor — its queue
- * is "prospects with no resolution", computed by query.
+ * uses for shard metadata). The propose cursor is a keyset tuple over the
+ * part-level source — (timestamp, row-unique id), "rows processed up to
+ * here". Curate has no cursor — its queue is "prospects with no resolution",
+ * computed by query.
+ *
+ * @import { EnrichStateFile, ProposeCursor } from './types.d.ts'
  */
 
 const STATE_FILE = 'enrich-state.json'
-
-/** @typedef {{ schema_version: 1, propose_cursor: string | null }} EnrichStateFile */
+const SCHEMA_VERSION = 2
 
 /**
  * @param {string} stateDir
@@ -24,13 +26,25 @@ export function readState(stateDir) {
   const file = path.join(stateDir, STATE_FILE)
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
-    if (parsed && parsed.schema_version === 1) {
-      return { schema_version: 1, propose_cursor: typeof parsed.propose_cursor === 'string' ? parsed.propose_cursor : null }
+    if (parsed && parsed.schema_version === SCHEMA_VERSION) {
+      return { schema_version: SCHEMA_VERSION, propose_cursor: readCursor(parsed.propose_cursor) }
     }
   } catch {
-    // Missing or malformed sidecar — start from the beginning.
+    // Missing, malformed, or an older schema — start from the beginning.
   }
-  return { schema_version: 1, propose_cursor: null }
+  return { schema_version: SCHEMA_VERSION, propose_cursor: null }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {ProposeCursor | null}
+ */
+function readCursor(value) {
+  if (value && typeof value === 'object') {
+    const c = /** @type {Record<string, unknown>} */ (value)
+    if (typeof c.ts === 'number' && Number.isFinite(c.ts) && typeof c.id === 'string') return { ts: c.ts, id: c.id }
+  }
+  return null
 }
 
 /**

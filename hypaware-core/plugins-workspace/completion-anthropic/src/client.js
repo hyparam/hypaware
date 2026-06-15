@@ -138,6 +138,9 @@ function buildRequest({ req, config, env, model, stream }) {
   if (Array.isArray(req.tools) && req.tools.length > 0) {
     body.tools = req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }))
   }
+  // Provider-neutral tool choice → Anthropic's native shape. Wins over a
+  // raw `params.tool_choice` so a portable caller's intent is authoritative.
+  if (req.toolChoice !== undefined) body.tool_choice = toAnthropicToolChoice(req.toolChoice)
   if (req.responseFormat !== undefined) {
     const existing = /** @type {Record<string, unknown>} */ (
       params.output_config && typeof params.output_config === 'object' ? params.output_config : {}
@@ -146,6 +149,20 @@ function buildRequest({ req, config, env, model, stream }) {
   }
 
   return { body: JSON.stringify(body), headers }
+}
+
+/**
+ * Translate the provider-neutral `toolChoice` to the Anthropic Messages
+ * shape: `'auto'` → `{type:'auto'}`, `'required'` → `{type:'any'}` (call some
+ * tool), `{name}` → `{type:'tool',name}` (call this one).
+ *
+ * @param {NonNullable<CompletionRequest['toolChoice']>} choice
+ * @returns {Record<string, unknown>}
+ */
+function toAnthropicToolChoice(choice) {
+  if (choice === 'auto') return { type: 'auto' }
+  if (choice === 'required') return { type: 'any' }
+  return { type: 'tool', name: choice.name }
 }
 
 /**

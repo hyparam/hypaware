@@ -127,9 +127,25 @@ function buildRequest({ req, config, env, model, stream }) {
       function: { name: t.name, description: t.description, parameters: t.input_schema },
     }))
   }
+  // Provider-neutral tool choice → OpenAI's native shape. Wins over a raw
+  // `params.tool_choice` so a portable caller's intent is authoritative.
+  if (req.toolChoice !== undefined) body.tool_choice = toOpenAiToolChoice(req.toolChoice)
   if (req.responseFormat !== undefined) body.response_format = req.responseFormat
 
   return { body: JSON.stringify(body), headers }
+}
+
+/**
+ * Translate the provider-neutral `toolChoice` to the OpenAI Chat Completions
+ * shape: `'auto'`/`'required'` pass through; `{name}` →
+ * `{type:'function',function:{name}}` (force this tool).
+ *
+ * @param {NonNullable<CompletionRequest['toolChoice']>} choice
+ * @returns {unknown}
+ */
+function toOpenAiToolChoice(choice) {
+  if (choice === 'auto' || choice === 'required') return choice
+  return { type: 'function', function: { name: choice.name } }
 }
 
 /**

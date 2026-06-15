@@ -140,6 +140,18 @@ test('complete returns a refusal as stopReason without throwing (HTTP 200)', asy
   assert.deepEqual(result.message.content, [])
 })
 
+test('complete translates the neutral toolChoice to the Anthropic shape', async () => {
+  const { requests, fetchImpl } = makeFakeFetch()
+  const completion = createAnthropicCompletion({ config: baseConfig(), env: { TEST_ANT_KEY: SECRET }, log: noopLog(), fetchImpl })
+  await completion.complete({ messages: [{ role: 'user', content: 'x' }], max_tokens: 64, toolChoice: { name: 'emit' } })
+  assert.deepEqual(requests[0].body.tool_choice, { type: 'tool', name: 'emit' })
+
+  const any = makeFakeFetch()
+  const c2 = createAnthropicCompletion({ config: baseConfig(), env: { TEST_ANT_KEY: SECRET }, log: noopLog(), fetchImpl: any.fetchImpl })
+  await c2.complete({ messages: [{ role: 'user', content: 'x' }], max_tokens: 64, toolChoice: 'required' })
+  assert.deepEqual(any.requests[0].body.tool_choice, { type: 'any' })
+})
+
 test('complete without the env var sends no x-api-key (localhost proxies)', async () => {
   const { requests, fetchImpl } = makeFakeFetch()
   const completion = createAnthropicCompletion({ config: baseConfig(), env: {}, log: noopLog(), fetchImpl })

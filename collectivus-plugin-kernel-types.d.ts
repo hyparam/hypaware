@@ -1577,15 +1577,26 @@ export interface CompletionRequest {
   max_tokens: number
   /**
    * Tools the model may call. The structured-extraction channel: force a
-   * tool to get schema-shaped output back as a `tool_use` block.
+   * tool (via `toolChoice`) to get schema-shaped output back as a `tool_use`
+   * block.
    */
   tools?: CompletionTool[]
+  /**
+   * Provider-neutral tool-choice control. Each provider translates to its
+   * native shape, so a caller forcing structured output stays portable:
+   *   - `'auto'` — the model decides whether to call a tool.
+   *   - `'required'` — the model must call some tool.
+   *   - `{ name }` — the model must call this specific tool.
+   * Prefer this over a provider-specific `params.tool_choice`; when both are
+   * set, `toolChoice` wins. Leave unset for the provider default.
+   */
+  toolChoice?: 'auto' | 'required' | { name: string }
   /** JSON-schema structured-output request, when the provider supports it. */
   responseFormat?: JsonValue
   /**
    * Provider-specific passthrough merged into the request body — e.g.
    * Anthropic `thinking` / `output_config.effort`. Portable callers leave
-   * this unset.
+   * this unset and use the neutral fields above.
    */
   params?: JsonObject
 }
