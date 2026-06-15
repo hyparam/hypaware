@@ -27,6 +27,16 @@ and "bring your own query engine" silently becomes false.
 separability and its boundary invariant are argued in full. This LLP records the
 hypaware-local implementation.)
 
+That surface can carry **pre-compaction duplicate rows** — the same
+content-addressed id committed twice by concurrent projections or a partial
+failure. [`hyp graph compact`](./0023-context-graph-projection.decision.md#graph-compaction)
+folds them, but a *read* must not depend on it having run first. So the reader
+folds node/edge rows by graph identity (`node_id`; `(src_id, edge_type, dst_id)`
+for edges) before traversing — two physical copies of one node resolve as a
+single seed rather than a false "ambiguous", and a doubled edge is walked once.
+Genuine ambiguity (distinct ids sharing a `natural_key`/`label`, e.g. two `File`s
+with the same basename) is preserved.
+
 ## Thin in-memory traversal
 
 `graph neighbors` loads `node` and `edge` once through the query surface, builds

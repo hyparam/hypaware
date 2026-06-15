@@ -7,10 +7,8 @@ import { queryNeighbors } from './query.js'
 /**
  * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { Direction, TraversalOk } from './query.js'
+ * @import { Direction, ParsedNeighbors, TraversalOk } from './types.d.ts'
  */
-
-/** @typedef {{ seed: string, depth: number, type: string | undefined, edgeTypes: string[], direction: Direction, limit: number, json: boolean }} ParsedNeighbors */
 
 /** A graph this large strained the basic in-memory loader; nudge to the index path. */
 const LARGE_GRAPH = 500_000

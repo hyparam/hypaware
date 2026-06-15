@@ -7,15 +7,7 @@ import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- */
-
-/**
- * @typedef {{ node_id: string, node_type: string, natural_key: string, label: string | null }} GraphNode
- * @typedef {{ src_id: string, dst_id: string, edge_type: string }} GraphEdge
- * @typedef {'out' | 'in' | 'both'} Direction
- * @typedef {{ hop: number, edge_type: string, direction: 'out' | 'in', from: string, node: GraphNode }} Neighbor
- * @typedef {{ ok: true, seed: GraphNode, neighbors: Neighbor[], reachable: number, truncated: boolean, totalNodes: number, totalEdges: number }} TraversalOk
- * @typedef {{ ok: false, error: string, candidates?: GraphNode[] }} TraversalErr
+ * @import { GraphNode, GraphEdge, Direction, Neighbor, TraversalOk, TraversalErr } from './types.d.ts'
  */
 
 /**
@@ -136,17 +128,39 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
   const edgeRows = await loadRows(query, storage, config, `SELECT src_id, dst_id, edge_type FROM ${EDGE_DATASET}`)
   const nodeRows = await loadRows(query, storage, config, `SELECT node_id, node_type, natural_key, label FROM ${NODE_DATASET}`)
 
-  /** @type {GraphEdge[]} */
-  const edges = edgeRows.map((r) => ({ src_id: String(r.src_id), dst_id: String(r.dst_id), edge_type: String(r.edge_type) }))
-  /** @type {GraphNode[]} */
-  const nodes = nodeRows.map((r) => ({
-    node_id: String(r.node_id),
-    node_type: String(r.node_type),
-    natural_key: String(r.natural_key),
-    label: r.label == null ? null : String(r.label),
-  }))
+  // Fold by graph identity before handing clean arrays to the pure traversal.
+  // The published surface can carry pre-compaction duplicates — the same
+  // content-addressed id committed twice by concurrent projections or a
+  // partial failure. `hyp graph compact` merges them, but a read must not
+  // depend on it having run: two physical copies of one node must resolve as
+  // a single seed (not a false "ambiguous"), and a doubled edge must not be
+  // walked twice. Node identity is `node_id`; edge identity is
+  // `(src_id, edge_type, dst_id)` — exactly the digest `edgeId()` hashes.
+  /** @type {Map<string, GraphNode>} */
+  const nodeById = new Map()
+  for (const r of nodeRows) {
+    const node_id = String(r.node_id)
+    if (nodeById.has(node_id)) continue
+    nodeById.set(node_id, {
+      node_id,
+      node_type: String(r.node_type),
+      natural_key: String(r.natural_key),
+      label: r.label == null ? null : String(r.label),
+    })
+  }
+  /** @type {Map<string, GraphEdge>} */
+  const edgeById = new Map()
+  for (const r of edgeRows) {
+    const edge = { src_id: String(r.src_id), dst_id: String(r.dst_id), edge_type: String(r.edge_type) }
+    const id = `${edge.src_id}\0${edge.edge_type}\0${edge.dst_id}`
+    if (!edgeById.has(id)) edgeById.set(id, edge)
+  }
 
-  return traverse({ nodes, edges, seed, depth, edgeTypes, direction, limit, type })
+  return traverse({
+    nodes: [...nodeById.values()],
+    edges: [...edgeById.values()],
+    seed, depth, edgeTypes, direction, limit, type,
+  })
 }
 
 /**

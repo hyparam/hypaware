@@ -187,3 +187,38 @@ test('queryNeighbors reads node/edge through the query surface and walks (integr
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('queryNeighbors folds pre-compaction duplicate rows so a natural-key seed still resolves', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-query-'))
+  try {
+    const registry = createQueryRegistry()
+    registry.registerDataset(graphDatasetRegistration('node'))
+    registry.registerDataset(graphDatasetRegistration('edge'))
+
+    // The same Session/Tool/edge committed twice in different source=
+    // partitions — what a concurrent projection lands before `hyp graph
+    // compact` runs. Without the identity fold, the duplicate node rows make
+    // the natural-key seed read as "ambiguous" and the doubled edge inflates
+    // the walk.
+    for (const part of ['source=a', 'source=b']) {
+      await appendRowsToSourceTable(cacheRoot, 'node', [part], NODE_COLUMNS, [
+        fullNode({ node_id: 'n-sess', node_type: 'Session', natural_key: 'conv-1', label: null }),
+        fullNode({ node_id: 'n-tool', node_type: 'Tool', natural_key: 'Bash', label: 'Bash' }),
+      ])
+      await appendRowsToSourceTable(cacheRoot, 'edge', [part], EDGE_COLUMNS, [
+        fullEdge({ edge_id: 'e-1', edge_type: 'used', src_id: 'n-sess', dst_id: 'n-tool', src_type: 'Session', dst_type: 'Tool' }),
+      ])
+    }
+
+    const storage = createQueryStorageService({ cacheRoot })
+
+    // Natural-key seed resolves to the single semantic node (not ambiguous),
+    // and the doubled edge is walked once.
+    const out = ok(await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out' }))
+    assert.equal(out.neighbors.length, 1)
+    assert.equal(out.neighbors[0].node.node_id, 'n-tool')
+    assert.equal(out.reachable, 1)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

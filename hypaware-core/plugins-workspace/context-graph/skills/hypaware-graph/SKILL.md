@@ -76,6 +76,6 @@ hyp graph neighbors claude-opus-4-8 --type Model --direction in  # sessions that
 ## Guardrails
 
 - **Project first.** The graph is only as fresh as the last `hyp graph project`; empty results usually mean it has not run.
-- **Read stderr.** `graph neighbors` writes not-found / ambiguity / truncation notes to stderr; exit `1` is a resolution error, `2` is a usage error.
+- **Read stderr for errors.** `graph neighbors` writes not-found / ambiguity notes (and the large-graph note) to stderr; exit `1` is a resolution error, `2` is a usage error. **Truncation is part of the result**, so it goes to **stdout** (`3 of 7 … — truncated`) and the `--json` `truncated` field — not stderr.
 - The graph is **derived and rebuildable** — never the source of truth. To change what it contains, fix capture/projection and re-project; don't hand-edit `node`/`edge`.
 - Basic traversal loads the graph in memory per call — fine at activity-graph scale; a very large graph prints a note pointing at the future indexed path.
