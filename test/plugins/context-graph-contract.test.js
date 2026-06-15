@@ -87,6 +87,19 @@ test('contract registry rejects malformed contracts', () => {
   assert.throws(() => reg.register(sampleContract({ rules: [] })), /rules/)
 })
 
+test('contract registry rejects malformed rules, naming the offending rule index', () => {
+  const reg = createContractRegistry()
+  const ok = { kind: 'node', type: 'T', sql: 'SELECT 1', toRow: () => null }
+  // A good rule at 0, a bad one at 1 — the error pins which rule and which field,
+  // so a connector typo fails at registration with a locatable message rather
+  // than mid-projection (or by silently routing rows into the wrong target map).
+  assert.throws(() => reg.register(sampleContract({ rules: [ok, { ...ok, kind: 'vertex' }] })), /rule 1 kind/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, type: '' }] })), /rule 0 type/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, sql: '' }] })), /rule 0 sql/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, toRow: 'nope' }] })), /rule 0 toRow/)
+  assert.throws(() => reg.register(sampleContract({ rules: [null] })), /rule 0 must be an object/)
+})
+
 test('contract registry rejects a duplicate (plugin, name)', () => {
   const reg = createContractRegistry()
   reg.register(sampleContract())

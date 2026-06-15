@@ -16,6 +16,10 @@ import { graphDatasetRegistration } from '../../hypaware-core/plugins-workspace/
 import { projectGraph } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 
+/**
+ * @import { Contract } from '../../hypaware-core/plugins-workspace/context-graph/src/types.d.ts'
+ */
+
 // End-to-end: a contributed contract, run by the engine, over a real seeded
 // `ai_gateway_messages` dataset. Proves Task 2 (engine iterates contracts),
 // Task 3 (the connector's contract), and Task 1 (the kit) together, and is the
@@ -100,5 +104,60 @@ test('projectGraph with no contracts writes nothing', async () => {
   await withSeededGateway(async ({ registry, storage }) => {
     const r = await projectGraph({ query: registry, storage, contracts: [] })
     assert.deepEqual(r, { nodes: 0, edges: 0, nodesWritten: 0, edgesWritten: 0 })
+  })
+})
+
+/**
+ * A minimal one-Session-node contract at a given projector version, over the
+ * same seeded `ai_gateway_messages`. Used to prove that `projector_version` is
+ * provenance, not a re-projection trigger (LLP 0023 §inline-provenance).
+ * @param {number} version
+ * @returns {Contract}
+ */
+function sessionContract(version) {
+  const { buildNode } = makeRowBuilders({ sourceDataset: 'ai_gateway_messages', projector: 'ai-gateway.t0', projectorVersion: version })
+  return {
+    name: 'session-only',
+    plugin: '@test/session',
+    sourceDataset: 'ai_gateway_messages',
+    projector: 'ai-gateway.t0',
+    projectorVersion: version,
+    rules: [
+      {
+        kind: 'node',
+        type: 'Session',
+        sql: 'SELECT conversation_id, message_created_at FROM ai_gateway_messages',
+        toRow(r) {
+          const key = r.conversation_id
+          if (typeof key !== 'string') return null
+          return buildNode({ type: 'Session', key, firstSeen: r.message_created_at, sourceKeys: { conversation_id: key } })
+        },
+      },
+    ],
+  }
+}
+
+test('bumping projectorVersion does not re-project — committed rows keep their original version', async () => {
+  await withSeededGateway(async ({ registry, storage }) => {
+    const v1 = await projectGraph({ query: registry, storage, contracts: [sessionContract(1)] })
+    assert.equal(v1.nodesWritten, 1, 'one Session node committed at v1')
+
+    // Same source, same content-addressed ids, projectorVersion bumped to 2.
+    const v2 = await projectGraph({ query: registry, storage, contracts: [sessionContract(2)] })
+    assert.equal(v2.nodesWritten, 0, 'a version bump alone rewrites nothing — pre-write dedup skips the committed id')
+
+    // Exactly one Session row survives, still stamped v1: bumping the version
+    // did not re-derive it. (Asserting on the single Session row rather than by
+    // node_id keeps the check independent of how the SQL engine compares the
+    // hex id literal.)
+    const res = await executeQuerySql({
+      query: `SELECT natural_key, projector_version FROM node WHERE node_type = 'Session'`,
+      registry,
+      storage,
+      refresh: 'always',
+    })
+    assert.equal(res.rows.length, 1, 'still exactly one Session row')
+    assert.equal(res.rows[0].natural_key, 'conv-1')
+    assert.equal(Number(res.rows[0].projector_version), 1, 'the committed row keeps its first-sighting version, not the bumped one')
   })
 })

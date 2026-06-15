@@ -120,6 +120,18 @@ sighting's keys" because the only V1 consumer is debugging ("where did this
 node come from?"), and a join table for that is overhead without a reader.
 Revisit when a consumer needs complete lineage, not just an exemplar.
 
+`projector_version` is **provenance, not a re-projection trigger**: it records
+which generation of the projector first minted a row. Bumping it rewrites
+nothing on its own — ids are content-addressed
+([§content-addressed-ids](#content-addressed-ids)), so a re-run mints the same
+ids and the pre-write dedup skips every already-committed row; the committed
+rows keep their original version. Re-deriving a source after a projector logic
+change is a deliberate operation (drop/re-project, or a compaction-style
+migration), never a side effect of incrementing this number. A contract that
+needs the *new* logic reflected in committed rows must remove the stale rows
+first — there is no version-aware replace in the engine, and adding one would
+have to define preference/cleanup rules across `(source_dataset, projector)`.
+
 ## On-demand projection
 
 The projection runs only via `hyp graph project` (and compaction via

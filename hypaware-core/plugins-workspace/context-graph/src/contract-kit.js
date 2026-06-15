@@ -5,6 +5,10 @@ import { nodeId, edgeId } from './ids.js'
 export { nodeId, edgeId }
 
 /**
+ * @import { NodeSpec, EdgeSpec } from './types.d.ts'
+ */
+
+/**
  * Build the provenance-stamping row builders for one source's contract.
  *
  * The id recipe (`ids.js`) and the provenance column shape live here, in the
@@ -78,24 +82,3 @@ function normalizeFirstSeen(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString()
   return null
 }
-
-/**
- * @typedef {object} NodeSpec
- * @property {string} type
- * @property {string} key
- * @property {string | null} [label]
- * @property {Record<string, unknown>} [props]
- * @property {unknown} firstSeen
- * @property {Record<string, unknown>} sourceKeys
- */
-
-/**
- * @typedef {object} EdgeSpec
- * @property {string} type
- * @property {string} srcType
- * @property {string} srcKey
- * @property {string} dstType
- * @property {string} dstKey
- * @property {unknown} firstSeen
- * @property {Record<string, unknown>} sourceKeys
- */

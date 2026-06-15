@@ -107,6 +107,42 @@ test('graph project --source with no matching contract reports cleanly and exits
   assert.equal(errs.join(''), '')
 })
 
+test('graph project --source=<ds> (equals form) parses and filters', async () => {
+  setGraphRuntime({
+    registry: /** @type {any} */ ({
+      list: () => [{ name: 'ai-gateway-t0', plugin: '@x', sourceDataset: 'ai_gateway_messages', projector: 'p', projectorVersion: 1, rules: [] }],
+    }),
+  })
+  const { ctx, out, errs } = mkCtx()
+  const code = await runGraphProject(['--source=imessage_messages'], ctx)
+  assert.equal(code, 0)
+  assert.match(out.join(''), /no contract registered for source 'imessage_messages'/)
+  assert.equal(errs.join(''), '')
+})
+
+// A missing/empty/flag-shaped --source value must NOT silently fall back to
+// projecting every contract (a broader write than asked for); reject it like
+// `graph neighbors` rejects its value flags.
+test('graph project usage errors exit 2 and report the offending argv on stderr', async () => {
+  /** @type {[string[], RegExp][]} */
+  const cases = [
+    [['--source'], /--source expects a value/],
+    [['--source='], /--source expects a value/],
+    [['--source', ''], /--source expects a value/],
+    [['--source', '--dry-run'], /--source expects a value/],
+    [['--bogus'], /unknown flag --bogus/],
+    [['ai_gateway_messages'], /unexpected argument ai_gateway_messages/],
+  ]
+  for (const [argv, pattern] of cases) {
+    const { ctx, out, errs } = mkCtx()
+    const code = await runGraphProject(argv, ctx)
+    assert.equal(code, 2, `argv ${JSON.stringify(argv)} should be a usage error`)
+    assert.match(errs.join(''), pattern)
+    assert.match(errs.join(''), /^hyp graph project: /)
+    assert.equal(out.join(''), '', 'usage errors write nothing to stdout')
+  }
+})
+
 // --- Usage errors: exit 2, message on stderr, no IO touched -----------------
 
 test('usage errors exit 2 and report the offending argv on stderr', async () => {

@@ -25,6 +25,34 @@ export interface ContractRule {
 }
 
 /**
+ * The per-node spec a contract's `toRow` hands the kit's `buildNode`. The
+ * source supplies graph identity (`type` + natural `key`), optional display
+ * (`label`, `props`), and provenance keys; the kit stamps id + provenance.
+ */
+export interface NodeSpec {
+  type: string
+  key: string
+  label?: string | null
+  props?: Record<string, unknown>
+  firstSeen: unknown
+  sourceKeys: Record<string, unknown>
+}
+
+/**
+ * The per-edge spec a contract's `toRow` hands the kit's `buildEdge`: the two
+ * endpoints (by type + natural key), the relation `type`, and provenance keys.
+ */
+export interface EdgeSpec {
+  type: string
+  srcType: string
+  srcKey: string
+  dstType: string
+  dstKey: string
+  firstSeen: unknown
+  sourceKeys: Record<string, unknown>
+}
+
+/**
  * A projection contract contributed by a source plugin through the
  * `hypaware.context-graph` capability. Carries the source's rules plus the
  * provenance metadata the kit stamps onto every row it produces. The engine
@@ -40,7 +68,15 @@ export interface Contract {
   sourceDataset: string
   /** Projector id stamped into provenance (e.g. `ai-gateway.t0`). */
   projector: string
-  /** Projector version stamped into provenance; bump to force re-projection. */
+  /**
+   * Projector version, stamped into every row's provenance — a marker for
+   * which generation of this source's projector minted the row, not a
+   * re-projection trigger. Ids are content-addressed (LLP 0023
+   * §content-addressed-ids), so a bump alone rewrites nothing: committed rows
+   * keep their old version and the pre-write dedup skips them. Re-deriving a
+   * source after a logic change is a deliberate migration, not a side effect
+   * of bumping this.
+   */
   projectorVersion: number
   /** The node/edge rules the engine runs for this source. */
   rules: ContractRule[]
@@ -63,8 +99,8 @@ export interface ContextGraphCapability {
     nodeId(type: string, naturalKey: string): string
     edgeId(srcId: string, type: string, dstId: string): string
     makeRowBuilders(meta: { sourceDataset: string; projector: string; projectorVersion: number }): {
-      buildNode(spec: Record<string, unknown>): GraphRow
-      buildEdge(spec: Record<string, unknown>): GraphRow
+      buildNode(spec: NodeSpec): GraphRow
+      buildEdge(spec: EdgeSpec): GraphRow
     }
   }
 }

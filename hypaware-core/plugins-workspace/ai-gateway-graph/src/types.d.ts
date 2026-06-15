@@ -11,10 +11,36 @@ export interface ContractRule {
   toRow(row: Record<string, unknown>): GraphRow | null
 }
 
+/**
+ * The per-node spec a contract's `toRow` hands `buildNode` (graph identity +
+ * optional display + provenance keys). Mirrors `context-graph`'s `NodeSpec`
+ * structurally — like the rest of this file, the connector re-declares the
+ * capability's shape rather than importing the provider's internal types.
+ */
+export interface NodeSpec {
+  type: string
+  key: string
+  label?: string | null
+  props?: Record<string, unknown>
+  firstSeen: unknown
+  sourceKeys: Record<string, unknown>
+}
+
+/** The per-edge spec a contract's `toRow` hands `buildEdge` (endpoints + relation type + provenance keys). */
+export interface EdgeSpec {
+  type: string
+  srcType: string
+  srcKey: string
+  dstType: string
+  dstKey: string
+  firstSeen: unknown
+  sourceKeys: Record<string, unknown>
+}
+
 /** The row builders the kit hands a contract author (id recipe + provenance live in the graph plugin). */
 export interface GraphRowBuilders {
-  buildNode(spec: Record<string, unknown>): GraphRow
-  buildEdge(spec: Record<string, unknown>): GraphRow
+  buildNode(spec: NodeSpec): GraphRow
+  buildEdge(spec: EdgeSpec): GraphRow
 }
 
 /** The shared authoring kit exposed on the `hypaware.context-graph` capability. */

@@ -23,8 +23,12 @@ const LARGE_GRAPH = 500_000
  * @returns {Promise<number>}
  */
 export async function runGraphProject(argv, ctx) {
-  const dryRun = argv.includes('--dry-run')
-  const source = flagValue(argv, '--source')
+  const parsed = parseProjectArgv(argv)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp graph project: ${parsed.error}\n`)
+    return 2
+  }
+  const { source, dryRun } = parsed
   try {
     const { registry } = requireGraphRuntime()
     const contracts = source
@@ -62,17 +66,45 @@ export async function runGraphProject(argv, ctx) {
 }
 
 /**
- * Read a `--flag value` / `--flag=value` option from argv.
+ * Parse `graph project` argv: flags only, no positional. `--source` takes a
+ * value (the source dataset to filter to, `--source <ds>` or `--source=<ds>`);
+ * `--dry-run` is boolean. A missing, empty, or flag-shaped `--source` value is
+ * a usage error — matching `parseNeighborsArgv` — so a malformed targeted
+ * command can't silently fall back to projecting *all* contracts, a broader
+ * write than was asked for. Unknown flags and stray positionals are rejected
+ * for the same reason.
  *
  * @param {string[]} argv
- * @param {string} flag
- * @returns {string | undefined}
+ * @returns {{ ok: true, source: string | undefined, dryRun: boolean } | { ok: false, error: string }}
  */
-function flagValue(argv, flag) {
-  const i = argv.indexOf(flag)
-  if (i !== -1 && i + 1 < argv.length) return argv[i + 1]
-  const eq = argv.find((a) => a.startsWith(`${flag}=`))
-  return eq ? eq.slice(flag.length + 1) : undefined
+function parseProjectArgv(argv) {
+  /** @type {string | undefined} */
+  let source
+  let dryRun = false
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--dry-run') {
+      dryRun = true
+    } else if (token === '--source') {
+      const value = argv[i + 1]
+      if (value === undefined || value.length === 0 || value.startsWith('--')) {
+        return { ok: false, error: '--source expects a value' }
+      }
+      i += 1
+      source = value
+    } else if (token.startsWith('--source=')) {
+      const value = token.slice('--source='.length)
+      if (value.length === 0) return { ok: false, error: '--source expects a value' }
+      source = value
+    } else if (token.startsWith('--')) {
+      return { ok: false, error: `unknown flag ${token}` }
+    } else {
+      return { ok: false, error: `unexpected argument ${token} (graph project takes no positional)` }
+    }
+  }
+
+  return { ok: true, source, dryRun }
 }
 
 /**

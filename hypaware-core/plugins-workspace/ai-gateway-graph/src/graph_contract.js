@@ -13,7 +13,7 @@ export const PLUGIN_NAME = '@hypaware/ai-gateway-graph'
 export const SOURCE_DATASET = 'ai_gateway_messages'
 /** Projector id stamped into every row's provenance. */
 export const PROJECTOR = 'ai-gateway.t0'
-/** Projector version; bump to force re-projection of this source's slice. */
+/** Projector version, stamped into provenance to mark which projector generation minted a row (not a re-projection trigger — ids are content-addressed; see LLP 0023 §inline-provenance). */
 export const PROJECTOR_VERSION = 1
 
 /** Tools whose args name a concrete file. */

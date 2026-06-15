@@ -47,6 +47,29 @@ export function createContractRegistry(opts = {}) {
     if (!Array.isArray(contract.rules) || contract.rules.length === 0) {
       throw new TypeError(`registerContract: '${contract.name}' rules must be a non-empty array`)
     }
+    // Validate each rule's shape at registration, not at projection time: the
+    // engine reads `kind`/`sql`/`toRow` directly (project.js) and routes by
+    // `kind`, so a connector typo would otherwise surface as a confusing
+    // mid-projection failure (or silently route rows into the wrong target
+    // map) far from the contract that caused it.
+    contract.rules.forEach((rule, i) => {
+      const at = `'${contract.name}' rule ${i}`
+      if (!rule || typeof rule !== 'object') {
+        throw new TypeError(`registerContract: ${at} must be an object`)
+      }
+      if (rule.kind !== 'node' && rule.kind !== 'edge') {
+        throw new TypeError(`registerContract: ${at} kind must be 'node' or 'edge'`)
+      }
+      if (typeof rule.type !== 'string' || rule.type.length === 0) {
+        throw new TypeError(`registerContract: ${at} type must be a non-empty string`)
+      }
+      if (typeof rule.sql !== 'string' || rule.sql.length === 0) {
+        throw new TypeError(`registerContract: ${at} sql must be a non-empty string`)
+      }
+      if (typeof rule.toRow !== 'function') {
+        throw new TypeError(`registerContract: ${at} toRow must be a function`)
+      }
+    })
 
     const key = `${contract.plugin}\0${contract.name}`
     if (contracts.has(key)) {
