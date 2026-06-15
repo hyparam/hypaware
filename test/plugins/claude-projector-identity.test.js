@@ -595,6 +595,61 @@ test('reminder-wrapped prompt canonicalizes to transcript content + wire_only ex
   }
 })
 
+test('real text riding with a tool_result is matched, not dumped as wire_only', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-mix', [
+      jsonlRow({
+        sessionId: 'sess-mix',
+        uuid: 'u-mix-tr',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'result text' }] },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-mix',
+        uuid: 'u-mix-text',
+        parentUuid: 'u-mix-tr',
+        type: 'user',
+        message: { role: 'user', content: 'queued user text' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-mix' }) },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_x', content: 'result text' },
+            { type: 'text', text: '<system-reminder>\ninjected banner\n</system-reminder>' },
+            { type: 'text', text: 'queued user text' },
+          ],
+        }],
+      },
+      responseBody: undefined,
+    })
+
+    const toolRow = rows.filter((r) => r.message_id === 'u-mix-tr')
+    assert.equal(toolRow.length, 1, 'tool_result matches its transcript line')
+    assert.equal(toolRow[0].part_type, 'tool_result')
+
+    const textRow = rows.filter((r) => r.message_id === 'u-mix-text')
+    assert.equal(textRow.length, 1, 'real text alongside the tool_result is matched, not wire_only')
+    assert.equal(textRow[0].content_text, 'queued user text')
+    assert.notEqual(readAttrPath(textRow[0], ['attributes', 'claude'])?.wire_only, true, 'real text must not be marked wire_only')
+
+    const wireOnly = rows.filter((r) => readAttrPath(r, ['attributes', 'claude'])?.wire_only === true)
+    assert.equal(wireOnly.length, 1, 'only the injected reminder is wire_only')
+    assert.match(String(wireOnly[0].content_text), /system-reminder/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('x-claude-code-agent-id header stamps is_sidechain even without a transcript', async () => {
   const env = await stageClaudeEnv()
   try {

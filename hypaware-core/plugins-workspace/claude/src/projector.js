@@ -409,7 +409,23 @@ function projectUserMessage(args) {
       out.push(projected)
     }
     const rest = blocks.filter((b) => !(isPlainObject(b) && b.type === 'tool_result'))
-    if (rest.length > 0) out.push(wireOnlyMessage('user', rest, messageAttrs))
+    const realRest = rest.filter((b) => !isInjectedReminderBlock(b))
+    const injectedRest = rest.filter(isInjectedReminderBlock)
+    // Only harness-injected reminders are wire_only. Real content riding
+    // alongside tool_results (queued user text, `[Request interrupted…]`
+    // markers, skill banners) is a genuine user message — project it
+    // normally with transcript matching, not as fallback-only noise.
+    if (realRest.length > 0) {
+      /** @type {AiGatewayProjectedMessage} */
+      const projected = { role: 'user', content: /** @type {any} */ (realRest) }
+      const match = matchEnabled
+        ? findTranscriptMatch(transcriptIndex, { role: 'user', content: realRest, agentId })
+        : undefined
+      applyTranscriptMatch(projected, match)
+      if (messageAttrs) projected.attributes = messageAttrs
+      out.push(projected)
+    }
+    if (injectedRest.length > 0) out.push(wireOnlyMessage('user', injectedRest, messageAttrs))
     return out
   }
 

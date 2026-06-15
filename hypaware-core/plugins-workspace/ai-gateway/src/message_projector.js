@@ -568,17 +568,35 @@ export function computeMessageId(conversation_id, role, content, agentId) {
 }
 
 /**
- * Drop per-block fields that vary across replays of the same logical
- * message without changing its meaning. Only block-level keys are
+ * Drop per-block fields that vary across the channels a logical message
+ * can arrive on without changing its meaning. Only block-level keys are
  * stripped; block payloads are otherwise untouched.
+ *
+ * `cache_control` is a wire-only prompt-cache breakpoint that moves
+ * between exchanges. `caller` is a tool_use annotation that rides the
+ * assistant *response* stream and the transcript but is dropped from
+ * the *request-input* echo of the same turn — so the one logical
+ * tool_use hashes with-or-without `caller` depending on which
+ * representation reaches this fallback. This MUST strip the same set
+ * the claude plugin's `contentKey` strips, so the fallback id and the
+ * transcript match key canonicalize a block identically. The two lists
+ * are kept in sync by hand: the plugins are decoupled (claude reaches
+ * the gateway only via the capability, no shared module), so a shared
+ * canonicalizer would be the first static link across that boundary and
+ * isn't worth it.
+ *
+ * Reached only for an *unmatched* assistant tool_use — a matched one
+ * carries its native uuid and skips this fallback — so the split is
+ * rare, but stripping `caller` keeps the two representations from
+ * landing as duplicate fallback rows when it does happen.
  *
  * @param {unknown} content
  */
 function stripVolatileBlockFields(content) {
   if (!Array.isArray(content)) return content
   return content.map((block) => {
-    if (!isPlainObject(block) || !('cache_control' in block)) return block
-    const { cache_control: _cache_control, ...rest } = block
+    if (!isPlainObject(block) || (!('cache_control' in block) && !('caller' in block))) return block
+    const { cache_control: _cache_control, caller: _caller, ...rest } = block
     return rest
   })
 }
