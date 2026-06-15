@@ -1,6 +1,6 @@
 // @ts-check
 
-import { runGraphCompact, runGraphProject } from './command.js'
+import { runGraphCompact, runGraphNeighbors, runGraphProject } from './command.js'
 import {
   EDGE_DATASET,
   graphDatasetRegistration,
@@ -23,6 +23,8 @@ import {
  *    `ai_gateway_messages`
  *  - command `graph compact` — merges duplicate node/edge rows and
  *    rewrites affected partitions into sorted tables
+ *  - command `graph neighbors` — walks the activity graph from a seed node out
+ *    to N hops, reading the published node/edge datasets ([LLP 0026])
  *
  * Registration only; the projection runs on demand via the command (no
  * snapshot/commit hook exists, and eventual freshness is acceptable).
@@ -48,5 +50,13 @@ export async function activate(ctx) {
     summary: 'Merge duplicate graph rows and rewrite affected partitions sorted',
     usage: 'hyp graph compact [--dry-run]',
     run: runGraphCompact,
+  })
+
+  ctx.commands.register({
+    name: 'graph neighbors',
+    plugin: PLUGIN_NAME,
+    summary: 'Walk the activity graph from a node out to N hops',
+    usage: 'hyp graph neighbors <node> [--depth N] [--type T] [--edge-type T] [--direction out|in|both] [--limit N] [--json]',
+    run: runGraphNeighbors,
   })
 }
