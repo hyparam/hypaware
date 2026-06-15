@@ -23,3 +23,59 @@ export interface ContractRule {
   sql: string
   toRow(row: Record<string, unknown>): GraphRow | null
 }
+
+/** A node as the traversal reads it — graph identity plus display fields. */
+export interface GraphNode {
+  node_id: string
+  node_type: string
+  natural_key: string
+  label: string | null
+}
+
+/** An edge as the traversal reads it — endpoints and relation type. */
+export interface GraphEdge {
+  src_id: string
+  dst_id: string
+  edge_type: string
+}
+
+/** Which way the walk follows the Session-rooted edges. */
+export type Direction = 'out' | 'in' | 'both'
+
+/** One reached node, tagged with how (and from where) the walk arrived. */
+export interface Neighbor {
+  hop: number
+  edge_type: string
+  direction: 'out' | 'in'
+  from: string
+  node: GraphNode
+}
+
+/** A successful traversal: resolved seed, reached neighbors in BFS order, honest totals. */
+export interface TraversalOk {
+  ok: true
+  seed: GraphNode
+  neighbors: Neighbor[]
+  reachable: number
+  truncated: boolean
+  totalNodes: number
+  totalEdges: number
+}
+
+/** A failed traversal: not-found, or ambiguity carrying the candidate nodes. */
+export interface TraversalErr {
+  ok: false
+  error: string
+  candidates?: GraphNode[]
+}
+
+/** Parsed `graph neighbors` argv: one positional seed plus flags. */
+export interface ParsedNeighbors {
+  seed: string
+  depth: number
+  type: string | undefined
+  edgeTypes: string[]
+  direction: Direction
+  limit: number
+  json: boolean
+}
