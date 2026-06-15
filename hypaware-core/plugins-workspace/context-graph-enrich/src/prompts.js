@@ -43,34 +43,47 @@ const T1_SYSTEM =
   'OVER-PROPOSE: favor recall over precision — a later curation step prunes. Emit many small, specific candidates rather than few broad ones. ' +
   'Each candidate gets a short canonical `label` (its key), a one-sentence `summary`, a `confidence` in 0..1, and a supporting `evidence` quote.'
 
-const CURATE_DECISION_TOOL = {
-  name: 'curate_decision',
-  description: 'Decide what to do with a single prospect, given the existing graph neighborhood and source.',
+const CURATE_DECISIONS_TOOL = {
+  name: 'curate_decisions',
+  description: 'Decide what to do with EACH listed prospect, given the shared graph neighborhood and source.',
   input_schema: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      decision: { type: 'string', enum: ['commit', 'merge', 'deepen', 'reject'] },
-      item_type: { type: 'string', description: 'Final node type (for commit/deepen).' },
-      item_key: { type: 'string', description: 'Final canonical key for the item (for commit/deepen). Reuse an existing key to converge.' },
-      label: { type: 'string', description: 'Final human-readable label.' },
-      summary: { type: 'string', description: 'Final one-sentence statement of the item.' },
-      confidence: { type: 'number', description: '0..1 — final confidence after curation.' },
-      merge_into: { type: 'string', description: 'Existing item key to merge into (for merge).' },
-      note: { type: 'string', description: 'Short rationale.' },
+      decisions: {
+        type: 'array',
+        description: 'One entry per prospect, referenced by its 1-based index. Include every prospect.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            index: { type: 'integer', description: '1-based index of the prospect this decision applies to.' },
+            decision: { type: 'string', enum: ['commit', 'merge', 'deepen', 'reject'] },
+            item_type: { type: 'string', description: 'Final node type (for commit/deepen).' },
+            item_key: { type: 'string', description: 'Final canonical key (for commit/deepen). Reuse an existing key to converge.' },
+            label: { type: 'string', description: 'Final human-readable label.' },
+            summary: { type: 'string', description: 'Final one-sentence statement of the item.' },
+            confidence: { type: 'number', description: '0..1 — final confidence after curation.' },
+            merge_into: { type: 'string', description: 'Existing item key to merge into (for merge).' },
+            note: { type: 'string', description: 'Short rationale.' },
+          },
+          required: ['index', 'decision'],
+        },
+      },
     },
-    required: ['decision'],
+    required: ['decisions'],
   },
 }
 
 const T2_SYSTEM =
   'You are a graph librarian curating proposed knowledge for a context graph. ' +
-  'Given ONE prospect, the existing graph neighborhood, similar existing items, and the source excerpt, choose exactly one action: ' +
-  '`commit` (it is real and new — give a final type, canonical key, label, summary, confidence), ' +
-  '`merge` (it duplicates an existing item — give `merge_into`), ' +
+  'You are given SEVERAL prospects from the same work session, plus the shared graph neighborhood, ' +
+  'per-prospect similar existing items, and the shared source excerpt. For EACH prospect choose exactly one action: ' +
+  '`commit` (real and new — give a final type, canonical key, label, summary, confidence), ' +
+  '`merge` (duplicates an existing item — give `merge_into`), ' +
   '`deepen` (real but should be corrected/enriched — give the improved fields), or ' +
   '`reject` (noise, trivial, or wrong). Prefer reusing existing keys so the same concept converges to one node. ' +
-  'Respond by calling the `curate_decision` tool exactly once; do not answer in prose.'
+  'Respond by calling the `curate_decisions` tool exactly once, with one entry per prospect referenced by its `index`.'
 
 /**
  * @param {{ text: string, model: string, maxTokens: number, maxCandidates: number }} args
@@ -88,27 +101,38 @@ export function buildProposeRequest({ text, model, maxTokens, maxCandidates }) {
 }
 
 /**
- * @param {{ prospect: { type: string, label: string, summary?: string, confidence?: number }, recall: string, neighborhood: string, source: string, model: string, maxTokens: number }} args
+ * Build ONE curate request for a batch of prospects that share an anchor
+ * (session). The graph neighborhood and source excerpt are read once and
+ * shared across the batch, so the same session source isn't re-sent per
+ * prospect — the win over a per-prospect call. The model returns one
+ * decision per prospect, keyed by 1-based index.
+ *
+ * @param {{ prospects: Array<{ type: string, label: string, summary?: string, confidence?: number, recall?: string }>, neighborhood: string, source: string, model: string, maxTokens: number }} args
  * @returns {CompletionRequest}
  */
-export function buildCurateRequest({ prospect, recall, neighborhood, source, model, maxTokens }) {
+export function buildCurateBatchRequest({ prospects, neighborhood, source, model, maxTokens }) {
+  const lines = prospects
+    .map((p, i) =>
+      `[${i + 1}] type: ${p.type} | label: ${p.label} | confidence: ${p.confidence ?? ''}\n` +
+      `    summary: ${p.summary ?? ''}\n` +
+      `    similar existing items: ${p.recall || '(none)'}`
+    )
+    .join('\n\n')
   const user =
-    `PROSPECT\n` +
-    `type: ${prospect.type}\nlabel: ${prospect.label}\nsummary: ${prospect.summary ?? ''}\nconfidence: ${prospect.confidence ?? ''}\n\n` +
-    `SIMILAR EXISTING ITEMS (recall)\n${recall || '(none)'}\n\n` +
-    `GRAPH NEIGHBORHOOD (around the anchor)\n${neighborhood || '(none)'}\n\n` +
-    `SOURCE EXCERPT\n${source || '(unavailable)'}\n`
+    `SHARED GRAPH NEIGHBORHOOD (around the session anchor)\n${neighborhood || '(none)'}\n\n` +
+    `SHARED SOURCE EXCERPT\n${source || '(unavailable)'}\n\n` +
+    `PROSPECTS — decide on each by index:\n${lines}\n`
   return {
     model,
     system: T2_SYSTEM,
     messages: [{ role: 'user', content: user }],
     max_tokens: maxTokens,
-    tools: [CURATE_DECISION_TOOL],
+    tools: [CURATE_DECISIONS_TOOL],
     params: {
       // Adaptive thinking forbids forcing a tool (Anthropic returns 400 for
-      // tool_choice:{type:'tool'} with thinking on), so we leave tool_choice
-      // at the default `auto` and instruct the model to call curate_decision
-      // exactly once. parseDecision treats a missing call as "no decision".
+      // tool_choice:{type:'tool'} with thinking on), so tool_choice stays at
+      // the default `auto` and the system prompt requires one curate_decisions
+      // call. parseDecisions treats a missing call as "no decisions".
       thinking: { type: 'adaptive' },
       output_config: { effort: 'high' },
     },
@@ -160,22 +184,39 @@ export function parseProspects(result) {
 }
 
 /**
- * @param {CompletionResult} result
- * @returns {{ decision: string, item_type?: string, item_key?: string, label?: string, summary?: string, confidence?: number, merge_into?: string, note?: string } | null}
+ * @typedef {{ index: number, decision: string, item_type?: string, item_key?: string, label?: string, summary?: string, confidence?: number, merge_into?: string, note?: string }} CurateDecision
  */
-export function parseDecision(result) {
-  const input = toolInput(result, 'curate_decision')
-  if (!input) return null
-  const decision = typeof input.decision === 'string' ? input.decision : ''
-  if (!['commit', 'merge', 'deepen', 'reject'].includes(decision)) return null
-  return {
-    decision,
-    item_type: typeof input.item_type === 'string' ? input.item_type : undefined,
-    item_key: typeof input.item_key === 'string' ? input.item_key : undefined,
-    label: typeof input.label === 'string' ? input.label : undefined,
-    summary: typeof input.summary === 'string' ? input.summary : undefined,
-    confidence: typeof input.confidence === 'number' ? input.confidence : undefined,
-    merge_into: typeof input.merge_into === 'string' ? input.merge_into : undefined,
-    note: typeof input.note === 'string' ? input.note : undefined,
+
+/**
+ * Parse the batched `curate_decisions` tool call into per-prospect decisions
+ * (keyed by 1-based `index`). Invalid/unknown-decision entries are dropped;
+ * an empty array means the model refused or returned no tool call.
+ *
+ * @param {CompletionResult} result
+ * @returns {CurateDecision[]}
+ */
+export function parseDecisions(result) {
+  const input = toolInput(result, 'curate_decisions')
+  const list = input && Array.isArray(input.decisions) ? input.decisions : []
+  /** @type {CurateDecision[]} */
+  const out = []
+  for (const raw of list) {
+    const d = /** @type {Record<string, unknown>} */ (raw ?? {})
+    const index = typeof d.index === 'number' ? d.index : NaN
+    const decision = typeof d.decision === 'string' ? d.decision : ''
+    if (!Number.isInteger(index) || index < 1) continue
+    if (!['commit', 'merge', 'deepen', 'reject'].includes(decision)) continue
+    out.push({
+      index,
+      decision,
+      item_type: typeof d.item_type === 'string' ? d.item_type : undefined,
+      item_key: typeof d.item_key === 'string' ? d.item_key : undefined,
+      label: typeof d.label === 'string' ? d.label : undefined,
+      summary: typeof d.summary === 'string' ? d.summary : undefined,
+      confidence: typeof d.confidence === 'number' ? d.confidence : undefined,
+      merge_into: typeof d.merge_into === 'string' ? d.merge_into : undefined,
+      note: typeof d.note === 'string' ? d.note : undefined,
+    })
   }
+  return out
 }

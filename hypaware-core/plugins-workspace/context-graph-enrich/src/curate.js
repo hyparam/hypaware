@@ -3,7 +3,7 @@
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 
 import { columnsFor, COMMITTED_DATASET, enrichTablePath, PROSPECTS_DATASET, RESOLUTIONS_DATASET } from './datasets.js'
-import { buildCurateRequest, parseDecision } from './prompts.js'
+import { buildCurateBatchRequest, parseDecisions } from './prompts.js'
 import { getCompletion, getVector, requireEnrichRuntime } from './runtime.js'
 import { runSql, sqlQuote } from './sql.js'
 
@@ -14,21 +14,22 @@ import { runSql, sqlQuote } from './sql.js'
 
 const CURATOR = 'enrich.t2'
 const CURATOR_VERSION = 1
-const T2_MAX_TOKENS = 4096
 const MAX_SOURCE_CHARS = 8_000
 
 /**
- * Run one T2 curate tick: select pending prospects (no resolution yet),
- * order by salience (novelty vs. committed knowledge), and for each assemble
- * the serve path (recall → expand → deref) and ask the curator to
- * prune/merge/deepen/commit. Committed items go to `enrichment_committed`
- * (the only dataset the graph contract reads); every processed prospect gets
- * a resolution row so it leaves the queue. Used by the daemon timer and
+ * Run one T2 curate tick. Selects pending prospects (no resolution yet),
+ * orders by salience (novelty vs. committed knowledge), then **groups the
+ * selection by anchor (session)** and makes ONE curator call per group:
+ * the shared graph neighborhood and source excerpt are read once and reused
+ * across the group's prospects, instead of re-reading the same session
+ * source for every prospect. Committed items go to `enrichment_committed`
+ * (the only dataset the graph contract reads); every decided prospect gets a
+ * resolution row so it leaves the queue. Used by the daemon timer and
  * `enrich curate`.
  *
  * @param {EnrichRuntime} runtime
  * @param {{ deadlineMs?: number, signal?: AbortSignal }} [opts]
- * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number }>}
+ * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, calls: number }>}
  */
 export async function runCurateTick(runtime, opts = {}) {
   const cfg = runtime.config
@@ -45,65 +46,118 @@ export async function runCurateTick(runtime, opts = {}) {
       const ordered = await orderBySalience(runtime, pending)
       const selected = ordered.slice(0, c.max_prospects_per_tick)
 
+      // Group the selection by anchor (session) → one curator call per group.
+      /** @type {Map<string, Record<string, unknown>[]>} */
+      const groups = new Map()
+      for (const p of selected) {
+        const k = strField(p.anchor_key) || '(none)'
+        const arr = groups.get(k) ?? []
+        arr.push(p)
+        groups.set(k, arr)
+      }
+
       /** @type {Record<string, unknown>[]} */
       const committedRows = []
       /** @type {Record<string, unknown>[]} */
       const resolutionRows = []
       let processed = 0
       let rejected = 0
+      let calls = 0
       const at = new Date().toISOString()
 
-      for (const prospect of selected) {
+      for (const group of groups.values()) {
         if (opts.deadlineMs && Date.now() > opts.deadlineMs) break
-        const view = {
-          type: strField(prospect.prospect_type),
-          label: strField(prospect.label),
-          summary: strField(asObject(prospect.props).summary),
-          confidence: numField(prospect.confidence),
+        const rep = group[0]
+        const anchorType = strField(rep.anchor_type)
+        const anchorKey = strField(rep.anchor_key)
+
+        // Per-prospect view + recall (cheap, local — not the cost driver).
+        /** @type {Array<{ prospect: Record<string, unknown>, view: { type: string, label: string, summary: string, confidence: number | undefined }, recall: string }>} */
+        const views = []
+        for (const prospect of group) {
+          const view = {
+            type: strField(prospect.prospect_type),
+            label: strField(prospect.label),
+            summary: strField(asObject(prospect.props).summary),
+            confidence: numField(prospect.confidence),
+          }
+          const recall = await safeRecall(runtime, `${view.type}: ${view.label} — ${view.summary}`.trim(), c.recall_top_k)
+          views.push({ prospect, view, recall })
         }
-        const prospectText = `${view.type}: ${view.label} — ${view.summary}`.trim()
 
-        const recall = await safeRecall(runtime, prospectText, c.recall_top_k)
-        const neighborhood = await safeExpand(runtime, prospect)
-        const source = await safeDeref(runtime, prospect)
+        // Shared expand + deref: read once for the whole group. The source is
+        // the union of every group prospect's provenance rows.
+        const neighborhood = await safeExpand(runtime, anchorType, anchorKey)
+        /** @type {Set<string>} */
+        const idSet = new Set()
+        for (const p of group) {
+          const keys = asObject(p.source_keys)[cfg.id_column]
+          if (Array.isArray(keys)) for (const k of keys) if (typeof k === 'string') idSet.add(k)
+        }
+        const source = await safeDeref(runtime, [...idSet])
 
+        const maxTokens = Math.min(16_000, 2048 + group.length * 512)
         const result = await getCompletion(runtime).complete(
-          buildCurateRequest({ prospect: view, recall, neighborhood, source, model: c.t2_model, maxTokens: T2_MAX_TOKENS }),
+          buildCurateBatchRequest({
+            prospects: views.map((v) => ({ ...v.view, recall: v.recall })),
+            neighborhood,
+            source,
+            model: c.t2_model,
+            maxTokens,
+          }),
           { signal: opts.signal }
         )
-        const decision = parseDecision(result)
-        processed++
-        const prospectId = strField(prospect.prospect_id)
+        calls++
 
-        if (!decision || decision.decision === 'reject') {
-          rejected++
-          resolutionRows.push(resolution(prospectId, 'reject', null, decision?.note ?? (decision ? null : 'no decision'), at))
+        const decisions = parseDecisions(result)
+        if (decisions.length === 0) {
+          // Refusal / no tool call — leave the whole group pending so it
+          // retries next tick rather than mass-rejecting on a transient miss.
+          runtime.log.warn('enrich.curate_no_decisions', { anchor: anchorKey, group_size: group.length })
           continue
         }
-        if (decision.decision === 'merge') {
-          const into = decision.merge_into || decision.item_key || null
-          resolutionRows.push(resolution(prospectId, 'merge', into ? [into] : null, decision.note ?? null, at))
-          continue
+        const byIndex = new Map(decisions.map((d) => [d.index, d]))
+
+        for (let i = 0; i < group.length; i++) {
+          const prospect = group[i]
+          const view = views[i].view
+          const pid = strField(prospect.prospect_id)
+          const decision = byIndex.get(i + 1)
+          processed++
+
+          // Omitted from the batch response = implicit reject (the model saw
+          // it and chose not to decide); keeps the queue finite and draining.
+          if (!decision || decision.decision === 'reject') {
+            rejected++
+            resolutionRows.push(resolution(pid, 'reject', null, decision?.note ?? (decision ? null : 'omitted by curator'), at))
+            continue
+          }
+          if (decision.decision === 'merge') {
+            const into = decision.merge_into || decision.item_key || null
+            resolutionRows.push(resolution(pid, 'merge', into ? [into] : null, decision.note ?? null, at))
+            continue
+          }
+          // commit | deepen → write a committed item
+          const itemType = decision.item_type || view.type
+          const itemKey = decision.item_key || view.label
+          const label = decision.label || view.label
+          const summary = decision.summary || view.summary
+          committedRows.push({
+            item_id: itemKey,
+            item_type: itemType,
+            label,
+            props: summary ? { summary } : null,
+            confidence: decision.confidence ?? view.confidence ?? null,
+            anchor_type: strField(prospect.anchor_type),
+            anchor_key: strField(prospect.anchor_key),
+            source_dataset: strField(prospect.source_dataset),
+            source_keys: asObject(prospect.source_keys),
+            curator: CURATOR,
+            curator_version: CURATOR_VERSION,
+            committed_at: at,
+          })
+          resolutionRows.push(resolution(pid, decision.decision, [itemKey], decision.note ?? null, at))
         }
-        // commit | deepen → write a committed item
-        const itemType = decision.item_type || view.type
-        const itemKey = decision.item_key || view.label
-        const label = decision.label || view.label
-        committedRows.push({
-          item_id: itemKey,
-          item_type: itemType,
-          label,
-          props: decision.summary ? { summary: decision.summary } : asObject(prospect.props).summary ? { summary: asObject(prospect.props).summary } : null,
-          confidence: decision.confidence ?? view.confidence ?? null,
-          anchor_type: strField(prospect.anchor_type),
-          anchor_key: strField(prospect.anchor_key),
-          source_dataset: strField(prospect.source_dataset),
-          source_keys: asObject(prospect.source_keys),
-          curator: CURATOR,
-          curator_version: CURATOR_VERSION,
-          committed_at: at,
-        })
-        resolutionRows.push(resolution(prospectId, decision.decision, [itemKey], decision.note ?? null, at))
       }
 
       if (committedRows.length > 0) {
@@ -117,7 +171,8 @@ export async function runCurateTick(runtime, opts = {}) {
       span.setAttribute('processed', processed)
       span.setAttribute('committed', committedRows.length)
       span.setAttribute('rejected', rejected)
-      return { pending: pending.length, processed, committed: committedRows.length, rejected }
+      span.setAttribute('curate_calls', calls)
+      return { pending: pending.length, processed, committed: committedRows.length, rejected, calls }
     },
     { component: 'plugin' }
   )
@@ -153,6 +208,8 @@ async function orderBySalience(runtime, pending) {
 }
 
 /**
+ * Similar existing committed items for one prospect (best-effort).
+ *
  * @param {EnrichRuntime} runtime
  * @param {string} text
  * @param {number} topK
@@ -168,18 +225,17 @@ async function safeRecall(runtime, text, topK) {
 }
 
 /**
- * One-hop neighborhood of the prospect's anchor node, read from the
- * published `node`/`edge` datasets (not via a cross-plugin import — the
- * substrate-true "bring your own query over the published surface").
+ * One-hop neighborhood of an anchor node, read from the published
+ * `node`/`edge` datasets (not via a cross-plugin import — the substrate-true
+ * "bring your own query over the published surface").
  *
  * @param {EnrichRuntime} runtime
- * @param {Record<string, unknown>} prospect
+ * @param {string} anchorType
+ * @param {string} anchorKey
  * @returns {Promise<string>}
  */
-async function safeExpand(runtime, prospect) {
+async function safeExpand(runtime, anchorType, anchorKey) {
   try {
-    const anchorType = strField(prospect.anchor_type)
-    const anchorKey = strField(prospect.anchor_key)
     if (!anchorType || !anchorKey) return ''
     const anchorId = runtime.graph.kit.nodeId(anchorType, anchorKey)
     const q = sqlQuote(anchorId)
@@ -207,22 +263,22 @@ async function safeExpand(runtime, prospect) {
 }
 
 /**
- * Targeted source excerpt behind the prospect (its provenance rows).
+ * Targeted source excerpt behind a set of provenance row ids (the union
+ * across a group's prospects). Bounded by {@link MAX_SOURCE_CHARS}.
  *
  * @param {EnrichRuntime} runtime
- * @param {Record<string, unknown>} prospect
+ * @param {string[]} ids
  * @returns {Promise<string>}
  */
-async function safeDeref(runtime, prospect) {
+async function safeDeref(runtime, ids) {
   try {
     const cfg = runtime.config
-    const keys = asObject(prospect.source_keys)[cfg.id_column]
-    const ids = Array.isArray(keys) ? keys.filter((k) => typeof k === 'string') : []
-    if (ids.length === 0) return ''
-    const inList = ids.slice(0, 20).map((id) => `'${sqlQuote(String(id))}'`).join(', ')
+    const list = ids.filter((k) => typeof k === 'string' && k.length > 0)
+    if (list.length === 0) return ''
+    const inList = list.slice(0, 40).map((id) => `'${sqlQuote(id)}'`).join(', ')
     const rows = await runSql(
       runtime,
-      `SELECT ${cfg.text_column} FROM ${cfg.source_dataset} WHERE ${cfg.id_column} IN (${inList}) LIMIT 20`
+      `SELECT ${cfg.text_column} FROM ${cfg.source_dataset} WHERE ${cfg.id_column} IN (${inList}) LIMIT 40`
     )
     let out = ''
     for (const r of rows) {

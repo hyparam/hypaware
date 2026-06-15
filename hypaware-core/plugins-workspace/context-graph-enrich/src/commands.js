@@ -53,7 +53,7 @@ export async function runEnrichCurate(_argv, ctx) {
     const runtime = requireEnrichRuntime()
     const r = await runCurateTick(runtime)
     ctx.stdout.write(
-      `enrich curate: ${r.processed}/${r.pending} processed — ${r.committed} committed, ${r.rejected} rejected\n` +
+      `enrich curate: ${r.processed}/${r.pending} processed in ${r.calls} call(s) — ${r.committed} committed, ${r.rejected} rejected\n` +
         `run 'hyp graph project' to project committed knowledge into the graph\n`
     )
     return 0
