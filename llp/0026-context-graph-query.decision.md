@@ -21,7 +21,11 @@ same query registry any consumer uses ([LLP 0015](./0015-query-and-datasets.spec
 querying and projecting **independently replaceable**. A third party can ship an
 alternate query command, or an alternate projector, against the same published
 tables without reaching into the other. Couple the reader to projection internals
-and "bring your own query engine" silently becomes false.
+and "bring your own query engine" silently becomes false. The same independence
+makes the reader indifferent to how *many* projectors write the surface:
+[LLP 0023](./0023-context-graph-projection.decision.md) now feeds `node`/`edge`
+from any number of source-contributed contracts, and `graph neighbors` reads the
+union identically.
 
 (Design home: cgproto's LLP 0003 §query-and-projection-are-separable, where this
 separability and its boundary invariant are argued in full. This LLP records the
