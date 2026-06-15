@@ -10,6 +10,7 @@ import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
+import { createClaudeSettlementEnricher } from './settle.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 
@@ -82,6 +83,17 @@ export async function activate(ctx) {
       stateFile,
       clientName: CLIENT_NAME,
       logger,
+    })
+  )
+
+  // @ref LLP 0027#decision — flush-time settlement: upgrade fallback rows
+  // (transcript line not yet on disk when captured) to native identity
+  // once the line has landed, so race duplicates collapse at flush.
+  gateway.registerSettlementEnricher(
+    createClaudeSettlementEnricher({
+      homeDir,
+      stateFile,
+      clientName: CLIENT_NAME,
     })
   )
 

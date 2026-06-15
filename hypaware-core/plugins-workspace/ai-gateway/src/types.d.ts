@@ -3,6 +3,7 @@ import type {
   AiGatewayClientRegistration,
   AiGatewayExchangeProjector,
   AiGatewayRouteInput,
+  AiGatewaySettlementEnricher,
   AiGatewayUpstreamPreset,
   PluginActivationContext,
 } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -134,6 +135,7 @@ export interface GatewayState {
   presets: Map<string, AiGatewayUpstreamPreset>
   clients: Map<string, AiGatewayClientRegistration>
   projectors: RegisteredProjector[]
+  enrichers: Map<string, AiGatewaySettlementEnricher>
   listen: { host: string; port: number } | undefined
 }
 

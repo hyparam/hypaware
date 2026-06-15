@@ -306,6 +306,7 @@ test('native ids are preserved verbatim; sidechain inferred from thread_source',
         timestamp: '2026-05-26T10:00:00.000Z',
         cwd: '/work/sub',
         thread_source: 'subagent',
+        parent_thread_id: 'thread-parent-1',
         cli_version: '0.133.0',
       },
       items: [
@@ -334,11 +335,14 @@ test('native ids are preserved verbatim; sidechain inferred from thread_source',
     // thread_source = subagent → sidechain signal.
     assert.equal(exchange.is_sidechain, true)
     assert.equal(exchange.user_type, 'subagent')
+    // parent_thread_id from session_meta → subagent lineage column.
+    assert.equal(exchange.parent_thread_id, 'thread-parent-1')
 
     const rows = await materialize(item)
     const userRow = rowsByRole(rows, 'user')[0]
     assert.equal(userRow.message_id, 'msg-user-1')
     assert.equal(userRow.is_sidechain, true)
+    assert.equal(userRow.parent_thread_id, 'thread-parent-1')
     // Native identity → gateway does NOT stamp a fallback identity_source.
     const attributes = /** @type {any} */ (userRow.attributes)
     assert.equal(attributes.gateway.identity_source, undefined)

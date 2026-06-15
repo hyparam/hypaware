@@ -7,8 +7,9 @@ import { discoverCachePartitions } from '../../../../src/core/cache/partition.js
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+ * @import { GatewayState } from './types.d.ts'
  * @import { AsyncDataSource } from 'squirreling'
  */
 
@@ -198,11 +199,13 @@ function emptySource() {
 
 /**
  * The DatasetRegistration passed to `ctx.query.registerDataset` from
- * activate().
+ * activate(). Takes the gateway state so `settleBatch` can dispatch to
+ * registered settlement enrichers by `client_name`.
  *
+ * @param {GatewayState} [state]
  * @returns {DatasetRegistration}
  */
-export function aiGatewayDatasetRegistration() {
+export function aiGatewayDatasetRegistration(state) {
   return {
     name: DATASET_NAME,
     plugin: PLUGIN_NAME,
@@ -229,7 +232,125 @@ export function aiGatewayDatasetRegistration() {
     discoverPartitions: discoverParts,
     refreshPartition,
     createDataSource,
+    settleBatch: createSettleBatch(state),
   }
+}
+
+/**
+ * Build the flush-time settlement pass (LLP 0024). On each flush batch:
+ *
+ *  1. Short-circuit when the batch carries no fallback rows
+ *     (`attributes.gateway.identity_source === 'gateway_fallback'`) — the
+ *     common case, so the hot path does zero transcript or storage I/O.
+ *  2. Group fallback rows by `client_name` and hand each group to the
+ *     enricher registered for that client; the enricher upgrades the
+ *     rows it can match against its native log (re-stamping
+ *     `message_id`/`part_id`/native identity, clearing `identity_source`)
+ *     and returns the rest unchanged.
+ *  3. Dedupe the whole batch by `part_id` against already-committed
+ *     partitions and within-batch, so an upgraded row collapses onto the
+ *     uuid twin a later replay already wrote. The committed row wins (the
+ *     flush path has no row-delete; dropping the in-flight duplicate is
+ *     the only achievable collapse).
+ *
+ * @param {GatewayState | undefined} state
+ * @returns {(rows: Record<string, unknown>[], ctx: DatasetSettleContext) => Promise<Record<string, unknown>[]>}
+ */
+function createSettleBatch(state) {
+  return async function settleBatch(rows, ctx) {
+    if (!Array.isArray(rows) || rows.length === 0) return rows
+    const hasFallback = rows.some(isFallbackRow)
+    if (!hasFallback) return rows
+
+    let settled = rows
+    const enrichers = state?.enrichers
+    if (enrichers && enrichers.size > 0) {
+      /** @type {Map<string, Record<string, unknown>[]>} */
+      const byClient = new Map()
+      for (const row of rows) {
+        if (!isFallbackRow(row)) continue
+        const client = stringValue(row.client_name)
+        const enricher = client ? enrichers.get(client) : undefined
+        if (!enricher) continue
+        const list = byClient.get(client ?? '')
+        if (list) list.push(row)
+        else byClient.set(client ?? '', [row])
+      }
+      if (byClient.size > 0) {
+        /** @type {Map<Record<string, unknown>, Record<string, unknown>>} */
+        const upgrades = new Map()
+        for (const [client, group] of byClient) {
+          const enricher = enrichers.get(client)
+          if (!enricher) continue
+          try {
+            const out = await enricher.settle(group, ctx)
+            for (let i = 0; i < group.length && i < out.length; i++) {
+              if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
+            }
+          } catch {
+            // An enricher failure must never drop rows — leave the
+            // group as provisional fallback; a later flush can retry.
+            continue
+          }
+        }
+        if (upgrades.size > 0) {
+          settled = rows.map((row) => upgrades.get(row) ?? row)
+        }
+      }
+    }
+
+    return dedupeByPartId(settled, ctx)
+  }
+}
+
+/**
+ * Drop rows whose `part_id` already exists in a committed partition or
+ * earlier in this same batch. Mirrors the backfill materializer's
+ * pre-write dedupe (committed scan + per-call fold-in), so an upgraded
+ * fallback row collapses onto the canonical committed uuid row.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @param {DatasetSettleContext} ctx
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function dedupeByPartId(rows, ctx) {
+  const storage = ctx?.storage
+  if (rows.length === 0 || !canScanExistingRows(storage)) return rows
+  const seen = await scanExistingPartIds(storage)
+  /** @type {Record<string, unknown>[]} */
+  const fresh = []
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) { fresh.push(row); continue }
+    if (seen.has(key)) continue
+    seen.add(key)
+    fresh.push(row)
+  }
+  return fresh
+}
+
+/** @param {Record<string, unknown>} row */
+function isFallbackRow(row) {
+  const attrs = row?.attributes
+  const parsed = typeof attrs === 'string' ? safeParseJson(attrs) : attrs
+  if (!isPlainObject(parsed)) return false
+  const gateway = parsed.gateway
+  return isPlainObject(gateway) && gateway.identity_source === 'gateway_fallback'
+}
+
+/** @param {string} value */
+function safeParseJson(value) {
+  try { return JSON.parse(value) } catch { return undefined }
+}
+
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** @param {unknown} value */
+function stringValue(value) {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /**

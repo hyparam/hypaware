@@ -502,6 +502,29 @@ test('thread_source=subagent flips is_sidechain to true', () => {
   assert.equal(projection.user_type, 'subagent')
 })
 
+test('subagent turn metadata captures parent_thread_id (lineage)', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'sess-1',
+        thread_id: 'thread-child',
+        parent_thread_id: 'thread-parent',
+        thread_source: 'subagent',
+        workspaces: { '/w': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-child')
+  assert.equal(projection.parent_thread_id, 'thread-parent')
+  assert.equal(projection.is_sidechain, true)
+})
+
 test('Codex workspace selection prefers recorded cwd over first metadata key', () => {
   const projector = createCodexExchangeProjector({ env: {} })
   const actualWorkspace = '/home/me/actual'

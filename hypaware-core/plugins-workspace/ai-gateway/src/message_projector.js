@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -39,6 +39,8 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'user_type', type: 'STRING', nullable: true },
   { name: 'permission_mode', type: 'STRING', nullable: true },
   { name: 'is_sidechain', type: 'BOOLEAN', nullable: true },
+  { name: 'agent_id', type: 'STRING', nullable: true },
+  { name: 'parent_thread_id', type: 'STRING', nullable: true },
   { name: 'message_id', type: 'STRING', nullable: false },
   { name: 'previous_message_id', type: 'JSON', nullable: true },
   { name: 'provider_uuid', type: 'STRING', nullable: true },
@@ -88,9 +90,16 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     successful, non-empty projection wins. Projectors that throw,
  *     return `undefined`, or return an invalid shape are warned and
  *     skipped.
- *  4. Applies fallback identity (hash `message_id`, linear
- *     `previous_message_id`) ONLY when the chosen projection omitted
- *     identity — projector-supplied IDs and history are authoritative.
+ *  4. Applies fallback identity (hash `message_id`) ONLY when the
+ *     chosen projection omitted identity — projector-supplied IDs are
+ *     authoritative. `previous_message_id` is gateway-owned either
+ *     way: unless the projector supplied explicit history, every row
+ *     gets its IMMEDIATE predecessor in the THREAD (a 0/1-element
+ *     array) — scoped to `(conversation_id, agent_id)` so a subagent's
+ *     chain and fallback hash stay separate from the main loop's — so
+ *     enriched and fallback rows stay query-compatible. The full
+ *     ancestry is the transitive closure of these links (storing it per
+ *     row was quadratic).
  *  5. Expands each projected message into the per-part rows the
  *     `ai_gateway_messages` schema advertises, merges
  *     `attributes.gateway.*` provenance, and strips to schema columns.
@@ -165,6 +174,27 @@ export function createAiGatewayConversationState() {
 }
 
 /**
+ * Lazily fetch the per-thread ordered message-id chain. Keyed by
+ * `(conversation_id, agent_id)`: a subagent (agent_id set) gets its own
+ * chain, separate from the main loop, while agent_id null reuses the
+ * plain conversation key so main-loop and Codex behavior is unchanged.
+ *
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @param {string} conversationId
+ * @param {string | undefined} agentId
+ * @returns {string[]}
+ */
+function threadMessageIds(state, conversationId, agentId) {
+  const key = agentId ? `${conversationId}\u0000${agentId}` : conversationId
+  let list = state.messageIdsByConversation.get(key)
+  if (!list) {
+    list = []
+    state.messageIdsByConversation.set(key, list)
+  }
+  return list
+}
+
+/**
  * Expand one projected exchange into canonical `ai_gateway_messages`
  * rows. This is the SINGLE row-expansion implementation shared by live
  * capture (`createAiGatewayMessageProjector`) and backfill
@@ -214,11 +244,6 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     conversationLookup = new Map()
     state.toolCallLookupByConversation.set(conversationId, conversationLookup)
   }
-  let conversationMessageIds = state.messageIdsByConversation.get(conversationId)
-  if (!conversationMessageIds) {
-    conversationMessageIds = []
-    state.messageIdsByConversation.set(conversationId, conversationMessageIds)
-  }
 
   /** @type {Record<string, unknown>[]} */
   const rows = []
@@ -230,9 +255,18 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     const content = normalizeContent(message.content)
     if (content.length === 0) continue
 
+    // conversation_id is a session id for Claude; a session holds the
+    // main loop plus subagents. Scope the prior-message chain (and the
+    // fallback hash) to (conversation_id, agent_id) so a subagent's
+    // history and identity stay separate from the main loop's. agent_id
+    // null (main loop / Codex) keeps the original conversation-only key.
+    const agentId = stringValue(message.agent_id) ?? stringValue(projection.agent_id)
+    const conversationMessageIds = threadMessageIds(state, conversationId, agentId)
+
     const identity = resolveIdentity({
       message,
       conversationId,
+      agentId,
       role,
       content,
       conversationMessageIds,
@@ -365,30 +399,41 @@ function isValidProjection(value) {
  * @param {{
  *   message: AiGatewayProjectedMessage,
  *   conversationId: string,
+ *   agentId: string | undefined,
  *   role: string,
  *   content: Array<Record<string, unknown>>,
  *   conversationMessageIds: string[],
  * }} ctx
  */
+// @ref LLP 0026#consequences [implements] — store only the immediate
+// predecessor, not the full ancestry; full chain is reconstructable by
+// walking links, and the prior O(N) chain made the column quadratic.
 function resolveIdentity(ctx) {
-  const supplied = stringValue(ctx.message.message_id)
-  if (supplied) {
-    const previous = Array.isArray(ctx.message.previous_message_id)
-      ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
-      : undefined
-    return {
-      messageId: supplied,
-      previousMessageId: previous,
-      fromFallback: false,
-    }
-  }
-  const messageId = computeMessageId(ctx.conversationId, ctx.role, ctx.content)
+  // `previous_message_id` carries the IMMEDIATE predecessor in this
+  // THREAD (a 0- or 1-element array) — scoped to (conversation_id,
+  // agent_id) by the caller's `conversationMessageIds`, whether
+  // `message_id` was projector-supplied (transcript uuid) or
+  // hash-synthesized here. The full ancestry is the transitive closure
+  // of this link; the native DAG parent lives in `parent_uuid`. Storing
+  // the whole chain per row was O(N) per message → O(N²) per thread and
+  // dominated the cache (defeats hyparquet's dictionary encoding once
+  // the growing strings pass its cardinality/page-size guards).
+  // Projector-supplied history still wins when present.
   const previousFromMessage = Array.isArray(ctx.message.previous_message_id)
     ? ctx.message.previous_message_id.filter((id) => typeof id === 'string')
     : undefined
+  const previousMessageId = previousFromMessage ?? ctx.conversationMessageIds.slice(-1)
+  const supplied = stringValue(ctx.message.message_id)
+  if (supplied) {
+    return {
+      messageId: supplied,
+      previousMessageId,
+      fromFallback: false,
+    }
+  }
   return {
-    messageId,
-    previousMessageId: previousFromMessage ?? [...ctx.conversationMessageIds],
+    messageId: computeMessageId(ctx.conversationId, ctx.role, ctx.content, ctx.agentId),
+    previousMessageId,
     fromFallback: true,
   }
 }
@@ -410,7 +455,7 @@ function resolveIdentity(ctx) {
  *   messageIndex: number,
  *   tsStart: string,
  *   projection: AiGatewayProjectedExchange,
- *   identity: { messageId: string, previousMessageId: string[] | undefined, fromFallback: boolean },
+ *   identity: { messageId: string, previousMessageId: string[], fromFallback: boolean },
  *   conversationLookup: Map<string, { tool_name?: string }>,
  * }} ctx
  * @returns {Record<string, unknown>[]}
@@ -445,6 +490,8 @@ function expandMessageParts(ctx) {
     is_sidechain: typeof ctx.message.is_sidechain === 'boolean'
       ? ctx.message.is_sidechain
       : ctx.projection.is_sidechain,
+    agent_id: stringValue(ctx.message.agent_id) ?? stringValue(ctx.projection.agent_id),
+    parent_thread_id: stringValue(ctx.message.parent_thread_id) ?? stringValue(ctx.projection.parent_thread_id),
     message_id: ctx.identity.messageId,
     previous_message_id: ctx.identity.previousMessageId,
     provider_uuid: stringValue(ctx.message.provider_uuid),
@@ -507,12 +554,60 @@ function expandMessageParts(ctx) {
 }
 
 /**
+ * Fallback identity hash. Volatile wire-only fields are stripped
+ * before hashing: clients move the `cache_control` prompt-cache
+ * breakpoint between exchanges, so hashing it would give the same
+ * logical message a new id on every replay where the breakpoint
+ * shifted — each one a duplicate row the seen-set cannot catch.
+ *
+ * // @ref LLP 0026#decision — conversation_id is a session id for Claude;
+ * // agent_id separates a subagent thread from the main loop so two
+ * // agents with identical content in one session don't collide on one
+ * // fallback id. Omitted from the hash when absent (main loop / Codex)
+ * // so those ids are unchanged.
+ *
  * @param {string} conversation_id
  * @param {string} role
  * @param {unknown} content
+ * @param {string} [agentId]
  */
-export function computeMessageId(conversation_id, role, content) {
-  return sha256Hex(`${conversation_id}:${role}:${canonicalJson(content)}`).slice(0, 16)
+export function computeMessageId(conversation_id, role, content, agentId) {
+  const scope = agentId ? `${conversation_id}:${agentId}` : conversation_id
+  return sha256Hex(`${scope}:${role}:${canonicalJson(stripVolatileBlockFields(content))}`).slice(0, 16)
+}
+
+/**
+ * Drop per-block fields that vary across the channels a logical message
+ * can arrive on without changing its meaning. Only block-level keys are
+ * stripped; block payloads are otherwise untouched.
+ *
+ * `cache_control` is a wire-only prompt-cache breakpoint that moves
+ * between exchanges. `caller` is a tool_use annotation that rides the
+ * assistant *response* stream and the transcript but is dropped from
+ * the *request-input* echo of the same turn — so the one logical
+ * tool_use hashes with-or-without `caller` depending on which
+ * representation reaches this fallback. This MUST strip the same set
+ * the claude plugin's `contentKey` strips, so the fallback id and the
+ * transcript match key canonicalize a block identically. The two lists
+ * are kept in sync by hand: the plugins are decoupled (claude reaches
+ * the gateway only via the capability, no shared module), so a shared
+ * canonicalizer would be the first static link across that boundary and
+ * isn't worth it.
+ *
+ * Reached only for an *unmatched* assistant tool_use — a matched one
+ * carries its native uuid and skips this fallback — so the split is
+ * rare, but stripping `caller` keeps the two representations from
+ * landing as duplicate fallback rows when it does happen.
+ *
+ * @param {unknown} content
+ */
+function stripVolatileBlockFields(content) {
+  if (!Array.isArray(content)) return content
+  return content.map((block) => {
+    if (!isPlainObject(block) || (!('cache_control' in block) && !('caller' in block))) return block
+    const { cache_control: _cache_control, caller: _caller, ...rest } = block
+    return rest
+  })
 }
 
 /** @param {string | undefined | null} stopReason */

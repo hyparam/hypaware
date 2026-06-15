@@ -52,6 +52,7 @@ export function createKernelRuntime(opts = {}) {
   const storage = opts.storage ?? createQueryStorageService({
     cacheRoot,
     getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
+    getSettleHook: (dataset) => query.getDataset(dataset)?.settleBatch,
   })
   return {
     ...(opts.configControl ? { configControl: opts.configControl } : {}),

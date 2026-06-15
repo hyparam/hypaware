@@ -74,6 +74,29 @@ async function writeRawTranscript(env, repo, fileName, rows) {
   return filePath
 }
 
+/**
+ * Write a subagent transcript and its `.meta.json` sidecar under the
+ * session's `subagents/` directory, mirroring Claude Code's on-disk
+ * layout (`<projects>/<repo>/<sessionId>/subagents/agent-<id>.jsonl`).
+ *
+ * @param {{ homeDir: string }} env
+ * @param {string} repo
+ * @param {string} sessionId
+ * @param {string} agentId
+ * @param {Record<string, unknown>[]} rows
+ * @param {Record<string, unknown>} meta
+ */
+async function writeSubagent(env, repo, sessionId, agentId, rows, meta) {
+  const dir = path.join(env.homeDir, '.claude', 'projects', repo, sessionId, 'subagents')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(
+    path.join(dir, `agent-${agentId}.jsonl`),
+    rows.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    'utf8'
+  )
+  await fs.writeFile(path.join(dir, `agent-${agentId}.meta.json`), JSON.stringify(meta), 'utf8')
+}
+
 function captureLog() {
   /** @type {Array<{ level: string, message: string, fields?: Record<string, unknown> }>} */
   const entries = []
@@ -279,22 +302,26 @@ test('native DAG identity is preserved verbatim', async () => {
     assert.ok(item)
     const [userMsg, asstMsg] = value(item).messages
 
-    // uuid -> message_id / provider_uuid; parentUuid -> previous_message_id / parent_uuid.
+    // uuid -> message_id / provider_uuid; parentUuid -> parent_uuid.
+    // previous_message_id is left to the gateway expansion, which
+    // fills the full prior-message chain on the materialized rows.
     assert.equal(userMsg.message_id, 'u-user-1')
     assert.equal(userMsg.provider_uuid, 'u-user-1')
-    assert.deepEqual(userMsg.previous_message_id, [])
+    assert.equal(userMsg.previous_message_id, undefined)
     assert.equal(userMsg.parent_uuid, undefined)
 
     assert.equal(asstMsg.message_id, 'u-asst-1')
     assert.equal(asstMsg.provider_uuid, 'u-asst-1')
-    assert.deepEqual(asstMsg.previous_message_id, ['u-user-1'])
+    assert.equal(asstMsg.previous_message_id, undefined)
     assert.equal(asstMsg.parent_uuid, 'u-user-1')
 
-    // Identity survives materialization into canonical rows.
+    // Identity survives materialization into canonical rows, and the
+    // gateway stamps the immediate-predecessor previous_message_id.
     const rows = await materialize(item)
     const userRow = rowsByRole(rows, 'user')[0]
     assert.equal(userRow.message_id, 'u-user-1')
     assert.equal(userRow.provider_uuid, 'u-user-1')
+    assert.deepEqual(userRow.previous_message_id, [])
     const asstRow = rowsByRole(rows, 'assistant')[0]
     assert.equal(asstRow.message_id, 'u-asst-1')
     assert.equal(asstRow.parent_uuid, 'u-user-1')
@@ -472,6 +499,61 @@ test('since bound filters out messages older than the window', async () => {
     const messages = value(item).messages
     assert.equal(messages.length, 1)
     assert.equal(messages[0].message_id, 'u-new')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('subagent rows carry the spawning tool call from the meta sidecar', async () => {
+  const env = await stageEnv()
+  try {
+    // Main session: an assistant turn that spawns the subagent via an
+    // Agent tool_use whose id the sidecar records.
+    await writeTranscript(env, 'repo-a', 'sess-1', [
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-asst-1',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_spawn', name: 'Agent', input: { subagent_type: 'Explore' } }],
+        },
+        timestamp: '2026-05-20T10:00:00.000Z',
+      },
+    ])
+    // Subagent transcript + sidecar under the session's subagents/ dir.
+    await writeSubagent(env, 'repo-a', 'sess-1', 'a7325fc7bf7423540', [
+      {
+        sessionId: 'sess-1',
+        uuid: 'sa-asst-1',
+        parentUuid: null,
+        type: 'assistant',
+        isSidechain: true,
+        agentId: 'a7325fc7bf7423540',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'on it' }] },
+        timestamp: '2026-05-20T10:00:02.000Z',
+      },
+    ], { agentType: 'Explore', description: 'Find X', toolUseId: 'toolu_spawn' })
+
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const items = await collectItems(provider.run(runContext().ctx))
+    // The main session file and the subagent file are walked separately,
+    // so flatten rows across every yielded item before asserting.
+    const rows = (await Promise.all(items.map(materialize))).flat()
+
+    // The subagent's row points back at the spawning tool call; the
+    // main-loop assistant row does not.
+    const subagentRow = rows.find((r) => r.agent_id === 'a7325fc7bf7423540')
+    assert.ok(subagentRow, 'subagent row present')
+    assert.equal(
+      /** @type {any} */ (subagentRow.attributes).claude.spawned_by_tool_use_id,
+      'toolu_spawn'
+    )
+    const mainRow = rows.find((r) => r.tool_call_id === 'toolu_spawn')
+    assert.ok(mainRow, 'main-loop spawning tool_call row present')
+    assert.equal(mainRow.agent_id, undefined)
+    assert.equal(/** @type {any} */ (mainRow.attributes)?.claude?.spawned_by_tool_use_id, undefined)
   } finally {
     await env.cleanup()
   }

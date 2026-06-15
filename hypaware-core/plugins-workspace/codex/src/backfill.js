@@ -441,6 +441,10 @@ function buildSession(args) {
     entrypoint: stringValue(metaPayload.originator),
     clientVersion: stringValue(metaPayload.cli_version),
     threadSource: stringValue(metaPayload.thread_source),
+    // Subagent lineage: the parent thread that spawned this one. Lives
+    // in the rollout's first `session_meta` row (mirrors the live
+    // `x-codex-turn-metadata` header's `parent_thread_id`).
+    parentThreadId: stringValue(metaPayload.parent_thread_id),
     model: firstTurnString(turnPayloads, 'model'),
     modelProvider: stringValue(metaPayload.model_provider),
     source: stringValue(metaPayload.source),
@@ -498,6 +502,7 @@ function projectedExchangeFromSession(args) {
   if (session.threadSource) exchange.user_type = session.threadSource
   if (session.sandbox) exchange.permission_mode = session.sandbox
   if (session.threadSource !== undefined) exchange.is_sidechain = session.threadSource === 'subagent'
+  if (session.parentThreadId) exchange.parent_thread_id = session.parentThreadId
   if (session.model) exchange.model = session.model
   return exchange
 }

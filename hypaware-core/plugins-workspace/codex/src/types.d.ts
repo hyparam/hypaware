@@ -40,6 +40,8 @@ export interface CodexRolloutSession {
   clientVersion?: string
   /** Thread provenance, e.g. `user` or `subagent` (`session_meta.thread_source`). */
   threadSource?: string
+  /** Parent thread that spawned this subagent (`session_meta.parent_thread_id`). */
+  parentThreadId?: string
   /** Model id resolved from the turn context(s). */
   model?: string
   /** Configured upstream provider (`session_meta.model_provider`). */

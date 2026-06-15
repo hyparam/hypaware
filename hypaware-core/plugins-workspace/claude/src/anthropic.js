@@ -404,6 +404,33 @@ function isAnthropicAssistant(value) {
   return isPlainObject(value) && value.role === 'assistant'
 }
 
+/**
+ * System-prompt fingerprints for Claude Code's harness-internal "aux"
+ * API calls — requests the CLI makes on its own behalf (not the user's
+ * conversation) that nonetheless flow through the gateway under the
+ * session's headers. The autonomous-mode security monitor fires on
+ * every action and, with its embedded session digest, dwarfs the real
+ * conversation in row volume. These calls have no transcript line, so
+ * they can never gain native identity; HypAware skips recording them.
+ */
+const AUX_SYSTEM_FINGERPRINTS = [
+  'You are a security monitor for autonomous AI coding agents',
+]
+
+/**
+ * True when a request is Claude Code harness-internal aux traffic that
+ * should not be recorded as conversation. Matched on the system prompt
+ * so it is robust to the digest payload the request carries.
+ *
+ * @param {unknown} reqBody
+ */
+export function isClaudeAuxRequest(reqBody) {
+  if (!isPlainObject(reqBody)) return false
+  const system = extractSystemText(reqBody.system)
+  if (!system) return false
+  return AUX_SYSTEM_FINGERPRINTS.some((fingerprint) => system.includes(fingerprint))
+}
+
 /** @param {unknown} system */
 function extractSystemText(system) {
   if (typeof system === 'string') return system.length === 0 ? undefined : system
@@ -441,7 +468,7 @@ function parseHeaders(raw) {
  * @param {string} name
  * @returns {string | undefined}
  */
-function headerValue(headers, name) {
+export function headerValue(headers, name) {
   if (!headers) return undefined
   const wanted = name.toLowerCase()
   for (const [key, value] of Object.entries(headers)) {

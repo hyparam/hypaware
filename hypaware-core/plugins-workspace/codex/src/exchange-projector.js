@@ -94,6 +94,7 @@ export function createCodexExchangeProjector(opts = {}) {
         user_type: recordedContext.user_type,
         permission_mode: recordedContext.permission_mode,
         is_sidechain: recordedContext.is_sidechain,
+        parent_thread_id: codexContext?.parent_thread_id,
         user_id: resolveUserId(reqBody, provider),
         request_id: resolveRequestId(input),
         prompt_id: codexContext?.turn_id,
@@ -472,6 +473,13 @@ function resolveCodexContext(input, provider, path, reqBody) {
   )
   const turn_id = readStringKey(metadata, 'turn_id')
   const thread_source = readStringKey(metadata, 'thread_source')
+  // Subagent lineage: the parent thread that spawned this one. Codex puts
+  // it in the same turn-metadata blob as thread_id (set for subagent
+  // turns; absent on the root thread).
+  const parent_thread_id = firstString(
+    readStringKey(metadata, 'parent_thread_id'),
+    readHeader(input.request_headers, 'parent-thread-id'),
+  )
   const originator = firstString(
     readHeader(input.request_headers, 'originator'),
     client.entrypoint,
@@ -489,6 +497,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
   const attributes = {}
   setIfString(attributes, 'thread_id', thread_id)
   setIfString(attributes, 'session_id', session_id)
+  setIfString(attributes, 'parent_thread_id', parent_thread_id)
   setIfString(attributes, 'turn_id', turn_id)
   setIfString(attributes, 'thread_source', thread_source)
   setIfString(attributes, 'originator', originator)
@@ -503,6 +512,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
   return {
     thread_id,
     session_id,
+    parent_thread_id,
     turn_id,
     thread_source,
     cwd: workspace?.path,

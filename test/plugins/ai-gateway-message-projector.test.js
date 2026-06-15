@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
-import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { computeMessageId, createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -29,6 +29,8 @@ const EXPECTED_COLUMNS = [
   ['user_type', 'STRING', true],
   ['permission_mode', 'STRING', true],
   ['is_sidechain', 'BOOLEAN', true],
+  ['agent_id', 'STRING', true],
+  ['parent_thread_id', 'STRING', true],
   ['message_id', 'STRING', false],
   ['previous_message_id', 'JSON', true],
   ['provider_uuid', 'STRING', true],
@@ -254,6 +256,43 @@ test('projector-supplied message_id and previous_message_id are preserved', asyn
   )
 })
 
+test('supplied message_id without history gets the immediate predecessor as previous_message_id', async () => {
+  // Adapter projectors (Claude transcripts, Codex native ids) supply
+  // message_id but never previous_message_id — the gateway fills the
+  // immediate predecessor (0/1-element) so enriched rows match fallback
+  // rows. Full ancestry is the transitive closure of these links.
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native-no-history', {
+        project: () => ({
+          provider: 'native',
+          conversation_id: 'conv-native',
+          messages: [
+            { role: 'user', content: 'one', message_id: 'uuid-1' },
+            { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+            { role: 'user', content: 'three', message_id: 'uuid-3' },
+          ],
+        }),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 3)
+  assert.deepEqual(rows[0].previous_message_id, [])
+  assert.deepEqual(rows[1].previous_message_id, ['uuid-1'])
+  assert.deepEqual(rows[2].previous_message_id, ['uuid-2'])
+  for (const row of rows) {
+    assert.equal(
+      isPlainObject(row.attributes) && isPlainObject(row.attributes.gateway)
+        ? row.attributes.gateway.identity_source
+        : undefined,
+      undefined,
+      'supplied ids must not be marked as fallback'
+    )
+  }
+})
+
 test('fallback identity stamps gateway.identity_source and a linear previous_message_id chain', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -284,6 +323,78 @@ test('fallback identity stamps gateway.identity_source and a linear previous_mes
       'fallback rows must mark attributes.gateway.identity_source'
     )
   }
+})
+
+test('fallback message_id ignores cache_control so identity is stable across replays', () => {
+  const blocks = [
+    { type: 'text', text: 'reminder' },
+    { type: 'text', text: 'the actual prompt' },
+  ]
+  const withBreakpoint = [
+    blocks[0],
+    { ...blocks[1], cache_control: { type: 'ephemeral' } },
+  ]
+  const plain = computeMessageId('conv-1', 'user', blocks)
+  assert.equal(
+    computeMessageId('conv-1', 'user', withBreakpoint),
+    plain,
+    'moving the prompt-cache breakpoint must not change the fallback message_id'
+  )
+  // Real content changes still change identity.
+  assert.notEqual(
+    computeMessageId('conv-1', 'user', [blocks[0], { type: 'text', text: 'different prompt' }]),
+    plain
+  )
+})
+
+test('fallback message_id is scoped by agent_id so subagents do not collide on shared content', () => {
+  const content = [{ type: 'text', text: 'ok' }]
+  const mainLoop = computeMessageId('sess-1', 'assistant', content)
+  const agentA = computeMessageId('sess-1', 'assistant', content, 'agent-a')
+  const agentB = computeMessageId('sess-1', 'assistant', content, 'agent-b')
+  // Same session, identical content, different agents → distinct ids.
+  assert.notEqual(agentA, agentB)
+  assert.notEqual(agentA, mainLoop)
+  // Absent agent_id is unchanged from the pre-agent hash (no migration
+  // for main-loop / Codex rows).
+  assert.equal(computeMessageId('sess-1', 'assistant', content, undefined), mainLoop)
+})
+
+test('previous_message_id chains are scoped per (conversation_id, agent_id)', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('threaded', {
+        project: () => ({
+          provider: 'p',
+          conversation_id: 'sess-1',
+          messages: [
+            // main loop
+            { role: 'user', content: 'main one' },
+            { role: 'assistant', content: 'main two' },
+            // subagent thread (agent_id set on the message)
+            { role: 'user', content: 'agent one', agent_id: 'agent-x' },
+            { role: 'assistant', content: 'agent two', agent_id: 'agent-x' },
+          ],
+        }),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  const byContent = (text) => rows.find((r) => r.content_text === text)
+  const mainOne = byContent('main one')
+  const mainTwo = byContent('main two')
+  const agentOne = byContent('agent one')
+  const agentTwo = byContent('agent two')
+  assert.ok(mainOne && mainTwo && agentOne && agentTwo, 'all four messages should be projected')
+
+  // Main-loop second message chains only on the main-loop first.
+  assert.deepEqual(mainTwo.previous_message_id, [mainOne.message_id])
+  // Subagent's first message starts a FRESH chain — it must not include
+  // the main-loop ids.
+  assert.deepEqual(agentOne.previous_message_id, [])
+  // Subagent's second chains only on the subagent's first.
+  assert.deepEqual(agentTwo.previous_message_id, [agentOne.message_id])
 })
 
 test('attributes.gateway carries exchange provenance and dev_run_id', async () => {

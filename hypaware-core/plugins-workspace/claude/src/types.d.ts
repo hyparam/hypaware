@@ -25,6 +25,7 @@ export interface TranscriptEntry {
   user_type: string | undefined
   permission_mode: string | undefined
   is_sidechain: boolean | undefined
+  agent_id: string | undefined
   attachment_type: string | undefined
   hook_event: string | undefined
   is_compact_summary: boolean | undefined
