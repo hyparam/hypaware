@@ -3,6 +3,7 @@
 import { compactGraphTables } from './maintenance.js'
 import { projectGraph } from './project.js'
 import { queryNeighbors } from './query.js'
+import { requireGraphRuntime } from './runtime.js'
 
 /**
  * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -14,7 +15,8 @@ import { queryNeighbors } from './query.js'
 const LARGE_GRAPH = 500_000
 
 /**
- * `hyp graph project` — run the T0 projection over `ai_gateway_messages`.
+ * `hyp graph project` — run the T0 projection over every registered source
+ * contract (optionally filtered to one source with `--source <dataset>`).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -22,10 +24,26 @@ const LARGE_GRAPH = 500_000
  */
 export async function runGraphProject(argv, ctx) {
   const dryRun = argv.includes('--dry-run')
+  const source = flagValue(argv, '--source')
   try {
+    const { registry } = requireGraphRuntime()
+    const contracts = source
+      ? registry.list().filter((c) => c.sourceDataset === source)
+      : registry.list()
+
+    if (contracts.length === 0) {
+      ctx.stdout.write(
+        source
+          ? `graph project: no contract registered for source '${source}'\n`
+          : 'graph project: no contracts registered — install a source connector (e.g. @hypaware/ai-gateway-graph)\n'
+      )
+      return 0
+    }
+
     const r = await projectGraph({
       query: ctx.query,
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+      contracts,
       config: ctx.config,
       dryRun,
     })
@@ -41,6 +59,20 @@ export async function runGraphProject(argv, ctx) {
     ctx.stderr.write(`hyp graph project: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
+}
+
+/**
+ * Read a `--flag value` / `--flag=value` option from argv.
+ *
+ * @param {string[]} argv
+ * @param {string} flag
+ * @returns {string | undefined}
+ */
+function flagValue(argv, flag) {
+  const i = argv.indexOf(flag)
+  if (i !== -1 && i + 1 < argv.length) return argv[i + 1]
+  const eq = argv.find((a) => a.startsWith(`${flag}=`))
+  return eq ? eq.slice(flag.length + 1) : undefined
 }
 
 /**

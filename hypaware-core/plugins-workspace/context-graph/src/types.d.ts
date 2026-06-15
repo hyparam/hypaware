@@ -24,6 +24,51 @@ export interface ContractRule {
   toRow(row: Record<string, unknown>): GraphRow | null
 }
 
+/**
+ * A projection contract contributed by a source plugin through the
+ * `hypaware.context-graph` capability. Carries the source's rules plus the
+ * provenance metadata the kit stamps onto every row it produces. The engine
+ * runs every registered contract; the stable core lexicon and the id recipe
+ * stay owned by the graph plugin (a contract maps *into* them, never forks them).
+ */
+export interface Contract {
+  /** Stable identifier (kebab-case), unique within the owning plugin. */
+  name: string
+  /** Owning plugin (e.g. `@hypaware/ai-gateway-graph`). */
+  plugin: string
+  /** The source dataset this contract reads (e.g. `ai_gateway_messages`). */
+  sourceDataset: string
+  /** Projector id stamped into provenance (e.g. `ai-gateway.t0`). */
+  projector: string
+  /** Projector version stamped into provenance; bump to force re-projection. */
+  projectorVersion: number
+  /** The node/edge rules the engine runs for this source. */
+  rules: ContractRule[]
+}
+
+/** The in-plugin registry source plugins contribute contracts into. */
+export interface ContractRegistry {
+  register(contract: Contract): void
+  list(): Contract[]
+}
+
+/**
+ * The `hypaware.context-graph` capability value. `registerContract` lets a
+ * source plugin (or a connector) contribute its contract; `kit` is the shared
+ * id + provenance authoring kit a contract's rules build rows with.
+ */
+export interface ContextGraphCapability {
+  registerContract(contract: Contract): void
+  kit: {
+    nodeId(type: string, naturalKey: string): string
+    edgeId(srcId: string, type: string, dstId: string): string
+    makeRowBuilders(meta: { sourceDataset: string; projector: string; projectorVersion: number }): {
+      buildNode(spec: Record<string, unknown>): GraphRow
+      buildEdge(spec: Record<string, unknown>): GraphRow
+    }
+  }
+}
+
 /** A node as the traversal reads it — graph identity plus display fields. */
 export interface GraphNode {
   node_id: string
