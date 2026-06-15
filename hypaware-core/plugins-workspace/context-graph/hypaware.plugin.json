@@ -10,6 +10,11 @@
   "permissions": ["read_state", "write_state"],
   "contributes": {
     "datasets": [{ "name": "node" }, { "name": "edge" }],
-    "commands": [{ "name": "graph project" }, { "name": "graph compact" }]
+    "commands": [
+      { "name": "graph project" },
+      { "name": "graph compact" },
+      { "name": "graph neighbors" }
+    ],
+    "skills": [{ "name": "hypaware-graph", "clients": ["claude", "codex"] }]
   }
 }

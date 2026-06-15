@@ -1,5 +1,8 @@
 // @ts-check
 
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { runGraphCompact, runGraphNeighbors, runGraphProject } from './command.js'
 import {
   EDGE_DATASET,
@@ -25,6 +28,9 @@ import {
  *    rewrites affected partitions into sorted tables
  *  - command `graph neighbors` — walks the activity graph from a seed node out
  *    to N hops, reading the published node/edge datasets ([LLP 0026])
+ *  - skill `hypaware-graph` — teaches AI clients (Claude, Codex) how to project
+ *    and query the graph; installed by `hyp skills install` when this plugin is
+ *    active
  *
  * Registration only; the projection runs on demand via the command (no
  * snapshot/commit hook exists, and eventual freshness is acceptable).
@@ -58,5 +64,15 @@ export async function activate(ctx) {
     summary: 'Walk the activity graph from a node out to N hops',
     usage: 'hyp graph neighbors <node> [--depth N] [--type T] [--edge-type T] [--direction out|in|both] [--limit N] [--json]',
     run: runGraphNeighbors,
+  })
+
+  // Teaches AI clients how to project and query the graph. Registered only
+  // when this plugin is active, so `hyp skills install` copies it into
+  // ~/.claude/skills and ~/.codex/skills only for installs that have the graph.
+  ctx.skills.register({
+    name: 'hypaware-graph',
+    plugin: PLUGIN_NAME,
+    clients: ['claude', 'codex'],
+    sourceDir: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'hypaware-graph'),
   })
 }
