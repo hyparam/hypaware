@@ -10,7 +10,8 @@ import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
-import { runGraphNeighbors } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
+import { runGraphNeighbors, runGraphProject } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
+import { setGraphRuntime } from '../../hypaware-core/plugins-workspace/context-graph/src/runtime.js'
 
 /**
  * A ctx whose stdout/stderr capture into arrays. `storage`/`query` are only
@@ -81,6 +82,30 @@ async function withGraph(/** @type {(deps: { ctx: any, out: string[], errs: stri
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 }
+
+// --- graph project: the registry-driven guard ------------------------------
+
+test('graph project with no contracts registered reports cleanly and exits 0', async () => {
+  setGraphRuntime({ registry: /** @type {any} */ ({ list: () => [] }) })
+  const { ctx, out, errs } = mkCtx()
+  const code = await runGraphProject([], ctx)
+  assert.equal(code, 0)
+  assert.match(out.join(''), /no contracts registered/)
+  assert.equal(errs.join(''), '', 'an empty registry is not an error')
+})
+
+test('graph project --source with no matching contract reports cleanly and exits 0', async () => {
+  setGraphRuntime({
+    registry: /** @type {any} */ ({
+      list: () => [{ name: 'ai-gateway-t0', plugin: '@x', sourceDataset: 'ai_gateway_messages', projector: 'p', projectorVersion: 1, rules: [] }],
+    }),
+  })
+  const { ctx, out, errs } = mkCtx()
+  const code = await runGraphProject(['--source', 'imessage_messages'], ctx)
+  assert.equal(code, 0)
+  assert.match(out.join(''), /no contract registered for source 'imessage_messages'/)
+  assert.equal(errs.join(''), '')
+})
 
 // --- Usage errors: exit 2, message on stderr, no IO touched -----------------
 
