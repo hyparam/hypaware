@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/context-graph-enrich",
+  "version": "0.1.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "T1/T2 enrichment for the context graph. A recall-tuned proposer (T1, cheap model) over-proposes prospect knowledge from source text; a graph-and-source-aware curator (T2, frontier model) prunes/merges/deepens/commits. The prospect lifecycle lives in this plugin's own datasets; only committed knowledge is projected into the graph (via a contract) — rejected prospects never reach it.",
+  "permissions": ["read_state", "write_state"],
+  "requires": {
+    "plugins": {
+      "@hypaware/context-graph": "^0.1.0"
+    },
+    "capabilities": {
+      "hypaware.context-graph": "^1.0.0",
+      "hypaware.vector-search": "^1.0.0",
+      "hypaware.completion": "^1.0.0"
+    }
+  },
+  "contributes": {
+    "datasets": [
+      { "name": "enrichment_prospects" },
+      { "name": "enrichment_resolutions" },
+      { "name": "enrichment_committed" }
+    ],
+    "config_sections": [{ "section": "context-graph-enrich" }],
+    "sources": [
+      { "name": "enrich-propose", "summary": "T1 proposer: over-propose prospect knowledge from new source text" },
+      { "name": "enrich-curate", "summary": "T2 curator: prune/merge/deepen/commit prospects against the graph + source" }
+    ],
+    "commands": [
+      { "name": "enrich", "summary": "Context-graph enrichment (subcommands: propose, curate, status)" },
+      { "name": "enrich propose", "summary": "Run one T1 propose tick now" },
+      { "name": "enrich curate", "summary": "Run one T2 curate tick now" },
+      { "name": "enrich status", "summary": "Show enrichment watermarks and prospect/committed counts" }
+    ]
+  }
+}

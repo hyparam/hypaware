@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/completion-anthropic",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "Anthropic (Claude) text-completion provider for HypAware. Speaks POST /v1/messages, so one plugin covers Claude models across tiers (e.g. Haiku for cheap proposal, Opus for curation) by per-request model. Provides hypaware.completion for enrichment and other model-using plugins.",
+  "permissions": ["network", "read_env"],
+  "provides": {
+    "capabilities": {
+      "hypaware.completion": "1.0.0"
+    }
+  },
+  "contributes": {
+    "config_sections": [{ "section": "completion-anthropic" }]
+  }
+}

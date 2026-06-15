@@ -52,6 +52,13 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * requires `hypaware.embedder`, which no default-activated plugin
  * provides.
  *
+ * The completion providers follow the same rule — enabling a model
+ * backend lets captured content (prompts built from the graph + source)
+ * leave the machine, so it is an explicit `plugins[]` choice. And
+ * `@hypaware/context-graph-enrich` requires the completion + vector-search
+ * capabilities (which no default-activated plugin provides) and spends on
+ * model calls, so it too activates only via explicit config.
+ *
  * @type {ReadonlySet<PluginName>}
  * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by] — the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  */
@@ -60,6 +67,9 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/gascity',
   '@hypaware/embedder-openai',
   '@hypaware/vector-search',
+  '@hypaware/completion-anthropic',
+  '@hypaware/completion-openai',
+  '@hypaware/context-graph-enrich',
 ]))
 
 /**

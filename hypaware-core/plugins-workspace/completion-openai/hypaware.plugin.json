@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/completion-openai",
+  "version": "1.0.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "OpenAI-compatible text-completion provider for HypAware. Speaks POST /v1/chat/completions against a configurable base_url, so one plugin covers OpenAI, compatible proxies, and local servers (Ollama, LM Studio). Provides hypaware.completion for enrichment and other model-using plugins.",
+  "permissions": ["network", "read_env"],
+  "provides": {
+    "capabilities": {
+      "hypaware.completion": "1.0.0"
+    }
+  },
+  "contributes": {
+    "config_sections": [{ "section": "completion-openai" }]
+  }
+}
