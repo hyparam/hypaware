@@ -1,0 +1,160 @@
+// @ts-check
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { edgeId, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import {
+  createAiGatewayGraphContract,
+  PROJECTOR,
+  PROJECTOR_VERSION,
+  SOURCE_DATASET,
+} from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
+
+// Build the contract the way the connector's activate() does: from the graph
+// plugin's shared kit. The rules' row identity + provenance are therefore the
+// real end-to-end ones — these assertions double as the digest-stability guard.
+const KIT = { nodeId, edgeId, makeRowBuilders }
+const contract = createAiGatewayGraphContract(KIT)
+
+/**
+ * @param {'node' | 'edge'} kind
+ * @param {string} type
+ */
+function rule(kind, type) {
+  const found = contract.rules.find((r) => r.kind === kind && r.type === type)
+  assert.ok(found, `${kind} rule ${type} exists`)
+  return found
+}
+
+const TS = '2026-06-05T12:00:00.000Z'
+
+test('contract carries its source/projector metadata', () => {
+  assert.equal(contract.name, 'ai-gateway-t0')
+  assert.equal(contract.plugin, '@hypaware/ai-gateway-graph')
+  assert.equal(contract.sourceDataset, SOURCE_DATASET)
+  assert.equal(contract.sourceDataset, 'ai_gateway_messages')
+  assert.equal(contract.projector, PROJECTOR)
+  assert.equal(contract.projectorVersion, PROJECTOR_VERSION)
+})
+
+test('Session rule builds a node keyed on conversation_id with pruned props', () => {
+  const r = rule('node', 'Session')
+  const row = r.toRow({
+    conversation_id: 'conv-1',
+    cwd: '/repo',
+    git_branch: null,
+    client_name: 'claude',
+    user_id: undefined,
+    message_created_at: TS,
+  })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Session', 'conv-1'))
+  assert.equal(row.node_type, 'Session')
+  assert.equal(row.natural_key, 'conv-1')
+  assert.deepEqual(row.props, { client_name: 'claude', cwd: '/repo' }, 'null/undefined props dropped, keys sorted')
+  assert.equal(row.first_seen, TS)
+  assert.equal(row.source_dataset, SOURCE_DATASET)
+  assert.deepEqual(row.source_keys, { conversation_id: 'conv-1' })
+  assert.equal(row.projector, PROJECTOR)
+  assert.equal(row.projector_version, PROJECTOR_VERSION)
+})
+
+test('node rules skip rows missing their natural key', () => {
+  assert.equal(rule('node', 'Session').toRow({ conversation_id: null, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Session').toRow({ conversation_id: '', message_created_at: TS }), null)
+  assert.equal(rule('node', 'App').toRow({ client_name: null, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Model').toRow({ model: undefined, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Tool').toRow({ tool_name: '', message_created_at: TS }), null)
+})
+
+test('Session rule with no optional fields builds null props', () => {
+  const row = rule('node', 'Session').toRow({ conversation_id: 'conv-1', message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.props, null, 'empty props prune to null')
+})
+
+test('File rule resolves file_path from file-touching tools only', () => {
+  const r = rule('node', 'File')
+  const row = r.toRow({ tool_name: 'Read', tool_args: { file_path: '/repo/auth.py' }, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('File', '/repo/auth.py'))
+  assert.equal(row.natural_key, '/repo/auth.py')
+  assert.equal(row.label, 'auth.py')
+
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: { file_path: '/x' }, message_created_at: TS }), null, 'non-file tool skipped')
+  assert.equal(r.toRow({ tool_name: 'Read', tool_args: {}, message_created_at: TS }), null, 'no path in args')
+  assert.equal(r.toRow({ tool_name: null, tool_args: { file_path: '/x' }, message_created_at: TS }), null)
+})
+
+test('File rule parses tool_args arriving as a JSON string, skipping malformed JSON', () => {
+  const r = rule('node', 'File')
+  const row = r.toRow({ tool_name: 'Edit', tool_args: '{"file_path":"/repo/proxy.py"}', message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, '/repo/proxy.py')
+
+  assert.equal(r.toRow({ tool_name: 'Edit', tool_args: '{not json', message_created_at: TS }), null, 'malformed JSON skipped')
+  assert.equal(r.toRow({ tool_name: 'Edit', tool_args: '"just a string"', message_created_at: TS }), null, 'non-object JSON skipped')
+})
+
+test('File rule falls back to notebook_path', () => {
+  const r = rule('node', 'File')
+  const row = r.toRow({ tool_name: 'NotebookEdit', tool_args: { notebook_path: '/repo/nb.ipynb' }, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, '/repo/nb.ipynb')
+  assert.equal(row.label, 'nb.ipynb')
+})
+
+test('touched edge wires Session and File node ids and skips partial rows', () => {
+  const r = rule('edge', 'touched')
+  const row = r.toRow({
+    conversation_id: 'conv-1',
+    tool_name: 'Write',
+    tool_args: { file_path: '/repo/a.js' },
+    message_created_at: TS,
+  })
+  assert.ok(row)
+  const src = nodeId('Session', 'conv-1')
+  const dst = nodeId('File', '/repo/a.js')
+  assert.equal(row.src_id, src)
+  assert.equal(row.dst_id, dst)
+  assert.equal(row.edge_id, edgeId(src, 'touched', dst))
+  assert.equal(row.src_type, 'Session')
+  assert.equal(row.dst_type, 'File')
+
+  assert.equal(r.toRow({ conversation_id: 'conv-1', tool_name: 'Bash', tool_args: {}, message_created_at: TS }), null)
+  assert.equal(r.toRow({ conversation_id: null, tool_name: 'Write', tool_args: { file_path: '/x' }, message_created_at: TS }), null)
+})
+
+test('via and used_model edges skip rows missing either endpoint', () => {
+  const via = rule('edge', 'via')
+  assert.ok(via.toRow({ conversation_id: 'c', client_name: 'a', message_created_at: TS }))
+  assert.equal(via.toRow({ conversation_id: 'c', client_name: null, message_created_at: TS }), null)
+  assert.equal(via.toRow({ conversation_id: null, client_name: 'a', message_created_at: TS }), null)
+
+  const used = rule('edge', 'used_model')
+  assert.ok(used.toRow({ conversation_id: 'c', model: 'm', message_created_at: TS }))
+  assert.equal(used.toRow({ conversation_id: 'c', model: '', message_created_at: TS }), null)
+})
+
+test('toRow normalizes first_seen from Date and epoch-number timestamps', () => {
+  const r = rule('node', 'App')
+  const fromDate = r.toRow({ client_name: 'claude', message_created_at: new Date(TS) })
+  assert.ok(fromDate)
+  assert.equal(fromDate.first_seen, TS)
+
+  const fromNumber = r.toRow({ client_name: 'claude', message_created_at: Date.parse(TS) })
+  assert.ok(fromNumber)
+  assert.equal(fromNumber.first_seen, TS)
+
+  const fromGarbage = r.toRow({ client_name: 'claude', message_created_at: '' })
+  assert.ok(fromGarbage)
+  assert.equal(fromGarbage.first_seen, null)
+})
+
+test('numeric natural keys are stringified', () => {
+  const row = rule('node', 'Session').toRow({ conversation_id: 42, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, '42')
+  assert.equal(row.node_id, nodeId('Session', '42'))
+})

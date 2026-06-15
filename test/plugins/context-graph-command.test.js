@@ -10,7 +10,8 @@ import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
-import { runGraphNeighbors } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
+import { runGraphNeighbors, runGraphProject } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
+import { setGraphRuntime } from '../../hypaware-core/plugins-workspace/context-graph/src/runtime.js'
 
 /**
  * A ctx whose stdout/stderr capture into arrays. `storage`/`query` are only
@@ -81,6 +82,66 @@ async function withGraph(/** @type {(deps: { ctx: any, out: string[], errs: stri
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 }
+
+// --- graph project: the registry-driven guard ------------------------------
+
+test('graph project with no contracts registered reports cleanly and exits 0', async () => {
+  setGraphRuntime({ registry: /** @type {any} */ ({ list: () => [] }) })
+  const { ctx, out, errs } = mkCtx()
+  const code = await runGraphProject([], ctx)
+  assert.equal(code, 0)
+  assert.match(out.join(''), /no contracts registered/)
+  assert.equal(errs.join(''), '', 'an empty registry is not an error')
+})
+
+test('graph project --source with no matching contract reports cleanly and exits 0', async () => {
+  setGraphRuntime({
+    registry: /** @type {any} */ ({
+      list: () => [{ name: 'ai-gateway-t0', plugin: '@x', sourceDataset: 'ai_gateway_messages', projector: 'p', projectorVersion: 1, rules: [] }],
+    }),
+  })
+  const { ctx, out, errs } = mkCtx()
+  const code = await runGraphProject(['--source', 'imessage_messages'], ctx)
+  assert.equal(code, 0)
+  assert.match(out.join(''), /no contract registered for source 'imessage_messages'/)
+  assert.equal(errs.join(''), '')
+})
+
+test('graph project --source=<ds> (equals form) parses and filters', async () => {
+  setGraphRuntime({
+    registry: /** @type {any} */ ({
+      list: () => [{ name: 'ai-gateway-t0', plugin: '@x', sourceDataset: 'ai_gateway_messages', projector: 'p', projectorVersion: 1, rules: [] }],
+    }),
+  })
+  const { ctx, out, errs } = mkCtx()
+  const code = await runGraphProject(['--source=imessage_messages'], ctx)
+  assert.equal(code, 0)
+  assert.match(out.join(''), /no contract registered for source 'imessage_messages'/)
+  assert.equal(errs.join(''), '')
+})
+
+// A missing/empty/flag-shaped --source value must NOT silently fall back to
+// projecting every contract (a broader write than asked for); reject it like
+// `graph neighbors` rejects its value flags.
+test('graph project usage errors exit 2 and report the offending argv on stderr', async () => {
+  /** @type {[string[], RegExp][]} */
+  const cases = [
+    [['--source'], /--source expects a value/],
+    [['--source='], /--source expects a value/],
+    [['--source', ''], /--source expects a value/],
+    [['--source', '--dry-run'], /--source expects a value/],
+    [['--bogus'], /unknown flag --bogus/],
+    [['ai_gateway_messages'], /unexpected argument ai_gateway_messages/],
+  ]
+  for (const [argv, pattern] of cases) {
+    const { ctx, out, errs } = mkCtx()
+    const code = await runGraphProject(argv, ctx)
+    assert.equal(code, 2, `argv ${JSON.stringify(argv)} should be a usage error`)
+    assert.match(errs.join(''), pattern)
+    assert.match(errs.join(''), /^hyp graph project: /)
+    assert.equal(out.join(''), '', 'usage errors write nothing to stdout')
+  }
+})
 
 // --- Usage errors: exit 2, message on stderr, no IO touched -----------------
 

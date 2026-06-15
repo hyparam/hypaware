@@ -3,7 +3,6 @@
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 
-import { CONTRACT_RULES } from './contract.js'
 import {
   EDGE_COLUMNS,
   EDGE_DATASET,
@@ -15,20 +14,23 @@ import {
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { GraphRow } from './types.d.ts'
+ * @import { Contract, GraphRow } from './types.d.ts'
  */
 
 /**
- * Run the T0 deterministic projection: read `ai_gateway_messages` through
- * each contract rule, materialize node/edge rows (deterministic ids +
- * inline provenance), dedup against already-committed rows, and append the
- * new ones. Idempotent: a second run with no new source data writes zero
- * rows.
+ * Run the T0 deterministic projection: read each registered source contract's
+ * rules, materialize node/edge rows (deterministic ids + inline provenance),
+ * dedup against already-committed rows, and append the new ones. Rows from
+ * different contracts that mint the same content-addressed id merge by the
+ * order-independent `mergeRow`, so two sources naming the same Actor/File
+ * structurally converge for free. Idempotent: a second run with no new source
+ * data writes zero rows.
  *
- * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config, dryRun?: boolean }} args
+ * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean }} args
  * @returns {Promise<{ nodes: number, edges: number, nodesWritten: number, edgesWritten: number }>}
+ * @ref LLP 0023#contract-contribution [implements] — the engine runs every registered contract; adding a source is contributing one
  */
-export async function projectGraph({ query, storage, config, dryRun = false }) {
+export async function projectGraph({ query, storage, contracts, config, dryRun = false }) {
   return withSpan(
     'graph.project',
     {
@@ -44,29 +46,32 @@ export async function projectGraph({ query, storage, config, dryRun = false }) {
       const edges = new Map()
 
       let sourceRows = 0
-      for (const rule of CONTRACT_RULES) {
-        const result = await executeQuerySql({
-          query: rule.sql,
-          registry: query,
-          storage,
-          config,
-          refresh: 'always',
-        })
-        sourceRows += result.rows.length
-        const target = rule.kind === 'node' ? nodes : edges
-        const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
-        for (const row of result.rows) {
-          const built = rule.toRow(row)
-          if (!built) continue
-          const id = /** @type {string} */ (built[idKey])
-          const existing = target.get(id)
-          if (existing) mergeRow(existing, built)
-          else target.set(id, built)
+      for (const contract of contracts) {
+        for (const rule of contract.rules) {
+          const result = await executeQuerySql({
+            query: rule.sql,
+            registry: query,
+            storage,
+            config,
+            refresh: 'always',
+          })
+          sourceRows += result.rows.length
+          const target = rule.kind === 'node' ? nodes : edges
+          const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
+          for (const row of result.rows) {
+            const built = rule.toRow(row)
+            if (!built) continue
+            const id = /** @type {string} */ (built[idKey])
+            const existing = target.get(id)
+            if (existing) mergeRow(existing, built)
+            else target.set(id, built)
+          }
         }
       }
 
       const nodeRows = [...nodes.values()]
       const edgeRows = [...edges.values()]
+      span.setAttribute('contract_count', contracts.length)
       span.setAttribute('source_row_count', sourceRows)
       span.setAttribute('node_count', nodeRows.length)
       span.setAttribute('edge_count', edgeRows.length)

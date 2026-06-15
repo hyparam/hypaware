@@ -3,138 +3,105 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { CONTRACT_RULES, PROJECTOR, PROJECTOR_VERSION, SOURCE_DATASET } from '../../hypaware-core/plugins-workspace/context-graph/src/contract.js'
-import { edgeId, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/ids.js'
+import { edgeId, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import { createContractRegistry } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-registry.js'
+
+// The contract kit and registry are what `@hypaware/context-graph` owns after
+// the contract rules moved out to source plugins: the central id recipe +
+// provenance stamping (kit), and the place sources contribute contracts the
+// engine iterates (registry). Rule semantics live with each source (see
+// ai-gateway-graph-contract.test.js).
+
+const TS = '2026-06-01T00:00:00.000Z'
+
+test('makeRowBuilders stamps provenance from the passed metadata', () => {
+  const { buildNode, buildEdge } = makeRowBuilders({ sourceDataset: 'src_ds', projector: 'src.t0', projectorVersion: 3 })
+
+  const n = buildNode({ type: 'Session', key: 'k', props: { a: 1 }, firstSeen: TS, sourceKeys: { conversation_id: 'k' } })
+  assert.equal(n.node_id, nodeId('Session', 'k'))
+  assert.equal(n.node_type, 'Session')
+  assert.equal(n.natural_key, 'k')
+  assert.equal(n.source_dataset, 'src_ds')
+  assert.equal(n.projector, 'src.t0')
+  assert.equal(n.projector_version, 3)
+  assert.deepEqual(n.source_keys, { conversation_id: 'k' })
+
+  const e = buildEdge({ type: 'via', srcType: 'Session', srcKey: 'k', dstType: 'App', dstKey: 'a', firstSeen: TS, sourceKeys: {} })
+  assert.equal(e.edge_id, edgeId(nodeId('Session', 'k'), 'via', nodeId('App', 'a')))
+  assert.equal(e.src_type, 'Session')
+  assert.equal(e.dst_type, 'App')
+  assert.equal(e.source_dataset, 'src_ds')
+  assert.equal(e.projector, 'src.t0')
+  assert.equal(e.projector_version, 3)
+})
+
+test('makeRowBuilders normalizes first_seen and prunes empty props to null', () => {
+  const { buildNode } = makeRowBuilders({ sourceDataset: 's', projector: 'p', projectorVersion: 1 })
+  assert.equal(buildNode({ type: 'A', key: 'k', firstSeen: new Date(TS), sourceKeys: {} }).first_seen, TS)
+  assert.equal(buildNode({ type: 'A', key: 'k', firstSeen: Date.parse(TS), sourceKeys: {} }).first_seen, TS)
+  assert.equal(buildNode({ type: 'A', key: 'k', firstSeen: '', sourceKeys: {} }).first_seen, null)
+  assert.equal(buildNode({ type: 'A', key: 'k', props: {}, firstSeen: TS, sourceKeys: {} }).props, null)
+})
+
+test('the id recipe is source-agnostic — same (type, key) converges across sources', () => {
+  const imsg = makeRowBuilders({ sourceDataset: 'imessage', projector: 'imsg.t0', projectorVersion: 1 })
+  const aigw = makeRowBuilders({ sourceDataset: 'ai_gateway_messages', projector: 'ai-gateway.t0', projectorVersion: 1 })
+  const a = imsg.buildNode({ type: 'Actor', key: 'phil', firstSeen: TS, sourceKeys: {} })
+  const b = aigw.buildNode({ type: 'Actor', key: 'phil', firstSeen: TS, sourceKeys: {} })
+  assert.equal(a.node_id, b.node_id, 'two sources naming the same node mint the same id')
+  assert.notEqual(a.source_dataset, b.source_dataset, 'but provenance still distinguishes them')
+})
 
 /**
- * @param {'node' | 'edge'} kind
- * @param {string} type
+ * A minimal well-formed contract for registry tests; `overrides` may also make
+ * it intentionally malformed, so the return is intentionally untyped.
+ * @param {Record<string, unknown>} [overrides]
+ * @returns {any}
  */
-function rule(kind, type) {
-  const found = CONTRACT_RULES.find((r) => r.kind === kind && r.type === type)
-  assert.ok(found, `${kind} rule ${type} exists`)
-  return found
+function sampleContract(overrides = {}) {
+  return {
+    name: 'x-src',
+    plugin: '@x/x',
+    sourceDataset: 'x',
+    projector: 'x.t0',
+    projectorVersion: 1,
+    rules: [{ kind: 'node', type: 'T', sql: 'SELECT 1', toRow: () => null }],
+    ...overrides,
+  }
 }
 
-const TS = '2026-06-05T12:00:00.000Z'
-
-test('Session rule builds a node keyed on conversation_id with pruned props', () => {
-  const r = rule('node', 'Session')
-  const row = r.toRow({
-    conversation_id: 'conv-1',
-    cwd: '/repo',
-    git_branch: null,
-    client_name: 'claude',
-    user_id: undefined,
-    message_created_at: TS,
-  })
-  assert.ok(row)
-  assert.equal(row.node_id, nodeId('Session', 'conv-1'))
-  assert.equal(row.node_type, 'Session')
-  assert.equal(row.natural_key, 'conv-1')
-  assert.deepEqual(row.props, { client_name: 'claude', cwd: '/repo' }, 'null/undefined props dropped, keys sorted')
-  assert.equal(row.first_seen, TS)
-  assert.equal(row.source_dataset, SOURCE_DATASET)
-  assert.deepEqual(row.source_keys, { conversation_id: 'conv-1' })
-  assert.equal(row.projector, PROJECTOR)
-  assert.equal(row.projector_version, PROJECTOR_VERSION)
+test('contract registry registers contracts and lists them name-sorted', () => {
+  const reg = createContractRegistry()
+  reg.register(sampleContract({ name: 'b-src', plugin: '@x/b' }))
+  reg.register(sampleContract({ name: 'a-src', plugin: '@x/a' }))
+  assert.deepEqual(reg.list().map((c) => c.name), ['a-src', 'b-src'])
 })
 
-test('node rules skip rows missing their natural key', () => {
-  assert.equal(rule('node', 'Session').toRow({ conversation_id: null, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Session').toRow({ conversation_id: '', message_created_at: TS }), null)
-  assert.equal(rule('node', 'App').toRow({ client_name: null, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Model').toRow({ model: undefined, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Tool').toRow({ tool_name: '', message_created_at: TS }), null)
+test('contract registry rejects malformed contracts', () => {
+  const reg = createContractRegistry()
+  assert.throws(() => reg.register(sampleContract({ name: '' })), /name/)
+  assert.throws(() => reg.register(sampleContract({ plugin: '' })), /plugin/)
+  assert.throws(() => reg.register(sampleContract({ sourceDataset: '' })), /sourceDataset/)
+  assert.throws(() => reg.register(sampleContract({ projector: '' })), /projector/)
+  assert.throws(() => reg.register(sampleContract({ projectorVersion: 1.5 })), /projectorVersion/)
+  assert.throws(() => reg.register(sampleContract({ rules: [] })), /rules/)
 })
 
-test('Session rule with no optional fields builds null props', () => {
-  const row = rule('node', 'Session').toRow({ conversation_id: 'conv-1', message_created_at: TS })
-  assert.ok(row)
-  assert.equal(row.props, null, 'empty props prune to null')
+test('contract registry rejects malformed rules, naming the offending rule index', () => {
+  const reg = createContractRegistry()
+  const ok = { kind: 'node', type: 'T', sql: 'SELECT 1', toRow: () => null }
+  // A good rule at 0, a bad one at 1 — the error pins which rule and which field,
+  // so a connector typo fails at registration with a locatable message rather
+  // than mid-projection (or by silently routing rows into the wrong target map).
+  assert.throws(() => reg.register(sampleContract({ rules: [ok, { ...ok, kind: 'vertex' }] })), /rule 1 kind/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, type: '' }] })), /rule 0 type/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, sql: '' }] })), /rule 0 sql/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, toRow: 'nope' }] })), /rule 0 toRow/)
+  assert.throws(() => reg.register(sampleContract({ rules: [null] })), /rule 0 must be an object/)
 })
 
-test('File rule resolves file_path from file-touching tools only', () => {
-  const r = rule('node', 'File')
-  const row = r.toRow({ tool_name: 'Read', tool_args: { file_path: '/repo/auth.py' }, message_created_at: TS })
-  assert.ok(row)
-  assert.equal(row.node_id, nodeId('File', '/repo/auth.py'))
-  assert.equal(row.natural_key, '/repo/auth.py')
-  assert.equal(row.label, 'auth.py')
-
-  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: { file_path: '/x' }, message_created_at: TS }), null, 'non-file tool skipped')
-  assert.equal(r.toRow({ tool_name: 'Read', tool_args: {}, message_created_at: TS }), null, 'no path in args')
-  assert.equal(r.toRow({ tool_name: null, tool_args: { file_path: '/x' }, message_created_at: TS }), null)
-})
-
-test('File rule parses tool_args arriving as a JSON string, skipping malformed JSON', () => {
-  const r = rule('node', 'File')
-  const row = r.toRow({ tool_name: 'Edit', tool_args: '{"file_path":"/repo/proxy.py"}', message_created_at: TS })
-  assert.ok(row)
-  assert.equal(row.natural_key, '/repo/proxy.py')
-
-  assert.equal(r.toRow({ tool_name: 'Edit', tool_args: '{not json', message_created_at: TS }), null, 'malformed JSON skipped')
-  assert.equal(r.toRow({ tool_name: 'Edit', tool_args: '"just a string"', message_created_at: TS }), null, 'non-object JSON skipped')
-})
-
-test('File rule falls back to notebook_path', () => {
-  const r = rule('node', 'File')
-  const row = r.toRow({ tool_name: 'NotebookEdit', tool_args: { notebook_path: '/repo/nb.ipynb' }, message_created_at: TS })
-  assert.ok(row)
-  assert.equal(row.natural_key, '/repo/nb.ipynb')
-  assert.equal(row.label, 'nb.ipynb')
-})
-
-test('touched edge wires Session and File node ids and skips partial rows', () => {
-  const r = rule('edge', 'touched')
-  const row = r.toRow({
-    conversation_id: 'conv-1',
-    tool_name: 'Write',
-    tool_args: { file_path: '/repo/a.js' },
-    message_created_at: TS,
-  })
-  assert.ok(row)
-  const src = nodeId('Session', 'conv-1')
-  const dst = nodeId('File', '/repo/a.js')
-  assert.equal(row.src_id, src)
-  assert.equal(row.dst_id, dst)
-  assert.equal(row.edge_id, edgeId(src, 'touched', dst))
-  assert.equal(row.src_type, 'Session')
-  assert.equal(row.dst_type, 'File')
-
-  assert.equal(r.toRow({ conversation_id: 'conv-1', tool_name: 'Bash', tool_args: {}, message_created_at: TS }), null)
-  assert.equal(r.toRow({ conversation_id: null, tool_name: 'Write', tool_args: { file_path: '/x' }, message_created_at: TS }), null)
-})
-
-test('via and used_model edges skip rows missing either endpoint', () => {
-  const via = rule('edge', 'via')
-  assert.ok(via.toRow({ conversation_id: 'c', client_name: 'a', message_created_at: TS }))
-  assert.equal(via.toRow({ conversation_id: 'c', client_name: null, message_created_at: TS }), null)
-  assert.equal(via.toRow({ conversation_id: null, client_name: 'a', message_created_at: TS }), null)
-
-  const used = rule('edge', 'used_model')
-  assert.ok(used.toRow({ conversation_id: 'c', model: 'm', message_created_at: TS }))
-  assert.equal(used.toRow({ conversation_id: 'c', model: '', message_created_at: TS }), null)
-})
-
-test('toRow normalizes first_seen from Date and epoch-number timestamps', () => {
-  const r = rule('node', 'App')
-  const fromDate = r.toRow({ client_name: 'claude', message_created_at: new Date(TS) })
-  assert.ok(fromDate)
-  assert.equal(fromDate.first_seen, TS)
-
-  const fromNumber = r.toRow({ client_name: 'claude', message_created_at: Date.parse(TS) })
-  assert.ok(fromNumber)
-  assert.equal(fromNumber.first_seen, TS)
-
-  const fromGarbage = r.toRow({ client_name: 'claude', message_created_at: '' })
-  assert.ok(fromGarbage)
-  assert.equal(fromGarbage.first_seen, null)
-})
-
-test('numeric natural keys are stringified', () => {
-  const row = rule('node', 'Session').toRow({ conversation_id: 42, message_created_at: TS })
-  assert.ok(row)
-  assert.equal(row.natural_key, '42')
-  assert.equal(row.node_id, nodeId('Session', '42'))
+test('contract registry rejects a duplicate (plugin, name)', () => {
+  const reg = createContractRegistry()
+  reg.register(sampleContract())
+  assert.throws(() => reg.register(sampleContract()), /duplicate/)
 })

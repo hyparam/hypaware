@@ -3,6 +3,7 @@
 import { compactGraphTables } from './maintenance.js'
 import { projectGraph } from './project.js'
 import { queryNeighbors } from './query.js'
+import { requireGraphRuntime } from './runtime.js'
 
 /**
  * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -14,18 +15,39 @@ import { queryNeighbors } from './query.js'
 const LARGE_GRAPH = 500_000
 
 /**
- * `hyp graph project` — run the T0 projection over `ai_gateway_messages`.
+ * `hyp graph project` — run the T0 projection over every registered source
+ * contract (optionally filtered to one source with `--source <dataset>`).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
 export async function runGraphProject(argv, ctx) {
-  const dryRun = argv.includes('--dry-run')
+  const parsed = parseProjectArgv(argv)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp graph project: ${parsed.error}\n`)
+    return 2
+  }
+  const { source, dryRun } = parsed
   try {
+    const { registry } = requireGraphRuntime()
+    const contracts = source
+      ? registry.list().filter((c) => c.sourceDataset === source)
+      : registry.list()
+
+    if (contracts.length === 0) {
+      ctx.stdout.write(
+        source
+          ? `graph project: no contract registered for source '${source}'\n`
+          : 'graph project: no contracts registered — install a source connector (e.g. @hypaware/ai-gateway-graph)\n'
+      )
+      return 0
+    }
+
     const r = await projectGraph({
       query: ctx.query,
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+      contracts,
       config: ctx.config,
       dryRun,
     })
@@ -41,6 +63,48 @@ export async function runGraphProject(argv, ctx) {
     ctx.stderr.write(`hyp graph project: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
+}
+
+/**
+ * Parse `graph project` argv: flags only, no positional. `--source` takes a
+ * value (the source dataset to filter to, `--source <ds>` or `--source=<ds>`);
+ * `--dry-run` is boolean. A missing, empty, or flag-shaped `--source` value is
+ * a usage error — matching `parseNeighborsArgv` — so a malformed targeted
+ * command can't silently fall back to projecting *all* contracts, a broader
+ * write than was asked for. Unknown flags and stray positionals are rejected
+ * for the same reason.
+ *
+ * @param {string[]} argv
+ * @returns {{ ok: true, source: string | undefined, dryRun: boolean } | { ok: false, error: string }}
+ */
+function parseProjectArgv(argv) {
+  /** @type {string | undefined} */
+  let source
+  let dryRun = false
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--dry-run') {
+      dryRun = true
+    } else if (token === '--source') {
+      const value = argv[i + 1]
+      if (value === undefined || value.length === 0 || value.startsWith('--')) {
+        return { ok: false, error: '--source expects a value' }
+      }
+      i += 1
+      source = value
+    } else if (token.startsWith('--source=')) {
+      const value = token.slice('--source='.length)
+      if (value.length === 0) return { ok: false, error: '--source expects a value' }
+      source = value
+    } else if (token.startsWith('--')) {
+      return { ok: false, error: `unknown flag ${token}` }
+    } else {
+      return { ok: false, error: `unexpected argument ${token} (graph project takes no positional)` }
+    }
+  }
+
+  return { ok: true, source, dryRun }
 }
 
 /**

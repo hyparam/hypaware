@@ -2,12 +2,15 @@
   "schema_version": 1,
   "name": "@hypaware/context-graph",
   "version": "0.1.0",
-  "description": "T0 deterministic projection: materializes a node/edge activity graph from ai_gateway_messages. Reads structured capture, emits graph rows with inline provenance — no models, exact-key matching only.",
+  "description": "T0 deterministic projection: materializes a node/edge activity graph from source-contributed contracts. Reads structured capture, emits graph rows with inline provenance — no models, exact-key matching only.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
   "permissions": ["read_state", "write_state"],
+  "provides": {
+    "capabilities": { "hypaware.context-graph": "1.0.0" }
+  },
   "contributes": {
     "datasets": [{ "name": "node" }, { "name": "edge" }],
     "commands": [
