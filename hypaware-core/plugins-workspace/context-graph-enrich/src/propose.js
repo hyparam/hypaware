@@ -5,7 +5,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { columnsFor, enrichTablePath, PROSPECTS_DATASET, prospectId } from './datasets.js'
 import { buildProposeRequest, parseProspects } from './prompts.js'
 import { getCompletion, requireEnrichRuntime } from './runtime.js'
-import { runSql } from './sql.js'
+import { contentFilterClauses, runSql } from './sql.js'
 import { readState, writeState } from './state.js'
 
 /**
@@ -90,6 +90,15 @@ export async function runProposeTick(runtime, opts = {}) {
  * {@link groupSourceRows}). `cursor.ts` is a number, so it is interpolated
  * directly (no injection surface).
  *
+ * On top of the watermark predicate the scan applies the shared
+ * {@link contentFilterClauses} (drop empty-text rows + excluded part types like
+ * `tool_result`), so the model only ever sees signal. Filtered-out rows are
+ * never returned, which is safe for the watermark: they carry no useful content
+ * to process, and the cursor advances over the rows it *did* see — so the next
+ * tick's `ts >= cursor` naturally starts past them. The filter is applied
+ * before `LIMIT`, so each tick's row budget is spent on useful rows, not
+ * plumbing.
+ *
  * @param {EnrichConfig} cfg
  * @param {ProposeCursor | null} cursor
  * @param {number} limit
@@ -99,7 +108,11 @@ export function buildProposeQuery(cfg, cursor, limit) {
   const ts = cfg.timestamp_column
   const tb = cfg.tiebreak_column
   const cols = [...new Set([cfg.id_column, cfg.text_column, cfg.anchor_key_column, ts, tb])]
-  const where = cursor ? `WHERE ${ts} >= ${Number(cursor.ts)} ` : ''
+  /** @type {string[]} */
+  const clauses = []
+  if (cursor) clauses.push(`${ts} >= ${Number(cursor.ts)}`)
+  clauses.push(...contentFilterClauses(cfg))
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')} ` : ''
   return `SELECT ${cols.join(', ')} FROM ${cfg.source_dataset} ${where}ORDER BY ${ts}, ${tb} LIMIT ${limit}`
 }
 

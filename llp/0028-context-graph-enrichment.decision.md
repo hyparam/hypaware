@@ -156,6 +156,53 @@ cursor advances only over the **fully-processed prefix** — an early
 `max_tick_ms` break must re-read, not skip, the un-proposed groups. Curate has
 no cursor; its queue is "prospects with no resolution", computed by query.
 
+## Row selection
+
+The enrichment scans **signal, not plumbing**. The T1 propose scan and the T2
+source deref share one content filter (`contentFilterClauses`), so the curator
+never sees a row the proposer was steered away from. Two knobs, both on the
+source config:
+
+- **`require_text`** (default `true`) drops rows whose text column is null/empty
+  *before* the per-tick row budget is spent on them. On a real
+  `ai_gateway_messages` corpus (~634k parts) **33% of rows carry no
+  `content_text`** — every `tool_call` part, plus the thinking/`reasoning` parts
+  whose text a proxy never persists (signature only; ~1.7 chars each). These
+  already contributed nothing to the model; filtering them in SQL just stops
+  them consuming `max_rows_per_tick` and watermark cycles. **This is why
+  "thinking tokens" need no dedicated filter** — they are empty, so
+  `require_text` already excludes them.
+- **`exclude_part_types`** (default `['tool_result']`) drops whole content
+  kinds. `tool_result` — raw file/command/search output — is **~60% of the
+  corpus by character volume** yet is bulk, not durable knowledge worth
+  extracting; feeding it to the recall-tuned T1 model is mostly noise and
+  crowds the per-session character cap. An explicit `[]` disables the filter.
+
+`part_type_column` names the column the second knob reads (default `part_type`).
+Filtered-out rows are simply never returned; this is safe for the **watermark**
+because they carry nothing to process and the cursor advances over the rows the
+tick *did* see, so the next `ts >= cursor` scan starts past them.
+
+The default `exclude_part_types` is **schema-bound**, not global. `part_type` is
+a column the base source contract (text / timestamp / id / tiebreak / anchor
+columns) never required, and only the default `ai_gateway_messages` schema is
+known to have it. So the `['tool_result']` default applies *only* when
+`source_dataset` is the default; a custom source defaults to `[]` (no part-type
+predicate) rather than emitting `part_type NOT IN (…)` against a column it may
+not have and silently breaking every scan. A custom source opts into part-type
+filtering explicitly. `require_text` is not gated — it reads `text_column`,
+which every source already configures, so it stays on by default everywhere.
+
+**Sub-agent rows were considered and deferred.** Excluding sidechain
+(sub-agent) content was the original ask, but on the measured corpus it is only
+~12% of text — ~80% of which is *already* removed as `tool_result` — and the
+signal is unreliable: `is_sidechain` is `NULL` for ~37% of rows (it depends on
+Claude-transcript matching) and only ~4% of conversations carry any flagged
+sidechain row. It is also a recall *policy* question (a research sub-agent's
+findings may be exactly the knowledge worth capturing), not a pure cost lever
+like `tool_result`. `exclude_part_types` is part-type-based and cannot express
+it; a sidechain predicate is left as a future knob if the signal firms up.
+
 ## Excluded from default activation
 
 Like the embedder/vector-search pair, the completion + enrich plugins are **not

@@ -133,6 +133,8 @@ function curateRuntime({ cfg, prospects, resolutions = [], decisions, vectorHits
     node: [],
     [cfg.source_dataset]: [],
   }
+  /** @type {string[]} */
+  const queries = []
   let calls = 0
   const completion = {
     provider: 'anthropic',
@@ -154,9 +156,12 @@ function curateRuntime({ cfg, prospects, resolutions = [], decisions, vectorHits
         ;(tables[p] ??= []).push(...rows)
       },
     },
-    execSql: async (/** @type {{ query: string }} */ { query }) => ({ rows: fakeQuery(query, tables) }),
+    execSql: async (/** @type {{ query: string }} */ { query }) => {
+      queries.push(query)
+      return { rows: fakeQuery(query, tables) }
+    },
   })
-  return { runtime, tables, getCalls: () => calls }
+  return { runtime, tables, queries, getCalls: () => calls }
 }
 
 test('runCurateTick curates pending prospects, writes committed + resolution rows, and skips already-resolved', async () => {
@@ -233,4 +238,37 @@ test('runCurateTick leaves a group pending (no resolution) when the curator retu
 
   assert.equal(r.processed, 0)
   assert.equal(tables.enrichment_resolutions.length, 0, 'no resolution written → stays pending for retry')
+})
+
+test('runCurateTick derefs the source with the shared content filter (T1/T2 parity)', async () => {
+  // @ref LLP 0028#row-selection — safeDeref must AND the same content filter as
+  // the T1 scan into the deref WHERE, so an excluded part (e.g. tool_result)
+  // sharing a message_id with a kept text part is not re-admitted into the
+  // curator excerpt. The fakeQuery ignores WHERE, so assert on the SQL itself.
+  const prospects = [prospectRow({ prospect_id: 'p1', label: 'X', source_keys: { message_id: ['m1'] } })]
+  const { runtime, queries } = curateRuntime({ cfg: cfg(), prospects, decisions: [{ index: 1, decision: 'commit' }] })
+
+  await runCurateTick(runtime)
+
+  const deref = queries.find((q) => /SELECT content_text FROM ai_gateway_messages/.test(q))
+  assert.ok(deref, 'curate tick derefs the source dataset by message id')
+  assert.match(deref, /message_id IN \('m1'\)/)
+  assert.match(deref, /content_text IS NOT NULL AND content_text <> ''/)
+  assert.match(deref, /part_type NOT IN \('tool_result'\)/)
+})
+
+test('runCurateTick deref drops the content filter when a custom source disables it', async () => {
+  // A custom source defaults exclude_part_types to [] and can turn require_text
+  // off, so the deref is the bare id predicate — no part_type column referenced.
+  const prospects = [prospectRow({ prospect_id: 'p1', label: 'X', source_dataset: 'my_logs', source_keys: { row_id: ['r1'] } })]
+  const c = cfg({ source_dataset: 'my_logs', text_column: 'body', id_column: 'row_id', require_text: false })
+  const { runtime, queries } = curateRuntime({ cfg: c, prospects, decisions: [{ index: 1, decision: 'commit' }] })
+
+  await runCurateTick(runtime)
+
+  const deref = queries.find((q) => /SELECT body FROM my_logs/.test(q))
+  assert.ok(deref, 'curate tick derefs the custom source')
+  assert.match(deref, /WHERE row_id IN \('r1'\) LIMIT/)
+  assert.doesNotMatch(deref, /part_type/)
+  assert.doesNotMatch(deref, /IS NOT NULL/)
 })

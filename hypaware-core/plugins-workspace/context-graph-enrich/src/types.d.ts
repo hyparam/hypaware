@@ -95,6 +95,12 @@ export interface EnrichConfig {
   tiebreak_column: string
   anchor_type: string
   anchor_key_column: string
+  /** Column naming the content kind (text / reasoning / tool_call / tool_result …). */
+  part_type_column: string
+  /** Part kinds dropped before the model scans them (default `['tool_result']`). */
+  exclude_part_types: string[]
+  /** Drop rows whose `text_column` is null/empty before scanning (default true). */
+  require_text: boolean
   recall_index?: string
   propose: ProposeConfig
   curate: CurateConfig
