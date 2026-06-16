@@ -136,13 +136,13 @@ export function createAiGatewayMessageProjector(opts) {
   // and dedup span the whole session, matching pre-extraction behavior.
   const state = createAiGatewayConversationState()
 
-  // In-flight (or settled) committed-row seed promise per conversation_id.
+  // In-flight (or settled) committed-row seed promise per session_id.
   // A live listener is rebuilt fresh on every daemon start/reload
   // (source.js launchListener), so without seeding the seen-set starts
   // empty and a replay of already-committed history re-emits
   // duplicate-part_id rows. Memoizing the PROMISE (not just a "seeded"
   // flag) is load-bearing: two concurrent first exchanges for one
-  // conversation must await the same scan before projecting, or the second
+  // session must await the same scan before projecting, or the second
   // races past a still-empty seen-set and re-emits the rows this guards
   // against.
   /** @type {Map<string, Promise<void>>} */
@@ -165,8 +165,11 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
-      await seedSeenMessagesForConversation(
-        projection.conversation_id,
+      // @ref LLP 0030#decision — seed by session_id (the partition key,
+      // always present). Claude `conversation_id` is null, so seeding on it
+      // would never dedup a replayed Claude session.
+      await seedSeenMessagesForSession(
+        projection.session_id,
         state,
         seedPromises,
         storage,
@@ -189,40 +192,45 @@ export function createAiGatewayMessageProjector(opts) {
 // replay of already-committed history would re-emit same-part_id rows.
 /**
  * Lazily pre-populate `state.seenMessages` with the `message_id`s already
- * committed for one conversation, the FIRST time that conversation is
- * projected in this listener's lifetime. Seeds one conversation at a time
- * (a large cache holds millions of part_ids — a global preload is a memory
- * and scan problem), and only once per conversation per listener.
+ * committed for one session, the FIRST time that session is projected in
+ * this listener's lifetime. Seeds one session at a time (a large cache
+ * holds millions of part_ids — a global preload is a memory and scan
+ * problem), and only once per session per listener.
+ *
+ * Scopes on `session_id` — the partition key (LLP 0030), always present.
+ * Claude `conversation_id` is null, so a conversation-scoped seed would
+ * never dedup a replayed Claude session; the session partition holds all
+ * of a session's committed rows across its threads.
  *
  * The scan promise is memoized SYNCHRONOUSLY in `seedPromises` before the
- * first `await`, so concurrent first exchanges for the same conversation
- * await the same scan instead of racing past an unseeded `seenMessages`
- * and re-emitting the duplicates this guards against. The proxy fires
+ * first `await`, so concurrent first exchanges for the same session await
+ * the same scan instead of racing past an unseeded `seenMessages` and
+ * re-emitting the duplicates this guards against. The proxy fires
  * `onExchangeFinished` without serializing (proxy.js stores the returned
  * promise but does not await it), so this overlap is real.
  *
- * @param {string} conversationId
+ * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {Map<string, Promise<void>>} seedPromises
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @returns {Promise<void>}
  */
-function seedSeenMessagesForConversation(conversationId, state, seedPromises, storage, log) {
-  if (!conversationId) return Promise.resolve()
-  let pending = seedPromises.get(conversationId)
+function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log) {
+  if (!sessionId) return Promise.resolve()
+  let pending = seedPromises.get(sessionId)
   if (!pending) {
     // This body runs to here synchronously (no prior await), so the map is
     // populated before any concurrent caller can observe a missing entry.
-    pending = scanCommittedMessageIds(conversationId, state, storage, log)
-    seedPromises.set(conversationId, pending)
+    pending = scanCommittedMessageIds(sessionId, state, storage, log)
+    seedPromises.set(sessionId, pending)
   }
   return pending
 }
 
 /**
- * Scan committed `ai_gateway_messages` partitions for one conversation and
- * fold their `message_id`s into `state.seenMessages`.
+ * Scan committed `ai_gateway_messages` partitions for one session and fold
+ * their `message_id`s into `state.seenMessages`.
  *
  * Best-effort throughout: a missing storage handle (unit-test stubs), a
  * missing table, or an unreadable partition degrades to "not seeded" and
@@ -231,13 +239,13 @@ function seedSeenMessagesForConversation(conversationId, state, seedPromises, st
  * throwing would drop a real row. The promise still resolves on a
  * partial/failed scan, so it is cached and not retried on every exchange.
  *
- * @param {string} conversationId
+ * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @returns {Promise<void>}
  */
-async function scanCommittedMessageIds(conversationId, state, storage, log) {
+async function scanCommittedMessageIds(sessionId, state, storage, log) {
   if (!canScanCommittedRows(storage)) return
 
   /** @type {CachePartitionMeta[]} */
@@ -246,7 +254,7 @@ async function scanCommittedMessageIds(conversationId, state, storage, log) {
     partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
   } catch (err) {
     log?.warn?.('aigw.seed_seen_messages_failed', {
-      conversation_id: conversationId,
+      session_id: sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
     return
@@ -255,16 +263,16 @@ async function scanCommittedMessageIds(conversationId, state, storage, log) {
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
-    // The dataset is Iceberg-partitioned by `conversation_id`, so a
-    // partition naming a different conversation cannot hold this one's
-    // rows — skip it without a read. The row-level `conversation_id`
-    // filter below is the correctness backstop for source-partitioned or
-    // legacy partitions that don't carry the key in their path.
-    const partitionConversation = part.partition?.conversation_id
-    if (typeof partitionConversation === 'string' && partitionConversation !== conversationId) continue
+    // The dataset is Iceberg-partitioned by `session_id` (LLP 0030), so a
+    // partition naming a different session cannot hold this one's rows —
+    // skip it without a read. The row-level `session_id` filter below is
+    // the correctness backstop for source-partitioned or legacy partitions
+    // that don't carry the key in their path.
+    const partitionSession = part.partition?.session_id
+    if (typeof partitionSession === 'string' && partitionSession !== sessionId) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['message_id', 'conversation_id'])) {
-        if (stringValue(row.conversation_id) !== conversationId) continue
+      for await (const row of storage.readRows(tablePath, ['message_id', 'session_id'])) {
+        if (stringValue(row.session_id) !== sessionId) continue
         const messageId = stringValue(row.message_id)
         if (messageId) state.seenMessages.add(messageId)
       }

@@ -196,9 +196,9 @@ test('aux filter handles attributes arriving as a JSON string', () => {
 test('non-aux rows pass through unchanged (attributes present but no aux_kind)', () => {
   const row = rule('node', 'Session').toRow({
     attributes: { claude: { client_name: 'claude' }, dev_run_id: 'run-1' },
-    conversation_id: 'conv-real',
+    session_id: 'sess-real',
     message_created_at: TS,
   })
   assert.ok(row, 'a real row with attributes but no aux_kind still mints its node')
-  assert.equal(row.natural_key, 'conv-real')
+  assert.equal(row.natural_key, 'sess-real')
 })

@@ -67,7 +67,7 @@ const ROWS = [
 // counts. Seeded only by the aux-exclusion test (the provenance tests use a
 // single-conversation fixture).
 const AUX_ROW = {
-  conversation_id: 'conv-aux', cwd: '/repo', git_branch: 'main', client_name: 'aux-app',
+  session_id: 'sess-aux', conversation_id: null, cwd: '/repo', git_branch: 'main', client_name: 'aux-app',
   user_id: 'u1', model: 'aux-model', tool_name: 'Read', tool_args: '{"file_path":"/repo/secret.py"}',
   part_type: 'tool_call', message_created_at: '2026-06-01T00:02:00.000Z',
   attributes: '{"claude":{"aux_kind":"security_monitor"}}',
@@ -134,7 +134,7 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
     assert.equal(r.edges, 4, 'aux row mints no extra edge')
 
     const auxNode = await executeQuerySql({
-      query: `SELECT node_id FROM node WHERE natural_key = 'conv-aux'`,
+      query: `SELECT node_id FROM node WHERE natural_key = 'sess-aux'`,
       registry,
       storage,
       refresh: 'always',

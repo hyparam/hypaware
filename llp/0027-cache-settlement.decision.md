@@ -169,7 +169,7 @@ coupling between core compaction and the gateway is the documented
   replayed already-committed message is dropped *at projection*, rather than
   leaning on `settleBatch` (which short-circuits for native-uuid batches with no
   fallback rows). See LLP 0026 Consequences and
-  `message_projector.js seedSeenMessagesForConversation`.
+  `message_projector.js seedSeenMessagesForSession`.
 
 ## References
 

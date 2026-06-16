@@ -181,13 +181,14 @@ user tool_result batches have no API message id, so backfill would have to
   `parent_uuid`.
 - Durable live dedup across daemon restarts is now handled: the live
   projector lazily seeds `seenMessages` from the committed `ai_gateway_messages`
-  rows for a conversation the first time that conversation is projected after a
+  rows for a session the first time that session is projected after a
   start/reload, so a replay of already-committed history no longer re-emits
   same-`part_id` rows (`createAiGatewayMessageProjector` →
-  `seedSeenMessagesForConversation`; threaded `ctx.storage` from
-  `source.js launchListener`; issue #108). Seeding is per-conversation and
-  best-effort — a missing/unreadable cache degrades to "not seeded" rather than
-  dropping rows — so it never loads the full cache's part_ids into memory.
+  `seedSeenMessagesForSession`; threaded `ctx.storage` from
+  `source.js launchListener`; issue #108). Seeding is per-session (the
+  partition key, LLP 0030) and best-effort — a missing/unreadable cache
+  degrades to "not seeded" rather than dropping rows — so it never loads the
+  full cache's part_ids into memory.
 - Remaining known gap (out of scope here): id-upgrade reconciliation when a
   fallback row's uuid arrives later.
 

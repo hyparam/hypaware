@@ -532,13 +532,14 @@ test('two Codex threads sharing a session_id keep separate start time and tool l
 })
 
 test('restart replay: seeds seen-set from committed part_ids so prior history re-emits zero rows', async () => {
-  // Simulate the pre-restart listener committing a conversation's rows,
+  // Simulate the pre-restart listener committing a session's rows,
   // then a fresh post-restart listener replaying the SAME history through
   // a stub storage that reports those rows as committed. With the seen-set
   // seeded from committed message_ids, the replay must emit zero rows.
+  // Seeding scopes on session_id — the partition key (LLP 0030).
   const project = () => ({
     provider: 'native',
-    conversation_id: 'conv-restart',
+    session_id: 'sess-restart',
     messages: [
       { role: 'user', content: 'one', message_id: 'uuid-1' },
       { role: 'assistant', content: 'two', message_id: 'uuid-2' },
@@ -555,7 +556,7 @@ test('restart replay: seeds seen-set from committed part_ids so prior history re
 
   // Restart: a brand-new projector with storage reporting the committed rows.
   const storage = stubStorage([
-    { partition: { conversation_id: 'conv-restart' }, rows: committed },
+    { partition: { session_id: 'sess-restart' }, rows: committed },
   ])
   const restarted = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -566,15 +567,15 @@ test('restart replay: seeds seen-set from committed part_ids so prior history re
   assert.equal(replayed.length, 0, 'replay of already-committed history emits no duplicate rows')
 })
 
-test('restart replay: seeding scans each conversation lazily and at most once per listener', async () => {
+test('restart replay: seeding scans each session lazily and at most once per listener', async () => {
   const project = () => ({
     provider: 'native',
-    conversation_id: 'conv-lazy',
+    session_id: 'sess-lazy',
     messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
   })
   let scanCalls = 0
   const storage = stubStorage(
-    [{ partition: { conversation_id: 'conv-lazy' }, rows: [{ message_id: 'uuid-1', conversation_id: 'conv-lazy' }] }],
+    [{ partition: { session_id: 'sess-lazy' }, rows: [{ message_id: 'uuid-1', session_id: 'sess-lazy' }] }],
     () => { scanCalls++ },
   )
   const projector = createAiGatewayMessageProjector({
@@ -585,17 +586,17 @@ test('restart replay: seeding scans each conversation lazily and at most once pe
   await projector.projectExchange(exchange())
   await projector.projectExchange(exchange())
   await projector.projectExchange(exchange())
-  assert.equal(scanCalls, 1, 'a conversation is scanned for committed part_ids at most once per listener')
+  assert.equal(scanCalls, 1, 'a session is scanned for committed part_ids at most once per listener')
 })
 
-test('restart replay: concurrent first exchanges for one conversation seed once and emit no duplicates', async () => {
+test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {
   // The proxy fires onExchangeFinished without serializing, so two first
-  // exchanges for the same conversation can be in flight at once. Both must
+  // exchanges for the same session can be in flight at once. Both must
   // await the same committed-row scan before projecting; otherwise the
   // second races past a still-empty seen-set and re-emits committed rows.
   const project = () => ({
     provider: 'native',
-    conversation_id: 'conv-concurrent',
+    session_id: 'sess-concurrent',
     messages: [
       { role: 'user', content: 'one', message_id: 'uuid-1' },
       { role: 'assistant', content: 'two', message_id: 'uuid-2' },
@@ -603,15 +604,15 @@ test('restart replay: concurrent first exchanges for one conversation seed once 
   })
   let scanCalls = 0
   // The scan awaits discoverCachePartitions, so the seen-set is still empty
-  // when control yields. A per-conversation "seeded" flag set before that
+  // when control yields. A per-session "seeded" flag set before that
   // await would let the second caller through unseeded; awaiting the shared
   // seed promise does not.
   const storage = stubStorage(
     [{
-      partition: { conversation_id: 'conv-concurrent' },
+      partition: { session_id: 'sess-concurrent' },
       rows: [
-        { message_id: 'uuid-1', conversation_id: 'conv-concurrent' },
-        { message_id: 'uuid-2', conversation_id: 'conv-concurrent' },
+        { message_id: 'uuid-1', session_id: 'sess-concurrent' },
+        { message_id: 'uuid-2', session_id: 'sess-concurrent' },
       ],
     }],
     () => { scanCalls++ },
@@ -629,9 +630,9 @@ test('restart replay: concurrent first exchanges for one conversation seed once 
   assert.equal(a.length + b.length, 0, 'both concurrent replays emit zero duplicate rows')
 })
 
-test('restart replay: a different conversation is not deduped against another conversation rows', async () => {
+test('restart replay: a different session is not deduped against another session rows', async () => {
   const storage = stubStorage([
-    { partition: { conversation_id: 'conv-A' }, rows: [{ message_id: 'uuid-A', conversation_id: 'conv-A' }] },
+    { partition: { session_id: 'sess-A' }, rows: [{ message_id: 'uuid-A', session_id: 'sess-A' }] },
   ])
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -639,7 +640,7 @@ test('restart replay: a different conversation is not deduped against another co
       registered('native', {
         project: () => ({
           provider: 'native',
-          conversation_id: 'conv-B',
+          session_id: 'sess-B',
           messages: [{ role: 'user', content: 'fresh', message_id: 'uuid-B' }],
         }),
       }),
@@ -647,7 +648,7 @@ test('restart replay: a different conversation is not deduped against another co
     storage,
   })
   const rows = await projector.projectExchange(exchange())
-  assert.equal(rows.length, 1, 'conv-B is fresh; conv-A committed rows must not suppress it')
+  assert.equal(rows.length, 1, 'sess-B is fresh; sess-A committed rows must not suppress it')
   assert.equal(rows[0].message_id, 'uuid-B')
 })
 
@@ -660,7 +661,7 @@ test('restart replay: with no storage, behavior is unchanged (committed history 
       registered('native', {
         project: () => ({
           provider: 'native',
-          conversation_id: 'conv-nostorage',
+          session_id: 'sess-nostorage',
           messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
         }),
       }),
@@ -681,7 +682,7 @@ test('restart replay: a throwing storage degrades to not-seeded and never drops 
       registered('native', {
         project: () => ({
           provider: 'native',
-          conversation_id: 'conv-throw',
+          session_id: 'sess-throw',
           messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
         }),
       }),

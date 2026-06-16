@@ -28,14 +28,17 @@ import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/trans
 
 /**
  * Minimal `ai_gateway_messages` column set sufficient to exercise the
- * partition declaration (conversation_id/cwd/date), the enricher's
- * transcript match (conversation_id, agent_id, attributes.claude.match_key)
- * and the part_id dedupe.
+ * partition declaration (session_id/conversation_id/cwd/date), the
+ * enricher's transcript match (session_id, agent_id,
+ * attributes.claude.match_key) and the part_id dedupe. session_id is the
+ * non-null partition key (LLP 0030); conversation_id is the nullable thread
+ * within it (null for Claude).
  *
  * @type {ColumnSpec[]}
  */
 const COLUMNS = [
-  { name: 'conversation_id', type: 'STRING', nullable: false },
+  { name: 'session_id', type: 'STRING', nullable: false },
+  { name: 'conversation_id', type: 'STRING', nullable: true },
   { name: 'cwd', type: 'STRING', nullable: true },
   { name: 'date', type: 'STRING', nullable: false },
   { name: 'client_name', type: 'STRING', nullable: true },
@@ -268,7 +271,8 @@ function buildGateway(env) {
 
 function fallbackRow() {
   return {
-    conversation_id: SESSION,
+    session_id: SESSION,
+    conversation_id: null,
     cwd: '/repo',
     date: '2026-05-22',
     client_name: 'claude',
@@ -290,7 +294,8 @@ function fallbackRow() {
 
 function nativeRow() {
   return {
-    conversation_id: SESSION,
+    session_id: SESSION,
+    conversation_id: null,
     cwd: '/repo',
     date: '2026-05-22',
     client_name: 'claude',
