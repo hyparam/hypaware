@@ -433,6 +433,161 @@ test('row output is stripped to the schema (no extra fields leak)', async () => 
   }
 })
 
+test('restart replay: seeds seen-set from committed part_ids so prior history re-emits zero rows', async () => {
+  // Simulate the pre-restart listener committing a conversation's rows,
+  // then a fresh post-restart listener replaying the SAME history through
+  // a stub storage that reports those rows as committed. With the seen-set
+  // seeded from committed message_ids, the replay must emit zero rows.
+  const project = () => ({
+    provider: 'native',
+    conversation_id: 'conv-restart',
+    messages: [
+      { role: 'user', content: 'one', message_id: 'uuid-1' },
+      { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+    ],
+  })
+
+  // First listener (no storage): captures and emits the rows fresh.
+  const first = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', { project })],
+  })
+  const committed = await first.projectExchange(exchange())
+  assert.equal(committed.length, 2, 'first capture writes both messages')
+
+  // Restart: a brand-new projector with storage reporting the committed rows.
+  const storage = stubStorage([
+    { partition: { conversation_id: 'conv-restart' }, rows: committed },
+  ])
+  const restarted = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', { project })],
+    storage,
+  })
+  const replayed = await restarted.projectExchange(exchange())
+  assert.equal(replayed.length, 0, 'replay of already-committed history emits no duplicate rows')
+})
+
+test('restart replay: seeding scans each conversation lazily and at most once per listener', async () => {
+  const project = () => ({
+    provider: 'native',
+    conversation_id: 'conv-lazy',
+    messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
+  })
+  let scanCalls = 0
+  const storage = stubStorage(
+    [{ partition: { conversation_id: 'conv-lazy' }, rows: [{ message_id: 'uuid-1', conversation_id: 'conv-lazy' }] }],
+    () => { scanCalls++ },
+  )
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', { project })],
+    storage,
+  })
+  await projector.projectExchange(exchange())
+  await projector.projectExchange(exchange())
+  await projector.projectExchange(exchange())
+  assert.equal(scanCalls, 1, 'a conversation is scanned for committed part_ids at most once per listener')
+})
+
+test('restart replay: a different conversation is not deduped against another conversation rows', async () => {
+  const storage = stubStorage([
+    { partition: { conversation_id: 'conv-A' }, rows: [{ message_id: 'uuid-A', conversation_id: 'conv-A' }] },
+  ])
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: () => ({
+          provider: 'native',
+          conversation_id: 'conv-B',
+          messages: [{ role: 'user', content: 'fresh', message_id: 'uuid-B' }],
+        }),
+      }),
+    ],
+    storage,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 1, 'conv-B is fresh; conv-A committed rows must not suppress it')
+  assert.equal(rows[0].message_id, 'uuid-B')
+})
+
+test('restart replay: with no storage, behavior is unchanged (committed history is not seeded)', async () => {
+  // Without a storage handle the projector cannot seed, so a replay re-emits
+  // rows exactly as the pre-fix behavior did within one listener lifetime.
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: () => ({
+          provider: 'native',
+          conversation_id: 'conv-nostorage',
+          messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
+        }),
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 1, 'with no storage the first projection still emits its rows')
+})
+
+test('restart replay: a throwing storage degrades to not-seeded and never drops rows', async () => {
+  const storage = {
+    discoverCachePartitions() { throw new Error('boom') },
+    async *readRows() {},
+  }
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('native', {
+        project: () => ({
+          provider: 'native',
+          conversation_id: 'conv-throw',
+          messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
+        }),
+      }),
+    ],
+    storage,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 1, 'a seeding failure must never throw and never drop a row')
+})
+
+/**
+ * Minimal `ExtendedQueryStorageService`-shaped stub exposing only the
+ * committed-partition read surface the projector feature-detects:
+ * `discoverCachePartitions` + `readRows`.
+ *
+ * @param {Array<{ partition: Record<string, string>, rows: Record<string, unknown>[] }>} parts
+ * @param {() => void} [onScan]
+ */
+function stubStorage(parts, onScan) {
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const byPath = new Map()
+  const partitions = parts.map((part, index) => {
+    const path = `/cache/part-${index}`
+    byPath.set(path, part.rows)
+    return { dataset: 'ai_gateway_messages', partition: part.partition, path, epoch: 0, rowCount: part.rows.length }
+  })
+  return {
+    async discoverCachePartitions() {
+      onScan?.()
+      return partitions
+    },
+    /** @param {string} tablePath @param {string[]=} columns */
+    async *readRows(tablePath, columns) {
+      const rows = byPath.get(tablePath) ?? []
+      for (const row of rows) {
+        if (!columns) { yield row; continue }
+        /** @type {Record<string, unknown>} */
+        const projected = {}
+        for (const column of columns) projected[column] = row[column]
+        yield projected
+      }
+    },
+  }
+}
+
 /**
  * @param {string} provider
  */

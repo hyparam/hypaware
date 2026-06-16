@@ -5,9 +5,12 @@ import { createHash } from 'node:crypto'
 export const SCHEMA_VERSION = 5
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, ColumnSpec, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
  * @import { RegisteredProjector } from './types.d.ts'
  */
+
+const DATASET_NAME = 'ai_gateway_messages'
 
 /**
  * HypAware's normalized AI gateway message-part query schema.
@@ -112,17 +115,27 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  * @param {{
  *   gatewayId: string,
  *   projectors: RegisteredProjector[],
+ *   storage?: ExtendedQueryStorageService | QueryStorageService,
  *   log?: PluginLogger | { warn(message: string, fields?: Record<string, unknown>): void, info?: (m: string, f?: Record<string, unknown>) => void },
  * }} opts
  */
 export function createAiGatewayMessageProjector(opts) {
   const gatewayId = opts.gatewayId || 'hypaware-local'
   const projectors = Array.isArray(opts.projectors) ? opts.projectors : []
+  const storage = opts.storage
   const log = opts.log
 
   // One persistent conversation state per listener: identity history
   // and dedup span the whole session, matching pre-extraction behavior.
   const state = createAiGatewayConversationState()
+
+  // Conversations whose committed message_ids have already been folded
+  // into `state.seenMessages`. A live listener is rebuilt fresh on every
+  // daemon start/reload (source.js launchListener), so without this the
+  // set starts empty and a replay of already-committed history re-emits
+  // duplicate-part_id rows.
+  /** @type {Set<string>} */
+  const seededConversations = new Set()
 
   return {
     /**
@@ -141,6 +154,14 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
+      await seedSeenMessagesForConversation(
+        projection.conversation_id,
+        state,
+        seededConversations,
+        storage,
+        log
+      )
+
       return aiGatewayRowsFromProjectedExchange(projection, {
         gatewayId,
         gatewayAttributes: buildGatewayAttributes(input),
@@ -149,6 +170,84 @@ export function createAiGatewayMessageProjector(opts) {
       })
     },
   }
+}
+
+// @ref LLP 0026#consequences [implements] — closes the "durable live dedup
+// across daemon restarts (seed the seen-set from committed part_ids)" gap:
+// the in-memory seen-set is rebuilt empty on every restart/reload, so a
+// replay of already-committed history would re-emit same-part_id rows.
+/**
+ * Lazily pre-populate `state.seenMessages` with the `message_id`s already
+ * committed for one conversation, the FIRST time that conversation is
+ * projected in this listener's lifetime. Seeds one conversation at a time
+ * (a large cache holds millions of part_ids — a global preload is a memory
+ * and scan problem), and only once per conversation per listener.
+ *
+ * Best-effort throughout: a missing storage handle (unit-test stubs), a
+ * missing table, or an unreadable partition degrades to "not seeded" and
+ * NEVER throws — a seeding miss only risks the duplicate this guards
+ * against (which settlement/compaction can still collapse), whereas
+ * throwing would drop a real row. The conversation is marked seeded
+ * regardless so a partial/failed scan is not retried on every exchange.
+ *
+ * @param {string} conversationId
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @param {Set<string>} seededConversations
+ * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
+ * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ */
+async function seedSeenMessagesForConversation(conversationId, state, seededConversations, storage, log) {
+  if (!conversationId || seededConversations.has(conversationId)) return
+  seededConversations.add(conversationId)
+  if (!canScanCommittedRows(storage)) return
+
+  /** @type {CachePartitionMeta[]} */
+  let partitions = []
+  try {
+    partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
+  } catch (err) {
+    log?.warn?.('aigw.seed_seen_messages_failed', {
+      conversation_id: conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return
+  }
+
+  for (const part of partitions ?? []) {
+    const tablePath = part?.path
+    if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
+    // The dataset is Iceberg-partitioned by `conversation_id`, so a
+    // partition naming a different conversation cannot hold this one's
+    // rows — skip it without a read. The row-level `conversation_id`
+    // filter below is the correctness backstop for source-partitioned or
+    // legacy partitions that don't carry the key in their path.
+    const partitionConversation = part.partition?.conversation_id
+    if (typeof partitionConversation === 'string' && partitionConversation !== conversationId) continue
+    try {
+      for await (const row of storage.readRows(tablePath, ['message_id', 'conversation_id'])) {
+        if (stringValue(row.conversation_id) !== conversationId) continue
+        const messageId = stringValue(row.message_id)
+        if (messageId) state.seenMessages.add(messageId)
+      }
+    } catch {
+      // Skip an unreadable partition; others still contribute.
+      continue
+    }
+  }
+}
+
+/**
+ * Feature-detect the committed-partition read surface. A bare storage stub
+ * (unit tests that only assert row shape) has neither method, so seeding is
+ * skipped and the projector behaves exactly as before.
+ *
+ * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
+ * @returns {storage is QueryStorageService}
+ */
+function canScanCommittedRows(storage) {
+  return !!storage &&
+    typeof storage.discoverCachePartitions === 'function' &&
+    typeof storage.readRows === 'function'
 }
 
 /**
