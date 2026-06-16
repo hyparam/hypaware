@@ -18,7 +18,7 @@ import {
   validateIcebergPartitionFields,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
-import { createCacheSpool, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
+import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INTERNAL_FIELDS } from './streaming-reader.js'
 
 import path from 'node:path'
@@ -293,9 +293,50 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       return discoverCachePartitionsImpl(cacheRoot, scope)
     },
 
+    // @ref LLP 0027#open-questions [implements] — read-only spool surface so
+    // `hyp backfill` can dedupe against rows captured live but not yet flushed,
+    // which the committed-partition scan cannot see. Inspection-only: never
+    // rotates or advances flush progress, so it is safe alongside live capture.
+    async *readSpooledRows(dataset, columns) {
+      if (!dataset) return
+      /** @type {string[]} */
+      let tables = []
+      try {
+        tables = await discoverSpoolTables(cacheRoot)
+      } catch {
+        return
+      }
+      for (const tablePath of tables) {
+        if (datasetForTablePath(cacheRoot, tablePath) !== dataset) continue
+        for await (const row of spool.readSpooledRows(tablePath)) {
+          for (const f of INTERNAL_FIELDS) delete row[f]
+          yield columns ? projectRow(row, columns) : row
+        }
+      }
+    },
+
     pendingInfo(tablePath) {
       return spool.pendingInfo(tablePath)
     },
   }
   return service
+}
+
+/**
+ * Narrow a spooled row to the requested columns. Keeps the spool reader
+ * parity with `readRows`, which projects committed rows to the same
+ * column subset, so a caller folding both into one seen-set compares
+ * like-for-like keys.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {string[]} columns
+ * @returns {Record<string, unknown>}
+ */
+function projectRow(row, columns) {
+  /** @type {Record<string, unknown>} */
+  const out = {}
+  for (const col of columns) {
+    if (col in row) out[col] = row[col]
+  }
+  return out
 }

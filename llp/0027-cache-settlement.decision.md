@@ -91,13 +91,21 @@ the match key is fragile.
   un-flushed spool rows can still see a provisional fallback id. For a local cache
   this is an acceptable contract (continues LLP 0013's spool-is-provisional stance).
 
-## Open questions / residue (out of scope here)
+## Open questions
 
 - A fallback row committed (flushed) *before* its uuid twin arrives, then never
   re-flushed, is not merged — compaction can't collapse it. Rare given the debounce
   vs race gap; a future maintenance sweep could re-settle committed fallback rows.
-- Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
-  spooled rows in the materializer) — separate fix.
+- ~~Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
+  spooled rows in the materializer) — separate fix.~~ **Resolved (issue #107):** the
+  backfill materializer now folds spooled `part_id`s into its pre-write dedupe
+  seen-set, so a `hyp backfill` run no longer re-materializes rows that are captured
+  live but still sitting unflushed in the spool. The settle path is deliberately
+  **excluded** from this spool scan — the rows it settles at flush *are* the spool
+  rows, so seeding them into its seen-set would drop the very rows being flushed.
+  See `scanSpooledPartIds` / `createBackfillDedupe` in
+  `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` and the read-only
+  `readSpooledRows` surface added to `src/core/cache/storage.js`.
 - Restart-replay seen-set seeding from committed `part_id`s.
 
 ## References

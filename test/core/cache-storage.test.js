@@ -269,3 +269,70 @@ test('spool flush uses resolveSourceSegments when declaration is provided', asyn
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+/* ------------------- readSpooledRows (issue #107) ------------------------ */
+
+/** @param {AsyncIterable<Record<string, unknown>>} gen */
+async function drain(gen) {
+  /** @type {Record<string, unknown>[]} */
+  const out = []
+  for await (const row of gen) out.push(row)
+  return out
+}
+
+test('readSpooledRows yields unflushed rows and goes empty after flush', async () => {
+  const cacheRoot = await makeTmpDir('spool-read')
+  try {
+    const storage = createQueryStorageService({ cacheRoot })
+    const tablePath = storage.cacheTablePath('my_ds', ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, SIMPLE_COLUMNS, [
+      { id: 1, value: 'a' },
+      { id: 2, value: 'b' },
+    ])
+
+    // Before flush, the rows live only in the spool — invisible to the
+    // committed-partition scan but visible to readSpooledRows.
+    const pending = await drain(storage.readSpooledRows('my_ds'))
+    assert.equal(pending.length, 2)
+    assert.deepEqual(pending.map((r) => r.id).sort(), [1, 2])
+
+    await storage.flushTable(tablePath, { force: true })
+
+    // After flush the spool files are gone, so the spool read is empty.
+    const afterFlush = await drain(storage.readSpooledRows('my_ds'))
+    assert.deepEqual(afterFlush, [])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('readSpooledRows projects to requested columns and filters by dataset', async () => {
+  const cacheRoot = await makeTmpDir('spool-read-proj')
+  try {
+    const storage = createQueryStorageService({ cacheRoot })
+    const mine = storage.cacheTablePath('ds_a', ['proxy_messages_v4'])
+    const other = storage.cacheTablePath('ds_b', ['proxy_messages_v4'])
+
+    await storage.appendRows(mine, SIMPLE_COLUMNS, [{ id: 1, value: 'keep' }])
+    await storage.appendRows(other, SIMPLE_COLUMNS, [{ id: 9, value: 'other' }])
+
+    const rows = await drain(storage.readSpooledRows('ds_a', ['id']))
+    assert.equal(rows.length, 1)
+    // Projection drops `value`; dataset filter excludes ds_b entirely.
+    assert.deepEqual(rows[0], { id: 1 })
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('readSpooledRows on an unknown dataset is an empty stream', async () => {
+  const cacheRoot = await makeTmpDir('spool-read-empty')
+  try {
+    const storage = createQueryStorageService({ cacheRoot })
+    assert.deepEqual(await drain(storage.readSpooledRows('nope')), [])
+    assert.deepEqual(await drain(storage.readSpooledRows('')), [])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

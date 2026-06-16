@@ -309,6 +309,12 @@ function createSettleBatch(state) {
  * pre-write dedupe (committed scan + per-call fold-in), so an upgraded
  * fallback row collapses onto the canonical committed uuid row.
  *
+ * Scans ONLY committed partitions — deliberately NOT the spool. The rows
+ * passed here are the batch being flushed out of the spool, so seeding
+ * the seen-set with spool `part_id`s would make every row match itself
+ * and be dropped (see scanSpooledPartIds's hazard note). That spool scan
+ * belongs to backfill alone.
+ *
  * @param {Record<string, unknown>[]} rows
  * @param {DatasetSettleContext} ctx
  * @returns {Promise<Record<string, unknown>[]>}
@@ -417,10 +423,13 @@ export function aiGatewayBackfillMaterializer() {
  * re-scans and observes the prior run's now-committed rows — which is
  * what makes a clean rerun write zero new rows.
  *
- * Reads see only committed (flushed) partitions, so a run interrupted
- * before its end-of-run flush leaves rows in the durable spool that the
- * next run's scan cannot see; compaction's content-hash dedupe is the
- * documented backup for that residual window.
+ * The seen-set is seeded from two sources: the committed (flushed)
+ * Iceberg partitions AND the rows still pending in the spool — captured
+ * live but not yet flushed (issue #107). Without the spool scan, backfill
+ * re-materializes its own copy of an unflushed live row and the spool
+ * later flushes its copy, leaving two rows with the same `part_id`. The
+ * spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
+ * settle path must never fold spool rows into its seen-set.
  *
  * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
  */
@@ -438,7 +447,12 @@ function createBackfillDedupe() {
 
       const runId = ctx?.devRunId
       if (!memo || memo.runId !== runId) {
-        memo = { runId, seen: await scanExistingPartIds(storage) }
+        const seen = await scanExistingPartIds(storage)
+        // Fold in part_ids pending in the spool so backfill does not
+        // re-materialize a row that was captured live and is still waiting
+        // to flush. Opt-in to the backfill path only — see scanSpooledPartIds.
+        await scanSpooledPartIds(storage, seen)
+        memo = { runId, seen }
       }
       const seen = memo.seen
 
@@ -505,6 +519,53 @@ async function scanExistingPartIds(storage) {
     }
   }
   return seen
+}
+
+/**
+ * Fold the `part_id`s of rows still pending in the spool into `seen`.
+ * These are rows captured live but not yet flushed to a committed
+ * partition, so `scanExistingPartIds` cannot see them. Folding them in
+ * lets `hyp backfill` skip re-materializing a row whose live copy is
+ * about to flush — the fix for issue #107.
+ *
+ * CRITICAL HAZARD — BACKFILL ONLY. This must never be wired into the
+ * flush-time settle path (`createSettleBatch` -> `dedupeByPartId`). At
+ * flush, the rows being settled ARE the spool rows; if the settle
+ * seen-set contained spool `part_id`s, every row would match itself and
+ * be dropped — the flush would delete the data it is committing. So the
+ * spool scan stays opt-in and is invoked only from `createBackfillDedupe`.
+ *
+ * Best-effort like the committed scan: a storage stub without the spool
+ * read surface, or any read error, leaves `seen` untouched — a dedupe
+ * miss only risks a duplicate compaction can later collapse, whereas
+ * throwing would abort the backfill.
+ *
+ * @ref LLP 0027#open-questions [implements] — resolves the documented
+ *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
+ *   rows in the materializer (not the settle path).
+ *
+ * @param {QueryStorageService} storage
+ * @param {Set<string>} seen
+ * @returns {Promise<void>}
+ */
+async function scanSpooledPartIds(storage, seen) {
+  if (!canScanSpooledRows(storage)) return
+  try {
+    for await (const row of storage.readSpooledRows(DATASET_NAME, ['part_id', 'message_id', 'part_index'])) {
+      const key = partIdKey(row)
+      if (key !== undefined) seen.add(key)
+    }
+  } catch {
+    // Spool unreadable mid-scan: keep whatever we folded in already.
+  }
+}
+
+/**
+ * @param {QueryStorageService | undefined} storage
+ * @returns {storage is ExtendedQueryStorageService}
+ */
+function canScanSpooledRows(storage) {
+  return !!storage && typeof (/** @type {any} */ (storage).readSpooledRows) === 'function'
 }
 
 /**
