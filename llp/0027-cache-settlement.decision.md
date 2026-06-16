@@ -125,15 +125,26 @@ adopt it now as a **backstop**, not a replacement for the flush-time pass.
    `part_id` now collides with one already emitted from this partition (its
    native twin) is dropped — the native twin wins. A row whose identity did not
    change is never dropped.
-4. **Force the rewrite when needed.** A cheap `attributes`-only scan gates the
-   sweep: a partition holding any `identity_source = 'gateway_fallback'` row is
-   rewritten even when file-count heuristics say compaction isn't due, so a split
-   pair in a small, never-compacted partition still gets collapsed.
+4. **Force the rewrite when needed — but only on new data.** A cheap
+   `attributes`-only scan gates the sweep: a partition holding any
+   `identity_source = 'gateway_fallback'` row is rewritten even when file-count
+   heuristics say compaction isn't due, so a split pair in a small,
+   never-compacted partition still gets collapsed. To avoid forcing that rewrite
+   *every* tick, the gate also requires the partition's live data-file count to
+   have moved off the **re-settle baseline** — the file count recorded in the
+   cursor's `compaction` block at the previous sweep. A fallback row whose
+   transcript line never lands (harness aux, wire-only reminders) is genuinely
+   unmatchable; without the baseline it would re-trigger a full rewrite forever
+   (the marker persists, and after a clean rewrite the forced sweep is the only
+   trigger left). The baseline makes an unchanged fallback set retried only when
+   new data has flushed.
 
-Conservative and idempotent: an enricher miss/failure leaves the fallback row
-untouched for a later sweep, and a second sweep is a no-op (the survivor is no
-longer fallback). The only coupling between core compaction and the gateway is
-the documented `gateway_fallback` marker.
+Conservative and bounded: an enricher miss/failure leaves the fallback row
+untouched for a later sweep; a matchable second sweep collapses the twin and the
+survivor is no longer fallback; and an **unmatchable** fallback set, once swept,
+does not force another rewrite until new data flushes past the baseline. The only
+coupling between core compaction and the gateway is the documented
+`gateway_fallback` marker.
 
 ## Open questions / residue (out of scope here)
 

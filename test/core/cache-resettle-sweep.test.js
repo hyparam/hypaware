@@ -159,10 +159,97 @@ test('re-settle sweep leaves the fallback row untouched when the transcript is u
   }
 })
 
+// Config under which the file-count/avg-size heuristics never fire, so the
+// ONLY thing that can trigger a compaction is the fallback-marker auto-sweep.
+const NO_NATURAL_COMPACTION = { compact_file_count: 1000, compact_avg_file_bytes: 1 }
+
+test('a fallback marker auto-triggers compaction without force; a no-marker partition does not', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    // No-marker partition: a lone native row. needsCompaction is false here,
+    // so without a fallback marker nothing should rewrite it.
+    await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
+    await storage.flushTable(tablePath, { force: true })
+
+    const noMarker = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.equal(noMarker.totalCompacted, 0, 'a partition with no fallback marker is left alone')
+
+    // Now add a fallback marker in the SAME partition. It must commit
+    // provisionally (transcript absent at flush time, or flush-time settle
+    // would upgrade it and leave no marker); the transcript lands afterward.
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    await writeTranscript(env, SESSION, [nativeAssistantLine()])
+
+    const withMarker = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.ok(withMarker.totalCompacted > 0, 'the fallback marker alone triggers a non-force sweep')
+    const after = await readPartIds(storage, tablePath)
+    assert.deepEqual(after, ['u-assist#0'], 'the matched fallback collapsed onto the native twin')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an unmatchable fallback does not force a rewrite every tick — only on new data', async () => {
+  // Regression for the forced-rewrite loop: a fallback whose transcript never
+  // lands stays a candidate forever. Without the re-settle baseline it would
+  // force a full rewrite on every maintenance tick. The baseline makes the
+  // sweep retry only when new data has flushed since the last rewrite.
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    // Unmatchable fallback (no transcript), flushed alone.
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+
+    const first = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.ok(first.totalCompacted > 0, 'first sweep rewrites once to attempt the re-settle')
+
+    // No new data: the sweep must NOT rewrite again (the loop this fixes).
+    const second = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.equal(second.totalCompacted, 0, 'an unchanged unmatchable fallback does not re-trigger a rewrite')
+
+    // New data flushes in: the sweep is retried (the transcript may now exist).
+    await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
+    await storage.flushTable(tablePath, { force: true })
+    const third = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.ok(third.totalCompacted > 0, 'genuine new data re-triggers the sweep')
+
+    // ...and once that rewrite settles, a further idle tick is again a no-op.
+    const fourth = await maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    assert.equal(fourth.totalCompacted, 0, 'no further rewrites without new data')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
 
 /**
- * @param {{ homeDir: string, stateFile: string }} env
+ * @param {{ homeDir: string, stateFile: string, cacheRoot: string }} env
  */
 function buildGateway(env) {
   const state = createGatewayState()

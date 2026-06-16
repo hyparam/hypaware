@@ -198,8 +198,16 @@ async function maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpire
     // @ref LLP 0027#re-settle-sweep — a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
-    // when the file-count heuristics say compaction isn't due.
-    const hasResettle = settle ? await hasResettleCandidate(tableDir) : false
+    // when the file-count heuristics say compaction isn't due. Gate that
+    // force on NEW data having flushed since the last sweep (the live
+    // data-file count moved off the recorded baseline): an unmatchable
+    // fallback — one whose transcript line never lands (harness aux,
+    // wire-only reminders) — would otherwise force a full rewrite every
+    // tick forever. The cheap baseline check also lets us skip the
+    // attributes scan entirely when nothing new has flushed.
+    const hasResettle = settle
+      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(tableDir)
+      : false
     const shouldCompact = opts.force || hasResettle || needsCompaction(tableDir, cfg)
     if (shouldCompact && !opts.dryRun) {
       const result = await compactSourceTable(r.path, cursor, cfg, settle)
@@ -247,8 +255,12 @@ async function maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snaps
   }
 
   if (!opts.expireOnly) {
-    // @ref LLP 0027#re-settle-sweep — same backstop on the legacy layout.
-    const hasResettle = settle ? await hasResettleCandidate(epochDir) : false
+    // @ref LLP 0027#re-settle-sweep — same backstop on the legacy layout,
+    // with the same new-data gate so an unmatchable fallback does not force
+    // a rewrite every tick.
+    const hasResettle = settle
+      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(epochDir)
+      : false
     const shouldCompact = opts.force || hasResettle || needsCompaction(epochDir, cfg)
     if (shouldCompact && !opts.dryRun) {
       const result = await compactPartition(part.path, cursor, cfg, settle)
@@ -568,6 +580,7 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
       compaction: {
         previousTableDir: oldTableDirName,
         compactedAt: new Date().toISOString(),
+        resettleBaselineFiles: 0,
       },
       layout: 'source-table',
       tableDir: newTableDirName,
@@ -585,12 +598,17 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
     await appendRowsToTable(newTableDir, columns, [], appendOpts)
   }
 
+  // Record the post-rewrite data-file count as the re-settle baseline: the
+  // next tick only forces another re-settle sweep once new data flushes past
+  // this count, so an unmatchable fallback does not loop (LLP 0027).
+  const newDataFiles = countDataFiles(newTableDir)
   await writeCursor(partitionDir, {
     epoch: cursor.epoch,
     rowCount: totalRows,
     compaction: {
       previousTableDir: oldTableDirName,
       compactedAt: new Date().toISOString(),
+      resettleBaselineFiles: newDataFiles,
     },
     layout: 'source-table',
     tableDir: newTableDirName,
@@ -602,7 +620,7 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
 
   return {
     rowCount: totalRows,
-    dataFiles: countDataFiles(newTableDir),
+    dataFiles: newDataFiles,
   }
 }
 
@@ -702,12 +720,14 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
     await appendRowsToTable(newEpochDir, columns, [], appendOpts)
   }
 
+  const newDataFiles = countDataFiles(newEpochDir)
   await writeCursor(partitionDir, {
     epoch: newEpoch,
     rowCount: totalRows,
     compaction: {
       previousEpoch: cursor.epoch,
       compactedAt: new Date().toISOString(),
+      resettleBaselineFiles: newDataFiles,
     },
   })
 
@@ -717,7 +737,7 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
   return {
     newEpoch,
     rowCount: totalRows,
-    dataFiles: countDataFiles(newEpochDir),
+    dataFiles: newDataFiles,
   }
 }
 
@@ -881,6 +901,24 @@ function isGatewayFallbackRow(row) {
   if (!isPlainObject(parsed)) return false
   const gateway = parsed.gateway
   return isPlainObject(gateway) && gateway.identity_source === 'gateway_fallback'
+}
+
+/**
+ * The data-file count recorded the last time a settle-compaction rewrote this
+ * partition (the "re-settle baseline"). The forced re-settle sweep compares the
+ * live data-file count against this: equal means no new data has flushed since
+ * the last sweep, so re-running settle would reproduce the same result. An
+ * unmatchable fallback row therefore stops forcing a rewrite every tick and is
+ * retried only when genuinely new data lands. Undefined for a partition never
+ * compacted (first sweep always runs). @ref LLP 0027#re-settle-sweep
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {number | undefined}
+ */
+function resettleBaselineFiles(cursor) {
+  const c = cursor.compaction
+  if (isPlainObject(c) && typeof c.resettleBaselineFiles === 'number') return c.resettleBaselineFiles
+  return undefined
 }
 
 /** @param {string} value */
