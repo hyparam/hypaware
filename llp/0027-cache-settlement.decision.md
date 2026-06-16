@@ -91,11 +91,55 @@ the match key is fragile.
   un-flushed spool rows can still see a provisional fallback id. For a local cache
   this is an acceptable contract (continues LLP 0013's spool-is-provisional stance).
 
+## Re-settle sweep {#re-settle-sweep}
+
+Flush-time settlement above only collapses a fallback/uuid twin pair when both
+rows land in the **same flush batch**. The finalize-vs-transcript race can flush
+a fallback row **alone** — its transcript line not yet on disk, so the enricher
+can't upgrade it, and its uuid twin is still in a later flush. That row commits
+unsettled, and the flush path (append-only, no row-delete, short-circuits on a
+batch with no fallback rows) can never revisit it. `--refresh always` forces a
+query-time flush that lands in the gap, so it surfaces the duplicate reliably,
+but natural flushing hits the same race — the zero-dup result is empirical, not
+guaranteed. This is the residue Option B (compaction-time) was rejected for; we
+adopt it now as a **backstop**, not a replacement for the flush-time pass.
+
+**Decision.** Cache maintenance runs a re-settle sweep during compaction:
+
+1. **Same partition, guaranteed.** Twins share content/role/conversation/date,
+   so they share the Iceberg partition key (`conversation_id`/`cwd`/`date`) and
+   always live in the **same** partition. A single-partition compaction rewrite
+   is therefore enough to collapse them — no cross-partition scan.
+2. **Reuse the flush enricher.** The dataset exposes a second hook,
+   `resettleBatch`, that the maintenance pass threads in alongside a storage
+   handle (resolving Option B's "`maintainCache` has no registry/storage handle"
+   blocker: `runDaemon` and `hyp query maintain` now pass
+   `getSettleHook: d => query.getDataset(d)?.resettleBatch` + `storage`).
+   `resettleBatch` runs the **same** transcript upgrade as `settleBatch` but
+   **omits** the committed-`part_id` dedupe — at sweep time the rows are already
+   committed, so a committed-scan would match a non-upgraded fallback against its
+   own committed copy and wrongly drop it. The rewrite owns the de-twin instead.
+3. **De-twin within the rewrite.** During the rewrite, non-fallback rows emit
+   immediately (bounded heap) while committed fallback rows are buffered; at
+   end-of-scan the buffer is upgraded, and an **upgraded** row whose native
+   `part_id` now collides with one already emitted from this partition (its
+   native twin) is dropped — the native twin wins. A row whose identity did not
+   change is never dropped.
+4. **Force the rewrite when needed.** A cheap `attributes`-only scan gates the
+   sweep: a partition holding any `identity_source = 'gateway_fallback'` row is
+   rewritten even when file-count heuristics say compaction isn't due, so a split
+   pair in a small, never-compacted partition still gets collapsed.
+
+Conservative and idempotent: an enricher miss/failure leaves the fallback row
+untouched for a later sweep, and a second sweep is a no-op (the survivor is no
+longer fallback). The only coupling between core compaction and the gateway is
+the documented `gateway_fallback` marker.
+
 ## Open questions / residue (out of scope here)
 
-- A fallback row committed (flushed) *before* its uuid twin arrives, then never
-  re-flushed, is not merged — compaction can't collapse it. Rare given the debounce
-  vs race gap; a future maintenance sweep could re-settle committed fallback rows.
+- ~~A fallback row committed before its uuid twin arrives, then never re-flushed,
+  is not merged.~~ **Resolved** by the [re-settle sweep](#re-settle-sweep): a
+  committed fallback row is upgraded and de-twinned during compaction.
 - Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
   spooled rows in the materializer) — separate fix.
 - Restart-replay seen-set seeding from committed `part_id`s.
@@ -106,5 +150,6 @@ the match key is fragile.
 - [LLP 0016](./0016-ai-gateway.decision.md) — gateway owns schema; adapters contribute
 - [LLP 0026](./0026-claude-native-granularity.decision.md) — granularity convergence
 - `src/core/cache/storage.js` — `appendChunk` flush hook point
-- `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` — `settleBatch`, dedup
+- `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` — `settleBatch`, `resettleBatch`, dedup
 - `hypaware-core/plugins-workspace/claude/src/settle.js` — the enricher
+- `src/core/cache/maintenance.js` — the re-settle sweep (buffer/upgrade/de-twin during compaction)
