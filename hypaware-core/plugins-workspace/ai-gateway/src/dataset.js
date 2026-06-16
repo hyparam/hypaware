@@ -233,6 +233,7 @@ export function aiGatewayDatasetRegistration(state) {
     refreshPartition,
     createDataSource,
     settleBatch: createSettleBatch(state),
+    resettleBatch: createResettleBatch(state),
   }
 }
 
@@ -259,48 +260,81 @@ export function aiGatewayDatasetRegistration(state) {
 function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
-    const hasFallback = rows.some(isFallbackRow)
-    if (!hasFallback) return rows
-
-    let settled = rows
-    const enrichers = state?.enrichers
-    if (enrichers && enrichers.size > 0) {
-      /** @type {Map<string, Record<string, unknown>[]>} */
-      const byClient = new Map()
-      for (const row of rows) {
-        if (!isFallbackRow(row)) continue
-        const client = stringValue(row.client_name)
-        const enricher = client ? enrichers.get(client) : undefined
-        if (!enricher) continue
-        const list = byClient.get(client ?? '')
-        if (list) list.push(row)
-        else byClient.set(client ?? '', [row])
-      }
-      if (byClient.size > 0) {
-        /** @type {Map<Record<string, unknown>, Record<string, unknown>>} */
-        const upgrades = new Map()
-        for (const [client, group] of byClient) {
-          const enricher = enrichers.get(client)
-          if (!enricher) continue
-          try {
-            const out = await enricher.settle(group, ctx)
-            for (let i = 0; i < group.length && i < out.length; i++) {
-              if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
-            }
-          } catch {
-            // An enricher failure must never drop rows — leave the
-            // group as provisional fallback; a later flush can retry.
-            continue
-          }
-        }
-        if (upgrades.size > 0) {
-          settled = rows.map((row) => upgrades.get(row) ?? row)
-        }
-      }
-    }
-
+    if (!rows.some(isFallbackRow)) return rows
+    const settled = await upgradeFallbackRows(rows, state, ctx)
     return dedupeByPartId(settled, ctx)
   }
+}
+
+/**
+ * Build the maintenance re-settle pass (LLP 0027 "Re-settle sweep"). This
+ * is the flush-time settle WITHOUT the committed-`part_id` dedupe: in the
+ * sweep the rows handed in are ALREADY committed, so a committed-scan
+ * dedupe would match a non-upgraded fallback against its own committed
+ * copy and wrongly drop it. The maintenance rewrite owns the de-twin
+ * instead — it has both committed twins of the partition in hand and
+ * collapses an upgraded fallback against the native twin within the
+ * rewrite set. So this pass upgrades fallback rows to native identity and
+ * returns them; it never drops a row.
+ *
+ * @param {GatewayState | undefined} state
+ * @returns {(rows: Record<string, unknown>[], ctx: DatasetSettleContext) => Promise<Record<string, unknown>[]>}
+ */
+function createResettleBatch(state) {
+  return async function resettleBatch(rows, ctx) {
+    if (!Array.isArray(rows) || rows.length === 0) return rows
+    if (!rows.some(isFallbackRow)) return rows
+    return upgradeFallbackRows(rows, state, ctx)
+  }
+}
+
+/**
+ * Dispatch fallback rows to the registered settlement enricher for their
+ * `client_name` and return the batch with matched rows upgraded to native
+ * identity. Unmatched rows (no transcript line, enricher failure) and
+ * non-fallback rows are returned unchanged. Pure with respect to dedupe:
+ * it never drops a row.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @param {GatewayState | undefined} state
+ * @param {DatasetSettleContext} ctx
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function upgradeFallbackRows(rows, state, ctx) {
+  const enrichers = state?.enrichers
+  if (!enrichers || enrichers.size === 0) return rows
+
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const byClient = new Map()
+  for (const row of rows) {
+    if (!isFallbackRow(row)) continue
+    const client = stringValue(row.client_name)
+    const enricher = client ? enrichers.get(client) : undefined
+    if (!enricher) continue
+    const list = byClient.get(client ?? '')
+    if (list) list.push(row)
+    else byClient.set(client ?? '', [row])
+  }
+  if (byClient.size === 0) return rows
+
+  /** @type {Map<Record<string, unknown>, Record<string, unknown>>} */
+  const upgrades = new Map()
+  for (const [client, group] of byClient) {
+    const enricher = enrichers.get(client)
+    if (!enricher) continue
+    try {
+      const out = await enricher.settle(group, ctx)
+      for (let i = 0; i < group.length && i < out.length; i++) {
+        if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
+      }
+    } catch {
+      // An enricher failure must never drop rows — leave the group as
+      // provisional fallback; a later flush or sweep can retry.
+      continue
+    }
+  }
+  if (upgrades.size === 0) return rows
+  return rows.map((row) => upgrades.get(row) ?? row)
 }
 
 /**

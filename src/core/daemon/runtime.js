@@ -361,6 +361,12 @@ export async function runDaemon(opts = {}) {
             cacheRoot: boot.runtime.storage.cacheRoot,
             budgetMs: mCfg.max_tick_ms,
             config: mCfg,
+            // @ref LLP 0027#re-settle-sweep — thread the dataset's
+            // re-settle hook (same enricher the flush path uses) so
+            // compaction can re-settle committed fallback rows split from
+            // their uuid twin.
+            storage: boot.runtime.storage,
+            getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
           })
         },
         { component: 'daemon' }

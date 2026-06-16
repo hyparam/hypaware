@@ -128,6 +128,41 @@ export interface MaintenanceOptions {
   expireOnly?: boolean
   budgetMs?: number
   config?: Partial<MaintenanceConfig>
+  /**
+   * Storage handle the re-settle sweep (LLP 0027) needs so the dataset's
+   * `settleBatch` can dedupe an upgraded fallback row against committed
+   * `part_id`s. Absent when the caller wires no settlement (every existing
+   * test/CLI path stays a pure compaction).
+   */
+  storage?: QueryStorageService
+  /**
+   * Resolve the flush-time settlement hook for a dataset, if any. Threaded
+   * through from the runtime that built the cache so compaction can re-run
+   * the same upgrade-and-dedupe over already-committed fallback rows — the
+   * backstop for a fallback row that flushed before its uuid twin arrived
+   * (LLP 0027 "Re-settle sweep").
+   */
+  getSettleHook?: (dataset: string) => DatasetSettleHook | undefined
+}
+
+/**
+ * The dataset's flush-time settlement pass, re-used by the maintenance
+ * re-settle sweep. Upgrades provisional fallback rows to native identity
+ * and drops any whose `part_id` already exists in a committed partition.
+ */
+export type DatasetSettleHook = (
+  rows: Record<string, unknown>[],
+  ctx: { storage: QueryStorageService },
+) => Promise<Record<string, unknown>[]>
+
+/**
+ * Resolved re-settle context for one partition rewrite: the dataset's
+ * settle hook plus the storage handle its committed-`part_id` dedupe
+ * scans against. Built once per partition in {@link MaintenanceOptions}.
+ */
+export interface SettleContext {
+  settle: DatasetSettleHook
+  storage: QueryStorageService
 }
 
 export interface MaintenancePartitionReport {

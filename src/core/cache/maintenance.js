@@ -24,13 +24,16 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTab
  *   CachePartitionMeta,
  *   CacheStatusPartition,
  *   CacheStatusReport,
+ *   DatasetSettleHook,
  *   MaintenanceConfig,
  *   MaintenanceOptions,
  *   MaintenancePartitionReport,
  *   MaintenanceReport,
  *   PartitionCursor,
  *   AppendOptions,
+ *   SettleContext,
  * } from './types.d.ts'
+ * @import { QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
@@ -134,12 +137,13 @@ export async function maintainCache(opts) {
         }
 
         const cursor = readCursorSync(part.path)
+        const settle = resolveSettleContext(opts, part.dataset)
 
         if (cursor.layout === 'source-table') {
-          return await maintainSourceTable(r, cursor, cfg, opts, snapshotsExpiredCounter, compactionsCounter)
+          return await maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
         }
 
-        return await maintainLegacyPartition(r, part, cursor, cfg, opts, snapshotsExpiredCounter, compactionsCounter)
+        return await maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
       },
       { component: 'cache' }
     )
@@ -169,11 +173,12 @@ export async function maintainCache(opts) {
  * @param {PartitionCursor} cursor
  * @param {MaintenanceConfig} cfg
  * @param {MaintenanceOptions} opts
+ * @param {SettleContext | null} settle
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} snapshotsExpiredCounter
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} compactionsCounter
  * @returns {Promise<MaintenancePartitionReport>}
  */
-async function maintainSourceTable(r, cursor, cfg, opts, snapshotsExpiredCounter, compactionsCounter) {
+async function maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
   const tableDir = path.join(r.path, cursor.tableDir ?? 'table')
   if (!tableExists(tableDir)) return r
 
@@ -190,9 +195,22 @@ async function maintainSourceTable(r, cursor, cfg, opts, snapshotsExpiredCounter
   }
 
   if (!opts.expireOnly) {
-    const shouldCompact = opts.force || needsCompaction(tableDir, cfg)
+    // @ref LLP 0027#re-settle-sweep — a partition holding a committed
+    // fallback row may carry a split twin pair the flush-time settle
+    // never collapsed; force a rewrite so the sweep can re-settle it even
+    // when the file-count heuristics say compaction isn't due. Gate that
+    // force on NEW data having flushed since the last sweep (the live
+    // data-file count moved off the recorded baseline): an unmatchable
+    // fallback — one whose transcript line never lands (harness aux,
+    // wire-only reminders) — would otherwise force a full rewrite every
+    // tick forever. The cheap baseline check also lets us skip the
+    // attributes scan entirely when nothing new has flushed.
+    const hasResettle = settle
+      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(tableDir)
+      : false
+    const shouldCompact = opts.force || hasResettle || needsCompaction(tableDir, cfg)
     if (shouldCompact && !opts.dryRun) {
-      const result = await compactSourceTable(r.path, cursor, cfg)
+      const result = await compactSourceTable(r.path, cursor, cfg, settle)
       if (result) {
         r.compacted = true
         r.rowCount = result.rowCount
@@ -215,11 +233,12 @@ async function maintainSourceTable(r, cursor, cfg, opts, snapshotsExpiredCounter
  * @param {PartitionCursor} cursor
  * @param {MaintenanceConfig} cfg
  * @param {MaintenanceOptions} opts
+ * @param {SettleContext | null} settle
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} snapshotsExpiredCounter
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} compactionsCounter
  * @returns {Promise<MaintenancePartitionReport>}
  */
-async function maintainLegacyPartition(r, part, cursor, cfg, opts, snapshotsExpiredCounter, compactionsCounter) {
+async function maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
   const epochDir = path.join(part.path, `epoch=${cursor.epoch}`)
   if (!tableExists(epochDir)) return r
 
@@ -236,9 +255,15 @@ async function maintainLegacyPartition(r, part, cursor, cfg, opts, snapshotsExpi
   }
 
   if (!opts.expireOnly) {
-    const shouldCompact = opts.force || needsCompaction(epochDir, cfg)
+    // @ref LLP 0027#re-settle-sweep — same backstop on the legacy layout,
+    // with the same new-data gate so an unmatchable fallback does not force
+    // a rewrite every tick.
+    const hasResettle = settle
+      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(epochDir)
+      : false
+    const shouldCompact = opts.force || hasResettle || needsCompaction(epochDir, cfg)
     if (shouldCompact && !opts.dryRun) {
-      const result = await compactPartition(part.path, cursor, cfg)
+      const result = await compactPartition(part.path, cursor, cfg, settle)
       if (result) {
         r.compacted = true
         r.newEpoch = result.newEpoch
@@ -448,9 +473,10 @@ function estimateRowBytes(row) {
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
  * @param {MaintenanceConfig} cfg
+ * @param {SettleContext | null} [settle]
  * @returns {Promise<{ rowCount: number, dataFiles: number } | null>}
  */
-async function compactSourceTable(partitionDir, cursor, cfg) {
+async function compactSourceTable(partitionDir, cursor, cfg, settle) {
   const oldTableDirName = cursor.tableDir ?? 'table'
   const oldTableDir = path.join(partitionDir, oldTableDirName)
   if (!tableExists(oldTableDir)) return null
@@ -492,6 +518,31 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
     ? { partitionSpec: existingSpec, sortOrder: sortColumns }
     : undefined
 
+  // Buffer committed fallback rows so the re-settle sweep can upgrade them
+  // after the full partition has been seen (a fallback row may stream
+  // before its native twin). Non-fallback rows emit immediately to keep
+  // peak heap bounded — settlement is rare and only touches the buffer.
+  /** @type {Record<string, unknown>[]} */
+  const fallbackBuffer = []
+  const emittedPartIds = settle ? new Set() : null
+  const emit = async (/** @type {Record<string, unknown>} */ row) => {
+    const rowId = row._hyp_cache_row_id
+    if (typeof rowId === 'string' && seen.has(rowId)) return
+    if (typeof rowId === 'string') seen.add(rowId)
+    if (emittedPartIds) {
+      const key = rowPartId(row)
+      if (key !== undefined) emittedPartIds.add(key)
+    }
+    batch.push(row)
+    batchBytes += estimateRowBytes(row)
+    if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
+      await appendRowsToTable(newTableDir, columns, batch, appendOpts)
+      totalRows += batch.length
+      batch = []
+      batchBytes = 0
+    }
+  }
+
   for await (const row of scanRowsFromTable(oldTableDir)) {
     if (!columns) {
       columns = Object.keys(row).map((name) => ({
@@ -500,17 +551,18 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
         nullable: true,
       }))
     }
-    const rowId = row._hyp_cache_row_id
-    if (typeof rowId === 'string' && seen.has(rowId)) continue
-    if (typeof rowId === 'string') seen.add(rowId)
-    batch.push(row)
-    batchBytes += estimateRowBytes(row)
+    // @ref LLP 0027#re-settle-sweep — hold provisional fallback rows back;
+    // emit only after the sweep upgrades and de-twins them at end-of-scan.
+    if (settle && isGatewayFallbackRow(row)) {
+      fallbackBuffer.push(row)
+      continue
+    }
+    await emit(row)
+  }
 
-    if (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes) {
-      await appendRowsToTable(newTableDir, columns, batch, appendOpts)
-      totalRows += batch.length
-      batch = []
-      batchBytes = 0
+  if (settle && emittedPartIds && fallbackBuffer.length > 0) {
+    for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
+      await emit(row)
     }
   }
 
@@ -528,6 +580,7 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
       compaction: {
         previousTableDir: oldTableDirName,
         compactedAt: new Date().toISOString(),
+        resettleBaselineFiles: 0,
       },
       layout: 'source-table',
       tableDir: newTableDirName,
@@ -545,12 +598,17 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
     await appendRowsToTable(newTableDir, columns, [], appendOpts)
   }
 
+  // Record the post-rewrite data-file count as the re-settle baseline: the
+  // next tick only forces another re-settle sweep once new data flushes past
+  // this count, so an unmatchable fallback does not loop (LLP 0027).
+  const newDataFiles = countDataFiles(newTableDir)
   await writeCursor(partitionDir, {
     epoch: cursor.epoch,
     rowCount: totalRows,
     compaction: {
       previousTableDir: oldTableDirName,
       compactedAt: new Date().toISOString(),
+      resettleBaselineFiles: newDataFiles,
     },
     layout: 'source-table',
     tableDir: newTableDirName,
@@ -562,7 +620,7 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
 
   return {
     rowCount: totalRows,
-    dataFiles: countDataFiles(newTableDir),
+    dataFiles: newDataFiles,
   }
 }
 
@@ -572,9 +630,10 @@ async function compactSourceTable(partitionDir, cursor, cfg) {
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
  * @param {MaintenanceConfig} cfg
+ * @param {SettleContext | null} [settle]
  * @returns {Promise<{ newEpoch: number, rowCount: number, dataFiles: number } | null>}
  */
-async function compactPartition(partitionDir, cursor, cfg) {
+async function compactPartition(partitionDir, cursor, cfg, settle) {
   const oldEpochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
   if (!tableExists(oldEpochDir)) return null
 
@@ -607,6 +666,27 @@ async function compactPartition(partitionDir, cursor, cfg) {
   /** @type {AppendOptions | undefined} */
   const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
 
+  /** @type {Record<string, unknown>[]} */
+  const fallbackBuffer = []
+  const emittedPartIds = settle ? new Set() : null
+  const emit = async (/** @type {Record<string, unknown>} */ row) => {
+    const rowId = row._hyp_cache_row_id
+    if (typeof rowId === 'string' && seen.has(rowId)) return
+    if (typeof rowId === 'string') seen.add(rowId)
+    if (emittedPartIds) {
+      const key = rowPartId(row)
+      if (key !== undefined) emittedPartIds.add(key)
+    }
+    batch.push(row)
+    batchBytes += estimateRowBytes(row)
+    if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
+      await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
+      totalRows += batch.length
+      batch = []
+      batchBytes = 0
+    }
+  }
+
   for await (const row of scanRowsFromTable(oldEpochDir)) {
     if (!columns) {
       columns = Object.keys(row).map((name) => ({
@@ -615,17 +695,17 @@ async function compactPartition(partitionDir, cursor, cfg) {
         nullable: true,
       }))
     }
-    const rowId = row._hyp_cache_row_id
-    if (typeof rowId === 'string' && seen.has(rowId)) continue
-    if (typeof rowId === 'string') seen.add(rowId)
-    batch.push(row)
-    batchBytes += estimateRowBytes(row)
+    // @ref LLP 0027#re-settle-sweep — same backstop on the legacy layout.
+    if (settle && isGatewayFallbackRow(row)) {
+      fallbackBuffer.push(row)
+      continue
+    }
+    await emit(row)
+  }
 
-    if (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes) {
-      await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
-      totalRows += batch.length
-      batch = []
-      batchBytes = 0
+  if (settle && emittedPartIds && fallbackBuffer.length > 0) {
+    for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
+      await emit(row)
     }
   }
 
@@ -640,12 +720,14 @@ async function compactPartition(partitionDir, cursor, cfg) {
     await appendRowsToTable(newEpochDir, columns, [], appendOpts)
   }
 
+  const newDataFiles = countDataFiles(newEpochDir)
   await writeCursor(partitionDir, {
     epoch: newEpoch,
     rowCount: totalRows,
     compaction: {
       previousEpoch: cursor.epoch,
       compactedAt: new Date().toISOString(),
+      resettleBaselineFiles: newDataFiles,
     },
   })
 
@@ -655,8 +737,198 @@ async function compactPartition(partitionDir, cursor, cfg) {
   return {
     newEpoch,
     rowCount: totalRows,
-    dataFiles: countDataFiles(newEpochDir),
+    dataFiles: newDataFiles,
   }
+}
+
+/* ----- Re-settle sweep (LLP 0027 "Re-settle sweep") -----
+ *
+ * Flush-time settlement (LLP 0027 "Decision") only collapses a
+ * fallback/uuid twin pair when both rows land in the same flush batch. A
+ * fallback row that flushed alone — its transcript line not yet on disk,
+ * its uuid twin still in a later flush — commits unsettled, and the flush
+ * path can never revisit it. The twins share the Iceberg partition key
+ * (`conversation_id`/`cwd`/`date`), so they always live in the SAME
+ * partition; a single-partition compaction rewrite is therefore enough to
+ * collapse them after the fact. This sweep re-runs the dataset's own
+ * `settleBatch` over the committed fallback rows during that rewrite,
+ * reusing the exact transcript-match-and-dedupe the flush path uses. */
+
+/**
+ * Resolve the per-partition settle context. Returns null unless the
+ * caller threaded both a storage handle and a settle hook for this
+ * dataset — so every existing maintenance path (CLI, tests) stays a pure
+ * compaction with no behavioural change.
+ *
+ * @ref LLP 0027#re-settle-sweep — compaction-time settle became acceptable
+ * once the registry/storage handle is threaded in (LLP 0027 option B's
+ * blocker).
+ * @param {MaintenanceOptions} opts
+ * @param {string} dataset
+ * @returns {SettleContext | null}
+ */
+function resolveSettleContext(opts, dataset) {
+  const storage = opts.storage
+  const settle = opts.getSettleHook?.(dataset)
+  if (!storage || typeof settle !== 'function') return null
+  return { settle, storage }
+}
+
+/**
+ * Re-settle a partition's committed fallback rows and return the survivors
+ * to emit into the rewrite.
+ *
+ * Two stages, both safe-by-construction:
+ *
+ *  1. **Upgrade.** The dataset's re-settle hook upgrades each fallback row
+ *     it can match to its native transcript identity (re-stamping
+ *     `message_id`/`part_id`, clearing the fallback marker), leaving the
+ *     rest as provisional fallbacks. The hook NEVER drops a row, so an
+ *     enricher miss or failure degrades safely — the row survives
+ *     unchanged for a later sweep.
+ *
+ *  2. **De-twin within the rewrite set.** A fallback that upgraded onto a
+ *     `part_id` already emitted from this same partition (its native twin,
+ *     which streamed as a normal non-fallback row) is the duplicate the
+ *     race left behind — drop it; the native twin wins. The twins share
+ *     the partition key (`conversation_id`/`cwd`/`date`), so the twin is
+ *     guaranteed to be in this rewrite set: no committed-partition scan is
+ *     needed, and a row whose identity did NOT change can never collide
+ *     with itself (its committed copy was buffered, not emitted). This is
+ *     why the sweep cannot reuse `settleBatch`'s committed-scan dedupe,
+ *     which would match a non-upgraded fallback against its own committed
+ *     copy and wrongly drop it.
+ *
+ * Conservative and idempotent: only an upgraded fallback whose `part_id`
+ * collides is dropped, and a second pass is a no-op because the survivor
+ * is no longer a fallback.
+ *
+ * @ref LLP 0027#re-settle-sweep — reuse the flush enricher; de-twin within the partition rewrite.
+ * @param {Record<string, unknown>[]} fallbackRows
+ * @param {SettleContext} settle
+ * @param {Set<unknown>} emittedPartIds  part_ids already emitted from this partition rewrite
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function resettleFallbackRows(fallbackRows, settle, emittedPartIds) {
+  /** @type {Record<string, unknown>[]} */
+  let upgraded
+  try {
+    const out = await settle.settle(fallbackRows, { storage: settle.storage })
+    upgraded = Array.isArray(out) && out.length === fallbackRows.length ? out : fallbackRows
+  } catch {
+    // Degrade safely: leave the fallback rows as committed. The next
+    // sweep (transcript now present, or the bug fixed) can retry.
+    return fallbackRows
+  }
+
+  /** @type {Record<string, unknown>[]} */
+  const survivors = []
+  for (let i = 0; i < upgraded.length; i++) {
+    const row = upgraded[i]
+    const wasUpgraded = row !== fallbackRows[i]
+    const key = rowPartId(row)
+    // Only an UPGRADED row may collapse: its native part_id now matches a
+    // twin already emitted (or an earlier survivor in this buffer). A row
+    // whose identity is unchanged is never dropped.
+    if (wasUpgraded && key !== undefined && emittedPartIds.has(key)) continue
+    if (key !== undefined) emittedPartIds.add(key)
+    survivors.push(row)
+  }
+  return survivors
+}
+
+/**
+ * The deterministic dedupe key for a row: its `part_id`, or the recomposed
+ * `<message_id>#<part_index>` for transitional rows that predate `part_id`.
+ * Returns undefined when neither identity is available (never deduped).
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {string | undefined}
+ */
+function rowPartId(row) {
+  const partId = row.part_id
+  if (typeof partId === 'string' && partId.length > 0) return partId
+  const messageId = row.message_id
+  const partIndex = row.part_index
+  if (
+    typeof messageId === 'string' &&
+    messageId.length > 0 &&
+    (typeof partIndex === 'number' || typeof partIndex === 'bigint')
+  ) {
+    return `${messageId}#${partIndex}`
+  }
+  return undefined
+}
+
+/**
+ * Does the table hold at least one committed gateway fallback row? Used
+ * to force a compaction rewrite even when the file-count heuristics say
+ * compaction isn't due — otherwise a split twin pair in a small,
+ * never-compacted partition would never get re-settled. Scans only the
+ * `attributes` column and short-circuits on the first hit, so the cost is
+ * bounded and paid only for settle-eligible datasets.
+ *
+ * @ref LLP 0027#re-settle-sweep — gate the sweep on a cheap fallback scan.
+ * @param {string} tableDir
+ * @returns {Promise<boolean>}
+ */
+async function hasResettleCandidate(tableDir) {
+  if (!tableExists(tableDir)) return false
+  try {
+    for await (const row of scanRowsFromTable(tableDir, ['attributes'])) {
+      if (isGatewayFallbackRow(row)) return true
+    }
+  } catch {
+    return false
+  }
+  return false
+}
+
+/**
+ * A committed row is a re-settle candidate when it carries the gateway's
+ * provisional-identity marker. This is the documented contract
+ * (`attributes.gateway.identity_source === 'gateway_fallback'`, LLP 0027
+ * "Decision") — a dataset-agnostic predicate, so the marker is the only
+ * coupling between core compaction and the gateway plugin. Tolerates the
+ * `attributes` column whether stored as an object or a JSON string.
+ *
+ * @param {Record<string, unknown>} row
+ * @returns {boolean}
+ */
+function isGatewayFallbackRow(row) {
+  const attrs = row?.attributes
+  const parsed = typeof attrs === 'string' ? safeParseJson(attrs) : attrs
+  if (!isPlainObject(parsed)) return false
+  const gateway = parsed.gateway
+  return isPlainObject(gateway) && gateway.identity_source === 'gateway_fallback'
+}
+
+/**
+ * The data-file count recorded the last time a settle-compaction rewrote this
+ * partition (the "re-settle baseline"). The forced re-settle sweep compares the
+ * live data-file count against this: equal means no new data has flushed since
+ * the last sweep, so re-running settle would reproduce the same result. An
+ * unmatchable fallback row therefore stops forcing a rewrite every tick and is
+ * retried only when genuinely new data lands. Undefined for a partition never
+ * compacted (first sweep always runs). @ref LLP 0027#re-settle-sweep
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {number | undefined}
+ */
+function resettleBaselineFiles(cursor) {
+  const c = cursor.compaction
+  if (isPlainObject(c) && typeof c.resettleBaselineFiles === 'number') return c.resettleBaselineFiles
+  return undefined
+}
+
+/** @param {string} value */
+function safeParseJson(value) {
+  try { return JSON.parse(value) } catch { return undefined }
+}
+
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
 /**
