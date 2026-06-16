@@ -80,6 +80,12 @@ export interface CacheSpool {
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>
   hasPendingSync(tablePath: string): boolean
+  /**
+   * Read-only view of rows currently pending in a table's spool (written
+   * by `append`, not yet committed by `flushTable`). Never mutates spool
+   * state; degrades to an empty stream on any error.
+   */
+  readSpooledRows(tablePath: string): AsyncGenerator<Record<string, unknown>>
 }
 
 export interface AppendOptions {
@@ -225,4 +231,11 @@ export type ExtendedQueryStorageService = QueryStorageService & {
     rows: Record<string, unknown>[],
   ): Promise<void>
   discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
+  /**
+   * Yield rows currently pending in the spool for every table belonging
+   * to `dataset` — rows captured live but not yet flushed to Iceberg, so
+   * invisible to `discoverCachePartitions`/`readRows`. Read-only; degrades
+   * to an empty stream on any error.
+   */
+  readSpooledRows(dataset: string, columns?: string[]): AsyncGenerator<Record<string, unknown>>
 }

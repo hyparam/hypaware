@@ -181,7 +181,82 @@ export function createCacheSpool(args) {
       knownTables.add(tablePath)
       return hasPendingSync(tablePath)
     },
+
+    readSpooledRows(tablePath) {
+      return readSpooledRows(tablePath)
+    },
   }
+}
+
+/**
+ * Read every row currently pending in a table's spool — the rows that
+ * `append` wrote but `flushTable` has not yet committed to Iceberg.
+ * Walks `active.jsonl` and every rotated `flush-*.jsonl`, parsing each
+ * line's `{ version, columns, rows }` envelope and yielding the raw
+ * `rows`. This is a read-only inspection surface; it never rotates,
+ * removes, or advances flush progress, so it is safe to call alongside
+ * live capture. Any error (missing dir, unreadable file, malformed
+ * line) degrades to skipping that file/line rather than throwing — the
+ * spool is provisional (LLP 0013) and a partial read is always better
+ * than aborting the caller.
+ *
+ * @param {string} tablePath
+ * @returns {AsyncGenerator<Record<string, unknown>>}
+ */
+async function* readSpooledRows(tablePath) {
+  const dir = spoolDir(tablePath)
+  /** @type {string[]} */
+  let names = []
+  try {
+    names = fsSync
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && isSpoolDataFile(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+  } catch {
+    return
+  }
+  for (const name of names) {
+    let raw
+    try {
+      raw = await fs.readFile(path.join(dir, name), 'utf8')
+    } catch {
+      continue
+    }
+    for (const line of raw.split('\n')) {
+      if (line.length === 0) continue
+      /** @type {{ version?: number, columns?: unknown, rows?: unknown } | null} */
+      let envelope = null
+      try {
+        envelope = JSON.parse(line)
+      } catch {
+        continue
+      }
+      // Mirror streamFlushFile's envelope-validity contract exactly: a
+      // parseable envelope missing `columns` is malformed, and the flush
+      // reader drops it (its rows never reach a committed partition).
+      // Backfill dedupe must skip the same rows — otherwise it would dedupe
+      // against, and so refuse to materialize, rows flush will never commit.
+      if (
+        !envelope ||
+        envelope.version !== 1 ||
+        !Array.isArray(envelope.columns) ||
+        !Array.isArray(envelope.rows)
+      ) continue
+      for (const row of envelope.rows) {
+        if (row && typeof row === 'object' && !Array.isArray(row)) {
+          yield /** @type {Record<string, unknown>} */ (row)
+        }
+      }
+    }
+  }
+}
+
+/**
+ * @param {string} name
+ */
+function isSpoolDataFile(name) {
+  return name === ACTIVE_FILE || (name.startsWith(FLUSH_PREFIX) && name.endsWith(FLUSH_SUFFIX))
 }
 
 /**
@@ -292,7 +367,7 @@ async function readLastFlushAt(tablePath) {
  * @param {string} cacheRoot
  * @returns {Promise<string[]>}
  */
-async function discoverSpoolTables(cacheRoot) {
+export async function discoverSpoolTables(cacheRoot) {
   /** @type {string[]} */
   const tables = []
   const root = path.join(cacheRoot, 'datasets')

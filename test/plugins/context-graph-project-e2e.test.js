@@ -37,32 +37,49 @@ const COLUMNS = /** @type {const} */ ([
   { name: 'tool_args', type: 'STRING', nullable: true },
   { name: 'part_type', type: 'STRING', nullable: true },
   { name: 'message_created_at', type: 'STRING', nullable: true },
+  // `attributes` is a real (always-present) column the contract's shared aux
+  // filter reads to exclude Claude harness aux rows (LLP 0026). JSON arrives
+  // as a string here, exactly like `tool_args`.
+  { name: 'attributes', type: 'STRING', nullable: true },
 ])
 
 const ROWS = [
   {
     conversation_id: 'conv-1', cwd: '/repo', git_branch: 'main', client_name: 'claude-code',
     user_id: 'u1', model: 'sonnet', tool_name: null, tool_args: null, part_type: 'text',
-    message_created_at: '2026-06-01T00:00:00.000Z',
+    message_created_at: '2026-06-01T00:00:00.000Z', attributes: '{"dev_run_id":"run-1"}',
   },
   {
     conversation_id: 'conv-1', cwd: null, git_branch: null, client_name: 'claude-code',
     user_id: null, model: 'sonnet', tool_name: 'Read', tool_args: '{"file_path":"/repo/auth.py"}',
-    part_type: 'tool_call', message_created_at: '2026-06-01T00:01:00.000Z',
+    part_type: 'tool_call', message_created_at: '2026-06-01T00:01:00.000Z', attributes: null,
   },
 ]
 
+// A Claude harness aux exchange: retained in the source (tagged
+// attributes.claude.aux_kind) but it must NOT mint any graph node/edge. Its
+// keys are all distinct, so a regressed filter would change the node/edge
+// counts. Seeded only by the aux-exclusion test (the provenance tests use a
+// single-conversation fixture).
+const AUX_ROW = {
+  conversation_id: 'conv-aux', cwd: '/repo', git_branch: 'main', client_name: 'aux-app',
+  user_id: 'u1', model: 'aux-model', tool_name: 'Read', tool_args: '{"file_path":"/repo/secret.py"}',
+  part_type: 'tool_call', message_created_at: '2026-06-01T00:02:00.000Z',
+  attributes: '{"claude":{"aux_kind":"security_monitor"}}',
+}
+
 /**
  * @param {(deps: { registry: any, storage: any }) => Promise<void>} body
+ * @param {Record<string, unknown>[]} [rows]
  */
-async function withSeededGateway(body) {
+async function withSeededGateway(body, rows = ROWS) {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-e2e-'))
   try {
     const registry = createQueryRegistry()
     registry.registerDataset(aiGatewayDatasetRegistration())
     registry.registerDataset(graphDatasetRegistration('node'))
     registry.registerDataset(graphDatasetRegistration('edge'))
-    await appendRowsToSourceTable(cacheRoot, DATASET_NAME, ['source=claude'], [...COLUMNS], ROWS)
+    await appendRowsToSourceTable(cacheRoot, DATASET_NAME, ['source=claude'], [...COLUMNS], rows)
     const storage = createQueryStorageService({ cacheRoot })
     await body({ registry, storage })
   } finally {
@@ -98,6 +115,27 @@ test('projectGraph runs a contributed contract end to end and is idempotent', as
     assert.equal(res.rows[0].source_dataset, 'ai_gateway_messages')
     assert.equal(res.rows[0].projector, 'ai-gateway.t0')
   })
+})
+
+test('projectGraph excludes retained Claude aux rows from the graph', async () => {
+  // The gateway now retains harness aux exchanges (tagged
+  // attributes.claude.aux_kind) instead of dropping them (LLP 0026). They
+  // must not mint graph nodes/edges. Seed the same two real rows plus one
+  // aux row whose keys are all distinct — counts must stay 5/4.
+  await withSeededGateway(async ({ registry, storage }) => {
+    const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
+    const r = await projectGraph({ query: registry, storage, contracts: [contract] })
+    assert.equal(r.nodes, 5, 'aux row mints no extra node')
+    assert.equal(r.edges, 4, 'aux row mints no extra edge')
+
+    const auxNode = await executeQuerySql({
+      query: `SELECT node_id FROM node WHERE natural_key = 'conv-aux'`,
+      registry,
+      storage,
+      refresh: 'always',
+    })
+    assert.equal(auxNode.rows.length, 0, 'aux-tagged traffic mints no graph node')
+  }, [...ROWS, AUX_ROW])
 })
 
 test('projectGraph with no contracts writes nothing', async () => {

@@ -167,14 +167,58 @@ export function createAiGatewayGraphContract(kit) {
     },
   ]
 
+  // @ref LLP 0026#decision [implements] — tag-don't-drop: the gateway now
+  // RETAINS Claude harness aux exchanges (security monitor, etc.) tagged
+  // `attributes.claude.aux_kind` instead of dropping them. That traffic is
+  // real but not user conversation, so it must not mint graph
+  // Session/App/Model/Tool/File nodes or edges. One shared source filter:
+  // select `attributes` for every rule and drop aux rows before toRow runs,
+  // so each rule's SQL stays focused on its own columns.
+  const auxFilteredRules = rules.map((rule) => ({
+    ...rule,
+    sql: withAttributes(rule.sql),
+    /** @param {Record<string, unknown>} r */
+    toRow(r) {
+      if (auxKindOf(r.attributes)) return null
+      return rule.toRow(r)
+    },
+  }))
+
   return {
     name: 'ai-gateway-t0',
     plugin: PLUGIN_NAME,
     sourceDataset: SOURCE_DATASET,
     projector: PROJECTOR,
     projectorVersion: PROJECTOR_VERSION,
-    rules,
+    rules: auxFilteredRules,
   }
+}
+
+/**
+ * Prepend the `attributes` column to a rule's projection so the shared aux
+ * filter can read `attributes.claude.aux_kind` without each rule's SQL
+ * repeating it. Every rule begins `SELECT <cols> FROM …`.
+ *
+ * @param {string} sql
+ * @returns {string}
+ */
+function withAttributes(sql) {
+  return sql.replace(/^SELECT\s+/i, 'SELECT attributes, ')
+}
+
+/**
+ * Read `attributes.claude.aux_kind` from a source row. `attributes` is a
+ * JSON column that may arrive parsed or as a string (like `tool_args`).
+ *
+ * @param {unknown} attributes
+ * @returns {string | null}
+ */
+function auxKindOf(attributes) {
+  const attrs = parseMaybeJson(attributes)
+  if (!attrs || typeof attrs !== 'object') return null
+  const claude = parseMaybeJson(/** @type {Record<string, unknown>} */ (attrs).claude)
+  if (!claude || typeof claude !== 'object') return null
+  return str(/** @type {Record<string, unknown>} */ (claude).aux_kind)
 }
 
 /**

@@ -151,9 +151,25 @@ coupling between core compaction and the gateway is the documented
 - ~~A fallback row committed before its uuid twin arrives, then never re-flushed,
   is not merged.~~ **Resolved** by the [re-settle sweep](#re-settle-sweep): a
   committed fallback row is upgraded and de-twinned during compaction.
-- Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
-  spooled rows in the materializer) — separate fix.
-- Restart-replay seen-set seeding from committed `part_id`s.
+- ~~Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
+  spooled rows in the materializer) — separate fix.~~ **Resolved (issue #107):** the
+  backfill materializer now folds spooled `part_id`s into its pre-write dedupe
+  seen-set, so a `hyp backfill` run no longer re-materializes rows that are captured
+  live but still sitting unflushed in the spool. The settle path is deliberately
+  **excluded** from this spool scan — the rows it settles at flush *are* the spool
+  rows, so seeding them into its seen-set would drop the very rows being flushed.
+  See `scanSpooledPartIds` / `createBackfillDedupe` in
+  `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js` and the read-only
+  `readSpooledRows` surface added to `src/core/cache/storage.js`.
+- Restart-replay seen-set seeding from committed `part_id`s — **resolved (issue
+  #108).** The live projector now lazily seeds its in-memory `seenMessages` set
+  per conversation from committed `ai_gateway_messages` rows on first replay,
+  reusing the same `discoverCachePartitions` + `readRows` scan machinery this
+  doc's `settleBatch` dedupe relies on. This guards the upstream re-emit so a
+  replayed already-committed message is dropped *at projection*, rather than
+  leaning on `settleBatch` (which short-circuits for native-uuid batches with no
+  fallback rows). See LLP 0026 Consequences and
+  `message_projector.js seedSeenMessagesForConversation`.
 
 ## References
 

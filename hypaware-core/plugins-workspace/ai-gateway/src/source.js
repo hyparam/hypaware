@@ -93,6 +93,10 @@ async function launchListener(ctx, state, liveState) {
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
     projectors: state.projectors,
+    // Thread storage so the projector can lazily seed its seen-set from
+    // committed part_ids per conversation — without it a restart/reload
+    // rebuilds an empty set and replays re-emit duplicate-part_id rows.
+    storage: ctx.storage,
     log: ctx.log,
   })
   const sourcesLog = getLogger('sources')
