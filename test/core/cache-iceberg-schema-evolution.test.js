@@ -71,6 +71,28 @@ async function tableHasColumn(dir, columnName) {
   return Boolean(schema?.fields.some(f => f.name === columnName))
 }
 
+/**
+ * The current-schema field for `columnName`, or undefined. Lets a test assert
+ * a column's `required` flag (not just its presence).
+ * @param {string} dir @param {string} columnName
+ */
+async function tableField(dir, columnName) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({
+    tableUrl: tableUrlForDir(dir), resolver, lister,
+  })
+  return currentSchema(metadata)?.fields.find(f => f.name === columnName)
+}
+
+/** @param {string} dir */
+async function tableSchemaCount(dir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({
+    tableUrl: tableUrlForDir(dir), resolver, lister,
+  })
+  return metadata.schemas.length
+}
+
 test('additive nullable column evolves the cache schema in place — new column queryable, no recreate', async () => {
   const dir = await makeTmpDir('additive')
   try {
@@ -181,6 +203,87 @@ test('breaking changes still reject after the table exists (no in-place evolutio
       ], { declaration: DECLARATION }),
       /column "message" type changed/
     )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// A non-partition column that starts required, then widens to nullable.
+/** @type {ColumnSpec[]} */
+const V1_WITH_REQUIRED_NOTE = [
+  { name: 'conversation_id', type: 'STRING', nullable: false },
+  { name: 'date', type: 'STRING', nullable: false },
+  { name: 'note', type: 'STRING', nullable: false },
+]
+/** @type {ColumnSpec[]} */
+const V2_NOTE_WIDENED = [
+  { name: 'conversation_id', type: 'STRING', nullable: false },
+  { name: 'date', type: 'STRING', nullable: false },
+  { name: 'note', type: 'STRING', nullable: true },
+]
+
+test('required→nullable widening evolves the table in place — a later null append lands', async () => {
+  // LLP 0029 lists a column that widened required→nullable as additive. The
+  // merge keeps the column's field id, so the old id-set "needs evolution"
+  // check missed it: the table stayed marked required and a null write was a
+  // contract violation. schemaNeedsEvolution now detects the required-flag
+  // delta and evolves the table.
+  const dir = await makeTmpDir('widen')
+  try {
+    await appendRowsToTable(dir, V1_WITH_REQUIRED_NOTE, [
+      { conversation_id: 'c1', date: '2026-06-16', note: 'present' },
+    ], { declaration: DECLARATION })
+
+    const before = await tableField(dir, 'note')
+    assert.equal(before?.required, true, 'note starts required')
+
+    // Append the widened schema with a NULL note — only valid if the table
+    // schema actually evolved to mark note nullable.
+    await appendRowsToTable(dir, V2_NOTE_WIDENED, [
+      { conversation_id: 'c2', date: '2026-06-16', note: null },
+    ], { declaration: DECLARATION })
+
+    const after = await tableField(dir, 'note')
+    assert.equal(after?.required, false, 'note widened to nullable in the current schema')
+
+    const rows = await readRowsFromTable(dir)
+    const byId = new Map(rows.map(r => [r.conversation_id, r]))
+    assert.equal(rows.length, 2)
+    assert.equal(byId.get('c1')?.note, 'present')
+    assert.equal(byId.get('c2')?.note ?? null, null, 'the widened-column null row read back')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a rejected append does not advance the table schema (coerce before any commit)', async () => {
+  // The new nullable column AND a row that violates an existing required
+  // column arrive in the same batch. Coercion runs before evolveSchemaInPlace,
+  // so the schema commit never happens — the table is unchanged, not left with
+  // schema ahead of data.
+  const dir = await makeTmpDir('atomic')
+  try {
+    await appendRowsToTable(dir, V1_COLUMNS, [
+      { conversation_id: 'c1', client_name: 'claude', date: '2026-06-16', message: 'm1' },
+    ], { declaration: DECLARATION })
+
+    const schemasBefore = await tableSchemaCount(dir)
+
+    await assert.rejects(
+      appendRowsToTable(dir, V2_COLUMNS, [
+        // conversation_id is required; null forces coercion to throw.
+        { conversation_id: null, client_name: 'claude', date: '2026-06-16', message: 'bad', agent_id: 'a7' },
+      ], { declaration: DECLARATION }),
+      /required column "conversation_id" got null/
+    )
+
+    assert.equal(await tableHasColumn(dir, 'agent_id'), false, 'rejected append did not add the new column')
+    assert.equal(await tableSchemaCount(dir), schemasBefore, 'no add-schema commit landed for the rejected batch')
+
+    // The table is still healthy: the original row reads back intact.
+    const rows = await readRowsFromTable(dir)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].conversation_id, 'c1')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

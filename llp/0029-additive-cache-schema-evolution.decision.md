@@ -150,7 +150,8 @@ rejection rather than weakening it.
 ## References
 
 - Code: `src/core/cache/iceberg/store.js` (`appendRowsToTable`,
-  `evolveSchemaInPlace`, `schemaAddsFields`),
+  `evolveSchemaInPlace`, `schemaNeedsEvolution` — triggers on a new field id
+  OR a required→nullable widening of an existing one),
   `src/core/cache/iceberg/schema.js` (`mergeFieldIdsFromTable` — the
   additive/breaking boundary).
 - Tests: `test/core/cache-iceberg-schema-evolution.test.js` (in-place

@@ -107,6 +107,13 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   const schema = icebergSchemaForColumns(columns)
   const declaration = options?.declaration
 
+  // Coerce/validate rows up front, before any metadata commit (table create
+  // or schema evolution). A row-level rejection (null in a required column, a
+  // bad numeric coercion) must abort BEFORE we durably advance the table's
+  // schema — otherwise evolveSchemaInPlace lands the new column and the append
+  // then throws, leaving the table's schema ahead of its data.
+  const records = rows.length > 0 ? rowsToIcebergRecords(columns, rows) : []
+
   if (!tableExists(tablePath)) {
     /** @type {PartitionSpec | undefined} */
     const partitionSpec = declaration
@@ -140,10 +147,11 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
       validatePartitionSpecStability(declaration, existingSpec, effectiveSchema)
     }
     // @ref LLP 0029#in-place-evolution [implements] — the single switch point.
-    // effectiveSchema is the merged write schema; if it adds nullable columns the
-    // table's current schema doesn't have yet, evolve the table in place
-    // (add-schema + set-current-schema) so the append below lands under the new
-    // schema and the columns become queryable — no recreate, old rows read null.
+    // effectiveSchema is the merged write schema; if it adds nullable columns
+    // or widens an existing column required→nullable that the table's current
+    // schema doesn't reflect yet, evolve the table in place (add-schema +
+    // set-current-schema) so the append below lands under the new schema and
+    // the columns become queryable — no recreate, old rows read null.
     if (existingSchema) {
       await evolveSchemaInPlace({
         catalog, tableUrl: url, resolver, lister, existingSchema, effectiveSchema,
@@ -152,11 +160,11 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   }
   /** @type {TableMetadata | null} */
   let metadata = null
-  if (rows.length > 0) {
+  if (records.length > 0) {
     metadata = await icebergAppend({
       catalog,
       tableUrl: url,
-      records: rowsToIcebergRecords(columns, rows),
+      records,
     })
   }
   const bytesWritten = metadata ? addedFilesSize(metadata) : 0
@@ -200,7 +208,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
  * @returns {Promise<void>}
  */
 async function evolveSchemaInPlace({ catalog, tableUrl, resolver, lister, existingSchema, effectiveSchema }) {
-  if (!schemaAddsFields(existingSchema, effectiveSchema)) return
+  if (!schemaNeedsEvolution(existingSchema, effectiveSchema)) return
   const ctx = await loadTable({ catalog, tableUrl, resolver })
   if (!ctx.resolver) throw new Error('cache-iceberg: resolver is required to evolve schema')
   await fileCatalogCommit({
@@ -225,18 +233,32 @@ async function evolveSchemaInPlace({ catalog, tableUrl, resolver, lister, existi
 }
 
 /**
- * True when `next` carries field ids that `prior` does not — i.e. the merged
- * schema adds at least one column. `mergeFieldIdsFromTable` only ever appends
- * new ids (existing columns keep their id), so an id-set superset check is a
- * sufficient and cheap "needs evolution" test.
+ * True when `next` differs from `prior` in a way that needs a
+ * set-current-schema commit. `mergeFieldIdsFromTable` produces exactly two
+ * kinds of additive delta, and both must trigger evolution:
+ *
+ *  - a new field id `prior` lacks (a new nullable column), and
+ *  - a shared field id whose `required` flag WIDENED (required → nullable):
+ *    the merge keeps the same id when only nullability flips, so an id-set
+ *    check alone misses it — the table would stay marked `required` and a
+ *    later append writing `null` would be rejected (issue #102 / LLP 0029
+ *    lists widening as additive).
+ *
+ * Every other delta is rejected before this point, so any shared-id `required`
+ * difference here is a widening.
  *
  * @param {Schema} prior
  * @param {Schema} next
  * @returns {boolean}
  */
-function schemaAddsFields(prior, next) {
-  const priorIds = new Set(prior.fields.map(f => f.id))
-  return next.fields.some(f => !priorIds.has(f.id))
+function schemaNeedsEvolution(prior, next) {
+  const priorById = new Map(prior.fields.map(f => [f.id, f]))
+  for (const f of next.fields) {
+    const before = priorById.get(f.id)
+    if (!before) return true
+    if (before.required !== f.required) return true
+  }
+  return false
 }
 
 /**
