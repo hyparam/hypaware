@@ -225,14 +225,24 @@ async function* readSpooledRows(tablePath) {
     }
     for (const line of raw.split('\n')) {
       if (line.length === 0) continue
-      /** @type {{ version?: number, rows?: unknown } | null} */
+      /** @type {{ version?: number, columns?: unknown, rows?: unknown } | null} */
       let envelope = null
       try {
         envelope = JSON.parse(line)
       } catch {
         continue
       }
-      if (!envelope || envelope.version !== 1 || !Array.isArray(envelope.rows)) continue
+      // Mirror streamFlushFile's envelope-validity contract exactly: a
+      // parseable envelope missing `columns` is malformed, and the flush
+      // reader drops it (its rows never reach a committed partition).
+      // Backfill dedupe must skip the same rows — otherwise it would dedupe
+      // against, and so refuse to materialize, rows flush will never commit.
+      if (
+        !envelope ||
+        envelope.version !== 1 ||
+        !Array.isArray(envelope.columns) ||
+        !Array.isArray(envelope.rows)
+      ) continue
       for (const row of envelope.rows) {
         if (row && typeof row === 'object' && !Array.isArray(row)) {
           yield /** @type {Record<string, unknown>} */ (row)
