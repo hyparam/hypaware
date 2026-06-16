@@ -17,7 +17,7 @@ import {
   partitionSpecForDeclaration,
   validatePartitionSpecStability,
 } from '../../src/core/iceberg/partition-spec.js'
-import { appendRowsToTable, tableExists } from '../../src/core/cache/iceberg/store.js'
+import { appendRowsToTable, readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
 
 /**
  * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -474,6 +474,14 @@ test('appendRowsToTable validates schema on existing table with declaration', as
         },
       ], { declaration: AI_GATEWAY_DECLARATION })
     )
+
+    // The additive column is evolved in place and immediately queryable: the
+    // first row (written before it existed) reads null, the second populates it.
+    // (Full evolution coverage lives in cache-iceberg-schema-evolution.test.js.)
+    const rows = await readRowsFromTable(dir)
+    const byId = new Map(rows.map(r => [r.conversation_id, r]))
+    assert.equal(byId.get('c1')?.extra_notes ?? null, null)
+    assert.equal(byId.get('c2')?.extra_notes, 'note')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

@@ -11,6 +11,14 @@ import {
   icebergRead,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
+// Deep imports for in-place schema evolution. icebird's public top-level API
+// (`icebergTransaction`'s `tx`) exposes append/delete/setRef/expireSnapshots
+// but no schema-update primitive (icebird#25). These two helpers ARE public:
+// the package `exports` map publishes `"./src/*.js"`, and the cache already
+// reaches `fileCatalogCommit` this way for out-of-band compaction
+// (`compactExportTable`, LLP 0022#compaction).
+import { loadTable } from 'icebird/src/catalog/loadTable.js'
+import { fileCatalogCommit } from 'icebird/src/write/commit.js'
 
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import {
@@ -26,7 +34,7 @@ import {
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { AppendOptions, CachePartitioningDeclaration } from '../types.d.ts'
- * @import { Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
+ * @import { Catalog, Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */
 
@@ -120,11 +128,26 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
     let effectiveSchema = schema
     if (existingSchema) {
       const partitionColumns = new Set(declaration.iceberg.fields.map(f => f.column))
+      // mergeFieldIdsFromTable reconciles the declared columns with the table's
+      // current schema: it keeps existing field ids, rejects breaking changes
+      // (type changes, dropped/partition columns, new required columns,
+      // nullable→required tightening), and assigns fresh ids to new *nullable*
+      // columns. Only additive (new-nullable) deltas survive to here.
       effectiveSchema = mergeFieldIdsFromTable(columns, existingSchema, partitionColumns)
     }
     const existingSpec = currentPartitionSpec(existing)
     if (existingSpec) {
       validatePartitionSpecStability(declaration, existingSpec, effectiveSchema)
+    }
+    // @ref LLP 0029#in-place-evolution [implements] — the single switch point.
+    // effectiveSchema is the merged write schema; if it adds nullable columns the
+    // table's current schema doesn't have yet, evolve the table in place
+    // (add-schema + set-current-schema) so the append below lands under the new
+    // schema and the columns become queryable — no recreate, old rows read null.
+    if (existingSchema) {
+      await evolveSchemaInPlace({
+        catalog, tableUrl: url, resolver, lister, existingSchema, effectiveSchema,
+      })
     }
   }
   /** @type {TableMetadata | null} */
@@ -138,6 +161,82 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   }
   const bytesWritten = metadata ? addedFilesSize(metadata) : 0
   return { tableUrl: url, appended: rows.length > 0, bytesWritten }
+}
+
+/**
+ * Evolve a table's current schema in place to `effectiveSchema` when it adds
+ * nullable columns the table doesn't have yet. Additive-only: by the time we
+ * reach here, `mergeFieldIdsFromTable` has already rejected every breaking
+ * change, so any delta between `existingSchema` and `effectiveSchema` is one or
+ * more new nullable fields (or a widened required→nullable). No-op when the two
+ * schemas carry the same field ids — the common case — so a steady-state append
+ * pays only a cheap id-set comparison, no extra commit.
+ *
+ * Mechanism: stage `add-schema` (with the merged schema) + `set-current-schema`
+ * and commit them through `fileCatalogCommit` as their own metadata-only
+ * commit. The subsequent `icebergAppend` reloads metadata, sees the new
+ * current schema, and writes the new columns; pre-existing data files simply
+ * lack the new field ids and icebird reads them back as `null`. This is the
+ * single place the merged schema actually reaches storage — historically it
+ * was computed and discarded, so the new column never appeared without a full
+ * cache recreate (issue #102).
+ *
+ * The `add-schema` is assigned a fresh schema-id via the spec sentinel `-1`;
+ * `set-current-schema: -1` then points the table at the just-added schema.
+ * `fileCatalogCommit` applies these via `applyUpdates`, which enforces
+ * icebird's own evolution rules (stable field ids, type promotion only, no new
+ * required fields without defaults) as a second guard behind
+ * `mergeFieldIdsFromTable`.
+ *
+ * @ref LLP 0029#reachable-path [implements] — fileCatalogCommit is the reachable
+ *   icebird primitive; icebergTransaction's tx has no schema method (icebird#25).
+ * @param {object} options
+ * @param {Catalog} options.catalog
+ * @param {string} options.tableUrl
+ * @param {Resolver} options.resolver
+ * @param {Lister} options.lister
+ * @param {Schema} options.existingSchema
+ * @param {Schema} options.effectiveSchema
+ * @returns {Promise<void>}
+ */
+async function evolveSchemaInPlace({ catalog, tableUrl, resolver, lister, existingSchema, effectiveSchema }) {
+  if (!schemaAddsFields(existingSchema, effectiveSchema)) return
+  const ctx = await loadTable({ catalog, tableUrl, resolver })
+  if (!ctx.resolver) throw new Error('cache-iceberg: resolver is required to evolve schema')
+  await fileCatalogCommit({
+    tableUrl: ctx.tableUrl,
+    metadata: ctx.metadata,
+    metadataFileName: ctx.metadataFileName,
+    currentVersion: ctx.version,
+    resolver: ctx.resolver,
+    conditionalCommits: catalog.type === 'file' && catalog.conditionalCommits,
+    staged: {
+      // fileCatalogCommit applies updates and never reads `snapshot`; this is a
+      // metadata-only commit (no data files, no new snapshot).
+      snapshot: /** @type {any} */ (undefined),
+      requirements: [],
+      updates: [
+        { action: 'add-schema', schema: { ...effectiveSchema, 'schema-id': -1 } },
+        { action: 'set-current-schema', 'schema-id': -1 },
+      ],
+      writtenFiles: [],
+    },
+  })
+}
+
+/**
+ * True when `next` carries field ids that `prior` does not — i.e. the merged
+ * schema adds at least one column. `mergeFieldIdsFromTable` only ever appends
+ * new ids (existing columns keep their id), so an id-set superset check is a
+ * sufficient and cheap "needs evolution" test.
+ *
+ * @param {Schema} prior
+ * @param {Schema} next
+ * @returns {boolean}
+ */
+function schemaAddsFields(prior, next) {
+  const priorIds = new Set(prior.fields.map(f => f.id))
+  return next.fields.some(f => !priorIds.has(f.id))
 }
 
 /**
