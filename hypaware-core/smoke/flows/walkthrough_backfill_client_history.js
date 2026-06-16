@@ -182,10 +182,12 @@ export async function run({ harness, expect }) {
     )
 
     // ----- User-visible query result: both clients' history landed -----
+    // session_id is the always-present session key; conversation_id is null
+    // for Claude after the schema v6 split, so scope/filter on session_id.
     const sql = `
-      select conversation_id, role, content_text, provider, conversation_source
+      select session_id, role, content_text, provider, conversation_source
       from ai_gateway_messages
-      where conversation_id in ('${claudeSession}', '${codexSession}')
+      where session_id in ('${claudeSession}', '${codexSession}')
       order by conversation_source, message_index, part_index
     `.trim().replace(/\s+/g, ' ')
 
@@ -206,8 +208,8 @@ export async function run({ harness, expect }) {
       expect.that(`stdout: query was valid JSON (${e instanceof Error ? e.message : String(e)})`, false, (v) => v === true)
     }
 
-    const claudeRows = rows.filter((r) => r.conversation_id === claudeSession)
-    const codexRows = rows.filter((r) => r.conversation_id === codexSession)
+    const claudeRows = rows.filter((r) => r.session_id === claudeSession)
+    const codexRows = rows.filter((r) => r.session_id === codexSession)
     expect.that('query: claude session produced two rows', claudeRows, (v) => Array.isArray(v) && v.length === 2)
     expect.that('query: codex session produced two rows', codexRows, (v) => Array.isArray(v) && v.length === 2)
     expect.that(

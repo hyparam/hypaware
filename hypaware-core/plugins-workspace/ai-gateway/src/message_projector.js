@@ -245,18 +245,26 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
   // null for Claude). @ref LLP 0030#decision
   const sessionId = projection.session_id
   const conversationId = stringValue(projection.conversation_id)
-  if (!state.conversationStartedAt.has(sessionId)) {
+  // Scope per-thread state by conversation_id when present (a Codex thread),
+  // else by session_id (Claude, where conversation_id is null). One Codex
+  // session_id can carry several thread conversation_ids, so keying these
+  // maps by session_id would let a later thread inherit the first thread's
+  // start time and cross-resolve tool-result names when tool_call ids
+  // collide across threads. This is the SAME scope used for the
+  // prior-message chain and fallback identity below. @ref LLP 0030#decision
+  const threadScope = conversationId ?? sessionId
+  if (!state.conversationStartedAt.has(threadScope)) {
     state.conversationStartedAt.set(
-      sessionId,
+      threadScope,
       stringValue(projection.conversation_started_at) ?? tsStart
     )
   }
-  const conversationStarted = state.conversationStartedAt.get(sessionId) ?? tsStart
+  const conversationStarted = state.conversationStartedAt.get(threadScope) ?? tsStart
 
-  let conversationLookup = state.toolCallLookupByConversation.get(sessionId)
+  let conversationLookup = state.toolCallLookupByConversation.get(threadScope)
   if (!conversationLookup) {
     conversationLookup = new Map()
-    state.toolCallLookupByConversation.set(sessionId, conversationLookup)
+    state.toolCallLookupByConversation.set(threadScope, conversationLookup)
   }
 
   /** @type {Record<string, unknown>[]} */
@@ -269,15 +277,11 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     const content = normalizeContent(message.content)
     if (content.length === 0) continue
 
-    // A Claude session (session_id) holds the main loop plus subagents
-    // plus side chats; conversation_id is null there. Scope the
-    // prior-message chain (and the fallback hash) to
-    // (conversation_id ?? session_id, agent_id) so a subagent's history
-    // and identity stay separate from the main loop's, and a Codex
-    // thread scopes by its own conversation_id. agent_id null (main loop
-    // / Codex) keeps the plain thread key. @ref LLP 0030#decision
+    // The prior-message chain and fallback hash share `threadScope`
+    // (above): a subagent's history (agent_id set) stays separate from the
+    // main loop's, and a Codex thread scopes by its own conversation_id.
+    // agent_id null (main loop / Codex) keeps the plain thread key.
     const agentId = stringValue(message.agent_id) ?? stringValue(projection.agent_id)
-    const threadScope = conversationId ?? sessionId
     const conversationMessageIds = threadMessageIds(state, threadScope, agentId)
 
     const identity = resolveIdentity({

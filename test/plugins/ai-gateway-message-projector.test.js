@@ -4,7 +4,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
-import { computeMessageId, createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import {
+  aiGatewayRowsFromProjectedExchange,
+  computeMessageId,
+  createAiGatewayConversationState,
+  createAiGatewayMessageProjector,
+} from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -483,6 +488,46 @@ test('row output is stripped to the schema (no extra fields leak)', async () => 
       )
     }
   }
+})
+
+test('two Codex threads sharing a session_id keep separate start time and tool lookup', () => {
+  // A Codex session_id can carry several thread conversation_ids. Per-thread
+  // state (conversation_started_at, tool_call→tool_name) must scope by the
+  // thread (conversation_id), not the session, or a later thread inherits the
+  // first thread's start time and cross-resolves tool-result names when
+  // tool_call ids collide. Drive both threads through ONE shared state, as
+  // live capture does. @ref LLP 0030#decision
+  const state = createAiGatewayConversationState()
+
+  const rowsT1 = aiGatewayRowsFromProjectedExchange({
+    provider: 'openai',
+    session_id: 'sess-shared',
+    conversation_id: 'thread-1',
+    conversation_started_at: '2026-06-01T00:00:00.000Z',
+    messages: [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call-x', name: 'read_file', input: {} }] },
+    ],
+  }, { gatewayId: 'gw', state })
+
+  const rowsT2 = aiGatewayRowsFromProjectedExchange({
+    provider: 'openai',
+    session_id: 'sess-shared',
+    conversation_id: 'thread-2',
+    conversation_started_at: '2026-06-02T00:00:00.000Z',
+    // Same tool_call id as thread-1, but thread-2 never issued that tool_use.
+    messages: [
+      { role: 'tool', content: [{ type: 'tool_result', tool_use_id: 'call-x', content: 'body' }] },
+    ],
+  }, { gatewayId: 'gw', state })
+
+  assert.equal(rowsT1[0].conversation_started_at, '2026-06-01T00:00:00.000Z')
+  // Thread-2 keeps its OWN start time — it does not inherit thread-1's.
+  assert.equal(rowsT2[0].conversation_started_at, '2026-06-02T00:00:00.000Z')
+  assert.equal(rowsT2[0].session_id, 'sess-shared')
+  assert.equal(rowsT2[0].conversation_id, 'thread-2')
+  // The colliding tool_call id must NOT resolve to thread-1's 'read_file':
+  // thread-2 has its own (empty) tool lookup.
+  assert.equal(rowsT2[0].tool_name ?? null, null, 'no cross-thread tool-name resolution on a colliding tool_call id')
 })
 
 /**

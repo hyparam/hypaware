@@ -23,9 +23,9 @@ hyp graph compact              # merge duplicate rows, rewrite partitions sorted
 
 Deterministic T0 projection — exact-key, no models. All edges are **Session-rooted**:
 
-- **Node types:** `Session` (one per conversation), `App` (client), `Model`, `Tool`, `File`.
+- **Node types:** `Session` (one per session), `App` (client), `Model`, `Tool`, `File`.
 - **Edge types:** `via` (Session→App), `used_model` (Session→Model), `used` (Session→Tool), `touched` (Session→File).
-- **natural_key** is the human key per type: Session = `conversation_id`, App = `client_name`, Model = model id, Tool = tool name, File = full path (its `label` is the basename). Every row carries inline provenance (`source_dataset`, `projector`, …).
+- **natural_key** is the human key per type: Session = `session_id` (the always-present session container; `conversation_id` is a nullable thread identity, null for Claude), App = `client_name`, Model = model id, Tool = tool name, File = full path (its `label` is the basename). Every row carries inline provenance (`source_dataset`, `projector`, …).
 
 ## Two ways to query
 
@@ -49,7 +49,7 @@ For "what connects to X", co-occurrence, and N-hop walks — what flat SQL can't
 hyp graph neighbors <node> [--depth N] [--type T] [--edge-type T] [--direction out|in|both] [--limit N] [--json]
 ```
 
-- **`<node>`** resolves by `node_id`, then `natural_key`, then `label` — so pass a conversation id, a file path (or basename), a model id, or a tool/app name. If it's ambiguous the command lists the candidates; narrow with `--type Session|App|Model|Tool|File`.
+- **`<node>`** resolves by `node_id`, then `natural_key`, then `label` — so pass a session id, a file path (or basename), a model id, or a tool/app name. If it's ambiguous the command lists the candidates; narrow with `--type Session|App|Model|Tool|File`.
 - **`--direction`** is load-bearing because edges are Session-rooted:
   - `out` from a **Session** → its app, model, tools, files.
   - `in` from a **File / Tool / Model / App** → the **Sessions** that touched/used it.
@@ -61,7 +61,7 @@ hyp graph neighbors <node> [--depth N] [--type T] [--edge-type T] [--direction o
 Examples:
 
 ```bash
-hyp graph neighbors conv-abc123 --direction out                  # what a session used / touched
+hyp graph neighbors sess-abc123 --direction out                  # what a session used / touched
 hyp graph neighbors src/auth.py --direction in                   # which sessions touched a file
 hyp graph neighbors src/auth.py --depth 2 --direction both       # files/tools that co-occur with it
 hyp graph neighbors Bash --direction in --edge-type used         # sessions that ran a tool

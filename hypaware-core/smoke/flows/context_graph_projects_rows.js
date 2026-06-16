@@ -195,8 +195,9 @@ async function dispatchOk(argv, ctx) {
 
 /**
  * Build a full ai_gateway_messages row from a partial, defaulting every
- * non-nullable column. `date` and `conversation_id` are required by the
- * dataset's cache partitioning declaration.
+ * non-nullable column. `session_id` and `date` are required by the dataset's
+ * cache partitioning declaration (schema v6; the graph Session anchor keys on
+ * `session_id`, and `conversation_id` is now a nullable thread identity).
  *
  * @param {Record<string, unknown>} over
  * @returns {Record<string, unknown>}
@@ -206,6 +207,7 @@ function fixtureRow(over) {
   return {
     gateway_id: 'gw-smoke',
     schema_version: 1,
+    session_id: 'conv-1',
     conversation_id: 'conv-1',
     provider: 'anthropic',
     model: 'claude-opus-4-8',
