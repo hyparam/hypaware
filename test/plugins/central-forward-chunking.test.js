@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
@@ -65,12 +66,19 @@ function makeIdentity() {
 }
 
 /**
- * Capturing fetch. `responder` decides the status per call; default 202.
- * @param {(call: { url: string, batchId: string, lines: string[] }) => number} [responder]
+ * Capturing fetch. `responder` returns either a bare status number or
+ * `{ status, retryAfter }` so a test can attach a `Retry-After` header to
+ * a 429/503. Default 202. The response exposes a real `headers.get` so
+ * the sink's header read is exercised.
+ *
+ * @param {(call: { url: string, batchId: string, lines: string[] }) => (number | { status: number, retryAfter?: number })} [responder]
  */
 function makeFetch(responder) {
   /** @type {Array<{ url: string, batchId: string, lines: string[], rowCount: number }>} */
   const calls = []
+  // Count of response bodies the sink cancelled (drained) before parking on
+  // backpressure — proves it releases the socket rather than leaking it.
+  let bodyCancels = 0
   /** @type {typeof fetch} */
   const fn = /** @type {any} */ (async (url, init) => {
     const headers = /** @type {Record<string, string>} */ (init?.headers ?? {})
@@ -78,10 +86,20 @@ function makeFetch(responder) {
     const lines = body.split('\n').filter((l) => l.length > 0)
     const call = { url: String(url), batchId: headers['x-hyp-batch-id'], lines, rowCount: lines.length }
     calls.push(call)
-    const status = responder ? responder(call) : 202
-    return /** @type {any} */ ({ status, ok: status >= 200 && status < 300, async text() { return '' } })
+    const result = responder ? responder(call) : 202
+    const status = typeof result === 'number' ? result : result.status
+    const retryAfter = typeof result === 'object' ? result.retryAfter : undefined
+    return /** @type {any} */ ({
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: (/** @type {string} */ n) => (n.toLowerCase() === 'retry-after' && retryAfter != null ? String(retryAfter) : null) },
+      // A real ReadableStream in production; here a spy so a test can prove
+      // the sink cancels a throttle body before its backpressure pause.
+      body: { cancel: async () => { bodyCancels += 1 } },
+      async text() { return '' },
+    })
   })
-  return { calls, fn }
+  return { calls, fn, drains: () => bodyCancels }
 }
 
 const TABLE = '/cache/ai_gateway_messages/source=claude'
@@ -89,16 +107,23 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
 /**
  * @param {{
  *   count: number,
- *   responder?: (c: any) => number,
+ *   responder?: (c: any) => (number | { status: number, retryAfter?: number }),
  *   rowFactory?: (i: number) => Record<string, unknown>,
  *   signal?: string | null,
+ *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs' }) {
+function buildSink({ count, responder, rowFactory, signal = 'logs', sleepFn }) {
   const storage = makeStorage(TABLE, count, rowFactory)
   const identityClient = makeIdentity()
-  const { calls, fn } = makeFetch(responder)
+  const { calls, fn, drains } = makeFetch(responder)
   const log = makeLog()
+  // Default sleep records the requested delay and returns instantly, so
+  // backpressure pacing is asserted without real waits; a test can pass
+  // the real abortableSleep to exercise close()-driven abort.
+  /** @type {number[]} */
+  const sleeps = []
+  const recordingSleep = async (/** @type {number} */ ms) => { sleeps.push(ms) }
   const sink = createForwardSink({
     config: /** @type {any} */ ({ url: 'http://server:8740', identity: {} }),
     identityClient: /** @type {any} */ (identityClient),
@@ -106,8 +131,9 @@ function buildSink({ count, responder, rowFactory, signal = 'logs' }) {
     storage: /** @type {any} */ (storage),
     log: /** @type {any} */ (log),
     fetchFn: fn,
+    sleepFn: sleepFn ?? recordingSleep,
   })
-  return { sink, calls, storage, identityClient, log }
+  return { sink, calls, storage, identityClient, log, sleeps, drains }
 }
 
 const batch = { partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE }] }
@@ -270,4 +296,146 @@ test('central.forward.failed names the failing chunk and how many landed', async
   // the failing chunk is the 2nd POST; one chunk landed before it
   assert.equal(failed[0].fields.batch_id, calls[1].batchId)
   assert.equal(failed[0].fields.chunks_sent, 1)
+})
+
+// ---- Backpressure: honor Retry-After and resume the same chunk (issue #118) ----
+
+test('429 honors Retry-After and retries the same chunk to success', async () => {
+  // First POST is throttled with Retry-After: 7; the chunk must pause for
+  // exactly that long (not the ladder default) and re-send byte-identical.
+  let n = 0
+  const { sink, calls, sleeps } = buildSink({
+    count: 10,
+    responder: () => (++n === 1 ? { status: 429, retryAfter: 7 } : 202),
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(sleeps, [7000])
+  // the retry is the same chunk: identical body + idempotency key
+  assert.equal(calls[0].batchId, calls[1].batchId)
+  assert.deepEqual(calls[0].lines, calls[1].lines)
+})
+
+test('429 without Retry-After falls back to the backoff ladder', async () => {
+  let n = 0
+  const { sink, sleeps } = buildSink({
+    count: 10,
+    responder: () => (++n === 1 ? 429 : 202), // no retryAfter header
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.deepEqual(sleeps, [30_000]) // RETRY_BACKOFF_SECONDS[0]
+})
+
+test('503 is backpressure (retried), not a hard failure', async () => {
+  let n = 0
+  const { sink, calls, sleeps } = buildSink({
+    count: 10,
+    responder: () => (++n === 1 ? { status: 503, retryAfter: 3 } : 202),
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.length, 2)
+  assert.deepEqual(sleeps, [3000])
+})
+
+test('repeated 429s walk the ladder before succeeding', async () => {
+  // Three throttles with no Retry-After, then accept: the inline waits
+  // climb the ladder by attempt index.
+  let n = 0
+  const { sink, calls, sleeps } = buildSink({
+    count: 10,
+    responder: () => (++n <= 3 ? 429 : 202),
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.length, 4)
+  assert.deepEqual(sleeps, [30_000, 60_000, 120_000])
+})
+
+test('backpressure beyond the inline budget fails the partition for retry', async () => {
+  // Persistent 429 with Retry-After: 120. The inline budget is 5 min, so
+  // two waits (240s) fit and the third would cross it — the chunk throws
+  // and the partition is handed back for the next tick (cheap: the server
+  // dedupes the delivered prefix).
+  const { sink, calls, sleeps } = buildSink({
+    count: 10,
+    responder: () => ({ status: 429, retryAfter: 120 }),
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(result.partitionsExported, 0)
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.match(String(result.error), /backpressure exceeded/)
+  assert.deepEqual(sleeps, [120_000, 120_000])
+  assert.equal(calls.length, 3) // initial + 2 retries, all the same chunk
+})
+
+test('a non-positive Retry-After (0 / past date) uses the ladder, never a zero-delay spin', async () => {
+  // A legal `Retry-After: 0` (and a past HTTP-date) parses to 0. Taking it
+  // verbatim would retry with no delay, never advance the inline budget,
+  // and spin forever. The sink must treat it as "no pacing" and climb the
+  // ladder, so the budget still bounds the loop and respools the partition.
+  const { sink, calls, sleeps } = buildSink({
+    count: 10,
+    responder: () => ({ status: 429, retryAfter: 0 }),
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.match(String(result.error), /backpressure exceeded/)
+  // Ladder values, not [0, 0, 0]: every wait advances and bounds the loop.
+  assert.deepEqual(sleeps, [30_000, 60_000, 120_000])
+  assert.equal(calls.length, 4)
+  assert.ok(!sleeps.includes(0))
+})
+
+test('backpressure drains the throttle response body before parking', async () => {
+  // undici pins the socket until the body is read or cancelled; the sink
+  // must release each 429/503 body it is about to retry past.
+  let n = 0
+  const { sink, drains } = buildSink({
+    count: 10,
+    responder: () => (++n <= 2 ? { status: 503, retryAfter: 1 } : 202),
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(drains(), 2) // both throttle bodies cancelled; the 202 returns without draining
+})
+
+test('each backpressure wait emits central.forward.backpressure telemetry', async () => {
+  let n = 0
+  const { sink, calls, log } = buildSink({
+    count: 10,
+    responder: () => (++n === 1 ? { status: 429, retryAfter: 9 } : 202),
+  })
+  await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  const bp = log.rows.filter((r) => r.message === 'central.forward.backpressure')
+  assert.equal(bp.length, 1)
+  assert.equal(bp[0].level, 'debug')
+  assert.equal(bp[0].fields.http_status, 429)
+  assert.equal(bp[0].fields.retry_after_seconds, 9)
+  assert.equal(bp[0].fields.batch_id, calls[0].batchId)
+  assert.equal(bp[0].fields.hyp_sink_signal, 'logs')
+})
+
+test('close() aborts a chunk paused on backpressure (no shutdown wedge)', async () => {
+  // Use the real abortableSleep so the chunk genuinely parks on the wait;
+  // close() must abort it and the partition reports for retry promptly.
+  const { sink, calls } = buildSink({
+    count: 10,
+    responder: () => ({ status: 429, retryAfter: 300 }),
+    sleepFn: abortableSleep,
+  })
+  const pending = sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  // Let the first POST land and the wait start before closing.
+  await new Promise((r) => setTimeout(r, 15))
+  await sink.close()
+  const result = await pending
+  assert.equal(result.status, 'failed')
+  assert.equal(result.retryPartitions?.length, 1)
+  assert.match(String(result.error), /closed/)
+  assert.equal(calls.length, 1) // never got past the first throttled POST
 })

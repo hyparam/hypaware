@@ -6,8 +6,8 @@ import assert from 'node:assert/strict'
 import {
   MAX_CONFIG_DOCUMENT_BYTES,
   createConfigPullLoop,
-  parseRetryAfter,
 } from '../../hypaware-core/plugins-workspace/central/src/config_client.js'
+import { parseRetryAfter } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
@@ -354,6 +354,25 @@ test('503 with a garbage Retry-After falls back to the backoff ladder', async ()
   assert.ok(row)
   assert.equal(row?.fields.http_status, 503)
   assert.equal('retry_after_seconds' in (row?.fields ?? {}), false)
+})
+
+test('429 with Retry-After: 0 reschedules via the ladder, not an immediate re-poll', async () => {
+  const control = makeControl()
+  // A legal `Retry-After: 0` (or a past date) parses to 0. Rescheduling at
+  // 0s would re-poll immediately and spin; the loop must back off on the
+  // ladder (30s) instead. Persistent throttle so a spin would be obvious.
+  const { fetchFn, requests } = makeFetch([
+    { status: 429, headers: { 'retry-after': '0' } },
+    { status: 429, headers: { 'retry-after': '0' } },
+    { status: 429, headers: { 'retry-after': '0' } },
+  ])
+  const { loop } = makeLoop({ configControl: control, fetchFn })
+  loop.start()
+  // Comfortably longer than a 0ms re-poll, far shorter than the 30s ladder:
+  // a spinning loop would issue many polls in this window; the fix issues one.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await loop.stop()
+  assert.equal(requests.length, 1)
 })
 
 test('parseRetryAfter: delta-seconds, HTTP-date, and garbage', () => {
