@@ -8,6 +8,7 @@ import { computeMessageId, createAiGatewayMessageProjector } from '../../hypawar
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.d.ts'
  */
 
 const EXPECTED_COLUMNS = [
@@ -490,6 +491,47 @@ test('restart replay: seeding scans each conversation lazily and at most once pe
   assert.equal(scanCalls, 1, 'a conversation is scanned for committed part_ids at most once per listener')
 })
 
+test('restart replay: concurrent first exchanges for one conversation seed once and emit no duplicates', async () => {
+  // The proxy fires onExchangeFinished without serializing, so two first
+  // exchanges for the same conversation can be in flight at once. Both must
+  // await the same committed-row scan before projecting; otherwise the
+  // second races past a still-empty seen-set and re-emits committed rows.
+  const project = () => ({
+    provider: 'native',
+    conversation_id: 'conv-concurrent',
+    messages: [
+      { role: 'user', content: 'one', message_id: 'uuid-1' },
+      { role: 'assistant', content: 'two', message_id: 'uuid-2' },
+    ],
+  })
+  let scanCalls = 0
+  // The scan awaits discoverCachePartitions, so the seen-set is still empty
+  // when control yields. A per-conversation "seeded" flag set before that
+  // await would let the second caller through unseeded; awaiting the shared
+  // seed promise does not.
+  const storage = stubStorage(
+    [{
+      partition: { conversation_id: 'conv-concurrent' },
+      rows: [
+        { message_id: 'uuid-1', conversation_id: 'conv-concurrent' },
+        { message_id: 'uuid-2', conversation_id: 'conv-concurrent' },
+      ],
+    }],
+    () => { scanCalls++ },
+  )
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', { project })],
+    storage,
+  })
+  const [a, b] = await Promise.all([
+    projector.projectExchange(exchange()),
+    projector.projectExchange(exchange()),
+  ])
+  assert.equal(scanCalls, 1, 'concurrent first exchanges share a single committed-row scan')
+  assert.equal(a.length + b.length, 0, 'both concurrent replays emit zero duplicate rows')
+})
+
 test('restart replay: a different conversation is not deduped against another conversation rows', async () => {
   const storage = stubStorage([
     { partition: { conversation_id: 'conv-A' }, rows: [{ message_id: 'uuid-A', conversation_id: 'conv-A' }] },
@@ -532,10 +574,10 @@ test('restart replay: with no storage, behavior is unchanged (committed history 
 })
 
 test('restart replay: a throwing storage degrades to not-seeded and never drops rows', async () => {
-  const storage = {
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
     discoverCachePartitions() { throw new Error('boom') },
     async *readRows() {},
-  }
+  }))
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [
@@ -569,7 +611,9 @@ function stubStorage(parts, onScan) {
     byPath.set(path, part.rows)
     return { dataset: 'ai_gateway_messages', partition: part.partition, path, epoch: 0, rowCount: part.rows.length }
   })
-  return {
+  // Only the committed-read surface the projector feature-detects is real;
+  // cast to the full service type so the call site typechecks.
+  return /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
     async discoverCachePartitions() {
       onScan?.()
       return partitions
@@ -585,7 +629,7 @@ function stubStorage(parts, onScan) {
         yield projected
       }
     },
-  }
+  }))
 }
 
 /**

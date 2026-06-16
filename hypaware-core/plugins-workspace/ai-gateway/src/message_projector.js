@@ -129,13 +129,17 @@ export function createAiGatewayMessageProjector(opts) {
   // and dedup span the whole session, matching pre-extraction behavior.
   const state = createAiGatewayConversationState()
 
-  // Conversations whose committed message_ids have already been folded
-  // into `state.seenMessages`. A live listener is rebuilt fresh on every
-  // daemon start/reload (source.js launchListener), so without this the
-  // set starts empty and a replay of already-committed history re-emits
-  // duplicate-part_id rows.
-  /** @type {Set<string>} */
-  const seededConversations = new Set()
+  // In-flight (or settled) committed-row seed promise per conversation_id.
+  // A live listener is rebuilt fresh on every daemon start/reload
+  // (source.js launchListener), so without seeding the seen-set starts
+  // empty and a replay of already-committed history re-emits
+  // duplicate-part_id rows. Memoizing the PROMISE (not just a "seeded"
+  // flag) is load-bearing: two concurrent first exchanges for one
+  // conversation must await the same scan before projecting, or the second
+  // races past a still-empty seen-set and re-emits the rows this guards
+  // against.
+  /** @type {Map<string, Promise<void>>} */
+  const seedPromises = new Map()
 
   return {
     /**
@@ -157,7 +161,7 @@ export function createAiGatewayMessageProjector(opts) {
       await seedSeenMessagesForConversation(
         projection.conversation_id,
         state,
-        seededConversations,
+        seedPromises,
         storage,
         log
       )
@@ -183,22 +187,50 @@ export function createAiGatewayMessageProjector(opts) {
  * (a large cache holds millions of part_ids — a global preload is a memory
  * and scan problem), and only once per conversation per listener.
  *
+ * The scan promise is memoized SYNCHRONOUSLY in `seedPromises` before the
+ * first `await`, so concurrent first exchanges for the same conversation
+ * await the same scan instead of racing past an unseeded `seenMessages`
+ * and re-emitting the duplicates this guards against. The proxy fires
+ * `onExchangeFinished` without serializing (proxy.js stores the returned
+ * promise but does not await it), so this overlap is real.
+ *
+ * @param {string} conversationId
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @param {Map<string, Promise<void>>} seedPromises
+ * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
+ * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @returns {Promise<void>}
+ */
+function seedSeenMessagesForConversation(conversationId, state, seedPromises, storage, log) {
+  if (!conversationId) return Promise.resolve()
+  let pending = seedPromises.get(conversationId)
+  if (!pending) {
+    // This body runs to here synchronously (no prior await), so the map is
+    // populated before any concurrent caller can observe a missing entry.
+    pending = scanCommittedMessageIds(conversationId, state, storage, log)
+    seedPromises.set(conversationId, pending)
+  }
+  return pending
+}
+
+/**
+ * Scan committed `ai_gateway_messages` partitions for one conversation and
+ * fold their `message_id`s into `state.seenMessages`.
+ *
  * Best-effort throughout: a missing storage handle (unit-test stubs), a
  * missing table, or an unreadable partition degrades to "not seeded" and
  * NEVER throws — a seeding miss only risks the duplicate this guards
  * against (which settlement/compaction can still collapse), whereas
- * throwing would drop a real row. The conversation is marked seeded
- * regardless so a partial/failed scan is not retried on every exchange.
+ * throwing would drop a real row. The promise still resolves on a
+ * partial/failed scan, so it is cached and not retried on every exchange.
  *
  * @param {string} conversationId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
- * @param {Set<string>} seededConversations
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @returns {Promise<void>}
  */
-async function seedSeenMessagesForConversation(conversationId, state, seededConversations, storage, log) {
-  if (!conversationId || seededConversations.has(conversationId)) return
-  seededConversations.add(conversationId)
+async function scanCommittedMessageIds(conversationId, state, storage, log) {
   if (!canScanCommittedRows(storage)) return
 
   /** @type {CachePartitionMeta[]} */
