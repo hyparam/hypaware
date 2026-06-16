@@ -25,8 +25,13 @@ import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-worksp
 // Task 3 (the connector's contract), and Task 1 (the kit) together, and is the
 // automated regression that the relocation changed nothing observable.
 
+// @ref LLP 0030#decision — the ai-gateway contract keys the Session on
+// session_id now (conversation_id is null for Claude). The fixture carries
+// both columns: session_id for the contract under test, conversation_id for
+// the version-bump regression's bespoke session-only contract below.
 /** Only the columns the ai-gateway contract reads (a subset of the full schema). */
 const COLUMNS = /** @type {const} */ ([
+  { name: 'session_id', type: 'STRING', nullable: false },
   { name: 'conversation_id', type: 'STRING', nullable: true },
   { name: 'cwd', type: 'STRING', nullable: true },
   { name: 'git_branch', type: 'STRING', nullable: true },
@@ -41,12 +46,12 @@ const COLUMNS = /** @type {const} */ ([
 
 const ROWS = [
   {
-    conversation_id: 'conv-1', cwd: '/repo', git_branch: 'main', client_name: 'claude-code',
+    session_id: 'sess-1', conversation_id: null, cwd: '/repo', git_branch: 'main', client_name: 'claude-code',
     user_id: 'u1', model: 'sonnet', tool_name: null, tool_args: null, part_type: 'text',
     message_created_at: '2026-06-01T00:00:00.000Z',
   },
   {
-    conversation_id: 'conv-1', cwd: null, git_branch: null, client_name: 'claude-code',
+    session_id: 'sess-1', conversation_id: null, cwd: null, git_branch: null, client_name: 'claude-code',
     user_id: null, model: 'sonnet', tool_name: 'Read', tool_args: '{"file_path":"/repo/auth.py"}',
     part_type: 'tool_call', message_created_at: '2026-06-01T00:01:00.000Z',
   },
@@ -126,11 +131,11 @@ function sessionContract(version) {
       {
         kind: 'node',
         type: 'Session',
-        sql: 'SELECT conversation_id, message_created_at FROM ai_gateway_messages',
+        sql: 'SELECT session_id, message_created_at FROM ai_gateway_messages',
         toRow(r) {
-          const key = r.conversation_id
+          const key = r.session_id
           if (typeof key !== 'string') return null
-          return buildNode({ type: 'Session', key, firstSeen: r.message_created_at, sourceKeys: { conversation_id: key } })
+          return buildNode({ type: 'Session', key, firstSeen: r.message_created_at, sourceKeys: { session_id: key } })
         },
       },
     ],
@@ -157,7 +162,7 @@ test('bumping projectorVersion does not re-project — committed rows keep their
       refresh: 'always',
     })
     assert.equal(res.rows.length, 1, 'still exactly one Session row')
-    assert.equal(res.rows[0].natural_key, 'conv-1')
+    assert.equal(res.rows[0].natural_key, 'sess-1')
     assert.equal(Number(res.rows[0].projector_version), 1, 'the committed row keeps its first-sighting version, not the bumped one')
   })
 })

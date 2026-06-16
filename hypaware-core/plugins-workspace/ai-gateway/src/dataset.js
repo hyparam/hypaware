@@ -25,7 +25,12 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
 export const AI_GATEWAY_PROJECTED_EXCHANGE_KIND = 'ai_gateway.projected_exchange'
 
 export const DATASET_NAME = 'ai_gateway_messages'
-export const PARTITION_LABEL = 'proxy_messages_v4'
+// @ref LLP 0030#breaking — the partition key moved from conversation_id
+// to session_id (schema v6). The label bump gives the recreated cache a
+// fresh partition path; discoverParts still lists the legacy v4 path so
+// any pending v4 spool still flushes.
+export const PARTITION_LABEL = 'proxy_messages_v5'
+const LEGACY_PARTITION_LABELS = Object.freeze(['proxy_messages_v4'])
 
 /**
  * Column shape for `ai_gateway_messages`. The shape is owned by the
@@ -52,9 +57,11 @@ export function aiGatewayTablePath(storage) {
 
 /**
  * Discover all partitions for `ai_gateway_messages`, including
- * new-style per-client/date partitions and legacy `proxy_messages_v4`
- * or `all` partitions.  Always includes the legacy spool path so
- * pending data gets flushed during query settlement.
+ * new-style per-client/date partitions and the current/legacy
+ * `proxy_messages_v*` spool partitions.  Always includes the current
+ * and legacy spool paths so pending data gets flushed during query
+ * settlement (the v4 → v5 bump on the session_id partition split means
+ * a recreated cache can still carry residual v4 spool).
  *
  * @param {DatasetDiscoveryContext} ctx
  * @returns {Promise<QueryPartition[]>}
@@ -67,13 +74,16 @@ export async function discoverParts(ctx) {
   const partitions = []
   const seen = new Set()
 
-  const legacyPath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
-  partitions.push({
-    dataset: DATASET_NAME,
-    partition: { partition: PARTITION_LABEL },
-    tablePath: legacyPath,
-  })
-  seen.add(legacyPath)
+  for (const label of [PARTITION_LABEL, ...LEGACY_PARTITION_LABELS]) {
+    const spoolPath = path.join(cacheDir, 'datasets', DATASET_NAME, label)
+    if (seen.has(spoolPath)) continue
+    partitions.push({
+      dataset: DATASET_NAME,
+      partition: { partition: label },
+      tablePath: spoolPath,
+    })
+    seen.add(spoolPath)
+  }
 
   const discovered = await discoverCachePartitions(cacheDir, buildDiscoveryScope(ctx.scope))
   for (const p of discovered) {
@@ -222,8 +232,15 @@ export function aiGatewayDatasetRegistration(state) {
         fallback: 'unknown',
       },
       iceberg: {
+        // @ref LLP 0030#breaking — the required identity partition field
+        // is session_id (always present), not conversation_id (now
+        // nullable). @ref LLP 0022#within-partition-sort — these identity
+        // fields, in declared order, also seed the export sort order, so
+        // session_id leads the clustering and conversation_id rides along
+        // as a secondary thread-lookup sort key.
         fields: [
-          { column: 'conversation_id', transform: 'identity', required: true },
+          { column: 'session_id', transform: 'identity', required: true },
+          { column: 'conversation_id', transform: 'identity' },
           { column: 'cwd', transform: 'identity' },
           { column: 'date', transform: 'identity', required: true },
         ],
@@ -536,9 +553,10 @@ function partIdKey(row) {
 /**
  * Narrow a `BackfillItem.value` to an `AiGatewayProjectedExchange`. The
  * runner already validated the envelope shape; this guards the
- * payload's minimal contract (`provider`, `conversation_id`, and a
+ * payload's minimal contract (`provider`, `session_id`, and a
  * `messages` array) so a malformed provider record yields zero rows
- * instead of throwing mid-run.
+ * instead of throwing mid-run. `session_id` is the non-null partition
+ * key; `conversation_id` is nullable (null for Claude). @ref LLP 0030
  *
  * @param {unknown} value
  * @returns {AiGatewayProjectedExchange | undefined}
@@ -547,7 +565,7 @@ function asProjectedExchange(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const v = /** @type {Record<string, unknown>} */ (value)
   if (typeof v.provider !== 'string' || v.provider.length === 0) return undefined
-  if (typeof v.conversation_id !== 'string' || v.conversation_id.length === 0) return undefined
+  if (typeof v.session_id !== 'string' || v.session_id.length === 0) return undefined
   if (!Array.isArray(v.messages)) return undefined
   return /** @type {AiGatewayProjectedExchange} */ (value)
 }

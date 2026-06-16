@@ -1330,12 +1330,23 @@ export interface AiGatewayExchangeInput {
  * fallback identity for messages lacking `message_id`, and expands
  * each `messages[]` entry into part rows in `ai_gateway_messages`.
  *
- * Provider-defined fields (`provider`, `conversation_id`, identity)
- * are authoritative — the gateway never overrides them when present.
+ * Provider-defined fields (`provider`, `session_id`, `conversation_id`,
+ * identity) are authoritative — the gateway never overrides them when
+ * present.
  */
 export interface AiGatewayProjectedExchange {
   provider: string
-  conversation_id: string
+  /**
+   * Partition key and session container, always present: the Claude
+   * session id or Codex `metadata.session_id`. A session holds the main
+   * loop plus N subagent / side-chat threads. (LLP 0030)
+   */
+  session_id: string
+  /**
+   * Thread within the session: the Codex thread id, or null for Claude
+   * (whose session id lives in `session_id`). Nullable since LLP 0030.
+   */
+  conversation_id?: string
   conversation_started_at?: string
   conversation_source?: string
   user_id?: string
@@ -1372,7 +1383,7 @@ export interface AiGatewayProjectedExchange {
  *  - If the projector supplies `message_id`, the gateway uses it
  *    verbatim and never overwrites it.
  *  - If `message_id` is omitted, the gateway computes a hash id from
- *    `(conversation_id, role, content)` and stamps
+ *    `(conversation_id ?? session_id, role, content)` and stamps
  *    `attributes.gateway.identity_source = "gateway_fallback"`.
  *  - `previous_message_id` is preserved when the projector supplies
  *    it (an empty array marks a conversation root). When the

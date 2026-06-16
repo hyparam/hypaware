@@ -41,13 +41,16 @@ export function createAiGatewayGraphContract(kit) {
   const rules = [
     // --- nodes ---
 
-    // Session per conversation.
+    // Session per session_id. @ref LLP 0030#decision — session_id is the
+    // session container (always present); conversation_id is null for
+    // Claude, so the Session node must key on session_id, not
+    // conversation_id.
     {
       kind: 'node',
       type: 'Session',
-      sql: `SELECT conversation_id, cwd, git_branch, client_name, user_id, message_created_at FROM ${SOURCE_DATASET}`,
+      sql: `SELECT session_id, cwd, git_branch, client_name, user_id, message_created_at FROM ${SOURCE_DATASET}`,
       toRow(r) {
-        const key = str(r.conversation_id)
+        const key = str(r.session_id)
         if (!key) return null
         return buildNode({
           type: 'Session',
@@ -59,7 +62,7 @@ export function createAiGatewayGraphContract(kit) {
             user_id: str(r.user_id),
           }),
           firstSeen: r.message_created_at,
-          sourceKeys: { conversation_id: key },
+          sourceKeys: { session_id: key },
         })
       },
     },
@@ -114,16 +117,17 @@ export function createAiGatewayGraphContract(kit) {
 
     // --- edges ---
 
-    // Session -via-> App
+    // Session -via-> App. @ref LLP 0030#decision — Session keyed on
+    // session_id (conversation_id is null for Claude).
     {
       kind: 'edge',
       type: 'via',
-      sql: `SELECT conversation_id, client_name, message_created_at FROM ${SOURCE_DATASET}`,
+      sql: `SELECT session_id, client_name, message_created_at FROM ${SOURCE_DATASET}`,
       toRow(r) {
-        const session = str(r.conversation_id)
+        const session = str(r.session_id)
         const app = str(r.client_name)
         if (!session || !app) return null
-        return buildEdge({ type: 'via', srcType: 'Session', srcKey: session, dstType: 'App', dstKey: app, firstSeen: r.message_created_at, sourceKeys: { conversation_id: session, client_name: app } })
+        return buildEdge({ type: 'via', srcType: 'Session', srcKey: session, dstType: 'App', dstKey: app, firstSeen: r.message_created_at, sourceKeys: { session_id: session, client_name: app } })
       },
     },
 
@@ -131,12 +135,12 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'used_model',
-      sql: `SELECT conversation_id, model, message_created_at FROM ${SOURCE_DATASET}`,
+      sql: `SELECT session_id, model, message_created_at FROM ${SOURCE_DATASET}`,
       toRow(r) {
-        const session = str(r.conversation_id)
+        const session = str(r.session_id)
         const model = str(r.model)
         if (!session || !model) return null
-        return buildEdge({ type: 'used_model', srcType: 'Session', srcKey: session, dstType: 'Model', dstKey: model, firstSeen: r.message_created_at, sourceKeys: { conversation_id: session, model } })
+        return buildEdge({ type: 'used_model', srcType: 'Session', srcKey: session, dstType: 'Model', dstKey: model, firstSeen: r.message_created_at, sourceKeys: { session_id: session, model } })
       },
     },
 
@@ -144,12 +148,12 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'used',
-      sql: `SELECT conversation_id, tool_name, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      sql: `SELECT session_id, tool_name, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
       toRow(r) {
-        const session = str(r.conversation_id)
+        const session = str(r.session_id)
         const tool = str(r.tool_name)
         if (!session || !tool) return null
-        return buildEdge({ type: 'used', srcType: 'Session', srcKey: session, dstType: 'Tool', dstKey: tool, firstSeen: r.message_created_at, sourceKeys: { conversation_id: session, tool_name: tool } })
+        return buildEdge({ type: 'used', srcType: 'Session', srcKey: session, dstType: 'Tool', dstKey: tool, firstSeen: r.message_created_at, sourceKeys: { session_id: session, tool_name: tool } })
       },
     },
 
@@ -157,12 +161,12 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'touched',
-      sql: `SELECT conversation_id, tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      sql: `SELECT session_id, tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
       toRow(r) {
-        const session = str(r.conversation_id)
+        const session = str(r.session_id)
         const file = filePathFrom(r.tool_name, r.tool_args)
         if (!session || !file) return null
-        return buildEdge({ type: 'touched', srcType: 'Session', srcKey: session, dstType: 'File', dstKey: file, firstSeen: r.message_created_at, sourceKeys: { conversation_id: session, file_path: file } })
+        return buildEdge({ type: 'touched', srcType: 'Session', srcKey: session, dstType: 'File', dstKey: file, firstSeen: r.message_created_at, sourceKeys: { session_id: session, file_path: file } })
       },
     },
   ]

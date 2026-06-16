@@ -243,9 +243,12 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
     assert.equal(item.provenance?.native_id, 'sess-1')
 
     // Projection carries the bead-mandated conversation envelope.
+    // @ref LLP 0030#decision — the Claude session id is the session_id
+    // partition key; conversation_id is null (no per-thread id).
     const exchange = value(item)
     assert.equal(exchange.provider, 'anthropic')
-    assert.equal(exchange.conversation_id, 'sess-1')
+    assert.equal(exchange.session_id, 'sess-1')
+    assert.equal(exchange.conversation_id, undefined)
     assert.equal(exchange.conversation_source, 'claude')
     assert.equal(exchange.client_name, 'claude')
     assert.equal(exchange.cwd, '/work/repo-a')
@@ -265,7 +268,10 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
     // user(text) + assistant(text + tool_use) = 3 part rows.
     assert.equal(rows.length, 3)
     for (const row of rows) {
-      assert.equal(row.conversation_id, 'sess-1')
+      assert.equal(row.session_id, 'sess-1')
+      // Claude has no per-thread conversation id; the projection omits it,
+      // so the expanded row carries conversation_id undefined. @ref LLP 0030
+      assert.equal(row.conversation_id, undefined)
       assert.equal(row.provider, 'anthropic')
       assert.equal(row.conversation_source, 'claude')
       assert.equal(row.client_name, 'claude')
@@ -421,7 +427,7 @@ test('sessions are grouped into one item each, across multiple files', async () 
     const items = await collectItems(provider.run(runContext().ctx))
     assert.equal(items.length, 2)
 
-    const byId = new Map(items.map((i) => [value(i).conversation_id, i]))
+    const byId = new Map(items.map((i) => [value(i).session_id, i]))
     assert.deepEqual([...byId.keys()].sort(), ['sess-a', 'sess-b'])
     const itemA = byId.get('sess-a')
     const itemB = byId.get('sess-b')
@@ -464,7 +470,7 @@ test('grouping keys on the entry session id, not the file name', async () => {
 
     const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
     const items = await collectItems(provider.run(runContext().ctx))
-    const ids = items.map((i) => value(i).conversation_id).sort()
+    const ids = items.map((i) => value(i).session_id).sort()
     assert.deepEqual(ids, ['sess-x', 'sess-y'])
   } finally {
     await env.cleanup()

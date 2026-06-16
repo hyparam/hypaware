@@ -13,7 +13,8 @@ import { computeMessageId, createAiGatewayMessageProjector } from '../../hypawar
 const EXPECTED_COLUMNS = [
   ['gateway_id', 'STRING', false],
   ['schema_version', 'INT32', false],
-  ['conversation_id', 'STRING', false],
+  ['session_id', 'STRING', false],
+  ['conversation_id', 'STRING', true],
   ['user_id', 'STRING', true],
   ['provider', 'STRING', false],
   ['model', 'STRING', true],
@@ -146,7 +147,7 @@ test('projector returning undefined or an empty messages array is skipped', asyn
     gatewayId: 'gw-test',
     projectors: [
       registered('undefined', { priority: 20, project: () => undefined }),
-      registered('empty', { priority: 10, project: () => ({ provider: 'empty', conversation_id: 'c', messages: [] }) }),
+      registered('empty', { priority: 10, project: () => ({ provider: 'empty', session_id: 's', conversation_id: 'c', messages: [] }) }),
       registered('ok', { priority: 5, project: () => projection('ok') }),
     ],
   })
@@ -232,6 +233,7 @@ test('projector-supplied message_id and previous_message_id are preserved', asyn
       registered('native', {
         project: () => ({
           provider: 'native',
+          session_id: 'sess-1',
           conversation_id: 'conv-1',
           messages: [
             { role: 'user', content: 'hi', message_id: 'msg-root', previous_message_id: [] },
@@ -267,6 +269,7 @@ test('supplied message_id without history gets the immediate predecessor as prev
       registered('native-no-history', {
         project: () => ({
           provider: 'native',
+          session_id: 'sess-native',
           conversation_id: 'conv-native',
           messages: [
             { role: 'user', content: 'one', message_id: 'uuid-1' },
@@ -300,6 +303,7 @@ test('fallback identity stamps gateway.identity_source and a linear previous_mes
       registered('partial', {
         project: () => ({
           provider: 'partial',
+          session_id: 'sess-fallback',
           conversation_id: 'conv-fallback',
           messages: [
             { role: 'user', content: 'first' },
@@ -360,14 +364,16 @@ test('fallback message_id is scoped by agent_id so subagents do not collide on s
   assert.equal(computeMessageId('sess-1', 'assistant', content, undefined), mainLoop)
 })
 
-test('previous_message_id chains are scoped per (conversation_id, agent_id)', async () => {
+test('previous_message_id chains are scoped per (conversation_id ?? session_id, agent_id)', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [
       registered('threaded', {
         project: () => ({
           provider: 'p',
-          conversation_id: 'sess-1',
+          // Claude shape: conversation_id null, so the scope falls back
+          // to session_id; a subagent (agent_id) still gets a fresh chain.
+          session_id: 'sess-1',
           messages: [
             // main loop
             { role: 'user', content: 'main one' },
@@ -395,6 +401,52 @@ test('previous_message_id chains are scoped per (conversation_id, agent_id)', as
   assert.deepEqual(agentOne.previous_message_id, [])
   // Subagent's second chains only on the subagent's first.
   assert.deepEqual(agentTwo.previous_message_id, [agentOne.message_id])
+})
+
+test('session_id is the partition key; conversation_id is null for Claude, the thread for Codex', async () => {
+  // Claude shape: session_id set, conversation_id absent → null column.
+  const claude = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('claude', {
+      project: () => ({ provider: 'anthropic', session_id: 'sess-claude', messages: [{ role: 'user', content: 'hi' }] }),
+    })],
+  })
+  const claudeRows = await claude.projectExchange(exchange())
+  assert.ok(claudeRows.length > 0)
+  assert.equal(claudeRows[0].session_id, 'sess-claude')
+  assert.equal(claudeRows[0].conversation_id, undefined, 'Claude rows carry a null conversation_id')
+
+  // Codex shape: both set (session_id = session container, conversation_id = thread).
+  const codex = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('codex', {
+      project: () => ({ provider: 'chatgpt', session_id: 'sess-codex', conversation_id: 'thread-codex', messages: [{ role: 'user', content: 'go' }] }),
+    })],
+  })
+  const codexRows = await codex.projectExchange(exchange())
+  assert.ok(codexRows.length > 0)
+  assert.equal(codexRows[0].session_id, 'sess-codex')
+  assert.equal(codexRows[0].conversation_id, 'thread-codex')
+})
+
+test('a projection without session_id is rejected as an invalid shape', async () => {
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = collectingLogger(logs)
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('no-session', {
+        priority: 20,
+        project: () => /** @type {any} */ ({ provider: 'p', conversation_id: 'c', messages: [{ role: 'user', content: 'x' }] }),
+      }),
+      registered('ok', { priority: 5, project: () => projection('ok') }),
+    ],
+    log,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows[0].provider, 'ok', 'the session_id-less projection is skipped, next one wins')
+  assert.ok(logs.some((e) => e.level === 'warn' && e.message === 'aigw.projector_invalid_output'))
 })
 
 test('attributes.gateway carries exchange provenance and dev_run_id', async () => {
@@ -439,6 +491,7 @@ test('row output is stripped to the schema (no extra fields leak)', async () => 
 function projection(provider) {
   return {
     provider,
+    session_id: `${provider}-sess`,
     conversation_id: `${provider}-conv`,
     messages: [
       { role: 'user', content: 'hello' },

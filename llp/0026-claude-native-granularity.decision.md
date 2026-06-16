@@ -5,7 +5,7 @@
 **Systems:** Gateway, Plugins
 **Author:** Brendan / Claude
 **Date:** 2026-06-12
-**Related:** LLP 0012, LLP 0016
+**Related:** LLP 0012, LLP 0016, LLP 0030
 
 ## Summary
 
@@ -124,6 +124,17 @@ user tool_result batches have no API message id, so backfill would have to
    providers (Codex max observed 2, raw API max 4), and legacy multi-block
    backfill rows (max 4). Retiring it would be a deliberate `schema_version`
    bump, not a side effect.
+
+> **Update (LLP 0030):** this doc was written when a Claude *session* lived in
+> the `conversation_id` column — the premise "conversation_id is a session id
+> for Claude". That is retired: the session container is now the dedicated
+> non-null **`session_id`** partition key, and Claude **`conversation_id` is
+> null** (a Claude session has no per-thread conversation id). The fallback-id
+> scope and the `previous_message_id` chain scope are now
+> `(conversation_id ?? session_id, agent_id)`, which for Claude resolves to the
+> session id — the same value the old `conversation_id` held — so Claude
+> identity, granularity, and dedup are all **unchanged** by the split. See
+> [LLP 0030](./0030-session-id-partition-key.decision.md).
 
 ## Consequences
 

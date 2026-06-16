@@ -38,10 +38,12 @@ test('contract carries its source/projector metadata', () => {
   assert.equal(contract.projectorVersion, PROJECTOR_VERSION)
 })
 
-test('Session rule builds a node keyed on conversation_id with pruned props', () => {
+// @ref LLP 0030#decision — the Session node keys on session_id (the
+// session container, always present); conversation_id is null for Claude.
+test('Session rule builds a node keyed on session_id with pruned props', () => {
   const r = rule('node', 'Session')
   const row = r.toRow({
-    conversation_id: 'conv-1',
+    session_id: 'sess-1',
     cwd: '/repo',
     git_branch: null,
     client_name: 'claude',
@@ -49,27 +51,27 @@ test('Session rule builds a node keyed on conversation_id with pruned props', ()
     message_created_at: TS,
   })
   assert.ok(row)
-  assert.equal(row.node_id, nodeId('Session', 'conv-1'))
+  assert.equal(row.node_id, nodeId('Session', 'sess-1'))
   assert.equal(row.node_type, 'Session')
-  assert.equal(row.natural_key, 'conv-1')
+  assert.equal(row.natural_key, 'sess-1')
   assert.deepEqual(row.props, { client_name: 'claude', cwd: '/repo' }, 'null/undefined props dropped, keys sorted')
   assert.equal(row.first_seen, TS)
   assert.equal(row.source_dataset, SOURCE_DATASET)
-  assert.deepEqual(row.source_keys, { conversation_id: 'conv-1' })
+  assert.deepEqual(row.source_keys, { session_id: 'sess-1' })
   assert.equal(row.projector, PROJECTOR)
   assert.equal(row.projector_version, PROJECTOR_VERSION)
 })
 
 test('node rules skip rows missing their natural key', () => {
-  assert.equal(rule('node', 'Session').toRow({ conversation_id: null, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Session').toRow({ conversation_id: '', message_created_at: TS }), null)
+  assert.equal(rule('node', 'Session').toRow({ session_id: null, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Session').toRow({ session_id: '', message_created_at: TS }), null)
   assert.equal(rule('node', 'App').toRow({ client_name: null, message_created_at: TS }), null)
   assert.equal(rule('node', 'Model').toRow({ model: undefined, message_created_at: TS }), null)
   assert.equal(rule('node', 'Tool').toRow({ tool_name: '', message_created_at: TS }), null)
 })
 
 test('Session rule with no optional fields builds null props', () => {
-  const row = rule('node', 'Session').toRow({ conversation_id: 'conv-1', message_created_at: TS })
+  const row = rule('node', 'Session').toRow({ session_id: 'sess-1', message_created_at: TS })
   assert.ok(row)
   assert.equal(row.props, null, 'empty props prune to null')
 })
@@ -108,13 +110,13 @@ test('File rule falls back to notebook_path', () => {
 test('touched edge wires Session and File node ids and skips partial rows', () => {
   const r = rule('edge', 'touched')
   const row = r.toRow({
-    conversation_id: 'conv-1',
+    session_id: 'sess-1',
     tool_name: 'Write',
     tool_args: { file_path: '/repo/a.js' },
     message_created_at: TS,
   })
   assert.ok(row)
-  const src = nodeId('Session', 'conv-1')
+  const src = nodeId('Session', 'sess-1')
   const dst = nodeId('File', '/repo/a.js')
   assert.equal(row.src_id, src)
   assert.equal(row.dst_id, dst)
@@ -122,19 +124,19 @@ test('touched edge wires Session and File node ids and skips partial rows', () =
   assert.equal(row.src_type, 'Session')
   assert.equal(row.dst_type, 'File')
 
-  assert.equal(r.toRow({ conversation_id: 'conv-1', tool_name: 'Bash', tool_args: {}, message_created_at: TS }), null)
-  assert.equal(r.toRow({ conversation_id: null, tool_name: 'Write', tool_args: { file_path: '/x' }, message_created_at: TS }), null)
+  assert.equal(r.toRow({ session_id: 'sess-1', tool_name: 'Bash', tool_args: {}, message_created_at: TS }), null)
+  assert.equal(r.toRow({ session_id: null, tool_name: 'Write', tool_args: { file_path: '/x' }, message_created_at: TS }), null)
 })
 
 test('via and used_model edges skip rows missing either endpoint', () => {
   const via = rule('edge', 'via')
-  assert.ok(via.toRow({ conversation_id: 'c', client_name: 'a', message_created_at: TS }))
-  assert.equal(via.toRow({ conversation_id: 'c', client_name: null, message_created_at: TS }), null)
-  assert.equal(via.toRow({ conversation_id: null, client_name: 'a', message_created_at: TS }), null)
+  assert.ok(via.toRow({ session_id: 'c', client_name: 'a', message_created_at: TS }))
+  assert.equal(via.toRow({ session_id: 'c', client_name: null, message_created_at: TS }), null)
+  assert.equal(via.toRow({ session_id: null, client_name: 'a', message_created_at: TS }), null)
 
   const used = rule('edge', 'used_model')
-  assert.ok(used.toRow({ conversation_id: 'c', model: 'm', message_created_at: TS }))
-  assert.equal(used.toRow({ conversation_id: 'c', model: '', message_created_at: TS }), null)
+  assert.ok(used.toRow({ session_id: 'c', model: 'm', message_created_at: TS }))
+  assert.equal(used.toRow({ session_id: 'c', model: '', message_created_at: TS }), null)
 })
 
 test('toRow normalizes first_seen from Date and epoch-number timestamps', () => {
@@ -153,7 +155,7 @@ test('toRow normalizes first_seen from Date and epoch-number timestamps', () => 
 })
 
 test('numeric natural keys are stringified', () => {
-  const row = rule('node', 'Session').toRow({ conversation_id: 42, message_created_at: TS })
+  const row = rule('node', 'Session').toRow({ session_id: 42, message_created_at: TS })
   assert.ok(row)
   assert.equal(row.natural_key, '42')
   assert.equal(row.node_id, nodeId('Session', '42'))

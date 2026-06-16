@@ -190,9 +190,15 @@ export function resolveClaudeSessionId(reqBody, headers) {
 }
 
 /**
- * Resolve the `conversation_id` for an Anthropic exchange. Mirrors the
- * donor: session id wins; otherwise hash the first message's content;
- * otherwise hash the exchange id so something is always written.
+ * Resolve the non-null `session_id` (partition key) for an Anthropic
+ * exchange. Claude has no per-thread conversation id — a session is a
+ * container of many threads — so this value is `session_id`, not
+ * `conversation_id` (which is null for Claude). @ref LLP 0030#decision
+ *
+ * Resolution: the session id wins; otherwise hash the first message's
+ * content; otherwise hash the exchange id, so the partition key is
+ * always populated even for generic Anthropic SDK traffic that carries
+ * no session header.
  *
  * @param {Record<string, unknown>} reqBody
  * @param {string} exchangeId

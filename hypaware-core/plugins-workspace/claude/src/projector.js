@@ -160,7 +160,14 @@ export function createClaudeExchangeProjector(opts) {
         : []
       const transcriptIndex = indexTranscriptEntries(transcriptEntries)
       const identityFromTranscript = transcriptIndex.ordered.length > 0
-      const conversationId = resolveAnthropicConversationId(
+      // @ref LLP 0030#decision — a Claude session is a container of many
+      // threads (main loop, subagents, side chats), so the session id is
+      // the `session_id` partition key, NOT `conversation_id`. Claude has
+      // no per-thread conversation id, so conversation_id is null.
+      // `resolveAnthropicConversationId` already yields a non-null value
+      // (session id, else a content/exchange hash) so session_id is never
+      // null even for generic Anthropic SDK traffic without a session id.
+      const sessionIdColumn = resolveAnthropicConversationId(
         reqBody,
         input.exchange_id,
         sessionId
@@ -233,7 +240,9 @@ export function createClaudeExchangeProjector(opts) {
       /** @type {AiGatewayProjectedExchange} */
       const projection = {
         provider: 'anthropic',
-        conversation_id: conversationId,
+        session_id: sessionIdColumn,
+        // conversation_id is null for Claude — the session id is the
+        // session container, not a per-thread id. @ref LLP 0030#decision
         conversation_source: conversationSource,
         client_name: clientName,
         messages: projectedMessages,
