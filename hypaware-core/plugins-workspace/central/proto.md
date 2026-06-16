@@ -163,15 +163,19 @@ batch from its outbox and counts it as a permanent failure rather than
 retrying forever.
 
 Response 429 / 503: server is rate-limiting or temporarily unavailable.
-Client retries the same batch. `Retry-After` (seconds or HTTP date) is
-honored when present.
+Client retries the same batch. A *positive* `Retry-After` (seconds or
+HTTP date) is honored; an absent, unparseable, or **non-positive** value
+(a literal `0` or a past date carries no useful pacing) falls back to the
+client's linear backoff ladder — a zero is never taken as an immediate
+retry.
 
 Response 5xx (other): transient transport failure. Client retries with
 exponential backoff capped at 5 minutes.
 
 > **Client status:** `429`/`503` are now handled as specified — the sink
-> honors `Retry-After` (falling back to the linear ladder) and **retries
-> the same chunk in place**, sleeping whenever the server's byte-rate
+> honors a positive `Retry-After` (falling back to the linear ladder when
+> it is absent, garbage, or non-positive) and **retries the same chunk in
+> place**, sleeping whenever the server's byte-rate
 > bucket empties, so a partition larger than the burst delivers across
 > one or more paced POSTs instead of failing. The inline wait per chunk
 > is bounded (~5 min); past it the chunk throws and the driver respools,

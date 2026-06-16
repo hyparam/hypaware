@@ -5,7 +5,7 @@
 **Systems:** Sinks
 **Author:** Phil / Claude
 **Date:** 2026-06-01
-**Related:** LLP 0010, LLP 0013
+**Related:** LLP 0010, LLP 0013, LLP 0025
 
 > Export targets and the export driver. Decomposed from `hypaware-design.md`
 > (Sinks).
@@ -70,6 +70,32 @@ interface Sink {
 
 `exportBatch` is called on the configured schedule with a batch of ready cache
 partitions; the sink writes them and acks.
+
+## Forward sink backpressure
+
+`@hypaware/central` is a request sink: `exportBatch` POSTs each partition's rows
+to the server in bounded chunks. The server rate-limits per gateway, so a chunk
+can come back `429`/`503` carrying a `Retry-After`. The sink treats this as
+**backpressure, not failure**:
+
+- It **retries the same chunk in place** — byte-identical body and
+  `X-Hyp-Batch-Id` — so the re-send is idempotent (the server dedupes the
+  already-delivered prefix; server LLP 0001).
+- It honors a **positive** `Retry-After`. An absent, garbage, or **non-positive**
+  value (a legal `Retry-After: 0` and a past HTTP-date both parse to `0`) carries
+  no useful pacing and falls back to the linear ladder (`30→60→120→300s`). Taking
+  a zero verbatim would retry with no delay and spin the loop; the ladder
+  guarantees every wait advances so the inline budget can bound it. The same rule
+  governs the config pull loop ([LLP 0025](./0025-remote-config-join-flow.spec.md#config-pull-loop)).
+- The inline wait per chunk is **bounded** (~5 min). Past the budget the chunk
+  throws and the export driver respools the partition (`ExportResult.retryPartitions`)
+  on the next scheduled tick — cheap, because the server has already deduped what
+  landed.
+- The wait is **abortable**: `close()` aborts an in-flight pause so daemon
+  shutdown is never wedged by a parked chunk.
+
+The wire contract for these statuses lives in `@hypaware/central`'s `proto.md`
+("Response 429 / 503").
 
 ## Config: two shapes
 

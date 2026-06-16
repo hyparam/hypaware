@@ -14,9 +14,11 @@ export const RETRY_BACKOFF_SECONDS = [30, 60, 120, 300]
 
 /**
  * Parse a `Retry-After` header into whole seconds: delta-seconds or an
- * HTTP-date, anything unparseable → `undefined` (callers fall back to
- * the backoff ladder — a garbage header must not collapse to a zero
- * delay and spin the retry loop).
+ * HTTP-date, anything unparseable → `undefined`. A literal `0` or a past
+ * HTTP-date faithfully parses to `0`. Callers must treat any non-positive
+ * (or `undefined`) result as "no useful pacing" and fall back to the
+ * backoff ladder — never honor it as a zero-delay retry, which would spin
+ * the retry loop.
  *
  * @param {string | null} value
  * @returns {number | undefined}

@@ -260,7 +260,10 @@ export function createConfigPullLoop(args) {
         http_status: response.status,
         ...(retryAfter !== undefined ? { retry_after_seconds: retryAfter } : {}),
       })
-      return retryAfter !== undefined ? retryAfter : 'retry_backoff'
+      // Honor only a *positive* Retry-After. A legal `0` or a past HTTP-date
+      // parses to 0 — rescheduling at 0s would re-poll immediately and spin;
+      // fall through to the ladder ('retry_backoff') instead.
+      return retryAfter ? retryAfter : 'retry_backoff'
     }
 
     consecutiveFailures += 1

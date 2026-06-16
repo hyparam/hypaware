@@ -388,9 +388,16 @@ async function postNdjson(args) {
       continue
     }
 
+    // @ref LLP 0014#forward-sink-backpressure [implements] — 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
     if (response.status === 429 || response.status === 503) {
+      // Honor only a *positive* Retry-After. A legal `Retry-After: 0` or a
+      // past HTTP-date parses to 0 (not undefined) and carries no useful
+      // pacing — taking it verbatim would retry with zero delay, never
+      // advance `waitedMs`, and spin this loop forever. `||` (not `??`)
+      // falls a zero through to the ladder, so every wait progresses and
+      // the inline budget can bound the retries.
       const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
-      const delaySeconds = retryAfter ?? RETRY_BACKOFF_SECONDS[
+      const delaySeconds = retryAfter || RETRY_BACKOFF_SECONDS[
         Math.min(backpressureRetries, RETRY_BACKOFF_SECONDS.length - 1)
       ]
       const delayMs = delaySeconds * 1000
@@ -407,6 +414,11 @@ async function postNdjson(args) {
         retry_after_seconds: delaySeconds,
         retry: backpressureRetries + 1,
       })
+      // Release the throttle response before parking: undici keeps the
+      // socket out of the pool until the body is read or cancelled, so a
+      // multi-minute pause — and every retry that piles up — would
+      // otherwise pin it.
+      await discardBody(response)
       await sleepFn(delayMs, abortSignal)
       waitedMs += delayMs
       backpressureRetries += 1
@@ -446,4 +458,15 @@ async function readErrorDetail(response) {
     return `${response.status} ${body.trim().slice(0, 200)}`
   }
   return `${response.status} ${response.statusText || ''}`.trim()
+}
+
+/**
+ * Discard a response body we will not read — a 429/503 we are about to
+ * retry past — so undici returns the socket to the pool. Cancelling is
+ * best-effort: a missing or already-settled body is a no-op.
+ *
+ * @param {Response} response
+ */
+async function discardBody(response) {
+  try { await response.body?.cancel() } catch { /* already settled or no body */ }
 }
