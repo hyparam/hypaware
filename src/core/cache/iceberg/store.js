@@ -15,8 +15,8 @@ import {
 // (`icebergTransaction`'s `tx`) exposes append/delete/setRef/expireSnapshots
 // but no schema-update primitive (icebird#25). These two helpers ARE public:
 // the package `exports` map publishes `"./src/*.js"`, and the cache already
-// reaches `fileCatalogCommit` this way for out-of-band compaction
-// (`compactExportTable`, LLP 0022#compaction).
+// deep-imports icebird write internals this way (e.g. retention.js reaches
+// `icebird/src/write/stage-position-delete.js` and `icebird/src/delete.js`).
 import { loadTable } from 'icebird/src/catalog/loadTable.js'
 import { fileCatalogCommit } from 'icebird/src/write/commit.js'
 

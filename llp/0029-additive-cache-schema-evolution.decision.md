@@ -61,9 +61,11 @@ patching:
 - `fileCatalogCommit` and `loadTable` are **published**: the package `exports`
   map declares `"./src/*.js"`, so `icebird/src/write/commit.js` and
   `icebird/src/catalog/loadTable.js` are deep-importable public API, not
-  internals. The cache **already** depends on exactly this for out-of-band
-  compaction — `compactExportTable` stages and commits through
-  `fileCatalogCommit` ([LLP 0022](./0022-iceberg-export-partitioning.spec.md#compaction)).
+  internals. The cache **already** deep-imports icebird write internals this
+  way — e.g. `retention.js` reaches `icebird/src/write/stage-position-delete.js`
+  and `icebird/src/delete.js` for position-delete maintenance — and the
+  top-level compaction path (`compactExportTable`) commits through icebird's
+  public `icebergRewrite`.
 - `fileCatalogCommit` applies `staged.updates` and never reads
   `staged.snapshot`, so a **metadata-only** commit (just `add-schema` +
   `set-current-schema`, no data files, no new snapshot) is well-formed.
@@ -161,6 +163,8 @@ rejection rather than weakening it.
   package `exports` (`"./src/*.js"` makes the deep imports public).
 - [LLP 0013](./0013-local-query-cache.decision.md) — the cache this evolves.
 - [LLP 0022](./0022-iceberg-export-partitioning.spec.md) — the shared icebird
-  engine, the `fileCatalogCommit` precedent, and partition-spec drift rejection.
+  engine and partition-spec drift rejection.
+- `src/core/cache/retention.js` — existing precedent for deep-importing
+  icebird `src/` write internals via the published `"./src/*.js"` exports.
 - Issue #102 (this work); issue #104 (partition-key move — the breaking case).
 - icebird#25 — request to expose schema evolution from the transaction API.
