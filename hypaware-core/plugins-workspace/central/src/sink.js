@@ -2,6 +2,8 @@
 
 import { createHash } from 'node:crypto'
 
+import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
+
 /**
  * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { IdentityClient } from './identity_client.js'
@@ -9,6 +11,16 @@ import { createHash } from 'node:crypto'
  */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
+
+// Ceiling on how long one chunk POST will pace itself against the
+// server's 429/503 backpressure before giving up inline. We retry the
+// SAME chunk (honoring Retry-After) so delivery is correct at any volume
+// — pausing whenever the server's byte-rate bucket empties — but bound
+// the inline wait so one throttled partition can't wedge a sink tick.
+// On exceeding it we throw: the driver respools the partition and the
+// next tick resumes, which is cheap because the server dedupes the
+// already-delivered prefix (server LLP 0001#idempotency-before-backpressure).
+const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 
 // A partition is streamed to the server in bounded chunks so a large
 // backlog never materializes in memory (a gateway joining with months
@@ -37,12 +49,19 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
  *   storage: QueryStorageService,
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
+ *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
  * }} args
  * @returns {Sink}
  */
 export function createForwardSink(args) {
   const { config, identityClient, query, storage, log } = args
   const fetchFn = args.fetchFn ?? fetch
+  // Injectable so tests drive backpressure pacing without real waits.
+  const sleepFn = args.sleepFn ?? abortableSleep
+
+  // Aborts an in-flight backpressure wait when the sink is closed, so a
+  // chunk paused on `Retry-After` cannot wedge daemon shutdown.
+  const abortController = new AbortController()
 
   return {
     /**
@@ -72,6 +91,7 @@ export function createForwardSink(args) {
         try {
           bytesWritten += await forwardPartition({
             partition, signal, config, identityClient, storage, fetchFn, log,
+            abortSignal: abortController.signal, sleepFn,
           })
           partitionsExported += 1
         } catch (err) {
@@ -116,7 +136,9 @@ export function createForwardSink(args) {
     async close() {
       // No background loops to stop here: the config pull loop wraps
       // this sink's close() in index.js, and identity refresh is lazy
-      // (every authenticated call refreshes inside the 24h window).
+      // (every authenticated call refreshes inside the 24h window). The
+      // one thing to interrupt is a chunk paused on server backpressure.
+      abortController.abort(new Error('central.forward sink closed'))
     },
   }
 }
@@ -155,10 +177,12 @@ function signalForPartition(query, partition) {
  *   storage: QueryStorageService,
  *   fetchFn: typeof fetch,
  *   log: PluginLogger,
+ *   abortSignal: AbortSignal,
+ *   sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, fetchFn, log }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, fetchFn, log, abortSignal, sleepFn }) {
   if (!KNOWN_SIGNALS.has(signal)) {
     throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
   }
@@ -182,7 +206,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     const bytes = Buffer.byteLength(body, 'utf8')
     const rows = lines.length
     try {
-      await postNdjson({ centralUrl: config.url, signal, body, batchId, identityClient, fetchFn })
+      await postNdjson({
+        centralUrl: config.url, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn,
+        hyp_dataset: partition.dataset, chunkIndex,
+      })
     } catch (err) {
       // Annotate so the partition-level failure log (exportBatch) can
       // name the failing chunk and how many already landed — the new
@@ -296,9 +323,22 @@ function serializeValue(value) {
 
 /**
  * POST one NDJSON chunk to `/v1/ingest/{signal}`, carrying its
- * idempotency key as `X-Hyp-Batch-Id`. Refreshes the JWT and retries
- * once on 401 (re-sending the same body + key, so the retry stays
- * idempotent); throws on transport errors or non-2xx response.
+ * idempotency key as `X-Hyp-Batch-Id`. Re-sends the *same* body + key on
+ * two transient conditions, so every retry stays idempotent:
+ *
+ * - `401` — refresh the JWT once and retry (a second `401` escalates).
+ * - `429`/`503` — server backpressure. Honor `Retry-After` (falling back
+ *   to the linear ladder when it is absent or garbage), sleep, and retry
+ *   the same chunk. This is what makes delivery correct at any volume:
+ *   the POST pauses whenever the server's byte-rate bucket empties rather
+ *   than failing the partition (proto.md, "Response 429 / 503"). The
+ *   inline wait is bounded by {@link MAX_BACKPRESSURE_WAIT_MS}; past it we
+ *   throw and let the driver respool (the server dedupes the delivered
+ *   prefix, so the next tick resumes cheaply).
+ *
+ * Any other non-2xx throws — `4xx` poison and other `5xx` are the
+ * driver's to classify (outbox respool); narrowing poison-drop is a
+ * separate follow-up (hypaware #118).
  *
  * @param {{
  *   centralUrl: string,
@@ -307,10 +347,15 @@ function serializeValue(value) {
  *   batchId: string,
  *   identityClient: IdentityClient,
  *   fetchFn: typeof fetch,
+ *   log: PluginLogger,
+ *   abortSignal: AbortSignal,
+ *   sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
+ *   hyp_dataset: string,
+ *   chunkIndex: number,
  * }} args
  */
 async function postNdjson(args) {
-  const { centralUrl, signal, body, batchId, identityClient, fetchFn } = args
+  const { centralUrl, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn, hyp_dataset, chunkIndex } = args
   if (!KNOWN_SIGNALS.has(signal)) {
     throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
   }
@@ -327,17 +372,50 @@ async function postNdjson(args) {
     body,
   })
 
-  let response = await send(await identityClient.getCurrentJwt())
+  let refreshed = false
+  let waitedMs = 0
+  let backpressureRetries = 0
+  for (;;) {
+    const response = await send(await identityClient.getCurrentJwt())
 
-  if (response.status === 401) {
-    await identityClient.refresh()
-    response = await send(await identityClient.getCurrentJwt())
+    if (response.status === 202 || response.ok) return
+
+    // One-shot refresh + retry on the first 401; a second falls through
+    // to the throw below as an auth failure (proto.md "Refresh window").
+    if (response.status === 401 && !refreshed) {
+      refreshed = true
+      await identityClient.refresh()
+      continue
+    }
+
+    if (response.status === 429 || response.status === 503) {
+      const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
+      const delaySeconds = retryAfter ?? RETRY_BACKOFF_SECONDS[
+        Math.min(backpressureRetries, RETRY_BACKOFF_SECONDS.length - 1)
+      ]
+      const delayMs = delaySeconds * 1000
+      if (waitedMs + delayMs > MAX_BACKPRESSURE_WAIT_MS) {
+        const detail = await readErrorDetail(response)
+        throw new Error(`central.forward POST ${url} backpressure exceeded ${MAX_BACKPRESSURE_WAIT_MS / 1000}s inline: ${detail}`)
+      }
+      log.debug('central.forward.backpressure', {
+        hyp_sink_signal: signal,
+        hyp_dataset,
+        batch_id: batchId,
+        chunk_index: chunkIndex,
+        http_status: response.status,
+        retry_after_seconds: delaySeconds,
+        retry: backpressureRetries + 1,
+      })
+      await sleepFn(delayMs, abortSignal)
+      waitedMs += delayMs
+      backpressureRetries += 1
+      continue
+    }
+
+    const detail = await readErrorDetail(response)
+    throw new Error(`central.forward POST ${url} failed: ${detail}`)
   }
-
-  if (response.status === 202 || response.ok) return
-
-  const detail = await readErrorDetail(response)
-  throw new Error(`central.forward POST ${url} failed: ${detail}`)
 }
 
 /**

@@ -1,5 +1,7 @@
 // @ts-check
 
+import { RETRY_BACKOFF_SECONDS, parseRetryAfter } from './backoff.js'
+
 /**
  * @import { ConfigControlFacade, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { IdentityClient } from './identity_client.js'
@@ -36,9 +38,6 @@ export const DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
  * request is cut off so shutdown stays prompt.
  */
 export const DEFAULT_STOP_GRACE_SECONDS = 1
-
-/** Linear backoff ladder (seconds) for 429/503/transport failures, per proto.md. */
-const RETRY_BACKOFF_SECONDS = [30, 60, 120, 300]
 
 /** Polite backoff (seconds) for the legacy 404 branch, per proto.md. */
 const LEGACY_404_BACKOFF_SECONDS = 300
@@ -402,24 +401,6 @@ function abortable(promise, signal) {
 /** @param {AbortSignal} signal */
 function abortReason(signal) {
   return signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? 'aborted'))
-}
-
-/**
- * Parse a `Retry-After` header into whole seconds: delta-seconds or an
- * HTTP-date, anything unparseable → `undefined` (callers fall back to
- * the backoff ladder — a garbage header must not produce a zero-delay
- * poll loop). Exported for direct unit tests.
- *
- * @param {string | null} value
- * @returns {number | undefined}
- */
-export function parseRetryAfter(value) {
-  if (!value) return undefined
-  const seconds = Number.parseInt(value, 10)
-  if (Number.isInteger(seconds) && seconds >= 0) return seconds
-  const date = Date.parse(value)
-  if (!Number.isNaN(date)) return Math.max(0, Math.round((date - Date.now()) / 1000))
-  return undefined
 }
 
 /**

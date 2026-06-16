@@ -6,8 +6,8 @@ import assert from 'node:assert/strict'
 import {
   MAX_CONFIG_DOCUMENT_BYTES,
   createConfigPullLoop,
-  parseRetryAfter,
 } from '../../hypaware-core/plugins-workspace/central/src/config_client.js'
+import { parseRetryAfter } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */

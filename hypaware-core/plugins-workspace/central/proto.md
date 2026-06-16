@@ -169,16 +169,22 @@ honored when present.
 Response 5xx (other): transient transport failure. Client retries with
 exponential backoff capped at 5 minutes.
 
-> **Client status (v1.4.x):** the per-status handling above is the
-> **target** contract; it is not yet what `@hypaware/central` does. The
-> current sink treats *any* non-2xx response uniformly: it throws, and
-> the kernel sink driver re-spools the whole partition for the next
-> tick. So poison (400/422) is **not** dropped — it retries forever — and
-> `Retry-After` on 429/503 is **not** honored (no client-side pacing).
-> Bulk backfill that trips the server's per-gateway `byte_rate` 429 is
-> the known consequence; closing this gap (poison-drop + `Retry-After`
-> backoff) is tracked as follow-up. New post-join traffic is small and
-> unaffected.
+> **Client status:** `429`/`503` are now handled as specified — the sink
+> honors `Retry-After` (falling back to the linear ladder) and **retries
+> the same chunk in place**, sleeping whenever the server's byte-rate
+> bucket empties, so a partition larger than the burst delivers across
+> one or more paced POSTs instead of failing. The inline wait per chunk
+> is bounded (~5 min); past it the chunk throws and the driver respools,
+> which is cheap because the server dedupes the already-delivered prefix
+> (server LLP 0001 idempotency ledger). The wait is abortable, so sink
+> `close()` / daemon shutdown is never wedged by a paused chunk.
+>
+> Two gaps remain, tracked as follow-up: poison (`400`/`422`) is still
+> **not** dropped — it throws like any other failure and the driver
+> retries it — and there is no **forward cursor** or proactive client
+> pacing yet, so each tick re-streams the whole partition (the server
+> dedup keeps that correct and, post the ledger-before-backpressure fix,
+> cheap).
 
 ### Batch boundaries
 
