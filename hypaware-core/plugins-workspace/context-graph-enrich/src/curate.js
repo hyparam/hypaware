@@ -5,7 +5,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { columnsFor, COMMITTED_DATASET, enrichTablePath, PROSPECTS_DATASET, RESOLUTIONS_DATASET } from './datasets.js'
 import { buildCurateBatchRequest, parseDecisions } from './prompts.js'
 import { getCompletion, getVector, requireEnrichRuntime } from './runtime.js'
-import { runSql, sqlQuote } from './sql.js'
+import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 
 /**
  * @import { CurateDecision, EnrichRuntime } from './types.d.ts'
@@ -261,9 +261,13 @@ async function safeDeref(runtime, ids) {
     const list = ids.filter((k) => typeof k === 'string' && k.length > 0)
     if (list.length === 0) return ''
     const inList = list.slice(0, 40).map((id) => `'${sqlQuote(id)}'`).join(', ')
+    // Same content filter as the T1 scan: a message whose kept text part shares
+    // its id with an excluded part (e.g. a tool_result) must not re-admit that
+    // part into the curator excerpt. @ref LLP 0028#row-selection
+    const where = [`${cfg.id_column} IN (${inList})`, ...contentFilterClauses(cfg)].join(' AND ')
     const rows = await runSql(
       runtime,
-      `SELECT ${cfg.text_column} FROM ${cfg.source_dataset} WHERE ${cfg.id_column} IN (${inList}) LIMIT 40`
+      `SELECT ${cfg.text_column} FROM ${cfg.source_dataset} WHERE ${where} LIMIT 40`
     )
     let out = ''
     for (const r of rows) {

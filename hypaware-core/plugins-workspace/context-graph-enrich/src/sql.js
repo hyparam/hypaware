@@ -3,7 +3,7 @@
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 
 /**
- * @import { EnrichRuntime } from './types.d.ts'
+ * @import { EnrichConfig, EnrichRuntime } from './types.d.ts'
  */
 
 /**
@@ -68,4 +68,44 @@ export function isMissingDatasetError(err) {
  */
 export function sqlQuote(v) {
   return v.replace(/'/g, "''")
+}
+
+/**
+ * Source-scan content filters shared by the T1 propose scan
+ * ({@link import('./propose.js').buildProposeQuery}) and the T2 source deref
+ * ({@link import('./curate.js')}'s `safeDeref`), so both skip the same
+ * low-signal rows. Returns SQL predicate fragments to AND into a WHERE clause;
+ * an empty array means no content filter.
+ *
+ * Applying the filter in *both* places matters: T1 groups by anchor and only
+ * proposes from rows it scanned, but T2 re-derefs the source by `id_column`
+ * (message id), so a message whose kept text part shares its id with an
+ * excluded part (e.g. a `tool_result`) would otherwise re-admit that part into
+ * the expensive curator call. Filtering the deref keeps T2 consistent with T1.
+ *
+ * `require_text` drops rows whose text column is null/empty: they contribute
+ * nothing to the model yet consume the per-tick row budget, and they include
+ * the signature-only thinking/reasoning parts a proxy does not persist.
+ * `exclude_part_types` drops whole part kinds — default `tool_result`, i.e. raw
+ * tool/file/command output, the bulk of the corpus but not durable knowledge.
+ *
+ * The column names are validated SQL identifiers and the part-type values are
+ * `sqlQuote`'d literals, so this introduces no injection surface.
+ *
+ * @ref LLP 0028#row-selection — enrichment scans signal, not plumbing.
+ *
+ * @param {EnrichConfig} cfg
+ * @returns {string[]}
+ */
+export function contentFilterClauses(cfg) {
+  /** @type {string[]} */
+  const clauses = []
+  if (cfg.require_text) {
+    clauses.push(`(${cfg.text_column} IS NOT NULL AND ${cfg.text_column} <> '')`)
+  }
+  if (cfg.exclude_part_types.length > 0) {
+    const list = cfg.exclude_part_types.map((t) => `'${sqlQuote(t)}'`).join(', ')
+    clauses.push(`${cfg.part_type_column} NOT IN (${list})`)
+  }
+  return clauses
 }

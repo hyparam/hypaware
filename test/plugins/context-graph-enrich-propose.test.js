@@ -40,21 +40,43 @@ function row({ ts, part, conv, msg = 'm', text = 'hello' }) {
 
 // --- buildProposeQuery -------------------------------------------------------
 
-test('buildProposeQuery with no cursor has no WHERE and orders by the keyset tuple', () => {
+test('buildProposeQuery with no cursor still applies the default content filter', () => {
+  // No watermark predicate without a cursor, but the content filter (drop
+  // empty-text rows + tool_result) is always applied. @ref LLP 0028#row-selection
   const sql = buildProposeQuery(cfg(), null, 200)
-  assert.doesNotMatch(sql, /WHERE/)
+  assert.match(sql, /WHERE/)
+  assert.doesNotMatch(sql, /message_created_at >=/)
+  assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
+  assert.match(sql, /part_type NOT IN \('tool_result'\)/)
   assert.match(sql, /FROM ai_gateway_messages/)
   assert.match(sql, /ORDER BY message_created_at, part_id LIMIT 200/)
 })
 
-test('buildProposeQuery filters with a numeric ts >= floor that includes the boundary instant', () => {
+test('buildProposeQuery filters with a numeric ts >= floor ANDed before the content filter', () => {
   // The engine compares a TIMESTAMP (Date) column correctly only against a
   // numeric literal, and `>=` (not `>`) keeps same-ts parts; the exact tuple
   // boundary is dropped in JS, not SQL.
   const sql = buildProposeQuery(cfg(), { ts: 1750000000000, id: 'p2' }, 50)
-  assert.match(sql, /WHERE message_created_at >= 1750000000000 /)
-  assert.doesNotMatch(sql, /'/) // numeric literal — no quoted value, no injection surface
+  assert.match(sql, /WHERE message_created_at >= 1750000000000 AND/)
+  assert.doesNotMatch(sql, /message_created_at >= '/) // numeric literal — no injection surface
+  assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
+  assert.match(sql, /part_type NOT IN \('tool_result'\)/)
   assert.match(sql, /ORDER BY message_created_at, part_id LIMIT 50/)
+})
+
+test('buildProposeQuery honors row-selection config (filters off, custom excludes)', () => {
+  // Both filters off + no cursor → no WHERE clause at all.
+  const none = buildProposeQuery(cfg({ require_text: false, exclude_part_types: [] }), null, 10)
+  assert.doesNotMatch(none, /WHERE/)
+
+  // require_text off keeps only the part-type filter, over the configured column.
+  const custom = buildProposeQuery(
+    cfg({ require_text: false, exclude_part_types: ['tool_result', 'image'], part_type_column: 'part_type' }),
+    null,
+    10
+  )
+  assert.match(custom, /WHERE part_type NOT IN \('tool_result', 'image'\)/)
+  assert.doesNotMatch(custom, /content_text IS NOT NULL/)
 })
 
 // --- groupSourceRows ---------------------------------------------------------

@@ -26,6 +26,17 @@ export const SOURCE_DEFAULTS = Object.freeze({
   // session container, always present), matching the ai-gateway-graph
   // Session node; conversation_id is null for Claude.
   anchor_key_column: 'session_id',
+  // @ref LLP 0028#row-selection — the enrichment scans *signal*, not plumbing.
+  // `part_type` distinguishes content kinds (text / reasoning / tool_call /
+  // tool_result …); `exclude_part_types` drops whole kinds before the model
+  // sees them. Default excludes `tool_result` — raw tool/file/command output is
+  // ~60% of the corpus by volume but not durable knowledge worth extracting.
+  part_type_column: 'part_type',
+  exclude_part_types: ['tool_result'],
+  // Drop rows whose text column is null/empty (tool_call parts, and the
+  // signature-only thinking parts a proxy doesn't persist): they contribute
+  // nothing to the model yet consume the per-tick row budget.
+  require_text: true,
 })
 
 export const PROPOSE_DEFAULTS = Object.freeze({
@@ -78,6 +89,13 @@ export function validateEnrichConfig(value) {
   const tiebreak_column = readIdentifier(raw, 'tiebreak_column', errors) ?? SOURCE_DEFAULTS.tiebreak_column
   const anchor_type = readString(raw, 'anchor_type', errors) ?? SOURCE_DEFAULTS.anchor_type
   const anchor_key_column = readIdentifier(raw, 'anchor_key_column', errors) ?? SOURCE_DEFAULTS.anchor_key_column
+  const part_type_column = readIdentifier(raw, 'part_type_column', errors) ?? SOURCE_DEFAULTS.part_type_column
+  // `exclude_part_types` values are interpolated as SQL string *literals*
+  // (sqlQuote'd), not identifiers, so any non-empty string is accepted. An
+  // explicit `[]` disables the part-type filter (it is not undefined, so it
+  // is honored rather than falling back to the default).
+  const exclude_part_types = readStringArray(raw, 'exclude_part_types', errors) ?? [...SOURCE_DEFAULTS.exclude_part_types]
+  const require_text = readBool(raw, 'require_text', '', errors) ?? SOURCE_DEFAULTS.require_text
   const recall_index = readString(raw, 'recall_index', errors)
 
   const propose = readPropose(raw.propose, errors)
@@ -95,6 +113,9 @@ export function validateEnrichConfig(value) {
       tiebreak_column,
       anchor_type,
       anchor_key_column,
+      part_type_column,
+      exclude_part_types,
+      require_text,
       ...(recall_index !== undefined ? { recall_index } : {}),
       propose,
       curate,
@@ -193,6 +214,27 @@ function readString(raw, key, errors, prefix = '') {
     return undefined
   }
   return v
+}
+
+/**
+ * Read an array of non-empty strings. Returns `undefined` when the key is
+ * absent (caller falls back to the default), but an explicit empty array is
+ * returned as-is — `[]` is a meaningful "filter nothing" value, distinct from
+ * "not configured".
+ *
+ * @param {Record<string, unknown>} raw
+ * @param {string} key
+ * @param {EnrichConfigError[]} errors
+ * @returns {string[] | undefined}
+ */
+function readStringArray(raw, key, errors) {
+  const v = raw[key]
+  if (v === undefined) return undefined
+  if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || x.length === 0)) {
+    errors.push(invalid(`/${key}`, `${key} must be an array of non-empty strings`))
+    return undefined
+  }
+  return /** @type {string[]} */ (v)
 }
 
 /**
