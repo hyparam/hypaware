@@ -124,6 +124,27 @@ user tool_result batches have no API message id, so backfill would have to
    providers (Codex max observed 2, raw API max 4), and legacy multi-block
    backfill rows (max 4). Retiring it would be a deliberate `schema_version`
    bump, not a side effect.
+6. **Harness-internal aux calls are tagged, not dropped** (issue #106).
+   Claude Code makes API calls on its own behalf — the autonomous
+   security monitor, recap, title generation — that flow through the
+   gateway under the session's headers but are not the user's
+   conversation. The projector stamps `attributes.claude.aux_kind` on
+   every projected message of such an exchange (riding the existing
+   `attributes` JSON column, no schema change — same mechanism as
+   `match_key`/`wire_only`, per [LLP 0027](./0027-cache-settlement.decision.md)
+   decision point 5), so conversation queries exclude aux rows with
+   `aux_kind IS NULL`. **Tag, don't drop:** a wrong tag is harmless; a
+   dropped row loses real captured data (the prior behavior returned
+   `undefined`, silently discarding the exchange — ~88% of rows in an
+   autonomous session were security-monitor calls). The kind is keyed
+   **only** on a stable, dedicated system-prompt fingerprint. The
+   security monitor is the one aux kind reliably fingerprintable today;
+   recap/title reuse the full Claude Code system prompt and differ only
+   in injected user text, so they have no stable signal and are left as
+   benign untagged rows rather than content-matched (a fragile heuristic
+   that risks mislabeling real turns). Tagging is keyed on *that*
+   exchange's request body, so only the aux exchange's rows carry
+   `aux_kind` — a real turn is never mislabeled.
 
 ## Consequences
 
@@ -164,6 +185,9 @@ user tool_result batches have no API message id, so backfill would have to
 - [LLP 0016](./0016-ai-gateway.decision.md) — gateway owns the schema;
   adapters own message shape
 - `hypaware-core/plugins-workspace/claude/src/projector.js` — the splitter
+  and the `aux_kind` tagging (decision point 6)
+- `hypaware-core/plugins-workspace/claude/src/anthropic.js` — `claudeAuxKind`,
+  the system-prompt aux classifier
 - `hypaware-core/plugins-workspace/claude/src/transcripts.js` — line index
 - `hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js` —
   row expansion and fallback identity

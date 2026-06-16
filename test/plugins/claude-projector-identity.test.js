@@ -770,7 +770,12 @@ test('transcript-matched rows do NOT carry a settlement match_key', async () => 
   }
 })
 
-test('harness aux traffic (security monitor) is skipped — no rows written', async () => {
+// Issue #106: aux traffic is TAGGED, not dropped. The prior behavior
+// returned undefined (no rows) for the security monitor, silently losing
+// real captured data. Now the exchange projects normally and every row
+// carries attributes.claude.aux_kind so conversation queries can exclude
+// it (aux_kind IS NULL) without dropping anything.
+test('harness aux traffic (security monitor) is tagged with aux_kind, not dropped', async () => {
   const env = await stageClaudeEnv()
   try {
     const rows = await projectViaGateway(env, {
@@ -782,7 +787,33 @@ test('harness aux traffic (security monitor) is skipped — no rows written', as
       },
       responseBody: { id: 'm', role: 'assistant', content: [{ type: 'text', text: 'allow' }], stop_reason: 'end_turn' },
     })
-    assert.equal(rows.length, 0, 'security-monitor requests must produce zero rows')
+    assert.ok(rows.length > 0, 'security-monitor requests must still produce rows (tag, do not drop)')
+    for (const row of rows) {
+      const claude = readAttrPath(row, ['attributes', 'claude'])
+      assert.equal(claude?.aux_kind, 'security_monitor', 'every aux row must carry aux_kind = security_monitor')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('ordinary conversation traffic carries no aux_kind', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-normal' }) },
+        system: 'You are Claude Code, Anthropic\'s official CLI for Claude.',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      responseBody: { id: 'm', role: 'assistant', content: [{ type: 'text', text: 'hi' }], stop_reason: 'end_turn' },
+    })
+    assert.ok(rows.length > 0)
+    for (const row of rows) {
+      const claude = readAttrPath(row, ['attributes', 'claude'])
+      assert.equal(claude?.aux_kind, undefined, 'a real turn must never be labeled aux')
+    }
   } finally {
     await env.cleanup()
   }
