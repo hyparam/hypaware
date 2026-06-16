@@ -8,10 +8,10 @@ import {
   anthropicExchangeAttributes,
   anthropicMessageAttributes,
   anthropicMessages,
+  claudeAuxKind,
   claudeClientVersion,
   hasAnthropicHeaderSignature,
   headerValue,
-  isClaudeAuxRequest,
   isAnthropicExchange,
   isAnthropicPath,
   resolveAnthropicConversationId,
@@ -110,16 +110,17 @@ export function createClaudeExchangeProjector(opts) {
       }
 
       // Harness-internal aux traffic (e.g. the autonomous security
-      // monitor) is not the user's conversation and has no transcript
-      // line; skip it so it doesn't bury real rows. ~88% of rows in an
-      // autonomous session were security-monitor calls before this.
-      if (isClaudeAuxRequest(reqBody)) {
-        ctx.log.debug?.('plugin.claude.projector_skip', {
-          reason: 'aux_request',
-          exchange_id: input.exchange_id,
-        })
-        return undefined
-      }
+      // monitor) is not the user's conversation, but it IS real captured
+      // data, so we tag rather than drop: stamp `attributes.claude.aux_kind`
+      // on every projected message below so conversation queries exclude
+      // it (`aux_kind IS NULL`) without losing it. `claudeAuxKind` keys
+      // only on the dedicated security-monitor system prompt — the one aux
+      // kind reliably fingerprintable today — so a normal turn is never
+      // mislabeled. The drop this replaced silently lost ~88% of rows in
+      // an autonomous session.
+      // @ref LLP 0026#decision — tag-don't-drop; aux_kind rides the
+      // attributes JSON (no schema change, per LLP 0027#decision pt 5).
+      const auxKind = claudeAuxKind(reqBody)
 
       const responseBody = parseMaybeJson(input.response_body)
       const headers = parseHeaders(input.request_headers)
@@ -222,6 +223,18 @@ export function createClaudeExchangeProjector(opts) {
       }
 
       if (projectedMessages.length === 0) return undefined
+
+      // Tag every message of an aux exchange so queries can exclude it.
+      // Keyed on THIS exchange's request body (see `auxKind` above), so
+      // only the aux exchange's rows carry `aux_kind` — real turns are
+      // never mislabeled.
+      if (auxKind) {
+        for (const projected of projectedMessages) {
+          projected.attributes = mergeAttrs(projected.attributes, {
+            claude: { aux_kind: auxKind },
+          })
+        }
+      }
 
       // @ref LLP 0027#decision — a message that came out fallback (no
       // transcript line on disk yet — the finalize race) carries the

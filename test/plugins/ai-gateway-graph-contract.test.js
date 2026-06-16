@@ -160,3 +160,45 @@ test('numeric natural keys are stringified', () => {
   assert.equal(row.natural_key, '42')
   assert.equal(row.node_id, nodeId('Session', '42'))
 })
+
+// @ref LLP 0026#decision — Claude harness aux exchanges are retained (tagged
+// attributes.claude.aux_kind) rather than dropped; the graph contract must
+// exclude them so security-monitor traffic mints no Session/App/Tool noise.
+test('every rule selects attributes so the shared aux filter has its input', () => {
+  for (const r of contract.rules) {
+    assert.match(r.sql, /^SELECT\s+attributes\b/i, `rule ${r.kind}/${r.type} projects attributes`)
+  }
+})
+
+test('aux-tagged rows are excluded from every node and edge rule', () => {
+  const aux = { attributes: { claude: { aux_kind: 'security_monitor' } } }
+  // Otherwise-valid rows that would each mint a node/edge if not aux.
+  assert.equal(rule('node', 'Session').toRow({ ...aux, conversation_id: 'conv-1', message_created_at: TS }), null)
+  assert.equal(rule('node', 'App').toRow({ ...aux, client_name: 'claude', message_created_at: TS }), null)
+  assert.equal(rule('node', 'Model').toRow({ ...aux, model: 'claude-opus', message_created_at: TS }), null)
+  assert.equal(rule('node', 'Tool').toRow({ ...aux, tool_name: 'Read', part_type: 'tool_call', message_created_at: TS }), null)
+  assert.equal(rule('node', 'File').toRow({ ...aux, tool_name: 'Read', tool_args: { file_path: '/x' }, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'via').toRow({ ...aux, conversation_id: 'c', client_name: 'a', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'used_model').toRow({ ...aux, conversation_id: 'c', model: 'm', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'used').toRow({ ...aux, conversation_id: 'c', tool_name: 'Read', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'touched').toRow({ ...aux, conversation_id: 'c', tool_name: 'Write', tool_args: { file_path: '/a.js' }, message_created_at: TS }), null)
+})
+
+test('aux filter handles attributes arriving as a JSON string', () => {
+  const row = rule('node', 'Session').toRow({
+    attributes: JSON.stringify({ claude: { aux_kind: 'security_monitor' } }),
+    conversation_id: 'conv-1',
+    message_created_at: TS,
+  })
+  assert.equal(row, null, 'aux_kind in a stringified attributes column is still excluded')
+})
+
+test('non-aux rows pass through unchanged (attributes present but no aux_kind)', () => {
+  const row = rule('node', 'Session').toRow({
+    attributes: { claude: { client_name: 'claude' }, dev_run_id: 'run-1' },
+    conversation_id: 'conv-real',
+    message_created_at: TS,
+  })
+  assert.ok(row, 'a real row with attributes but no aux_kind still mints its node')
+  assert.equal(row.natural_key, 'conv-real')
+})

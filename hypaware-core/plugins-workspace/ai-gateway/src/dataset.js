@@ -250,6 +250,7 @@ export function aiGatewayDatasetRegistration(state) {
     refreshPartition,
     createDataSource,
     settleBatch: createSettleBatch(state),
+    resettleBatch: createResettleBatch(state),
   }
 }
 
@@ -276,48 +277,81 @@ export function aiGatewayDatasetRegistration(state) {
 function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
-    const hasFallback = rows.some(isFallbackRow)
-    if (!hasFallback) return rows
-
-    let settled = rows
-    const enrichers = state?.enrichers
-    if (enrichers && enrichers.size > 0) {
-      /** @type {Map<string, Record<string, unknown>[]>} */
-      const byClient = new Map()
-      for (const row of rows) {
-        if (!isFallbackRow(row)) continue
-        const client = stringValue(row.client_name)
-        const enricher = client ? enrichers.get(client) : undefined
-        if (!enricher) continue
-        const list = byClient.get(client ?? '')
-        if (list) list.push(row)
-        else byClient.set(client ?? '', [row])
-      }
-      if (byClient.size > 0) {
-        /** @type {Map<Record<string, unknown>, Record<string, unknown>>} */
-        const upgrades = new Map()
-        for (const [client, group] of byClient) {
-          const enricher = enrichers.get(client)
-          if (!enricher) continue
-          try {
-            const out = await enricher.settle(group, ctx)
-            for (let i = 0; i < group.length && i < out.length; i++) {
-              if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
-            }
-          } catch {
-            // An enricher failure must never drop rows — leave the
-            // group as provisional fallback; a later flush can retry.
-            continue
-          }
-        }
-        if (upgrades.size > 0) {
-          settled = rows.map((row) => upgrades.get(row) ?? row)
-        }
-      }
-    }
-
+    if (!rows.some(isFallbackRow)) return rows
+    const settled = await upgradeFallbackRows(rows, state, ctx)
     return dedupeByPartId(settled, ctx)
   }
+}
+
+/**
+ * Build the maintenance re-settle pass (LLP 0027 "Re-settle sweep"). This
+ * is the flush-time settle WITHOUT the committed-`part_id` dedupe: in the
+ * sweep the rows handed in are ALREADY committed, so a committed-scan
+ * dedupe would match a non-upgraded fallback against its own committed
+ * copy and wrongly drop it. The maintenance rewrite owns the de-twin
+ * instead — it has both committed twins of the partition in hand and
+ * collapses an upgraded fallback against the native twin within the
+ * rewrite set. So this pass upgrades fallback rows to native identity and
+ * returns them; it never drops a row.
+ *
+ * @param {GatewayState | undefined} state
+ * @returns {(rows: Record<string, unknown>[], ctx: DatasetSettleContext) => Promise<Record<string, unknown>[]>}
+ */
+function createResettleBatch(state) {
+  return async function resettleBatch(rows, ctx) {
+    if (!Array.isArray(rows) || rows.length === 0) return rows
+    if (!rows.some(isFallbackRow)) return rows
+    return upgradeFallbackRows(rows, state, ctx)
+  }
+}
+
+/**
+ * Dispatch fallback rows to the registered settlement enricher for their
+ * `client_name` and return the batch with matched rows upgraded to native
+ * identity. Unmatched rows (no transcript line, enricher failure) and
+ * non-fallback rows are returned unchanged. Pure with respect to dedupe:
+ * it never drops a row.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @param {GatewayState | undefined} state
+ * @param {DatasetSettleContext} ctx
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function upgradeFallbackRows(rows, state, ctx) {
+  const enrichers = state?.enrichers
+  if (!enrichers || enrichers.size === 0) return rows
+
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const byClient = new Map()
+  for (const row of rows) {
+    if (!isFallbackRow(row)) continue
+    const client = stringValue(row.client_name)
+    const enricher = client ? enrichers.get(client) : undefined
+    if (!enricher) continue
+    const list = byClient.get(client ?? '')
+    if (list) list.push(row)
+    else byClient.set(client ?? '', [row])
+  }
+  if (byClient.size === 0) return rows
+
+  /** @type {Map<Record<string, unknown>, Record<string, unknown>>} */
+  const upgrades = new Map()
+  for (const [client, group] of byClient) {
+    const enricher = enrichers.get(client)
+    if (!enricher) continue
+    try {
+      const out = await enricher.settle(group, ctx)
+      for (let i = 0; i < group.length && i < out.length; i++) {
+        if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
+      }
+    } catch {
+      // An enricher failure must never drop rows — leave the group as
+      // provisional fallback; a later flush or sweep can retry.
+      continue
+    }
+  }
+  if (upgrades.size === 0) return rows
+  return rows.map((row) => upgrades.get(row) ?? row)
 }
 
 /**
@@ -325,6 +359,12 @@ function createSettleBatch(state) {
  * earlier in this same batch. Mirrors the backfill materializer's
  * pre-write dedupe (committed scan + per-call fold-in), so an upgraded
  * fallback row collapses onto the canonical committed uuid row.
+ *
+ * Scans ONLY committed partitions — deliberately NOT the spool. The rows
+ * passed here are the batch being flushed out of the spool, so seeding
+ * the seen-set with spool `part_id`s would make every row match itself
+ * and be dropped (see scanSpooledPartIds's hazard note). That spool scan
+ * belongs to backfill alone.
  *
  * @param {Record<string, unknown>[]} rows
  * @param {DatasetSettleContext} ctx
@@ -434,10 +474,13 @@ export function aiGatewayBackfillMaterializer() {
  * re-scans and observes the prior run's now-committed rows — which is
  * what makes a clean rerun write zero new rows.
  *
- * Reads see only committed (flushed) partitions, so a run interrupted
- * before its end-of-run flush leaves rows in the durable spool that the
- * next run's scan cannot see; compaction's content-hash dedupe is the
- * documented backup for that residual window.
+ * The seen-set is seeded from two sources: the committed (flushed)
+ * Iceberg partitions AND the rows still pending in the spool — captured
+ * live but not yet flushed (issue #107). Without the spool scan, backfill
+ * re-materializes its own copy of an unflushed live row and the spool
+ * later flushes its copy, leaving two rows with the same `part_id`. The
+ * spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
+ * settle path must never fold spool rows into its seen-set.
  *
  * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
  */
@@ -455,7 +498,12 @@ function createBackfillDedupe() {
 
       const runId = ctx?.devRunId
       if (!memo || memo.runId !== runId) {
-        memo = { runId, seen: await scanExistingPartIds(storage) }
+        const seen = await scanExistingPartIds(storage)
+        // Fold in part_ids pending in the spool so backfill does not
+        // re-materialize a row that was captured live and is still waiting
+        // to flush. Opt-in to the backfill path only — see scanSpooledPartIds.
+        await scanSpooledPartIds(storage, seen)
+        memo = { runId, seen }
       }
       const seen = memo.seen
 
@@ -522,6 +570,53 @@ async function scanExistingPartIds(storage) {
     }
   }
   return seen
+}
+
+/**
+ * Fold the `part_id`s of rows still pending in the spool into `seen`.
+ * These are rows captured live but not yet flushed to a committed
+ * partition, so `scanExistingPartIds` cannot see them. Folding them in
+ * lets `hyp backfill` skip re-materializing a row whose live copy is
+ * about to flush — the fix for issue #107.
+ *
+ * CRITICAL HAZARD — BACKFILL ONLY. This must never be wired into the
+ * flush-time settle path (`createSettleBatch` -> `dedupeByPartId`). At
+ * flush, the rows being settled ARE the spool rows; if the settle
+ * seen-set contained spool `part_id`s, every row would match itself and
+ * be dropped — the flush would delete the data it is committing. So the
+ * spool scan stays opt-in and is invoked only from `createBackfillDedupe`.
+ *
+ * Best-effort like the committed scan: a storage stub without the spool
+ * read surface, or any read error, leaves `seen` untouched — a dedupe
+ * miss only risks a duplicate compaction can later collapse, whereas
+ * throwing would abort the backfill.
+ *
+ * @ref LLP 0027#open-questions [implements] — resolves the documented
+ *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
+ *   rows in the materializer (not the settle path).
+ *
+ * @param {QueryStorageService} storage
+ * @param {Set<string>} seen
+ * @returns {Promise<void>}
+ */
+async function scanSpooledPartIds(storage, seen) {
+  if (!canScanSpooledRows(storage)) return
+  try {
+    for await (const row of storage.readSpooledRows(DATASET_NAME, ['part_id', 'message_id', 'part_index'])) {
+      const key = partIdKey(row)
+      if (key !== undefined) seen.add(key)
+    }
+  } catch {
+    // Spool unreadable mid-scan: keep whatever we folded in already.
+  }
+}
+
+/**
+ * @param {QueryStorageService | undefined} storage
+ * @returns {storage is ExtendedQueryStorageService}
+ */
+function canScanSpooledRows(storage) {
+  return !!storage && typeof (/** @type {any} */ (storage).readSpooledRows) === 'function'
 }
 
 /**

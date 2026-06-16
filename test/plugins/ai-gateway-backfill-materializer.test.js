@@ -213,12 +213,18 @@ function nativeProjection() {
 function dedupeStorage(initial = []) {
   /** @type {Record<string, unknown>[]} */
   const committed = [...initial]
+  /** @type {Record<string, unknown>[]} */
+  let spooled = []
   let readError = false
+  let spoolError = false
   return {
     cacheRoot: '/tmp/fake-dedupe',
     /** @param {Record<string, unknown>[]} rows */
     commit(rows) { committed.push(...rows) },
+    /** Rows captured live, sitting unflushed in the spool. @param {Record<string, unknown>[]} rows */
+    spool(rows) { spooled = [...spooled, ...rows] },
     failReads() { readError = true },
+    failSpoolReads() { spoolError = true },
     async discoverCachePartitions() {
       if (committed.length === 0) return []
       return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/tmp/fake-dedupe/p', epoch: 1, rowCount: committed.length }]
@@ -226,6 +232,10 @@ function dedupeStorage(initial = []) {
     async *readRows() {
       if (readError) throw new Error('partition unreadable')
       for (const row of committed) yield row
+    },
+    async *readSpooledRows() {
+      if (spoolError) throw new Error('spool unreadable')
+      for (const row of spooled) yield row
     },
   }
 }
@@ -301,4 +311,71 @@ test('backfill dedupe: an unreadable partition degrades to no dedupe rather than
   // The scan throws, the seen-set stays empty, so every row passes through
   // — a dedupe miss is recoverable (compaction), dropping rows is not.
   assert.equal(rows.length, 2)
+})
+
+/* ----------------------- spool-aware dedupe (issue #107) ----------------- */
+
+test('backfill dedupe: rows pending in the spool are not re-materialized', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  // Nothing committed yet, but both messages were captured live and are
+  // sitting unflushed in the spool. Backfill must see them and skip both,
+  // or the spool's later flush would leave same-id duplicates.
+  const storage = dedupeStorage()
+  storage.spool([{ part_id: 'm1#0' }, { part_id: 'm2#0' }])
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
+  assert.deepEqual(rows, [])
+})
+
+test('backfill dedupe: only the spool-overlapping parts are skipped', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  // Only m1 is in the spool; m2 has never been captured, so backfill must
+  // still materialize m2 while skipping the overlapping m1.
+  const storage = dedupeStorage()
+  storage.spool([{ part_id: 'm1#0' }])
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].message_id, 'm2')
+})
+
+test('backfill dedupe: spool dedupe also matches legacy rows via message_id + part_index', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  // A spooled row that predates part_id: partIdKey must recompose `m1#0`.
+  const storage = dedupeStorage()
+  storage.spool([{ message_id: 'm1', part_index: 0 }])
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].message_id, 'm2')
+})
+
+test('backfill dedupe: committed and spooled part_ids are unioned into one seen-set', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  // m1 already committed, m2 still in the spool — together they cover the
+  // whole conversation, so a backfill of the same conversation is a no-op.
+  const storage = dedupeStorage([{ part_id: 'm1#0' }])
+  storage.spool([{ part_id: 'm2#0' }])
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
+  assert.deepEqual(rows, [])
+})
+
+test('backfill dedupe: an unreadable spool degrades to committed-only dedupe', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  // m1 committed; the spool read throws. The committed scan still folds in
+  // m1, and m2 (never seen) passes through — the spool failure is absorbed.
+  const storage = dedupeStorage([{ part_id: 'm1#0' }])
+  storage.failSpoolReads()
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].message_id, 'm2')
+})
+
+test('backfill dedupe: a storage stub without readSpooledRows still dedupes against committed', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  // Storage exposes the committed read surface but no spool surface; the
+  // spool scan is feature-detected away and committed dedupe is unaffected.
+  const storage = dedupeStorage([{ part_id: 'm1#0' }])
+  // @ts-expect-error — intentionally drop the spool surface for this case
+  delete storage.readSpooledRows
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].message_id, 'm2')
 })

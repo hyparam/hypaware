@@ -1006,6 +1006,17 @@ export interface DatasetRegistration {
    * settle. See LLP 0024.
    */
   settleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
+  /**
+   * Optional maintenance-time re-settlement pass (LLP 0027 "Re-settle
+   * sweep"). The cache compaction calls this over a partition's
+   * already-committed fallback rows; the dataset upgrades each to its
+   * native identity and returns them WITHOUT dropping any (the rows are
+   * already committed, so a committed-`part_id` dedupe would match a
+   * non-upgraded fallback against its own copy). Compaction owns the
+   * within-rewrite de-twin instead. Distinct from `settleBatch`, whose
+   * dedupe assumes the rows are not yet committed.
+   */
+  resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
 
 export interface DatasetSettleContext {

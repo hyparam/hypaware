@@ -1042,6 +1042,10 @@ async function runQueryMaintain(argv, ctx) {
     compactOnly,
     expireOnly,
     config: maintenanceConfig,
+    // @ref LLP 0027#re-settle-sweep — `hyp query maintain` re-settles
+    // committed fallback rows too, so a manual sweep also closes the race.
+    storage: ctx.storage,
+    getSettleHook: (dataset) => ctx.query.getDataset(dataset)?.resettleBatch,
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')

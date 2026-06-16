@@ -414,27 +414,42 @@ function isAnthropicAssistant(value) {
  * System-prompt fingerprints for Claude Code's harness-internal "aux"
  * API calls — requests the CLI makes on its own behalf (not the user's
  * conversation) that nonetheless flow through the gateway under the
- * session's headers. The autonomous-mode security monitor fires on
- * every action and, with its embedded session digest, dwarfs the real
- * conversation in row volume. These calls have no transcript line, so
- * they can never gain native identity; HypAware skips recording them.
+ * session's headers. Each entry maps a stable system-prompt substring to
+ * the aux kind it identifies.
+ *
+ * The autonomous-mode security monitor fires on every action and, with
+ * its embedded session digest, dwarfs the real conversation in row
+ * volume — and it has a dedicated system prompt, so it is the one aux
+ * kind reliably fingerprintable today. Other aux calls (recap, title
+ * generation) reuse the full Claude Code system prompt and only differ in
+ * injected user text, so they have no stable fingerprint and are
+ * deliberately left untagged rather than content-matched (a fragile
+ * heuristic that risks mislabeling real turns). Add a kind here only when
+ * Claude Code emits a reliable marker for it.
+ *
+ * @type {Array<{ fingerprint: string, kind: string }>}
  */
 const AUX_SYSTEM_FINGERPRINTS = [
-  'You are a security monitor for autonomous AI coding agents',
+  { fingerprint: 'You are a security monitor for autonomous AI coding agents', kind: 'security_monitor' },
 ]
 
 /**
- * True when a request is Claude Code harness-internal aux traffic that
- * should not be recorded as conversation. Matched on the system prompt
- * so it is robust to the digest payload the request carries.
+ * Classify a request as Claude Code harness-internal aux traffic, or
+ * `undefined` when it is an ordinary conversation turn. Matched on the
+ * system prompt so it is robust to the digest payload the request
+ * carries. The returned kind is stamped onto every projected message's
+ * `attributes.claude.aux_kind` so conversation queries can exclude aux
+ * rows (`aux_kind IS NULL`) without dropping data.
  *
  * @param {unknown} reqBody
+ * @returns {string | undefined}
  */
-export function isClaudeAuxRequest(reqBody) {
-  if (!isPlainObject(reqBody)) return false
+export function claudeAuxKind(reqBody) {
+  if (!isPlainObject(reqBody)) return undefined
   const system = extractSystemText(reqBody.system)
-  if (!system) return false
-  return AUX_SYSTEM_FINGERPRINTS.some((fingerprint) => system.includes(fingerprint))
+  if (!system) return undefined
+  const match = AUX_SYSTEM_FINGERPRINTS.find((entry) => system.includes(entry.fingerprint))
+  return match?.kind
 }
 
 /** @param {unknown} system */
