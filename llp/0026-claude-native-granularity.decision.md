@@ -147,9 +147,17 @@ user tool_result batches have no API message id, so backfill would have to
   column O(1) per row and dictionary-friendly; the full ancestry is the
   transitive closure of the links, and the native DAG parent still rides
   `parent_uuid`.
-- Remaining known gaps (out of scope here): durable live dedup across daemon
-  restarts (seed the seen-set from committed `part_id`s), and id-upgrade
-  reconciliation when a fallback row's uuid arrives later.
+- Durable live dedup across daemon restarts is now handled: the live
+  projector lazily seeds `seenMessages` from the committed `ai_gateway_messages`
+  rows for a conversation the first time that conversation is projected after a
+  start/reload, so a replay of already-committed history no longer re-emits
+  same-`part_id` rows (`createAiGatewayMessageProjector` →
+  `seedSeenMessagesForConversation`; threaded `ctx.storage` from
+  `source.js launchListener`; issue #108). Seeding is per-conversation and
+  best-effort — a missing/unreadable cache degrades to "not seeded" rather than
+  dropping rows — so it never loads the full cache's part_ids into memory.
+- Remaining known gap (out of scope here): id-upgrade reconciliation when a
+  fallback row's uuid arrives later.
 
 ## Open questions
 

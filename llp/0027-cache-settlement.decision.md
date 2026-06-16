@@ -98,7 +98,15 @@ the match key is fragile.
   vs race gap; a future maintenance sweep could re-settle committed fallback rows.
 - Backfill-vs-spool same-id duplicates (flush spool before `hyp backfill`, or scan
   spooled rows in the materializer) — separate fix.
-- Restart-replay seen-set seeding from committed `part_id`s.
+- Restart-replay seen-set seeding from committed `part_id`s — **resolved (issue
+  #108).** The live projector now lazily seeds its in-memory `seenMessages` set
+  per conversation from committed `ai_gateway_messages` rows on first replay,
+  reusing the same `discoverCachePartitions` + `readRows` scan machinery this
+  doc's `settleBatch` dedupe relies on. This guards the upstream re-emit so a
+  replayed already-committed message is dropped *at projection*, rather than
+  leaning on `settleBatch` (which short-circuits for native-uuid batches with no
+  fallback rows). See LLP 0026 Consequences and
+  `message_projector.js seedSeenMessagesForConversation`.
 
 ## References
 
