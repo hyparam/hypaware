@@ -1531,6 +1531,138 @@ export interface VectorShardStatus {
 }
 
 // =============================================================================
+// Completion capability (`hypaware.completion@1.0.0`)
+// =============================================================================
+
+/**
+ * Text generation, provided by completion plugins (the first two are
+ * `@hypaware/completion-anthropic` and `@hypaware/completion-openai`).
+ * Consumers (e.g. `@hypaware/context-graph-enrich`) require this
+ * capability rather than binding to a specific provider, so swapping the
+ * model backend is a config decision — which plugin is installed — not a
+ * refactor. This is the same separable-capability split as
+ * `hypaware.embedder`; a localhost `base_url` keeps generation on-machine.
+ *
+ * One installed provider serves several models: `complete`/`stream` take
+ * a per-request `model` that overrides `defaultModel`, so a single
+ * provider can answer both a cheap, high-recall tier and a frontier tier
+ * (e.g. Anthropic Haiku vs Opus) by model selection alone.
+ */
+export interface CompletionCapability {
+  /** Stable provider identifier (e.g. `"anthropic"`, `"openai-compatible"`). */
+  provider: string
+  /** Model used when a request omits `model`. */
+  defaultModel: string
+  /** One non-streaming generation. */
+  complete(req: CompletionRequest, opts?: CompletionOptions): Promise<CompletionResult>
+  /**
+   * Streaming generation. Yields incremental deltas; the terminal delta
+   * carries `stopReason` and `usage`. Providers parse provider-native SSE
+   * internally and normalize to `CompletionDelta`.
+   */
+  stream(req: CompletionRequest, opts?: CompletionOptions): AsyncIterable<CompletionDelta>
+}
+
+export interface CompletionRequest {
+  /**
+   * Model id; overrides the provider's `defaultModel`. Lets one installed
+   * provider serve multiple tiers (e.g. a cheap proposer and a frontier
+   * curator).
+   */
+  model?: string
+  /** Optional system prompt. */
+  system?: string
+  messages: CompletionMessage[]
+  /** Hard output ceiling (provider-enforced). */
+  max_tokens: number
+  /**
+   * Tools the model may call. The structured-extraction channel: force a
+   * tool (via `toolChoice`) to get schema-shaped output back as a `tool_use`
+   * block.
+   */
+  tools?: CompletionTool[]
+  /**
+   * Provider-neutral tool-choice control. Each provider translates to its
+   * native shape, so a caller forcing structured output stays portable:
+   *   - `'auto'` — the model decides whether to call a tool.
+   *   - `'required'` — the model must call some tool.
+   *   - `{ name }` — the model must call this specific tool.
+   * Prefer this over a provider-specific `params.tool_choice`; when both are
+   * set, `toolChoice` wins. Leave unset for the provider default.
+   */
+  toolChoice?: 'auto' | 'required' | { name: string }
+  /** JSON-schema structured-output request, when the provider supports it. */
+  responseFormat?: JsonValue
+  /**
+   * Provider-specific passthrough merged into the request body — e.g.
+   * Anthropic `thinking` / `output_config.effort`. Portable callers leave
+   * this unset and use the neutral fields above.
+   */
+  params?: JsonObject
+}
+
+export interface CompletionMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string | CompletionContentBlock[]
+}
+
+/**
+ * A content block. `text` carries prose; `tool_use` carries a structured
+ * tool call (the channel for structured extraction). Providers normalize
+ * native shapes to this union.
+ */
+export interface CompletionContentBlock {
+  type: 'text' | 'tool_use'
+  /** Present when `type === 'text'`. */
+  text?: string
+  /** Tool-call id, present when `type === 'tool_use'`. */
+  id?: string
+  /** Tool name, present when `type === 'tool_use'`. */
+  name?: string
+  /** Parsed tool input, present when `type === 'tool_use'`. */
+  input?: JsonObject
+}
+
+export interface CompletionTool {
+  name: string
+  description?: string
+  /** JSON Schema for the tool's input object. */
+  input_schema: JsonObject
+}
+
+export interface CompletionOptions {
+  signal?: AbortSignal
+}
+
+export interface CompletionResult {
+  /** The assistant message (text and/or `tool_use` blocks). */
+  message: CompletionMessage
+  /** Model that actually produced the response. */
+  model: string
+  /**
+   * Why generation stopped (e.g. `"end_turn"`, `"tool_use"`,
+   * `"max_tokens"`, `"refusal"`). Callers MUST check for `"refusal"`
+   * before trusting `message`.
+   */
+  stopReason?: string
+  usage?: CompletionUsage
+}
+
+export interface CompletionDelta {
+  /** Incremental text, when this delta carries prose. */
+  text?: string
+  /** Set on the terminal delta. */
+  stopReason?: string
+  /** Set on the terminal delta. */
+  usage?: CompletionUsage
+}
+
+export interface CompletionUsage {
+  input_tokens?: number
+  output_tokens?: number
+}
+
+// =============================================================================
 // Skills and init presets
 // =============================================================================
 
