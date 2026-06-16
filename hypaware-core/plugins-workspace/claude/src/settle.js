@@ -48,24 +48,26 @@ export function createClaudeSettlementEnricher(opts) {
     async settle(rows, _ctx) {
       if (!Array.isArray(rows) || rows.length === 0) return rows
 
-      // Group fallback rows by conversation so each session's transcript
-      // is loaded and indexed once.
+      // Group fallback rows by session so each session's transcript is
+      // loaded and indexed once. @ref LLP 0030#decision — the session id
+      // lives in `session_id` now; Claude `conversation_id` is null, so
+      // grouping on it would load nothing and never enrich.
       /** @type {Map<string, number[]>} */
-      const byConversation = new Map()
+      const bySession = new Map()
       for (let i = 0; i < rows.length; i++) {
-        const conversationId = stringValue(rows[i].conversation_id)
-        if (!conversationId) continue
-        const list = byConversation.get(conversationId)
+        const sessionId = stringValue(rows[i].session_id)
+        if (!sessionId) continue
+        const list = bySession.get(sessionId)
         if (list) list.push(i)
-        else byConversation.set(conversationId, [i])
+        else bySession.set(sessionId, [i])
       }
-      if (byConversation.size === 0) return rows
+      if (bySession.size === 0) return rows
 
       /** @type {SessionContextRecord[]} */
       const sessionRecords = await readSessionContextSafe(stateFile)
 
       const out = rows.slice()
-      for (const [sessionId, indices] of byConversation) {
+      for (const [sessionId, indices] of bySession) {
         const record = pickLatestMatching(sessionRecords, { sessionId })
         /** @type {Awaited<ReturnType<typeof loadTranscript>>} */
         let entries

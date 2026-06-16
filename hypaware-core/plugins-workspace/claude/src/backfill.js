@@ -157,7 +157,7 @@ async function* runClaudeBackfill(args) {
       log.info('claude.backfill.session_projected', {
         component: 'plugin.claude.backfill',
         operation: 'backfill.project',
-        conversation_id: sessionId,
+        session_id: sessionId,
         message_count: exchange.messages.length,
         status: 'ok',
       })
@@ -285,7 +285,10 @@ function projectedExchangeFromEntries(args) {
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
     provider: 'anthropic',
-    conversation_id: sessionId,
+    // @ref LLP 0030#decision — the Claude session id is the session_id
+    // partition key; conversation_id is null (no per-thread id). Matches
+    // live capture so backfilled and live rows still converge.
+    session_id: sessionId,
     // Bead 2 contract: backfilled Claude history is tagged
     // conversation_source = client_name = 'claude'. Live capture derives
     // 'claude_code' / 'api' from the request User-Agent; backfill has no

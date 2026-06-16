@@ -12,7 +12,7 @@
 
 export const SOURCE_DEFAULTS = Object.freeze({
   source_dataset: 'ai_gateway_messages',
-  // schema v5 exposes the per-part text as `content_text`; there is no bare
+  // schema v6 exposes the per-part text as `content_text`; there is no bare
   // `content` column (see ai-gateway/src/message_projector.js).
   text_column: 'content_text',
   timestamp_column: 'message_created_at',
@@ -22,7 +22,10 @@ export const SOURCE_DEFAULTS = Object.freeze({
   // the tuple (timestamp_column, tiebreak_column); `part_id` is the per-row id.
   tiebreak_column: 'part_id',
   anchor_type: 'Session',
-  anchor_key_column: 'conversation_id',
+  // @ref LLP 0030#decision — the Session anchor keys on session_id (the
+  // session container, always present), matching the ai-gateway-graph
+  // Session node; conversation_id is null for Claude.
+  anchor_key_column: 'session_id',
 })
 
 export const PROPOSE_DEFAULTS = Object.freeze({

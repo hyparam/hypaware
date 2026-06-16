@@ -31,7 +31,7 @@ test('enricher upgrades a fallback row to native transcript identity', async () 
     const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
 
     const row = fallbackRow({
-      conversation_id: 'sess-up',
+      session_id: 'sess-up',
       role: 'assistant',
       agent_id: 'ag1',
       content_text: 'the answer is 42',
@@ -68,7 +68,7 @@ test('enricher leaves a row unchanged when no transcript line matches', async ()
     ])
     const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
     const row = fallbackRow({
-      conversation_id: 'sess-miss', role: 'assistant', content_text: 'unmatched',
+      session_id: 'sess-miss', role: 'assistant', content_text: 'unmatched',
       match_key: matchKey('assistant', [{ type: 'text', text: 'unmatched' }]),
     })
 
@@ -116,7 +116,7 @@ test('settleBatch dispatches to the enricher and dedupes the upgraded row agains
     })
 
     const fb = fallbackRow({
-      conversation_id: 'sess-dd', role: 'assistant', content_text: 'dup me',
+      session_id: 'sess-dd', role: 'assistant', content_text: 'dup me',
       match_key: matchKey('assistant', [{ type: 'text', text: 'dup me' }]),
     })
     const out = await /** @type {any} */ (registration).settleBatch([fb], ctx)
@@ -128,6 +128,9 @@ test('settleBatch dispatches to the enricher and dedupes the upgraded row agains
 
 // --- helpers ---------------------------------------------------------
 
+// @ref LLP 0030#decision — the settlement enricher groups fallback rows by
+// session_id (Claude conversation_id is null), so the row fixtures carry the
+// session in session_id, not conversation_id.
 /** @param {Partial<Record<string, unknown>> & { match_key: string }} f */
 function fallbackRow(f) {
   return {
@@ -135,7 +138,8 @@ function fallbackRow(f) {
     part_id: 'fallbackhash16ab#0',
     part_index: 0,
     role: f.role,
-    conversation_id: f.conversation_id,
+    session_id: f.session_id,
+    conversation_id: null,
     ...(f.agent_id ? { agent_id: f.agent_id } : {}),
     client_name: 'claude',
     content_text: f.content_text,
@@ -150,7 +154,8 @@ function uuidRow(u) {
     part_id: `${u.message_id}#${u.part_index}`,
     part_index: u.part_index,
     role: 'assistant',
-    conversation_id: 'c',
+    session_id: 's',
+    conversation_id: null,
     client_name: 'claude',
     attributes: { gateway: { exchange_id: 'ex' } },
   }

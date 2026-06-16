@@ -82,7 +82,8 @@ test('materializer parity with live projector: native message ids', async () => 
   /** @type {AiGatewayProjectedExchange} */
   const projection = {
     provider: 'anthropic',
-    conversation_id: 'conv-native',
+    // @ref LLP 0030#decision — Claude carries session_id (conversation_id null).
+    session_id: 'conv-native',
     conversation_source: 'claude',
     client_name: 'claude',
     client_version: '1.2.3',
@@ -113,7 +114,7 @@ test('materializer parity with live projector: fallback identity and chain', asy
   /** @type {AiGatewayProjectedExchange} */
   const projection = {
     provider: 'anthropic',
-    conversation_id: 'conv-fallback',
+    session_id: 'conv-fallback',
     conversation_source: 'claude',
     client_name: 'claude',
     conversation_started_at: '2026-05-01T00:00:00.000Z',
@@ -125,7 +126,7 @@ test('materializer parity with live projector: fallback identity and chain', asy
   const live = await liveRows(projection)
   const back = await materializer.materialize(item(projection), MAT_CTX)
 
-  // Fallback ids are deterministic hashes of conversation/role/content,
+  // Fallback ids are deterministic hashes of session/role/content,
   // so the synthesized identity and chain match across both paths.
   assert.deepEqual(back.map((r) => r.message_id), live.map((r) => r.message_id))
   assert.deepEqual(back.map((r) => r.previous_message_id), live.map((r) => r.previous_message_id))
@@ -144,7 +145,7 @@ test('materializer stamps hashed source-path provenance (raw path not stored)', 
   /** @type {AiGatewayProjectedExchange} */
   const projection = {
     provider: 'anthropic',
-    conversation_id: 'c',
+    session_id: 'c',
     client_name: 'claude',
     conversation_started_at: '2026-05-01T00:00:00.000Z',
     messages: [{ role: 'user', content: 'hi', message_created_at: '2026-05-01T00:00:01.000Z' }],
@@ -166,7 +167,7 @@ test('materialized rows are stripped to the gateway schema columns', async () =>
   /** @type {AiGatewayProjectedExchange} */
   const projection = {
     provider: 'anthropic',
-    conversation_id: 'c',
+    session_id: 'c',
     conversation_started_at: '2026-05-01T00:00:00.000Z',
     messages: [{ role: 'user', content: 'hi', message_created_at: '2026-05-01T00:00:01.000Z' }],
   }
@@ -190,7 +191,7 @@ test('materialized rows are stripped to the gateway schema columns', async () =>
 function nativeProjection() {
   return {
     provider: 'anthropic',
-    conversation_id: 'conv-dedupe',
+    session_id: 'conv-dedupe',
     conversation_source: 'claude',
     client_name: 'claude',
     conversation_started_at: '2026-05-01T00:00:00.000Z',

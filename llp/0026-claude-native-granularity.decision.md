@@ -5,7 +5,7 @@
 **Systems:** Gateway, Plugins
 **Author:** Brendan / Claude
 **Date:** 2026-06-12
-**Related:** LLP 0012, LLP 0016
+**Related:** LLP 0012, LLP 0016, LLP 0030
 
 ## Summary
 
@@ -146,6 +146,17 @@ user tool_result batches have no API message id, so backfill would have to
    exchange's request body, so only the aux exchange's rows carry
    `aux_kind` — a real turn is never mislabeled.
 
+> **Update (LLP 0030):** this doc was written when a Claude *session* lived in
+> the `conversation_id` column — the premise "conversation_id is a session id
+> for Claude". That is retired: the session container is now the dedicated
+> non-null **`session_id`** partition key, and Claude **`conversation_id` is
+> null** (a Claude session has no per-thread conversation id). The fallback-id
+> scope and the `previous_message_id` chain scope are now
+> `(conversation_id ?? session_id, agent_id)`, which for Claude resolves to the
+> session id — the same value the old `conversation_id` held — so Claude
+> identity, granularity, and dedup are all **unchanged** by the split. See
+> [LLP 0030](./0030-session-id-partition-key.decision.md).
+
 ## Consequences
 
 - Live and backfilled rows for the same conversation share
@@ -170,13 +181,14 @@ user tool_result batches have no API message id, so backfill would have to
   `parent_uuid`.
 - Durable live dedup across daemon restarts is now handled: the live
   projector lazily seeds `seenMessages` from the committed `ai_gateway_messages`
-  rows for a conversation the first time that conversation is projected after a
+  rows for a session the first time that session is projected after a
   start/reload, so a replay of already-committed history no longer re-emits
   same-`part_id` rows (`createAiGatewayMessageProjector` →
-  `seedSeenMessagesForConversation`; threaded `ctx.storage` from
-  `source.js launchListener`; issue #108). Seeding is per-conversation and
-  best-effort — a missing/unreadable cache degrades to "not seeded" rather than
-  dropping rows — so it never loads the full cache's part_ids into memory.
+  `seedSeenMessagesForSession`; threaded `ctx.storage` from
+  `source.js launchListener`; issue #108). Seeding is per-session (the
+  partition key, LLP 0030) and best-effort — a missing/unreadable cache
+  degrades to "not seeded" rather than dropping rows — so it never loads the
+  full cache's part_ids into memory.
 - Remaining known gap (out of scope here): id-upgrade reconciliation when a
   fallback row's uuid arrives later.
 

@@ -488,6 +488,11 @@ function projectedExchangeFromSession(args) {
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
     provider: PROVIDER,
+    // @ref LLP 0030#decision — the rollout id is the thread; the rollout
+    // carries no distinct session id, so session_id (the non-null
+    // partition key) and conversation_id (the thread) are both the
+    // rollout id here.
+    session_id: session.sessionId,
     conversation_id: session.sessionId,
     conversation_source: CONVERSATION_SOURCE,
     client_name: clientName,

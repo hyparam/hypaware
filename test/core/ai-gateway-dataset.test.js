@@ -42,13 +42,18 @@ test('ai-gateway registers cache partitioning for source columns and iceberg fie
   assert.ok(dataset.cachePartitioning)
   assert.deepEqual(dataset.cachePartitioning.source.columns, ['client_name', 'conversation_source', 'provider'])
   assert.equal(dataset.cachePartitioning.source.fallback, 'unknown')
-  assert.equal(dataset.cachePartitioning.iceberg.fields.length, 3)
-  assert.equal(dataset.cachePartitioning.iceberg.fields[0].column, 'conversation_id')
+  // @ref LLP 0030#breaking — the required identity partition field is
+  // session_id (always present), not conversation_id (now nullable);
+  // conversation_id rides along as a secondary, non-required field.
+  assert.equal(dataset.cachePartitioning.iceberg.fields.length, 4)
+  assert.equal(dataset.cachePartitioning.iceberg.fields[0].column, 'session_id')
   assert.equal(dataset.cachePartitioning.iceberg.fields[0].required, true)
-  assert.equal(dataset.cachePartitioning.iceberg.fields[1].column, 'cwd')
+  assert.equal(dataset.cachePartitioning.iceberg.fields[1].column, 'conversation_id')
   assert.equal(dataset.cachePartitioning.iceberg.fields[1].required, undefined)
-  assert.equal(dataset.cachePartitioning.iceberg.fields[2].column, 'date')
-  assert.equal(dataset.cachePartitioning.iceberg.fields[2].required, true)
+  assert.equal(dataset.cachePartitioning.iceberg.fields[2].column, 'cwd')
+  assert.equal(dataset.cachePartitioning.iceberg.fields[2].required, undefined)
+  assert.equal(dataset.cachePartitioning.iceberg.fields[3].column, 'date')
+  assert.equal(dataset.cachePartitioning.iceberg.fields[3].required, true)
 })
 
 test('ai-gateway registers sourceSignal proxy so rows forward under a known ingest signal', () => {

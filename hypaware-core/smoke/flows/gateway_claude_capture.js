@@ -258,7 +258,7 @@ export async function run({ harness, expect }) {
       JSON_VALUE(attributes, '$.gateway.status_code') as status_code
     from ai_gateway_messages
     where JSON_VALUE(attributes, '$.dev_run_id') = '${harness.devRunId}'
-    order by conversation_id, message_index
+    order by session_id, message_index
   `.trim().replace(/\s+/g, ' ')
   const stdoutBuf = makeBuf()
   const stderrBuf = makeBuf()

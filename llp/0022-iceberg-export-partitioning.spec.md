@@ -10,9 +10,13 @@
 > Lay out exported Iceberg tables for an archive's job, not the cache's:
 > **partition by day** (a writer-owned default from `primaryTimestampColumn`,
 > *not* the cache's `cachePartitioning`) and **sort each partition by the
-> dataset's lookup key** (`conversation_id`). Day grain bounds file count by
-> time; the within-partition sort preserves conversation-lookup speed via
-> row-group pruning instead of one-file-per-conversation partitioning.
+> dataset's lookup key**. Day grain bounds file count by time; the
+> within-partition sort preserves session/conversation-lookup speed via
+> row-group pruning instead of one-file-per-conversation partitioning. As of
+> [LLP 0030](./0030-session-id-partition-key.decision.md) the ai-gateway lookup
+> key leads with `session_id` (the non-null partition key) followed by
+> `conversation_id` (the nullable thread); the cardinality argument below
+> ("Why day, not conversation_id") applies equally to `session_id`.
 
 ## Summary
 
@@ -118,8 +122,12 @@ would have achieved only at the unbounded file-count cost above.
 **Sort-key derivation.** The dataset's lookup columns are exactly the identity
 columns it already declares in `cachePartitioning.iceberg.fields`. The export
 sorts by those identity columns, in declared order — for ai-gateway,
-`conversation_id, cwd, date`, so `conversation_id` leads and dominates the
-clustering. This is the one place the export **does** read `cachePartitioning`:
+`session_id, conversation_id, cwd, date`, so **`session_id` leads and dominates
+the clustering** and `conversation_id` rides along as a secondary
+thread-lookup sort key ([LLP 0030](./0030-session-id-partition-key.decision.md):
+`session_id` is the non-null partition/lookup key, `conversation_id` is the
+nullable thread within it). This is the one place the export **does** read
+`cachePartitioning`:
 for the *sort* axis, where reusing the dataset's declared identity columns is
 beneficial and carries none of the partition file-count cost. The *partition*
 axis stays writer-owned and independent (see
@@ -262,7 +270,8 @@ rewrite was not safe for them.
 Emit the resolved partition spec and sort order on the iceberg sink's
 `iceberg.table.create` / `iceberg.snapshot.commit` spans as **`hyp_partition_spec`**
 (e.g. `day(message_created_at)`) and **`hyp_sort_order`** (e.g.
-`conversation_id,cwd,date`), so a smoke can assert the intended layout was written
+`session_id,conversation_id,cwd,date`), so a smoke can assert the intended layout
+was written
 ([LLP 0021](./0021-observability.spec.md)). On drift rejection, emit
 `error_kind=iceberg_partition_spec_drift`.
 

@@ -4,7 +4,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { AI_GATEWAY_SCHEMA_COLUMNS } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
-import { computeMessageId, createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import {
+  aiGatewayRowsFromProjectedExchange,
+  computeMessageId,
+  createAiGatewayConversationState,
+  createAiGatewayMessageProjector,
+} from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
@@ -14,7 +19,8 @@ import { computeMessageId, createAiGatewayMessageProjector } from '../../hypawar
 const EXPECTED_COLUMNS = [
   ['gateway_id', 'STRING', false],
   ['schema_version', 'INT32', false],
-  ['conversation_id', 'STRING', false],
+  ['session_id', 'STRING', false],
+  ['conversation_id', 'STRING', true],
   ['user_id', 'STRING', true],
   ['provider', 'STRING', false],
   ['model', 'STRING', true],
@@ -147,7 +153,7 @@ test('projector returning undefined or an empty messages array is skipped', asyn
     gatewayId: 'gw-test',
     projectors: [
       registered('undefined', { priority: 20, project: () => undefined }),
-      registered('empty', { priority: 10, project: () => ({ provider: 'empty', conversation_id: 'c', messages: [] }) }),
+      registered('empty', { priority: 10, project: () => ({ provider: 'empty', session_id: 's', conversation_id: 'c', messages: [] }) }),
       registered('ok', { priority: 5, project: () => projection('ok') }),
     ],
   })
@@ -233,6 +239,7 @@ test('projector-supplied message_id and previous_message_id are preserved', asyn
       registered('native', {
         project: () => ({
           provider: 'native',
+          session_id: 'sess-1',
           conversation_id: 'conv-1',
           messages: [
             { role: 'user', content: 'hi', message_id: 'msg-root', previous_message_id: [] },
@@ -268,6 +275,7 @@ test('supplied message_id without history gets the immediate predecessor as prev
       registered('native-no-history', {
         project: () => ({
           provider: 'native',
+          session_id: 'sess-native',
           conversation_id: 'conv-native',
           messages: [
             { role: 'user', content: 'one', message_id: 'uuid-1' },
@@ -301,6 +309,7 @@ test('fallback identity stamps gateway.identity_source and a linear previous_mes
       registered('partial', {
         project: () => ({
           provider: 'partial',
+          session_id: 'sess-fallback',
           conversation_id: 'conv-fallback',
           messages: [
             { role: 'user', content: 'first' },
@@ -361,14 +370,16 @@ test('fallback message_id is scoped by agent_id so subagents do not collide on s
   assert.equal(computeMessageId('sess-1', 'assistant', content, undefined), mainLoop)
 })
 
-test('previous_message_id chains are scoped per (conversation_id, agent_id)', async () => {
+test('previous_message_id chains are scoped per (conversation_id ?? session_id, agent_id)', async () => {
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [
       registered('threaded', {
         project: () => ({
           provider: 'p',
-          conversation_id: 'sess-1',
+          // Claude shape: conversation_id null, so the scope falls back
+          // to session_id; a subagent (agent_id) still gets a fresh chain.
+          session_id: 'sess-1',
           messages: [
             // main loop
             { role: 'user', content: 'main one' },
@@ -396,6 +407,52 @@ test('previous_message_id chains are scoped per (conversation_id, agent_id)', as
   assert.deepEqual(agentOne.previous_message_id, [])
   // Subagent's second chains only on the subagent's first.
   assert.deepEqual(agentTwo.previous_message_id, [agentOne.message_id])
+})
+
+test('session_id is the partition key; conversation_id is null for Claude, the thread for Codex', async () => {
+  // Claude shape: session_id set, conversation_id absent → null column.
+  const claude = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('claude', {
+      project: () => ({ provider: 'anthropic', session_id: 'sess-claude', messages: [{ role: 'user', content: 'hi' }] }),
+    })],
+  })
+  const claudeRows = await claude.projectExchange(exchange())
+  assert.ok(claudeRows.length > 0)
+  assert.equal(claudeRows[0].session_id, 'sess-claude')
+  assert.equal(claudeRows[0].conversation_id, undefined, 'Claude rows carry a null conversation_id')
+
+  // Codex shape: both set (session_id = session container, conversation_id = thread).
+  const codex = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('codex', {
+      project: () => ({ provider: 'chatgpt', session_id: 'sess-codex', conversation_id: 'thread-codex', messages: [{ role: 'user', content: 'go' }] }),
+    })],
+  })
+  const codexRows = await codex.projectExchange(exchange())
+  assert.ok(codexRows.length > 0)
+  assert.equal(codexRows[0].session_id, 'sess-codex')
+  assert.equal(codexRows[0].conversation_id, 'thread-codex')
+})
+
+test('a projection without session_id is rejected as an invalid shape', async () => {
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = collectingLogger(logs)
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('no-session', {
+        priority: 20,
+        project: () => /** @type {any} */ ({ provider: 'p', conversation_id: 'c', messages: [{ role: 'user', content: 'x' }] }),
+      }),
+      registered('ok', { priority: 5, project: () => projection('ok') }),
+    ],
+    log,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows[0].provider, 'ok', 'the session_id-less projection is skipped, next one wins')
+  assert.ok(logs.some((e) => e.level === 'warn' && e.message === 'aigw.projector_invalid_output'))
 })
 
 test('attributes.gateway carries exchange provenance and dev_run_id', async () => {
@@ -434,14 +491,55 @@ test('row output is stripped to the schema (no extra fields leak)', async () => 
   }
 })
 
+test('two Codex threads sharing a session_id keep separate start time and tool lookup', () => {
+  // A Codex session_id can carry several thread conversation_ids. Per-thread
+  // state (conversation_started_at, tool_call→tool_name) must scope by the
+  // thread (conversation_id), not the session, or a later thread inherits the
+  // first thread's start time and cross-resolves tool-result names when
+  // tool_call ids collide. Drive both threads through ONE shared state, as
+  // live capture does. @ref LLP 0030#decision
+  const state = createAiGatewayConversationState()
+
+  const rowsT1 = aiGatewayRowsFromProjectedExchange({
+    provider: 'openai',
+    session_id: 'sess-shared',
+    conversation_id: 'thread-1',
+    conversation_started_at: '2026-06-01T00:00:00.000Z',
+    messages: [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call-x', name: 'read_file', input: {} }] },
+    ],
+  }, { gatewayId: 'gw', state })
+
+  const rowsT2 = aiGatewayRowsFromProjectedExchange({
+    provider: 'openai',
+    session_id: 'sess-shared',
+    conversation_id: 'thread-2',
+    conversation_started_at: '2026-06-02T00:00:00.000Z',
+    // Same tool_call id as thread-1, but thread-2 never issued that tool_use.
+    messages: [
+      { role: 'tool', content: [{ type: 'tool_result', tool_use_id: 'call-x', content: 'body' }] },
+    ],
+  }, { gatewayId: 'gw', state })
+
+  assert.equal(rowsT1[0].conversation_started_at, '2026-06-01T00:00:00.000Z')
+  // Thread-2 keeps its OWN start time — it does not inherit thread-1's.
+  assert.equal(rowsT2[0].conversation_started_at, '2026-06-02T00:00:00.000Z')
+  assert.equal(rowsT2[0].session_id, 'sess-shared')
+  assert.equal(rowsT2[0].conversation_id, 'thread-2')
+  // The colliding tool_call id must NOT resolve to thread-1's 'read_file':
+  // thread-2 has its own (empty) tool lookup.
+  assert.equal(rowsT2[0].tool_name ?? null, null, 'no cross-thread tool-name resolution on a colliding tool_call id')
+})
+
 test('restart replay: seeds seen-set from committed part_ids so prior history re-emits zero rows', async () => {
-  // Simulate the pre-restart listener committing a conversation's rows,
+  // Simulate the pre-restart listener committing a session's rows,
   // then a fresh post-restart listener replaying the SAME history through
   // a stub storage that reports those rows as committed. With the seen-set
   // seeded from committed message_ids, the replay must emit zero rows.
+  // Seeding scopes on session_id — the partition key (LLP 0030).
   const project = () => ({
     provider: 'native',
-    conversation_id: 'conv-restart',
+    session_id: 'sess-restart',
     messages: [
       { role: 'user', content: 'one', message_id: 'uuid-1' },
       { role: 'assistant', content: 'two', message_id: 'uuid-2' },
@@ -458,7 +556,7 @@ test('restart replay: seeds seen-set from committed part_ids so prior history re
 
   // Restart: a brand-new projector with storage reporting the committed rows.
   const storage = stubStorage([
-    { partition: { conversation_id: 'conv-restart' }, rows: committed },
+    { partition: { session_id: 'sess-restart' }, rows: committed },
   ])
   const restarted = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -469,15 +567,15 @@ test('restart replay: seeds seen-set from committed part_ids so prior history re
   assert.equal(replayed.length, 0, 'replay of already-committed history emits no duplicate rows')
 })
 
-test('restart replay: seeding scans each conversation lazily and at most once per listener', async () => {
+test('restart replay: seeding scans each session lazily and at most once per listener', async () => {
   const project = () => ({
     provider: 'native',
-    conversation_id: 'conv-lazy',
+    session_id: 'sess-lazy',
     messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
   })
   let scanCalls = 0
   const storage = stubStorage(
-    [{ partition: { conversation_id: 'conv-lazy' }, rows: [{ message_id: 'uuid-1', conversation_id: 'conv-lazy' }] }],
+    [{ partition: { session_id: 'sess-lazy' }, rows: [{ message_id: 'uuid-1', session_id: 'sess-lazy' }] }],
     () => { scanCalls++ },
   )
   const projector = createAiGatewayMessageProjector({
@@ -488,17 +586,17 @@ test('restart replay: seeding scans each conversation lazily and at most once pe
   await projector.projectExchange(exchange())
   await projector.projectExchange(exchange())
   await projector.projectExchange(exchange())
-  assert.equal(scanCalls, 1, 'a conversation is scanned for committed part_ids at most once per listener')
+  assert.equal(scanCalls, 1, 'a session is scanned for committed part_ids at most once per listener')
 })
 
-test('restart replay: concurrent first exchanges for one conversation seed once and emit no duplicates', async () => {
+test('restart replay: concurrent first exchanges for one session seed once and emit no duplicates', async () => {
   // The proxy fires onExchangeFinished without serializing, so two first
-  // exchanges for the same conversation can be in flight at once. Both must
+  // exchanges for the same session can be in flight at once. Both must
   // await the same committed-row scan before projecting; otherwise the
   // second races past a still-empty seen-set and re-emits committed rows.
   const project = () => ({
     provider: 'native',
-    conversation_id: 'conv-concurrent',
+    session_id: 'sess-concurrent',
     messages: [
       { role: 'user', content: 'one', message_id: 'uuid-1' },
       { role: 'assistant', content: 'two', message_id: 'uuid-2' },
@@ -506,15 +604,15 @@ test('restart replay: concurrent first exchanges for one conversation seed once 
   })
   let scanCalls = 0
   // The scan awaits discoverCachePartitions, so the seen-set is still empty
-  // when control yields. A per-conversation "seeded" flag set before that
+  // when control yields. A per-session "seeded" flag set before that
   // await would let the second caller through unseeded; awaiting the shared
   // seed promise does not.
   const storage = stubStorage(
     [{
-      partition: { conversation_id: 'conv-concurrent' },
+      partition: { session_id: 'sess-concurrent' },
       rows: [
-        { message_id: 'uuid-1', conversation_id: 'conv-concurrent' },
-        { message_id: 'uuid-2', conversation_id: 'conv-concurrent' },
+        { message_id: 'uuid-1', session_id: 'sess-concurrent' },
+        { message_id: 'uuid-2', session_id: 'sess-concurrent' },
       ],
     }],
     () => { scanCalls++ },
@@ -532,9 +630,9 @@ test('restart replay: concurrent first exchanges for one conversation seed once 
   assert.equal(a.length + b.length, 0, 'both concurrent replays emit zero duplicate rows')
 })
 
-test('restart replay: a different conversation is not deduped against another conversation rows', async () => {
+test('restart replay: a different session is not deduped against another session rows', async () => {
   const storage = stubStorage([
-    { partition: { conversation_id: 'conv-A' }, rows: [{ message_id: 'uuid-A', conversation_id: 'conv-A' }] },
+    { partition: { session_id: 'sess-A' }, rows: [{ message_id: 'uuid-A', session_id: 'sess-A' }] },
   ])
   const projector = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
@@ -542,7 +640,7 @@ test('restart replay: a different conversation is not deduped against another co
       registered('native', {
         project: () => ({
           provider: 'native',
-          conversation_id: 'conv-B',
+          session_id: 'sess-B',
           messages: [{ role: 'user', content: 'fresh', message_id: 'uuid-B' }],
         }),
       }),
@@ -550,7 +648,7 @@ test('restart replay: a different conversation is not deduped against another co
     storage,
   })
   const rows = await projector.projectExchange(exchange())
-  assert.equal(rows.length, 1, 'conv-B is fresh; conv-A committed rows must not suppress it')
+  assert.equal(rows.length, 1, 'sess-B is fresh; sess-A committed rows must not suppress it')
   assert.equal(rows[0].message_id, 'uuid-B')
 })
 
@@ -563,7 +661,7 @@ test('restart replay: with no storage, behavior is unchanged (committed history 
       registered('native', {
         project: () => ({
           provider: 'native',
-          conversation_id: 'conv-nostorage',
+          session_id: 'sess-nostorage',
           messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
         }),
       }),
@@ -584,7 +682,7 @@ test('restart replay: a throwing storage degrades to not-seeded and never drops 
       registered('native', {
         project: () => ({
           provider: 'native',
-          conversation_id: 'conv-throw',
+          session_id: 'sess-throw',
           messages: [{ role: 'user', content: 'one', message_id: 'uuid-1' }],
         }),
       }),
@@ -638,6 +736,7 @@ function stubStorage(parts, onScan) {
 function projection(provider) {
   return {
     provider,
+    session_id: `${provider}-sess`,
     conversation_id: `${provider}-conv`,
     messages: [
       { role: 'user', content: 'hello' },

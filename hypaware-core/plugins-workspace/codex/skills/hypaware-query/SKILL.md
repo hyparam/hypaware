@@ -44,7 +44,7 @@ Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages
 
 Key columns:
 
-- `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable conversation, message, and part identity.
+- `session_id`, `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable identity. `session_id` is the always-present session key (group/scope on it); `conversation_id` is a nullable thread within a session (a Codex thread; null for Claude).
 - `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields.
 - `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
 - `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.

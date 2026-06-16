@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -26,7 +26,12 @@ const DATASET_NAME = 'ai_gateway_messages'
 export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'gateway_id', type: 'STRING', nullable: false },
   { name: 'schema_version', type: 'INT32', nullable: false },
-  { name: 'conversation_id', type: 'STRING', nullable: false },
+  // @ref LLP 0030#decision — session_id is the partition key and the
+  // session container (Claude session / Codex metadata.session_id),
+  // always present; conversation_id is the thread WITHIN it (Codex
+  // thread; null for Claude) and is therefore nullable.
+  { name: 'session_id', type: 'STRING', nullable: false },
+  { name: 'conversation_id', type: 'STRING', nullable: true },
   { name: 'user_id', type: 'STRING', nullable: true },
   { name: 'provider', type: 'STRING', nullable: false },
   { name: 'model', type: 'STRING', nullable: true },
@@ -98,9 +103,11 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     authoritative. `previous_message_id` is gateway-owned either
  *     way: unless the projector supplied explicit history, every row
  *     gets its IMMEDIATE predecessor in the THREAD (a 0/1-element
- *     array) — scoped to `(conversation_id, agent_id)` so a subagent's
- *     chain and fallback hash stay separate from the main loop's — so
- *     enriched and fallback rows stay query-compatible. The full
+ *     array) — scoped to `(conversation_id ?? session_id, agent_id)` so
+ *     a Claude subagent's chain (conversation_id null, scopes by
+ *     session) and a Codex thread (scopes by its own conversation_id)
+ *     stay separate from the main loop's — so enriched and fallback
+ *     rows stay query-compatible. The full
  *     ancestry is the transitive closure of these links (storing it per
  *     row was quadratic).
  *  5. Expands each projected message into the per-part rows the
@@ -129,13 +136,13 @@ export function createAiGatewayMessageProjector(opts) {
   // and dedup span the whole session, matching pre-extraction behavior.
   const state = createAiGatewayConversationState()
 
-  // In-flight (or settled) committed-row seed promise per conversation_id.
+  // In-flight (or settled) committed-row seed promise per session_id.
   // A live listener is rebuilt fresh on every daemon start/reload
   // (source.js launchListener), so without seeding the seen-set starts
   // empty and a replay of already-committed history re-emits
   // duplicate-part_id rows. Memoizing the PROMISE (not just a "seeded"
   // flag) is load-bearing: two concurrent first exchanges for one
-  // conversation must await the same scan before projecting, or the second
+  // session must await the same scan before projecting, or the second
   // races past a still-empty seen-set and re-emits the rows this guards
   // against.
   /** @type {Map<string, Promise<void>>} */
@@ -158,8 +165,11 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
-      await seedSeenMessagesForConversation(
-        projection.conversation_id,
+      // @ref LLP 0030#decision — seed by session_id (the partition key,
+      // always present). Claude `conversation_id` is null, so seeding on it
+      // would never dedup a replayed Claude session.
+      await seedSeenMessagesForSession(
+        projection.session_id,
         state,
         seedPromises,
         storage,
@@ -182,40 +192,45 @@ export function createAiGatewayMessageProjector(opts) {
 // replay of already-committed history would re-emit same-part_id rows.
 /**
  * Lazily pre-populate `state.seenMessages` with the `message_id`s already
- * committed for one conversation, the FIRST time that conversation is
- * projected in this listener's lifetime. Seeds one conversation at a time
- * (a large cache holds millions of part_ids — a global preload is a memory
- * and scan problem), and only once per conversation per listener.
+ * committed for one session, the FIRST time that session is projected in
+ * this listener's lifetime. Seeds one session at a time (a large cache
+ * holds millions of part_ids — a global preload is a memory and scan
+ * problem), and only once per session per listener.
+ *
+ * Scopes on `session_id` — the partition key (LLP 0030), always present.
+ * Claude `conversation_id` is null, so a conversation-scoped seed would
+ * never dedup a replayed Claude session; the session partition holds all
+ * of a session's committed rows across its threads.
  *
  * The scan promise is memoized SYNCHRONOUSLY in `seedPromises` before the
- * first `await`, so concurrent first exchanges for the same conversation
- * await the same scan instead of racing past an unseeded `seenMessages`
- * and re-emitting the duplicates this guards against. The proxy fires
+ * first `await`, so concurrent first exchanges for the same session await
+ * the same scan instead of racing past an unseeded `seenMessages` and
+ * re-emitting the duplicates this guards against. The proxy fires
  * `onExchangeFinished` without serializing (proxy.js stores the returned
  * promise but does not await it), so this overlap is real.
  *
- * @param {string} conversationId
+ * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {Map<string, Promise<void>>} seedPromises
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @returns {Promise<void>}
  */
-function seedSeenMessagesForConversation(conversationId, state, seedPromises, storage, log) {
-  if (!conversationId) return Promise.resolve()
-  let pending = seedPromises.get(conversationId)
+function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log) {
+  if (!sessionId) return Promise.resolve()
+  let pending = seedPromises.get(sessionId)
   if (!pending) {
     // This body runs to here synchronously (no prior await), so the map is
     // populated before any concurrent caller can observe a missing entry.
-    pending = scanCommittedMessageIds(conversationId, state, storage, log)
-    seedPromises.set(conversationId, pending)
+    pending = scanCommittedMessageIds(sessionId, state, storage, log)
+    seedPromises.set(sessionId, pending)
   }
   return pending
 }
 
 /**
- * Scan committed `ai_gateway_messages` partitions for one conversation and
- * fold their `message_id`s into `state.seenMessages`.
+ * Scan committed `ai_gateway_messages` partitions for one session and fold
+ * their `message_id`s into `state.seenMessages`.
  *
  * Best-effort throughout: a missing storage handle (unit-test stubs), a
  * missing table, or an unreadable partition degrades to "not seeded" and
@@ -224,13 +239,13 @@ function seedSeenMessagesForConversation(conversationId, state, seedPromises, st
  * throwing would drop a real row. The promise still resolves on a
  * partial/failed scan, so it is cached and not retried on every exchange.
  *
- * @param {string} conversationId
+ * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {ExtendedQueryStorageService | QueryStorageService | undefined} storage
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
  * @returns {Promise<void>}
  */
-async function scanCommittedMessageIds(conversationId, state, storage, log) {
+async function scanCommittedMessageIds(sessionId, state, storage, log) {
   if (!canScanCommittedRows(storage)) return
 
   /** @type {CachePartitionMeta[]} */
@@ -239,7 +254,7 @@ async function scanCommittedMessageIds(conversationId, state, storage, log) {
     partitions = await storage.discoverCachePartitions({ datasets: [DATASET_NAME] })
   } catch (err) {
     log?.warn?.('aigw.seed_seen_messages_failed', {
-      conversation_id: conversationId,
+      session_id: sessionId,
       error: err instanceof Error ? err.message : String(err),
     })
     return
@@ -248,16 +263,16 @@ async function scanCommittedMessageIds(conversationId, state, storage, log) {
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
-    // The dataset is Iceberg-partitioned by `conversation_id`, so a
-    // partition naming a different conversation cannot hold this one's
-    // rows — skip it without a read. The row-level `conversation_id`
-    // filter below is the correctness backstop for source-partitioned or
-    // legacy partitions that don't carry the key in their path.
-    const partitionConversation = part.partition?.conversation_id
-    if (typeof partitionConversation === 'string' && partitionConversation !== conversationId) continue
+    // The dataset is Iceberg-partitioned by `session_id` (LLP 0030), so a
+    // partition naming a different session cannot hold this one's rows —
+    // skip it without a read. The row-level `session_id` filter below is
+    // the correctness backstop for source-partitioned or legacy partitions
+    // that don't carry the key in their path.
+    const partitionSession = part.partition?.session_id
+    if (typeof partitionSession === 'string' && partitionSession !== sessionId) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['message_id', 'conversation_id'])) {
-        if (stringValue(row.conversation_id) !== conversationId) continue
+      for await (const row of storage.readRows(tablePath, ['message_id', 'session_id'])) {
+        if (stringValue(row.session_id) !== sessionId) continue
         const messageId = stringValue(row.message_id)
         if (messageId) state.seenMessages.add(messageId)
       }
@@ -306,17 +321,20 @@ export function createAiGatewayConversationState() {
 
 /**
  * Lazily fetch the per-thread ordered message-id chain. Keyed by
- * `(conversation_id, agent_id)`: a subagent (agent_id set) gets its own
- * chain, separate from the main loop, while agent_id null reuses the
- * plain conversation key so main-loop and Codex behavior is unchanged.
+ * `(threadScope, agent_id)` where `threadScope = conversation_id ??
+ * session_id`: a subagent (agent_id set) gets its own chain, separate
+ * from the main loop, while agent_id null reuses the plain thread key.
+ * Claude has conversation_id null, so it scopes by session; Codex keeps
+ * scoping by its thread (conversation_id) — both unchanged from before
+ * the split, since Claude's old conversation_id WAS the session id.
  *
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
- * @param {string} conversationId
+ * @param {string} threadScope
  * @param {string | undefined} agentId
  * @returns {string[]}
  */
-function threadMessageIds(state, conversationId, agentId) {
-  const key = agentId ? `${conversationId}\u0000${agentId}` : conversationId
+function threadMessageIds(state, threadScope, agentId) {
+  const key = agentId ? `${threadScope}\u0000${agentId}` : threadScope
   let list = state.messageIdsByConversation.get(key)
   if (!list) {
     list = []
@@ -361,19 +379,31 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
   const gatewayAttributes = opts.gatewayAttributes ?? {}
   const tsStart = opts.tsStart ?? stringValue(projection.conversation_started_at) ?? new Date().toISOString()
 
-  const conversationId = projection.conversation_id
-  if (!state.conversationStartedAt.has(conversationId)) {
+  // session_id is the partition key and the session container (always
+  // present); conversation_id is the thread within it (Codex thread;
+  // null for Claude). @ref LLP 0030#decision
+  const sessionId = projection.session_id
+  const conversationId = stringValue(projection.conversation_id)
+  // Scope per-thread state by conversation_id when present (a Codex thread),
+  // else by session_id (Claude, where conversation_id is null). One Codex
+  // session_id can carry several thread conversation_ids, so keying these
+  // maps by session_id would let a later thread inherit the first thread's
+  // start time and cross-resolve tool-result names when tool_call ids
+  // collide across threads. This is the SAME scope used for the
+  // prior-message chain and fallback identity below. @ref LLP 0030#decision
+  const threadScope = conversationId ?? sessionId
+  if (!state.conversationStartedAt.has(threadScope)) {
     state.conversationStartedAt.set(
-      conversationId,
+      threadScope,
       stringValue(projection.conversation_started_at) ?? tsStart
     )
   }
-  const conversationStarted = state.conversationStartedAt.get(conversationId) ?? tsStart
+  const conversationStarted = state.conversationStartedAt.get(threadScope) ?? tsStart
 
-  let conversationLookup = state.toolCallLookupByConversation.get(conversationId)
+  let conversationLookup = state.toolCallLookupByConversation.get(threadScope)
   if (!conversationLookup) {
     conversationLookup = new Map()
-    state.toolCallLookupByConversation.set(conversationId, conversationLookup)
+    state.toolCallLookupByConversation.set(threadScope, conversationLookup)
   }
 
   /** @type {Record<string, unknown>[]} */
@@ -386,17 +416,16 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
     const content = normalizeContent(message.content)
     if (content.length === 0) continue
 
-    // conversation_id is a session id for Claude; a session holds the
-    // main loop plus subagents. Scope the prior-message chain (and the
-    // fallback hash) to (conversation_id, agent_id) so a subagent's
-    // history and identity stay separate from the main loop's. agent_id
-    // null (main loop / Codex) keeps the original conversation-only key.
+    // The prior-message chain and fallback hash share `threadScope`
+    // (above): a subagent's history (agent_id set) stays separate from the
+    // main loop's, and a Codex thread scopes by its own conversation_id.
+    // agent_id null (main loop / Codex) keeps the plain thread key.
     const agentId = stringValue(message.agent_id) ?? stringValue(projection.agent_id)
-    const conversationMessageIds = threadMessageIds(state, conversationId, agentId)
+    const conversationMessageIds = threadMessageIds(state, threadScope, agentId)
 
     const identity = resolveIdentity({
       message,
-      conversationId,
+      threadScope,
       agentId,
       role,
       content,
@@ -414,6 +443,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       message,
       role,
       content,
+      sessionId,
       conversationId,
       conversationStarted,
       messageIndex: i,
@@ -521,7 +551,9 @@ function byPriorityThenSeq(a, b) {
 function isValidProjection(value) {
   if (!isPlainObject(value)) return false
   if (typeof value.provider !== 'string' || value.provider.length === 0) return false
-  if (typeof value.conversation_id !== 'string' || value.conversation_id.length === 0) return false
+  // session_id is the non-null partition key; conversation_id is now
+  // nullable (null for Claude). @ref LLP 0030#decision
+  if (typeof value.session_id !== 'string' || value.session_id.length === 0) return false
   if (!Array.isArray(value.messages)) return false
   return true
 }
@@ -529,7 +561,7 @@ function isValidProjection(value) {
 /**
  * @param {{
  *   message: AiGatewayProjectedMessage,
- *   conversationId: string,
+ *   threadScope: string,
  *   agentId: string | undefined,
  *   role: string,
  *   content: Array<Record<string, unknown>>,
@@ -563,7 +595,7 @@ function resolveIdentity(ctx) {
     }
   }
   return {
-    messageId: computeMessageId(ctx.conversationId, ctx.role, ctx.content, ctx.agentId),
+    messageId: computeMessageId(ctx.threadScope, ctx.role, ctx.content, ctx.agentId),
     previousMessageId,
     fromFallback: true,
   }
@@ -581,7 +613,8 @@ function resolveIdentity(ctx) {
  *   message: AiGatewayProjectedMessage,
  *   role: string,
  *   content: Array<Record<string, unknown>>,
- *   conversationId: string,
+ *   sessionId: string,
+ *   conversationId: string | undefined,
  *   conversationStarted: string,
  *   messageIndex: number,
  *   tsStart: string,
@@ -603,6 +636,7 @@ function expandMessageParts(ctx) {
 
   const base = {
     schema_version: SCHEMA_VERSION,
+    session_id: ctx.sessionId,
     conversation_id: ctx.conversationId,
     user_id: ctx.projection.user_id,
     provider: ctx.projection.provider,
@@ -691,19 +725,22 @@ function expandMessageParts(ctx) {
  * logical message a new id on every replay where the breakpoint
  * shifted — each one a duplicate row the seen-set cannot catch.
  *
- * // @ref LLP 0026#decision — conversation_id is a session id for Claude;
- * // agent_id separates a subagent thread from the main loop so two
- * // agents with identical content in one session don't collide on one
- * // fallback id. Omitted from the hash when absent (main loop / Codex)
- * // so those ids are unchanged.
+ * // @ref LLP 0030#decision — the thread scope is `conversation_id ??
+ * // session_id`: for Claude (conversation_id null) that is the session
+ * // id, the same value the pre-split conversation_id held, so Claude
+ * // fallback ids are unchanged; for Codex it is the thread. agent_id
+ * // separates a subagent thread from the main loop so two agents with
+ * // identical content in one session don't collide on one fallback id.
+ * // Omitted from the hash when absent (main loop / Codex) so those ids
+ * // are unchanged.
  *
- * @param {string} conversation_id
+ * @param {string} threadScope
  * @param {string} role
  * @param {unknown} content
  * @param {string} [agentId]
  */
-export function computeMessageId(conversation_id, role, content, agentId) {
-  const scope = agentId ? `${conversation_id}:${agentId}` : conversation_id
+export function computeMessageId(threadScope, role, content, agentId) {
+  const scope = agentId ? `${threadScope}:${agentId}` : threadScope
   return sha256Hex(`${scope}:${role}:${canonicalJson(stripVolatileBlockFields(content))}`).slice(0, 16)
 }
 

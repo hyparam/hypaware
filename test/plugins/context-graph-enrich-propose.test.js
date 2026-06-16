@@ -30,10 +30,12 @@ function cfg(overrides = {}) {
  * Source row in the default `ai_gateway_messages` shape (part-level). `ts` is
  * epoch millis here (the engine surfaces TIMESTAMP as a Date, which
  * `groupSourceRows` coerces to millis); part_id is the row-unique tiebreak.
+ * The anchor is keyed on `session_id` (@ref LLP 0030#decision — the Session
+ * anchor moved off conversation_id, which is null for Claude).
  * @param {{ ts: number, part: string, conv: string, msg?: string, text?: string }} r
  */
 function row({ ts, part, conv, msg = 'm', text = 'hello' }) {
-  return { message_created_at: ts, part_id: part, conversation_id: conv, message_id: msg, content_text: text }
+  return { message_created_at: ts, part_id: part, session_id: conv, conversation_id: null, message_id: msg, content_text: text }
 }
 
 // --- buildProposeQuery -------------------------------------------------------
@@ -105,8 +107,8 @@ test('groupSourceRows tags rows with no anchor or no text as non-blocking (ancho
 test('groupSourceRows coerces Date and ISO-string timestamps to epoch millis', () => {
   const ms = Date.parse('2026-06-15T00:00:01.000Z')
   const rows = [
-    { message_created_at: new Date(ms), part_id: 'p1', conversation_id: 'A', message_id: 'm1', content_text: 'd' },
-    { message_created_at: '2026-06-15T00:00:01.000Z', part_id: 'p2', conversation_id: 'A', message_id: 'm1', content_text: 's' },
+    { message_created_at: new Date(ms), part_id: 'p1', session_id: 'A', message_id: 'm1', content_text: 'd' },
+    { message_created_at: '2026-06-15T00:00:01.000Z', part_id: 'p2', session_id: 'A', message_id: 'm1', content_text: 's' },
   ]
   const { rowMeta } = groupSourceRows(rows, cfg())
   assert.deepEqual(rowMeta.map((m) => m.ts), [ms, ms])

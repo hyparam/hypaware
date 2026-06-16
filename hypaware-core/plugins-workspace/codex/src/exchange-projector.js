@@ -68,6 +68,11 @@ export function createCodexExchangeProjector(opts = {}) {
       const augmented = augmentFromLogReaders(logReaders, input)
 
       const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
+      // @ref LLP 0030#decision — session_id is the partition key (always
+      // non-null): Codex's `metadata.session_id`, falling back to the
+      // thread (conversation_id) when no session id was captured. Keep
+      // conversation_id = the thread; both can be set for Codex.
+      const sessionId = stringValue(codexContext?.session_id) ?? conversationId
       const recordedContext = resolveRecordedContext(reqBody, codexContext)
 
       /** @type {JsonObject} */
@@ -83,6 +88,7 @@ export function createCodexExchangeProjector(opts = {}) {
       /** @type {AiGatewayProjectedExchange} */
       const projection = {
         provider,
+        session_id: sessionId,
         conversation_id: conversationId,
         conversation_started_at: input.ts_start,
         conversation_source: resolveConversationSource(provider),

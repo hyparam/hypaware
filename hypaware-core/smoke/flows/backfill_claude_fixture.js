@@ -161,7 +161,7 @@ export async function run({ harness, expect }) {
     const sql = `
       select role, content_text, message_id, provider, conversation_source, client_name
       from ai_gateway_messages
-      where conversation_id = '${sessionId}'
+      where session_id = '${sessionId}'
       order by message_index, part_index
     `.trim().replace(/\s+/g, ' ')
 
