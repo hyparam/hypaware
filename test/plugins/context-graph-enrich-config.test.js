@@ -94,6 +94,30 @@ test('validateEnrichConfig accepts row-selection overrides incl. an empty exclud
   assert.deepEqual(cleared.config.exclude_part_types, [])
 })
 
+test('validateEnrichConfig gates the default tool_result filter to the default source schema', () => {
+  // The default source keeps the part-type filter...
+  const dflt = validateEnrichConfig({})
+  assert.equal(dflt.ok, true)
+  if (!dflt.ok) return
+  assert.deepEqual(dflt.config.exclude_part_types, ['tool_result'])
+  assert.equal(dflt.config.require_text, true)
+
+  // ...but a custom source defaults to no part-type filter (it may lack a
+  // `part_type` column), while require_text — which only reads text_column —
+  // stays on.
+  const custom = validateEnrichConfig({ source_dataset: 'my_logs', text_column: 'body' })
+  assert.equal(custom.ok, true)
+  if (!custom.ok) return
+  assert.deepEqual(custom.config.exclude_part_types, [])
+  assert.equal(custom.config.require_text, true)
+
+  // A custom source can still opt into part-type filtering explicitly.
+  const optIn = validateEnrichConfig({ source_dataset: 'my_logs', part_type_column: 'kind', exclude_part_types: ['blob'] })
+  assert.equal(optIn.ok, true)
+  if (!optIn.ok) return
+  assert.deepEqual(optIn.config.exclude_part_types, ['blob'])
+})
+
 test('validateEnrichConfig rejects a non-string-array exclude_part_types', () => {
   const result = validateEnrichConfig({ exclude_part_types: ['tool_result', 7] })
   assert.equal(result.ok, false)

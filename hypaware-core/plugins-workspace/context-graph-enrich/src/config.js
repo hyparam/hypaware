@@ -94,7 +94,17 @@ export function validateEnrichConfig(value) {
   // (sqlQuote'd), not identifiers, so any non-empty string is accepted. An
   // explicit `[]` disables the part-type filter (it is not undefined, so it
   // is honored rather than falling back to the default).
-  const exclude_part_types = readStringArray(raw, 'exclude_part_types', errors) ?? [...SOURCE_DEFAULTS.exclude_part_types]
+  //
+  // @ref LLP 0028#row-selection — the default `['tool_result']` only fits the
+  // default `ai_gateway_messages` schema, which has a `part_type` column. A
+  // custom `source_dataset` may not, so it defaults to *no* part-type filter
+  // (`[]`) rather than emitting `part_type NOT IN (…)` against a column the
+  // source lacks; the user opts in explicitly. (`require_text` only reads
+  // `text_column`, which every source already configures, so it keeps its
+  // default for any source.)
+  const part_type_filter_default =
+    source_dataset === SOURCE_DEFAULTS.source_dataset ? [...SOURCE_DEFAULTS.exclude_part_types] : []
+  const exclude_part_types = readStringArray(raw, 'exclude_part_types', errors) ?? part_type_filter_default
   const require_text = readBool(raw, 'require_text', '', errors) ?? SOURCE_DEFAULTS.require_text
   const recall_index = readString(raw, 'recall_index', errors)
 

@@ -183,6 +183,16 @@ Filtered-out rows are simply never returned; this is safe for the **watermark**
 because they carry nothing to process and the cursor advances over the rows the
 tick *did* see, so the next `ts >= cursor` scan starts past them.
 
+The default `exclude_part_types` is **schema-bound**, not global. `part_type` is
+a column the base source contract (text / timestamp / id / tiebreak / anchor
+columns) never required, and only the default `ai_gateway_messages` schema is
+known to have it. So the `['tool_result']` default applies *only* when
+`source_dataset` is the default; a custom source defaults to `[]` (no part-type
+predicate) rather than emitting `part_type NOT IN (…)` against a column it may
+not have and silently breaking every scan. A custom source opts into part-type
+filtering explicitly. `require_text` is not gated — it reads `text_column`,
+which every source already configures, so it stays on by default everywhere.
+
 **Sub-agent rows were considered and deferred.** Excluding sidechain
 (sub-agent) content was the original ask, but on the measured corpus it is only
 ~12% of text — ~80% of which is *already* removed as `tool_result` — and the
