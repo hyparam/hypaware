@@ -161,4 +161,11 @@ export interface EnrichRuntime {
   query: QueryRegistry
   log: PluginLogger
   stateDir: string
+  /**
+   * Test seam for {@link runSql}: when set, `runSql` calls this instead of the
+   * real `executeQuerySql` over `query` + `storage`. Production leaves it
+   * unset (mirrors the completion providers' injected `fetch` seam) so the
+   * tick functions can be driven by a fake runtime in unit tests.
+   */
+  execSql?: (args: { query: string }) => Promise<{ rows: Record<string, unknown>[] }>
 }

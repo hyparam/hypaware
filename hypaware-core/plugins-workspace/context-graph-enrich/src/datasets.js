@@ -52,7 +52,7 @@ export const PROSPECT_COLUMNS = Object.freeze([
  */
 export const RESOLUTION_COLUMNS = Object.freeze([
   { name: 'prospect_id',     type: 'STRING',    nullable: false },
-  { name: 'decision',        type: 'STRING',    nullable: false }, // commit | merge | deepen | reject
+  { name: 'decision',        type: 'STRING',    nullable: false }, // commit | merge | deepen | reject | skip (salience auto-skip)
   { name: 'committed_ids',   type: 'JSON',      nullable: true  },
   { name: 'note',            type: 'STRING',    nullable: true  },
   { name: 'curator',         type: 'STRING',    nullable: false },
@@ -242,7 +242,11 @@ function emptySource(dataset) {
 /**
  * Deterministic prospect id: stable across re-runs of the same extractor
  * version over the same source provenance + candidate key, so re-proposing
- * the same content dedups instead of duplicating.
+ * the same content dedups instead of duplicating. This determinism is what
+ * lets propose filter against already-persisted ids for cross-tick idempotency
+ * (see propose.js `filterNewProspects`).
+ *
+ * @ref LLP 0028#idempotent-prospects [implements]
  *
  * @param {{ extractor: string, extractorVersion: number, anchorKey: string, candidateKey: string }} parts
  * @returns {string}

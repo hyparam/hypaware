@@ -60,7 +60,8 @@ export async function runProposeTick(runtime, opts = {}) {
       }
 
       const createdAt = new Date().toISOString()
-      const newRows = [...collectProspectRows(perGroup, cfg, createdAt).values()]
+      const candidateRows = [...collectProspectRows(perGroup, cfg, createdAt).values()]
+      const newRows = await filterNewProspects(runtime, candidateRows)
       if (newRows.length > 0) {
         await runtime.storage.appendRows(enrichTablePath(runtime.storage, PROSPECTS_DATASET), [...columnsFor(PROSPECTS_DATASET)], newRows)
       }
@@ -151,7 +152,8 @@ export function groupSourceRows(rows, cfg, cursor = null) {
  * front, the cursor does not move (no safe progress). Order-independent: a
  * later-but-already-processed group can't pull the cursor past an earlier
  * un-proposed group. Reprocessing past the boundary is harmless (prospect ids
- * are deterministic and dedup); skipping is not — so this errs toward redo.
+ * are deterministic and {@link filterNewProspects} drops already-persisted
+ * ones); skipping is not — so this errs toward redo.
  *
  * @param {Array<{ ts: number, id: string, anchorKey: string | null }>} rowMeta
  * @param {Set<string>} processedAnchors
@@ -215,6 +217,31 @@ export function collectProspectRows(perGroup, cfg, createdAt) {
     }
   }
   return out
+}
+
+/**
+ * Drop candidate prospect rows whose deterministic {@link prospectId} is
+ * already persisted, making the append **idempotent across ticks**. The
+ * watermark deliberately errs toward re-reading source rows (see
+ * {@link nextProposeCursor}), and a tick that appends prospects but crashes
+ * before advancing the watermark re-reads the same source next tick — so
+ * without this filter a retried/overlapping tick would append duplicate
+ * prospect rows that T2 then curates again (duplicate committed + resolution
+ * rows and wasted model spend). Mirrors the graph projector's pre-write dedup
+ * (read the committed id set, filter before append; only a missing dataset is
+ * a benign failure there).
+ *
+ * @ref LLP 0028#idempotent-prospects [implements]
+ *
+ * @param {EnrichRuntime} runtime
+ * @param {Record<string, unknown>[]} candidates
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function filterNewProspects(runtime, candidates) {
+  if (candidates.length === 0) return candidates
+  const existing = await runSql(runtime, `SELECT prospect_id FROM ${PROSPECTS_DATASET}`, { allowMissing: true })
+  const seen = new Set(existing.map((r) => strField(r.prospect_id)))
+  return candidates.filter((r) => !seen.has(strField(r.prospect_id)))
 }
 
 /**

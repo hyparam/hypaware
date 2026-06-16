@@ -29,7 +29,7 @@ const MAX_SOURCE_CHARS = 8_000
  *
  * @param {EnrichRuntime} runtime
  * @param {{ deadlineMs?: number, signal?: AbortSignal }} [opts]
- * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, calls: number }>}
+ * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, skipped: number, calls: number }>}
  */
 export async function runCurateTick(runtime, opts = {}) {
   const cfg = runtime.config
@@ -38,12 +38,12 @@ export async function runCurateTick(runtime, opts = {}) {
     'enrich.curate_tick',
     { [Attr.COMPONENT]: 'plugin', [Attr.OPERATION]: 'enrich.curate_tick', [Attr.PLUGIN]: '@hypaware/context-graph-enrich', status: 'ok' },
     async (span) => {
-      const resolvedRows = await runSql(runtime, `SELECT prospect_id FROM ${RESOLUTIONS_DATASET}`)
+      const resolvedRows = await runSql(runtime, `SELECT prospect_id FROM ${RESOLUTIONS_DATASET}`, { allowMissing: true })
       const resolved = new Set(resolvedRows.map((r) => strField(r.prospect_id)))
-      const allProspects = await runSql(runtime, `SELECT * FROM ${PROSPECTS_DATASET}`)
-      const pending = allProspects.filter((p) => !resolved.has(strField(p.prospect_id)))
+      const allProspects = await runSql(runtime, `SELECT * FROM ${PROSPECTS_DATASET}`, { allowMissing: true })
+      const pending = dedupeById(allProspects.filter((p) => !resolved.has(strField(p.prospect_id))))
 
-      const ordered = await orderBySalience(runtime, pending)
+      const { ordered, skipped } = await orderBySalience(runtime, pending)
       const selected = ordered.slice(0, c.max_prospects_per_tick)
 
       // Group the selection by anchor (session) → one curator call per group.
@@ -129,6 +129,13 @@ export async function runCurateTick(runtime, opts = {}) {
         }
       }
 
+      // Sub-salience-threshold prospects are auto-skipped: a terminal `skip`
+      // resolution (no curator call, nothing committed) drains them from the
+      // pending queue so they don't re-score every tick. @ref LLP 0028#salience-drain
+      for (const p of skipped) {
+        resolutionRows.push(resolution(strField(p.prospect_id), 'skip', null, 'below salience threshold', at))
+      }
+
       if (committedRows.length > 0) {
         await runtime.storage.appendRows(enrichTablePath(runtime.storage, COMMITTED_DATASET), [...columnsFor(COMMITTED_DATASET)], committedRows)
       }
@@ -140,27 +147,34 @@ export async function runCurateTick(runtime, opts = {}) {
       span.setAttribute('processed', processed)
       span.setAttribute('committed', committedRows.length)
       span.setAttribute('rejected', rejected)
+      span.setAttribute('skipped', skipped.length)
       span.setAttribute('curate_calls', calls)
-      return { pending: pending.length, processed, committed: committedRows.length, rejected, calls }
+      return { pending: pending.length, processed, committed: committedRows.length, rejected, skipped: skipped.length, calls }
     },
     { component: 'plugin' }
   )
 }
 
 /**
- * Order pending prospects by novelty (1 - best similarity to existing
- * committed knowledge). No recall index configured → FIFO. A cheap,
- * no-LLM triage so the curator spends on the least-covered prospects first.
+ * Triage pending prospects by novelty (1 - best similarity to existing
+ * committed knowledge): a cheap, no-LLM pass so the curator spends on the
+ * least-covered prospects first. Returns the above-threshold prospects in
+ * `ordered` (descending novelty) and the below-threshold ones in `skipped`
+ * — the caller writes the skipped a terminal resolution so they drain instead
+ * of re-scoring every tick (@ref LLP 0028#salience-drain). No recall index
+ * configured → everything is `ordered` (FIFO), nothing skipped.
  *
  * @param {EnrichRuntime} runtime
  * @param {Record<string, unknown>[]} pending
- * @returns {Promise<Record<string, unknown>[]>}
+ * @returns {Promise<{ ordered: Record<string, unknown>[], skipped: Record<string, unknown>[] }>}
  */
 async function orderBySalience(runtime, pending) {
   const c = runtime.config.curate
-  if (!runtime.config.recall_index || pending.length <= 1) return pending
+  if (!runtime.config.recall_index || pending.length <= 1) return { ordered: pending, skipped: [] }
   /** @type {Array<{ row: Record<string, unknown>, novelty: number }>} */
   const scored = []
+  /** @type {Record<string, unknown>[]} */
+  const skipped = []
   for (const p of pending) {
     const text = `${strField(p.prospect_type)}: ${strField(p.label)}`
     let novelty = 1
@@ -171,9 +185,10 @@ async function orderBySalience(runtime, pending) {
       // recall unavailable — treat as fully novel
     }
     if (novelty >= c.salience_threshold) scored.push({ row: p, novelty })
+    else skipped.push(p)
   }
   scored.sort((a, b) => b.novelty - a.novelty)
-  return scored.map((s) => s.row)
+  return { ordered: scored.map((s) => s.row), skipped }
 }
 
 /**
@@ -211,7 +226,8 @@ async function safeExpand(runtime, anchorType, anchorKey) {
     const limit = runtime.config.curate.recall_top_k
     const edges = await runSql(
       runtime,
-      `SELECT edge_type, src_id, dst_id FROM edge WHERE src_id = '${q}' OR dst_id = '${q}' LIMIT ${limit}`
+      `SELECT edge_type, src_id, dst_id FROM edge WHERE src_id = '${q}' OR dst_id = '${q}' LIMIT ${limit}`,
+      { allowMissing: true } // graph surface may not be projected yet
     )
     if (edges.length === 0) return ''
     /** @type {Set<string>} */
@@ -224,7 +240,7 @@ async function safeExpand(runtime, anchorType, anchorKey) {
     }
     if (neighborIds.size === 0) return ''
     const inList = [...neighborIds].map((id) => `'${sqlQuote(id)}'`).join(', ')
-    const nodes = await runSql(runtime, `SELECT node_type, label FROM node WHERE node_id IN (${inList}) LIMIT 50`)
+    const nodes = await runSql(runtime, `SELECT node_type, label FROM node WHERE node_id IN (${inList}) LIMIT 50`, { allowMissing: true })
     return nodes.map((n) => `- ${strField(n.node_type)}: ${strField(n.label)}`).join('\n')
   } catch {
     return ''
@@ -394,6 +410,30 @@ export async function startCurateSource() {
       if (inFlight) await inFlight.catch(() => {})
     },
   }
+}
+
+/**
+ * Keep one row per `prospect_id`. Defense-in-depth against duplicate prospect
+ * rows (e.g. rows persisted before propose became idempotent across ticks, or
+ * a future concurrent proposer): curate must never process the same prospect
+ * twice in a tick, which would emit duplicate committed/resolution rows and
+ * double the model spend. @ref LLP 0028#idempotent-prospects
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Record<string, unknown>[]}
+ */
+function dedupeById(rows) {
+  /** @type {Set<string>} */
+  const seen = new Set()
+  /** @type {Record<string, unknown>[]} */
+  const out = []
+  for (const r of rows) {
+    const id = strField(r.prospect_id)
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(r)
+  }
+  return out
 }
 
 /** @param {unknown} v @returns {string} */
