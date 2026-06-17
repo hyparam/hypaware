@@ -453,7 +453,7 @@ async function runStatus(argv, ctx) {
  *   cacheRoot: string,
  * }} args
  */
-function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
+export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
   return {
     overall: report.overall,
     config: {
@@ -489,6 +489,9 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       name: s.name,
       plugin: s.plugin,
       state: s.state,
+      ...(report.layered
+        ? { provenance: report.layered.centralPlugins.includes(s.plugin) ? 'central' : 'local' }
+        : {}),
       ...(s.error ? { error: s.error } : {}),
     })),
     sinks: report.sinks.map((s) => ({
@@ -508,6 +511,9 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       name: c.name,
       configured: c.configured,
       attached: c.attached,
+      ...(report.layered
+        ? { provenance: report.layered.centralPlugins.includes(c.plugin) ? 'central' : 'local' }
+        : {}),
       ...(c.settingsPath ? { settings_path: c.settingsPath } : {}),
       ...(c.version ? { version: c.version } : {}),
       ...(c.port ? { port: c.port } : {}),
@@ -534,6 +540,7 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
           section: d.section,
           key: d.key,
           reason: d.reason,
+          ...(d.detail ? { detail: d.detail } : {}),
         })),
       }
       : null,
@@ -576,7 +583,7 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
  *   stdout: { write(chunk: string): unknown },
  * }} args
  */
-function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
+export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
   stdout.write('hypaware\n')
   stdout.write(`  overall:  ${report.overall}\n`)
   const configState = report.configExists
@@ -592,7 +599,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
     stdout.write('    (none — no config or no plugins selected)\n')
   } else {
     for (const name of report.activePlugins) {
-      stdout.write(`    - ${name}${provenanceTag(report.layered, 'plugin', name)}\n`)
+      stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}\n`)
     }
   }
 
@@ -601,7 +608,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
     stdout.write('    (none)\n')
   } else {
     for (const s of report.sources) {
-      stdout.write(`    - ${s.name}  (${s.plugin})  [${s.state}]\n`)
+      stdout.write(`    - ${s.name}  (${s.plugin})  [${s.state}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
     }
   }
 
@@ -610,7 +617,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
     stdout.write('    (none — keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
-      stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})${provenanceTag(report.layered, 'sink', s.instance)}\n`)
+      stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
     }
   }
 
@@ -627,7 +634,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
       state.push(c.attached ? 'attached' : 'not attached')
-      stdout.write(`    - ${c.name}  [${state.join(', ')}]\n`)
+      stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
     }
     for (const name of clientNames) {
       if (seen.has(name)) continue
@@ -651,7 +658,10 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
   if (report.layered && (report.layered.drops.length > 0 || report.layered.centralQueryIgnored)) {
     stdout.write('  local config (not applied):\n')
     for (const d of report.layered.drops) {
-      stdout.write(`    - ${d.section}.${d.key}  (${d.reason.replace(/_/g, ' ')})\n`)
+      const why = d.detail
+        ? `${d.reason.replace(/_/g, ' ')}: ${d.detail.replace(/_/g, ' ')}`
+        : d.reason.replace(/_/g, ' ')
+      stdout.write(`    - ${d.section}.${d.key}  (${why})\n`)
     }
     if (report.layered.centralQueryIgnored) {
       stdout.write('    - central query block ignored (query is local-only)\n')
@@ -691,18 +701,36 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
  * Per-entry layer provenance tag for `hyp status` text. Empty on a host
  * that never joined (no central layer → the V1 surface is unchanged);
  * otherwise `[central · locked]` for entries the central layer owns and
- * `[local]` for the user's additive entries.
+ * `[local]` for the user's additive entries. Used for plugin, source,
+ * sink, and client lines — sources and clients inherit their owning
+ * plugin's layer.
  *
  * @param {HypAwareStatusReport['layered']} layered
- * @param {'plugin' | 'sink'} kind
- * @param {string} name
+ * @param {boolean} isCentral
  * @returns {string}
- * @ref LLP 0031#status-provenance [implements] — every active plugin/sink line tagged central·locked or local
+ * @ref LLP 0031#status-provenance [implements] — every active plugin/source/sink/client line tagged central·locked or local
  */
-function provenanceTag(layered, kind, name) {
+function provenanceTag(layered, isCentral) {
   if (!layered) return ''
-  const locked = kind === 'plugin' ? layered.centralPlugins : layered.centralSinks
-  return locked.includes(name) ? '  [central · locked]' : '  [local]'
+  return isCentral ? '  [central · locked]' : '  [local]'
+}
+
+/**
+ * @param {HypAwareStatusReport['layered']} layered
+ * @param {string} plugin
+ * @returns {boolean}
+ */
+function isCentralPlugin(layered, plugin) {
+  return !!layered && layered.centralPlugins.includes(plugin)
+}
+
+/**
+ * @param {HypAwareStatusReport['layered']} layered
+ * @param {string} instance
+ * @returns {boolean}
+ */
+function isCentralSink(layered, instance) {
+  return !!layered && layered.centralSinks.includes(instance)
 }
 
 /**

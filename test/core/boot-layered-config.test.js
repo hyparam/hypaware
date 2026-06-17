@@ -97,3 +97,35 @@ test('central seed + local layer: effective is the merge, collisions drop, centr
   ])
   assert.equal(boot.centralConfigPath, seedPath)
 })
+
+test('a local plugin that invalidates the merge (capability tie) is dropped; central boots', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+
+  // Central locks the parquet encoder.
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/format-parquet' }],
+  }) + '\n')
+
+  // Local adds a second encoder (ties with central — capability_ambiguous,
+  // dropped) plus a clean additive client (kept).
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/format-jsonl' }, { name: '@hypaware/claude' }],
+  }) + '\n')
+
+  const boot = await bootNoActivate(hypHome)
+
+  assert.deepEqual(boot.config?.plugins?.map((p) => p.name), [
+    '@hypaware/central',
+    '@hypaware/format-parquet',
+    '@hypaware/claude',
+  ])
+  // The tie-causing local entry is dropped (not a boot failure), tagged
+  // with the triggering error_kind; the central layer always boots.
+  assert.deepEqual(boot.configDrops, [
+    { section: 'plugins', key: '@hypaware/format-jsonl', reason: 'invalid_merge', detail: 'capability_ambiguous' },
+  ])
+})

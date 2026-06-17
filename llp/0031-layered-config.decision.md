@@ -116,11 +116,19 @@ Validation happens at two points with a hard asymmetry:
    Probation, rollback, and `If-None-Match` convergence depend **only** on the
    central layer. A local edit can never trigger a central rollback or affect
    fleet convergence.
-2. **Boot-time** (`boot.js`): merge central ⊕ local and validate the merge. **Any
-   local entry that collides with a central-named key, or that makes the merge
-   invalid (e.g. two sources producing the same dataset table — [LLP 0000](./0000-hypaware.explainer.md#cross-cutting-invariants),
-   a `disambiguate`-less capability tie, a port clash), is dropped with a loud
-   warning; the central layer always boots.**
+2. **Boot-time** (`boot.js` → `resolveLayeredConfig` in `merge.js`): merge
+   central ⊕ local and validate the merge. **Any local entry that collides with a
+   central-named key, or that makes the merge fail `config validate` (a
+   `disambiguate`-less capability tie a local plugin introduces, an additive sink
+   that names an unknown/incompatible plugin, an unknown local plugin), is dropped
+   with a loud warning; the central layer always boots.** Mechanically: validate
+   the central layer alone for a baseline, then add each surviving local entry
+   back one at a time and keep it only when it introduces no error beyond that
+   baseline — a maximal valid additive subset, so an error the central document
+   carries on its own never blames the local layer. Richer cross-entry checks
+   (two sources producing the same dataset table — [LLP 0000](./0000-hypaware.explainer.md#cross-cutting-invariants),
+   a port clash) ride along automatically as `config validate` learns to catch
+   them; they are not special-cased here.
 
 Two guarantees this buys, both central to #111:
 
@@ -163,7 +171,12 @@ Consequences:
   central layer is fine in any boot (CLI or daemon); only the daemon runs the
   apply *engine* that writes it — so `hyp status` / `hyp query` show the correct
   merged config without firing config polls (consistent with LLP 0025: CLI boots
-  leave `ctx.configControl` undefined).
+  leave `ctx.configControl` undefined). The same resolution is the daemon's
+  **SIGHUP reload** path: a reload re-runs the two-layer merge, never a
+  local-only re-read — re-reading the local layer alone would drop the merged
+  central config on a joined host and re-open #111. Boot and reload therefore
+  share one resolver (`resolveLayeredConfigFromDisk`) so they can never
+  disagree on what "effective" means.
 - **Rollback-to-seed improves**: the central layer rolls back to the seed while
   the local layer is untouched, so a rolled-back gateway *keeps recording
   locally* — strictly better than today, where rollback-to-seed left a

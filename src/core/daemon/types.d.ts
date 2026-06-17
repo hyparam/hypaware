@@ -92,6 +92,8 @@ export interface StatusDiagnostic {
 export interface ClientAttachReport {
   /** `claude` or `codex`. */
   name: string
+  /** The plugin that owns this client (for layer provenance, LLP 0031). */
+  plugin: string
   /** Plugin enabled in config. */
   configured: boolean
   /** Settings file carries the HypAware marker. */

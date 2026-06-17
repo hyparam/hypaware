@@ -11,10 +11,9 @@ import {
   withSpan,
 } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { loadConfigFile } from '../config/schema.js'
 import { createConfigControl } from '../config/apply.js'
 import { buildConfigApplyDeps } from '../config/apply_deps.js'
-import { bootKernel } from '../runtime/boot.js'
+import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import {
@@ -455,19 +454,39 @@ export async function runDaemon(opts = {}) {
         status: 'ok',
       },
       async () => {
-        let freshConfig = boot.config ?? null
-        if (boot.configPath) {
-          const loaded = await loadConfigFile(boot.configPath)
-          if (!loaded.ok) {
-            fileLog.warn('daemon.reload_config_failed', {
-              config_path: boot.configPath,
-              error_kind: loaded.errorKind,
-              message: loaded.message,
-            })
-            return
-          }
-          freshConfig = loaded.config
-          boot.config = loaded.config
+        // Re-resolve BOTH layers, exactly as bootKernel does (LLP 0031): a
+        // SIGHUP must re-merge the central layer, not re-read the local
+        // layer alone. Re-reading only the local file would drop the merged
+        // central config on a joined host and re-open the #111 footgun this
+        // design closes. The central layer is read-only here; only an
+        // *apply* (which triggers a restart, not a reload) rewrites it.
+        // @ref LLP 0031#two-layers-merged-at-boot [implements] — reload re-runs the two-layer resolution; reload never sees the local layer alone
+        const resolved = await resolveLayeredConfigForDaemon({
+          stateRoot,
+          configPath: boot.configPath ?? null,
+        })
+        // A broken/missing local layer is loud but not fatal — keep running
+        // on the already-merged config rather than reload from a degraded
+        // view (the central layer always carries the host).
+        if (boot.configPath && resolved.localLoaded && !resolved.localLoaded.ok) {
+          fileLog.warn('daemon.reload_config_failed', {
+            config_path: boot.configPath,
+            error_kind: resolved.localLoaded.errorKind,
+            message: resolved.localLoaded.message,
+          })
+          return
+        }
+        const freshConfig = resolved.effective ?? boot.config ?? null
+        boot.config = freshConfig
+        for (const drop of resolved.drops) {
+          fileLog.warn('config.local_entry_dropped', {
+            [Attr.COMPONENT]: 'config',
+            [Attr.ERROR_KIND]: drop.reason,
+            section: drop.section,
+            key: drop.key,
+            hyp_reason: drop.reason,
+            ...(drop.detail ? { detail: drop.detail } : {}),
+          })
         }
         const configByName = new Map(
           (freshConfig?.plugins ?? []).map((p) => [p.name, p.config ?? {}])

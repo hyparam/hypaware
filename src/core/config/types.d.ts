@@ -67,10 +67,16 @@ export type ConfigValidationError = ValidationError & { errorKind: ConfigValidat
 
 /**
  * Why a local-layer entry was dropped during the boot-time merge.
- * `collides_with_central` is the only reason today — a local entry
- * naming a key the central layer already locks.
+ *
+ * - `collides_with_central` — the entry named a key the central layer
+ *   already locks (caught by the structural key merge).
+ * - `invalid_merge` — the entry is valid in isolation but makes the
+ *   merged config invalid once layered onto the central document (e.g. a
+ *   capability tie a local plugin introduces, an additive sink that
+ *   references an unknown/incompatible plugin). `detail` carries the
+ *   triggering `error_kind`.
  */
-export type ConfigLayerDropReason = 'collides_with_central'
+export type ConfigLayerDropReason = 'collides_with_central' | 'invalid_merge'
 
 /** A local-layer entry dropped while merging central ⊕ local at boot. */
 export interface ConfigLayerDrop {
@@ -79,6 +85,8 @@ export interface ConfigLayerDrop {
   /** The entry's natural merge key (plugin name / sink instance / capability). */
   key: string
   reason: ConfigLayerDropReason
+  /** For `invalid_merge`, the `error_kind` of the validation error the entry triggered. */
+  detail?: string
 }
 
 /**

@@ -7,9 +7,9 @@ import process from 'node:process'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
-import { mergeConfigLayers } from '../config/merge.js'
+import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
-import { diagnoseV1Config, validateConfig } from '../config/validate.js'
+import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
@@ -131,7 +131,36 @@ export async function collectHypAwareStatus(opts = {}) {
   const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
   const hasCentral = centralConfig !== null
 
-  const merged = mergeConfigLayers(centralConfig, localConfig)
+  // Build the plugin catalog before the merge so the layer resolution
+  // validates local additions against the same plugin set the daemon
+  // runs — a local plugin that invalidates the merge (capability tie,
+  // unknown plugin) is dropped here, not surfaced as a config error.
+  /** @type {PluginCatalog | undefined} */
+  let catalog
+  try {
+    /** @type {LoadedManifest[]} */
+    let bundledLoaded = []
+    /** @type {LoadedManifest[]} */
+    let installedLoaded = []
+    try {
+      const bundled = await discoverBundledPlugins()
+      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+    } catch { /* bundled discovery failure is non-fatal */ }
+    try {
+      const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
+      installedLoaded = installed.loaded
+    } catch { /* installed discovery failure is non-fatal */ }
+    catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
+  } catch { /* catalog build failure is non-fatal */ }
+
+  // @ref LLP 0031#central-layer-is-sacrosanct [implements] — same merge + validation pruning as boot, so status shows exactly what runs
+  const merged = resolveLayeredConfig({
+    central: centralConfig,
+    local: localConfig,
+    validate: (cfg) => collectConfigErrors(cfg, {
+      ...(catalog ? { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets } : {}),
+    }),
+  })
   const config = (centralConfig || localConfig) ? merged.effective : null
   const centralPluginNames = new Set((centralConfig?.plugins ?? []).map((p) => p.name))
   const centralSinkNames = new Set(Object.keys(centralConfig?.sinks ?? {}))
@@ -152,25 +181,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
 
-  /** @type {PluginCatalog | undefined} */
-  let catalog
-  try {
-    /** @type {LoadedManifest[]} */
-    let bundledLoaded = []
-    /** @type {LoadedManifest[]} */
-    let installedLoaded = []
-    try {
-      const bundled = await discoverBundledPlugins()
-      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
-    } catch { /* bundled discovery failure is non-fatal */ }
-    try {
-      const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
-      installedLoaded = installed.loaded
-    } catch { /* installed discovery failure is non-fatal */ }
-    catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
-  } catch { /* catalog build failure is non-fatal */ }
-
-  // Validate the *effective* (merged) config — that is what runs.
+  // Validate the *effective* (merged + pruned) config — that is what runs.
+  // After pruning, any error left is the central layer's own (apply-time's
+  // concern); a local entry that lost the merge shows in `layered.drops`,
+  // not here, so it never degrades `overall`.
   /** @type {ConfigValidationError[]} */
   let validationErrors = []
   if (config && catalog) {
@@ -425,6 +439,7 @@ export async function collectHypAwareStatus(opts = {}) {
       : { attached: false }
     clients.push({
       name: clientName,
+      plugin: descriptor.plugin,
       configured,
       attached: probe.attached,
       ...(probe.settingsPath ? { settingsPath: probe.settingsPath } : {}),
