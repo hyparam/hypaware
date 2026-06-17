@@ -5,7 +5,7 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { defaultConfigPath } from '../config/schema.js'
+import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
@@ -412,6 +412,31 @@ function legacyRetentionPromptFactory(opts) {
 }
 
 /**
+ * Build the interactive "overwrite existing config?" confirm. Defaults
+ * to **no** — a bare Enter keeps the existing config — so a stray
+ * keystroke never destroys a working install. On yes the caller backs
+ * the file up before replacing it.
+ *
+ * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
+ * @returns {(targetPath: string) => Promise<boolean>}
+ */
+function defaultOverwriteConfirmFactory(opts) {
+  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
+  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
+  return async function (targetPath) {
+    const rl = readline.createInterface({ input, output, terminal: false })
+    try {
+      const answer = await rl.question(
+        `A config already exists at ${targetPath}. Overwrite it (a backup is kept)? [y/N]: `
+      )
+      return /^y(es)?$/i.test(answer.trim())
+    } finally {
+      rl.close()
+    }
+  }
+}
+
+/**
  * Render each pick category through the new TUI multiselect prompt.
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
@@ -757,6 +782,27 @@ export async function runPickerWalkthrough(opts) {
     ? path.resolve(env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
 
+  // Guard against clobbering an existing local config (the non-destructive
+  // half of #111). Interactive runs prompt for confirmation;
+  // non-interactive runs require `--force`. Either path backs up the
+  // existing file before replacing it.
+  // @ref LLP 0031#local-layer-writers [implements] — init overwrite safety on the walkthrough write path
+  const overwriteConfirm = interactive
+    ? (opts.confirmOverwrite ?? defaultOverwriteConfirmFactory({ stdin: opts.stdin, stdout }))
+    : undefined
+  const guard = await prepareLocalConfigWrite({
+    targetPath: configPath,
+    force: opts.force,
+    ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
+  })
+  if (!guard.proceed) {
+    opts.stderr.write(`hyp init: ${guard.message}\n`)
+    return overwriteAbortedResult({ opts, configPath, config, picks })
+  }
+  if (guard.backupPath) {
+    stdout.write(`Backed up existing config to ${guard.backupPath}\n`)
+  }
+
   await withSpan(
     'walkthrough.write_config',
     {
@@ -764,6 +810,7 @@ export async function runPickerWalkthrough(opts) {
       [Attr.OPERATION]: 'walkthrough.write_config',
       config_path: configPath,
       plugin_count: config.plugins?.length ?? 0,
+      ...(guard.backupPath ? { config_backed_up: true } : {}),
       status: 'ok',
     },
     async () => {
@@ -1431,6 +1478,44 @@ async function buildWalkthroughClientDescriptorMap() {
     }
   } catch { /* discovery failure → empty map */ }
   return map
+}
+
+/**
+ * Result returned when the overwrite guard refuses (non-interactive,
+ * `--force` absent) or the user declines the interactive prompt. No
+ * config is written; exit code 1 surfaces the refusal to the caller.
+ *
+ * @param {{
+ *   opts: RunPickerWalkthroughOptions,
+ *   configPath: string,
+ *   config: HypAwareV2Config,
+ *   picks: PickerPicks,
+ * }} args
+ * @returns {Promise<PickerWalkthroughResult>}
+ */
+async function overwriteAbortedResult({ opts, configPath, config, picks }) {
+  await withSpan(
+    'walkthrough.finish',
+    {
+      [Attr.COMPONENT]: 'walkthrough',
+      [Attr.OPERATION]: 'walkthrough.finish',
+      config_path: configPath,
+      exit_code: 1,
+      status: 'aborted',
+      hyp_reason: 'config_exists',
+    },
+    async () => {},
+    { component: 'walkthrough' }
+  )
+  return {
+    exitCode: 1,
+    configPath,
+    config,
+    sourcesPicked: picks.sources,
+    exportPicked: picks.exportChoice,
+    clientsPicked: [],
+    retentionDays: picks.retentionDays,
+  }
 }
 
 /**

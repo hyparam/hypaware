@@ -15,6 +15,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
  *   LoadConfigFailure,
  *   LoadConfigResult,
  *   LoadConfigSuccess,
+ *   LocalConfigWriteGuard,
  * } from './types.d.ts'
  */
 
@@ -35,6 +36,59 @@ export const CONFIG_BASENAME = 'hypaware-config.json'
  */
 export function defaultConfigPath(hypHome) {
   return path.join(hypHome, CONFIG_BASENAME)
+}
+
+/**
+ * Guard a write to the user-owned **local** config layer
+ * (`hypaware-config.json`) so `init` cannot silently clobber it — the
+ * remaining, non-destructive half of #111 (`join` no longer writes here;
+ * `init` still can). Behaviour:
+ *
+ * - **No existing config** → proceed.
+ * - **Existing config, non-interactive** (no `confirmOverwrite`): refuse
+ *   unless `force`; on `force`, copy the current file to
+ *   `hypaware-config.json.bak-<ts>` first, then proceed.
+ * - **Existing config, interactive** (`confirmOverwrite` supplied):
+ *   prompt; on confirm, back up and proceed; on decline, abort.
+ *
+ * The helper only decides + backs up; the caller performs the write.
+ *
+ * @param {{
+ *   targetPath: string,
+ *   force?: boolean,
+ *   confirmOverwrite?: (targetPath: string) => Promise<boolean>,
+ *   now?: () => number,
+ * }} args
+ * @returns {Promise<LocalConfigWriteGuard>}
+ * @ref LLP 0031#local-layer-writers [implements] — init overwrite safety: refuse / --force / backup (non-interactive), prompt (interactive)
+ */
+export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwrite, now }) {
+  let exists = true
+  try {
+    await fs.access(targetPath)
+  } catch {
+    exists = false
+  }
+  if (!exists) return { proceed: true }
+
+  if (confirmOverwrite) {
+    const confirmed = await confirmOverwrite(targetPath)
+    if (!confirmed) {
+      return { proceed: false, message: `keeping existing config at ${targetPath}` }
+    }
+  } else if (!force) {
+    return {
+      proceed: false,
+      message:
+        `refusing to overwrite existing config at ${targetPath} — ` +
+        `pass --force to replace it (a timestamped .bak copy is written first)`,
+    }
+  }
+
+  const stamp = new Date((now ?? Date.now)()).toISOString().replace(/[:.]/g, '-')
+  const backupPath = `${targetPath}.bak-${stamp}`
+  await fs.copyFile(targetPath, backupPath)
+  return { proceed: true, backupPath }
 }
 
 /**

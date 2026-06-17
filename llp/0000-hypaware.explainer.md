@@ -74,6 +74,7 @@ plugin that registers a dataset gets query and formatting for free.
 | Context-graph T0 projection | [0023](./0023-context-graph-projection.decision.md) | Decision |
 | Vector search plugin | [0024](./0024-vector-search-plugin.decision.md) | Decision |
 | Remote config & join flow | [0025](./0025-remote-config-join-flow.spec.md) | Spec |
+| Layered config (central + local) | [0031](./0031-layered-config.decision.md) | Decision |
 | Context-graph T1/T2 enrichment + completion | [0028](./0028-context-graph-enrichment.decision.md) | Decision |
 
 ## Where to start

@@ -11,8 +11,10 @@ import {
   DEFAULT_POLL_INTERVAL_SECONDS,
   MAX_CONFIG_DOCUMENT_BYTES,
   PROBATION_FLOOR_SECONDS,
+  centralSeedPath,
   createConfigControl,
   readConfigControlStatus,
+  resolveCentralLayerPath,
 } from '../../src/core/config/apply.js'
 import { parseConfigShape } from '../../src/core/config/schema.js'
 
@@ -46,10 +48,19 @@ const REMOTE_CONFIG = {
 async function makeFixture() {
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-config-apply-'))
   const stateRoot = path.join(tmp, 'hypaware')
-  await fsp.mkdir(stateRoot, { recursive: true })
-  const configPath = path.join(tmp, 'hypaware-config.json')
-  await fsp.writeFile(configPath, JSON.stringify(SEED_CONFIG, null, 2) + '\n')
-  return { tmp, stateRoot, configPath }
+  // `join` writes the seed (the initial central layer) under
+  // config-control/, never to the user-owned hypaware-config.json.
+  const seedPath = centralSeedPath(stateRoot)
+  await fsp.mkdir(path.dirname(seedPath), { recursive: true })
+  await fsp.writeFile(seedPath, JSON.stringify(SEED_CONFIG, null, 2) + '\n')
+  return { tmp, stateRoot, seedPath }
+}
+
+/** Read whatever the central-layer pointer currently resolves to. */
+function readCentralLayer(stateRoot) {
+  const p = resolveCentralLayerPath({ stateRoot })
+  if (!p) return null
+  return JSON.parse(fs.readFileSync(p, 'utf8'))
 }
 
 /**
@@ -81,14 +92,13 @@ function makeDeps(opts = {}) {
 }
 
 /**
- * @param {{ stateRoot: string, configPath: string, now?: () => number }} args
+ * @param {{ stateRoot: string, now?: () => number }} args
  */
-function makeControl({ stateRoot, configPath, now }) {
+function makeControl({ stateRoot, now }) {
   /** @type {string[]} */
   const restarts = []
   const control = createConfigControl({
     stateRoot,
-    configPath,
     requestRestart: (reason) => { restarts.push(reason) },
     ...(now ? { now } : {}),
   })
@@ -96,25 +106,28 @@ function makeControl({ stateRoot, configPath, now }) {
 }
 
 test('stage applies a document: slot persisted, pointer flipped, etag staged, probation armed, restart requested', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control, restarts } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control, restarts } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
 
   const result = await control.stage(REMOTE_CONFIG, 'etag-1')
   assert.deepEqual(result, { ok: true, action: 'applied' })
   assert.deepEqual(restarts, ['config_applied'])
 
-  // Operative config is now a symlink whose content is the new doc.
-  const stat = await fsp.lstat(configPath)
+  // The active-slot pointer (inside config-control/, not the user config)
+  // is now a symlink resolving to the new doc.
+  const pointer = path.join(stateRoot, 'config-control', 'active')
+  const stat = await fsp.lstat(pointer)
   assert.ok(stat.isSymbolicLink())
-  const operative = JSON.parse(await fsp.readFile(configPath, 'utf8'))
-  assert.deepEqual(operative.plugins, REMOTE_CONFIG.plugins)
+  assert.deepEqual(readCentralLayer(stateRoot).plugins, REMOTE_CONFIG.plugins)
 
-  // The seed was preserved as the rollback target.
+  // The seed was preserved as the rollback target, and retired from its
+  // own file once the apply succeeded.
   const slotA = JSON.parse(
     await fsp.readFile(path.join(stateRoot, 'config-control', 'config.a.json'), 'utf8')
   )
   assert.deepEqual(slotA, SEED_CONFIG)
+  assert.equal(fs.existsSync(centralSeedPath(stateRoot)), false)
 
   assert.equal(control.runningEtag(), 'etag-1')
   const status = await control.status()
@@ -124,9 +137,9 @@ test('stage applies a document: slot persisted, pointer flipped, etag staged, pr
 })
 
 test('probation window is max(3 × poll interval, floor) from the staged document', async () => {
-  const { stateRoot, configPath } = await makeFixture()
+  const { stateRoot } = await makeFixture()
   const t0 = Date.parse('2026-06-12T00:00:00.000Z')
-  const { control } = makeControl({ stateRoot, configPath, now: () => t0 })
+  const { control } = makeControl({ stateRoot, now: () => t0 })
   control.attachApplyDeps(makeDeps())
 
   // No poll_interval_seconds in the doc → default cadence.
@@ -139,7 +152,7 @@ test('probation window is max(3 × poll interval, floor) from the staged documen
 
   // A fast cadence is floored. Fresh engine: the first stage left a
   // restart pending in the old one.
-  const relaunch = makeControl({ stateRoot, configPath, now: () => t0 })
+  const relaunch = makeControl({ stateRoot, now: () => t0 })
   relaunch.control.attachApplyDeps(makeDeps())
   relaunch.control.confirmPoll()
   const fastDoc = {
@@ -160,17 +173,17 @@ test('probation window is max(3 × poll interval, floor) from the staged documen
 })
 
 test('stage before attachApplyDeps fails closed', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control, restarts } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control, restarts } = makeControl({ stateRoot })
   const result = await control.stage(REMOTE_CONFIG, 'etag-1')
   assert.equal(result.ok, false)
   assert.equal(!result.ok && result.errorKind, 'apply_engine_not_ready')
   assert.deepEqual(restarts, [])
 })
 
-test('validation failure remembers the bad etag and leaves the config untouched', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control, restarts } = makeControl({ stateRoot, configPath })
+test('validation failure remembers the bad etag and leaves the central layer untouched', async () => {
+  const { stateRoot, seedPath } = await makeFixture()
+  const { control, restarts } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps({ validateOk: false }))
 
   const result = await control.stage(REMOTE_CONFIG, 'etag-bad')
@@ -178,9 +191,10 @@ test('validation failure remembers the bad etag and leaves the config untouched'
   assert.equal(!result.ok && result.errorKind, 'config_invalid')
   assert.deepEqual(restarts, [])
 
-  // Still the seed, still a regular file.
-  const stat = await fsp.lstat(configPath)
-  assert.ok(!stat.isSymbolicLink())
+  // Still the seed, no pointer flipped, no slot written.
+  assert.equal(fs.existsSync(path.join(stateRoot, 'config-control', 'active')), false)
+  assert.equal(resolveCentralLayerPath({ stateRoot }), seedPath)
+  assert.deepEqual(readCentralLayer(stateRoot), SEED_CONFIG)
   const status = await control.status()
   assert.equal(status.badEtag?.etag, 'etag-bad')
   assert.equal(status.badEtag?.reason, 'validation_failed')
@@ -191,8 +205,8 @@ test('pinned plugins install before full validation, so a config can name a not-
   // Catalog-backed validation only knows a plugin once it is installed;
   // install-on-config breaks if validation runs first (LLP 0025
   // install-on-config). The shape gate runs before install instead.
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   const deps = makeDeps()
   control.attachApplyDeps(deps)
 
@@ -202,8 +216,8 @@ test('pinned plugins install before full validation, so a config can name a not-
 })
 
 test('a shape-invalid document is rejected before any install runs', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   const deps = makeDeps()
   control.attachApplyDeps(deps)
 
@@ -216,8 +230,8 @@ test('a shape-invalid document is rejected before any install runs', async () =>
 })
 
 test('a remembered bad etag backs off re-apply until the etag changes', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   const deps = makeDeps({ validateOk: false })
   control.attachApplyDeps(deps)
 
@@ -236,8 +250,8 @@ test('a remembered bad etag backs off re-apply until the etag changes', async ()
 })
 
 test('pinned install hash mismatch is an apply failure with a structured reason', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control, restarts } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control, restarts } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps({
     installResult: { ok: false, errorKind: 'artifact_hash_mismatch', message: 'hash differs' },
   }))
@@ -250,8 +264,8 @@ test('pinned install hash mismatch is an apply failure with a structured reason'
 })
 
 test('oversized documents are rejected before validation', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   const deps = makeDeps()
   control.attachApplyDeps(deps)
 
@@ -262,21 +276,21 @@ test('oversized documents are rejected before validation', async () => {
 })
 
 test('staging the running etag is a no-op', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const first = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const first = makeControl({ stateRoot })
   first.control.attachApplyDeps(makeDeps())
   await first.control.stage(REMOTE_CONFIG, 'etag-1')
 
   // Relaunch: a fresh engine over the same state.
-  const second = makeControl({ stateRoot, configPath })
+  const second = makeControl({ stateRoot })
   second.control.attachApplyDeps(makeDeps())
   const result = await second.control.stage(REMOTE_CONFIG, 'etag-1')
   assert.deepEqual(result, { ok: true, action: 'noop_same_etag' })
 })
 
 test('a second stage in the same process is refused while a restart is pending', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
   const result = await control.stage(REMOTE_CONFIG, 'etag-2')
@@ -284,8 +298,8 @@ test('a second stage in the same process is refused while a restart is pending',
 })
 
 test('confirmPoll clears probation', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
@@ -298,14 +312,14 @@ test('confirmPoll clears probation', async () => {
 })
 
 test('chained applies alternate slots and roll back one revision', async () => {
-  const { stateRoot, configPath } = await makeFixture()
+  const { stateRoot } = await makeFixture()
 
-  const first = makeControl({ stateRoot, configPath })
+  const first = makeControl({ stateRoot })
   first.control.attachApplyDeps(makeDeps())
   await first.control.stage(REMOTE_CONFIG, 'etag-1')
 
   // Relaunch, probation clears, a newer revision arrives.
-  const second = makeControl({ stateRoot, configPath })
+  const second = makeControl({ stateRoot })
   second.control.attachApplyDeps(makeDeps())
   second.control.confirmPoll()
   const doc2 = { ...REMOTE_CONFIG, plugins: [{ name: '@hypaware/central' }] }
@@ -317,7 +331,7 @@ test('chained applies alternate slots and roll back one revision', async () => {
 
   // Expired probation at the next boot rolls back to etag-1, not the seed.
   const future = Date.now() + 10 * 24 * 60 * 60 * 1000
-  const third = makeControl({ stateRoot, configPath, now: () => future })
+  const third = makeControl({ stateRoot, now: () => future })
   const evaluated = await third.control.evaluateAtBoot()
   assert.equal(evaluated.action, 'rolled_back')
   assert.equal(third.control.runningEtag(), 'etag-1')
@@ -328,28 +342,28 @@ test('chained applies alternate slots and roll back one revision', async () => {
 })
 
 test('evaluateAtBoot rolls an expired first apply back onto the seed', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
   const future = Date.now() + 10 * 24 * 60 * 60 * 1000
-  const relaunch = makeControl({ stateRoot, configPath, now: () => future })
+  const relaunch = makeControl({ stateRoot, now: () => future })
   const evaluated = await relaunch.control.evaluateAtBoot()
   assert.equal(evaluated.action, 'rolled_back')
 
-  const operative = JSON.parse(await fsp.readFile(configPath, 'utf8'))
-  assert.deepEqual(operative, SEED_CONFIG)
+  // Rolled back onto the seed bytes preserved in slot 'a'.
+  assert.deepEqual(readCentralLayer(stateRoot), SEED_CONFIG)
   assert.equal(relaunch.control.runningEtag(), undefined)
 })
 
 test('evaluateAtBoot keeps an unexpired probation marker', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
-  const relaunch = makeControl({ stateRoot, configPath })
+  const relaunch = makeControl({ stateRoot })
   const evaluated = await relaunch.control.evaluateAtBoot()
   assert.equal(evaluated.action, 'none')
   const status = await relaunch.control.status()
@@ -357,8 +371,8 @@ test('evaluateAtBoot keeps an unexpired probation marker', async () => {
 })
 
 test('evaluateAtBoot discards a probation marker whose flip never committed', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
@@ -369,18 +383,18 @@ test('evaluateAtBoot discards a probation marker whose flip never committed', as
   state.probation.slot = 'a'
   fs.writeFileSync(statePath, JSON.stringify(state))
 
-  const relaunch = makeControl({ stateRoot, configPath })
+  const relaunch = makeControl({ stateRoot })
   const evaluated = await relaunch.control.evaluateAtBoot()
   assert.equal(evaluated.action, 'cleared_orphan')
   const status = await relaunch.control.status()
   assert.equal(status.probation, null)
-  // The operative config is untouched by orphan cleanup.
+  // The operative central config is untouched by orphan cleanup.
   assert.equal(relaunch.control.runningEtag(), 'etag-1')
 })
 
 test('the probation watchdog rolls back and requests a restart on expiry', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control, restarts } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control, restarts } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
   assert.deepEqual(restarts, ['config_applied'])
@@ -398,13 +412,12 @@ test('the probation watchdog rolls back and requests a restart on expiry', async
   const status = await control.status()
   assert.equal(status.lastRollback?.reason, 'probation_expired')
   assert.equal(status.runningEtag, null)
-  const operative = JSON.parse(await fsp.readFile(configPath, 'utf8'))
-  assert.deepEqual(operative, SEED_CONFIG)
+  assert.deepEqual(readCentralLayer(stateRoot), SEED_CONFIG)
 })
 
 test('a confirmed poll disarms the watchdog before it fires', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const { control, restarts } = makeControl({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const { control, restarts } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
@@ -422,15 +435,15 @@ test('a confirmed poll disarms the watchdog before it fires', async () => {
 })
 
 test('readConfigControlStatus reads without an engine and tolerates a fresh install', async () => {
-  const { stateRoot, configPath } = await makeFixture()
-  const empty = readConfigControlStatus({ stateRoot, configPath })
+  const { stateRoot } = await makeFixture()
+  const empty = readConfigControlStatus({ stateRoot })
   assert.deepEqual(empty, { probation: null, lastRollback: null, badEtag: null, runningEtag: null })
 
-  const { control } = makeControl({ stateRoot, configPath })
+  const { control } = makeControl({ stateRoot })
   control.attachApplyDeps(makeDeps())
   await control.stage(REMOTE_CONFIG, 'etag-1')
 
-  const status = readConfigControlStatus({ stateRoot, configPath })
+  const status = readConfigControlStatus({ stateRoot })
   assert.equal(status.runningEtag, 'etag-1')
   assert.equal(status.probation?.etag, 'etag-1')
 })

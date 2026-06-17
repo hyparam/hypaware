@@ -8,7 +8,8 @@ import process from 'node:process'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
+import { centralSeedPath } from '../config/apply.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -452,7 +453,7 @@ async function runStatus(argv, ctx) {
  *   cacheRoot: string,
  * }} args
  */
-function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
+export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
   return {
     overall: report.overall,
     config: {
@@ -464,8 +465,15 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // without needing to know the version. The collector currently
     // does not track per-plugin version (Phase 2 set version on each
     // entry but it was always 'unknown'); keeping the field reserved
-    // lets later phases populate it without breaking smokes.
-    active_plugins: report.activePlugins.map((name) => ({ name })),
+    // lets later phases populate it without breaking smokes. On a
+    // centrally-managed host each entry also carries its layer
+    // provenance (LLP 0031).
+    active_plugins: report.activePlugins.map((name) => ({
+      name,
+      ...(report.layered
+        ? { provenance: report.layered.centralPlugins.includes(name) ? 'central' : 'local' }
+        : {}),
+    })),
     daemon: {
       installed: report.daemon.installed,
       loaded: report.daemon.loaded,
@@ -481,12 +489,18 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       name: s.name,
       plugin: s.plugin,
       state: s.state,
+      ...(report.layered
+        ? { provenance: report.layered.centralPlugins.includes(s.plugin) ? 'central' : 'local' }
+        : {}),
       ...(s.error ? { error: s.error } : {}),
     })),
     sinks: report.sinks.map((s) => ({
       instance: s.instance,
       plugin: s.plugin,
       kind: s.kind,
+      ...(report.layered
+        ? { provenance: report.layered.centralSinks.includes(s.instance) ? 'central' : 'local' }
+        : {}),
       ...(s.lastTickAt ? { last_tick_at: s.lastTickAt } : {}),
       ...(s.lastSuccessAt ? { last_success_at: s.lastSuccessAt } : {}),
     })),
@@ -497,6 +511,9 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       name: c.name,
       configured: c.configured,
       attached: c.attached,
+      ...(report.layered
+        ? { provenance: report.layered.centralPlugins.includes(c.plugin) ? 'central' : 'local' }
+        : {}),
       ...(c.settingsPath ? { settings_path: c.settingsPath } : {}),
       ...(c.version ? { version: c.version } : {}),
       ...(c.port ? { port: c.port } : {}),
@@ -511,6 +528,22 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       oldest_partition_date: report.cache.oldestDate,
     },
     recent_error_count: report.recentErrorCount,
+    // Two-layer provenance (LLP 0031). Null on a host that never joined,
+    // so the V1 JSON shape is unchanged for ordinary installs.
+    config_layers: report.layered
+      ? {
+        central: true,
+        central_plugins: report.layered.centralPlugins,
+        central_sinks: report.layered.centralSinks,
+        central_query_ignored: report.layered.centralQueryIgnored,
+        local_not_applied: report.layered.drops.map((d) => ({
+          section: d.section,
+          key: d.key,
+          reason: d.reason,
+          ...(d.detail ? { detail: d.detail } : {}),
+        })),
+      }
+      : null,
     // Remote-config apply state (LLP 0025). All-null until the gateway
     // applies its first centrally-served config.
     remote_config: report.remoteConfig
@@ -550,7 +583,7 @@ function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
  *   stdout: { write(chunk: string): unknown },
  * }} args
  */
-function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
+export function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) {
   stdout.write('hypaware\n')
   stdout.write(`  overall:  ${report.overall}\n`)
   const configState = report.configExists
@@ -566,7 +599,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
     stdout.write('    (none — no config or no plugins selected)\n')
   } else {
     for (const name of report.activePlugins) {
-      stdout.write(`    - ${name}\n`)
+      stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}\n`)
     }
   }
 
@@ -575,7 +608,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
     stdout.write('    (none)\n')
   } else {
     for (const s of report.sources) {
-      stdout.write(`    - ${s.name}  (${s.plugin})  [${s.state}]\n`)
+      stdout.write(`    - ${s.name}  (${s.plugin})  [${s.state}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
     }
   }
 
@@ -584,7 +617,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
     stdout.write('    (none — keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
-      stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})\n`)
+      stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
     }
   }
 
@@ -601,7 +634,7 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
       state.push(c.attached ? 'attached' : 'not attached')
-      stdout.write(`    - ${c.name}  [${state.join(', ')}]\n`)
+      stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
     }
     for (const name of clientNames) {
       if (seen.has(name)) continue
@@ -618,6 +651,22 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
   stdout.write(`  cache size:      ${report.cache.totalBytes} bytes\n`)
   stdout.write(`  datasets:        ${datasets.length}\n`)
   stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
+
+  // Local entries the central layer overrides (LLP 0031): dropped at
+  // merge, listed here with their reason. Loud, but not an outage signal
+  // — the gateway runs fine on the central config.
+  if (report.layered && (report.layered.drops.length > 0 || report.layered.centralQueryIgnored)) {
+    stdout.write('  local config (not applied):\n')
+    for (const d of report.layered.drops) {
+      const why = d.detail
+        ? `${d.reason.replace(/_/g, ' ')}: ${d.detail.replace(/_/g, ' ')}`
+        : d.reason.replace(/_/g, ' ')
+      stdout.write(`    - ${d.section}.${d.key}  (${why})\n`)
+    }
+    if (report.layered.centralQueryIgnored) {
+      stdout.write('    - central query block ignored (query is local-only)\n')
+    }
+  }
 
   // Remote-config section appears only once the gateway has state to
   // show — a never-joined install keeps the V1 status surface.
@@ -646,6 +695,42 @@ function renderStatusText({ report, clientNames, datasets, cacheRoot, stdout }) 
       }
     }
   }
+}
+
+/**
+ * Per-entry layer provenance tag for `hyp status` text. Empty on a host
+ * that never joined (no central layer → the V1 surface is unchanged);
+ * otherwise `[central · locked]` for entries the central layer owns and
+ * `[local]` for the user's additive entries. Used for plugin, source,
+ * sink, and client lines — sources and clients inherit their owning
+ * plugin's layer.
+ *
+ * @param {HypAwareStatusReport['layered']} layered
+ * @param {boolean} isCentral
+ * @returns {string}
+ * @ref LLP 0031#status-provenance [implements] — every active plugin/source/sink/client line tagged central·locked or local
+ */
+function provenanceTag(layered, isCentral) {
+  if (!layered) return ''
+  return isCentral ? '  [central · locked]' : '  [local]'
+}
+
+/**
+ * @param {HypAwareStatusReport['layered']} layered
+ * @param {string} plugin
+ * @returns {boolean}
+ */
+function isCentralPlugin(layered, plugin) {
+  return !!layered && layered.centralPlugins.includes(plugin)
+}
+
+/**
+ * @param {HypAwareStatusReport['layered']} layered
+ * @param {string} instance
+ * @returns {boolean}
+ */
+function isCentralSink(layered, instance) {
+  return !!layered && layered.centralSinks.includes(instance)
 }
 
 /**
@@ -2529,7 +2614,7 @@ async function runInit(argv, ctx) {
     }
     const available = ctx.initPresets.list()
     ctx.stderr.write('hyp init: stdin is not a TTY — pass a preset name or non-interactive flags.\n')
-    ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] ...\n')
+    ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] [--force] ...\n')
     if (available.length === 0) {
       ctx.stderr.write('  no presets registered\n')
     } else {
@@ -2572,7 +2657,7 @@ const INIT_FLAG_NAMES = new Set([
   '--dry-run',
   '--client', '--source', '--export',
   '--retention-days', '--from-file',
-  '--bin',
+  '--bin', '--force',
 ])
 
 /**
@@ -2602,12 +2687,14 @@ function parseInitFlags(argv) {
     sources: [],
     exportChoice: undefined,
     retentionDays: 30,
+    force: false,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--yes' || arg === '-y') { flags.yes = true; continue }
     if (arg === '--no-daemon') { flags.noDaemon = true; continue }
     if (arg === '--dry-run') { flags.dryRun = true; continue }
+    if (arg === '--force') { flags.force = true; continue }
     if (arg === '--client' || arg.startsWith('--client=')) {
       const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
       if (value !== 'claude' && value !== 'codex') {
@@ -2736,6 +2823,7 @@ async function runPickerInit(flags, ctx) {
       retentionDays: flags.retentionDays,
     },
     exportOrigin,
+    force: flags.force,
     backfill: buildPickerBackfillRunner(ctx),
     finale: {
       skipDaemon: flags.noDaemon,
@@ -2806,6 +2894,19 @@ async function runInitFromFile(flags, ctx) {
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
 
+  // `init` writes the user-owned local layer, so guard against silently
+  // clobbering a working config (the non-destructive half of #111).
+  // `--from-file` is non-interactive: refuse unless `--force`, and back
+  // up before replacing.
+  const guard = await prepareLocalConfigWrite({ targetPath, force: flags.force })
+  if (!guard.proceed) {
+    ctx.stderr.write(`hyp init: ${guard.message}\n`)
+    return 1
+  }
+  if (guard.backupPath) {
+    ctx.stdout.write(`  backed up existing config to ${guard.backupPath}\n`)
+  }
+
   await withSpan(
     'walkthrough.write_config',
     {
@@ -2813,6 +2914,7 @@ async function runInitFromFile(flags, ctx) {
       [Attr.OPERATION]: 'walkthrough.write_config',
       config_path: targetPath,
       from_file: true,
+      ...(guard.backupPath ? { config_backed_up: true } : {}),
       status: 'ok',
     },
     async () => {
@@ -2928,28 +3030,32 @@ async function runJoin(argv, ctx) {
     return 1
   }
 
+  // The seed is the initial *central* layer. It is written to a
+  // dedicated central-seed file under `config-control/` — never to
+  // `hypaware-config.json`, which is the user-owned local layer. This is
+  // the #111 fix: `join` augments a working install instead of
+  // destroying it.
+  // @ref LLP 0031#physical-layout [implements] — join writes only the central seed, never the local layer
   const obsEnv = readObservabilityEnv(ctx.env)
-  const targetPath = ctx.env.HYP_CONFIG
-    ? path.resolve(ctx.env.HYP_CONFIG)
-    : defaultConfigPath(obsEnv.hypHome)
+  const seedPath = centralSeedPath(obsEnv.stateDir)
 
   return withSpan(
     'join.run',
     {
       [Attr.COMPONENT]: 'join',
       [Attr.OPERATION]: 'join.run',
-      config_path: targetPath,
+      config_path: seedPath,
       install_daemon: !parsed.noDaemon,
       status: 'ok',
     },
     async (span) => {
       // The token is the only credential on disk until the first
       // bootstrap, so the seed write is atomic and mode 0600.
-      await fs.mkdir(path.dirname(targetPath), { recursive: true })
-      const tmp = `${targetPath}.tmp.${process.pid}.${Date.now()}`
+      await fs.mkdir(path.dirname(seedPath), { recursive: true })
+      const tmp = `${seedPath}.tmp.${process.pid}.${Date.now()}`
       await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
-      await fs.rename(tmp, targetPath)
-      ctx.stdout.write(`✓ Wrote seed config ${targetPath}\n`)
+      await fs.rename(tmp, seedPath)
+      ctx.stdout.write(`✓ Wrote seed config ${seedPath}\n`)
 
       if (parsed.noDaemon) {
         ctx.stdout.write('  daemon install skipped (--no-daemon); run `hyp daemon install` to finish joining\n')

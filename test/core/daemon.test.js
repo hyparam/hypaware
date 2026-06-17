@@ -16,6 +16,7 @@ import {
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
@@ -251,6 +252,74 @@ test('runDaemon reload refreshes plugin config before source.reload', async () =
     assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')), {
       started: 'before',
       reloaded: 'after',
+    })
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('runDaemon reload re-merges the central layer (does not re-read local alone) — #111 regression', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-reload-central-'))
+  let handle
+  try {
+    const installDir = await stageReloadPlugin(hypHome)
+    const stateRoot = path.join(hypHome, 'hypaware')
+    await writeLock(stateRoot, {
+      schema_version: 1,
+      plugins: {
+        '@third-party/reload-fixture': {
+          name: '@third-party/reload-fixture',
+          version: '0.1.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-05-22T00:00:00.000Z',
+        },
+      },
+    })
+
+    // The fixture's config lives ONLY in the central layer (the join
+    // seed). The local layer exists and loads, but never names it — so a
+    // reload that re-read the local layer alone would lose the central
+    // config and write `reloaded: undefined`.
+    const seedPath = centralSeedPath(stateRoot)
+    await fs.mkdir(path.dirname(seedPath), { recursive: true })
+    await fs.writeFile(seedPath, JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@third-party/reload-fixture', config: { value: 'central' } }],
+    }) + '\n')
+
+    const configPath = defaultConfigPath(hypHome)
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'reload-central-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    const statePath = path.join(stateRoot, 'plugins', '@third-party/reload-fixture', 'reload-state.json')
+    // Source started from the central layer's config.
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')), {
+      started: 'central',
+      reloaded: null,
+    })
+
+    await handle.reload()
+
+    // After SIGHUP the merge still carries the central layer's config —
+    // not `undefined` from a local-only re-read.
+    assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')), {
+      started: 'central',
+      reloaded: 'central',
     })
   } finally {
     if (handle) {

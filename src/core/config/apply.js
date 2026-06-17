@@ -49,6 +49,54 @@ const CONTROL_DIRNAME = 'config-control'
 const STATE_BASENAME = 'state.json'
 
 /**
+ * The active-slot pointer. A relative symlink under `config-control/`
+ * pointing at the live `config.{a,b}.json` slot. Relocated here (off the
+ * user-facing `hypaware-config.json` path) so the local layer can be a
+ * plain user file — the atomic symlink-flip crash-safety is preserved.
+ * @ref LLP 0031#physical-layout [constrained-by] — active-slot pointer relocated into config-control/
+ */
+const ACTIVE_BASENAME = 'active'
+
+/**
+ * The join seed: the initial central layer, written by `hyp join` (mode
+ * 0600 — it holds the policy token). Read once on the first apply to
+ * preserve it as the rollback target, then retired.
+ * @ref LLP 0031#physical-layout [implements] — dedicated central-seed file, not hypaware-config.json
+ */
+const SEED_BASENAME = 'seed.json'
+
+/**
+ * Path to the join seed (the initial central layer) under a host's
+ * state root. `hyp join` writes here; the apply engine retires it after
+ * the first successful apply.
+ *
+ * @param {string} stateRoot
+ * @returns {string}
+ */
+export function centralSeedPath(stateRoot) {
+  return path.join(stateRoot, CONTROL_DIRNAME, SEED_BASENAME)
+}
+
+/**
+ * Resolve the central layer's source file for boot, read-only: the
+ * active applied slot if the pointer is set, **else** the join seed,
+ * **else** null (a host that never joined). Reading is safe in any boot
+ * (CLI or daemon) — only the daemon's apply engine ever *writes* here.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {string | null}
+ * @ref LLP 0031#physical-layout [implements] — central = active slot else seed else none
+ */
+export function resolveCentralLayerPath({ stateRoot }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const slot = readActiveSlot(controlDir)
+  if (slot) return path.join(controlDir, `config.${slot}.json`)
+  const seed = path.join(controlDir, SEED_BASENAME)
+  if (fs.existsSync(seed)) return seed
+  return null
+}
+
+/**
  * Build the kernel config apply engine: shape-check → install pinned
  * plugins → validate against the post-install catalog → persist to an
  * A/B slot → flip the operative pointer → staged restart, plus
@@ -67,11 +115,13 @@ const STATE_BASENAME = 'state.json'
  * @ref LLP 0025#apply-engine-is-kernel-surface [implements] — the engine is kernel-owned; plugins only see the narrow facade
  */
 export function createConfigControl(opts) {
-  const { stateRoot, configPath, requestRestart } = opts
+  const { stateRoot, requestRestart } = opts
   const now = opts.now ?? Date.now
   const log = getLogger('config-control')
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
   const statePath = path.join(controlDir, STATE_BASENAME)
+  const activePath = path.join(controlDir, ACTIVE_BASENAME)
+  const seedPath = path.join(controlDir, SEED_BASENAME)
 
   /** @type {ConfigApplyDeps | null} */
   let applyDeps = null
@@ -104,27 +154,28 @@ export function createConfigControl(opts) {
 
   /** @returns {ConfigSlot | null} */
   function activeSlot() {
-    return readActiveSlot(controlDir, configPath)
+    return readActiveSlot(controlDir)
   }
 
   /**
-   * Atomically point the operative config path at `slot`. A relative
-   * symlink is created at a tmp path and renamed over the config path,
-   * so a crash leaves either the old or the new pointer — never
-   * neither.
+   * Atomically point the active-slot pointer at `slot`. A relative
+   * symlink is created at a tmp path and renamed over the pointer, so a
+   * crash leaves either the old or the new pointer — never neither. The
+   * pointer lives inside `config-control/` (not at the user-facing
+   * config path), so the local layer is never a symlink.
    *
    * @param {ConfigSlot} slot
+   * @ref LLP 0031#physical-layout [constrained-by] — pointer relocated into config-control/, atomic flip preserved
    */
   function flipPointer(slot) {
-    const target = path.relative(path.dirname(configPath), slotPath(slot))
-    const tmp = `${configPath}.tmp.${process.pid}.${now()}`
-    fs.symlinkSync(target, tmp)
-    fs.renameSync(tmp, configPath)
+    const tmp = `${activePath}.tmp.${process.pid}.${now()}`
+    fs.symlinkSync(`config.${slot}.json`, tmp)
+    fs.renameSync(tmp, activePath)
   }
 
   /** @returns {string | undefined} */
   function runningEtag() {
-    return readRunningEtag(controlDir, configPath)
+    return readRunningEtag(controlDir)
   }
 
   /**
@@ -408,14 +459,15 @@ export function createConfigControl(opts) {
 
     /** @type {ConfigSlot | null} */
     let previousSlot = current
+    let firstApplyOverSeed = false
     if (current === null) {
-      // First apply over a regular file (the seed, or a hand-written
-      // config): preserve its bytes in slot 'a' so rollback lands back
-      // on it. Seed-config mode is a legitimate steady state, so this
-      // is a safe rollback target by construction.
+      // First apply with no active slot yet: preserve the join seed's
+      // bytes in slot 'a' so rollback lands back on it. Seed-config mode
+      // is a legitimate steady state, so this is a safe rollback target
+      // by construction.
       let seedRaw = null
       try {
-        seedRaw = fs.readFileSync(configPath, 'utf8')
+        seedRaw = fs.readFileSync(seedPath, 'utf8')
       } catch (err) {
         if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
       }
@@ -423,6 +475,7 @@ export function createConfigControl(opts) {
         fs.writeFileSync(slotPath('a'), seedRaw, { mode: 0o600 })
         fs.rmSync(slotEtagPath('a'), { force: true })
         previousSlot = 'a'
+        firstApplyOverSeed = true
       }
     }
 
@@ -444,11 +497,20 @@ export function createConfigControl(opts) {
     writeState(state)
 
     flipPointer(target)
+
+    // First successful apply retires the seed file — its bytes survive
+    // in slot 'a' as the rollback target, and the policy token it
+    // carried no longer needs to sit on disk (identity.json carries the
+    // JWT from here on).
+    // @ref LLP 0031#physical-layout [implements] — seed retired after first successful apply
+    if (firstApplyOverSeed) {
+      fs.rmSync(seedPath, { force: true })
+    }
   }
 
   /** @returns {Promise<ConfigControlStatus>} */
   async function status() {
-    return readConfigControlStatus({ stateRoot, configPath })
+    return readConfigControlStatus({ stateRoot })
   }
 
   return {
@@ -482,21 +544,22 @@ function readControlState(statePath) {
 }
 
 /**
- * Which slot the operative config symlink points at, or null when it
- * is a regular file (seed / hand-written config) or missing.
+ * Which slot the active-slot pointer (`config-control/active`) points
+ * at, or null when no apply has flipped it yet (seed-config mode) or it
+ * is missing.
  *
  * @param {string} controlDir
- * @param {string} configPath
  * @returns {ConfigSlot | null}
  */
-function readActiveSlot(controlDir, configPath) {
+function readActiveSlot(controlDir) {
+  const activePath = path.join(controlDir, ACTIVE_BASENAME)
   let target
   try {
-    target = fs.readlinkSync(configPath)
+    target = fs.readlinkSync(activePath)
   } catch {
     return null
   }
-  const resolved = path.resolve(path.dirname(configPath), target)
+  const resolved = path.resolve(controlDir, target)
   if (resolved === path.join(controlDir, 'config.a.json')) return 'a'
   if (resolved === path.join(controlDir, 'config.b.json')) return 'b'
   return null
@@ -504,11 +567,10 @@ function readActiveSlot(controlDir, configPath) {
 
 /**
  * @param {string} controlDir
- * @param {string} configPath
  * @returns {string | undefined}
  */
-function readRunningEtag(controlDir, configPath) {
-  const slot = readActiveSlot(controlDir, configPath)
+function readRunningEtag(controlDir) {
+  const slot = readActiveSlot(controlDir)
   if (!slot) return undefined
   try {
     const etag = fs.readFileSync(path.join(controlDir, `config.${slot}.etag`), 'utf8').trim()
@@ -523,11 +585,11 @@ function readRunningEtag(controlDir, configPath) {
  * usable from any process (the CLI is not the daemon), so it never
  * constructs the engine or takes its hooks.
  *
- * @param {{ stateRoot: string, configPath: string }} args
+ * @param {{ stateRoot: string }} args
  * @returns {ConfigControlStatus}
  * @ref LLP 0025#last-known-good-rollback [implements] — operator-visible probation/rollback/bad-etag state without log spelunking
  */
-export function readConfigControlStatus({ stateRoot, configPath }) {
+export function readConfigControlStatus({ stateRoot }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
   /** @type {ConfigControlState} */
   let state = {}
@@ -540,7 +602,7 @@ export function readConfigControlStatus({ stateRoot, configPath }) {
     probation: state.probation ?? null,
     lastRollback: state.last_rollback ?? null,
     badEtag: state.bad_etag ?? null,
-    runningEtag: readRunningEtag(controlDir, configPath) ?? null,
+    runningEtag: readRunningEtag(controlDir) ?? null,
   }
 }
 

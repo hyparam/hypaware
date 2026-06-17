@@ -8,6 +8,10 @@ import {
   runRoot,
 } from '../observability/index.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { resolveCentralLayerPath } from '../config/apply.js'
+import { resolveLayeredConfig } from '../config/merge.js'
+import { collectConfigErrors } from '../config/validate.js'
+import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
@@ -27,6 +31,7 @@ import { discoverInstalledPlugins } from './installed.js'
  * @import { KernelRuntime } from './activation.js'
  * @import { ActivationResult } from './loader.js'
  * @import { BootKernelOptions, BootKernelResult, BootProfile } from './types.d.ts'
+ * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../config/types.d.ts'
  */
 
 /**
@@ -129,8 +134,54 @@ export async function bootKernel(opts = {}) {
         throw shadowErr
       }
 
-      const loadedConfig = configPath ? await loadConfigFile(configPath) : null
-      const config = loadedConfig?.ok ? loadedConfig.config : null
+      // Two-layer config resolution (LLP 0031): the effective config is
+      // the merge of a server-owned **central** layer (authoritative,
+      // locked) and the user-owned **local** layer (`hypaware-config.json`,
+      // additive-only). Both are read-only here — only the daemon's apply
+      // engine ever writes the central layer. A host that never joined has
+      // no central layer, so `effective = local` (this whole block is a
+      // no-op for it) and behaviour is byte-for-byte what it was before.
+      // The catalog is built from the very manifests this boot discovered
+      // so the merge validates local additions against the same plugin set
+      // it will activate.
+      // @ref LLP 0031#two-layers-merged-at-boot [implements] — effective = merge(central, local), computed at boot
+      const catalog = buildPluginCatalog([...discovered.loaded, ...discovered.excluded], installed.loaded)
+      const merged = await resolveLayeredConfigFromDisk({
+        stateRoot,
+        configPath,
+        knownPlugins: catalog.pluginMetadata,
+        knownDatasets: catalog.knownDatasets,
+      })
+      const centralConfig = merged.centralConfig
+      const centralConfigPath = merged.centralConfigPath
+      const config = merged.effective
+
+      // The central layer is sacrosanct: a local entry that collides with a
+      // locked central key, or that invalidates the merge, is dropped
+      // (loudly) — never failing boot. A garbage local edit can never take
+      // down a centrally-managed gateway.
+      // @ref LLP 0031#central-layer-is-sacrosanct [implements] — collisions / invalid additions drop the local entry with a loud log; central always boots
+      if (centralConfig) {
+        const cfgLog = getLogger('config')
+        for (const drop of merged.drops) {
+          cfgLog.warn('config.local_entry_dropped', {
+            [Attr.COMPONENT]: 'config',
+            [Attr.ERROR_KIND]: drop.reason,
+            section: drop.section,
+            key: drop.key,
+            hyp_reason: drop.reason,
+            ...(drop.detail ? { detail: drop.detail } : {}),
+          })
+        }
+        if (merged.centralQueryIgnored) {
+          cfgLog.warn('config.central_query_ignored', {
+            [Attr.COMPONENT]: 'config',
+            hyp_reason: 'query_is_local_only',
+          })
+        }
+        span.setAttribute('config_layers', 'central+local')
+        if (merged.drops.length > 0) span.setAttribute('local_entries_dropped', merged.drops.length)
+      }
 
       // Full plugin pool: V1 allowlist + excluded-from-default set +
       // installed plugins. Excluded plugins are in the pool so they
@@ -189,6 +240,9 @@ export async function bootKernel(opts = {}) {
           activations: /** @type {ActivationResult[]} */ ([]),
           config: config ?? null,
           configPath,
+          centralConfigPath,
+          configDrops: merged.drops,
+          centralQueryIgnored: merged.centralQueryIgnored,
           mode,
           runId,
           skipped,
@@ -239,6 +293,9 @@ export async function bootKernel(opts = {}) {
         activations: result.results,
         config: config ?? null,
         configPath,
+        centralConfigPath,
+        configDrops: merged.drops,
+        centralQueryIgnored: merged.centralQueryIgnored,
         mode,
         runId,
         skipped,
@@ -246,6 +303,75 @@ export async function bootKernel(opts = {}) {
     },
     { component: 'kernel' }
   )
+}
+
+/**
+ * Resolve the effective two-layer config from disk (LLP 0031): load the
+ * user-owned **local** layer (`configPath`) and the server-owned
+ * **central** layer (active slot / join seed under `stateRoot`), then
+ * merge + prune via {@link resolveLayeredConfig}. Both layers are read
+ * read-only — only the daemon's apply engine ever writes the central
+ * layer. The single place `bootKernel` and the SIGHUP reload agree on
+ * what "effective" means, so a reload can never silently drop the central
+ * layer.
+ *
+ * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string> }} args
+ * @returns {Promise<{
+ *   centralConfig: HypAwareV2Config | null,
+ *   localConfig: HypAwareV2Config | null,
+ *   centralConfigPath: string | null,
+ *   localLoaded: LoadConfigResult | null,
+ *   effective: HypAwareV2Config | null,
+ *   drops: ConfigLayerDrop[],
+ *   centralQueryIgnored: boolean,
+ * }>}
+ */
+export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets }) {
+  const localLoaded = configPath ? await loadConfigFile(configPath) : null
+  const localConfig = localLoaded?.ok ? localLoaded.config : null
+  const centralConfigPath = resolveCentralLayerPath({ stateRoot })
+  const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath) : null
+  const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
+
+  const merged = resolveLayeredConfig({
+    central: centralConfig,
+    local: localConfig,
+    validate: (cfg) => collectConfigErrors(cfg, {
+      ...(knownPlugins ? { knownPlugins } : {}),
+      ...(knownDatasets ? { knownDatasets } : {}),
+    }),
+  })
+
+  return {
+    centralConfig,
+    localConfig,
+    centralConfigPath,
+    localLoaded,
+    effective: (centralConfig || localConfig) ? merged.effective : null,
+    drops: merged.drops,
+    centralQueryIgnored: merged.centralQueryIgnored,
+  }
+}
+
+/**
+ * Like {@link resolveLayeredConfigFromDisk}, but discovers the plugin
+ * catalog itself — for callers outside `bootKernel` that don't already
+ * hold the discovered manifest set (the daemon's SIGHUP reload). The
+ * catalog drives the validation pass, so it must reflect the same
+ * bundled + installed plugin set the kernel runs.
+ *
+ * @param {{ stateRoot: string, configPath: string | null, workspaceDir?: string }} args
+ */
+export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, workspaceDir }) {
+  const discovered = await discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {})
+  const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
+  const catalog = buildPluginCatalog([...discovered.loaded, ...discovered.excluded], installed.loaded)
+  return resolveLayeredConfigFromDisk({
+    stateRoot,
+    configPath,
+    knownPlugins: catalog.pluginMetadata,
+    knownDatasets: catalog.knownDatasets,
+  })
 }
 
 /**

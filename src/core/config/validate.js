@@ -150,6 +150,34 @@ function pluginMetadataFromManifest(manifest) {
 }
 
 /**
+ * Run the cross-plugin checks and return the raw error list, without the
+ * `config.validate` span or per-error logging. The synchronous, quiet
+ * core that `validateConfig` wraps — used by the boot-time layer merge,
+ * which re-validates candidate merges many times and must stay silent and
+ * cheap (no telemetry spam, no async).
+ *
+ * @param {HypAwareV2Config} config
+ * @param {ValidateContext} [ctx]
+ * @returns {ConfigValidationError[]}
+ * @ref LLP 0010#validation [implements] — the same cross-plugin checks, sans span/logging
+ */
+export function collectConfigErrors(config, ctx = {}) {
+  const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
+  const knownDatasets = ctx.knownDatasets ?? new Set()
+  const configRegistry = ctx.configRegistry
+
+  /** @type {ConfigValidationError[]} */
+  const errors = []
+  checkDuplicatePlugins(config, errors)
+  checkPluginsKnown(config, knownPlugins, errors)
+  checkSinks(config, knownPlugins, errors)
+  checkRetention(config, knownDatasets, errors)
+  checkCapabilityAmbiguity(config, knownPlugins, errors)
+  runPerPluginSectionValidators(config, configRegistry, errors)
+  return errors
+}
+
+/**
  * Run kernel-level cross-plugin validation over a parsed v2 config.
  *
  * Rules:
@@ -204,15 +232,7 @@ export async function validateConfig(config, ctx = {}) {
       sink_count: sinkCount,
     },
     async (span) => {
-      /** @type {ConfigValidationError[]} */
-      const errors = []
-
-      checkDuplicatePlugins(config, errors)
-      checkPluginsKnown(config, knownPlugins, errors)
-      checkSinks(config, knownPlugins, errors)
-      checkRetention(config, knownDatasets, errors)
-      checkCapabilityAmbiguity(config, knownPlugins, errors)
-      runPerPluginSectionValidators(config, configRegistry, errors)
+      const errors = collectConfigErrors(config, { knownPlugins, knownDatasets, configRegistry })
 
       for (const e of errors) {
         log.error('config.validate.error', {
