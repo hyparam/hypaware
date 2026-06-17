@@ -8,6 +8,8 @@ import {
   runRoot,
 } from '../observability/index.js'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { resolveCentralLayerPath } from '../config/apply.js'
+import { mergeConfigLayers } from '../config/merge.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
@@ -129,8 +131,47 @@ export async function bootKernel(opts = {}) {
         throw shadowErr
       }
 
-      const loadedConfig = configPath ? await loadConfigFile(configPath) : null
-      const config = loadedConfig?.ok ? loadedConfig.config : null
+      // Two-layer config resolution (LLP 0031): the effective config is
+      // the merge of a server-owned **central** layer (authoritative,
+      // locked) and the user-owned **local** layer (`hypaware-config.json`,
+      // additive-only). Both are read-only here — only the daemon's apply
+      // engine ever writes the central layer. A host that never joined has
+      // no central layer, so `effective = local` (this whole block is a
+      // no-op for it) and behaviour is byte-for-byte what it was before.
+      // @ref LLP 0031#two-layers-merged-at-boot [implements] — effective = merge(central, local), computed at boot
+      const localLoaded = configPath ? await loadConfigFile(configPath) : null
+      const localConfig = localLoaded?.ok ? localLoaded.config : null
+      const centralConfigPath = resolveCentralLayerPath({ stateRoot })
+      const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath) : null
+      const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
+
+      // Merge central ⊕ local; the central layer is sacrosanct — any local
+      // entry that collides with a central-named key is dropped (loudly),
+      // never failing boot. A garbage local edit can never take down a
+      // centrally-managed gateway.
+      // @ref LLP 0031#central-layer-is-sacrosanct [implements] — collisions drop the local entry with a loud log; central always boots
+      const merged = mergeConfigLayers(centralConfig, localConfig)
+      const config = (centralConfig || localConfig) ? merged.effective : null
+      if (centralConfig) {
+        const cfgLog = getLogger('config')
+        for (const drop of merged.drops) {
+          cfgLog.warn('config.local_entry_dropped', {
+            [Attr.COMPONENT]: 'config',
+            [Attr.ERROR_KIND]: drop.reason,
+            section: drop.section,
+            key: drop.key,
+            hyp_reason: drop.reason,
+          })
+        }
+        if (merged.centralQueryIgnored) {
+          cfgLog.warn('config.central_query_ignored', {
+            [Attr.COMPONENT]: 'config',
+            hyp_reason: 'query_is_local_only',
+          })
+        }
+        span.setAttribute('config_layers', 'central+local')
+        if (merged.drops.length > 0) span.setAttribute('local_entries_dropped', merged.drops.length)
+      }
 
       // Full plugin pool: V1 allowlist + excluded-from-default set +
       // installed plugins. Excluded plugins are in the pool so they
@@ -189,6 +230,9 @@ export async function bootKernel(opts = {}) {
           activations: /** @type {ActivationResult[]} */ ([]),
           config: config ?? null,
           configPath,
+          centralConfigPath,
+          configDrops: merged.drops,
+          centralQueryIgnored: merged.centralQueryIgnored,
           mode,
           runId,
           skipped,
@@ -239,6 +283,9 @@ export async function bootKernel(opts = {}) {
         activations: result.results,
         config: config ?? null,
         configPath,
+        centralConfigPath,
+        configDrops: merged.drops,
+        centralQueryIgnored: merged.centralQueryIgnored,
         mode,
         runId,
         skipped,

@@ -10,6 +10,19 @@ import type {
   ValidationError,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 
+/**
+ * Outcome of the `init` overwrite guard (LLP 0031). `proceed` is true
+ * when the write may continue; `backupPath` is set when an existing
+ * local config was copied aside first. When `proceed` is false the
+ * caller surfaces `message` and aborts (either a non-interactive refusal
+ * or an interactive decline).
+ */
+export interface LocalConfigWriteGuard {
+  proceed: boolean
+  backupPath?: string
+  message?: string
+}
+
 export interface LoadConfigSuccess {
   ok: true
   config: HypAwareV2Config
@@ -47,6 +60,40 @@ export type ConfigValidationErrorKind =
   | 'duplicate_plugin'
 
 export type ConfigValidationError = ValidationError & { errorKind: ConfigValidationErrorKind }
+
+// =============================================================================
+// Layered config merge (LLP 0031)
+// =============================================================================
+
+/**
+ * Why a local-layer entry was dropped during the boot-time merge.
+ * `collides_with_central` is the only reason today — a local entry
+ * naming a key the central layer already locks.
+ */
+export type ConfigLayerDropReason = 'collides_with_central'
+
+/** A local-layer entry dropped while merging central ⊕ local at boot. */
+export interface ConfigLayerDrop {
+  /** Section the dropped entry came from. */
+  section: 'plugins' | 'sinks' | 'disambiguate'
+  /** The entry's natural merge key (plugin name / sink instance / capability). */
+  key: string
+  reason: ConfigLayerDropReason
+}
+
+/**
+ * Result of merging the server-owned central (authoritative) layer with
+ * the user-owned local (additive-only) layer. `effective` is what the
+ * kernel boots; `drops` are the local entries that lost a collision with
+ * a locked central key; `centralQueryIgnored` flags a `query` block in
+ * the central document (query is structurally local-only).
+ * @see LLP 0031 #merge-model
+ */
+export interface ConfigMergeResult {
+  effective: HypAwareV2Config
+  drops: ConfigLayerDrop[]
+  centralQueryIgnored: boolean
+}
 
 /**
  * Phase 8 diagnostic kinds — internally inconsistent configurations
@@ -195,10 +242,12 @@ export interface ConfigControl extends ConfigControlFacade {
 }
 
 export interface CreateConfigControlOptions {
-  /** Kernel state root (`<HYP_HOME>/hypaware`). */
+  /**
+   * Kernel state root (`<HYP_HOME>/hypaware`). The central-layer slots,
+   * the active-slot pointer, the join seed, and the apply state all live
+   * under `<stateRoot>/config-control/` (LLP 0031).
+   */
   stateRoot: string
-  /** Operative config path the daemon booted with. */
-  configPath: string
   /** Staged restart hook; the daemon exits with the restart code. */
   requestRestart(reason: string): void
   now?: () => number

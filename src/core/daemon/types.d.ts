@@ -3,7 +3,7 @@ import type {
   CapabilityRegistry,
   QueryRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
-import type { ConfigControlStatus, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
+import type { ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
 import type { ExtendedSourceRegistry } from '../registry/sources.js'
 import type { ExtendedSinkRegistry } from '../registry/sinks.js'
 import type { KernelRuntime } from '../runtime/activation.js'
@@ -67,6 +67,7 @@ export type StatusDiagnosticKind =
   | 'config_invalid'
   | 'config_missing'
   | 'config_unreadable'
+  | 'config_local_unreadable'
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
@@ -131,6 +132,22 @@ export interface HypAwareStatusReport {
   configExists: boolean
   configValid: boolean
   activePlugins: string[]
+  /**
+   * Two-layer provenance (LLP 0031). Null on a host that never joined (a
+   * single local layer — the V1 surface is unchanged). When set, the
+   * gateway is centrally managed: `centralPlugins` / `centralSinks` name
+   * the entries the central layer locks (everything else in
+   * `activePlugins` / `sinks` is local), `drops` lists local entries that
+   * lost a collision and are not applied, and `centralQueryIgnored` flags
+   * a `query` block the central layer tried (and is not allowed) to set.
+   */
+  layered: {
+    hasCentral: true
+    centralPlugins: string[]
+    centralSinks: string[]
+    drops: ConfigLayerDrop[]
+    centralQueryIgnored: boolean
+  } | null
   daemon: ServiceState
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]

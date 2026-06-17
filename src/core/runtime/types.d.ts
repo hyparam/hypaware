@@ -6,6 +6,7 @@ import type {
   PluginName,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
+import type { ConfigLayerDrop } from '../config/types.d.ts'
 import type { LoadedManifest, FailedManifest } from '../manifest.d.ts'
 import type { KernelRuntime } from './activation.d.ts'
 import type { ActivationResult } from './loader.d.ts'
@@ -58,10 +59,19 @@ export interface BootKernelResult {
   activePlugins: ActivePlugin[]
   /** Full per-plugin activation results. */
   activations: ActivationResult[]
-  /** Loaded config (null if missing or unreadable). */
+  /**
+   * Effective config the kernel booted — the merge of the central and
+   * local layers (LLP 0031). Null when neither layer exists.
+   */
   config: HypAwareV2Config | null
-  /** Path that was probed for config. */
+  /** Path probed for the user-owned local layer (`hypaware-config.json`). */
   configPath: string | null
+  /** Path the central layer was resolved from (active slot / seed), or null. */
+  centralConfigPath: string | null
+  /** Local entries dropped at merge (collisions with a locked central key). */
+  configDrops: ConfigLayerDrop[]
+  /** True when the central layer carried a `query` block (ignored — local-only). */
+  centralQueryIgnored: boolean
   mode: string
   runId: string
   /** Bundled plugins available but not activated this boot. */

@@ -134,6 +134,18 @@ export interface RunPickerWalkthroughOptions {
   backfill?: PickerBackfillRunner
   /** When set, run daemon install / attach / skills / restart after writing config. */
   finale?: PickerFinaleActions
+  /**
+   * Overwrite an existing local config (LLP 0031). Non-interactive only
+   * (`--force` / `--from-file`); the interactive wizard prompts instead.
+   */
+  force?: boolean
+  /**
+   * Interactive overwrite confirm, consulted only in interactive mode
+   * (no pre-baked `picks`) when a local config already exists. Tests
+   * inject a stub; the default is a readline yes/no prompt defaulting to
+   * no.
+   */
+  confirmOverwrite?: (targetPath: string) => Promise<boolean>
 }
 
 /**
@@ -239,4 +251,6 @@ export interface InitFlags {
   retentionDays: number
   fromFile?: string
   binPath?: string
+  /** Overwrite an existing local config (backs it up first). */
+  force: boolean
 }

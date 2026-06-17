@@ -7,7 +7,7 @@ import process from 'node:process'
 
 import { installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
-import { readConfigControlStatus } from '../../../src/core/config/apply.js'
+import { centralSeedPath, readConfigControlStatus, resolveCentralLayerPath } from '../../../src/core/config/apply.js'
 import { DAEMON_RESTART_EXIT_CODE, runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
@@ -28,16 +28,24 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * resolves with the restart exit code, exactly as a dev shell or the
  * service manager would.
  *
+ * Under layering (LLP 0031) the seed is the **central** layer, written
+ * to config-control/ — never to the user's `hypaware-config.json`. This
+ * smoke seeds a pre-existing local config to prove `join` leaves it
+ * intact (#111) and that its colliding entry drops at the boot-time
+ * merge.
+ *
  * Asserted signals (Log-Driven Development):
- *  - external: operative config replaced wholesale (token retired),
- *    seed preserved as the rollback slot, otlp source running on the
- *    served config, `If-None-Match` convergence transitions on the
- *    stub server.
- *  - internal: `config.apply` span (status=ok), `config.applied` and
- *    `config.probation_cleared` log rows, `join.run` span.
+ *  - external: central layer replaced wholesale (token retired), seed
+ *    preserved as the rollback slot, local config untouched by join,
+ *    otlp source running on the served config, `If-None-Match`
+ *    convergence transitions on the stub server.
+ *  - internal: `config.apply` span (status=ok), `config.applied`,
+ *    `config.probation_cleared`, and `config.local_entry_dropped` log
+ *    rows, `join.run` span.
  *
  * @param {{ harness: any, expect: any }} args
  * @ref LLP 0025#the-join-sequence [tests] — seed → bootstrap → pull → apply → restart → operational, end to end against a stub server
+ * @ref LLP 0031#physical-layout [tests] — join writes the central seed (not the local layer); boot merges central ⊕ local
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
@@ -49,8 +57,9 @@ export async function run({ harness, expect }) {
 
   process.env.HYP_HOME = harness.hypHome
   delete process.env.HYP_CONFIG
-  const configPath = defaultConfigPath(harness.hypHome)
+  const localConfigPath = defaultConfigPath(harness.hypHome)
   const stateRoot = path.join(harness.hypHome, 'hypaware')
+  const seedPath = centralSeedPath(stateRoot)
 
   // ----- smoke_step: stub_server_up -----
   const server = await startStubCentralServer()
@@ -84,7 +93,14 @@ export async function run({ harness, expect }) {
       query: { cache: { retention: { default_days: 30 } } },
     }, 'rev-1')
 
-    // ----- smoke_step: join (write seed + skip daemon install) -----
+    // A pre-existing local install (LLP 0031 / #111): `join` must not
+    // touch this file. Its `@hypaware/central` entry collides with the
+    // central layer, so it is dropped at the boot-time merge — surfaced
+    // as a structured `config.local_entry_dropped` log asserted below.
+    const localConfig = { version: 2, plugins: [{ name: '@hypaware/central' }] }
+    await fs.writeFile(localConfigPath, JSON.stringify(localConfig, null, 2) + '\n')
+
+    // ----- smoke_step: join (write central seed + skip daemon install) -----
     const joinOut = makeBuf()
     const joinErr = makeBuf()
     const joinCode = await dispatch(
@@ -100,11 +116,16 @@ export async function run({ harness, expect }) {
       joinCode,
       (v) => v === 0
     )
-    const seed = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    const seed = JSON.parse(await fs.readFile(seedPath, 'utf8'))
     expect.that(
-      'join: seed config carries the policy token',
+      'join: the central seed carries the policy token',
       seed.sinks?.central?.config?.identity?.bootstrap_token,
       (v) => v === 'policy-token-smoke'
+    )
+    expect.that(
+      'join: the pre-existing local config is untouched (#111)',
+      JSON.parse(await fs.readFile(localConfigPath, 'utf8')).plugins?.[0]?.name,
+      (v) => v === '@hypaware/central'
     )
 
     // ----- smoke_step: seed_boot (bootstrap → pull → apply → restart) -----
@@ -126,16 +147,19 @@ export async function run({ harness, expect }) {
       (v) => v === DAEMON_RESTART_EXIT_CODE
     )
 
-    // The apply replaced the operative config wholesale and preserved
-    // the seed as the rollback slot.
-    const operative = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    // The apply replaced the central layer wholesale and preserved the
+    // seed as the rollback slot. The central layer now resolves through
+    // the relocated config-control pointer, not the user-owned local file.
+    const operative = JSON.parse(await fs.readFile(
+      /** @type {string} */ (resolveCentralLayerPath({ stateRoot })), 'utf8'
+    ))
     expect.that(
-      'apply: operative config no longer carries the policy token',
+      'apply: central layer no longer carries the policy token',
       operative.sinks?.central?.config?.identity?.bootstrap_token,
       (v) => v === undefined
     )
     expect.that(
-      'apply: operative config names the otel plugin from the served revision',
+      'apply: central layer names the otel plugin from the served revision',
       operative.plugins?.some((/** @type {any} */ p) => p.name === '@hypaware/otel'),
       (v) => v === true
     )
@@ -147,7 +171,7 @@ export async function run({ harness, expect }) {
       slotA.sinks?.central?.config?.identity?.bootstrap_token,
       (v) => v === 'policy-token-smoke'
     )
-    const midStatus = readConfigControlStatus({ stateRoot, configPath })
+    const midStatus = readConfigControlStatus({ stateRoot })
     expect.that(
       'apply: probation marker armed for the served revision',
       midStatus.probation?.etag,
@@ -165,11 +189,11 @@ export async function run({ harness, expect }) {
     try {
       // Probation clears on the first successful poll (304 here).
       await waitFor(
-        () => readConfigControlStatus({ stateRoot, configPath }).probation === null,
+        () => readConfigControlStatus({ stateRoot }).probation === null,
         10_000,
         'probation did not clear within 10s of relaunch'
       )
-      const cleared = readConfigControlStatus({ stateRoot, configPath })
+      const cleared = readConfigControlStatus({ stateRoot })
       expect.that(
         'probation: cleared with the served revision running',
         cleared.runningEtag,
@@ -248,6 +272,13 @@ export async function run({ harness, expect }) {
     'logs: config.applied recorded for rev-1',
     logs.some((/** @type {any} */ l) =>
       l.body === 'config.applied' && l.attributes?.config_etag === 'rev-1'
+    ),
+    (v) => v === true
+  )
+  expect.that(
+    'logs: config.local_entry_dropped recorded for the colliding local central entry (LLP 0031)',
+    logs.some((/** @type {any} */ l) =>
+      l.body === 'config.local_entry_dropped' && l.attributes?.key === '@hypaware/central'
     ),
     (v) => v === true
   )

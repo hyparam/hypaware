@@ -6,7 +6,8 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
-import { readConfigControlStatus } from '../config/apply.js'
+import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
+import { mergeConfigLayers } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -33,7 +34,7 @@ import {
 
 /**
  * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigControlStatus, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
+ * @import { ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
  * @import { ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
@@ -114,13 +115,42 @@ export async function collectHypAwareStatus(opts = {}) {
   const platform = opts.platform ?? process.platform
   const homeDir = opts.homeDir ?? env.HOME ?? process.env.HOME ?? ''
 
-  // ----- config -----
+  // ----- config (LLP 0031: central ⊕ local) -----
+  // The user-facing config path is the local layer; the central layer is
+  // resolved read-only from config-control/ (active slot or join seed) —
+  // reading it never fires a config poll. What's "running" is the merge.
+  // @ref LLP 0031#status-provenance [implements] — restore inspectability: provenance tags + dropped-local section over the merged config
   const configPath = env.HYP_CONFIG
     ? path.resolve(env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
-  const loaded = await loadConfigFile(configPath)
-  const config = loaded.ok ? loaded.config : null
-  const configExists = loaded.ok || (loaded.errorKind !== 'config_missing')
+  const localLoaded = await loadConfigFile(configPath)
+  const localConfig = localLoaded.ok ? localLoaded.config : null
+
+  const centralConfigPath = resolveCentralLayerPath({ stateRoot })
+  const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath) : null
+  const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
+  const hasCentral = centralConfig !== null
+
+  const merged = mergeConfigLayers(centralConfig, localConfig)
+  const config = (centralConfig || localConfig) ? merged.effective : null
+  const centralPluginNames = new Set((centralConfig?.plugins ?? []).map((p) => p.name))
+  const centralSinkNames = new Set(Object.keys(centralConfig?.sinks ?? {}))
+  /** @type {HypAwareStatusReport['layered']} */
+  const layered = hasCentral
+    ? {
+      hasCentral: true,
+      centralPlugins: [...centralPluginNames],
+      centralSinks: [...centralSinkNames],
+      drops: merged.drops,
+      centralQueryIgnored: merged.centralQueryIgnored,
+    }
+    : null
+
+  // A local file that fails to load is only a hard problem when no
+  // central layer is carrying the host; under layering the central layer
+  // always boots, so a broken/absent local layer is a warning, never an
+  // outage. `configExists` tracks whether *anything* is configured.
+  const configExists = config !== null
 
   /** @type {PluginCatalog | undefined} */
   let catalog
@@ -140,11 +170,12 @@ export async function collectHypAwareStatus(opts = {}) {
     catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
   } catch { /* catalog build failure is non-fatal */ }
 
+  // Validate the *effective* (merged) config — that is what runs.
   /** @type {ConfigValidationError[]} */
   let validationErrors = []
-  if (loaded.ok && catalog) {
+  if (config && catalog) {
     try {
-      const result = await validateConfig(loaded.config, {
+      const result = await validateConfig(config, {
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
       })
@@ -157,29 +188,40 @@ export async function collectHypAwareStatus(opts = {}) {
       }]
     }
   }
-  const configValid = loaded.ok && validationErrors.length === 0
+  const configValid = config !== null && validationErrors.length === 0
 
   // ----- diagnostics -----
   /** @type {StatusDiagnostic[]} */
   const diagnostics = []
 
-  if (!loaded.ok) {
-    if (loaded.errorKind === 'config_missing') {
+  if (config === null) {
+    // Nothing configured at all: no central layer and no readable local.
+    if (localLoaded.ok || localLoaded.errorKind === 'config_missing') {
       diagnostics.push({
         severity: 'warning',
         kind: 'config_missing',
-        message: `config file not found at ${configPath}`,
-        repair: ['hyp init', 'hyp init --from-file <config.json>'],
+        message: `no config found — neither a central layer nor ${configPath}`,
+        repair: ['hyp init', 'hyp init --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
       diagnostics.push({
         severity: 'error',
         kind: 'config_unreadable',
-        message: loaded.message,
+        message: localLoaded.message,
         repair: ['hyp init --from-file <config.json>'],
       })
     }
-  } else if (validationErrors.length > 0) {
+  } else {
+    // A broken local file with the central layer still carrying the host
+    // is loud but not an outage — the central layer always boots.
+    if (!localLoaded.ok && localLoaded.errorKind !== 'config_missing') {
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'config_local_unreadable',
+        message: `local config layer is unreadable (${localLoaded.message}) — running on the central layer only`,
+        repair: ['hyp init --from-file <config.json> --force'],
+      })
+    }
     for (const err of validationErrors) {
       diagnostics.push({
         severity: 'error',
@@ -409,7 +451,7 @@ export async function collectHypAwareStatus(opts = {}) {
   /** @type {ConfigControlStatus | null} */
   let remoteConfig = null
   try {
-    remoteConfig = readConfigControlStatus({ stateRoot, configPath })
+    remoteConfig = readConfigControlStatus({ stateRoot })
   } catch { /* best-effort probe */ }
   if (remoteConfig?.lastRollback) {
     diagnostics.push({
@@ -448,6 +490,7 @@ export async function collectHypAwareStatus(opts = {}) {
     configExists,
     configValid,
     activePlugins,
+    layered,
     daemon,
     sources,
     sinks,

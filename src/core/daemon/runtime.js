@@ -14,7 +14,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { loadConfigFile } from '../config/schema.js'
 import { createConfigControl } from '../config/apply.js'
 import { buildConfigApplyDeps } from '../config/apply_deps.js'
-import { bootKernel, resolveConfigPath } from '../runtime/boot.js'
+import { bootKernel } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import {
@@ -150,23 +150,20 @@ export async function runDaemon(opts = {}) {
   writeStatusFile(stateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
-  // ----- Config apply engine (LLP 0025) -----
+  // ----- Config apply engine (LLP 0025 / LLP 0031) -----
   // Created before bootKernel so probation expiry is evaluated before
   // any plugin activates: a kernel-killing-but-valid config that
   // crashloops under the service manager may never live long enough
-  // for an in-process timer to fire.
-  const operativeConfigPath = resolveConfigPath({
-    ...(opts.configPath !== undefined ? { explicit: opts.configPath } : {}),
-    env,
-    hypHome,
-  })
+  // for an in-process timer to fire. The central-layer slots, pointer,
+  // and join seed all live under `<stateRoot>/config-control/` — the
+  // engine derives every path from `stateRoot` and never touches the
+  // user-owned local layer (`hypaware-config.json`).
   // An apply can land while the daemon is still wiring up (the pull
   // loop's immediate pull races the tail of runDaemon), so a restart
   // request before triggerShutdown exists is parked, not dropped.
   let pendingRestart = false
   const configControl = createConfigControl({
     stateRoot,
-    configPath: operativeConfigPath,
     requestRestart: (reason) => {
       fileLog.info('daemon.restart_requested', { hyp_reason: reason })
       if (triggerShutdown) {

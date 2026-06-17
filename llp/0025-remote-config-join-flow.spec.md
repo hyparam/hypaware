@@ -79,22 +79,33 @@ on their own timers when wired in" — this spec wires the config pull:
 
 ## Seed-config mode
 
-The seed is an **ordinary v2 config file** — `~/.hyp/hypaware-config.json`
-containing exactly the central plugin (server URL + policy token), nothing
-else. There is no seed-specific file format and the kernel has no "seed"
-state: seed-config mode is just this particular config booted, consistent
-with [LLP 0010](./0010-config-model.spec.md#no-mode-field) (no mode flag; a
-host is what its config says).
+> **Amended by [LLP 0031](./0031-layered-config.decision.md).** Under layering
+> the seed is the initial **central layer**, written by `join` to a **dedicated
+> central-seed file** under `config-control/` (not `hypaware-config.json`, which
+> is the user-owned local layer). The first successful apply retires the seed
+> *file* — its bytes survive as the rollback slot; the local layer is never
+> touched. This is why `join` is no longer destructive
+> ([#111](https://github.com/hyparam/hypaware/issues/111)).
+
+The seed is an **ordinary v2 config file** containing exactly the central
+plugin (server URL + policy token), nothing else. Under layering it lives at
+`<state>/config-control/seed.json` (mode 0600) and is resolved as the central
+layer until the first pull (pre-layering it sat at the operative config path).
+There is no seed-specific file format and the kernel has no "seed" state:
+seed-config mode is just this particular central layer booted, consistent with
+[LLP 0010](./0010-config-model.spec.md#no-mode-field) (no mode flag; a host is
+what its config says).
 
 Such a config must boot cleanly: no sources, no other sinks, collecting
 nothing, polling for config. This is a legitimate steady state for the
 seconds between enrollment and first 200 — not an error.
 
-The policy token lives in the seed config itself (the config file is mode
-0600). Policy tokens are multi-use (server LLP 0008), so it is not consumed
-on bootstrap; the first successful apply replaces the seed config wholesale,
-which naturally retires the token from disk. From then on `identity.json`
-carries the JWT.
+The policy token lives in the seed file itself (mode 0600). Policy tokens are
+multi-use (server LLP 0008), so it is not consumed on bootstrap; the first
+successful apply persists the served central layer to an A/B slot and
+**retires the seed file**, which removes the token from disk (its bytes
+survive only as the rollback slot). From then on `identity.json` carries the
+JWT.
 
 `hypaware join <url> <token>` is convenience sugar for MDM install scripts:
 it writes the seed config and performs the non-interactive daemon install,
@@ -108,9 +119,17 @@ forms — a bare argv token lands in shell history and process listings.
 
 ## Apply semantics: staged restart
 
-A pulled 200 body is a **full HypAware v2 config and replaces the operative
-config wholesale** — no merging, no client-owned sections. Persist the
-document, then restart. Never live-mutate.
+> **Amended by [LLP 0031](./0031-layered-config.decision.md).** A pulled config
+> replaces the **central layer** wholesale; that layer is one of two — the
+> user-owned local layer (`hypaware-config.json`) is client-owned and additive,
+> and a host's effective config is the boot-time merge of the two. "Wholesale,
+> no merging" below describes the central layer's apply, not the whole config.
+
+A pulled 200 body is a **full HypAware v2 config and replaces the central
+layer wholesale** — the apply engine never merges into it, and the central
+layer carries no client-owned sections. Persist the document to an A/B slot,
+then restart; the boot-time merge with the additive local layer happens on
+relaunch. Never live-mutate.
 
 Staged restart is a **process-level restart**: the daemon persists the new
 config and exits; the service manager relaunches it
@@ -125,10 +144,13 @@ path and flip an atomic pointer (symlink or one-line file) as the last step
 before exit. Same semantics as "file swap," but a crash between persist and
 restart can never leave an ambiguous operative config, and last-known-good
 is crash-safe by construction. As implemented: slot files live under
-`<state>/config-control/`, the operative config path becomes a relative
-symlink to the active slot (replaced atomically via tmp + rename), and each
-slot carries its served etag in a per-slot sidecar written before the flip —
-so the document and its etag commit on the same rename, in both directions.
+`<state>/config-control/`, an active-slot pointer (`config-control/active`) is
+a relative symlink to the active slot (replaced atomically via tmp + rename;
+relocated here off the user-facing config path by
+[LLP 0031](./0031-layered-config.decision.md#physical-layout) so the local
+layer stays a plain file), and each slot carries its served etag in a per-slot
+sidecar written before the flip — so the document and its etag commit on the
+same rename, in both directions.
 
 ### Apply engine is kernel surface
 
@@ -289,6 +311,15 @@ reference and is amended by this spec:
   policy-token amendment (server LLP 0008); both changes fold in together.
 
 ## Server-side guarantees the client relies on
+
+> **Amended by [LLP 0031](./0031-layered-config.decision.md).** The served
+> document is now **the central layer**. The "fleet can't be disconnected"
+> guarantee *strengthens*: because the local layer is additive-only, a user
+> cannot remove or override the central sink even from their own config — a
+> colliding local entry is dropped at the boot-time merge. The server save
+> pipeline should also **forbid / strip a `query` block** in served configs
+> (query is structurally local-only; the client ignores a central `query`
+> regardless — see [LLP 0031 §Query is local-only](./0031-layered-config.decision.md#query-is-local-only)).
 
 - Every gateway enrolled through a policy token resolves to a config —
   join-time 404 is structurally impossible for new enrollments.

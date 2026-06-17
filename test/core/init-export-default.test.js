@@ -23,6 +23,7 @@ function flags(overrides = {}) {
     sources: [],
     exportChoice: undefined,
     retentionDays: 30,
+    force: false,
     ...overrides,
   }
 }

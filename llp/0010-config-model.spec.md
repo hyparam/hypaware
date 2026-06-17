@@ -9,6 +9,15 @@
 
 > The v2 config shape. Decomposed from `hypaware-design.md` (Config Model).
 
+> **Extended by [LLP 0031](./0031-layered-config.decision.md).** On a
+> centrally-managed host the effective config is the **merge of two layers** — a
+> server-owned central layer (authoritative, locked) and a user-owned local
+> layer (`hypaware-config.json`, additive-only) — computed at boot, with
+> per-entry provenance (`[central · locked]` / `[local]`) and a dropped-local
+> section surfaced in `hyp status`. The explicit-`plugins[]` grep-ability
+> rationale below is preserved: each layer file is still plain JSON. Non-joined
+> hosts are a single local layer, exactly as described here.
+
 ## No mode field
 
 Use a breaking **v2** config shape. There is **no `mode` field** and no
