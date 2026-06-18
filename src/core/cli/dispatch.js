@@ -109,7 +109,13 @@ export async function dispatch(argv, opts = {}) {
   if (opts.kernel) {
     kernel = opts.kernel
   } else {
-    const bootProfile = decideBootProfile(argv)
+    // A remote `query sql` (any `--server`) executes entirely on the server,
+    // so it must NOT activate the admin's local recording/export plugins or
+    // materialize sinks. Boot an empty runtime — the intrinsic query kernel
+    // still comes up for formatting.
+    // @ref LLP 0032#empty-runtime-boot [constrained-by] — remote sql boots { activate: [] }, skips materializeSinks
+    const remoteQuery = isRemoteQuerySql(argv)
+    const bootProfile = remoteQuery ? { activate: [] } : decideBootProfile(argv)
     const boot = await bootKernel({
       hypHome: obsEnv.hypHome,
       mode: 'cli',
@@ -124,14 +130,16 @@ export async function dispatch(argv, opts = {}) {
     activePlugins = boot.activePlugins
     if (boot.config) activeConfig = boot.config
 
-    const sinkResult = await materializeSinks(kernel, boot.config, {
-      stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
-      runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
-    })
-    for (const err of sinkResult.errors) {
-      stderr.write(
-        `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
-      )
+    if (!remoteQuery) {
+      const sinkResult = await materializeSinks(kernel, boot.config, {
+        stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
+        runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
+      })
+      for (const err of sinkResult.errors) {
+        stderr.write(
+          `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
+        )
+      }
     }
   }
 
@@ -290,6 +298,21 @@ function decideBootProfile(argv) {
   if (argv[0] === 'init') return 'all-available'
   if (argv[0] === 'daemon' || argv[0] === 'status' || argv[0] === 'smoke' || argv[0] === 'version') return { activate: [] }
   return 'config'
+}
+
+/**
+ * Is this invocation a remote `query sql`? True when it's `query sql` and
+ * carries `--server` (with or without a URL — bare resolves the saved
+ * target). Read here, pre-boot, so the empty-runtime profile is chosen
+ * before any plugin activates. A bare `query sql` is always local, so a
+ * saved target alone does NOT make it remote.
+ *
+ * @ref LLP 0032#empty-runtime-boot [implements] — --server presence drives the boot profile
+ * @param {string[]} argv
+ * @returns {boolean}
+ */
+function isRemoteQuerySql(argv) {
+  return argv[0] === 'query' && argv[1] === 'sql' && argv.includes('--server')
 }
 
 /**

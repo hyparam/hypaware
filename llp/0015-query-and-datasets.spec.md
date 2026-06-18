@@ -5,7 +5,7 @@
 **Systems:** Query
 **Author:** Phil / Claude
 **Date:** 2026-06-01
-**Related:** LLP 0013, LLP 0016
+**Related:** LLP 0013, LLP 0016, LLP 0032
 
 > The intrinsic query surface and the `collect` on-ramp. Decomposed from
 > `hypaware-design.md` (Query and Datasets, Collect Command).
@@ -14,6 +14,12 @@
 
 Query and Iceberg storage are intrinsic services. Plugins register datasets;
 core handles SQL, cache cursors, freshness, and output formatting.
+
+> **Scope (local execution).** This describes querying **local** recordings: the
+> kernel executes SQL over the intrinsic cache on this machine. `hyp query sql`
+> additionally accepts a **remote target** ([LLP 0032](./0032-remote-query-connect.decision.md))
+> where the *server's* kernel runs the SQL and freshness/cache are its concern;
+> `schema`, `status`, and `refresh` remain local-only and unaffected.
 
 ```js
 ctx.query.registerDataset({

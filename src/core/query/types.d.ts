@@ -44,3 +44,34 @@ export interface ExecuteSqlResult {
   datasets: string[]
   freshnessMessages: string[]
 }
+
+/** The machine-local remote query target saved by `hyp query connect`. */
+export interface RemoteTarget {
+  /** Base URL of the central server's admin query endpoint host. */
+  serverUrl: string
+}
+
+export interface RemoteQueryOptions {
+  /** Base URL of the central server (scheme + host + optional port). */
+  serverUrl: string
+  /** Operator admin bearer token (from HYP_ADMIN_TOKEN / --token-file). */
+  token: string
+  /** SQL string to execute on the server. */
+  query: string
+  /** Injectable fetch, for tests. Defaults to the global `fetch`. */
+  fetchFn?: typeof fetch
+  /** External abort signal (e.g. Ctrl-C). Combined with the timeout. */
+  signal?: AbortSignal
+  /** Fail-fast timeout in ms. Defaults to 30s. */
+  timeoutMs?: number
+}
+
+export type PingVerdict = 'connected' | 'unauthorized' | 'unreachable'
+
+export interface PingResult {
+  kind: PingVerdict
+  /** True only for 'connected'. */
+  ok: boolean
+  /** Extra context for the failure (e.g. the connection error message). */
+  detail?: string
+}

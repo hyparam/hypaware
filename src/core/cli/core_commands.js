@@ -20,6 +20,8 @@ import { collectHypAwareStatus } from '../daemon/status.js'
 import { applyContextControls, renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { executeQuerySql } from '../query/sql.js'
+import { executeQuerySqlRemote, pingRemote } from '../query/sql-remote.js'
+import { clearRemoteTarget, readRemoteTarget, writeRemoteTarget } from '../query/remote-target.js'
 import { runBackfill, runBackfillList, runBackfillPlan, runBackfillProvider } from '../commands/backfill.js'
 import {
   installPlugin,
@@ -99,9 +101,21 @@ function buildCoreCommands() {
     },
     {
       name: 'query sql',
-      summary: 'Run a SQL query against registered datasets',
-      usage: 'hyp query sql <sql> [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]',
+      summary: 'Run a SQL query against registered datasets (or a connected server)',
+      usage: 'hyp query sql <sql> [--server <url>] [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]',
       run: runQuerySql,
+    },
+    {
+      name: 'query connect',
+      summary: 'Save a HypAware server URL for `query sql --server` (admin token via HYP_ADMIN_TOKEN)',
+      usage: 'hyp query connect <url> [--token-file <path>] [--no-verify]',
+      run: runQueryConnect,
+    },
+    {
+      name: 'query disconnect',
+      summary: 'Forget the saved query server URL',
+      usage: 'hyp query disconnect',
+      run: runQueryDisconnect,
     },
     {
       name: 'query refresh',
@@ -881,6 +895,20 @@ async function runQuerySql(argv, ctx) {
     ctx.stderr.write(parsed.error + '\n')
     return 2
   }
+
+  // Local is always the default. Only `--server` selects the server: with a
+  // URL it names one; bare it resolves the URL saved by `query connect`.
+  // @ref LLP 0032#command-surface [implements] — --server is the selector; absence is always local
+  if (parsed.serverGiven) {
+    const obsEnv = readObservabilityEnv(ctx.env)
+    const remoteUrl = parsed.server ?? (await readRemoteTarget(obsEnv.stateDir))?.serverUrl
+    if (!remoteUrl) {
+      ctx.stderr.write('hyp query sql: --server given without a URL and no saved server — pass a URL or run `hyp query connect <url>`\n')
+      return 2
+    }
+    return runQuerySqlRemote(parsed, remoteUrl, ctx)
+  }
+
   try {
     const result = await executeQuerySql({
       query: parsed.sql,
@@ -903,6 +931,186 @@ async function runQuerySql(argv, ctx) {
     ctx.stderr.write(`hyp query sql: ${message}\n`)
     return 1
   }
+}
+
+/**
+ * Run `hyp query sql` against a remote server. The SQL executes on the
+ * server's kernel (spanning its cache + Iceberg archive); results render
+ * through the same formatters as a local query.
+ *
+ * @ref LLP 0032#credential [constrained-by] — admin token from HYP_ADMIN_TOKEN only; never persisted
+ * @param {Extract<ReturnType<typeof parseQuerySqlArgv>, { ok: true }>} parsed
+ * @param {string} serverUrl
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runQuerySqlRemote(parsed, serverUrl, ctx) {
+  const token = ctx.env.HYP_ADMIN_TOKEN
+  if (!token || token.length === 0) {
+    ctx.stderr.write('hyp query sql: HYP_ADMIN_TOKEN is not set — export it (e.g. in ~/.zshrc) to query a server\n')
+    return 2
+  }
+  warnPlainHttp('hyp query sql', serverUrl, ctx)
+  if (parsed.refreshGiven) {
+    ctx.stderr.write('hyp query sql: --refresh is a no-op for a remote query (the server spans cache + archive)\n')
+  }
+
+  try {
+    const result = await executeQuerySqlRemote({ serverUrl, token, query: parsed.sql })
+    for (const message of result.freshnessMessages ?? []) {
+      ctx.stderr.write(`${message}\n`)
+    }
+    const out = buildQuerySqlOutput({ columns: result.columns, rows: result.rows }, parsed)
+    if (out.file) await fs.writeFile(out.file.path, out.file.content)
+    if (out.stderr) ctx.stderr.write(out.stderr)
+    ctx.stdout.write(out.stdout)
+    return 0
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp query sql: ${message}\n`)
+    return 1
+  }
+}
+
+/**
+ * `hyp query connect <url>` — save a remote query target for `query sql`.
+ * Persists only the URL (the admin token stays in the environment);
+ * verifies reachability + auth with a ping unless `--no-verify`.
+ *
+ * @ref LLP 0032#connect-verb [implements] — connect/disconnect persist a sql-only target
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runQueryConnect(argv, ctx) {
+  /** @type {string[]} */
+  const positional = []
+  /** @type {string | undefined} */
+  let tokenFile
+  let noVerify = false
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--token-file') {
+      tokenFile = argv[i + 1]
+      if (tokenFile === undefined || tokenFile.startsWith('--')) {
+        ctx.stderr.write('hyp query connect: --token-file expects a path\n')
+        return 2
+      }
+      i += 1
+    } else if (token === '--no-verify') {
+      noVerify = true
+    } else {
+      positional.push(token)
+    }
+  }
+  if (positional.length !== 1) {
+    ctx.stderr.write('usage: hyp query connect <url> [--token-file <path>] [--no-verify]\n')
+    return 2
+  }
+
+  const rawUrl = positional[0]
+  let url
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    ctx.stderr.write(`hyp query connect: not a valid URL: ${rawUrl}\n`)
+    return 2
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    ctx.stderr.write(`hyp query connect: url must be http(s); got ${url.protocol}\n`)
+    return 2
+  }
+  warnPlainHttp('hyp query connect', rawUrl, ctx)
+
+  if (!noVerify) {
+    const resolved = await resolveAdminToken(ctx, tokenFile)
+    if (!resolved.ok) {
+      ctx.stderr.write(`hyp query connect: ${resolved.error}\n`)
+      return 2
+    }
+    const verdict = await pingRemote({ serverUrl: rawUrl, token: resolved.token })
+    if (verdict.kind === 'unreachable') {
+      ctx.stderr.write(`hyp query connect: could not reach ${rawUrl}${verdict.detail ? ` (${verdict.detail})` : ''}\n`)
+      return 1
+    }
+    if (verdict.kind === 'unauthorized') {
+      ctx.stderr.write('hyp query connect: server rejected the admin token (401). Check HYP_ADMIN_TOKEN.\n')
+      return 1
+    }
+  }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  await writeRemoteTarget(obsEnv.stateDir, rawUrl)
+  ctx.stdout.write(`✓ saved ${rawUrl} as the query server${noVerify ? ' (unverified)' : ''}\n`)
+  ctx.stdout.write('  run: hyp query sql "<sql>" --server   (bare --server uses this URL; hyp query disconnect to forget)\n')
+  return 0
+}
+
+/**
+ * `hyp query disconnect` — clear the saved remote target. Idempotent.
+ *
+ * @ref LLP 0032#connect-verb [implements]
+ * @param {string[]} _argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runQueryDisconnect(_argv, ctx) {
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const cleared = await clearRemoteTarget(obsEnv.stateDir)
+  ctx.stdout.write(cleared ? '✓ forgot the saved query server\n' : 'no saved query server\n')
+  return 0
+}
+
+/**
+ * Resolve the operator admin token: explicit `--token-file` wins, else
+ * `HYP_ADMIN_TOKEN`, else stdin when piped. Never read from argv.
+ *
+ * @ref LLP 0032#credential [constrained-by]
+ * @param {CommandRunContext} ctx
+ * @param {string | undefined} tokenFile
+ * @returns {Promise<{ ok: true, token: string } | { ok: false, error: string }>}
+ */
+async function resolveAdminToken(ctx, tokenFile) {
+  if (tokenFile !== undefined) {
+    try {
+      const fromFile = (await fs.readFile(tokenFile, 'utf8')).trim()
+      if (fromFile.length === 0) return { ok: false, error: '--token-file is empty' }
+      return { ok: true, token: fromFile }
+    } catch (err) {
+      return { ok: false, error: `--token-file: ${err instanceof Error ? err.message : String(err)}` }
+    }
+  }
+  const envToken = ctx.env.HYP_ADMIN_TOKEN
+  if (envToken && envToken.length > 0) return { ok: true, token: envToken }
+  if (!isTty(ctx.stdin)) {
+    const fromStdin = (await readAllStdin(ctx.stdin)).trim()
+    if (fromStdin.length > 0) return { ok: true, token: fromStdin }
+  }
+  return { ok: false, error: 'HYP_ADMIN_TOKEN is not set — export it (e.g. in ~/.zshrc) or pass --token-file' }
+}
+
+/**
+ * Warn (don't block) when the admin token would cross a plain-HTTP, non-
+ * loopback connection. Tailscale/VPN http is a legitimate deployment, so
+ * this never blocks; it just makes an unencrypted public send visible.
+ *
+ * @ref LLP 0032#scheme-warning [implements] — warn on http:// to a non-loopback host
+ * @param {string} prefix
+ * @param {string} rawUrl
+ * @param {CommandRunContext} ctx
+ */
+function warnPlainHttp(prefix, rawUrl, ctx) {
+  let url
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return
+  }
+  if (url.protocol !== 'http:') return
+  const host = url.hostname
+  const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
+  if (loopback) return
+  ctx.stderr.write(`${prefix}: warning: sending the admin token over plain HTTP to ${host}. Ensure the network is trusted (Tailscale/VPN/loopback) or use https://.\n`)
 }
 
 /**
@@ -973,13 +1181,19 @@ export const DEFAULT_QUERY_MAX_BYTES = 32_768
  * `--output`, which is always lossless.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, sql: string, refresh: RefreshMode, format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number } | { ok: false, error: string }}
+ * @returns {{ ok: true, sql: string, refresh: RefreshMode, refreshGiven: boolean, serverGiven: boolean, server: string | undefined, format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number } | { ok: false, error: string }}
  */
 export function parseQuerySqlArgv(argv) {
   /** @type {string[]} */
   const positional = []
   /** @type {RefreshMode} */
   let refresh = 'auto'
+  let refreshGiven = false
+  // `--server` selects the server: with a URL it names one, bare (no value)
+  // it uses the URL saved by `query connect`. Absent → always local.
+  let serverGiven = false
+  /** @type {string | undefined} */
+  let server
   /** @type {QueryFormat} */
   let format = 'table'
   /** @type {string | undefined} */
@@ -995,7 +1209,16 @@ export function parseQuerySqlArgv(argv) {
         return { ok: false, error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
       }
       refresh = value
+      refreshGiven = true
       i += 1
+    } else if (token === '--server') {
+      serverGiven = true
+      const value = argv[i + 1]
+      if (value !== undefined && !value.startsWith('--')) {
+        server = value
+        i += 1
+      }
+      // bare `--server` (no value) → resolved from the saved connect target
     } else if (token === '--format') {
       const value = argv[i + 1]
       if (value !== 'table' && value !== 'json' && value !== 'jsonl' && value !== 'markdown') {
@@ -1025,10 +1248,10 @@ export function parseQuerySqlArgv(argv) {
   }
 
   if (positional.length === 0) {
-    return { ok: false, error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]' }
+    return { ok: false, error: 'usage: hyp query sql <sql> [--server <url>] [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]' }
   }
   const sql = positional.join(' ')
-  return { ok: true, sql, refresh, format, output, maxCell, maxBytes }
+  return { ok: true, sql, refresh, refreshGiven, serverGiven, server, format, output, maxCell, maxBytes }
 }
 
 /**

@@ -1,11 +1,11 @@
 ---
 name: hypaware-query
-description: Inspect local HypAware recordings with the hyp query CLI. Use when the user asks about recorded logs, traces, metrics, AI gateway exchanges, query cache freshness, or wants SQL over local HypAware data, including collected JSONL tables.
+description: Inspect HypAware recordings with the hyp query CLI. Use when the user asks about recorded logs, traces, metrics, AI gateway exchanges, query cache freshness, or wants SQL over local HypAware data (or a remote central server via `hyp query sql --server` / `hyp query connect`), including collected JSONL tables.
 ---
 
 # HypAware Query
 
-Use `hyp query` to inspect local HypAware recordings. It reads local JSONL recordings and an explicit local query cache; it does not query the central server.
+Use `hyp query` to inspect HypAware recordings. By default it reads **local** JSONL recordings and an explicit local query cache. A single `hyp query sql` can also run against a **remote** central server with `--server` (see [Querying a remote server](#querying-a-remote-server)); `schema`, `status`, and `refresh` are always local. Default to local unless the user explicitly wants server/remote results.
 
 ## Workflow
 
@@ -31,7 +31,17 @@ hyp collect list
 hyp collect remove <name>
 ```
 
-These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain; `hyp collect`: list, remove). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
+These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain, connect, disconnect; `hyp collect`: list, remove). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
+
+## Querying a remote server
+
+`hyp query sql` can run on a central HypAware server instead of local recordings. Only `sql` is remote-capable — `schema`, `status`, and `refresh` are always local.
+
+- **One-off:** `hyp query sql "<sql>" --server <url>`
+- **Save the URL** so a bare `--server` reuses it: `hyp query connect <url>` (and `hyp query disconnect` to forget). `--server` is the *only* thing that selects the server — a bare `hyp query sql` with no `--server` is **always local**, so connecting never silently reroutes a query.
+- **Auth:** the operator **admin** bearer token in `HYP_ADMIN_TOKEN` (this is the server's `HYPSERVER_ADMIN_TOKEN` value — same secret, different env-var name on each side). `connect` also accepts `--token-file <path>` for its verify ping; `sql` reads only the env var.
+- The query runs on the **server's** kernel and spans its cache + Iceberg archive, so it returns **org-wide** data, not just this host's. Results are server-capped (~10k rows / 32 MB) and a truncation notice prints to stderr.
+- This is an **admin operation against shared data**. Do not run it unless the user explicitly wants remote/server results; default to local. The admin token is fleet-grade — never echo it.
 
 ## SQL dialect notes
 
@@ -47,11 +57,29 @@ Key columns:
 - `session_id`, `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable identity. `session_id` is the always-present session key (group/scope on it); `conversation_id` is a nullable thread within a session (a Codex thread; null for Claude).
 - `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields.
 - `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
-- `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
+- `attributes` (JSON) — request settings, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway` (e.g. `exchange_id`, `request_bytes`). Token usage is **not** here.
+- `raw_frame` (JSON) — the full client message envelope. Token usage is at `raw_frame.message.usage`, the Anthropic response id at `raw_frame.message.id`, the model at `raw_frame.message.model`. See **Token / cost accounting** below.
 
 Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
 
 Run `hyp query schema ai_gateway_messages --format markdown` for the authoritative column reference.
+
+## Token / cost accounting
+
+Usage is in `raw_frame.message.usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`), on `role='assistant'` rows only.
+
+**Dedup by `raw_frame.message.id`** (the Anthropic `msg_…` = one billed response), `max()` per id — never `sum` (streaming emits usage twice per id). Do **not** group by the column `message_id` (per content-block → overcounts ~2.5×) or `exchange_id` (too coarse → undercounts). `model` is null as a column — use `raw_frame.message.model`.
+
+```sql
+SELECT dim, count(*) AS calls, sum(in_t) AS input, sum(out_t) AS output, sum(cr) AS cache_read
+FROM (SELECT CAST(JSON_EXTRACT(raw_frame,'$.message.id') AS VARCHAR) AS rid,
+        max(CAST(JSON_EXTRACT(raw_frame,'$.message.usage.input_tokens') AS BIGINT)) AS in_t,
+        max(CAST(JSON_EXTRACT(raw_frame,'$.message.usage.output_tokens') AS BIGINT)) AS out_t,
+        max(CAST(JSON_EXTRACT(raw_frame,'$.message.usage.cache_read_input_tokens') AS BIGINT)) AS cr,
+        max(session_id) AS dim   -- or date / gateway_id / raw_frame.message.model
+      FROM ai_gateway_messages WHERE role='assistant' AND raw_frame IS NOT NULL
+      GROUP BY rid) GROUP BY dim
+```
 
 ## Guardrails
 

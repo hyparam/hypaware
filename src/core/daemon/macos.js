@@ -226,18 +226,55 @@ export function planLaunchAgentInstall(options) {
   }
 }
 
+const DEFAULT_SLEEP = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 /**
- * Install or refresh a HypAware LaunchAgent. Idempotent: if the agent
- * is already loaded, it is booted out first before the new plist is
- * written and bootstrapped back in.
+ * Poll `launchctl print` until the target is unloaded (non-zero exit) or
+ * the bound elapses. `launchctl bootout` is **asynchronous** — launchd may
+ * still be tearing the service down after the command returns, and
+ * bootstrapping into that half-removed state fails with
+ * `Bootstrap failed: 5: Input/output error`. Waiting for the service to
+ * actually disappear closes that race.
  *
- * @param {PlanLaunchAgentInstallOptions & { launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ * @param {LaunchctlAdapter} launchctl
+ * @param {string} target
+ * @param {(ms: number) => Promise<void>} sleep
+ */
+async function waitUntilUnloaded(launchctl, target, sleep) {
+  for (let i = 0; i < 30; i += 1) { // ~3s ceiling (30 × 100ms)
+    const res = await launchctl.print([target])
+    if (res.exitCode !== 0) return // gone
+    await sleep(100)
+  }
+}
+
+/**
+ * Is a failed bootstrap the transient EIO launchd returns while a prior
+ * instance is still releasing? Those are safe to retry; a genuine config
+ * error is not.
+ *
+ * @param {LaunchctlResult} res
+ * @returns {boolean}
+ */
+function isTransientBootstrap(res) {
+  return res.exitCode === 5 || /\b5:\s*Input\/output|Input\/output error/i.test(res.stderr || '')
+}
+
+/**
+ * Install or refresh a HypAware LaunchAgent. Idempotent: if the agent is
+ * already loaded, it is booted out — and we **wait for launchd to fully
+ * release it** — before the new plist is written and bootstrapped back in.
+ * Bootstrap retries the transient EIO (`error 5`) launchd raises during an
+ * unfinished teardown, so a reinstall over a live agent doesn't fail.
+ *
+ * @param {PlanLaunchAgentInstallOptions & { launchctl?: LaunchctlAdapter, userDomain?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<LaunchAgentInstallPlan>}
  */
 export async function installLaunchAgent(options) {
   const plan = planLaunchAgentInstall(options)
   const launchctl = options.launchctl ?? realLaunchctl
   const userDomain = options.userDomain ?? defaultUserDomain()
+  const sleep = options.sleep ?? DEFAULT_SLEEP
   const target = `${userDomain}/${plan.label}`
 
   fs.mkdirSync(plan.plistDir, { recursive: true })
@@ -246,11 +283,17 @@ export async function installLaunchAgent(options) {
   const printRes = await launchctl.print([target])
   if (printRes.exitCode === 0) {
     await launchctl.bootout([target]).catch(function() { /* best-effort */ })
+    await waitUntilUnloaded(launchctl, target, sleep) // close the bootout→bootstrap race
   }
 
   atomicWrite(plan.targetPath, plan.content)
 
-  const bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
+  let bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
+  for (let attempt = 0; attempt < 3 && bootstrapRes.exitCode !== 0 && isTransientBootstrap(bootstrapRes); attempt += 1) {
+    await waitUntilUnloaded(launchctl, target, sleep)
+    await sleep(150)
+    bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
+  }
   if (bootstrapRes.exitCode !== 0) {
     throw new LaunchAgentError(
       `failed to bootstrap LaunchAgent ${plan.label}: ${bootstrapRes.stderr.trim() || `exit ${bootstrapRes.exitCode}`}`,
