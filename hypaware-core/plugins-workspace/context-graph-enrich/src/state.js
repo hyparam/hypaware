@@ -106,3 +106,28 @@ export function writeState(stateDir, state) {
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
   fs.renameSync(tmp, file)
 }
+
+/**
+ * Read-modify-write the sidecar without an `await` between the read and the
+ * write, so it is atomic with respect to the single-threaded event loop. This is
+ * what lets the two independent daemon sources share one sidecar safely: the
+ * `enrich-propose` and `enrich-curate` ticks run on separate timers and each
+ * owns a disjoint field (propose advances `session_marks`, curate owns
+ * `curate_job`). Both have long `await` windows (frontier-model calls, batch
+ * submit/poll); a writer that captured a snapshot *before* its await and wrote it
+ * *after* would clobber the field the other source advanced in between — a lost
+ * update that orphans a submitted batch (results never collected) and lets the
+ * next tick double-submit. Every mutation of the sidecar therefore goes through
+ * here, merging into the latest on-disk state.
+ *
+ * @ref LLP 0028#two-regimes [constrained-by]
+ *
+ * @param {string} stateDir
+ * @param {(current: EnrichStateFile) => EnrichStateFile} mutate
+ * @returns {EnrichStateFile}
+ */
+export function updateState(stateDir, mutate) {
+  const next = mutate(readState(stateDir))
+  writeState(stateDir, next)
+  return next
+}

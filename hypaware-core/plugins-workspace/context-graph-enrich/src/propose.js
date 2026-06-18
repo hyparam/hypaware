@@ -6,7 +6,7 @@ import { columnsFor, enrichTablePath, PROSPECTS_DATASET, prospectId } from './da
 import { buildProposeRequest, parseProspects } from './prompts.js'
 import { getCompletion, requireEnrichRuntime } from './runtime.js'
 import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
-import { readState, writeState } from './state.js'
+import { readState, updateState } from './state.js'
 
 /**
  * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.d.ts'
@@ -66,9 +66,10 @@ export async function runProposeTick(runtime, opts = {}) {
         const ordered = orderSessionParts(partRows, cfg)
         if (ordered.length === 0) continue
         const mark = sessionMark(ordered, cfg)
-        // Precise per-session re-qualification: skip a session already enriched
-        // through its current latest part (the aggregate selector compares only
-        // the coarse timestamp). Backfill re-extracts unconditionally — its
+        // Re-qualify against this read's own parts: the selector already compared
+        // the exact tuple, but its aggregate and this parts query are separate
+        // reads — a part landing between them could make a just-selected session
+        // already-covered (TOCTOU). Backfill re-extracts unconditionally — its
         // appends are idempotent ({@link filterNewProspects}).
         if (regime === 'ongoing') {
           const prev = marks[sid]
@@ -102,8 +103,16 @@ export async function runProposeTick(runtime, opts = {}) {
       // marking first then crashing would lose a session's prospects forever.
       const advanced = Object.keys(newMarks)
       if (advanced.length > 0) {
-        // Preserve any in-flight curate job; propose only advances the marks.
-        writeState(runtime.stateDir, { schema_version: 4, session_marks: { ...marks, ...newMarks }, curate_job: state.curate_job })
+        // Read-modify-write the latest state, never the start-of-tick snapshot:
+        // a curate tick may have submitted a job during this tick's await window,
+        // so merge marks into the on-disk state and preserve its curate_job
+        // rather than clobbering it back to null (lost update → orphaned batch +
+        // double spend). @ref LLP 0028#two-regimes
+        updateState(runtime.stateDir, (cur) => ({
+          schema_version: 4,
+          session_marks: { ...cur.session_marks, ...newMarks },
+          curate_job: cur.curate_job,
+        }))
       }
 
       span.setAttribute('candidate_sessions', sessionIds.length)
@@ -117,19 +126,24 @@ export async function runProposeTick(runtime, opts = {}) {
 }
 
 /**
- * Select the sessions a tick should extract. One cheap aggregate query
- * ({@link buildSessionAggregateQuery}) returns the latest-part timestamp per
- * session — bounded by the session count, not the part count — and the regime
- * filters it in JS:
+ * Select the sessions a tick should extract. One aggregate query
+ * ({@link buildSessionAggregateQuery}) returns the **precise latest part tuple**
+ * `(last_ts, last_id)` per session — one row per session — and the regime filters
+ * it in JS:
  *
  * - `backfill` — every session with extractable content.
  * - `ongoing` — only **settled** sessions (latest part older than
- *   `settle_cutoff_minutes`) whose latest part is past the stored watermark,
- *   oldest-settled first and capped at `max_sessions_per_tick`.
+ *   `settle_cutoff_minutes`) whose latest part is strictly past the stored
+ *   watermark, oldest-settled first and capped at `max_sessions_per_tick`.
  *
- * The coarse `lastTs <= mark.ts` exclusion is exact in practice (a new part
- * never shares a wall-clock millisecond with a long-since-enriched one); the
- * precise tuple re-check lives in {@link runProposeTick}.
+ * The exclusion compares the **full `(ts, tiebreak)` tuple** against the mark
+ * ({@link cmpMark}), not the timestamp alone: parts of one message share a
+ * wall-clock millisecond, so a same-`ts` part that advanced the session past its
+ * mark (higher tiebreak) must re-qualify — a timestamp-only check would silently
+ * drop its text. The tuple match is also why an already-enriched session
+ * (`cmpMark == 0`) is excluded rather than re-selected every tick (no
+ * cap-flooding). {@link runProposeTick} keeps a precise re-check as a TOCTOU
+ * guard against rows landing between the two queries.
  *
  * @ref LLP 0028#two-regimes [implements]
  *
@@ -152,7 +166,9 @@ export async function selectSessions(runtime, { regime, nowMs, marks }) {
     if (regime === 'ongoing') {
       if (lastTs >= settleBeforeMs) continue // not settled yet
       const prev = marks[sid]
-      if (prev && lastTs <= prev.ts) continue // already enriched through (coarse)
+      // Exact tuple compare: a same-ts part with a higher tiebreak still counts
+      // as new, and an enriched-through session (cmpMark == 0) is dropped.
+      if (prev && cmpMark({ ts: lastTs, id: strField(r.last_id) }, prev) <= 0) continue
     }
     eligible.push({ sid, lastTs })
   }
@@ -164,22 +180,33 @@ export async function selectSessions(runtime, { regime, nowMs, marks }) {
 }
 
 /**
- * The cheap per-session selector query: one row per session carrying its
- * latest-part timestamp. The shared {@link contentFilterClauses} are applied so
- * a session that is *only* plumbing (all `tool_result` / empty-text parts) never
- * appears, and `last_ts` reflects the latest part the proposer would actually
- * read. `last_ts` is the MAX over a TIMESTAMP column — the engine compares
- * Date-to-Date here (not against a literal), so no numeric-epoch workaround is
- * needed.
+ * The per-session selector query: one row per session carrying the **precise
+ * latest part tuple** `(last_ts, last_id)` — the timestamp *and* tiebreak of the
+ * session's latest kept part, so the selector can compare the full mark, not the
+ * timestamp alone ({@link selectSessions}). A plain `MAX(ts)` aggregate can't do
+ * this: the tiebreak that wins at the max timestamp is not the global `MAX`
+ * tiebreak, so we rank parts with `ROW_NUMBER() OVER (… ORDER BY ts DESC,
+ * tiebreak DESC)` and keep `rn = 1`. The shared {@link contentFilterClauses} are
+ * applied in the inner scan so a session that is *only* plumbing never appears
+ * and the tuple reflects the latest part the proposer would actually read —
+ * matching {@link sessionMark}, which is computed over the same filtered parts.
  *
  * @param {EnrichConfig} cfg
  * @returns {string}
  */
 export function buildSessionAggregateQuery(cfg) {
   const anchor = cfg.anchor_key_column
+  const ts = cfg.timestamp_column
+  const tb = cfg.tiebreak_column
   const clauses = contentFilterClauses(cfg)
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')} ` : ''
-  return `SELECT ${anchor}, MAX(${cfg.timestamp_column}) AS last_ts FROM ${cfg.source_dataset} ${where}GROUP BY ${anchor}`
+  const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''
+  return (
+    `SELECT ${anchor}, last_ts, last_id FROM (` +
+    `SELECT ${anchor}, ${ts} AS last_ts, ${tb} AS last_id, ` +
+    `ROW_NUMBER() OVER (PARTITION BY ${anchor} ORDER BY ${ts} DESC, ${tb} DESC) AS rn ` +
+    `FROM ${cfg.source_dataset}${where}` +
+    `) WHERE rn = 1`
+  )
 }
 
 /**

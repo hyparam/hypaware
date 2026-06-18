@@ -44,18 +44,26 @@ function srow({ ts, part, sid, msg = 'm', text = 'hello' }) {
 
 // --- buildSessionAggregateQuery (the cheap session selector) -----------------
 
-test('buildSessionAggregateQuery groups by session and takes MAX(ts), applying the content filter', () => {
+test('buildSessionAggregateQuery ranks the precise latest (ts, tiebreak) per session, applying the content filter', () => {
   const sql = buildSessionAggregateQuery(cfg())
-  assert.match(sql, /SELECT session_id, MAX\(message_created_at\) AS last_ts FROM ai_gateway_messages/)
+  // Outer query keeps the rn=1 row per session, carrying both tuple components.
+  assert.match(sql, /SELECT session_id, last_ts, last_id FROM \(/)
+  assert.match(sql, /message_created_at AS last_ts/)
+  assert.match(sql, /part_id AS last_id/)
+  // ROW_NUMBER over (ts DESC, tiebreak DESC) — a plain MAX(ts) can't pick the
+  // winning tiebreak among same-ts parts.
+  assert.match(sql, /ROW_NUMBER\(\) OVER \(PARTITION BY session_id ORDER BY message_created_at DESC, part_id DESC\) AS rn/)
+  assert.match(sql, /FROM ai_gateway_messages WHERE/)
   assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
   assert.match(sql, /part_type NOT IN \('tool_result'\)/)
-  assert.match(sql, /GROUP BY session_id$/)
+  assert.match(sql, /\) WHERE rn = 1$/)
 })
 
-test('buildSessionAggregateQuery omits WHERE when both filters are off', () => {
+test('buildSessionAggregateQuery omits the inner content filter when both filters are off', () => {
   const sql = buildSessionAggregateQuery(cfg({ require_text: false, exclude_part_types: [] }))
-  assert.doesNotMatch(sql, /WHERE/)
-  assert.match(sql, /GROUP BY session_id$/)
+  assert.doesNotMatch(sql, /content_text IS NOT NULL/)
+  assert.doesNotMatch(sql, /part_type NOT IN/)
+  assert.match(sql, /FROM ai_gateway_messages\) WHERE rn = 1$/)
 })
 
 // --- buildSessionPartsQuery (the full-session read) --------------------------
@@ -121,9 +129,10 @@ test('sessionMark returns the latest ordered part tuple', () => {
 
 /**
  * A runtime whose `execSql` returns a fixed aggregate result (one row per
- * session: { session_id, last_ts }) — the shape buildSessionAggregateQuery
- * yields. Lets us drive selectSessions without a SQL engine.
- * @param {{ cfg: EnrichConfig, aggregate: Array<{ session_id: string, last_ts: number }> }} args
+ * session: { session_id, last_ts, last_id }) — the shape
+ * buildSessionAggregateQuery yields (the precise latest part tuple). Lets us
+ * drive selectSessions without a SQL engine.
+ * @param {{ cfg: EnrichConfig, aggregate: Array<{ session_id: string, last_ts: number, last_id?: string }> }} args
  */
 function selectorRuntime({ cfg, aggregate }) {
   return /** @type {any} */ ({
@@ -137,24 +146,46 @@ const HOUR = 60 * 60_000
 
 test('selectSessions ongoing keeps only settled, past-watermark sessions, oldest first, capped', () => {
   const aggregate = [
-    { session_id: 'fresh', last_ts: NOW - 5 * 60_000 },   // 5m old — not settled
-    { session_id: 'old1', last_ts: NOW - 3 * HOUR },      // settled
-    { session_id: 'old2', last_ts: NOW - 2 * HOUR },      // settled
-    { session_id: 'done', last_ts: NOW - 4 * HOUR },      // settled but already enriched-through
+    { session_id: 'fresh', last_ts: NOW - 5 * 60_000, last_id: 'p1' }, // 5m old — not settled
+    { session_id: 'old1', last_ts: NOW - 3 * HOUR, last_id: 'p1' },    // settled
+    { session_id: 'old2', last_ts: NOW - 2 * HOUR, last_id: 'p1' },    // settled
+    { session_id: 'done', last_ts: NOW - 4 * HOUR, last_id: 'p1' },    // settled but already enriched-through
   ]
   const runtime = selectorRuntime({ cfg: cfg({ propose: { max_sessions_per_tick: 2 } }), aggregate })
-  const marks = { done: { ts: NOW - 4 * HOUR, id: 'z' } } // last_ts <= mark.ts → excluded
+  const marks = { done: { ts: NOW - 4 * HOUR, id: 'p1' } } // exact tuple match → excluded
   const ids = /** @type {Promise<string[]>} */ (selectSessions(runtime, { regime: 'ongoing', nowMs: NOW, marks }))
   return ids.then((res) => {
     assert.deepEqual(res, ['old1', 'old2'], 'fresh not settled; done already covered; oldest-settled first; capped at 2')
   })
 })
 
+test('selectSessions ongoing reselects a same-timestamp session whose latest part advanced past the mark (tiebreak)', async () => {
+  // Mark {ts, id:'p1'}; the session's latest part is now {ts, id:'p2'} — same
+  // wall-clock millisecond, higher tiebreak (parts of one message share a ts).
+  // The exact (ts, id) compare must reselect it; a timestamp-only check would
+  // silently drop the new part's text — the defect Codex #1 flagged.
+  const settledTs = NOW - 3 * HOUR
+  const aggregate = [{ session_id: 'S', last_ts: settledTs, last_id: 'p2' }]
+  const runtime = selectorRuntime({ cfg: cfg(), aggregate })
+  const ids = await selectSessions(runtime, { regime: 'ongoing', nowMs: NOW, marks: { S: { ts: settledTs, id: 'p1' } } })
+  assert.deepEqual(ids, ['S'], 'same-ts, higher-tiebreak part past the mark re-qualifies the session')
+})
+
+test('selectSessions ongoing drops a session already enriched through its exact latest (ts, tiebreak)', async () => {
+  // The mirror of the above: an exact-tuple match is already covered, so it must
+  // NOT be reselected (else every enriched session floods the per-tick cap).
+  const settledTs = NOW - 3 * HOUR
+  const aggregate = [{ session_id: 'S', last_ts: settledTs, last_id: 'p2' }]
+  const runtime = selectorRuntime({ cfg: cfg(), aggregate })
+  const ids = await selectSessions(runtime, { regime: 'ongoing', nowMs: NOW, marks: { S: { ts: settledTs, id: 'p2' } } })
+  assert.deepEqual(ids, [], 'exact-tuple match → already covered, not reselected')
+})
+
 test('selectSessions backfill returns every session, ignoring settle + watermark + cap', async () => {
   const aggregate = [
-    { session_id: 'fresh', last_ts: NOW - 1 * 60_000 },
-    { session_id: 'old', last_ts: NOW - 5 * HOUR },
-    { session_id: 'done', last_ts: NOW - 4 * HOUR },
+    { session_id: 'fresh', last_ts: NOW - 1 * 60_000, last_id: 'p1' },
+    { session_id: 'old', last_ts: NOW - 5 * HOUR, last_id: 'p1' },
+    { session_id: 'done', last_ts: NOW - 4 * HOUR, last_id: 'p1' },
   ]
   const runtime = selectorRuntime({ cfg: cfg({ propose: { max_sessions_per_tick: 1 } }), aggregate })
   const ids = await selectSessions(runtime, { regime: 'backfill', nowMs: NOW, marks: { done: { ts: NOW, id: 'z' } } })
@@ -224,9 +255,12 @@ function fakeQuery(query, tables) {
  * `appendRows` mutates `tables`, so the cross-tick idempotency filter sees prior
  * writes.
  *
- * @param {{ cfg: EnrichConfig, stateDir: string, source: Record<string, unknown>[], prospects?: Record<string, unknown>[], candidates: Array<Record<string, unknown>> }} args
+ * `onComplete` (optional) runs inside `complete()` — i.e. during the tick's
+ * await window — to simulate a concurrent source mutating the sidecar mid-tick.
+ *
+ * @param {{ cfg: EnrichConfig, stateDir: string, source: Record<string, unknown>[], prospects?: Record<string, unknown>[], candidates: Array<Record<string, unknown>>, onComplete?: () => void | Promise<void> }} args
  */
-function proposeRuntime({ cfg, stateDir, source, prospects = [], candidates }) {
+function proposeRuntime({ cfg, stateDir, source, prospects = [], candidates, onComplete }) {
   /** @type {Record<string, Record<string, unknown>[]>} */
   const tables = {
     [cfg.source_dataset]: source,
@@ -237,6 +271,7 @@ function proposeRuntime({ cfg, stateDir, source, prospects = [], candidates }) {
     provider: 'anthropic',
     async complete() {
       calls++
+      if (onComplete) await onComplete()
       return {
         stopReason: 'end_turn',
         message: { role: 'assistant', content: [{ type: 'tool_use', name: 'emit_prospects', input: { prospects: candidates } }] },
@@ -304,6 +339,31 @@ test('runProposeTick is idempotent across ticks — re-extracting the same sessi
     const second = await runProposeTick(runtime, { regime: 'backfill', sessionIds: ['A'] })
     assert.equal(second.prospects, 0, 're-derived id already persisted → nothing appended')
     assert.equal(tables.enrichment_prospects.length, 1, 'no duplicate prospect row')
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('runProposeTick preserves a curate_job submitted concurrently during its await window (no lost update)', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const source = [srow({ ts: 1000, part: 'p1', sid: 'A', msg: 'm1', text: 'use redis' })]
+    const candidates = [{ type: 'Decision', label: 'Use Redis', confidence: 0.9 }]
+    // Simulate a curate tick that submits a batch job AFTER propose's start-of-tick
+    // read but BEFORE its final write. The old code wrote back its stale snapshot
+    // (curate_job: null), orphaning the batch; the read-modify-write must keep it.
+    const onComplete = () => {
+      const cur = readState(stateDir)
+      writeState(stateDir, { ...cur, curate_job: { id: 'batch_x', submitted_at: 't', clusters: [] } })
+    }
+    const { runtime } = proposeRuntime({ cfg: cfg(), stateDir, source, candidates, onComplete })
+
+    const r = await runProposeTick(runtime, { regime: 'backfill', sessionIds: ['A'] })
+
+    assert.equal(r.prospects, 1)
+    const state = readState(stateDir)
+    assert.equal(state.curate_job?.id, 'batch_x', 'concurrently-submitted curate job preserved, not clobbered to null')
+    assert.deepEqual(state.session_marks.A, { ts: 1000, id: 'p1' }, "this tick's mark still advanced")
   } finally {
     fs.rmSync(stateDir, { recursive: true, force: true })
   }

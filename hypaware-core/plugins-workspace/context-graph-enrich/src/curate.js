@@ -9,7 +9,7 @@ import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 
 /**
  * @import { CurateDecision, EnrichRuntime } from './types.d.ts'
- * @import { CompletionResult, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompletionRequest, CompletionResult, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const CURATOR = 'enrich.t2'
@@ -127,7 +127,7 @@ export async function buildCurateClusters(runtime, pending, opts = {}) {
  * @param {EnrichRuntime} runtime
  * @param {Record<string, unknown>[]} cluster
  * @param {Map<string, VectorSearchHit[]>} recallByProspect
- * @returns {Promise<import('../../../../collectivus-plugin-kernel-types.d.ts').CompletionRequest>}
+ * @returns {Promise<CompletionRequest>}
  */
 export async function curateRequestForCluster(runtime, cluster, recallByProspect) {
   const cfg = runtime.config
@@ -154,7 +154,7 @@ export async function curateRequestForCluster(runtime, cluster, recallByProspect
  * @param {Record<string, unknown>[]} cluster
  * @param {CompletionResult | null} result
  * @param {string} at
- * @returns {{ committedRows: Record<string, unknown>[], resolutionRows: Record<string, unknown>[], rejected: number, merged: number, processed: number, noDecisions: boolean }}
+ * @returns {{ committedRows: Record<string, unknown>[], resolutionRows: Record<string, unknown>[], rejected: number, merged: number, processed: number, pending: number, noDecisions: boolean }}
  */
 export function routeClusterDecisions(cluster, result, at) {
   const decisions = result ? parseDecisions(result) : []
@@ -163,21 +163,29 @@ export function routeClusterDecisions(cluster, result, at) {
   /** @type {Record<string, unknown>[]} */
   const resolutionRows = []
   if (decisions.length === 0) {
-    return { committedRows, resolutionRows, rejected: 0, merged: 0, processed: 0, noDecisions: true }
+    return { committedRows, resolutionRows, rejected: 0, merged: 0, processed: 0, pending: 0, noDecisions: true }
   }
   const byIndex = new Map(decisions.map((d) => [d.index, d]))
   let rejected = 0
   let merged = 0
   let processed = 0
+  let pending = 0
   for (let i = 0; i < cluster.length; i++) {
-    processed++
     const routed = routeDecision(cluster[i], viewOf(cluster[i]), byIndex.get(i + 1), at)
+    // An under-specified merge ({@link routeDecision}) yields no resolution: it
+    // is left in the pending queue for a better-specified later pass rather than
+    // committed to the wrong node, so it is not counted as processed.
+    if (!routed.resolution) {
+      pending++
+      continue
+    }
+    processed++
     if (routed.rejected) rejected++
     if (routed.merged) merged++
     if (routed.committed) committedRows.push(routed.committed)
     resolutionRows.push(routed.resolution)
   }
-  return { committedRows, resolutionRows, rejected, merged, processed, noDecisions: false }
+  return { committedRows, resolutionRows, rejected, merged, processed, pending, noDecisions: false }
 }
 
 /**
@@ -524,8 +532,8 @@ async function safeDeref(runtime, ids) {
 }
 
 /**
- * Route one curator decision into the rows it produces: always a resolution row
- * (so the prospect leaves the pending queue), plus a committed row for
+ * Route one curator decision into the rows it produces: normally a resolution
+ * row (so the prospect leaves the pending queue), plus a committed row for
  * `commit`/`deepen`/**`merge`**. The merge case is what realizes
  * **provenance-per-contributing-session**: a merge contributes no *new* node,
  * but it writes a committed row carrying the merging session's anchor +
@@ -534,7 +542,14 @@ async function safeDeref(runtime, ids) {
  * session's `produced` edge ([§committed-only-projection](LLP 0028)). A `reject`
  * — or a prospect the curator omitted (implicit reject) — commits nothing, so a
  * rejected prospect never reaches `enrichment_committed`, hence never the graph.
- * Pure: no I/O.
+ *
+ * A merge converges only under the *target's* canonical `(item_type, item_id)`,
+ * so it needs BOTH `merge_into` (the key) and `item_type` (the type). If either
+ * is missing, falling back to the prospect's own type/key would derive a
+ * *different* content-addressed id and attach the `produced` edge to the wrong
+ * node — silent provenance corruption. An under-specified merge is therefore
+ * returned **pending** (`resolution: null`, no commit): it stays in the queue for
+ * a later, better-specified pass rather than mis-routing. Pure: no I/O.
  *
  * @ref LLP 0028#committed-only-projection [implements]
  *
@@ -542,7 +557,7 @@ async function safeDeref(runtime, ids) {
  * @param {{ type: string, label: string, summary: string, confidence: number | undefined }} view
  * @param {CurateDecision | undefined} decision
  * @param {string} at
- * @returns {{ committed: Record<string, unknown> | null, resolution: Record<string, unknown>, rejected: boolean, merged: boolean }}
+ * @returns {{ committed: Record<string, unknown> | null, resolution: Record<string, unknown> | null, rejected: boolean, merged: boolean }}
  */
 export function routeDecision(prospect, view, decision, at) {
   const pid = strField(prospect.prospect_id)
@@ -555,10 +570,15 @@ export function routeDecision(prospect, view, decision, at) {
   }
 
   const isMerge = decision.decision === 'merge'
+  // A merge without its target key + type cannot be routed to the right
+  // content-addressed node — leave it pending rather than corrupt provenance.
+  if (isMerge && (!decision.merge_into || !decision.item_type)) {
+    return { committed: null, rejected: false, merged: false, resolution: null }
+  }
   // merge: reuse the existing canonical (type, key) so the content-addressed
   // node id collapses across sessions; commit/deepen mint from the curator's
   // fields, falling back to the prospect view.
-  const itemKey = (isMerge ? decision.merge_into || decision.item_key : decision.item_key) || view.label
+  const itemKey = (isMerge ? decision.merge_into : decision.item_key) || view.label
   const itemType = decision.item_type || view.type
   // For merge, props come only from what the curator supplies (it saw the
   // target); null leaves the node's first-sighting props untouched.

@@ -46,15 +46,15 @@ test('routeDecision commit writes a committed row + a resolution, never rejected
   assert.equal(r.committed?.confidence, 0.9) // decision confidence wins over the view's
   assert.equal(r.committed?.anchor_key, 'conv-1')
   assert.deepEqual(r.committed?.source_keys, { message_id: ['m1'] })
-  assert.equal(r.resolution.decision, 'commit')
-  assert.deepEqual(r.resolution.committed_ids, ['Use Redis'])
-  assert.equal(r.resolution.note, 'good')
+  assert.equal(r.resolution?.decision, 'commit')
+  assert.deepEqual(r.resolution?.committed_ids, ['Use Redis'])
+  assert.equal(r.resolution?.note, 'good')
 })
 
 test('routeDecision commit reuses an explicit item_key (convergence) over the label', () => {
   const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'commit', item_key: 'redis-decision', item_type: 'Decision' }, AT)
   assert.equal(r.committed?.item_id, 'redis-decision')
-  assert.deepEqual(r.resolution.committed_ids, ['redis-decision'])
+  assert.deepEqual(r.resolution?.committed_ids, ['redis-decision'])
 })
 
 test('routeDecision deepen also commits an item', () => {
@@ -62,24 +62,24 @@ test('routeDecision deepen also commits an item', () => {
   assert.equal(r.rejected, false)
   assert.ok(r.committed)
   assert.deepEqual(r.committed?.props, { summary: 'better summary' })
-  assert.equal(r.resolution.decision, 'deepen')
+  assert.equal(r.resolution?.decision, 'deepen')
 })
 
 test('routeDecision reject commits nothing — a rejected prospect never reaches the graph', () => {
   const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'reject', note: 'noise' }, AT)
   assert.equal(r.rejected, true)
   assert.equal(r.committed, null)
-  assert.equal(r.resolution.decision, 'reject')
-  assert.equal(r.resolution.committed_ids, null)
-  assert.equal(r.resolution.note, 'noise')
+  assert.equal(r.resolution?.decision, 'reject')
+  assert.equal(r.resolution?.committed_ids, null)
+  assert.equal(r.resolution?.note, 'noise')
 })
 
 test('routeDecision treats an omitted decision as an implicit reject', () => {
   const r = routeDecision(prospect(), VIEW, undefined, AT)
   assert.equal(r.rejected, true)
   assert.equal(r.committed, null)
-  assert.equal(r.resolution.decision, 'reject')
-  assert.equal(r.resolution.note, 'omitted by curator')
+  assert.equal(r.resolution?.decision, 'reject')
+  assert.equal(r.resolution?.note, 'omitted by curator')
 })
 
 test('routeDecision merge writes a committed row under the canonical key with the merging session anchor', () => {
@@ -93,8 +93,25 @@ test('routeDecision merge writes a committed row under the canonical key with th
   assert.equal(r.committed?.item_id, 'redis-decision')
   assert.equal(r.committed?.item_type, 'Decision')
   assert.equal(r.committed?.anchor_key, 'conv-B', 'the merging session, not the canonical')
-  assert.equal(r.resolution.decision, 'merge')
-  assert.deepEqual(r.resolution.committed_ids, ['redis-decision'])
+  assert.equal(r.resolution?.decision, 'merge')
+  assert.deepEqual(r.resolution?.committed_ids, ['redis-decision'])
+})
+
+test('routeDecision leaves an under-specified merge pending (no commit, no resolution) — avoids mis-routing the produced edge', () => {
+  // merge_into present but item_type missing: the canonical node type is unknown,
+  // so committing would derive the content-addressed id from the PROSPECT's own
+  // type and attach the produced edge to the wrong node. Leave it pending.
+  const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'merge', merge_into: 'redis-decision' }, AT)
+  assert.equal(r.committed, null)
+  assert.equal(r.resolution, null, 'no resolution → stays in the pending queue for a later pass')
+  assert.equal(r.merged, false)
+  assert.equal(r.rejected, false)
+})
+
+test('routeDecision leaves a merge missing merge_into pending too', () => {
+  const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'merge', item_type: 'Decision' }, AT)
+  assert.equal(r.committed, null)
+  assert.equal(r.resolution, null)
 })
 
 // --- pure clustering helpers -------------------------------------------------
@@ -268,6 +285,32 @@ test('runCurateTick merges cross-session duplicates — each contributing sessio
   assert.equal(tables.enrichment_committed.length, 2)
   assert.deepEqual(tables.enrichment_committed.map((c) => c.item_id).sort(), ['redis-key', 'redis-key'])
   assert.deepEqual(tables.enrichment_committed.map((c) => c.anchor_key).sort(), ['A', 'B'], 'one committed row per contributing session')
+})
+
+test('runCurateTick leaves an under-specified merge prospect pending while committing its clustermate', async () => {
+  // Two sessions in one cluster: the curator commits p1 but returns a merge for
+  // p2 with no item_type. The merge can't be routed to the right node, so p2 is
+  // left pending (no resolution) for a later pass while p1 still commits.
+  const prospects = [
+    prospectRow({ prospect_id: 'p1', label: 'Use Redis', anchor_key: 'A', source_keys: { message_id: ['mA'] } }),
+    prospectRow({ prospect_id: 'p2', label: 'Use Redis', anchor_key: 'B', source_keys: { message_id: ['mB'] } }),
+  ]
+  const decisions = [
+    { index: 1, decision: 'commit', item_key: 'redis-key', item_type: 'Decision' },
+    { index: 2, decision: 'merge', merge_into: 'redis-key' }, // missing item_type → pending
+  ]
+  const { runtime, tables } = curateRuntime({ cfg: cfg(), prospects, decisions })
+
+  const r = await runCurateTick(runtime)
+
+  assert.equal(r.committed, 1, 'only the valid commit writes a committed row')
+  assert.equal(r.merged, 0)
+  assert.equal(tables.enrichment_committed.length, 1)
+  assert.deepEqual(
+    tables.enrichment_resolutions.map((x) => x.prospect_id),
+    ['p1'],
+    'the under-specified merge gets no resolution → still pending',
+  )
 })
 
 test('runCurateTick processes a duplicated prospect_id only once (idempotency defense-in-depth)', async () => {

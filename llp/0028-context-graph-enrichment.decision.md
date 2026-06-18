@@ -67,12 +67,17 @@ The pipeline is the same in both regimes ([§two-regimes](#two-regimes)):
 
 - **`enrich-propose` (T1)** extracts prospects from a **whole session at once**,
   not a watermark-bounded slice. The session's filtered parts
-  ([§row-selection](#row-selection)) are stitched in **DAG order**
-  (`message_index` / `previous_message_id` / `agent_id`), `tool_result`
-  excluded, and passed to a **single frontier-model call** — every session in
-  the measured corpus fits the 1M-token context (largest ~415k tokens). One
-  coherent transcript per session beats the old timestamp-shuffled 12k-char
-  concatenation and carries the **whole** session, closing the truncation defect
+  ([§row-selection](#row-selection)) are stitched into one transcript by a
+  deterministic **`(timestamp, tiebreak)` sort**: the gateway assigns
+  `message_created_at` in logical message order, so this reconstructs the
+  conversation **without coupling to the `ai_gateway_messages`-specific
+  message-graph columns** (`message_index` / `previous_message_id` / `agent_id`)
+  a custom source may lack, and the row-unique tiebreak keeps the order total so
+  re-runs over a session yield the identical transcript (hence the same prospect
+  ids). `tool_result` is excluded, and the transcript is passed to a **single
+  frontier-model call** — every session in the measured corpus fits the 1M-token
+  context (largest ~415k tokens). One coherent transcript per session carries the
+  **whole** session, closing the truncation defect
   ([§per-session-watermark](#per-session-watermark)). Recall over precision —
   T2 prunes.
 - **`enrich-curate` (T2)** groups pending prospects into **similarity / recall

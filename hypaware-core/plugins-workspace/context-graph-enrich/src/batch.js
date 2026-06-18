@@ -15,7 +15,7 @@ import {
 } from './curate.js'
 import { getCompletion, requireEnrichRuntime } from './runtime.js'
 import { runSql } from './sql.js'
-import { readState, writeState } from './state.js'
+import { readState, updateState } from './state.js'
 
 /**
  * Batch-regime curate orchestration ([§two-regimes](LLP 0028)). T2's frontier
@@ -34,7 +34,7 @@ import { readState, writeState } from './state.js'
  * @ref LLP 0028#two-regimes [implements]
  *
  * @import { EnrichRuntime } from './types.d.ts'
- * @import { CompletionBatch, CompletionBatchStatus, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompletionBatch, CompletionBatchStatus, CompletionRequest, SourceStatus, StartedSource, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 /**
@@ -134,12 +134,12 @@ export async function submitCurateJob(runtime, opts = {}) {
     async (span) => {
       const built = await buildClusterRequests(runtime, clusters, recallByProspect)
       const status = await batch.submit(built.map((b) => ({ customId: b.customId, request: b.request })), { signal: opts.signal })
-      // Re-read so a concurrent propose tick's session_marks (advanced during
-      // the submit await) aren't clobbered by the stale snapshot.
-      writeState(runtime.stateDir, {
-        ...readState(runtime.stateDir),
+      // Read-modify-write so a concurrent propose tick's session_marks (advanced
+      // during the submit await) aren't clobbered by a stale snapshot.
+      updateState(runtime.stateDir, (cur) => ({
+        ...cur,
         curate_job: { id: status.id, submitted_at: at, clusters: built.map((b) => ({ customId: b.customId, prospectIds: b.prospectIds })) },
-      })
+      }))
       span.setAttribute('batch_id', status.id)
       span.setAttribute('clusters', built.length)
       return { phase: 'submitted', id: status.id, clusters: built.length }
@@ -165,7 +165,7 @@ export async function collectCurateJob(runtime, opts = {}) {
   if (!job) return { phase: 'none' }
   const batch = getCompletion(runtime).batch
   if (!batch) {
-    writeState(runtime.stateDir, { ...state, curate_job: null })
+    updateState(runtime.stateDir, (cur) => ({ ...cur, curate_job: null }))
     return { phase: 'none' }
   }
   return withSpan(
@@ -200,7 +200,7 @@ export async function collectCurateJob(runtime, opts = {}) {
       }
       await appendCommitted(runtime, committedRows)
       await appendResolutions(runtime, resolutionRows)
-      writeState(runtime.stateDir, { ...readState(runtime.stateDir), curate_job: null })
+      updateState(runtime.stateDir, (cur) => ({ ...cur, curate_job: null }))
 
       span.setAttribute('committed', committedRows.length)
       span.setAttribute('processed', processed)
@@ -216,8 +216,8 @@ export async function collectCurateJob(runtime, opts = {}) {
  *
  * @param {EnrichRuntime} runtime
  * @param {Record<string, unknown>[][]} clusters
- * @param {Map<string, import('../../../../collectivus-plugin-kernel-types.d.ts').VectorSearchHit[]>} recallByProspect
- * @returns {Promise<Array<{ customId: string, cluster: Record<string, unknown>[], prospectIds: string[], request: import('../../../../collectivus-plugin-kernel-types.d.ts').CompletionRequest }>>}
+ * @param {Map<string, VectorSearchHit[]>} recallByProspect
+ * @returns {Promise<Array<{ customId: string, cluster: Record<string, unknown>[], prospectIds: string[], request: CompletionRequest }>>}
  */
 async function buildClusterRequests(runtime, clusters, recallByProspect) {
   const built = []

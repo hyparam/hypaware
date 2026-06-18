@@ -70,10 +70,14 @@ export async function runEnrichBackfill(argv, ctx) {
 }
 
 /**
+ * Parse `hyp enrich backfill` argv. Pure + deterministic, so it carries its own
+ * traditional test (CLAUDE.md: argv/config parsing-and-validation). Accepts the
+ * two mutually-exclusive phase flags and rejects unknown flags or any positional.
+ *
  * @param {string[]} argv
  * @returns {{ ok: true, proposeOnly: boolean, curateOnly: boolean } | { ok: false, error: string }}
  */
-function parseBackfillArgv(argv) {
+export function parseBackfillArgv(argv) {
   let proposeOnly = false
   let curateOnly = false
   for (const token of argv) {
