@@ -9,6 +9,7 @@
 
 import type {
   CompletionCapability,
+  EmbedderCapability,
   PluginActivationContext,
   PluginLogger,
   QueryRegistry,
@@ -69,7 +70,18 @@ export interface ProposeConfig {
   enabled: boolean
   interval_minutes: number
   max_tick_ms: number
-  max_rows_per_tick: number
+  /**
+   * Bound how many settled sessions one ongoing tick extracts (the daemon
+   * path). The batch/backfill paths process the whole eligible pool and ignore
+   * this cap. @ref LLP 0028#two-regimes
+   */
+  max_sessions_per_tick: number
+  /**
+   * A session is "settled" once its latest source part is older than this many
+   * minutes — the ongoing regime's selector. This is a run-time SQL/JS predicate
+   * over the latest part, not a per-session idle timer. @ref LLP 0028#two-regimes
+   */
+  settle_cutoff_minutes: number
   t1_model: string
   max_candidates: number
   confidence_floor: number
@@ -83,7 +95,24 @@ export interface CurateConfig {
   t2_model: string
   salience_threshold: number
   recall_top_k: number
-  expand_depth: number
+  /**
+   * Min top-recall similarity for a prospect to be **recall-region** clustered
+   * (curated against the committed region it hits) rather than treated as cold
+   * and embedding-clustered. @ref LLP 0028#curate-clustering
+   */
+  recall_cluster_floor: number
+  /**
+   * Cosine-similarity threshold for greedily clustering the **no-recall**
+   * remainder by their own embeddings, so near-duplicate proposals from
+   * different sessions land in one curator call. @ref LLP 0028#curate-clustering
+   */
+  cluster_similarity: number
+  /**
+   * Upper bound on prospects per curator call — clusters are chunked to this
+   * size so the decisions JSON stays inside the output-token budget.
+   * @ref LLP 0028#curate-clustering
+   */
+  max_cluster_size: number
 }
 
 export interface EnrichConfig {
@@ -107,22 +136,40 @@ export interface EnrichConfig {
 }
 
 /**
- * Propose watermark cursor: a keyset tuple over the part-level source. `ts`
- * is the source timestamp as **epoch milliseconds** (the query engine surfaces
- * a TIMESTAMP column as a Date and only compares it correctly against a
- * numeric literal — string/`=` comparisons match nothing), `id` the row-unique
- * tiebreak. "Rows processed up to (ts, id)"; the next tick reads strictly past
- * it. The same-`ts` boundary is handled in JS, not SQL (see propose.js).
+ * Per-session high-water mark: the latest source part a session has been
+ * enriched through. `ts` is the source timestamp as **epoch milliseconds** (the
+ * query engine surfaces a TIMESTAMP column as a Date), `id` the row-unique
+ * tiebreak (`part_id`). A session re-qualifies for the ongoing regime when its
+ * latest part is strictly past this tuple. @ref LLP 0028#per-session-watermark
  */
-export interface ProposeCursor {
+export interface SessionMark {
   ts: number
   id: string
 }
 
-/** The persisted propose watermark sidecar (see state.js). */
+/**
+ * An in-flight ongoing-regime curate batch job (submit-and-collect). The
+ * cluster→prospect mapping is persisted so a later tick can route the job's
+ * results without rebuilding clusters against a moved-on pending pool.
+ * @ref LLP 0028#two-regimes
+ */
+export interface CurateJob {
+  id: string
+  submitted_at: string
+  clusters: Array<{ customId: string, prospectIds: string[] }>
+}
+
+/**
+ * The persisted enrichment watermark sidecar (see state.js). Holds one
+ * {@link SessionMark} per session keyed by its anchor key (session_id) — the
+ * per-session model that **replaces** the single global keyset cursor — plus the
+ * in-flight ongoing curate batch job, if any.
+ * @ref LLP 0028#per-session-watermark
+ */
 export interface EnrichStateFile {
-  schema_version: 2
-  propose_cursor: ProposeCursor | null
+  schema_version: 4
+  session_marks: Record<string, SessionMark>
+  curate_job: CurateJob | null
 }
 
 /** One parsed T2 decision for a prospect, keyed by its 1-based `index`. */
@@ -163,6 +210,8 @@ export interface EnrichRuntime {
    */
   _vector?: VectorSearchCapability
   _completion?: CompletionCapability
+  /** Embedder, resolved lazily + best-effort for cold-remainder clustering (see runtime.getEmbedder). */
+  _embedder?: EmbedderCapability
   storage: ExtendedQueryStorageService
   query: QueryRegistry
   log: PluginLogger

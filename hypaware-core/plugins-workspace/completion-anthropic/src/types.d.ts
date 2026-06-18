@@ -39,7 +39,8 @@ export type CompletionConfigResult =
 export type FetchLike = (url: string, init: {
   method: string,
   headers: Record<string, string>,
-  body: string,
+  /** Omitted for GET batch poll/results calls. */
+  body?: string,
   signal?: AbortSignal,
 }) => Promise<{
   ok: boolean,

@@ -18,8 +18,36 @@ test('validateEnrichConfig fills source + tier defaults', () => {
   assert.equal(result.config.require_text, true)
   assert.equal(result.config.propose.t1_model, 'claude-haiku-4-5')
   assert.equal(result.config.propose.enabled, true)
+  assert.equal(result.config.propose.max_sessions_per_tick, 50)
+  assert.equal(result.config.propose.settle_cutoff_minutes, 60)
   assert.equal(result.config.curate.t2_model, 'claude-opus-4-8')
-  assert.equal(result.config.curate.expand_depth, 1)
+  assert.equal(result.config.curate.recall_cluster_floor, 0.6)
+  assert.equal(result.config.curate.cluster_similarity, 0.82)
+  assert.equal(result.config.curate.max_cluster_size, 16)
+})
+
+test('validateEnrichConfig accepts the clustering overrides', () => {
+  const result = validateEnrichConfig({ curate: { cluster_similarity: 0.9, max_cluster_size: 8, recall_cluster_floor: 0.5 } })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.equal(result.config.curate.cluster_similarity, 0.9)
+  assert.equal(result.config.curate.max_cluster_size, 8)
+  assert.equal(result.config.curate.recall_cluster_floor, 0.5)
+})
+
+test('validateEnrichConfig accepts the regime selector overrides', () => {
+  const result = validateEnrichConfig({ propose: { max_sessions_per_tick: 10, settle_cutoff_minutes: 5 } })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.equal(result.config.propose.max_sessions_per_tick, 10)
+  assert.equal(result.config.propose.settle_cutoff_minutes, 5)
+})
+
+test('validateEnrichConfig rejects a non-positive settle_cutoff_minutes', () => {
+  const result = validateEnrichConfig({ propose: { settle_cutoff_minutes: 0 } })
+  assert.equal(result.ok, false)
+  if (result.ok) return
+  assert.equal(result.errors[0].pointer, '/propose/settle_cutoff_minutes')
 })
 
 test('validateEnrichConfig accepts overrides incl. recall_index', () => {

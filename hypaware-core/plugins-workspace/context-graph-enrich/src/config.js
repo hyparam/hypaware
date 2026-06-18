@@ -43,7 +43,12 @@ export const PROPOSE_DEFAULTS = Object.freeze({
   enabled: true,
   interval_minutes: 5,
   max_tick_ms: 60_000,
-  max_rows_per_tick: 200,
+  // @ref LLP 0028#two-regimes — the proposer is session-oriented, not
+  // row-oriented: an ongoing tick extracts whole *settled* sessions (latest
+  // part older than `settle_cutoff_minutes`), bounded by `max_sessions_per_tick`
+  // so a synchronous tick can't run away. Backfill ignores both knobs.
+  max_sessions_per_tick: 50,
+  settle_cutoff_minutes: 60,
   // Cheap, high-recall tier. Anthropic Haiku is a good default; override per
   // provider (e.g. an Ollama model when using completion-openai).
   t1_model: 'claude-haiku-4-5',
@@ -60,7 +65,15 @@ export const CURATE_DEFAULTS = Object.freeze({
   t2_model: 'claude-opus-4-8',
   salience_threshold: 0.0,
   recall_top_k: 8,
-  expand_depth: 1,
+  // @ref LLP 0028#curate-clustering — the curate unit is a similarity/recall
+  // cluster, not a session. A prospect whose top recall hit clears
+  // `recall_cluster_floor` is grouped against that committed region; the
+  // no-recall remainder is greedily clustered by embedding cosine
+  // (`cluster_similarity`); clusters are chunked to `max_cluster_size` so the
+  // decisions JSON fits the output-token budget.
+  recall_cluster_floor: 0.6,
+  cluster_similarity: 0.82,
+  max_cluster_size: 16,
 })
 
 /**
@@ -165,7 +178,8 @@ function readPropose(value, errors) {
     enabled: readBool(raw, 'enabled', '/propose', errors) ?? PROPOSE_DEFAULTS.enabled,
     interval_minutes: readPositiveNumber(raw, 'interval_minutes', '/propose', errors) ?? PROPOSE_DEFAULTS.interval_minutes,
     max_tick_ms: readPositiveInt(raw, 'max_tick_ms', '/propose', errors) ?? PROPOSE_DEFAULTS.max_tick_ms,
-    max_rows_per_tick: readPositiveInt(raw, 'max_rows_per_tick', '/propose', errors) ?? PROPOSE_DEFAULTS.max_rows_per_tick,
+    max_sessions_per_tick: readPositiveInt(raw, 'max_sessions_per_tick', '/propose', errors) ?? PROPOSE_DEFAULTS.max_sessions_per_tick,
+    settle_cutoff_minutes: readPositiveNumber(raw, 'settle_cutoff_minutes', '/propose', errors) ?? PROPOSE_DEFAULTS.settle_cutoff_minutes,
     t1_model: readString(raw, 't1_model', errors, '/propose') ?? PROPOSE_DEFAULTS.t1_model,
     max_candidates: readPositiveInt(raw, 'max_candidates', '/propose', errors) ?? PROPOSE_DEFAULTS.max_candidates,
     confidence_floor: readUnitInterval(raw, 'confidence_floor', '/propose', errors) ?? PROPOSE_DEFAULTS.confidence_floor,
@@ -186,7 +200,9 @@ function readCurate(value, errors) {
     t2_model: readString(raw, 't2_model', errors, '/curate') ?? CURATE_DEFAULTS.t2_model,
     salience_threshold: readUnitInterval(raw, 'salience_threshold', '/curate', errors) ?? CURATE_DEFAULTS.salience_threshold,
     recall_top_k: readPositiveInt(raw, 'recall_top_k', '/curate', errors) ?? CURATE_DEFAULTS.recall_top_k,
-    expand_depth: readPositiveInt(raw, 'expand_depth', '/curate', errors) ?? CURATE_DEFAULTS.expand_depth,
+    recall_cluster_floor: readUnitInterval(raw, 'recall_cluster_floor', '/curate', errors) ?? CURATE_DEFAULTS.recall_cluster_floor,
+    cluster_similarity: readUnitInterval(raw, 'cluster_similarity', '/curate', errors) ?? CURATE_DEFAULTS.cluster_similarity,
+    max_cluster_size: readPositiveInt(raw, 'max_cluster_size', '/curate', errors) ?? CURATE_DEFAULTS.max_cluster_size,
   }
 }
 

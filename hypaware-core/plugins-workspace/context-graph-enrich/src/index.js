@@ -1,10 +1,10 @@
 // @ts-check
 
+import { startCurateSource } from './batch.js'
 import { buildEnrichmentContract } from './contract.js'
 import { validateEnrichConfig } from './config.js'
 import { COMMITTED_DATASET, enrichDatasetRegistration, PROSPECTS_DATASET, RESOLUTIONS_DATASET } from './datasets.js'
-import { runEnrich, runEnrichCurate, runEnrichPropose, runEnrichStatus } from './commands.js'
-import { startCurateSource } from './curate.js'
+import { runEnrich, runEnrichBackfill, runEnrichCurate, runEnrichPropose, runEnrichStatus } from './commands.js'
 import { startProposeSource } from './propose.js'
 import { setEnrichRuntime } from './runtime.js'
 
@@ -73,21 +73,22 @@ export async function activate(ctx) {
   ctx.sources.register({
     name: 'enrich-propose',
     plugin: PLUGIN_NAME,
-    summary: 'T1 proposer: over-propose prospect knowledge from new source text',
+    summary: 'T1 proposer (ongoing): extract whole settled sessions into prospect knowledge',
     configSection: 'context-graph-enrich',
     start: startProposeSource,
   })
   ctx.sources.register({
     name: 'enrich-curate',
     plugin: PLUGIN_NAME,
-    summary: 'T2 curator: prune/merge/deepen/commit prospects against the graph + source',
+    summary: 'T2 curator (ongoing): cluster + curate pending prospects via the Batch API (submit-and-collect)',
     configSection: 'context-graph-enrich',
     start: startCurateSource,
   })
 
-  ctx.commands.register({ name: 'enrich', plugin: PLUGIN_NAME, summary: 'Context-graph enrichment', usage: 'hyp enrich <propose|curate|status>', run: runEnrich })
+  ctx.commands.register({ name: 'enrich', plugin: PLUGIN_NAME, summary: 'Context-graph enrichment', usage: 'hyp enrich <propose|curate|backfill|status>', run: runEnrich })
   ctx.commands.register({ name: 'enrich propose', plugin: PLUGIN_NAME, summary: 'Run one T1 propose tick now', usage: 'hyp enrich propose', run: runEnrichPropose })
   ctx.commands.register({ name: 'enrich curate', plugin: PLUGIN_NAME, summary: 'Run one T2 curate tick now', usage: 'hyp enrich curate', run: runEnrichCurate })
+  ctx.commands.register({ name: 'enrich backfill', plugin: PLUGIN_NAME, summary: 'Enrich ALL history (propose every session, curate via the Batch API)', usage: 'hyp enrich backfill [--propose-only|--curate-only]', run: runEnrichBackfill })
   ctx.commands.register({ name: 'enrich status', plugin: PLUGIN_NAME, summary: 'Show enrichment watermarks and counts', usage: 'hyp enrich status', run: runEnrichStatus })
 
   ctx.log.info('enrich.activated', {

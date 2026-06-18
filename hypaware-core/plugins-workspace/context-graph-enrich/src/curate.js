@@ -4,12 +4,12 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 
 import { columnsFor, COMMITTED_DATASET, enrichTablePath, PROSPECTS_DATASET, RESOLUTIONS_DATASET } from './datasets.js'
 import { buildCurateBatchRequest, parseDecisions } from './prompts.js'
-import { getCompletion, getVector, requireEnrichRuntime } from './runtime.js'
+import { getCompletion, getEmbedder, getVector } from './runtime.js'
 import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 
 /**
  * @import { CurateDecision, EnrichRuntime } from './types.d.ts'
- * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompletionRequest, CompletionResult, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const CURATOR = 'enrich.t2'
@@ -17,44 +17,27 @@ const CURATOR_VERSION = 1
 const MAX_SOURCE_CHARS = 8_000
 
 /**
- * Run one T2 curate tick. Selects pending prospects (no resolution yet),
- * orders by salience (novelty vs. committed knowledge), then **groups the
- * selection by anchor (session)** and makes ONE curator call per group:
- * the shared graph neighborhood and source excerpt are read once and reused
- * across the group's prospects, instead of re-reading the same session
- * source for every prospect. Committed items go to `enrichment_committed`
- * (the only dataset the graph contract reads); every decided prospect gets a
- * resolution row so it leaves the queue. Used by the daemon timer and
- * `enrich curate`.
+ * Run one **synchronous** T2 curate tick (the `hyp enrich curate` command path).
+ * Selects pending prospects, scores them by novelty, clusters by
+ * similarity/recall ([§curate-clustering](LLP 0028)), and makes ONE curator
+ * call per cluster, blocking on each. The batch regimes (backfill command,
+ * ongoing daemon) reuse the same {@link buildCurateClusters} /
+ * {@link curateRequestForCluster} / {@link routeClusterDecisions} pieces but
+ * submit through the Batch API instead (see batch.js).
+ *
+ * @ref LLP 0028#curate-clustering [implements]
  *
  * @param {EnrichRuntime} runtime
  * @param {{ deadlineMs?: number, signal?: AbortSignal }} [opts]
- * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, skipped: number, calls: number }>}
+ * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, merged: number, skipped: number, calls: number, clusters: number }>}
  */
 export async function runCurateTick(runtime, opts = {}) {
-  const cfg = runtime.config
-  const c = cfg.curate
   return withSpan(
     'enrich.curate_tick',
     { [Attr.COMPONENT]: 'plugin', [Attr.OPERATION]: 'enrich.curate_tick', [Attr.PLUGIN]: '@hypaware/context-graph-enrich', status: 'ok' },
     async (span) => {
-      const resolvedRows = await runSql(runtime, `SELECT prospect_id FROM ${RESOLUTIONS_DATASET}`, { allowMissing: true })
-      const resolved = new Set(resolvedRows.map((r) => strField(r.prospect_id)))
-      const allProspects = await runSql(runtime, `SELECT * FROM ${PROSPECTS_DATASET}`, { allowMissing: true })
-      const pending = dedupeById(allProspects.filter((p) => !resolved.has(strField(p.prospect_id))))
-
-      const { ordered, skipped } = await orderBySalience(runtime, pending)
-      const selected = ordered.slice(0, c.max_prospects_per_tick)
-
-      // Group the selection by anchor (session) → one curator call per group.
-      /** @type {Map<string, Record<string, unknown>[]>} */
-      const groups = new Map()
-      for (const p of selected) {
-        const k = strField(p.anchor_key) || '(none)'
-        const arr = groups.get(k) ?? []
-        arr.push(p)
-        groups.set(k, arr)
-      }
+      const pending = await selectPending(runtime)
+      const { clusters, skipped, recallByProspect } = await buildCurateClusters(runtime, pending)
 
       /** @type {Record<string, unknown>[]} */
       const committedRows = []
@@ -62,194 +45,459 @@ export async function runCurateTick(runtime, opts = {}) {
       const resolutionRows = []
       let processed = 0
       let rejected = 0
+      let merged = 0
       let calls = 0
       const at = new Date().toISOString()
 
-      for (const group of groups.values()) {
+      for (const cluster of clusters) {
         if (opts.deadlineMs && Date.now() > opts.deadlineMs) break
-        const rep = group[0]
-        const anchorType = strField(rep.anchor_type)
-        const anchorKey = strField(rep.anchor_key)
-
-        // Per-prospect view + recall (cheap, local — not the cost driver).
-        /** @type {Array<{ prospect: Record<string, unknown>, view: { type: string, label: string, summary: string, confidence: number | undefined }, recall: string }>} */
-        const views = []
-        for (const prospect of group) {
-          const view = {
-            type: strField(prospect.prospect_type),
-            label: strField(prospect.label),
-            summary: strField(asObject(prospect.props).summary),
-            confidence: numField(prospect.confidence),
-          }
-          const recall = await safeRecall(runtime, `${view.type}: ${view.label} — ${view.summary}`.trim(), c.recall_top_k)
-          views.push({ prospect, view, recall })
-        }
-
-        // Shared expand + deref: read once for the whole group. The source is
-        // the union of every group prospect's provenance rows.
-        const neighborhood = await safeExpand(runtime, anchorType, anchorKey)
-        /** @type {Set<string>} */
-        const idSet = new Set()
-        for (const p of group) {
-          const keys = asObject(p.source_keys)[cfg.id_column]
-          if (Array.isArray(keys)) for (const k of keys) if (typeof k === 'string') idSet.add(k)
-        }
-        const source = await safeDeref(runtime, [...idSet])
-
-        const maxTokens = Math.min(16_000, 2048 + group.length * 512)
-        const completion = getCompletion(runtime)
-        const result = await completion.complete(
-          buildCurateBatchRequest({
-            prospects: views.map((v) => ({ ...v.view, recall: v.recall })),
-            neighborhood,
-            source,
-            model: c.t2_model,
-            maxTokens,
-            provider: completion.provider,
-          }),
-          { signal: opts.signal }
-        )
+        const request = await curateRequestForCluster(runtime, cluster, recallByProspect)
+        const result = await getCompletion(runtime).complete(request, { signal: opts.signal })
         calls++
-
-        const decisions = parseDecisions(result)
-        if (decisions.length === 0) {
-          // Refusal / no tool call — leave the whole group pending so it
-          // retries next tick rather than mass-rejecting on a transient miss.
-          runtime.log.warn('enrich.curate_no_decisions', { anchor: anchorKey, group_size: group.length })
+        const routed = routeClusterDecisions(cluster, result, at)
+        if (routed.noDecisions) {
+          // Refusal / no tool call — leave the cluster pending for retry.
+          runtime.log.warn('enrich.curate_no_decisions', { cluster_size: cluster.length })
           continue
         }
-        const byIndex = new Map(decisions.map((d) => [d.index, d]))
-
-        for (let i = 0; i < group.length; i++) {
-          processed++
-          const routed = routeDecision(group[i], views[i].view, byIndex.get(i + 1), at)
-          if (routed.rejected) rejected++
-          if (routed.committed) committedRows.push(routed.committed)
-          resolutionRows.push(routed.resolution)
-        }
+        committedRows.push(...routed.committedRows)
+        resolutionRows.push(...routed.resolutionRows)
+        processed += routed.processed
+        rejected += routed.rejected
+        merged += routed.merged
       }
 
-      // Sub-salience-threshold prospects are auto-skipped: a terminal `skip`
-      // resolution (no curator call, nothing committed) drains them from the
-      // pending queue so they don't re-score every tick. @ref LLP 0028#salience-drain
-      for (const p of skipped) {
-        resolutionRows.push(resolution(strField(p.prospect_id), 'skip', null, 'below salience threshold', at))
-      }
+      // Sub-salience-threshold prospects drain via a terminal `skip` resolution
+      // (no curator call). @ref LLP 0028#salience-drain
+      resolutionRows.push(...skipResolutionRows(skipped, at))
 
-      if (committedRows.length > 0) {
-        await runtime.storage.appendRows(enrichTablePath(runtime.storage, COMMITTED_DATASET), [...columnsFor(COMMITTED_DATASET)], committedRows)
-      }
-      if (resolutionRows.length > 0) {
-        await runtime.storage.appendRows(enrichTablePath(runtime.storage, RESOLUTIONS_DATASET), [...columnsFor(RESOLUTIONS_DATASET)], resolutionRows)
-      }
+      await appendCommitted(runtime, committedRows)
+      await appendResolutions(runtime, resolutionRows)
 
       span.setAttribute('pending', pending.length)
+      span.setAttribute('clusters', clusters.length)
       span.setAttribute('processed', processed)
       span.setAttribute('committed', committedRows.length)
       span.setAttribute('rejected', rejected)
+      span.setAttribute('merged', merged)
       span.setAttribute('skipped', skipped.length)
       span.setAttribute('curate_calls', calls)
-      return { pending: pending.length, processed, committed: committedRows.length, rejected, skipped: skipped.length, calls }
+      return { pending: pending.length, processed, committed: committedRows.length, rejected, merged, skipped: skipped.length, calls, clusters: clusters.length }
     },
     { component: 'plugin' }
   )
 }
 
 /**
- * Triage pending prospects by novelty (1 - best similarity to existing
- * committed knowledge): a cheap, no-LLM pass so the curator spends on the
- * least-covered prospects first. Returns the above-threshold prospects in
- * `ordered` (descending novelty) and the below-threshold ones in `skipped`
- * — the caller writes the skipped a terminal resolution so they drain instead
- * of re-scoring every tick (@ref LLP 0028#salience-drain). No recall index
- * configured → everything is `ordered` (FIFO), nothing skipped.
+ * The pending curate queue: prospects with no resolution row, deduped by id.
+ *
+ * @param {EnrichRuntime} runtime
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+export async function selectPending(runtime) {
+  const resolvedRows = await runSql(runtime, `SELECT prospect_id FROM ${RESOLUTIONS_DATASET}`, { allowMissing: true })
+  const resolved = new Set(resolvedRows.map((r) => strField(r.prospect_id)))
+  const allProspects = await runSql(runtime, `SELECT * FROM ${PROSPECTS_DATASET}`, { allowMissing: true })
+  return dedupeById(allProspects.filter((p) => !resolved.has(strField(p.prospect_id))))
+}
+
+/**
+ * Score the pending pool by novelty and cluster it. The synchronous tick caps
+ * the selection at `max_prospects_per_tick`; the **batch** regimes pass
+ * `uncapped` and process the whole eligible pool ([§salience-drain](LLP 0028)).
  *
  * @param {EnrichRuntime} runtime
  * @param {Record<string, unknown>[]} pending
- * @returns {Promise<{ ordered: Record<string, unknown>[], skipped: Record<string, unknown>[] }>}
+ * @param {{ uncapped?: boolean }} [opts]
+ * @returns {Promise<{ clusters: Record<string, unknown>[][], skipped: Record<string, unknown>[], recallByProspect: Map<string, VectorSearchHit[]> }>}
  */
-async function orderBySalience(runtime, pending) {
+export async function buildCurateClusters(runtime, pending, opts = {}) {
   const c = runtime.config.curate
-  if (!runtime.config.recall_index || pending.length <= 1) return { ordered: pending, skipped: [] }
+  const { ordered, skipped, recallByProspect } = await scoreAndRecall(runtime, pending)
+  const selected = opts.uncapped ? ordered : ordered.slice(0, c.max_prospects_per_tick)
+  const clusters = await clusterProspects(runtime, selected, recallByProspect)
+  return { clusters, skipped, recallByProspect }
+}
+
+/**
+ * Build the one curator request for a cluster: per-prospect views + recall, the
+ * shared recalled-knowledge block, and the source excerpt behind the cluster's
+ * combined provenance.
+ *
+ * @param {EnrichRuntime} runtime
+ * @param {Record<string, unknown>[]} cluster
+ * @param {Map<string, VectorSearchHit[]>} recallByProspect
+ * @returns {Promise<CompletionRequest>}
+ */
+export async function curateRequestForCluster(runtime, cluster, recallByProspect) {
+  const cfg = runtime.config
+  const c = cfg.curate
+  const completion = getCompletion(runtime)
+  const prospects = cluster.map((p) => ({ ...viewOf(p), recall: formatHits(recallByProspect.get(strField(p.prospect_id)) ?? []) }))
+  const sharedRecalled = formatSharedRecalled(cluster, recallByProspect)
+  /** @type {Set<string>} */
+  const idSet = new Set()
+  for (const p of cluster) {
+    const keys = asObject(p.source_keys)[cfg.id_column]
+    if (Array.isArray(keys)) for (const k of keys) if (typeof k === 'string') idSet.add(k)
+  }
+  const source = await safeDeref(runtime, [...idSet])
+  const maxTokens = Math.min(16_000, 2048 + cluster.length * 512)
+  return buildCurateBatchRequest({ prospects, neighborhood: sharedRecalled, source, model: c.t2_model, maxTokens, provider: completion.provider })
+}
+
+/**
+ * Route a cluster's curator result into committed + resolution rows. A null
+ * result (refusal, batch error, or a per-request failure) or an empty decision
+ * set leaves the whole cluster pending (`noDecisions`).
+ *
+ * @param {Record<string, unknown>[]} cluster
+ * @param {CompletionResult | null} result
+ * @param {string} at
+ * @returns {{ committedRows: Record<string, unknown>[], resolutionRows: Record<string, unknown>[], rejected: number, merged: number, processed: number, pending: number, noDecisions: boolean }}
+ */
+export function routeClusterDecisions(cluster, result, at) {
+  const decisions = result ? parseDecisions(result) : []
+  /** @type {Record<string, unknown>[]} */
+  const committedRows = []
+  /** @type {Record<string, unknown>[]} */
+  const resolutionRows = []
+  if (decisions.length === 0) {
+    return { committedRows, resolutionRows, rejected: 0, merged: 0, processed: 0, pending: 0, noDecisions: true }
+  }
+  const byIndex = new Map(decisions.map((d) => [d.index, d]))
+  let rejected = 0
+  let merged = 0
+  let processed = 0
+  let pending = 0
+  for (let i = 0; i < cluster.length; i++) {
+    const routed = routeDecision(cluster[i], viewOf(cluster[i]), byIndex.get(i + 1), at)
+    // An under-specified merge ({@link routeDecision}) yields no resolution: it
+    // is left in the pending queue for a better-specified later pass rather than
+    // committed to the wrong node, so it is not counted as processed.
+    if (!routed.resolution) {
+      pending++
+      continue
+    }
+    processed++
+    if (routed.rejected) rejected++
+    if (routed.merged) merged++
+    if (routed.committed) committedRows.push(routed.committed)
+    resolutionRows.push(routed.resolution)
+  }
+  return { committedRows, resolutionRows, rejected, merged, processed, pending, noDecisions: false }
+}
+
+/**
+ * Terminal `skip` resolutions for below-salience prospects (no curator call).
+ * @ref LLP 0028#salience-drain
+ *
+ * @param {Record<string, unknown>[]} skipped
+ * @param {string} at
+ * @returns {Record<string, unknown>[]}
+ */
+export function skipResolutionRows(skipped, at) {
+  return skipped.map((p) => resolution(strField(p.prospect_id), 'skip', null, 'below salience threshold', at))
+}
+
+/**
+ * @param {EnrichRuntime} runtime
+ * @param {Record<string, unknown>[]} rows
+ */
+export async function appendCommitted(runtime, rows) {
+  if (rows.length > 0) {
+    await runtime.storage.appendRows(enrichTablePath(runtime.storage, COMMITTED_DATASET), [...columnsFor(COMMITTED_DATASET)], rows)
+  }
+}
+
+/**
+ * @param {EnrichRuntime} runtime
+ * @param {Record<string, unknown>[]} rows
+ */
+export async function appendResolutions(runtime, rows) {
+  if (rows.length > 0) {
+    await runtime.storage.appendRows(enrichTablePath(runtime.storage, RESOLUTIONS_DATASET), [...columnsFor(RESOLUTIONS_DATASET)], rows)
+  }
+}
+
+/**
+ * One recall pass over the pending prospects: returns the per-prospect hits
+ * (reused for clustering and the prompt), the salience-ordered above-threshold
+ * prospects (`ordered`, descending novelty), and the below-threshold ones
+ * (`skipped`). Novelty is `1 - top-1 similarity` to committed knowledge — a
+ * cheap, no-LLM triage so the curator spends on the least-covered first; the
+ * caller writes a terminal resolution for the skipped so they drain instead of
+ * re-scoring every tick (@ref LLP 0028#salience-drain). Salience-skipping only
+ * applies when a `recall_index` is configured (otherwise there is no meaningful
+ * novelty); recall hits are still gathered best-effort for clustering.
+ *
+ * @param {EnrichRuntime} runtime
+ * @param {Record<string, unknown>[]} pending
+ * @returns {Promise<{ ordered: Record<string, unknown>[], skipped: Record<string, unknown>[], recallByProspect: Map<string, VectorSearchHit[]> }>}
+ */
+async function scoreAndRecall(runtime, pending) {
+  const c = runtime.config.curate
+  const recallIndex = runtime.config.recall_index
+  /** @type {Map<string, VectorSearchHit[]>} */
+  const recallByProspect = new Map()
   /** @type {Array<{ row: Record<string, unknown>, novelty: number }>} */
   const scored = []
   /** @type {Record<string, unknown>[]} */
   const skipped = []
   for (const p of pending) {
-    const text = `${strField(p.prospect_type)}: ${strField(p.label)}`
-    let novelty = 1
+    const pid = strField(p.prospect_id)
+    let hits = /** @type {VectorSearchHit[]} */ ([])
     try {
-      const hits = await getVector(runtime).search({ query: text, index: runtime.config.recall_index, topK: 1 })
-      if (hits.length > 0) novelty = 1 - hits[0].score
+      hits = await getVector(runtime).search({ query: clusterText(p), topK: c.recall_top_k, ...(recallIndex ? { index: recallIndex } : {}) })
     } catch {
-      // recall unavailable — treat as fully novel
+      // recall unavailable — treat as fully novel / cold
     }
-    if (novelty >= c.salience_threshold) scored.push({ row: p, novelty })
+    recallByProspect.set(pid, hits)
+    const novelty = hits.length > 0 ? 1 - hits[0].score : 1
+    if (!recallIndex || novelty >= c.salience_threshold) scored.push({ row: p, novelty })
     else skipped.push(p)
   }
   scored.sort((a, b) => b.novelty - a.novelty)
-  return { ordered: scored.map((s) => s.row), skipped }
+  return { ordered: scored.map((s) => s.row), skipped, recallByProspect }
 }
 
 /**
- * Similar existing committed items for one prospect (best-effort).
+ * Group the selected prospects into curator-call clusters
+ * ([§curate-clustering](LLP 0028)):
+ *
+ * - **Recall-region** — prospects whose top recall hit clears
+ *   `recall_cluster_floor` are bucketed by that committed node id (dominates the
+ *   warm ongoing regime).
+ * - **Embedding** — the no-recall remainder is greedily clustered by its own
+ *   embeddings so near-duplicate proposals from different sessions land in one
+ *   call (dominates the cold backfill regime). Best-effort: if no embedder is
+ *   resolvable the remainder falls back to session grouping.
+ *
+ * Every cluster is finally chunked to `max_cluster_size` so the decisions JSON
+ * stays inside the output-token budget.
  *
  * @param {EnrichRuntime} runtime
- * @param {string} text
- * @param {number} topK
- * @returns {Promise<string>}
+ * @param {Record<string, unknown>[]} prospects
+ * @param {Map<string, VectorSearchHit[]>} recallByProspect
+ * @returns {Promise<Record<string, unknown>[][]>}
  */
-async function safeRecall(runtime, text, topK) {
+export async function clusterProspects(runtime, prospects, recallByProspect) {
+  const c = runtime.config.curate
+  if (prospects.length === 0) return []
+  /** @type {Record<string, unknown>[]} */
+  const warm = []
+  /** @type {Record<string, unknown>[]} */
+  const cold = []
+  for (const p of prospects) {
+    const hits = recallByProspect.get(strField(p.prospect_id)) ?? []
+    if (hits.length > 0 && hits[0].score >= c.recall_cluster_floor) warm.push(p)
+    else cold.push(p)
+  }
+  const regionClusters = clusterByRecallRegion(warm, recallByProspect)
+  const coldClusters = await embeddingClusters(runtime, cold)
+  return [...regionClusters, ...coldClusters].flatMap((cl) => chunkBySize(cl, c.max_cluster_size))
+}
+
+/**
+ * Bucket warm prospects by their top recalled committed node id — prospects
+ * that recall the same region of the graph are curated together against it.
+ * Pure.
+ *
+ * @param {Record<string, unknown>[]} warm
+ * @param {Map<string, VectorSearchHit[]>} recallByProspect
+ * @returns {Record<string, unknown>[][]}
+ */
+export function clusterByRecallRegion(warm, recallByProspect) {
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const buckets = new Map()
+  for (const p of warm) {
+    const hits = recallByProspect.get(strField(p.prospect_id)) ?? []
+    const key = hits[0]?.id || '(none)'
+    const arr = buckets.get(key) ?? []
+    arr.push(p)
+    buckets.set(key, arr)
+  }
+  return [...buckets.values()]
+}
+
+/**
+ * Embed + greedily cluster the no-recall remainder. Best-effort: if no embedder
+ * is resolvable the remainder is grouped by session (anchor) instead, keeping a
+ * bounded curator-call count without the embedding signal.
+ *
+ * @param {EnrichRuntime} runtime
+ * @param {Record<string, unknown>[]} cold
+ * @returns {Promise<Record<string, unknown>[][]>}
+ */
+async function embeddingClusters(runtime, cold) {
+  const c = runtime.config.curate
+  if (cold.length === 0) return []
+  if (cold.length === 1) return [cold]
   try {
-    const hits = await getVector(runtime).search({ query: text, topK, ...(runtime.config.recall_index ? { index: runtime.config.recall_index } : {}) })
-    return hits.map((h) => `- [${h.score.toFixed(2)}] ${h.text ?? h.id}`).join('\n')
-  } catch {
-    return ''
+    const { vectors } = await getEmbedder(runtime).embed(cold.map((p) => clusterText(p)))
+    const items = cold.map((p, i) => ({ p, v: vectors[i] }))
+    return greedyCosineClusters(items, c.cluster_similarity)
+  } catch (err) {
+    runtime.log.warn('enrich.curate_embed_unavailable', {
+      [Attr.ERROR_KIND]: 'enrich_embedder_unavailable',
+      message: err instanceof Error ? err.message : String(err),
+      cold: cold.length,
+    })
+    return groupByAnchor(cold)
   }
 }
 
 /**
- * One-hop neighborhood of an anchor node, read from the published
- * `node`/`edge` datasets (not via a cross-plugin import — the substrate-true
- * "bring your own query over the published surface").
+ * Greedy single-pass cosine clustering: walk items in a deterministic order and
+ * place each into the first cluster whose seed is within `threshold`, else start
+ * a new cluster. Pure (the embedding call is the caller's). Deterministic order
+ * keeps re-runs stable.
  *
- * @param {EnrichRuntime} runtime
- * @param {string} anchorType
- * @param {string} anchorKey
- * @returns {Promise<string>}
+ * @param {Array<{ p: Record<string, unknown>, v: ArrayLike<number> }>} items
+ * @param {number} threshold
+ * @returns {Record<string, unknown>[][]}
  */
-async function safeExpand(runtime, anchorType, anchorKey) {
-  try {
-    if (!anchorType || !anchorKey) return ''
-    const anchorId = runtime.graph.kit.nodeId(anchorType, anchorKey)
-    const q = sqlQuote(anchorId)
-    const limit = runtime.config.curate.recall_top_k
-    const edges = await runSql(
-      runtime,
-      `SELECT edge_type, src_id, dst_id FROM edge WHERE src_id = '${q}' OR dst_id = '${q}' LIMIT ${limit}`,
-      { allowMissing: true } // graph surface may not be projected yet
-    )
-    if (edges.length === 0) return ''
-    /** @type {Set<string>} */
-    const neighborIds = new Set()
-    for (const e of edges) {
-      const src = strField(e.src_id)
-      const dst = strField(e.dst_id)
-      if (src && src !== anchorId) neighborIds.add(src)
-      if (dst && dst !== anchorId) neighborIds.add(dst)
+export function greedyCosineClusters(items, threshold) {
+  const sorted = [...items].sort((a, b) => {
+    const ia = strField(a.p.prospect_id)
+    const ib = strField(b.p.prospect_id)
+    return ia < ib ? -1 : ia > ib ? 1 : 0
+  })
+  /** @type {Array<{ seed: ArrayLike<number>, members: Record<string, unknown>[] }>} */
+  const clusters = []
+  for (const it of sorted) {
+    let placed = false
+    for (const cl of clusters) {
+      if (cosine(it.v, cl.seed) >= threshold) {
+        cl.members.push(it.p)
+        placed = true
+        break
+      }
     }
-    if (neighborIds.size === 0) return ''
-    const inList = [...neighborIds].map((id) => `'${sqlQuote(id)}'`).join(', ')
-    const nodes = await runSql(runtime, `SELECT node_type, label FROM node WHERE node_id IN (${inList}) LIMIT 50`, { allowMissing: true })
-    return nodes.map((n) => `- ${strField(n.node_type)}: ${strField(n.label)}`).join('\n')
-  } catch {
-    return ''
+    if (!placed) clusters.push({ seed: it.v, members: [it.p] })
+  }
+  return clusters.map((cl) => cl.members)
+}
+
+/**
+ * Cosine similarity over two numeric vectors. Returns 0 for a zero vector
+ * (avoids NaN). Pure.
+ *
+ * @param {ArrayLike<number>} a
+ * @param {ArrayLike<number>} b
+ * @returns {number}
+ */
+export function cosine(a, b) {
+  const n = Math.min(a.length, b.length)
+  let dot = 0
+  let na = 0
+  let nb = 0
+  for (let i = 0; i < n; i++) {
+    const x = a[i]
+    const y = b[i]
+    dot += x * y
+    na += x * x
+    nb += y * y
+  }
+  if (na === 0 || nb === 0) return 0
+  return dot / (Math.sqrt(na) * Math.sqrt(nb))
+}
+
+/**
+ * Split a cluster into sub-clusters of at most `maxSize` items. Pure.
+ *
+ * @template T
+ * @param {T[]} items
+ * @param {number} maxSize
+ * @returns {T[][]}
+ */
+export function chunkBySize(items, maxSize) {
+  if (items.length <= maxSize) return [items]
+  /** @type {T[][]} */
+  const out = []
+  for (let i = 0; i < items.length; i += maxSize) out.push(items.slice(i, i + maxSize))
+  return out
+}
+
+/**
+ * Fallback clustering when no embedder is available: one cluster per session
+ * (anchor). Pure.
+ *
+ * @param {Record<string, unknown>[]} prospects
+ * @returns {Record<string, unknown>[][]}
+ */
+function groupByAnchor(prospects) {
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const buckets = new Map()
+  for (const p of prospects) {
+    const k = strField(p.anchor_key) || '(none)'
+    const arr = buckets.get(k) ?? []
+    arr.push(p)
+    buckets.set(k, arr)
+  }
+  return [...buckets.values()]
+}
+
+/**
+ * The text used for recall + embedding clustering of a prospect.
+ *
+ * @param {Record<string, unknown>} p
+ * @returns {string}
+ */
+function clusterText(p) {
+  const summary = strField(asObject(p.props).summary)
+  return `${strField(p.prospect_type)}: ${strField(p.label)}${summary ? ` — ${summary}` : ''}`.trim()
+}
+
+/**
+ * @param {Record<string, unknown>} p
+ * @returns {{ type: string, label: string, summary: string, confidence: number | undefined }}
+ */
+function viewOf(p) {
+  return {
+    type: strField(p.prospect_type),
+    label: strField(p.label),
+    summary: strField(asObject(p.props).summary),
+    confidence: numField(p.confidence),
   }
 }
 
 /**
- * Targeted source excerpt behind a set of provenance row ids (the union
- * across a group's prospects). Bounded by {@link MAX_SOURCE_CHARS}.
+ * Render a hit list (per-prospect recall, or the shared union) for the prompt.
+ *
+ * @param {VectorSearchHit[]} hits
+ * @returns {string}
+ */
+function formatHits(hits) {
+  return hits.map((h) => `- [${h.score.toFixed(2)}] ${h.text ?? h.id}`).join('\n')
+}
+
+/**
+ * The cluster's **shared recalled knowledge**: the union of every cluster
+ * prospect's recall hits, deduped by committed node id and ordered by score —
+ * the content-based context the curator reasons against (cold clusters yield an
+ * empty block).
+ *
+ * @param {Record<string, unknown>[]} cluster
+ * @param {Map<string, VectorSearchHit[]>} recallByProspect
+ * @returns {string}
+ */
+function formatSharedRecalled(cluster, recallByProspect) {
+  /** @type {Map<string, { score: number, text: string }>} */
+  const seen = new Map()
+  for (const p of cluster) {
+    for (const h of recallByProspect.get(strField(p.prospect_id)) ?? []) {
+      const prev = seen.get(h.id)
+      if (!prev || h.score > prev.score) seen.set(h.id, { score: h.score, text: h.text ?? h.id })
+    }
+  }
+  return [...seen.values()].sort((a, b) => b.score - a.score).map((i) => `- [${i.score.toFixed(2)}] ${i.text}`).join('\n')
+}
+
+/**
+ * Targeted source excerpt behind a set of provenance row ids (the union across a
+ * cluster's prospects — possibly spanning sessions). Bounded by
+ * {@link MAX_SOURCE_CHARS}.
  *
  * @param {EnrichRuntime} runtime
  * @param {string[]} ids
@@ -284,18 +532,32 @@ async function safeDeref(runtime, ids) {
 }
 
 /**
- * Route one curator decision into the rows it produces: always a resolution
+ * Route one curator decision into the rows it produces: normally a resolution
  * row (so the prospect leaves the pending queue), plus a committed row for
- * `commit`/`deepen`. A `reject` — or a prospect the curator omitted from the
- * batch response (implicit reject) — commits nothing: that is exactly how a
- * rejected prospect never reaches `enrichment_committed`, hence never the
- * graph. Pure: no I/O, so the reject/merge/commit/deepen routing is testable.
+ * `commit`/`deepen`/**`merge`**. The merge case is what realizes
+ * **provenance-per-contributing-session**: a merge contributes no *new* node,
+ * but it writes a committed row carrying the merging session's anchor +
+ * source_keys under the canonical `(item_type, item_key)`, so the
+ * content-addressed graph id collapses the node while the projector emits this
+ * session's `produced` edge ([§committed-only-projection](LLP 0028)). A `reject`
+ * — or a prospect the curator omitted (implicit reject) — commits nothing, so a
+ * rejected prospect never reaches `enrichment_committed`, hence never the graph.
+ *
+ * A merge converges only under the *target's* canonical `(item_type, item_id)`,
+ * so it needs BOTH `merge_into` (the key) and `item_type` (the type). If either
+ * is missing, falling back to the prospect's own type/key would derive a
+ * *different* content-addressed id and attach the `produced` edge to the wrong
+ * node — silent provenance corruption. An under-specified merge is therefore
+ * returned **pending** (`resolution: null`, no commit): it stays in the queue for
+ * a later, better-specified pass rather than mis-routing. Pure: no I/O.
+ *
+ * @ref LLP 0028#committed-only-projection [implements]
  *
  * @param {Record<string, unknown>} prospect
  * @param {{ type: string, label: string, summary: string, confidence: number | undefined }} view
  * @param {CurateDecision | undefined} decision
  * @param {string} at
- * @returns {{ committed: Record<string, unknown> | null, resolution: Record<string, unknown>, rejected: boolean }}
+ * @returns {{ committed: Record<string, unknown> | null, resolution: Record<string, unknown> | null, rejected: boolean, merged: boolean }}
  */
 export function routeDecision(prospect, view, decision, at) {
   const pid = strField(prospect.prospect_id)
@@ -304,20 +566,29 @@ export function routeDecision(prospect, view, decision, at) {
   // chose not to decide); keeps the queue finite and draining.
   if (!decision || decision.decision === 'reject') {
     const note = decision?.note ?? (decision ? null : 'omitted by curator')
-    return { committed: null, rejected: true, resolution: resolution(pid, 'reject', null, note, at) }
+    return { committed: null, rejected: true, merged: false, resolution: resolution(pid, 'reject', null, note, at) }
   }
-  if (decision.decision === 'merge') {
-    const into = decision.merge_into || decision.item_key || null
-    return { committed: null, rejected: false, resolution: resolution(pid, 'merge', into ? [into] : null, decision.note ?? null, at) }
+
+  const isMerge = decision.decision === 'merge'
+  // A merge without its target key + type cannot be routed to the right
+  // content-addressed node — leave it pending rather than corrupt provenance.
+  if (isMerge && (!decision.merge_into || !decision.item_type)) {
+    return { committed: null, rejected: false, merged: false, resolution: null }
   }
-  // commit | deepen → write a committed item
-  const itemKey = decision.item_key || view.label
+  // merge: reuse the existing canonical (type, key) so the content-addressed
+  // node id collapses across sessions; commit/deepen mint from the curator's
+  // fields, falling back to the prospect view.
+  const itemKey = (isMerge ? decision.merge_into : decision.item_key) || view.label
+  const itemType = decision.item_type || view.type
+  // For merge, props come only from what the curator supplies (it saw the
+  // target); null leaves the node's first-sighting props untouched.
+  const summary = decision.summary || (isMerge ? '' : view.summary)
   const committed = {
     item_id: itemKey,
-    item_type: decision.item_type || view.type,
+    item_type: itemType,
     label: decision.label || view.label,
-    props: decision.summary || view.summary ? { summary: decision.summary || view.summary } : null,
-    confidence: decision.confidence ?? view.confidence ?? null,
+    props: summary ? { summary } : null,
+    confidence: decision.confidence ?? (isMerge ? undefined : view.confidence) ?? null,
     anchor_type: strField(prospect.anchor_type),
     anchor_key: strField(prospect.anchor_key),
     source_dataset: strField(prospect.source_dataset),
@@ -326,7 +597,7 @@ export function routeDecision(prospect, view, decision, at) {
     curator_version: CURATOR_VERSION,
     committed_at: at,
   }
-  return { committed, rejected: false, resolution: resolution(pid, decision.decision, [itemKey], decision.note ?? null, at) }
+  return { committed, rejected: false, merged: isMerge, resolution: resolution(pid, decision.decision, [itemKey], decision.note ?? null, at) }
 }
 
 /**
@@ -346,73 +617,6 @@ function resolution(prospectId, decision, committedIds, note, at) {
     curator: CURATOR,
     curator_version: CURATOR_VERSION,
     resolved_at: at,
-  }
-}
-
-/**
- * Daemon source mirroring the propose source's timer shape.
- *
- * @returns {Promise<StartedSource>}
- */
-export async function startCurateSource() {
-  const runtime = requireEnrichRuntime()
-  /** @type {ReturnType<typeof setInterval> | null} */
-  let handle = null
-  /** @type {Promise<unknown> | null} */
-  let inFlight = null
-  let lastTickAt = /** @type {string | null} */ (null)
-
-  async function tick() {
-    lastTickAt = new Date().toISOString()
-    const c = runtime.config.curate
-    try {
-      await runCurateTick(runtime, { deadlineMs: Date.now() + c.max_tick_ms })
-    } catch (err) {
-      runtime.log.error('enrich.curate_tick_failed', {
-        [Attr.ERROR_KIND]: 'enrich_curate_failed',
-        message: err instanceof Error ? err.message : String(err),
-      })
-    }
-  }
-
-  function startTimer() {
-    const c = runtime.config.curate
-    if (!c.enabled) return
-    const intervalMs = Math.max(1, Math.round(c.interval_minutes * 60_000))
-    handle = setInterval(() => {
-      if (inFlight) return
-      inFlight = tick().finally(() => { inFlight = null })
-    }, intervalMs)
-    if (typeof handle.unref === 'function') handle.unref()
-  }
-
-  function stopTimer() {
-    if (handle) clearInterval(handle)
-    handle = null
-  }
-
-  startTimer()
-
-  return {
-    async status() {
-      /** @type {SourceStatus} */
-      const status = {
-        state: handle !== null ? 'ready' : 'stopped',
-        message: runtime.config.curate.enabled
-          ? `curate every ${runtime.config.curate.interval_minutes}m`
-          : 'disabled',
-        details: { last_tick_at: lastTickAt },
-      }
-      return status
-    },
-    async reload() {
-      stopTimer()
-      startTimer()
-    },
-    async stop() {
-      stopTimer()
-      if (inFlight) await inFlight.catch(() => {})
-    },
   }
 }
 

@@ -1583,6 +1583,51 @@ export interface CompletionCapability {
    * internally and normalize to `CompletionDelta`.
    */
   stream(req: CompletionRequest, opts?: CompletionOptions): AsyncIterable<CompletionDelta>
+  /**
+   * Async batch generation, when the provider offers it (Anthropic Message
+   * Batches: 50% off, asynchronous, results within ≤24h). Latency-insensitive
+   * callers submit many requests at once, poll, and collect. Absent on
+   * providers without a batch API — callers feature-detect and fall back to
+   * sequential {@link complete}.
+   */
+  batch?: CompletionBatch
+}
+
+/**
+ * Provider-neutral batch generation surface (Anthropic Message Batches under
+ * the hood). One `submit` enqueues N requests keyed by caller-chosen
+ * `customId`; `poll` reports job progress; `results` returns one outcome per
+ * `customId` (a normalized {@link CompletionResult} or an error). A `refusal`
+ * is a *successful* per-request result with `stopReason: "refusal"`, not an
+ * error — the same contract as {@link CompletionCapability.complete}.
+ */
+export interface CompletionBatch {
+  submit(requests: CompletionBatchRequest[], opts?: CompletionOptions): Promise<CompletionBatchStatus>
+  poll(id: string, opts?: CompletionOptions): Promise<CompletionBatchStatus>
+  results(id: string, opts?: CompletionOptions): Promise<CompletionBatchResult[]>
+  cancel?(id: string, opts?: CompletionOptions): Promise<CompletionBatchStatus>
+}
+
+export interface CompletionBatchRequest {
+  /** Caller-chosen id, echoed on the matching {@link CompletionBatchResult}. Unique within the batch. */
+  customId: string
+  request: CompletionRequest
+}
+
+export interface CompletionBatchStatus {
+  id: string
+  /** `"in_progress"` while running; `"ended"` once every request is finalized; `"canceling"` after a cancel. */
+  status: 'in_progress' | 'ended' | 'canceling' | string
+  /** Per-state request tallies, when the provider reports them. */
+  counts?: { processing?: number, succeeded?: number, errored?: number, canceled?: number, expired?: number }
+}
+
+export interface CompletionBatchResult {
+  customId: string
+  /** Present when the request succeeded (including a `refusal` stop reason). */
+  result?: CompletionResult
+  /** Present when the request errored, expired, or was canceled. */
+  error?: { type: string, message?: string }
 }
 
 export interface CompletionRequest {
