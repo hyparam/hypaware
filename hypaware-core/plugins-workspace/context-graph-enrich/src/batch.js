@@ -254,6 +254,16 @@ export async function pollUntilEnded(batch, id, opts = {}) {
 }
 
 /**
+ * A cancellable inter-poll wait. The timer is deliberately **not** `unref`'d:
+ * unlike the daemon source intervals (which unref so they never block shutdown),
+ * this delay is *awaited* inside {@link pollUntilEnded}'s run-to-completion loop —
+ * the only thing the `hyp enrich backfill` command is doing while it waits — so
+ * it must keep the event loop alive. An unref'd timer here would let the process
+ * exit mid-poll (abandoning the batch) and leaves an awaited promise pending when
+ * the loop drains, which the node:test runner reports as a failure ("Promise
+ * resolution is still pending but the event loop has already resolved"). The
+ * abort signal still clears the timer for prompt cancellation.
+ *
  * @param {number} ms
  * @param {AbortSignal | undefined} signal
  * @returns {Promise<void>}
@@ -262,7 +272,6 @@ function delay(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('aborted'))
     const t = setTimeout(resolve, ms)
-    if (typeof t.unref === 'function') t.unref()
     signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')) }, { once: true })
   })
 }
