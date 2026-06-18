@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { messagesEndpoint } from './config.js'
 
 /**
- * @import { CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompletionBatchRequest, CompletionBatchResult, CompletionBatchStatus, CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { AnthropicCompletionConfig, CreateAnthropicCompletionOptions, FetchLike } from './types.d.ts'
  */
 
@@ -28,10 +28,24 @@ export function createAnthropicCompletion(opts) {
   const { config, env, log } = opts
   const fetchImpl = opts.fetchImpl ?? /** @type {FetchLike} */ (/** @type {unknown} */ (globalThis.fetch))
   const endpoint = messagesEndpoint(config.base_url)
+  const batchEndpoint = `${endpoint}/batches`
 
   return {
     provider: 'anthropic',
     defaultModel: config.model,
+
+    // Anthropic Message Batches (50% off, async, ≤24h). The enrichment regimes
+    // submit their many curator/proposer calls here rather than blocking on
+    // sequential `complete`s. @ref LLP 0028#two-regimes
+    batch: {
+      submit: (requests, batchOpts) => submitBatch({ requests, config, env, fetchImpl, batchEndpoint, log, signal: batchOpts?.signal }),
+      async poll(id, batchOpts) {
+        const full = await pollBatchFull({ id, config, env, fetchImpl, batchEndpoint, signal: batchOpts?.signal })
+        return { id: full.id, status: full.status, counts: full.counts }
+      },
+      results: (id, batchOpts) => batchResults({ id, config, env, fetchImpl, batchEndpoint, log, signal: batchOpts?.signal }),
+      cancel: (id, batchOpts) => cancelBatch({ id, config, env, fetchImpl, batchEndpoint, signal: batchOpts?.signal }),
+    },
 
     async complete(req, completeOpts) {
       assertMessages(req)
@@ -110,20 +124,44 @@ function assertMessages(req) {
  * @returns {{ body: string, headers: Record<string, string> }}
  */
 function buildRequest({ req, config, env, model, stream }) {
+  const { body, betas } = composeMessageBody({ req, config, model, stream })
+  const headers = authHeaders(config, env)
+  if (betas && betas.length > 0) headers['anthropic-beta'] = betas.join(',')
+  return { body: JSON.stringify(body), headers }
+}
+
+/**
+ * Standard auth + version headers. The API key resolves from the environment
+ * at call time, used only for `x-api-key`; it is never logged, thrown, or
+ * stored. An unset key (localhost proxy) simply omits the header.
+ *
+ * @param {AnthropicCompletionConfig} config
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Record<string, string>}
+ */
+function authHeaders(config, env) {
   const apiKey = env[config.api_key_env]
   /** @type {Record<string, string>} */
-  const headers = {
-    'content-type': 'application/json',
-    'anthropic-version': config.anthropic_version,
-  }
+  const headers = { 'content-type': 'application/json', 'anthropic-version': config.anthropic_version }
   if (apiKey) headers['x-api-key'] = apiKey
+  return headers
+}
 
+/**
+ * Compose a Messages API request **body object** (and any `betas` lifted out of
+ * `params`). Shared by the synchronous {@link buildRequest} path (which
+ * stringifies it) and the batch path (which embeds it as a per-request
+ * `params`). Explicit fields (messages/system/tools/toolChoice/responseFormat)
+ * always win over `params`.
+ *
+ * @param {{ req: CompletionRequest, config: AnthropicCompletionConfig, model: string, stream: boolean }} args
+ * @returns {{ body: Record<string, unknown>, betas: string[] | undefined }}
+ */
+function composeMessageBody({ req, config, model, stream }) {
   const params = /** @type {Record<string, unknown>} */ ({ ...(req.params ?? {}) })
-  const betas = params.betas
+  const rawBetas = params.betas
   delete params.betas
-  if (Array.isArray(betas) && betas.length > 0) {
-    headers['anthropic-beta'] = betas.map(String).join(',')
-  }
+  const betas = Array.isArray(rawBetas) && rawBetas.length > 0 ? rawBetas.map(String) : undefined
 
   const { system, messages } = toAnthropicMessages(req)
   /** @type {Record<string, unknown>} */
@@ -148,7 +186,7 @@ function buildRequest({ req, config, env, model, stream }) {
     body.output_config = { ...existing, format: req.responseFormat }
   }
 
-  return { body: JSON.stringify(body), headers }
+  return { body, betas }
 }
 
 /**
@@ -220,19 +258,33 @@ function contentToText(content) {
  * @returns {Promise<Awaited<ReturnType<FetchLike>>>}
  */
 async function sendRequest({ endpoint, headers, body, fetchImpl, config, signal }) {
+  return sendHttp({ endpoint, method: 'POST', headers, body, fetchImpl, config, signal })
+}
+
+/**
+ * Generalized HTTP send (any method, optional body — the batch poll/results
+ * GETs carry none), mapping transport/HTTP failures to `hypErrorKind` errors.
+ * The response body is deliberately never read into an error — a provider may
+ * echo prompt content or credential material in its error detail; status +
+ * endpoint + kind are enough to diagnose.
+ *
+ * @param {{ endpoint: string, method: string, headers: Record<string, string>, body?: string, fetchImpl: FetchLike, config: AnthropicCompletionConfig, signal: AbortSignal | undefined }} args
+ * @returns {Promise<Awaited<ReturnType<FetchLike>>>}
+ */
+async function sendHttp({ endpoint, method, headers, body, fetchImpl, config, signal }) {
   const timeoutSignal = AbortSignal.timeout(config.timeout_ms)
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
 
   /** @type {Awaited<ReturnType<FetchLike>>} */
   let response
   try {
-    response = await fetchImpl(endpoint, { method: 'POST', headers, body, signal: requestSignal })
+    response = await fetchImpl(endpoint, { method, headers, ...(body !== undefined ? { body } : {}), signal: requestSignal })
   } catch (err) {
     if (timeoutSignal.aborted) {
-      throw newCompletionError('completion_timeout', `messages request to ${endpoint} timed out after ${config.timeout_ms}ms`)
+      throw newCompletionError('completion_timeout', `request to ${endpoint} timed out after ${config.timeout_ms}ms`)
     }
     const message = err instanceof Error ? err.message : String(err)
-    throw newCompletionError('completion_request_failed', `messages request to ${endpoint} failed: ${message}`)
+    throw newCompletionError('completion_request_failed', `request to ${endpoint} failed: ${message}`)
   }
 
   if (!response.ok) {
@@ -243,7 +295,7 @@ async function sendRequest({ endpoint, headers, body, fetchImpl, config, signal 
         : ''
     const err = newCompletionError(
       `completion_http_${response.status}`,
-      `messages request to ${endpoint} failed with HTTP ${response.status}${hint}`
+      `request to ${endpoint} failed with HTTP ${response.status}${hint}`
     )
     err.status = response.status
     throw err
@@ -291,6 +343,205 @@ export function parseAnthropicMessageResponse(payload, ctx) {
     stopReason: typeof data.stop_reason === 'string' ? data.stop_reason : undefined,
     usage: { input_tokens: data.usage?.input_tokens, output_tokens: data.usage?.output_tokens },
   }
+}
+
+/**
+ * Submit a Message Batch — one Anthropic batch job over N `{custom_id, params}`
+ * requests, each `params` a Messages body built by {@link composeMessageBody}.
+ * Returns the initial job status; the caller polls and collects. Any `betas`
+ * across the requests are unioned onto the submit's `anthropic-beta` header.
+ *
+ * @ref LLP 0028#two-regimes [implements]
+ *
+ * @param {{ requests: CompletionBatchRequest[], config: AnthropicCompletionConfig, env: NodeJS.ProcessEnv, fetchImpl: FetchLike, batchEndpoint: string, log: PluginLogger, signal: AbortSignal | undefined }} args
+ * @returns {Promise<CompletionBatchStatus>}
+ */
+async function submitBatch({ requests, config, env, fetchImpl, batchEndpoint, log, signal }) {
+  if (!Array.isArray(requests) || requests.length === 0) {
+    throw newCompletionError('completion_empty_messages', 'batch submit requires a non-empty requests array')
+  }
+  return withSpan(
+    'completion.batch_submit',
+    { [Attr.COMPONENT]: 'completion', [Attr.OPERATION]: 'completion.batch_submit', [Attr.PLUGIN]: PLUGIN_NAME, batch_size: requests.length, status: 'ok' },
+    async (span) => {
+      const headers = authHeaders(config, env)
+      /** @type {Set<string>} */
+      const betaSet = new Set()
+      const batchRequests = requests.map(({ customId, request }) => {
+        assertMessages(request)
+        const model = request.model ?? config.model
+        const { body, betas } = composeMessageBody({ req: request, config, model, stream: false })
+        if (betas) for (const b of betas) betaSet.add(b)
+        return { custom_id: customId, params: body }
+      })
+      if (betaSet.size > 0) headers['anthropic-beta'] = [...betaSet].join(',')
+      const response = await sendHttp({ endpoint: batchEndpoint, method: 'POST', headers, body: JSON.stringify({ requests: batchRequests }), fetchImpl, config, signal })
+      const status = parseBatchStatusFull(await readJson(response, batchEndpoint))
+      span.setAttribute('batch_id', status.id)
+      span.setAttribute('batch_status', status.status)
+      return status
+    },
+    { component: 'completion' }
+  ).catch((/** @type {unknown} */ err) => {
+    logBatchError(log, 'submit', err)
+    throw err
+  })
+}
+
+/**
+ * Poll one batch job's status, including the internal `resultsUrl` (present once
+ * `status === 'ended'`). The public `batch.poll` strips `resultsUrl`.
+ *
+ * @param {{ id: string, config: AnthropicCompletionConfig, env: NodeJS.ProcessEnv, fetchImpl: FetchLike, batchEndpoint: string, signal: AbortSignal | undefined }} args
+ * @returns {Promise<CompletionBatchStatus & { resultsUrl?: string }>}
+ */
+async function pollBatchFull({ id, config, env, fetchImpl, batchEndpoint, signal }) {
+  const endpoint = `${batchEndpoint}/${encodeURIComponent(id)}`
+  const response = await sendHttp({ endpoint, method: 'GET', headers: authHeaders(config, env), fetchImpl, config, signal })
+  return parseBatchStatusFull(await readJson(response, endpoint))
+}
+
+/**
+ * Retrieve a finished batch's per-request results. Polls first for the
+ * `results_url`; returns `[]` if the job is not yet ended (the caller polls
+ * again). Each line is normalized to a {@link CompletionResult} (a `refusal` is
+ * a successful result, not an error) or a safe error category.
+ *
+ * @param {{ id: string, config: AnthropicCompletionConfig, env: NodeJS.ProcessEnv, fetchImpl: FetchLike, batchEndpoint: string, log: PluginLogger, signal: AbortSignal | undefined }} args
+ * @returns {Promise<CompletionBatchResult[]>}
+ */
+async function batchResults({ id, config, env, fetchImpl, batchEndpoint, log, signal }) {
+  return withSpan(
+    'completion.batch_results',
+    { [Attr.COMPONENT]: 'completion', [Attr.OPERATION]: 'completion.batch_results', [Attr.PLUGIN]: PLUGIN_NAME, batch_id: id, status: 'ok' },
+    async (span) => {
+      const status = await pollBatchFull({ id, config, env, fetchImpl, batchEndpoint, signal })
+      span.setAttribute('batch_status', status.status)
+      if (!status.resultsUrl) return []
+      const response = await sendHttp({ endpoint: status.resultsUrl, method: 'GET', headers: authHeaders(config, env), fetchImpl, config, signal })
+      let text
+      try {
+        text = await response.text()
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        throw newCompletionError('completion_bad_response', `batch results body from ${status.resultsUrl} is unreadable: ${message}`)
+      }
+      const results = parseBatchResultsJsonl(text, { model: config.model, endpoint: batchEndpoint })
+      span.setAttribute('result_count', results.length)
+      return results
+    },
+    { component: 'completion' }
+  ).catch((/** @type {unknown} */ err) => {
+    logBatchError(log, 'results', err)
+    throw err
+  })
+}
+
+/**
+ * Request cancellation of a batch job.
+ *
+ * @param {{ id: string, config: AnthropicCompletionConfig, env: NodeJS.ProcessEnv, fetchImpl: FetchLike, batchEndpoint: string, signal: AbortSignal | undefined }} args
+ * @returns {Promise<CompletionBatchStatus>}
+ */
+async function cancelBatch({ id, config, env, fetchImpl, batchEndpoint, signal }) {
+  const endpoint = `${batchEndpoint}/${encodeURIComponent(id)}/cancel`
+  const response = await sendHttp({ endpoint, method: 'POST', headers: authHeaders(config, env), fetchImpl, config, signal })
+  return parseBatchStatusFull(await readJson(response, endpoint))
+}
+
+/**
+ * Parse a batch status payload (`/v1/messages/batches/{id}`) into the normalized
+ * shape plus the internal `resultsUrl`.
+ *
+ * @param {unknown} payload
+ * @returns {CompletionBatchStatus & { resultsUrl?: string }}
+ */
+function parseBatchStatusFull(payload) {
+  const data = /** @type {{ id?: unknown, processing_status?: unknown, request_counts?: Record<string, unknown>, results_url?: unknown }} */ (payload ?? {})
+  const rc = data.request_counts && typeof data.request_counts === 'object' ? data.request_counts : undefined
+  return {
+    id: typeof data.id === 'string' ? data.id : '',
+    status: typeof data.processing_status === 'string' ? data.processing_status : 'in_progress',
+    counts: rc
+      ? {
+          processing: numOrUndef(rc.processing),
+          succeeded: numOrUndef(rc.succeeded),
+          errored: numOrUndef(rc.errored),
+          canceled: numOrUndef(rc.canceled),
+          expired: numOrUndef(rc.expired),
+        }
+      : undefined,
+    resultsUrl: typeof data.results_url === 'string' ? data.results_url : undefined,
+  }
+}
+
+/**
+ * Parse the JSONL results body into per-`custom_id` outcomes. A `succeeded`
+ * entry's `message` is normalized via {@link parseAnthropicMessageResponse}
+ * (so a `refusal` arrives as a successful result with `stopReason: 'refusal'`);
+ * everything else surfaces only the safe error *category* — never the provider
+ * error message, which can echo prompt content.
+ *
+ * @param {string} text
+ * @param {{ model: string, endpoint: string }} ctx
+ * @returns {CompletionBatchResult[]}
+ */
+function parseBatchResultsJsonl(text, ctx) {
+  /** @type {CompletionBatchResult[]} */
+  const out = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    /** @type {any} */
+    let entry
+    try {
+      entry = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const customId = typeof entry.custom_id === 'string' ? entry.custom_id : ''
+    if (!customId) continue
+    const r = entry.result ?? {}
+    if (r.type === 'succeeded' && r.message) {
+      out.push({ customId, result: parseAnthropicMessageResponse(r.message, ctx) })
+    } else {
+      const innerType = r.error && typeof r.error.type === 'string' ? r.error.type : undefined
+      out.push({ customId, error: { type: innerType ?? (typeof r.type === 'string' ? r.type : 'errored') } })
+    }
+  }
+  return out
+}
+
+/**
+ * @param {Awaited<ReturnType<FetchLike>>} response
+ * @param {string} endpoint
+ * @returns {Promise<unknown>}
+ */
+async function readJson(response, endpoint) {
+  try {
+    return await response.json()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    throw newCompletionError('completion_bad_response', `response from ${endpoint} is not JSON: ${message}`)
+  }
+}
+
+/**
+ * @param {PluginLogger} log
+ * @param {string} op
+ * @param {unknown} err
+ */
+function logBatchError(log, op, err) {
+  const errorKind = /** @type {HypError} */ (err)?.hypErrorKind ?? 'completion_batch_failed'
+  log.error(`completion.batch_${op}_failed`, {
+    [Attr.ERROR_KIND]: errorKind,
+    message: err instanceof Error ? err.message : String(err),
+  })
+}
+
+/** @param {unknown} v @returns {number | undefined} */
+function numOrUndef(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
 }
 
 /**

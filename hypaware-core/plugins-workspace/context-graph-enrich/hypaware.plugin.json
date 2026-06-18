@@ -26,13 +26,14 @@
     ],
     "config_sections": [{ "section": "context-graph-enrich" }],
     "sources": [
-      { "name": "enrich-propose", "summary": "T1 proposer: over-propose prospect knowledge from new source text" },
-      { "name": "enrich-curate", "summary": "T2 curator: prune/merge/deepen/commit prospects against the graph + source" }
+      { "name": "enrich-propose", "summary": "T1 proposer (ongoing): extract whole settled sessions into prospect knowledge" },
+      { "name": "enrich-curate", "summary": "T2 curator (ongoing): cluster + curate pending prospects via the Batch API (submit-and-collect)" }
     ],
     "commands": [
-      { "name": "enrich", "summary": "Context-graph enrichment (subcommands: propose, curate, status)" },
+      { "name": "enrich", "summary": "Context-graph enrichment (subcommands: propose, curate, backfill, status)" },
       { "name": "enrich propose", "summary": "Run one T1 propose tick now" },
       { "name": "enrich curate", "summary": "Run one T2 curate tick now" },
+      { "name": "enrich backfill", "summary": "Enrich ALL history (propose every session, curate via the Batch API)" },
       { "name": "enrich status", "summary": "Show enrichment watermarks and prospect/committed counts" }
     ]
   }

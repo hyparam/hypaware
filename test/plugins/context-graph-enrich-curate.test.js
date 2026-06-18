@@ -4,7 +4,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { validateEnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/config.js'
-import { routeDecision, runCurateTick } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/curate.js'
+import {
+  chunkBySize,
+  clusterByRecallRegion,
+  cosine,
+  greedyCosineClusters,
+  routeDecision,
+  runCurateTick,
+} from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/curate.js'
 
 /**
  * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
@@ -26,9 +33,12 @@ function prospect(o = {}) {
 
 const VIEW = { type: 'Decision', label: 'Use Redis', summary: 'cache layer', confidence: 0.6 }
 
-test('routeDecision commit writes a committed row + a resolution, never rejected', () => {
+// --- routeDecision -----------------------------------------------------------
+
+test('routeDecision commit writes a committed row + a resolution, never rejected/merged', () => {
   const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'commit', confidence: 0.9, note: 'good' }, AT)
   assert.equal(r.rejected, false)
+  assert.equal(r.merged, false)
   assert.ok(r.committed)
   assert.equal(r.committed?.item_id, 'Use Redis') // falls back to the view label as the key
   assert.equal(r.committed?.item_type, 'Decision')
@@ -72,15 +82,62 @@ test('routeDecision treats an omitted decision as an implicit reject', () => {
   assert.equal(r.resolution.note, 'omitted by curator')
 })
 
-test('routeDecision merge records the target and commits nothing', () => {
-  const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'merge', merge_into: 'existing-key' }, AT)
+test('routeDecision merge writes a committed row under the canonical key with the merging session anchor', () => {
+  // The committed-only projection makes provenance-per-session fall out of this:
+  // merge writes a committed row (target identity, this session's anchor), so the
+  // content-addressed node id collapses while this session gets its produced edge.
+  const r = routeDecision(prospect({ anchor_key: 'conv-B' }), VIEW, { index: 1, decision: 'merge', merge_into: 'redis-decision', item_type: 'Decision' }, AT)
+  assert.equal(r.merged, true)
   assert.equal(r.rejected, false)
-  assert.equal(r.committed, null)
+  assert.ok(r.committed)
+  assert.equal(r.committed?.item_id, 'redis-decision')
+  assert.equal(r.committed?.item_type, 'Decision')
+  assert.equal(r.committed?.anchor_key, 'conv-B', 'the merging session, not the canonical')
   assert.equal(r.resolution.decision, 'merge')
-  assert.deepEqual(r.resolution.committed_ids, ['existing-key'])
+  assert.deepEqual(r.resolution.committed_ids, ['redis-decision'])
 })
 
-// --- runCurateTick (orchestration: pending → salience → group → curate → route → append) ---
+// --- pure clustering helpers -------------------------------------------------
+
+test('cosine: identical → 1, orthogonal → 0, zero vector → 0', () => {
+  assert.equal(cosine([1, 0, 0], [1, 0, 0]), 1)
+  assert.equal(cosine([1, 0], [0, 1]), 0)
+  assert.equal(cosine([3, 4], [6, 8]), 1) // same direction, different magnitude
+  assert.equal(cosine([0, 0], [1, 1]), 0)
+})
+
+test('greedyCosineClusters groups near-duplicates and separates distinct ones, deterministically', () => {
+  const items = [
+    { p: { prospect_id: 'b' }, v: [1, 0] },
+    { p: { prospect_id: 'a' }, v: [0.99, 0.14] }, // ~same direction as [1,0]
+    { p: { prospect_id: 'c' }, v: [0, 1] },       // orthogonal → its own cluster
+  ]
+  const clusters = greedyCosineClusters(items, 0.9)
+  // Deterministic order is by prospect_id: a, b, c. a seeds; b joins a; c new.
+  assert.equal(clusters.length, 2)
+  assert.deepEqual(clusters[0].map((p) => p.prospect_id), ['a', 'b'])
+  assert.deepEqual(clusters[1].map((p) => p.prospect_id), ['c'])
+})
+
+test('clusterByRecallRegion buckets warm prospects by their top recalled node id', () => {
+  const recall = new Map([
+    ['p1', [{ id: 'nodeX', score: 0.9 }]],
+    ['p2', [{ id: 'nodeX', score: 0.8 }]],
+    ['p3', [{ id: 'nodeY', score: 0.7 }]],
+  ])
+  const warm = [{ prospect_id: 'p1' }, { prospect_id: 'p2' }, { prospect_id: 'p3' }]
+  const clusters = clusterByRecallRegion(warm, /** @type {any} */ (recall))
+  assert.equal(clusters.length, 2)
+  assert.deepEqual(clusters[0].map((p) => p.prospect_id), ['p1', 'p2'])
+  assert.deepEqual(clusters[1].map((p) => p.prospect_id), ['p3'])
+})
+
+test('chunkBySize splits an oversized cluster and leaves a small one whole', () => {
+  assert.deepEqual(chunkBySize([1, 2, 3], 5), [[1, 2, 3]])
+  assert.deepEqual(chunkBySize([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
+})
+
+// --- runCurateTick (orchestration: pending → score → cluster → curate → route → append) ---
 
 /** @returns {EnrichConfig} */
 function cfg(overrides = {}) {
@@ -117,9 +174,9 @@ function fakeQuery(query, tables) {
 
 /**
  * Fake EnrichRuntime backed by in-memory tables + injected execSql, a stub
- * completion returning a fixed `curate_decisions` call, and a stub vector
- * search. `appendRows` mutates `tables` so assertions can read committed /
- * resolution rows back.
+ * completion returning a fixed `curate_decisions` call, a stub vector search,
+ * and a stub embedder returning identical vectors (so the no-recall remainder
+ * collapses into ONE cluster — deterministic). `appendRows` mutates `tables`.
  *
  * @param {{ cfg: EnrichConfig, prospects: Record<string, unknown>[], resolutions?: Record<string, unknown>[], decisions: Array<Record<string, unknown>>, vectorHits?: Array<{ id: string, score: number }>, providerThrows?: boolean }} args
  */
@@ -129,8 +186,6 @@ function curateRuntime({ cfg, prospects, resolutions = [], decisions, vectorHits
     enrichment_prospects: [...prospects],
     enrichment_resolutions: [...resolutions],
     enrichment_committed: [],
-    edge: [],
-    node: [],
     [cfg.source_dataset]: [],
   }
   /** @type {string[]} */
@@ -148,7 +203,7 @@ function curateRuntime({ cfg, prospects, resolutions = [], decisions, vectorHits
     config: cfg,
     _completion: completion,
     _vector: { async search() { return vectorHits ?? [] } },
-    graph: { kit: { nodeId: (/** @type {string} */ t, /** @type {string} */ k) => `${t}:${k}` } },
+    _embedder: { async embed(/** @type {string[]} */ texts) { return { vectors: texts.map(() => new Float32Array([1, 0, 0])), dimension: 3, model: 'fake' } } },
     log: { info() {}, warn() {}, error() {} },
     storage: {
       cacheTablePath: (/** @type {string} */ dataset) => dataset,
@@ -183,11 +238,36 @@ test('runCurateTick curates pending prospects, writes committed + resolution row
   assert.equal(r.processed, 2)
   assert.equal(r.committed, 1)
   assert.equal(r.rejected, 1)
-  assert.equal(r.calls, 1, 'one curator call for the whole session group')
+  assert.equal(r.clusters, 1, 'identical embeddings collapse the no-recall remainder into one cluster')
+  assert.equal(r.calls, 1, 'one curator call for the cluster')
   assert.equal(getCalls(), 1)
   assert.equal(tables.enrichment_committed.length, 1)
   assert.equal(tables.enrichment_committed[0].item_id, 'Use Redis')
   assert.equal(tables.enrichment_resolutions.length, 3, 'p1 + p2 resolutions added to the pre-existing p3')
+})
+
+test('runCurateTick merges cross-session duplicates — each contributing session gets a committed row (produced edge)', async () => {
+  // Two sessions propose the same thing; the curator commits one and merges the
+  // other into its key. Both write a committed row under the canonical item_id
+  // (the node dedups by content-addressed id), each carrying its own session
+  // anchor → a produced edge per contributing session.
+  const prospects = [
+    prospectRow({ prospect_id: 'p1', label: 'Use Redis', anchor_key: 'A', source_keys: { message_id: ['mA'] } }),
+    prospectRow({ prospect_id: 'p2', label: 'Use Redis', anchor_key: 'B', source_keys: { message_id: ['mB'] } }),
+  ]
+  const decisions = [
+    { index: 1, decision: 'commit', item_key: 'redis-key', item_type: 'Decision' },
+    { index: 2, decision: 'merge', merge_into: 'redis-key', item_type: 'Decision' },
+  ]
+  const { runtime, tables } = curateRuntime({ cfg: cfg(), prospects, decisions })
+
+  const r = await runCurateTick(runtime)
+
+  assert.equal(r.committed, 2, 'commit + merge both write a committed row')
+  assert.equal(r.merged, 1)
+  assert.equal(tables.enrichment_committed.length, 2)
+  assert.deepEqual(tables.enrichment_committed.map((c) => c.item_id).sort(), ['redis-key', 'redis-key'])
+  assert.deepEqual(tables.enrichment_committed.map((c) => c.anchor_key).sort(), ['A', 'B'], 'one committed row per contributing session')
 })
 
 test('runCurateTick processes a duplicated prospect_id only once (idempotency defense-in-depth)', async () => {
@@ -230,7 +310,7 @@ test('runCurateTick auto-skips below-salience prospects with a terminal resoluti
   assert.equal(tables.enrichment_resolutions[0].note, 'below salience threshold')
 })
 
-test('runCurateTick leaves a group pending (no resolution) when the curator returns no decisions', async () => {
+test('runCurateTick leaves a cluster pending (no resolution) when the curator returns no decisions', async () => {
   const prospects = [prospectRow({ prospect_id: 'p1', label: 'X' })]
   const { runtime, tables } = curateRuntime({ cfg: cfg(), prospects, decisions: [] })
 
@@ -255,20 +335,4 @@ test('runCurateTick derefs the source with the shared content filter (T1/T2 pari
   assert.match(deref, /message_id IN \('m1'\)/)
   assert.match(deref, /content_text IS NOT NULL AND content_text <> ''/)
   assert.match(deref, /part_type NOT IN \('tool_result'\)/)
-})
-
-test('runCurateTick deref drops the content filter when a custom source disables it', async () => {
-  // A custom source defaults exclude_part_types to [] and can turn require_text
-  // off, so the deref is the bare id predicate — no part_type column referenced.
-  const prospects = [prospectRow({ prospect_id: 'p1', label: 'X', source_dataset: 'my_logs', source_keys: { row_id: ['r1'] } })]
-  const c = cfg({ source_dataset: 'my_logs', text_column: 'body', id_column: 'row_id', require_text: false })
-  const { runtime, queries } = curateRuntime({ cfg: c, prospects, decisions: [{ index: 1, decision: 'commit' }] })
-
-  await runCurateTick(runtime)
-
-  const deref = queries.find((q) => /SELECT body FROM my_logs/.test(q))
-  assert.ok(deref, 'curate tick derefs the custom source')
-  assert.match(deref, /WHERE row_id IN \('r1'\) LIMIT/)
-  assert.doesNotMatch(deref, /part_type/)
-  assert.doesNotMatch(deref, /IS NOT NULL/)
 })

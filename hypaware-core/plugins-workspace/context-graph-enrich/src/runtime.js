@@ -8,7 +8,7 @@
  */
 
 /**
- * @import { CompletionCapability, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CompletionCapability, EmbedderCapability, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { EnrichRuntime } from './types.d.ts'
  */
 
@@ -53,4 +53,22 @@ export function getVector(rt) {
     rt._vector = /** @type {VectorSearchCapability} */ (rt.ctx.requireCapability('hypaware.vector-search', '^1.0.0'))
   }
   return rt._vector
+}
+
+/**
+ * Lazily resolve + cache the embedder capability. Used only by the T2
+ * cold-remainder clustering ([§curate-clustering](LLP 0028)): prospects that
+ * recall nothing are clustered by their own embeddings. Resolved best-effort —
+ * an embedder provider is already present transitively (vector-search requires
+ * one), but if it isn't, the caller falls back to session grouping rather than
+ * failing the tick. Throws (caught by the caller) when no provider is installed.
+ *
+ * @param {EnrichRuntime} rt
+ * @returns {EmbedderCapability}
+ */
+export function getEmbedder(rt) {
+  if (!rt._embedder) {
+    rt._embedder = /** @type {EmbedderCapability} */ (rt.ctx.requireCapability('hypaware.embedder', '^1.0.0'))
+  }
+  return rt._embedder
 }

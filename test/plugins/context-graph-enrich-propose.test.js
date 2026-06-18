@@ -8,12 +8,16 @@ import path from 'node:path'
 
 import { validateEnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/config.js'
 import {
-  buildProposeQuery,
+  buildSessionAggregateQuery,
+  buildSessionPartsQuery,
+  buildTranscript,
   collectProspectRows,
-  groupSourceRows,
-  nextProposeCursor,
+  orderSessionParts,
   runProposeTick,
+  selectSessions,
+  sessionMark,
 } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/propose.js'
+import { readState, writeState } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/state.js'
 
 /**
  * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
@@ -28,161 +32,139 @@ function cfg(overrides = {}) {
 
 /**
  * Source row in the default `ai_gateway_messages` shape (part-level). `ts` is
- * epoch millis here (the engine surfaces TIMESTAMP as a Date, which
- * `groupSourceRows` coerces to millis); part_id is the row-unique tiebreak.
- * The anchor is keyed on `session_id` (@ref LLP 0030#decision — the Session
- * anchor moved off conversation_id, which is null for Claude).
- * @param {{ ts: number, part: string, conv: string, msg?: string, text?: string }} r
+ * epoch millis here (the engine surfaces TIMESTAMP as a Date, which the propose
+ * helpers coerce to millis); part_id is the row-unique tiebreak; session_id is
+ * the anchor (@ref LLP 0030#decision — the Session anchor moved off
+ * conversation_id, which is null for Claude).
+ * @param {{ ts: number, part: string, sid: string, msg?: string, text?: string }} r
  */
-function row({ ts, part, conv, msg = 'm', text = 'hello' }) {
-  return { message_created_at: ts, part_id: part, session_id: conv, conversation_id: null, message_id: msg, content_text: text }
+function srow({ ts, part, sid, msg = 'm', text = 'hello' }) {
+  return { message_created_at: ts, part_id: part, session_id: sid, conversation_id: null, message_id: msg, content_text: text }
 }
 
-// --- buildProposeQuery -------------------------------------------------------
+// --- buildSessionAggregateQuery (the cheap session selector) -----------------
 
-test('buildProposeQuery with no cursor still applies the default content filter', () => {
-  // No watermark predicate without a cursor, but the content filter (drop
-  // empty-text rows + tool_result) is always applied. @ref LLP 0028#row-selection
-  const sql = buildProposeQuery(cfg(), null, 200)
-  assert.match(sql, /WHERE/)
-  assert.doesNotMatch(sql, /message_created_at >=/)
+test('buildSessionAggregateQuery groups by session and takes MAX(ts), applying the content filter', () => {
+  const sql = buildSessionAggregateQuery(cfg())
+  assert.match(sql, /SELECT session_id, MAX\(message_created_at\) AS last_ts FROM ai_gateway_messages/)
   assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
   assert.match(sql, /part_type NOT IN \('tool_result'\)/)
-  assert.match(sql, /FROM ai_gateway_messages/)
-  assert.match(sql, /ORDER BY message_created_at, part_id LIMIT 200/)
+  assert.match(sql, /GROUP BY session_id$/)
 })
 
-test('buildProposeQuery filters with a numeric ts >= floor ANDed before the content filter', () => {
-  // The engine compares a TIMESTAMP (Date) column correctly only against a
-  // numeric literal, and `>=` (not `>`) keeps same-ts parts; the exact tuple
-  // boundary is dropped in JS, not SQL.
-  const sql = buildProposeQuery(cfg(), { ts: 1750000000000, id: 'p2' }, 50)
-  assert.match(sql, /WHERE message_created_at >= 1750000000000 AND/)
-  assert.doesNotMatch(sql, /message_created_at >= '/) // numeric literal — no injection surface
+test('buildSessionAggregateQuery omits WHERE when both filters are off', () => {
+  const sql = buildSessionAggregateQuery(cfg({ require_text: false, exclude_part_types: [] }))
+  assert.doesNotMatch(sql, /WHERE/)
+  assert.match(sql, /GROUP BY session_id$/)
+})
+
+// --- buildSessionPartsQuery (the full-session read) --------------------------
+
+test('buildSessionPartsQuery selects all transcript columns for one session, with no LIMIT', () => {
+  const sql = buildSessionPartsQuery(cfg(), 'sess-1')
+  assert.match(sql, /SELECT session_id, message_created_at, part_id, message_id, content_text FROM ai_gateway_messages/)
+  assert.match(sql, /WHERE session_id = 'sess-1' AND/)
   assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
   assert.match(sql, /part_type NOT IN \('tool_result'\)/)
-  assert.match(sql, /ORDER BY message_created_at, part_id LIMIT 50/)
+  assert.doesNotMatch(sql, /LIMIT/) // full session — the whole point
 })
 
-test('buildProposeQuery honors row-selection config (filters off, custom excludes)', () => {
-  // Both filters off + no cursor → no WHERE clause at all.
-  const none = buildProposeQuery(cfg({ require_text: false, exclude_part_types: [] }), null, 10)
-  assert.doesNotMatch(none, /WHERE/)
-
-  // require_text off keeps only the part-type filter, over the configured column.
-  const custom = buildProposeQuery(
-    cfg({ require_text: false, exclude_part_types: ['tool_result', 'image'], part_type_column: 'part_type' }),
-    null,
-    10
-  )
-  assert.match(custom, /WHERE part_type NOT IN \('tool_result', 'image'\)/)
-  assert.doesNotMatch(custom, /content_text IS NOT NULL/)
+test("buildSessionPartsQuery escapes a single quote in the session id (no injection surface)", () => {
+  const sql = buildSessionPartsQuery(cfg(), "a'b")
+  assert.match(sql, /WHERE session_id = 'a''b' AND/)
 })
 
-// --- groupSourceRows ---------------------------------------------------------
-
-test('groupSourceRows groups by anchor, concatenates text, and collects provenance keys', () => {
-  const rows = [
-    row({ ts: 1000, part: 'p1', conv: 'A', msg: 'm1', text: 'one' }),
-    row({ ts: 1000, part: 'p2', conv: 'A', msg: 'm1', text: 'two' }),
-    row({ ts: 2000, part: 'p3', conv: 'B', msg: 'm2', text: 'three' }),
-  ]
-  const { groups, rowMeta } = groupSourceRows(rows, cfg())
-  assert.equal(groups.size, 2)
-  assert.equal(groups.get('A')?.text, 'one\ntwo')
-  assert.deepEqual(groups.get('A')?.keys, ['m1', 'm1'])
-  assert.equal(groups.get('B')?.text, 'three')
-  assert.deepEqual(rowMeta, [
-    { ts: 1000, id: 'p1', anchorKey: 'A' },
-    { ts: 1000, id: 'p2', anchorKey: 'A' },
-    { ts: 2000, id: 'p3', anchorKey: 'B' },
-  ])
+test('buildSessionPartsQuery for a custom source is the bare anchor predicate (no part_type column)', () => {
+  const c = cfg({ source_dataset: 'my_logs', text_column: 'body', id_column: 'row_id', anchor_key_column: 'thread', require_text: false })
+  const sql = buildSessionPartsQuery(c, 'T1')
+  assert.match(sql, /SELECT thread, message_created_at, part_id, row_id, body FROM my_logs/)
+  assert.match(sql, /WHERE thread = 'T1'$/)
+  assert.doesNotMatch(sql, /part_type/)
+  assert.doesNotMatch(sql, /IS NOT NULL/)
 })
 
-test('groupSourceRows drops rows at or before the cursor tuple (boundary re-fetch)', () => {
-  // The `ts >= cursorMs` query re-includes the boundary millisecond (1000);
-  // p1/p2 were already processed, p3 (same ts, id > p2) and p4 are new.
-  const rows = [
-    row({ ts: 1000, part: 'p1', conv: 'A', text: 'a' }),
-    row({ ts: 1000, part: 'p2', conv: 'A', text: 'b' }),
-    row({ ts: 1000, part: 'p3', conv: 'A', text: 'c' }),
-    row({ ts: 2000, part: 'p4', conv: 'B', text: 'd' }),
-  ]
-  const { groups, rowMeta } = groupSourceRows(rows, cfg(), { ts: 1000, id: 'p2' })
-  assert.deepEqual(rowMeta.map((m) => m.id), ['p3', 'p4'], 'same-ts boundary part p3 is NOT skipped')
-  assert.equal(groups.get('A')?.text, 'c')
-  assert.equal(groups.get('B')?.text, 'd')
-})
+// --- orderSessionParts / buildTranscript / sessionMark ----------------------
 
-test('groupSourceRows tags rows with no anchor or no text as non-blocking (anchorKey null)', () => {
-  const rows = [
-    row({ ts: 1000, part: 'p1', conv: '', text: 'x' }),     // no anchor
-    row({ ts: 2000, part: 'p2', conv: 'A', text: '' }),     // no text
-    row({ ts: 3000, part: 'p3', conv: 'A', text: 'real' }), // real
-  ]
-  const { groups, rowMeta } = groupSourceRows(rows, cfg())
-  assert.equal(groups.size, 1)
-  assert.equal(groups.get('A')?.text, 'real')
-  assert.deepEqual(rowMeta.map((m) => m.anchorKey), [null, null, 'A'])
-})
-
-test('groupSourceRows coerces Date and ISO-string timestamps to epoch millis', () => {
+test('orderSessionParts sorts by (timestamp, tiebreak) and coerces Date/ISO timestamps', () => {
   const ms = Date.parse('2026-06-15T00:00:01.000Z')
   const rows = [
-    { message_created_at: new Date(ms), part_id: 'p1', session_id: 'A', message_id: 'm1', content_text: 'd' },
-    { message_created_at: '2026-06-15T00:00:01.000Z', part_id: 'p2', session_id: 'A', message_id: 'm1', content_text: 's' },
+    srow({ ts: 2000, part: 'p3', sid: 'A', text: 'third' }),
+    { message_created_at: new Date(ms), part_id: 'p2', session_id: 'A', message_id: 'm', content_text: 'date' },
+    { message_created_at: '2026-06-15T00:00:01.000Z', part_id: 'p1', session_id: 'A', message_id: 'm', content_text: 'iso' },
+    srow({ ts: 1000, part: 'p9', sid: 'A', text: 'first' }),
   ]
-  const { rowMeta } = groupSourceRows(rows, cfg())
-  assert.deepEqual(rowMeta.map((m) => m.ts), [ms, ms])
+  const ordered = orderSessionParts(rows, cfg())
+  // 1000 < 2000 < ms (2026-06-15 ≈ 1.78e12); at ms the tiebreak p1 < p2.
+  assert.deepEqual(ordered.map((r) => r.content_text), ['first', 'third', 'iso', 'date'])
 })
 
-// --- nextProposeCursor (the watermark) --------------------------------------
-
-const RM = [
-  { ts: 1000, id: 'p1', anchorKey: 'A' },
-  { ts: 1000, id: 'p2', anchorKey: 'A' },
-  { ts: 2000, id: 'p3', anchorKey: 'B' },
-  { ts: 3000, id: 'p4', anchorKey: 'B' },
-]
-
-test('nextProposeCursor advances to the global max tuple when every group was processed', () => {
-  assert.deepEqual(nextProposeCursor(RM, new Set(['A', 'B']), null), { ts: 3000, id: 'p4' })
-})
-
-test('nextProposeCursor advances only over the processed prefix on an early deadline break', () => {
-  // A processed, B not (deadline broke before B) → cursor stops just before
-  // B's first row, so B is NOT skipped: it is re-read next tick.
-  assert.deepEqual(nextProposeCursor(RM, new Set(['A']), null), { ts: 1000, id: 'p2' })
-})
-
-test('nextProposeCursor does not advance when the very first group is unprocessed', () => {
-  const prior = { ts: 500, id: 'z' }
-  assert.deepEqual(nextProposeCursor(RM, new Set(['B']), prior), prior)
-})
-
-test('nextProposeCursor is order-independent — a later processed group cannot skip an earlier unprocessed one', () => {
-  // Interleaved timestamps across anchors: A at 1000+3000, B at 2000.
-  const interleaved = [
-    { ts: 1000, id: 'p1', anchorKey: 'A' },
-    { ts: 2000, id: 'p2', anchorKey: 'B' },
-    { ts: 3000, id: 'p3', anchorKey: 'A' },
+test('buildTranscript stitches ordered text and dedups provenance ids, skipping empties', () => {
+  const ordered = [
+    srow({ ts: 1, part: 'p1', sid: 'A', msg: 'm1', text: 'one' }),
+    srow({ ts: 2, part: 'p2', sid: 'A', msg: 'm1', text: '' }),     // empty — skipped
+    srow({ ts: 3, part: 'p3', sid: 'A', msg: 'm2', text: 'two' }),
   ]
-  // A processed, B not. A's t=3000 row must NOT pull the cursor past B's t=2000 row.
-  assert.deepEqual(nextProposeCursor(interleaved, new Set(['A']), null), { ts: 1000, id: 'p1' })
+  const { text, keys } = buildTranscript(ordered, cfg())
+  assert.equal(text, 'one\ntwo')
+  assert.deepEqual(keys, ['m1', 'm2'], 'message ids deduped across parts')
 })
 
-test('nextProposeCursor advances past non-blocking (no-anchor) rows', () => {
-  const rm = [
-    { ts: 1000, id: 'p1', anchorKey: null },
-    { ts: 2000, id: 'p2', anchorKey: 'A' },
+test('sessionMark returns the latest ordered part tuple', () => {
+  const ordered = orderSessionParts(
+    [srow({ ts: 1000, part: 'p1', sid: 'A' }), srow({ ts: 3000, part: 'p9', sid: 'A' }), srow({ ts: 3000, part: 'p2', sid: 'A' })],
+    cfg()
+  )
+  assert.deepEqual(sessionMark(ordered, cfg()), { ts: 3000, id: 'p9' })
+})
+
+// --- selectSessions (the two-regime selector) -------------------------------
+
+/**
+ * A runtime whose `execSql` returns a fixed aggregate result (one row per
+ * session: { session_id, last_ts }) — the shape buildSessionAggregateQuery
+ * yields. Lets us drive selectSessions without a SQL engine.
+ * @param {{ cfg: EnrichConfig, aggregate: Array<{ session_id: string, last_ts: number }> }} args
+ */
+function selectorRuntime({ cfg, aggregate }) {
+  return /** @type {any} */ ({
+    config: cfg,
+    execSql: async () => ({ rows: aggregate }),
+  })
+}
+
+const NOW = Date.parse('2026-06-18T12:00:00.000Z')
+const HOUR = 60 * 60_000
+
+test('selectSessions ongoing keeps only settled, past-watermark sessions, oldest first, capped', () => {
+  const aggregate = [
+    { session_id: 'fresh', last_ts: NOW - 5 * 60_000 },   // 5m old — not settled
+    { session_id: 'old1', last_ts: NOW - 3 * HOUR },      // settled
+    { session_id: 'old2', last_ts: NOW - 2 * HOUR },      // settled
+    { session_id: 'done', last_ts: NOW - 4 * HOUR },      // settled but already enriched-through
   ]
-  assert.deepEqual(nextProposeCursor(rm, new Set(['A']), null), { ts: 2000, id: 'p2' })
+  const runtime = selectorRuntime({ cfg: cfg({ propose: { max_sessions_per_tick: 2 } }), aggregate })
+  const marks = { done: { ts: NOW - 4 * HOUR, id: 'z' } } // last_ts <= mark.ts → excluded
+  const ids = /** @type {Promise<string[]>} */ (selectSessions(runtime, { regime: 'ongoing', nowMs: NOW, marks }))
+  return ids.then((res) => {
+    assert.deepEqual(res, ['old1', 'old2'], 'fresh not settled; done already covered; oldest-settled first; capped at 2')
+  })
+})
+
+test('selectSessions backfill returns every session, ignoring settle + watermark + cap', async () => {
+  const aggregate = [
+    { session_id: 'fresh', last_ts: NOW - 1 * 60_000 },
+    { session_id: 'old', last_ts: NOW - 5 * HOUR },
+    { session_id: 'done', last_ts: NOW - 4 * HOUR },
+  ]
+  const runtime = selectorRuntime({ cfg: cfg({ propose: { max_sessions_per_tick: 1 } }), aggregate })
+  const ids = await selectSessions(runtime, { regime: 'backfill', nowMs: NOW, marks: { done: { ts: NOW, id: 'z' } } })
+  assert.deepEqual(ids.sort(), ['done', 'fresh', 'old'])
 })
 
 // --- collectProspectRows (dedup + row shape) --------------------------------
 
-test('collectProspectRows dedups identical (type,label) within an anchor and shapes the row', () => {
-  const perGroup = [
+test('collectProspectRows dedups identical (type,label) within a session and shapes the row', () => {
+  const perSession = [
     {
       anchorKey: 'A',
       keys: ['m1', 'm2'],
@@ -192,36 +174,55 @@ test('collectProspectRows dedups identical (type,label) within an anchor and sha
       ],
     },
   ]
-  const out = collectProspectRows(perGroup, cfg(), '2026-06-15T00:00:00.000Z')
+  const out = collectProspectRows(perSession, cfg(), '2026-06-15T00:00:00.000Z')
   assert.equal(out.size, 1, 'same type+label+anchor collapses to one prospect')
   const r = [...out.values()][0]
   assert.equal(r.prospect_type, 'Decision')
   assert.equal(r.label, 'Use Redis')
   assert.deepEqual(r.props, { summary: 'cache' })
-  assert.equal(r.confidence, 0.7)
   assert.equal(r.anchor_type, 'Session')
   assert.equal(r.anchor_key, 'A')
-  assert.equal(r.source_dataset, 'ai_gateway_messages')
   assert.deepEqual(r.source_keys, { message_id: ['m1', 'm2'] })
   assert.equal(r.extractor, 'enrich.t1')
 })
 
-test('collectProspectRows keeps the same label under different anchors as distinct prospects', () => {
-  const perGroup = [
+test('collectProspectRows keeps the same label under different sessions as distinct prospects', () => {
+  const perSession = [
     { anchorKey: 'A', keys: ['m1'], candidates: [{ type: 'Concept', label: 'X' }] },
     { anchorKey: 'B', keys: ['m2'], candidates: [{ type: 'Concept', label: 'X' }] },
   ]
-  const out = collectProspectRows(perGroup, cfg(), 'now')
+  const out = collectProspectRows(perSession, cfg(), 'now')
   assert.equal(out.size, 2, 'prospect id includes the anchor, so different sessions do not collide')
 })
 
-// --- runProposeTick (orchestration: read → propose → dedup → append → watermark) ---
+// --- runProposeTick (orchestration: select → read → extract → dedup → append → mark) ---
 
 /**
- * A fake EnrichRuntime backed by in-memory tables + the injected `execSql`
- * seam. `complete` returns the same emit_prospects tool call for every group.
- * `appendRows` mutates `tables`, so the cross-tick idempotency filter (which
- * reads back enrichment_prospects) sees prior writes.
+ * Minimal SQL stand-in: resolves the first `FROM <table>`, then honors a single
+ * `<col> = '<val>'` equality (the per-session parts query) — enough for the tick
+ * to read one session's parts and the idempotency filter to read prospects.
+ *
+ * @param {string} query
+ * @param {Record<string, Record<string, unknown>[]>} tables
+ */
+function fakeQuery(query, tables) {
+  const m = /FROM\s+(\w+)/i.exec(query)
+  const name = m ? m[1] : ''
+  let rows = tables[name] ? [...tables[name]] : []
+  const eq = /WHERE\s+(\w+)\s*=\s*'((?:[^']|'')*)'/i.exec(query)
+  if (eq) {
+    const col = eq[1]
+    const val = eq[2].replace(/''/g, "'")
+    rows = rows.filter((r) => String(r[col]) === val)
+  }
+  return rows
+}
+
+/**
+ * Fake EnrichRuntime backed by in-memory tables + the injected `execSql` seam.
+ * `complete` returns the same emit_prospects tool call for every session.
+ * `appendRows` mutates `tables`, so the cross-tick idempotency filter sees prior
+ * writes.
  *
  * @param {{ cfg: EnrichConfig, stateDir: string, source: Record<string, unknown>[], prospects?: Record<string, unknown>[], candidates: Array<Record<string, unknown>> }} args
  */
@@ -230,12 +231,12 @@ function proposeRuntime({ cfg, stateDir, source, prospects = [], candidates }) {
   const tables = {
     [cfg.source_dataset]: source,
     enrichment_prospects: [...prospects],
-    enrichment_resolutions: [],
-    enrichment_committed: [],
   }
+  let calls = 0
   const completion = {
     provider: 'anthropic',
     async complete() {
+      calls++
       return {
         stopReason: 'end_turn',
         message: { role: 'assistant', content: [{ type: 'tool_use', name: 'emit_prospects', input: { prospects: candidates } }] },
@@ -254,72 +255,74 @@ function proposeRuntime({ cfg, stateDir, source, prospects = [], candidates }) {
     },
     execSql: async (/** @type {{ query: string }} */ { query }) => ({ rows: fakeQuery(query, tables) }),
   })
-  return { runtime, tables }
-}
-
-/**
- * Minimal SQL stand-in: resolves the first `FROM <table>` and returns its rows.
- * The pure query helpers (buildProposeQuery/groupSourceRows) are tested above,
- * so here we only need rows to flow through the tick — WHERE/LIMIT are ignored.
- *
- * @param {string} query
- * @param {Record<string, Record<string, unknown>[]>} tables
- */
-function fakeQuery(query, tables) {
-  const m = /FROM\s+(\w+)/i.exec(query)
-  const name = m ? m[1] : ''
-  return tables[name] ? [...tables[name]] : []
+  return { runtime, tables, getCalls: () => calls }
 }
 
 function tmpStateDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'enrich-propose-'))
 }
 
-test('runProposeTick reads source, proposes, appends prospects, and advances the watermark', async () => {
+test('runProposeTick extracts a whole session in one call, appends prospects, and advances its mark', async () => {
   const stateDir = tmpStateDir()
   try {
     const source = [
-      row({ ts: 1000, part: 'p1', conv: 'A', msg: 'm1', text: 'we will use redis' }),
-      row({ ts: 2000, part: 'p2', conv: 'A', msg: 'm2', text: 'redis is the cache' }),
+      srow({ ts: 1000, part: 'p1', sid: 'A', msg: 'm1', text: 'we will use redis' }),
+      srow({ ts: 2000, part: 'p2', sid: 'A', msg: 'm2', text: 'redis is the cache' }),
     ]
     const candidates = [
       { type: 'Decision', label: 'Use Redis', summary: 'cache', confidence: 0.9 },
       { type: 'Concept', label: 'Cache', summary: 'a cache', confidence: 0.8 },
     ]
-    const { runtime, tables } = proposeRuntime({ cfg: cfg(), stateDir, source, candidates })
+    const { runtime, tables, getCalls } = proposeRuntime({ cfg: cfg(), stateDir, source, candidates })
 
-    const r = await runProposeTick(runtime)
+    const r = await runProposeTick(runtime, { regime: 'backfill', sessionIds: ['A'] })
 
-    assert.equal(r.groups, 1, 'one anchor (session A)')
+    assert.equal(r.sessions, 1)
+    assert.equal(getCalls(), 1, 'one full-session extraction call (not one per part)')
     assert.equal(r.prospects, 2, 'two distinct prospects appended')
-    assert.deepEqual(r.cursor, { ts: 2000, id: 'p2' }, 'watermark advanced to the max tuple')
     assert.equal(tables.enrichment_prospects.length, 2)
-    const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'enrich-state.json'), 'utf8'))
-    assert.deepEqual(persisted.propose_cursor, { ts: 2000, id: 'p2' })
+    const marks = readState(stateDir).session_marks
+    assert.deepEqual(marks.A, { ts: 2000, id: 'p2' }, 'mark advanced to the session latest part')
   } finally {
     fs.rmSync(stateDir, { recursive: true, force: true })
   }
 })
 
-test('runProposeTick is idempotent across ticks — re-reading the same source appends no duplicate (Codex finding)', async () => {
+test('runProposeTick is idempotent across ticks — re-extracting the same session appends no duplicate', async () => {
   const stateDir = tmpStateDir()
   try {
-    const source = [row({ ts: 1000, part: 'p1', conv: 'A', msg: 'm1', text: 'use redis' })]
+    const source = [srow({ ts: 1000, part: 'p1', sid: 'A', msg: 'm1', text: 'use redis' })]
     const candidates = [{ type: 'Decision', label: 'Use Redis', summary: 'cache', confidence: 0.9 }]
     const { runtime, tables } = proposeRuntime({ cfg: cfg(), stateDir, source, candidates })
 
-    const first = await runProposeTick(runtime)
+    const first = await runProposeTick(runtime, { regime: 'backfill', sessionIds: ['A'] })
     assert.equal(first.prospects, 1)
     assert.equal(tables.enrichment_prospects.length, 1)
 
-    // Simulate a tick that proposed then crashed before its watermark persisted:
-    // the next tick re-reads the same source from a null cursor and re-derives
-    // the same deterministic prospect id.
-    fs.rmSync(path.join(stateDir, 'enrich-state.json'))
-    const second = await runProposeTick(runtime)
+    // Re-run backfill over the same session (e.g. a later overlapping run): the
+    // deterministic prospect id is already persisted → filtered before append.
+    const second = await runProposeTick(runtime, { regime: 'backfill', sessionIds: ['A'] })
+    assert.equal(second.prospects, 0, 're-derived id already persisted → nothing appended')
+    assert.equal(tables.enrichment_prospects.length, 1, 'no duplicate prospect row')
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
 
-    assert.equal(second.prospects, 0, 're-derived id already persisted → filtered before append')
-    assert.equal(tables.enrichment_prospects.length, 1, 'no duplicate prospect row appended')
+test('runProposeTick ongoing skips a session already enriched through its latest part', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const source = [srow({ ts: 1000, part: 'p1', sid: 'A', msg: 'm1', text: 'use redis' })]
+    const candidates = [{ type: 'Decision', label: 'Use Redis', confidence: 0.9 }]
+    const { runtime, tables, getCalls } = proposeRuntime({ cfg: cfg(), stateDir, source, candidates })
+    // Seed the mark at the session's current latest part → no new content.
+    writeState(stateDir, { schema_version: 4, session_marks: { A: { ts: 1000, id: 'p1' } }, curate_job: null })
+
+    const r = await runProposeTick(runtime, { regime: 'ongoing', sessionIds: ['A'] })
+
+    assert.equal(r.sessions, 0, 'precise watermark check skips the already-enriched session')
+    assert.equal(getCalls(), 0, 'no model call for a session with no new content')
+    assert.equal(tables.enrichment_prospects.length, 0)
   } finally {
     fs.rmSync(stateDir, { recursive: true, force: true })
   }
@@ -328,14 +331,14 @@ test('runProposeTick is idempotent across ticks — re-reading the same source a
 test('runProposeTick drops candidates below the confidence floor before appending', async () => {
   const stateDir = tmpStateDir()
   try {
-    const source = [row({ ts: 1000, part: 'p1', conv: 'A', msg: 'm1', text: 'mixed' })]
+    const source = [srow({ ts: 1000, part: 'p1', sid: 'A', msg: 'm1', text: 'mixed' })]
     const candidates = [
       { type: 'Decision', label: 'Keep', confidence: 0.9 },
       { type: 'Concept', label: 'Drop', confidence: 0.05 },
     ]
     const { runtime, tables } = proposeRuntime({ cfg: cfg({ propose: { confidence_floor: 0.5 } }), stateDir, source, candidates })
 
-    const r = await runProposeTick(runtime)
+    const r = await runProposeTick(runtime, { regime: 'backfill', sessionIds: ['A'] })
 
     assert.equal(r.prospects, 1)
     assert.equal(tables.enrichment_prospects.length, 1)

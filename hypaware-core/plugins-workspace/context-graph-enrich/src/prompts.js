@@ -46,7 +46,7 @@ const T1_SYSTEM =
 
 const CURATE_DECISIONS_TOOL = {
   name: 'curate_decisions',
-  description: 'Decide what to do with EACH listed prospect, given the shared graph neighborhood and source.',
+  description: 'Decide what to do with EACH listed prospect, given the shared recalled knowledge and source.',
   input_schema: {
     type: 'object',
     additionalProperties: false,
@@ -60,12 +60,12 @@ const CURATE_DECISIONS_TOOL = {
           properties: {
             index: { type: 'integer', description: '1-based index of the prospect this decision applies to.' },
             decision: { type: 'string', enum: ['commit', 'merge', 'deepen', 'reject'] },
-            item_type: { type: 'string', description: 'Final node type (for commit/deepen).' },
+            item_type: { type: 'string', description: 'Final node type (for commit/deepen/merge). For merge, use the existing item\'s type so the node converges.' },
             item_key: { type: 'string', description: 'Final canonical key (for commit/deepen). Reuse an existing key to converge.' },
             label: { type: 'string', description: 'Final human-readable label.' },
             summary: { type: 'string', description: 'Final one-sentence statement of the item.' },
             confidence: { type: 'number', description: '0..1 — final confidence after curation.' },
-            merge_into: { type: 'string', description: 'Existing item key to merge into (for merge).' },
+            merge_into: { type: 'string', description: 'Existing item key to merge into (for merge). Pair with item_type so the merged node matches.' },
             note: { type: 'string', description: 'Short rationale.' },
           },
           required: ['index', 'decision'],
@@ -78,12 +78,13 @@ const CURATE_DECISIONS_TOOL = {
 
 const T2_SYSTEM =
   'You are a graph librarian curating proposed knowledge for a context graph. ' +
-  'You are given SEVERAL prospects from the same work session, plus the shared graph neighborhood, ' +
-  'per-prospect similar existing items, and the shared source excerpt. For EACH prospect choose exactly one action: ' +
+  'You are given a CLUSTER of related prospects (which may come from DIFFERENT work sessions), plus the shared recalled ' +
+  'committed knowledge, per-prospect similar existing items, and the shared source excerpt. For EACH prospect choose exactly one action: ' +
   '`commit` (real and new — give a final type, canonical key, label, summary, confidence), ' +
-  '`merge` (duplicates an existing item — give `merge_into`), ' +
+  '`merge` (duplicates another prospect in this cluster or an existing committed item — give `merge_into` AND `item_type` so the node converges), ' +
   '`deepen` (real but should be corrected/enriched — give the improved fields), or ' +
-  '`reject` (noise, trivial, or wrong). Prefer reusing existing keys so the same concept converges to one node. ' +
+  '`reject` (noise, trivial, or wrong). When two prospects in the cluster are the same concept, commit one and `merge` the others into its key, ' +
+  'so cross-session duplicates collapse to one node. Prefer reusing existing keys so the same concept converges. ' +
   'Respond by calling the `curate_decisions` tool exactly once, with one entry per prospect referenced by its `index`.'
 
 /**
@@ -105,11 +106,13 @@ export function buildProposeRequest({ text, model, maxTokens, maxCandidates }) {
 }
 
 /**
- * Build ONE curate request for a batch of prospects that share an anchor
- * (session). The graph neighborhood and source excerpt are read once and
- * shared across the batch, so the same session source isn't re-sent per
- * prospect — the win over a per-prospect call. The model returns one
- * decision per prospect, keyed by 1-based index.
+ * Build ONE curate request for a **similarity/recall cluster** of prospects
+ * (possibly spanning sessions). The shared recalled committed knowledge and the
+ * source excerpt are read once and shared across the cluster, so they aren't
+ * re-sent per prospect — the cost win — and the curator can merge cross-session
+ * duplicates in one call. The model returns one decision per prospect, keyed by
+ * 1-based index. (`neighborhood` carries the content-based shared recalled
+ * knowledge; the field name is kept for call-site stability.)
  *
  * The request is provider-aware: on Anthropic, adaptive thinking + high
  * effort buy curation quality but forbid forcing a tool (the API returns 400
@@ -131,7 +134,7 @@ export function buildCurateBatchRequest({ prospects, neighborhood, source, model
     )
     .join('\n\n')
   const user =
-    `SHARED GRAPH NEIGHBORHOOD (around the session anchor)\n${neighborhood || '(none)'}\n\n` +
+    `SHARED RECALLED KNOWLEDGE (committed items related to this cluster)\n${neighborhood || '(none)'}\n\n` +
     `SHARED SOURCE EXCERPT\n${source || '(unavailable)'}\n\n` +
     `PROSPECTS — decide on each by index:\n${lines}\n`
   /** @type {CompletionRequest} */

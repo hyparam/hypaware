@@ -15,44 +15,66 @@ function tmpDir() {
 
 const STATE_FILE = 'enrich-state.json'
 
-test('readState returns a null cursor when the sidecar is missing', () => {
+test('readState returns an empty mark map + no job when the sidecar is missing', () => {
   const dir = tmpDir()
   const state = readState(dir)
-  assert.equal(state.schema_version, 2)
-  assert.equal(state.propose_cursor, null)
+  assert.equal(state.schema_version, 4)
+  assert.deepEqual(state.session_marks, {})
+  assert.equal(state.curate_job, null)
 })
 
-test('writeState then readState round-trips the keyset cursor', () => {
+test('writeState then readState round-trips the per-session marks', () => {
   const dir = tmpDir()
-  writeState(dir, { schema_version: 2, propose_cursor: { ts: 1750000000000, id: 'part-9' } })
+  writeState(dir, { schema_version: 4, session_marks: { A: { ts: 1750000000000, id: 'part-9' }, B: { ts: 1751000000000, id: 'part-3' } }, curate_job: null })
   const state = readState(dir)
-  assert.deepEqual(state.propose_cursor, { ts: 1750000000000, id: 'part-9' })
+  assert.deepEqual(state.session_marks, { A: { ts: 1750000000000, id: 'part-9' }, B: { ts: 1751000000000, id: 'part-3' } })
+})
+
+test('writeState then readState round-trips the in-flight curate job', () => {
+  const dir = tmpDir()
+  const job = { id: 'batch_1', submitted_at: '2026-06-18T00:00:00.000Z', clusters: [{ customId: 'c0', prospectIds: ['p1', 'p2'] }] }
+  writeState(dir, { schema_version: 4, session_marks: {}, curate_job: job })
+  assert.deepEqual(readState(dir).curate_job, job)
 })
 
 test('writeState creates the state dir and persists atomically (no leftover temp files)', () => {
   const dir = path.join(tmpDir(), 'nested', 'state')
-  writeState(dir, { schema_version: 2, propose_cursor: null })
+  writeState(dir, { schema_version: 4, session_marks: {}, curate_job: null })
   const entries = fs.readdirSync(dir)
   assert.deepEqual(entries, [STATE_FILE], 'only the final file remains — temp was renamed')
 })
 
-test('readState falls back to null on malformed JSON', () => {
+test('readState falls back to an empty state on malformed JSON', () => {
   const dir = tmpDir()
   fs.writeFileSync(path.join(dir, STATE_FILE), '{ not json', 'utf8')
-  assert.equal(readState(dir).propose_cursor, null)
+  assert.deepEqual(readState(dir).session_marks, {})
+  assert.equal(readState(dir).curate_job, null)
 })
 
-test('readState ignores an older schema_version (starts fresh, no partial migration)', () => {
+test('readState ignores an older schema_version (the global-cursor v2 sidecar is discarded)', () => {
   const dir = tmpDir()
-  // The v1 sidecar stored propose_cursor as a bare timestamp string.
-  fs.writeFileSync(path.join(dir, STATE_FILE), JSON.stringify({ schema_version: 1, propose_cursor: '2026-01-01T00:00:00.000Z' }), 'utf8')
+  fs.writeFileSync(path.join(dir, STATE_FILE), JSON.stringify({ schema_version: 2, propose_cursor: { ts: 1, id: 'p' } }), 'utf8')
   const state = readState(dir)
-  assert.equal(state.schema_version, 2)
-  assert.equal(state.propose_cursor, null)
+  assert.equal(state.schema_version, 4)
+  assert.deepEqual(state.session_marks, {})
 })
 
-test('readState coerces a malformed cursor (missing id) to null', () => {
+test('readState drops only the malformed marks, keeping the well-formed ones', () => {
   const dir = tmpDir()
-  fs.writeFileSync(path.join(dir, STATE_FILE), JSON.stringify({ schema_version: 2, propose_cursor: { ts: 'x' } }), 'utf8')
-  assert.equal(readState(dir).propose_cursor, null)
+  fs.writeFileSync(
+    path.join(dir, STATE_FILE),
+    JSON.stringify({ schema_version: 4, session_marks: { A: { ts: 5, id: 'p1' }, B: { ts: 'x' }, C: { id: 'p2' } }, curate_job: null }),
+    'utf8'
+  )
+  assert.deepEqual(readState(dir).session_marks, { A: { ts: 5, id: 'p1' } })
+})
+
+test('readState drops a malformed curate job (no clusters array)', () => {
+  const dir = tmpDir()
+  fs.writeFileSync(
+    path.join(dir, STATE_FILE),
+    JSON.stringify({ schema_version: 4, session_marks: {}, curate_job: { id: 'batch_1' } }),
+    'utf8'
+  )
+  assert.equal(readState(dir).curate_job, null)
 })

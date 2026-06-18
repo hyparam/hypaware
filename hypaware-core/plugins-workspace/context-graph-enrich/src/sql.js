@@ -71,14 +71,15 @@ export function sqlQuote(v) {
 }
 
 /**
- * Source-scan content filters shared by the T1 propose scan
- * ({@link import('./propose.js').buildProposeQuery}) and the T2 source deref
+ * Source-scan content filters shared by the T1 session scans
+ * ({@link import('./propose.js').buildSessionAggregateQuery} /
+ * {@link import('./propose.js').buildSessionPartsQuery}) and the T2 source deref
  * ({@link import('./curate.js')}'s `safeDeref`), so both skip the same
  * low-signal rows. Returns SQL predicate fragments to AND into a WHERE clause;
  * an empty array means no content filter.
  *
- * Applying the filter in *both* places matters: T1 groups by anchor and only
- * proposes from rows it scanned, but T2 re-derefs the source by `id_column`
+ * Applying the filter in *both* places matters: T1 extracts a whole session and
+ * only proposes from rows it scanned, but T2 re-derefs the source by `id_column`
  * (message id), so a message whose kept text part shares its id with an
  * excluded part (e.g. a `tool_result`) would otherwise re-admit that part into
  * the expensive curator call. Filtering the deref keeps T2 consistent with T1.

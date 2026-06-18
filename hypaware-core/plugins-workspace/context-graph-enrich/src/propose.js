@@ -5,189 +5,272 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { columnsFor, enrichTablePath, PROSPECTS_DATASET, prospectId } from './datasets.js'
 import { buildProposeRequest, parseProspects } from './prompts.js'
 import { getCompletion, requireEnrichRuntime } from './runtime.js'
-import { contentFilterClauses, runSql } from './sql.js'
+import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 import { readState, writeState } from './state.js'
 
 /**
- * @import { EnrichConfig, EnrichRuntime, ProposeCursor } from './types.d.ts'
+ * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.d.ts'
  * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const EXTRACTOR = 'enrich.t1'
 const EXTRACTOR_VERSION = 1
-const T1_MAX_TOKENS = 2048
-/** Bound the text handed to one T1 call so a long session can't blow the budget. */
-const MAX_GROUP_CHARS = 12_000
 
 /**
- * Run one T1 propose tick: read source rows since the watermark, group by
- * anchor (session), over-propose prospects per group, append them, and
- * advance the watermark. Used by both the daemon timer and `enrich propose`.
+ * Run one T1 propose tick over **whole sessions**. The two regimes differ only
+ * in their session selector ([§two-regimes](LLP 0028)):
+ *
+ * - `ongoing` (default) — settled, not-yet-enriched sessions: latest part older
+ *   than `settle_cutoff_minutes` AND past the session's watermark, capped at
+ *   `max_sessions_per_tick`.
+ * - `backfill` — every session, ignoring the settle cutoff and the watermark.
+ *
+ * Each selected session's filtered parts are stitched in DAG order, `tool_result`
+ * excluded, and passed to a **single** frontier-model call — closing the old
+ * 12k-char truncation defect. Prospects are deduped by a deterministic
+ * {@link prospectId}, pre-write-filtered against the persisted set (idempotent
+ * across ticks/regimes), appended, and the session's watermark is advanced.
+ *
+ * @ref LLP 0028#two-tiers-one-pipeline [implements]
  *
  * @param {EnrichRuntime} runtime
- * @param {{ deadlineMs?: number, signal?: AbortSignal }} [opts]
- * @returns {Promise<{ groups: number, prospects: number, cursor: ProposeCursor | null }>}
+ * @param {{ regime?: 'ongoing' | 'backfill', sessionIds?: string[], deadlineMs?: number, nowMs?: number, signal?: AbortSignal }} [opts]
+ * @returns {Promise<{ regime: string, candidates: number, sessions: number, prospects: number }>}
  */
 export async function runProposeTick(runtime, opts = {}) {
   const cfg = runtime.config
   const p = cfg.propose
+  const regime = opts.regime ?? 'ongoing'
   return withSpan(
     'enrich.propose_tick',
-    { [Attr.COMPONENT]: 'plugin', [Attr.OPERATION]: 'enrich.propose_tick', [Attr.PLUGIN]: '@hypaware/context-graph-enrich', status: 'ok' },
+    { [Attr.COMPONENT]: 'plugin', [Attr.OPERATION]: 'enrich.propose_tick', [Attr.PLUGIN]: '@hypaware/context-graph-enrich', regime, status: 'ok' },
     async (span) => {
       const state = readState(runtime.stateDir)
-      const cursor = state.propose_cursor
+      const marks = state.session_marks
+      const nowMs = opts.nowMs ?? Date.now()
 
-      const rows = await runSql(runtime, buildProposeQuery(cfg, cursor, p.max_rows_per_tick))
-      const { groups, rowMeta } = groupSourceRows(rows, cfg, cursor)
+      const sessionIds = opts.sessionIds ?? (await selectSessions(runtime, { regime, nowMs, marks }))
 
-      // Over-propose per group, bounded by the per-tick deadline. Track which
-      // groups we actually finished so the watermark advances only over the
-      // processed prefix (an early deadline break must not skip the rest).
-      /** @type {Set<string>} */
-      const processedAnchors = new Set()
+      // Per session: read its filtered parts, DAG-order them, extract in full.
+      // Track which sessions advanced so the watermark only moves over the
+      // sessions actually processed (an early deadline break must not skip the
+      // rest — they re-qualify next tick).
       /** @type {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} */
-      const perGroup = []
-      for (const [anchorKey, g] of groups) {
+      const perSession = []
+      /** @type {Record<string, SessionMark>} */
+      const newMarks = {}
+      let extracted = 0
+      for (const sid of sessionIds) {
         if (opts.deadlineMs && Date.now() > opts.deadlineMs) break
-        const result = await getCompletion(runtime).complete(
-          buildProposeRequest({ text: g.text, model: p.t1_model, maxTokens: T1_MAX_TOKENS, maxCandidates: p.max_candidates }),
-          { signal: opts.signal }
-        )
-        processedAnchors.add(anchorKey)
-        const candidates = parseProspects(result).filter((c) => (c.confidence ?? 1) >= p.confidence_floor)
-        perGroup.push({ anchorKey, keys: g.keys, candidates })
+        const partRows = await runSql(runtime, buildSessionPartsQuery(cfg, sid))
+        const ordered = orderSessionParts(partRows, cfg)
+        if (ordered.length === 0) continue
+        const mark = sessionMark(ordered, cfg)
+        // Precise per-session re-qualification: skip a session already enriched
+        // through its current latest part (the aggregate selector compares only
+        // the coarse timestamp). Backfill re-extracts unconditionally — its
+        // appends are idempotent ({@link filterNewProspects}).
+        if (regime === 'ongoing') {
+          const prev = marks[sid]
+          if (prev && cmpMark(mark, prev) <= 0) continue
+        }
+
+        const { text, keys } = buildTranscript(ordered, cfg)
+        if (text) {
+          const result = await getCompletion(runtime).complete(
+            buildProposeRequest({ text, model: p.t1_model, maxTokens: t1MaxTokens(p), maxCandidates: p.max_candidates }),
+            { signal: opts.signal }
+          )
+          const candidates = parseProspects(result).filter((c) => (c.confidence ?? 1) >= p.confidence_floor)
+          perSession.push({ anchorKey: sid, keys, candidates })
+          extracted++
+        }
+        // Advance even for a settled session with no extractable text, so it
+        // drains from the eligible pool instead of being re-fetched every tick.
+        newMarks[sid] = mark
       }
 
       const createdAt = new Date().toISOString()
-      const candidateRows = [...collectProspectRows(perGroup, cfg, createdAt).values()]
+      const candidateRows = [...collectProspectRows(perSession, cfg, createdAt).values()]
       const newRows = await filterNewProspects(runtime, candidateRows)
       if (newRows.length > 0) {
         await runtime.storage.appendRows(enrichTablePath(runtime.storage, PROSPECTS_DATASET), [...columnsFor(PROSPECTS_DATASET)], newRows)
       }
 
-      const nextCursor = nextProposeCursor(rowMeta, processedAnchors, cursor)
-      if (!sameCursor(nextCursor, cursor)) writeState(runtime.stateDir, { schema_version: 2, propose_cursor: nextCursor })
+      // Persist marks only AFTER the prospects are appended: a crash in between
+      // re-reads the same sessions next tick (safe — idempotent), whereas
+      // marking first then crashing would lose a session's prospects forever.
+      const advanced = Object.keys(newMarks)
+      if (advanced.length > 0) {
+        // Preserve any in-flight curate job; propose only advances the marks.
+        writeState(runtime.stateDir, { schema_version: 4, session_marks: { ...marks, ...newMarks }, curate_job: state.curate_job })
+      }
 
-      span.setAttribute('source_rows', rows.length)
-      span.setAttribute('groups', processedAnchors.size)
+      span.setAttribute('candidate_sessions', sessionIds.length)
+      span.setAttribute('sessions_extracted', extracted)
+      span.setAttribute('sessions_marked', advanced.length)
       span.setAttribute('prospects_written', newRows.length)
-      return { groups: processedAnchors.size, prospects: newRows.length, cursor: nextCursor }
+      return { regime, candidates: sessionIds.length, sessions: extracted, prospects: newRows.length }
     },
     { component: 'plugin' }
   )
 }
 
 /**
- * Build the SELECT for one propose tick. The watermark is the tuple
- * (timestamp, tiebreak) — `ai_gateway_messages` is part-level, so many rows
- * share one `message_created_at`. The query engine surfaces a TIMESTAMP
- * column as a `Date` and only compares it correctly against a **numeric epoch
- * literal** (`=` and string literals match nothing), so the boundary can't be
- * expressed in SQL. Instead we filter coarsely with `ts >= cursorMs` — which
- * *includes* the boundary millisecond so no same-`ts` part is lost — order by
- * the full tuple, and drop already-processed rows by exact tuple in JS (see
- * {@link groupSourceRows}). `cursor.ts` is a number, so it is interpolated
- * directly (no injection surface).
+ * Select the sessions a tick should extract. One cheap aggregate query
+ * ({@link buildSessionAggregateQuery}) returns the latest-part timestamp per
+ * session — bounded by the session count, not the part count — and the regime
+ * filters it in JS:
  *
- * On top of the watermark predicate the scan applies the shared
- * {@link contentFilterClauses} (drop empty-text rows + excluded part types like
- * `tool_result`), so the model only ever sees signal. Filtered-out rows are
- * never returned, which is safe for the watermark: they carry no useful content
- * to process, and the cursor advances over the rows it *did* see — so the next
- * tick's `ts >= cursor` naturally starts past them. The filter is applied
- * before `LIMIT`, so each tick's row budget is spent on useful rows, not
- * plumbing.
+ * - `backfill` — every session with extractable content.
+ * - `ongoing` — only **settled** sessions (latest part older than
+ *   `settle_cutoff_minutes`) whose latest part is past the stored watermark,
+ *   oldest-settled first and capped at `max_sessions_per_tick`.
  *
- * @param {EnrichConfig} cfg
- * @param {ProposeCursor | null} cursor
- * @param {number} limit
- * @returns {string}
+ * The coarse `lastTs <= mark.ts` exclusion is exact in practice (a new part
+ * never shares a wall-clock millisecond with a long-since-enriched one); the
+ * precise tuple re-check lives in {@link runProposeTick}.
+ *
+ * @ref LLP 0028#two-regimes [implements]
+ *
+ * @param {EnrichRuntime} runtime
+ * @param {{ regime: 'ongoing' | 'backfill', nowMs: number, marks: Record<string, SessionMark> }} args
+ * @returns {Promise<string[]>}
  */
-export function buildProposeQuery(cfg, cursor, limit) {
-  const ts = cfg.timestamp_column
-  const tb = cfg.tiebreak_column
-  const cols = [...new Set([cfg.id_column, cfg.text_column, cfg.anchor_key_column, ts, tb])]
-  /** @type {string[]} */
-  const clauses = []
-  if (cursor) clauses.push(`${ts} >= ${Number(cursor.ts)}`)
-  clauses.push(...contentFilterClauses(cfg))
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')} ` : ''
-  return `SELECT ${cols.join(', ')} FROM ${cfg.source_dataset} ${where}ORDER BY ${ts}, ${tb} LIMIT ${limit}`
+export async function selectSessions(runtime, { regime, nowMs, marks }) {
+  const cfg = runtime.config
+  const p = cfg.propose
+  const rows = await runSql(runtime, buildSessionAggregateQuery(cfg), { allowMissing: false })
+  const settleBeforeMs = nowMs - Math.round(p.settle_cutoff_minutes * 60_000)
+
+  /** @type {Array<{ sid: string, lastTs: number }>} */
+  const eligible = []
+  for (const r of rows) {
+    const sid = strField(r[cfg.anchor_key_column])
+    if (!sid) continue
+    const lastTs = toMillis(r.last_ts)
+    if (regime === 'ongoing') {
+      if (lastTs >= settleBeforeMs) continue // not settled yet
+      const prev = marks[sid]
+      if (prev && lastTs <= prev.ts) continue // already enriched through (coarse)
+    }
+    eligible.push({ sid, lastTs })
+  }
+  // Oldest-settled first, so the longest-waiting sessions are enriched soonest;
+  // a stable tiebreak on the id keeps selection deterministic.
+  eligible.sort((a, b) => a.lastTs - b.lastTs || (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0))
+  const ids = eligible.map((e) => e.sid)
+  return regime === 'ongoing' ? ids.slice(0, p.max_sessions_per_tick) : ids
 }
 
 /**
- * Group fetched source rows by anchor (session), after dropping any row at or
- * before the `cursor` tuple — the `ts >= cursorMs` query re-includes the
- * boundary millisecond, so this exact-tuple drop is what makes the watermark
- * strictly monotonic without losing same-`ts` parts. Each surviving group
- * collects bounded text + provenance ids. `rowMeta` carries every surviving
- * row's tuple, tagged with the anchor it grouped under (or `null` if the row
- * had no anchor/text, so contributes nothing and never blocks the watermark)
- * — consumed by {@link nextProposeCursor}.
+ * The cheap per-session selector query: one row per session carrying its
+ * latest-part timestamp. The shared {@link contentFilterClauses} are applied so
+ * a session that is *only* plumbing (all `tool_result` / empty-text parts) never
+ * appears, and `last_ts` reflects the latest part the proposer would actually
+ * read. `last_ts` is the MAX over a TIMESTAMP column — the engine compares
+ * Date-to-Date here (not against a literal), so no numeric-epoch workaround is
+ * needed.
+ *
+ * @param {EnrichConfig} cfg
+ * @returns {string}
+ */
+export function buildSessionAggregateQuery(cfg) {
+  const anchor = cfg.anchor_key_column
+  const clauses = contentFilterClauses(cfg)
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')} ` : ''
+  return `SELECT ${anchor}, MAX(${cfg.timestamp_column}) AS last_ts FROM ${cfg.source_dataset} ${where}GROUP BY ${anchor}`
+}
+
+/**
+ * Read **all** filtered parts of one session — the full transcript, no row
+ * budget and no truncation (that was the defect). The shared content filter
+ * keeps the proposer on signal, and the anchor value is `sqlQuote`'d (the only
+ * interpolated value; column names are validated identifiers). Ordering is done
+ * in JS ({@link orderSessionParts}) so the watermark and transcript are computed
+ * from the same coerced tuples.
+ *
+ * @param {EnrichConfig} cfg
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function buildSessionPartsQuery(cfg, sessionId) {
+  const cols = [...new Set([cfg.anchor_key_column, cfg.timestamp_column, cfg.tiebreak_column, cfg.id_column, cfg.text_column])]
+  const clauses = [`${cfg.anchor_key_column} = '${sqlQuote(sessionId)}'`, ...contentFilterClauses(cfg)]
+  return `SELECT ${cols.join(', ')} FROM ${cfg.source_dataset} WHERE ${clauses.join(' AND ')}`
+}
+
+/**
+ * Order a session's parts into one coherent transcript. The gateway assigns
+ * `message_created_at` in logical message order, so sorting by (timestamp,
+ * row-unique tiebreak) reconstructs the conversation — the "DAG order" the
+ * design calls for — without coupling to `ai_gateway_messages`-specific columns
+ * (`message_index` / `agent_id`), which a custom source may lack. Deterministic,
+ * so re-runs over the same session yield the same transcript (hence the same
+ * prospect ids).
+ *
+ * @ref LLP 0028#two-tiers-one-pipeline [implements]
  *
  * @param {Record<string, unknown>[]} rows
  * @param {EnrichConfig} cfg
- * @param {ProposeCursor | null} [cursor]
- * @returns {{ groups: Map<string, { text: string, keys: string[] }>, rowMeta: Array<{ ts: number, id: string, anchorKey: string | null }> }}
+ * @returns {Record<string, unknown>[]}
  */
-export function groupSourceRows(rows, cfg, cursor = null) {
-  /** @type {Map<string, { text: string, keys: string[] }>} */
-  const groups = new Map()
-  /** @type {Array<{ ts: number, id: string, anchorKey: string | null }>} */
-  const rowMeta = []
-  for (const r of rows) {
-    const ts = toMillis(r[cfg.timestamp_column])
-    const id = strField(r[cfg.tiebreak_column])
-    if (cursor && cmpTuple({ ts, id }, cursor) <= 0) continue // already processed (boundary re-fetch)
-    const anchorKey = strField(r[cfg.anchor_key_column])
-    const text = anchorKey ? textField(r[cfg.text_column]) : ''
-    if (anchorKey && text) {
-      const g = groups.get(anchorKey) ?? { text: '', keys: [] }
-      if (g.text.length < MAX_GROUP_CHARS) {
-        g.text += (g.text ? '\n' : '') + text.slice(0, MAX_GROUP_CHARS - g.text.length)
-      }
-      const idVal = strField(r[cfg.id_column])
-      if (idVal) g.keys.push(idVal)
-      groups.set(anchorKey, g)
-      rowMeta.push({ ts, id, anchorKey })
-    } else {
-      rowMeta.push({ ts, id, anchorKey: null })
-    }
-  }
-  return { groups, rowMeta }
+export function orderSessionParts(rows, cfg) {
+  return [...rows].sort((a, b) => {
+    const ta = toMillis(a[cfg.timestamp_column])
+    const tb = toMillis(b[cfg.timestamp_column])
+    if (ta !== tb) return ta - tb
+    const ia = strField(a[cfg.tiebreak_column])
+    const ib = strField(b[cfg.tiebreak_column])
+    return ia < ib ? -1 : ia > ib ? 1 : 0
+  })
 }
 
 /**
- * Advance the watermark to the largest row tuple that is strictly below every
- * *unprocessed* group's rows — i.e. only over the fully-processed prefix.
- * Rows with no anchor never block. If the very first blocking row is at the
- * front, the cursor does not move (no safe progress). Order-independent: a
- * later-but-already-processed group can't pull the cursor past an earlier
- * un-proposed group. Reprocessing past the boundary is harmless (prospect ids
- * are deterministic and {@link filterNewProspects} drops already-persisted
- * ones); skipping is not — so this errs toward redo.
+ * Stitch ordered parts into the transcript text + deduped provenance ids. Empty
+ * parts are skipped; provenance keys are the (deduped) source `id_column` values
+ * the curator later derefs.
  *
- * @param {Array<{ ts: number, id: string, anchorKey: string | null }>} rowMeta
- * @param {Set<string>} processedAnchors
- * @param {ProposeCursor | null} currentCursor
- * @returns {ProposeCursor | null}
+ * @param {Record<string, unknown>[]} orderedRows
+ * @param {EnrichConfig} cfg
+ * @returns {{ text: string, keys: string[] }}
  */
-export function nextProposeCursor(rowMeta, processedAnchors, currentCursor) {
-  /** @type {ProposeCursor | null} */
-  let minBlocking = null
-  for (const m of rowMeta) {
-    if (m.anchorKey && !processedAnchors.has(m.anchorKey)) {
-      if (!minBlocking || cmpTuple(m, minBlocking) < 0) minBlocking = { ts: m.ts, id: m.id }
-    }
+export function buildTranscript(orderedRows, cfg) {
+  let text = ''
+  /** @type {Set<string>} */
+  const keys = new Set()
+  for (const r of orderedRows) {
+    const t = textField(r[cfg.text_column])
+    if (t) text += (text ? '\n' : '') + t
+    const idVal = strField(r[cfg.id_column])
+    if (idVal) keys.add(idVal)
   }
-  let next = currentCursor
-  for (const m of rowMeta) {
-    if (m.anchorKey && !processedAnchors.has(m.anchorKey)) continue
-    if (minBlocking && cmpTuple(m, minBlocking) >= 0) continue
-    if (!next || cmpTuple(m, next) > 0) next = { ts: m.ts, id: m.id }
-  }
-  return next
+  return { text, keys: [...keys] }
+}
+
+/**
+ * The session's watermark: the (timestamp, tiebreak) tuple of its latest
+ * ordered part. {@link orderSessionParts} sorts ascending, so the last row is
+ * the max.
+ *
+ * @param {Record<string, unknown>[]} orderedRows
+ * @param {EnrichConfig} cfg
+ * @returns {SessionMark}
+ */
+export function sessionMark(orderedRows, cfg) {
+  const last = orderedRows[orderedRows.length - 1]
+  return { ts: toMillis(last[cfg.timestamp_column]), id: strField(last[cfg.tiebreak_column]) }
+}
+
+/**
+ * Bound the T1 output to the JSON for `max_candidates` prospects (a full
+ * session legitimately yields more knowledge than the old slice), with headroom.
+ *
+ * @param {EnrichConfig['propose']} p
+ * @returns {number}
+ */
+function t1MaxTokens(p) {
+  return Math.min(8192, 1024 + p.max_candidates * 256)
 }
 
 /**
@@ -195,15 +278,15 @@ export function nextProposeCursor(rowMeta, processedAnchors, currentCursor) {
  * {@link prospectId} — the same (extractor, version, anchor, type+label)
  * collapses to one row, so re-proposing the same content never duplicates.
  *
- * @param {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} perGroup
+ * @param {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} perSession
  * @param {EnrichConfig} cfg
  * @param {string} createdAt
  * @returns {Map<string, Record<string, unknown>>}
  */
-export function collectProspectRows(perGroup, cfg, createdAt) {
+export function collectProspectRows(perSession, cfg, createdAt) {
   /** @type {Map<string, Record<string, unknown>>} */
   const out = new Map()
-  for (const { anchorKey, keys, candidates } of perGroup) {
+  for (const { anchorKey, keys, candidates } of perSession) {
     for (const c of candidates) {
       const id = prospectId({
         extractor: EXTRACTOR,
@@ -234,15 +317,11 @@ export function collectProspectRows(perGroup, cfg, createdAt) {
 
 /**
  * Drop candidate prospect rows whose deterministic {@link prospectId} is
- * already persisted, making the append **idempotent across ticks**. The
- * watermark deliberately errs toward re-reading source rows (see
- * {@link nextProposeCursor}), and a tick that appends prospects but crashes
- * before advancing the watermark re-reads the same source next tick — so
- * without this filter a retried/overlapping tick would append duplicate
- * prospect rows that T2 then curates again (duplicate committed + resolution
- * rows and wasted model spend). Mirrors the graph projector's pre-write dedup
- * (read the committed id set, filter before append; only a missing dataset is
- * a benign failure there).
+ * already persisted, making the append **idempotent across ticks and regimes**.
+ * A session seen by both backfill and a later ongoing run (or a resumed session
+ * re-extracted after it settles again) re-derives the same ids and appends
+ * nothing new. Mirrors the graph projector's pre-write dedup (read the committed
+ * id set, filter before append; only a missing dataset is benign there).
  *
  * @ref LLP 0028#idempotent-prospects [implements]
  *
@@ -258,21 +337,11 @@ async function filterNewProspects(runtime, candidates) {
 }
 
 /**
- * @param {ProposeCursor | null} a
- * @param {ProposeCursor | null} b
- * @returns {boolean}
- */
-function sameCursor(a, b) {
-  if (a === null || b === null) return a === b
-  return a.ts === b.ts && a.id === b.id
-}
-
-/**
- * @param {{ ts: number, id: string }} a
- * @param {{ ts: number, id: string }} b
+ * @param {SessionMark} a
+ * @param {SessionMark} b
  * @returns {number}
  */
-function cmpTuple(a, b) {
+function cmpMark(a, b) {
   if (a.ts < b.ts) return -1
   if (a.ts > b.ts) return 1
   if (a.id < b.id) return -1
@@ -282,8 +351,9 @@ function cmpTuple(a, b) {
 
 /**
  * Coerce a source timestamp cell to epoch milliseconds. The query engine
- * surfaces a TIMESTAMP column as a `Date`; spool/JSON paths may surface an
- * ISO string or a raw number. A missing/unparseable value sorts first (0).
+ * surfaces a TIMESTAMP column (and a MAX over one) as a `Date`; spool/JSON
+ * paths may surface an ISO string or a raw number. A missing/unparseable value
+ * sorts first (0).
  *
  * @param {unknown} v
  * @returns {number}
@@ -299,9 +369,11 @@ function toMillis(v) {
 }
 
 /**
- * Daemon source: a refresh timer mirroring `@hypaware/vector-search`'s
- * `vector-search-refresh` (interval tick, in-flight guard, unref'd handle,
- * reload on config change).
+ * Daemon source for the **ongoing** regime: a refresh timer mirroring
+ * `@hypaware/vector-search`'s `vector-search-refresh` (interval tick, in-flight
+ * guard, unref'd handle, reload on config change). Each tick extracts a bounded
+ * batch of settled sessions synchronously; the backfill regime is the
+ * out-of-daemon command path.
  *
  * @returns {Promise<StartedSource>}
  */
@@ -317,7 +389,7 @@ export async function startProposeSource() {
     lastTickAt = new Date().toISOString()
     const p = runtime.config.propose
     try {
-      await runProposeTick(runtime, { deadlineMs: Date.now() + p.max_tick_ms })
+      await runProposeTick(runtime, { regime: 'ongoing', deadlineMs: Date.now() + p.max_tick_ms })
     } catch (err) {
       runtime.log.error('enrich.propose_tick_failed', {
         [Attr.ERROR_KIND]: 'enrich_propose_failed',
@@ -350,7 +422,7 @@ export async function startProposeSource() {
       const status = {
         state: handle !== null ? 'ready' : 'stopped',
         message: runtime.config.propose.enabled
-          ? `propose every ${runtime.config.propose.interval_minutes}m`
+          ? `propose settled sessions every ${runtime.config.propose.interval_minutes}m`
           : 'disabled',
         details: { last_tick_at: lastTickAt },
       }

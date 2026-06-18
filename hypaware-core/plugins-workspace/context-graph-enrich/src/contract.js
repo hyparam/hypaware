@@ -27,6 +27,14 @@ const SELECT_COMMITTED =
  * (type,key) with the shared id recipe, so the edge attaches to the existing
  * activity node rather than a duplicate.
  *
+ * Multi-session provenance falls out of this for free: every contributing
+ * session writes its own committed row (commit/deepen, and `merge` too — see
+ * curate.js `routeDecision`) under the same canonical `(item_type, item_id)`.
+ * The content-addressed node id collapses the rows to **one node** (LLP 0023
+ * dedup-by-id), while each row's distinct anchor yields a separate `produced`
+ * edge — so the node carries a `produced` edge **per contributing session**,
+ * append-only. @ref LLP 0028#committed-only-projection
+ *
  * @param {GraphKit} kit
  * @returns {ContractLike}
  */
