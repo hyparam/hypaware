@@ -180,10 +180,33 @@ async function gitRepoFacts(cwd) {
     gitLine(cwd, ['rev-parse', '--show-toplevel']),
   ])
   return {
-    remote,
+    // Strip credential userinfo before it reaches the session-context record
+    // (which the projector stamps onto the `git_remote` row column).
+    remote: redactRemoteUserinfo(remote),
     headSha: headSha && /^[0-9a-f]{40}$/i.test(headSha) ? headSha : undefined,
     repoRoot,
   }
+}
+
+/**
+ * Strip credential userinfo (`user[:token]@`) from a git remote URL so a token
+ * embedded in an HTTPS remote — e.g. `https://x-access-token:<token>@github.com/owner/repo.git`,
+ * which `gh` and CI checkouts write into `remote.origin.url` — never lands in
+ * the session-context sidecar or the `git_remote` row column. Convergence only
+ * needs the normalized `owner/repo`, so the raw secret has no downstream use.
+ *
+ * Only the `scheme://[user[:token]@]host/…` URL form carries a secret; the
+ * scp-like SSH form (`git@github.com:owner/repo.git`) authenticates by key, so
+ * its `git@` user is left intact. Duplicated (deliberately) in `@hypaware/codex`
+ * `git-remote.js` — the plugins are decoupled; a test on each path pins it.
+ *
+ * @ref LLP 0032#remote-redaction — owner/repo is all convergence needs; the raw remote can carry a secret
+ * @param {string | undefined} remote
+ * @returns {string | undefined}
+ */
+export function redactRemoteUserinfo(remote) {
+  if (typeof remote !== 'string' || remote.length === 0) return remote
+  return remote.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, '$1')
 }
 
 /**

@@ -2,6 +2,8 @@
 
 import { createHash } from 'node:crypto'
 
+import { redactRemoteUserinfo } from './git-remote.js'
+
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CodexLogReader } from './types.d.ts'
@@ -497,7 +499,10 @@ function resolveCodexContext(input, provider, path, reqBody) {
   const sandbox = readStringKey(metadata, 'sandbox')
   const turn_started_at_unix_ms = numberValue(readKey(metadata, 'turn_started_at_unix_ms'))
   const window_id = readHeader(input.request_headers, 'x-codex-window-id')
-  const git_origin_url = readStringKey(remoteUrls, 'origin')
+  // Strip any credential userinfo at ingress, before it reaches the first-class
+  // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
+  // @ref LLP 0032#remote-redaction
+  const git_origin_url = redactRemoteUserinfo(readStringKey(remoteUrls, 'origin'))
   const git_commit = readStringKey(workspaceInfo, 'latest_git_commit_hash')
   const has_changes = typeof workspaceInfo?.has_changes === 'boolean'
     ? workspaceInfo.has_changes

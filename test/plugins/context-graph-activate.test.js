@@ -25,11 +25,14 @@ test('activate provides the context-graph capability and registers node/edge dat
   // The capability source plugins/connectors contribute contracts through.
   assert.equal(caps.length, 1)
   assert.equal(caps[0].name, 'hypaware.context-graph')
-  assert.equal(caps[0].version, '1.0.0')
+  // 1.1.0: `keys` joined the kit (LLP 0032); the minor bump lets a connector
+  // that calls kit.keys reject a pre-keys provider at activation.
+  assert.equal(caps[0].version, '1.1.0')
   assert.equal(typeof caps[0].value.registerContract, 'function')
   assert.equal(typeof caps[0].value.kit.makeRowBuilders, 'function')
   assert.equal(typeof caps[0].value.kit.nodeId, 'function')
   assert.equal(typeof caps[0].value.kit.edgeId, 'function')
+  assert.equal(typeof caps[0].value.kit.keys.repoKeyFromRemote, 'function')
 
   assert.deepEqual(datasets.map((d) => d.name).sort(), ['edge', 'node'])
   assert.deepEqual(commands.map((c) => c.name).sort(), ['graph compact', 'graph neighbors', 'graph project'])

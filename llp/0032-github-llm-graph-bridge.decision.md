@@ -43,6 +43,15 @@ home, exposed on the capability kit as **`kit.keys`** so a contract derives a
 bridge key from the one recipe instead of re-deriving (and risking divergence
 from) it.
 
+Adding `keys` to the kit widens the `hypaware.context-graph` capability
+surface: a connector that calls `kit.keys` cannot run against a provider that
+predates it. So the provider bumps the capability **minor** version
+(`1.0.0` → `1.1.0`) and the `@hypaware/ai-gateway-graph` connector tightens its
+`requireCapability` range to `^1.1.0`. The kernel then fails a stale `1.0.x`
+provider at activation with a clear `cap_missing` error (LLP 0006), instead of
+satisfying activation and only throwing `kit.keys is undefined` deep in
+projection.
+
 The `Repo`/`Commit`/`File` recipes there are **byte-identical** to
 `github-hyp-plugin/src/keys.js` — owner/repo lowercased, sha full-40-hex
 lowercased, relpath POSIX with no leading `./` or `/`. The host adds two
@@ -80,6 +89,29 @@ partitions predate the columns. So that a contract or query reading a new column
 does not throw `ColumnNotFoundError` over a pre-v7 partition, the gateway data
 source exposes its **declared** schema columns (padding absent physical columns
 to null) — `createDataSource` / `withSchemaColumns` in `ai-gateway/dataset.js`.
+
+## Remote redaction
+
+A git remote can carry a credential in its userinfo —
+`https://x-access-token:<token>@github.com/owner/repo.git` is exactly what `gh`
+and CI checkouts write into `remote.origin.url`. Convergence needs only the
+normalized `owner/repo` (`ownerRepoFromRemote` discards userinfo on the way to
+the key), so the raw secret is **never** needed downstream. Each capture path
+therefore strips URL userinfo at **ingress** — the moment it reads the remote,
+before the value reaches any sink: the `git_remote` row column, the
+`attributes.codex.git_origin_url` provenance mirror, the Claude session-context
+sidecar, and (read back from the row at projection) the graph node/edge
+`source_keys`. Redacting at ingress, not at one storage chokepoint, keeps the
+secret out of *every* current and future sink by construction — the same
+boundary-redaction discipline the gateway recorder already uses for headers.
+
+Only the `scheme://user[:token]@host/…` URL form carries a secret; the scp-like
+SSH form (`git@github.com:owner/repo.git`) authenticates by key, so its `git@`
+user is left intact (and `ownerRepoFromRemote` parses both forms unchanged).
+The capture plugins are decoupled, so the tiny redactor is duplicated per plugin
+and pinned by a test on each path, exactly as the key recipes are. Rows written
+before this guard still hold raw remotes; rewrite them with the same
+drop-and-re-project migration the `File` re-key uses (below).
 
 ## Repo-Commit nodes
 

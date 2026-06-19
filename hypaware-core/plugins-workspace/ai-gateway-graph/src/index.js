@@ -22,8 +22,11 @@ import { createAiGatewayGraphContract } from './graph_contract.js'
  * @ref LLP 0023#contract-contribution [implements] — connector contributes the source's contract via the capability
  */
 export async function activate(ctx) {
+  // ^1.1.0: the contract calls `kit.keys` unconditionally, which only a
+  // provider that ships the shared key vocabulary has (LLP 0032). A pre-`keys`
+  // 1.0.x provider is rejected here, not mid-projection.
   const graph = /** @type {ContextGraphCapability} */ (
-    ctx.requireCapability('hypaware.context-graph', '^1.0.0')
+    ctx.requireCapability('hypaware.context-graph', '^1.1.0')
   )
   graph.registerContract(createAiGatewayGraphContract(graph.kit))
 }

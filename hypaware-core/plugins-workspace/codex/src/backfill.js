@@ -3,6 +3,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { redactRemoteUserinfo } from './git-remote.js'
+
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.d.ts'
@@ -433,7 +435,7 @@ function buildSession(args) {
     sessionId: stringValue(metaPayload.id) ?? fallbackId,
     startedAtMs: timestampToMs(metaPayload.timestamp),
     cwd: firstString(stringValue(metaPayload.cwd), firstTurnString(turnPayloads, 'cwd')),
-    gitOriginUrl: git ? firstString(stringValue(git.repository_url), stringValue(git.origin_url)) : undefined,
+    gitOriginUrl: git ? redactRemoteUserinfo(firstString(stringValue(git.repository_url), stringValue(git.origin_url))) : undefined,
     gitCommit: git ? firstString(stringValue(git.commit_hash), stringValue(git.commit)) : undefined,
     gitBranch: git ? stringValue(git.branch) : undefined,
     gitDirty: git ? firstBool(boolValue(git.dirty), boolValue(git.is_dirty)) : undefined,

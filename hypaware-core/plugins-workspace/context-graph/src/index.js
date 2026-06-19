@@ -19,14 +19,21 @@ import { setGraphRuntime } from './runtime.js'
  * @import { ContextGraphCapability } from './types.d.ts'
  */
 
-/** The capability version source plugins / connectors require to contribute a contract. */
-const CAPABILITY_VERSION = '1.0.0'
+/**
+ * The capability version source plugins / connectors require to contribute a
+ * contract. Bumped to `1.1.0` when `keys` joined the kit (LLP 0032): a
+ * connector that calls `kit.keys` must not bind to a pre-`keys` provider, so
+ * the minor bump + the connector's `^1.1.0` range fails a stale provider at
+ * activation instead of deep in projection.
+ * @ref LLP 0032#shared-key-vocabulary [constrained-by] — widening the kit bumps the capability minor
+ */
+const CAPABILITY_VERSION = '1.1.0'
 
 /**
  * Activate `@hypaware/context-graph`.
  *
  * Registers:
- *  - capability `hypaware.context-graph@1.0.0` — source plugins (or a
+ *  - capability `hypaware.context-graph@1.1.0` — source plugins (or a
  *    connector like `@hypaware/ai-gateway-graph`) call `registerContract` to
  *    contribute a projection contract, and build its rows with the shared
  *    `kit` (id recipe + provenance). The engine runs every registered contract.

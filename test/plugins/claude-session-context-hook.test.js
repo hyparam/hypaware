@@ -17,7 +17,7 @@ import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
-import { runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
+import { redactRemoteUserinfo, runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
 import { appendSessionContext, defaultSessionContextFile, pickLatestMatching, readSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /**
@@ -174,6 +174,64 @@ test('hook captures repo identity for a real git repo and the projector stamps i
   } finally {
     await env.cleanup()
   }
+})
+
+test('hook redacts credential userinfo from an https remote before it is recorded (LLP 0032)', async () => {
+  const env = await stageEnv()
+  try {
+    const repo = path.join(env.homeDir, 'work', 'CredRepo')
+    await fs.mkdir(repo, { recursive: true })
+    const git = (/** @type {string[]} */ ...args) => execFileAsync('git', ['-C', repo, ...args])
+    await git('init', '-q')
+    // A token-bearing HTTPS remote, exactly as `gh`/CI writes into remote.origin.url.
+    await git('remote', 'add', 'origin', 'https://x-access-token:ghp_SUPERSECRET@github.com/Acme/CredRepo.git')
+    await fs.writeFile(path.join(repo, 'a.txt'), 'hi')
+    await git('add', 'a.txt')
+    await git('-c', 'user.email=t@example.com', '-c', 'user.name=Test', 'commit', '-q', '-m', 'init')
+
+    const registry = createCommandRegistry()
+    registerCoreCommands(registry)
+    registry.register({
+      name: 'claude-hook session-context',
+      summary: 'Internal Claude Code hook',
+      usage: 'hyp claude-hook session-context --state-file <path>',
+      hidden: true,
+      run: runClaudeSessionContextHook,
+    })
+    const kernel = createKernelRuntime({ commandRegistry: registry })
+    const code = await dispatch(
+      ['claude-hook', 'session-context', '--state-file', env.stateFile],
+      {
+        stdout: makeBuf(),
+        stderr: makeBuf(),
+        stdin: stdinFor({ session_id: 'sess-cred', cwd: repo, hook_event_name: 'SessionStart' }),
+        env: { ...process.env, HYP_HOME: env.hypHome },
+        registry,
+        kernel,
+      }
+    )
+    assert.equal(code, 0)
+
+    const records = await readSessionContext(env.stateFile)
+    const latest = pickLatestMatching(records, { sessionId: 'sess-cred' })
+    assert.ok(latest)
+    // The token is stripped at capture; only the credential-free owner/repo lands on disk.
+    assert.equal(latest.git_remote, 'https://github.com/Acme/CredRepo.git')
+    assert.ok(!JSON.stringify(latest).includes('ghp_SUPERSECRET'), 'no token anywhere in the recorded session-context')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('redactRemoteUserinfo strips only the credential-bearing URL form', () => {
+  assert.equal(
+    redactRemoteUserinfo('https://x-access-token:ghp_SECRET@github.com/acme/repo.git'),
+    'https://github.com/acme/repo.git',
+  )
+  // scp-like SSH authenticates by key — its git@ user is meaningful, kept intact.
+  assert.equal(redactRemoteUserinfo('git@github.com:acme/repo.git'), 'git@github.com:acme/repo.git')
+  assert.equal(redactRemoteUserinfo('https://github.com/acme/repo.git'), 'https://github.com/acme/repo.git')
+  assert.equal(redactRemoteUserinfo(undefined), undefined)
 })
 
 test('pickLatestMatching prefers newer records when multiple share a session_id', async () => {
