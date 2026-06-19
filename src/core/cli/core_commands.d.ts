@@ -21,6 +21,9 @@ export declare function parseQuerySqlArgv(
       ok: true
       sql: string
       refresh: RefreshMode
+      refreshGiven: boolean
+      serverGiven: boolean
+      server: string | undefined
       format: QueryFormat
       output: string | undefined
       maxCell: number

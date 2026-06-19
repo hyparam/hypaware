@@ -19,8 +19,9 @@ async function makeOpts(extraEnv) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-remote-connect-'))
   const stdout = makeBuf()
   const stderr = makeBuf()
+  /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', ...extraEnv }
-  return { hypHome, stdout, stderr, opts: { stdout, stderr, stdin: { isTTY: true }, env } }
+  return { hypHome, stdout, stderr, opts: { stdout, stderr, stdin: /** @type {any} */ ({ isTTY: true }), env } }
 }
 
 /** @param {string} hypHome */
@@ -50,7 +51,7 @@ test('connect rejects a non-http(s) URL', async () => {
 })
 
 test('disconnect clears the saved target and is idempotent', async () => {
-  const { hypHome, stdout, opts } = await makeOpts()
+  const { hypHome, opts } = await makeOpts()
   await dispatch(['query', 'connect', 'http://127.0.0.1:8740', '--no-verify'], opts)
   assert.ok(await readRemoteTarget(stateDir(hypHome)))
 
