@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { runGraphCompact, runGraphNeighbors, runGraphProject } from './command.js'
-import { makeRowBuilders, nodeId, edgeId } from './contract-kit.js'
+import { makeRowBuilders, nodeId, edgeId, keys } from './contract-kit.js'
 import { createContractRegistry } from './contract-registry.js'
 import {
   EDGE_DATASET,
@@ -59,7 +59,9 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
-    kit: { nodeId, edgeId, makeRowBuilders },
+    // @ref LLP 0032#shared-key-vocabulary [implements] — `keys` rides the kit
+    // so a contract derives bridge keys from the one shared recipe, never its own.
+    kit: { nodeId, edgeId, makeRowBuilders, keys },
   }
   ctx.provideCapability('hypaware.context-graph', CAPABILITY_VERSION, capability)
 

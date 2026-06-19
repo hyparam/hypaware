@@ -12,8 +12,21 @@ import { edgeId, nodeId } from '../../hypaware-core/plugins-workspace/context-gr
 test('nodeId pins known digests', () => {
   assert.equal(nodeId('Session', 'conv-1'), '5f39286b22257c21464b8de1')
   assert.equal(nodeId('App', 'claude'), '2e9bdd4283a3dfed19a24ddc')
-  // Keys containing spaces must not collide with delimiter boundaries.
+  // Keys containing spaces must not collide with delimiter boundaries. This is
+  // ALSO an out-of-repo File path: the LLP 0032 File re-key only bridges paths
+  // INSIDE a captured repo, so an absolute /tmp path keeps its key — this pin is
+  // deliberately unchanged by the migration.
   assert.equal(nodeId('File', '/tmp/a b.txt'), 'f089fa67a6b72ea65ff004f9')
+})
+
+// LLP 0032 bridge keys, pinned at the recipe level (the contract-driven
+// convergence proof lives in ai-gateway-graph-bridge.test.js). These ids equal
+// what @hypaware/github mints for Octocat/Hello-World, so they double as the
+// cross-repo contract: a change to the id recipe here breaks both sides.
+test('nodeId pins the GitHub↔LLM bridge keys', () => {
+  assert.equal(nodeId('Repo', 'octocat/hello-world'), 'e1505143b1ca95f6a92c3681')
+  assert.equal(nodeId('Commit', '6dcb09b5b57875f334f61aebed695e2e4193db5e'), 'c40ec7e789b96f5b036504dd')
+  assert.equal(nodeId('File', 'octocat/hello-world:src/App.js'), 'ca7c3b2086e794a4ac00a9e0')
 })
 
 test('edgeId pins known digests', () => {

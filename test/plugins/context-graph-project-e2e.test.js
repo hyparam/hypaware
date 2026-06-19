@@ -11,7 +11,7 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { executeQuerySql } from '../../src/core/query/sql.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { aiGatewayDatasetRegistration, DATASET_NAME } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
-import { edgeId, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import { edgeId, keys, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
 import { graphDatasetRegistration } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
 import { projectGraph } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
@@ -94,7 +94,7 @@ async function withSeededGateway(body, rows = ROWS) {
 
 test('projectGraph runs a contributed contract end to end and is idempotent', async () => {
   await withSeededGateway(async ({ registry, storage }) => {
-    const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
+    const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders, keys })
 
     const first = await projectGraph({ query: registry, storage, contracts: [contract] })
     assert.equal(first.nodes, 5, 'Session, App, Model, Tool, File')
@@ -128,7 +128,7 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
   // must not mint graph nodes/edges. Seed the same two real rows plus one
   // aux row whose keys are all distinct — counts must stay 5/4.
   await withSeededGateway(async ({ registry, storage }) => {
-    const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
+    const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders, keys })
     const r = await projectGraph({ query: registry, storage, contracts: [contract] })
     assert.equal(r.nodes, 5, 'aux row mints no extra node')
     assert.equal(r.edges, 4, 'aux row mints no extra edge')

@@ -472,6 +472,14 @@ test('Codex turn metadata + headers project into first-class columns and codex.*
   assert.equal(projection.request_id, 'oai-req-x')
   assert.equal(projection.prompt_id, 'turn-x')
 
+  // LLP 0032: repo identity promoted to first-class projection fields (still
+  // mirrored in attributes.codex.* for provenance). head_sha carries the raw
+  // captured value — `abc123` here is abbreviated, so the graph's commitKey
+  // guard mints no Commit node, but the column stays faithful to capture.
+  assert.equal(projection.git_remote, 'git@github.com:acme/repo.git')
+  assert.equal(projection.head_sha, 'abc123')
+  assert.equal(projection.repo_root, workspace)
+
   assert.equal(projection.attributes.codex.thread_id, 'thread-x')
   assert.equal(projection.attributes.codex.session_id, 'session-x')
   assert.equal(projection.attributes.codex.turn_id, 'turn-x')

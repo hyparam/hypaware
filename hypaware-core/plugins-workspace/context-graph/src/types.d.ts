@@ -102,7 +102,27 @@ export interface ContextGraphCapability {
       buildNode(spec: NodeSpec): GraphRow
       buildEdge(spec: EdgeSpec): GraphRow
     }
+    keys: GraphKeys
   }
+}
+
+/**
+ * The shared bridge-key vocabulary (`graph-keys.js`) exposed on the kit so a
+ * contract derives convergence keys from one recipe. The `Repo`/`Commit`/`File`
+ * recipes are byte-identical to `github-hyp-plugin/src/keys.js`; the
+ * remote-URL / absolute-path reconciliation is host-only. A null return means
+ * "not bridgeable" (non-github remote, abbreviated sha, path outside the repo)
+ * — the caller keeps its own fallback key.
+ */
+export interface GraphKeys {
+  repoKey(ownerOrFull: unknown, repo?: unknown): string | null
+  repoKeyFromRemote(remote: unknown): string | null
+  ownerRepoFromRemote(remote: unknown): string | null
+  commitKey(sha: unknown): string | null
+  fileKey(repoFull: unknown, relpath: unknown): string | null
+  fileKeyFromParts(remote: unknown, repoRoot: unknown, absPath: unknown): string | null
+  relativizePath(repoRoot: unknown, absPath: unknown): string | null
+  normalizeRelpath(value: unknown): string | null
 }
 
 /** A node as the traversal reads it — graph identity plus display fields. */

@@ -3,7 +3,7 @@
 import path from 'node:path'
 
 /**
- * @import { ContractRule, GraphKit } from './types.d.ts'
+ * @import { ContractRule, GraphKit, GraphKeys } from './types.d.ts'
  */
 
 /** This connector's plugin name, stamped on the contract for provenance/dedup keys. */
@@ -36,6 +36,11 @@ export function createAiGatewayGraphContract(kit) {
     projector: PROJECTOR,
     projectorVersion: PROJECTOR_VERSION,
   })
+  // The shared bridge-key vocabulary (owned by @hypaware/context-graph). Using
+  // it — never a local key recipe — is what lets a Repo/Commit/File this
+  // contract mints converge with the same entity seen by @hypaware/github.
+  // @ref LLP 0032#shared-key-vocabulary [constrained-by]
+  const { keys } = kit
 
   /** @type {ContractRule[]} */
   const rules = [
@@ -103,15 +108,48 @@ export function createAiGatewayGraphContract(kit) {
       },
     },
 
-    // File per resolved path, from file-touching tool calls.
+    // File per resolved path, from file-touching tool calls. The key is
+    // `owner/repo:relpath` when the absolute path can be relativized against the
+    // captured repo (so it converges with @hypaware/github AND across worktrees
+    // of one repo); it falls back to the absolute path otherwise (file outside
+    // the repo, non-github remote, or a session with no captured repo).
+    // @ref LLP 0032#file-migration [implements]
     {
       kind: 'node',
       type: 'File',
-      sql: `SELECT tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      sql: `SELECT tool_name, tool_args, git_remote, repo_root, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
       toRow(r) {
-        const file = filePathFrom(r.tool_name, r.tool_args)
-        if (!file) return null
-        return buildNode({ type: 'File', key: file, label: path.basename(file), firstSeen: r.message_created_at, sourceKeys: { file_path: file } })
+        const target = fileTargetFrom(keys, r.tool_name, r.tool_args, r.git_remote, r.repo_root)
+        if (!target) return null
+        return buildNode({ type: 'File', key: target.key, label: target.label, firstSeen: r.message_created_at, sourceKeys: target.sourceKeys })
+      },
+    },
+
+    // Repo per captured git remote (`owner/repo`). Bridge-ready: a repo seen by
+    // @hypaware/github lands on this same node. @ref LLP 0032#repo-commit-nodes
+    {
+      kind: 'node',
+      type: 'Repo',
+      sql: `SELECT git_remote, message_created_at FROM ${SOURCE_DATASET}`,
+      toRow(r) {
+        const key = keys.repoKeyFromRemote(r.git_remote)
+        if (!key) return null
+        return buildNode({ type: 'Repo', key, label: key, firstSeen: r.message_created_at, sourceKeys: { git_remote: str(r.git_remote) } })
+      },
+    },
+
+    // Commit per captured full HEAD sha. Bridge-ready: the sha is globally
+    // unique across git, so it converges with @hypaware/github with no repo
+    // qualification. An abbreviated sha is rejected by `commitKey` (it could
+    // not converge with the full-sha node). @ref LLP 0032#repo-commit-nodes
+    {
+      kind: 'node',
+      type: 'Commit',
+      sql: `SELECT head_sha, message_created_at FROM ${SOURCE_DATASET}`,
+      toRow(r) {
+        const key = keys.commitKey(r.head_sha)
+        if (!key) return null
+        return buildNode({ type: 'Commit', key, label: key.slice(0, 12), firstSeen: r.message_created_at, sourceKeys: { head_sha: key } })
       },
     },
 
@@ -157,16 +195,59 @@ export function createAiGatewayGraphContract(kit) {
       },
     },
 
-    // Session -touched-> File
+    // Session -touched-> File. The File endpoint is keyed identically to the
+    // File node rule (bridge key when relativizable, else absolute path), so the
+    // edge always points at a node the File rule mints. @ref LLP 0032#file-migration
     {
       kind: 'edge',
       type: 'touched',
-      sql: `SELECT session_id, tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      sql: `SELECT session_id, tool_name, tool_args, git_remote, repo_root, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
       toRow(r) {
         const session = str(r.session_id)
-        const file = filePathFrom(r.tool_name, r.tool_args)
-        if (!session || !file) return null
-        return buildEdge({ type: 'touched', srcType: 'Session', srcKey: session, dstType: 'File', dstKey: file, firstSeen: r.message_created_at, sourceKeys: { session_id: session, file_path: file } })
+        const target = fileTargetFrom(keys, r.tool_name, r.tool_args, r.git_remote, r.repo_root)
+        if (!session || !target) return null
+        return buildEdge({ type: 'touched', srcType: 'Session', srcKey: session, dstType: 'File', dstKey: target.key, firstSeen: r.message_created_at, sourceKeys: { session_id: session, ...target.sourceKeys } })
+      },
+    },
+
+    // Session -in-> Repo: which repo this session ran in. @ref LLP 0032#repo-commit-nodes
+    {
+      kind: 'edge',
+      type: 'in',
+      sql: `SELECT session_id, git_remote, message_created_at FROM ${SOURCE_DATASET}`,
+      toRow(r) {
+        const session = str(r.session_id)
+        const repo = keys.repoKeyFromRemote(r.git_remote)
+        if (!session || !repo) return null
+        return buildEdge({ type: 'in', srcType: 'Session', srcKey: session, dstType: 'Repo', dstKey: repo, firstSeen: r.message_created_at, sourceKeys: { session_id: session, git_remote: str(r.git_remote) } })
+      },
+    },
+
+    // Session -at-> Commit: the HEAD the session was sitting on. @ref LLP 0032#repo-commit-nodes
+    {
+      kind: 'edge',
+      type: 'at',
+      sql: `SELECT session_id, head_sha, message_created_at FROM ${SOURCE_DATASET}`,
+      toRow(r) {
+        const session = str(r.session_id)
+        const commit = keys.commitKey(r.head_sha)
+        if (!session || !commit) return null
+        return buildEdge({ type: 'at', srcType: 'Session', srcKey: session, dstType: 'Commit', dstKey: commit, firstSeen: r.message_created_at, sourceKeys: { session_id: session, head_sha: commit } })
+      },
+    },
+
+    // Commit -in-> Repo: situates the HEAD commit in its repo. This is the SAME
+    // edge @hypaware/github mints, so it converges (not just the endpoint
+    // nodes). @ref LLP 0032#repo-commit-nodes
+    {
+      kind: 'edge',
+      type: 'in',
+      sql: `SELECT head_sha, git_remote, message_created_at FROM ${SOURCE_DATASET}`,
+      toRow(r) {
+        const commit = keys.commitKey(r.head_sha)
+        const repo = keys.repoKeyFromRemote(r.git_remote)
+        if (!commit || !repo) return null
+        return buildEdge({ type: 'in', srcType: 'Commit', srcKey: commit, dstType: 'Repo', dstKey: repo, firstSeen: r.message_created_at, sourceKeys: { head_sha: commit, git_remote: str(r.git_remote) } })
       },
     },
   ]
@@ -223,6 +304,34 @@ function auxKindOf(attributes) {
   const claude = parseMaybeJson(/** @type {Record<string, unknown>} */ (attrs).claude)
   if (!claude || typeof claude !== 'object') return null
   return str(/** @type {Record<string, unknown>} */ (claude).aux_kind)
+}
+
+/**
+ * Resolve a touched file's graph key + label + provenance. Prefers the bridge
+ * key `owner/repo:relpath` — which converges with @hypaware/github AND across
+ * worktrees of one repo (each worktree has its own root but the same relpath) —
+ * and falls back to the absolute path when the file can't be relativized
+ * (outside the repo, a non-github remote, or a session with no captured repo).
+ * The label is always the basename; `sourceKeys` records the absolute path for
+ * provenance regardless of which key won. The File node rule and the touched
+ * edge share this so the edge always lands on a node the node rule mints.
+ *
+ * @param {GraphKeys} keys
+ * @param {unknown} toolName
+ * @param {unknown} toolArgs
+ * @param {unknown} gitRemote
+ * @param {unknown} repoRoot
+ * @returns {{ key: string, label: string, sourceKeys: Record<string, unknown> } | null}
+ */
+function fileTargetFrom(keys, toolName, toolArgs, gitRemote, repoRoot) {
+  const file = filePathFrom(toolName, toolArgs)
+  if (!file) return null
+  const label = path.basename(file)
+  const bridged = keys.fileKeyFromParts(gitRemote, repoRoot, file)
+  if (bridged) {
+    return { key: bridged, label, sourceKeys: { file_path: file, git_remote: str(gitRemote) } }
+  }
+  return { key: file, label, sourceKeys: { file_path: file } }
 }
 
 /**

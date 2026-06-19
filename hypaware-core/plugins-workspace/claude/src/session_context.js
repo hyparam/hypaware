@@ -122,6 +122,10 @@ function recordFrom(value) {
     transcript_path: stringValue(value.transcript_path),
     cwd: stringValue(value.cwd),
     git_branch: stringValue(value.git_branch),
+    // @ref LLP 0032#capture — repo identity for the graph bridge.
+    git_remote: stringValue(value.git_remote),
+    head_sha: stringValue(value.head_sha),
+    repo_root: stringValue(value.repo_root),
     ts: stringValue(value.ts),
   }
   return record

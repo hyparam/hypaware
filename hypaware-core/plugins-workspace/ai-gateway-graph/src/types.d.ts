@@ -43,6 +43,19 @@ export interface GraphRowBuilders {
   buildEdge(spec: EdgeSpec): GraphRow
 }
 
+/**
+ * The shared bridge-key vocabulary the kit exposes (`graph-keys.js`, owned by
+ * `@hypaware/context-graph`). Re-declared structurally here, like the rest of
+ * this file, rather than importing the provider's internal types. A null return
+ * means "not bridgeable" — the contract keeps its own fallback key.
+ */
+export interface GraphKeys {
+  repoKeyFromRemote(remote: unknown): string | null
+  ownerRepoFromRemote(remote: unknown): string | null
+  commitKey(sha: unknown): string | null
+  fileKeyFromParts(remote: unknown, repoRoot: unknown, absPath: unknown): string | null
+}
+
 /** The shared authoring kit exposed on the `hypaware.context-graph` capability. */
 export interface GraphKit {
   nodeId(type: string, naturalKey: string): string
@@ -52,6 +65,7 @@ export interface GraphKit {
     projector: string
     projectorVersion: number
   }): GraphRowBuilders
+  keys: GraphKeys
 }
 
 /** The `hypaware.context-graph` capability value, as this connector consumes it. */

@@ -1,11 +1,15 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
@@ -99,6 +103,73 @@ test('hook → state file → projector roundtrip writes cwd onto the row', asyn
     assert.ok(rows.length >= 1)
     for (const row of rows) {
       assert.equal(row.cwd, '/Users/me/code/some-repo')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0032#capture — the Claude hook captures repo identity (remote, full
+// HEAD sha, repo root) for the graph bridge, and the projector stamps it on
+// every row, the same way it already does cwd/git_branch.
+test('hook captures repo identity for a real git repo and the projector stamps it', async () => {
+  const env = await stageEnv()
+  try {
+    const repo = path.join(env.homeDir, 'work', 'MyRepo')
+    await fs.mkdir(repo, { recursive: true })
+    const git = (/** @type {string[]} */ ...args) => execFileAsync('git', ['-C', repo, ...args])
+    await git('init', '-q')
+    await git('remote', 'add', 'origin', 'git@github.com:Acme/MyRepo.git')
+    await fs.writeFile(path.join(repo, 'a.txt'), 'hi')
+    await git('add', 'a.txt')
+    await git('-c', 'user.email=t@example.com', '-c', 'user.name=Test', 'commit', '-q', '-m', 'init')
+
+    // Stage 1: hook records the repo facts (cwd is the live repo).
+    const registry = createCommandRegistry()
+    registerCoreCommands(registry)
+    registry.register({
+      name: 'claude-hook session-context',
+      summary: 'Internal Claude Code hook',
+      usage: 'hyp claude-hook session-context --state-file <path>',
+      hidden: true,
+      run: runClaudeSessionContextHook,
+    })
+    const kernel = createKernelRuntime({ commandRegistry: registry })
+    const code = await dispatch(
+      ['claude-hook', 'session-context', '--state-file', env.stateFile],
+      {
+        stdout: makeBuf(),
+        stderr: makeBuf(),
+        stdin: stdinFor({ session_id: 'sess-repo', cwd: repo, hook_event_name: 'SessionStart' }),
+        env: { ...process.env, HYP_HOME: env.hypHome },
+        registry,
+        kernel,
+      }
+    )
+    assert.equal(code, 0)
+
+    const records = await readSessionContext(env.stateFile)
+    const latest = pickLatestMatching(records, { sessionId: 'sess-repo' })
+    assert.ok(latest)
+    assert.equal(latest.git_remote, 'git@github.com:Acme/MyRepo.git')
+    assert.match(/** @type {string} */ (latest.head_sha), /^[0-9a-f]{40}$/, 'full HEAD sha, never abbreviated')
+    assert.ok(latest.repo_root && latest.repo_root.endsWith('MyRepo'), 'repo root captured')
+
+    // Stage 2: the projector stamps the captured repo identity onto every row.
+    const projector = createClaudeExchangeProjector({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const dispatcher = createAiGatewayMessageProjector({ gatewayId: 'gw-test', projectors: [{ ...projector, _seq: 0 }] })
+    const rows = await dispatcher.projectExchange(syntheticExchange({
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-repo' }) },
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    }))
+    assert.ok(rows.length >= 1)
+    for (const row of rows) {
+      assert.equal(row.git_remote, 'git@github.com:Acme/MyRepo.git')
+      assert.match(/** @type {string} */ (row.head_sha), /^[0-9a-f]{40}$/)
+      assert.equal(row.repo_root, latest.repo_root)
     }
   } finally {
     await env.cleanup()

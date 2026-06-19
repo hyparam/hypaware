@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -15,11 +15,13 @@ const DATASET_NAME = 'ai_gateway_messages'
 /**
  * HypAware's normalized AI gateway message-part query schema.
  *
- * Unchanged across `hypaware.ai-gateway@1.x` → `2.0.0`: the row shape
- * is the contract the dataset advertises and downstream queries lock
- * onto. The gateway always emits this column set, regardless of which
- * adapter projector produced the messages — projector-defined fields
- * map onto these named columns directly.
+ * The row shape is the contract the dataset advertises and downstream
+ * queries lock onto. The gateway always emits this column set, regardless
+ * of which adapter projector produced the messages — projector-defined
+ * fields map onto these named columns directly. `schema_version` 7 added
+ * the `git_remote` / `head_sha` / `repo_root` capture columns (LLP 0032);
+ * the additions are nullable, so old partitions read them as null and no
+ * partition-label bump is needed.
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */
@@ -42,6 +44,13 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'client_name', type: 'STRING', nullable: true },
   { name: 'cwd', type: 'STRING', nullable: true },
   { name: 'git_branch', type: 'STRING', nullable: true },
+  // @ref LLP 0032#capture — captured repo identity for the GitHub↔LLM graph
+  // bridge: the git remote URL, full HEAD sha, and repo root (the prefix that
+  // relativizes a touched file's absolute path). Nullable: a session may run
+  // outside a git repo, and older partitions predate these columns (read null).
+  { name: 'git_remote', type: 'STRING', nullable: true },
+  { name: 'head_sha', type: 'STRING', nullable: true },
+  { name: 'repo_root', type: 'STRING', nullable: true },
   { name: 'client_version', type: 'STRING', nullable: true },
   { name: 'entrypoint', type: 'STRING', nullable: true },
   { name: 'user_type', type: 'STRING', nullable: true },
@@ -648,6 +657,11 @@ function expandMessageParts(ctx) {
     client_name: stringValue(ctx.projection.client_name),
     cwd: ctx.projection.cwd,
     git_branch: ctx.projection.git_branch,
+    // @ref LLP 0032#capture — repo identity for the graph bridge, exchange-level
+    // like cwd/git_branch (captured by the Claude hook / Codex turn metadata).
+    git_remote: ctx.projection.git_remote,
+    head_sha: ctx.projection.head_sha,
+    repo_root: ctx.projection.repo_root,
     client_version: ctx.projection.client_version,
     entrypoint: stringValue(ctx.message.entrypoint) ?? ctx.projection.entrypoint,
     user_type: stringValue(ctx.message.user_type) ?? ctx.projection.user_type,
