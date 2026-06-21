@@ -43,7 +43,26 @@ export interface GraphRowBuilders {
   buildEdge(spec: EdgeSpec): GraphRow
 }
 
-/** The shared authoring kit exposed on the `hypaware.context-graph` capability. */
+/**
+ * The bridge-key vocabulary this connector owns (`./graph-keys.js`). The
+ * `Repo`/`Commit`/`File` recipes are byte-identical to
+ * `github-hyp-plugin/src/keys.js`; the remote-URL / absolute-path
+ * reconciliation is host-only. A null return means "not bridgeable" (non-github
+ * remote, abbreviated sha, path outside the repo) — the contract keeps its own
+ * fallback key.
+ */
+export interface GraphKeys {
+  repoKey(ownerOrFull: unknown, repo?: unknown): string | null
+  repoKeyFromRemote(remote: unknown): string | null
+  ownerRepoFromRemote(remote: unknown): string | null
+  commitKey(sha: unknown): string | null
+  fileKey(repoFull: unknown, relpath: unknown): string | null
+  fileKeyFromParts(remote: unknown, repoRoot: unknown, absPath: unknown): string | null
+  relativizePath(repoRoot: unknown, absPath: unknown): string | null
+  normalizeRelpath(value: unknown): string | null
+}
+
+/** The generic authoring kit exposed on the `hypaware.context-graph` capability (type-blind; node-type recipes live in the connector). */
 export interface GraphKit {
   nodeId(type: string, naturalKey: string): string
   edgeId(srcId: string, type: string, dstId: string): string

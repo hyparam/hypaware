@@ -3,6 +3,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { redactRemoteUserinfo } from './git-remote.js'
+
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.d.ts'
@@ -433,7 +435,7 @@ function buildSession(args) {
     sessionId: stringValue(metaPayload.id) ?? fallbackId,
     startedAtMs: timestampToMs(metaPayload.timestamp),
     cwd: firstString(stringValue(metaPayload.cwd), firstTurnString(turnPayloads, 'cwd')),
-    gitOriginUrl: git ? firstString(stringValue(git.repository_url), stringValue(git.origin_url)) : undefined,
+    gitOriginUrl: git ? redactRemoteUserinfo(firstString(stringValue(git.repository_url), stringValue(git.origin_url))) : undefined,
     gitCommit: git ? firstString(stringValue(git.commit_hash), stringValue(git.commit)) : undefined,
     gitBranch: git ? stringValue(git.branch) : undefined,
     gitDirty: git ? firstBool(boolValue(git.dirty), boolValue(git.is_dirty)) : undefined,
@@ -502,6 +504,14 @@ function projectedExchangeFromSession(args) {
   if (session.startedAtMs !== undefined) exchange.conversation_started_at = new Date(session.startedAtMs).toISOString()
   if (session.cwd) exchange.cwd = session.cwd
   if (session.gitBranch) exchange.git_branch = session.gitBranch
+  // @ref LLP 0032#capture — repo identity for the graph bridge (Repo/Commit),
+  // from the rollout's session_meta `git` block (commitKey rejects an
+  // abbreviated sha). repo_root is intentionally NOT set from `cwd`: the rollout
+  // records no verified git toplevel, and the cwd may be a repo subdir, which
+  // would mis-relativize File keys. Codex File nodes keep absolute keys in V1,
+  // matching the live Codex path. @ref LLP 0032#codex-repo-root
+  if (session.gitOriginUrl) exchange.git_remote = session.gitOriginUrl
+  if (session.gitCommit) exchange.head_sha = session.gitCommit
   if (session.clientVersion) exchange.client_version = session.clientVersion
   if (session.entrypoint) exchange.entrypoint = session.entrypoint
   if (session.threadSource) exchange.user_type = session.threadSource

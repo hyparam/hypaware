@@ -472,6 +472,17 @@ test('Codex turn metadata + headers project into first-class columns and codex.*
   assert.equal(projection.request_id, 'oai-req-x')
   assert.equal(projection.prompt_id, 'turn-x')
 
+  // LLP 0032: repo identity promoted to first-class projection fields (still
+  // mirrored in attributes.codex.* for provenance). head_sha carries the raw
+  // captured value — `abc123` here is abbreviated, so the graph's commitKey
+  // guard mints no Commit node, but the column stays faithful to capture.
+  assert.equal(projection.git_remote, 'git@github.com:acme/repo.git')
+  assert.equal(projection.head_sha, 'abc123')
+  // repo_root stays null: the workspace path is NOT a verified git toplevel
+  // (it may be a repo subdir), so Codex File keys must not bridge against it —
+  // they fall back to absolute. @ref LLP 0032#codex-repo-root
+  assert.equal(projection.repo_root, undefined)
+
   assert.equal(projection.attributes.codex.thread_id, 'thread-x')
   assert.equal(projection.attributes.codex.session_id, 'session-x')
   assert.equal(projection.attributes.codex.turn_id, 'turn-x')
@@ -481,6 +492,35 @@ test('Codex turn metadata + headers project into first-class columns and codex.*
   assert.equal(projection.attributes.codex.has_changes, true)
   assert.equal(projection.attributes.codex.sandbox, 'seatbelt')
   assert.equal(projection.attributes.codex.identity_source, 'gateway_fallback')
+})
+
+test('live projector redacts credential userinfo from the turn-metadata remote (LLP 0032)', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const workspace = '/home/me/workspace'
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    is_sse: true,
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-x',
+        workspaces: {
+          // A token-bearing HTTPS remote in the turn metadata.
+          [workspace]: { associated_remote_urls: { origin: 'https://x-access-token:ghp_SUPERSECRET@github.com/acme/repo.git' } },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: '',
+    stream_events: [
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 0, event: 'response.completed', data: JSON.stringify({ type: 'response.completed', id: 'resp_x', output_text: 'done' }) },
+    ],
+  }), context()))
+
+  // Stripped at ingress: neither the first-class field nor the provenance mirror holds the token.
+  assert.equal(projection.git_remote, 'https://github.com/acme/repo.git')
+  assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/repo.git')
+  assert.ok(!JSON.stringify(projection).includes('ghp_SUPERSECRET'), 'no token anywhere in the projection')
 })
 
 test('thread_source=subagent flips is_sidechain to true', () => {

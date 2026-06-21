@@ -156,8 +156,9 @@ function rowsByRole(rows, role) {
  * output, and an assistant reply. No native ids → deterministic identity.
  *
  * @param {string} sessionId
+ * @param {{ git?: Record<string, unknown> }} [overrides]
  */
-function modernConversation(sessionId) {
+function modernConversation(sessionId, overrides = {}) {
   return {
     meta: {
       id: sessionId,
@@ -168,7 +169,7 @@ function modernConversation(sessionId) {
       source: 'vscode',
       thread_source: 'user',
       model_provider: 'hypaware',
-      git: { commit_hash: 'abc123def', repository_url: 'https://github.com/acme/repo.git', dirty: true },
+      git: overrides.git ?? { commit_hash: 'abc123def', repository_url: 'https://github.com/acme/repo.git', dirty: true },
     },
     turns: [
       { turn_id: 't-1', cwd: '/work/repo', model: 'gpt-5.5', sandbox_policy: { type: 'workspace-write' } },
@@ -240,6 +241,17 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
     assert.equal(exchange.model, 'gpt-5.5')
     assert.equal(exchange.conversation_started_at, '2026-05-25T19:56:38.942Z')
 
+    // LLP 0032: repo identity promoted to first-class fields from session_meta.git
+    // (git_remote ← repository_url, head_sha ← commit_hash). The clean URL passes
+    // through redaction unchanged; the credential case is pinned by 'backfill
+    // redacts credential userinfo …' below.
+    assert.equal(exchange.git_remote, 'https://github.com/acme/repo.git')
+    assert.equal(exchange.head_sha, 'abc123def')
+    // repo_root stays null: the rollout cwd is NOT a verified git toplevel (may
+    // be a repo subdir), so Codex File keys fall back to absolute rather than
+    // mis-relativizing. @ref LLP 0032#codex-repo-root
+    assert.equal(exchange.repo_root, undefined)
+
     // Codex provenance lives under attributes.codex, including identity_source.
     assert.equal(exchange.attributes.codex.identity_source, 'gateway_fallback')
     assert.equal(exchange.attributes.codex.git_origin_url, 'https://github.com/acme/repo.git')
@@ -267,6 +279,11 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
       assert.equal(row.conversation_source, 'codex')
       assert.equal(row.client_name, 'codex')
       assert.equal(row.cwd, '/work/repo')
+      // First-class repo-identity columns survive materialization (LLP 0032).
+      // repo_root is null for Codex (no verified toplevel — §codex-repo-root).
+      assert.equal(row.git_remote, 'https://github.com/acme/repo.git')
+      assert.equal(row.head_sha, 'abc123def')
+      assert.equal(row.repo_root, undefined)
       const attributes = /** @type {any} */ (row.attributes)
       assert.equal(attributes.gateway.source, 'backfill')
       assert.equal(typeof attributes.gateway.source_path_hash, 'string')
@@ -292,6 +309,41 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
     assert.equal(resultRow.content_text, 'file-a\nfile-b')
     // Tool name is back-filled from the earlier call within the conversation.
     assert.equal(resultRow.tool_name, 'shell')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('backfill redacts credential userinfo from the git remote (LLP 0032)', async () => {
+  const env = await stageEnv()
+  try {
+    // A token-bearing HTTPS remote, exactly as `gh`/CI writes into remote.origin.url.
+    await writeModernRollout(env, '2026/05/27/rollout-cred.jsonl', modernConversation('sess-cred', {
+      git: {
+        commit_hash: 'abc123def',
+        repository_url: 'https://x-access-token:ghp_SUPERSECRET@github.com/acme/repo.git',
+        dirty: true,
+      },
+    }))
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx } = runContext()
+    const { items } = await collect(provider.run(ctx))
+    const item = items[0]
+    assert.ok(item)
+
+    const exchange = value(item)
+    // The token is stripped at ingress: neither the first-class column nor the
+    // provenance mirror ever holds the secret; the owner/repo is preserved.
+    assert.equal(exchange.git_remote, 'https://github.com/acme/repo.git')
+    assert.equal(exchange.attributes.codex.git_origin_url, 'https://github.com/acme/repo.git')
+    assert.ok(!JSON.stringify(exchange).includes('ghp_SUPERSECRET'), 'no token anywhere in the projected exchange')
+
+    const rows = await materialize(item)
+    for (const row of rows) {
+      assert.equal(row.git_remote, 'https://github.com/acme/repo.git')
+      assert.ok(!JSON.stringify(row).includes('ghp_SUPERSECRET'), 'no token anywhere in a materialized row')
+    }
   } finally {
     await env.cleanup()
   }

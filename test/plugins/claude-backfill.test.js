@@ -225,6 +225,11 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
       transcript_path: filePath,
       cwd: '/work/repo-a',
       git_branch: 'feature/x',
+      // @ref LLP 0032#capture — the hook also captures repo identity; backfill
+      // must replay all three or re-imported Claude sessions drop out of the join.
+      git_remote: 'git@github.com:acme/repo-a.git',
+      head_sha: '0123456789abcdef0123456789abcdef01234567',
+      repo_root: '/work/repo-a',
       ts: '2026-05-20T10:00:06.000Z',
     })
 
@@ -253,6 +258,11 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
     assert.equal(exchange.client_name, 'claude')
     assert.equal(exchange.cwd, '/work/repo-a')
     assert.equal(exchange.git_branch, 'feature/x')
+    // @ref LLP 0032#capture — repo identity rides the same record as cwd; the
+    // live projector stamps these too, so backfilled rows converge with live.
+    assert.equal(exchange.git_remote, 'git@github.com:acme/repo-a.git')
+    assert.equal(exchange.head_sha, '0123456789abcdef0123456789abcdef01234567')
+    assert.equal(exchange.repo_root, '/work/repo-a')
     assert.equal(exchange.client_version, '1.2.3')
     assert.equal(exchange.messages.length, 2)
 
@@ -277,6 +287,10 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
       assert.equal(row.client_name, 'claude')
       assert.equal(row.cwd, '/work/repo-a')
       assert.equal(row.git_branch, 'feature/x')
+      // First-class repo-identity columns survive materialization (LLP 0032).
+      assert.equal(row.git_remote, 'git@github.com:acme/repo-a.git')
+      assert.equal(row.head_sha, '0123456789abcdef0123456789abcdef01234567')
+      assert.equal(row.repo_root, '/work/repo-a')
       const attributes = /** @type {any} */ (row.attributes)
       assert.equal(attributes.gateway.source, 'backfill')
       assert.equal(typeof attributes.gateway.source_path_hash, 'string')

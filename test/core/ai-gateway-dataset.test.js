@@ -216,3 +216,43 @@ test('ai-gateway createDataSource unions legacy and source-table data', async ()
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('ai-gateway createDataSource pads declared schema columns absent from an old partition', async () => {
+  // A v7 column (e.g. git_remote, LLP 0032) read over a pre-v7 partition that
+  // physically lacks it must surface as a null-valued column, not throw
+  // ColumnNotFoundError. `withSchemaColumns` is the only thing guaranteeing
+  // this, and every other test stages partitions that already carry all
+  // columns — so without this test a regression dropping the padding would pass
+  // the suite while breaking real queries over old data. @ref LLP 0032#capture
+  const cacheRoot = await makeTmpDir('schema-pad')
+  try {
+    // Stage a partition with ONLY id/date — no repo-identity columns at all.
+    await appendRowsToSourceTable(
+      cacheRoot, DATASET_NAME, ['source=claude'],
+      TEST_COLUMNS, [{ id: 1, date: '2026-05-26' }]
+    )
+
+    const storage = createQueryStorageService({ cacheRoot })
+    /** @type {QueryScope} */
+    const scope = { limit: 1000 }
+    const partitions = await discoverParts({ cacheDir: cacheRoot, scope, config: { version: 2 } })
+    const source = await createDataSource(partitions, { scope, storage })
+
+    // The declared v7 columns are advertised even though the partition lacks them.
+    for (const col of ['git_remote', 'head_sha', 'repo_root']) {
+      assert.ok(source.columns.includes(col), `source advertises declared column ${col}`)
+    }
+
+    // Scanning reads them as null/undefined rather than throwing.
+    const seen = []
+    for await (const row of source.scan({}).rows()) {
+      if (row.resolved) seen.push(row.resolved)
+    }
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].id, 1)
+    assert.equal(seen[0].git_remote ?? null, null, 'absent column reads as null')
+    assert.equal(seen[0].repo_root ?? null, null)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

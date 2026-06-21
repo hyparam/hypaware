@@ -1363,6 +1363,12 @@ export interface AiGatewayProjectedExchange {
   user_id?: string
   cwd?: string
   git_branch?: string
+  /** Git remote URL of the session's repo (e.g. `git@github.com:owner/repo.git`); feeds the `Repo`/`File` bridge keys (LLP 0032). */
+  git_remote?: string
+  /** Full 40-hex HEAD sha at capture time; feeds the `Commit` bridge key (LLP 0032). */
+  head_sha?: string
+  /** Absolute repo root (`git rev-parse --show-toplevel`); relativizes a touched file's absolute path for the `File` bridge key (LLP 0032). */
+  repo_root?: string
   client_name?: string
   client_version?: string
   entrypoint?: string

@@ -3,6 +3,14 @@ export interface SessionContextRecord {
   transcript_path: string | undefined
   cwd: string | undefined
   git_branch: string | undefined
+  /**
+   * Repo identity for the GitHub↔LLM graph bridge (LLP 0032), captured by the
+   * hook. Optional (not `string | undefined`): each is best-effort and the hook
+   * omits a key when its git lookup fails, so older records simply lack them.
+   */
+  git_remote?: string
+  head_sha?: string
+  repo_root?: string
   ts: string | undefined
 }
 

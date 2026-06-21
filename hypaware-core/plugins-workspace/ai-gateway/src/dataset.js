@@ -142,8 +142,36 @@ export async function createDataSource(partitions, ctx) {
   }
 
   if (sources.length === 0) return emptySource()
-  if (sources.length === 1) return sources[0]
-  return unionSources(sources)
+  if (sources.length === 1) return withSchemaColumns(sources[0])
+  return withSchemaColumns(unionSources(sources))
+}
+
+const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
+
+/**
+ * Expose the dataset's DECLARED schema columns on a data source even when the
+ * underlying parquet partitions physically lack some of them — the normal state
+ * after an additive schema bump, when older partitions predate a new column
+ * (e.g. `git_remote`/`head_sha`/`repo_root` in v7, LLP 0032). Squirreling's
+ * `validateScan` rejects a SELECT that names a column absent from the source's
+ * `columns`, so without this a contract or query that reads a freshly-added
+ * column would throw `ColumnNotFoundError` over any pre-bump partition. The scan
+ * itself is unchanged: a row object that lacks the key simply reads as null,
+ * which is the correct value for "this partition predates the column".
+ *
+ * @ref LLP 0032#capture [implements] — additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
+ * @param {AsyncDataSource} source
+ * @returns {AsyncDataSource}
+ */
+function withSchemaColumns(source) {
+  const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
+  return {
+    columns,
+    numRows: source.numRows,
+    scan(options) {
+      return source.scan(options)
+    },
+  }
 }
 
 /**

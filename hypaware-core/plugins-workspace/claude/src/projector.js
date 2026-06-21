@@ -268,6 +268,11 @@ export function createClaudeExchangeProjector(opts) {
       if (userId) projection.user_id = userId
       if (sessionContextRecord?.cwd) projection.cwd = sessionContextRecord.cwd
       if (sessionContextRecord?.git_branch) projection.git_branch = sessionContextRecord.git_branch
+      // @ref LLP 0032#capture — repo identity for the graph bridge, recovered
+      // from the same hook-written session-context record as cwd/git_branch.
+      if (sessionContextRecord?.git_remote) projection.git_remote = sessionContextRecord.git_remote
+      if (sessionContextRecord?.head_sha) projection.head_sha = sessionContextRecord.head_sha
+      if (sessionContextRecord?.repo_root) projection.repo_root = sessionContextRecord.repo_root
       if (exchangeAttrs) projection.attributes = exchangeAttrs
       if (input.ts_start) projection.conversation_started_at = input.ts_start
 

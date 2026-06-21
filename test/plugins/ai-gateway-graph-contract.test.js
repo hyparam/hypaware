@@ -12,7 +12,8 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 
 // Build the contract the way the connector's activate() does: from the graph
-// plugin's shared kit. The rules' row identity + provenance are therefore the
+// plugin's generic kit (the bridge-key recipe is the connector's own, imported
+// inside the contract). The rules' row identity + provenance are therefore the
 // real end-to-end ones — these assertions double as the digest-stability guard.
 const KIT = { nodeId, edgeId, makeRowBuilders }
 const contract = createAiGatewayGraphContract(KIT)
@@ -20,11 +21,13 @@ const contract = createAiGatewayGraphContract(KIT)
 /**
  * @param {'node' | 'edge'} kind
  * @param {string} type
+ * @param {number} [nth] which match to return when several rules share a type
+ *   (the two membership edges both use `in`); defaults to the first.
  */
-function rule(kind, type) {
-  const found = contract.rules.find((r) => r.kind === kind && r.type === type)
-  assert.ok(found, `${kind} rule ${type} exists`)
-  return found
+function rule(kind, type, nth = 0) {
+  const found = contract.rules.filter((r) => r.kind === kind && r.type === type)
+  assert.ok(found[nth], `${kind} rule ${type} #${nth} exists`)
+  return found[nth]
 }
 
 const TS = '2026-06-05T12:00:00.000Z'
@@ -201,4 +204,140 @@ test('non-aux rows pass through unchanged (attributes present but no aux_kind)',
   })
   assert.ok(row, 'a real row with attributes but no aux_kind still mints its node')
   assert.equal(row.natural_key, 'sess-real')
+})
+
+// --- LLP 0032: GitHub↔LLM bridge nodes/edges + File re-key ---
+
+const REMOTE = 'git@github.com:Acme/Repo.git'
+const SHA = '0123456789abcdef0123456789abcdef01234567'
+
+test('Repo node keys on owner/repo derived from the git remote', () => {
+  const row = rule('node', 'Repo').toRow({ git_remote: REMOTE, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, 'acme/repo')
+  assert.equal(row.node_id, nodeId('Repo', 'acme/repo'))
+  assert.equal(row.label, 'acme/repo')
+  assert.deepEqual(row.source_keys, { git_remote: REMOTE })
+  // Non-github / missing remotes mint no Repo node.
+  assert.equal(rule('node', 'Repo').toRow({ git_remote: 'git@gitlab.com:a/b.git', message_created_at: TS }), null)
+  assert.equal(rule('node', 'Repo').toRow({ git_remote: null, message_created_at: TS }), null)
+})
+
+test('Commit node keys on the full HEAD sha and rejects an abbreviated one', () => {
+  const row = rule('node', 'Commit').toRow({ head_sha: SHA.toUpperCase(), message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, SHA, 'sha lowercased')
+  assert.equal(row.node_id, nodeId('Commit', SHA))
+  assert.equal(row.label, SHA.slice(0, 12))
+  assert.equal(rule('node', 'Commit').toRow({ head_sha: 'abc123', message_created_at: TS }), null, 'abbreviated sha skipped')
+  assert.equal(rule('node', 'Commit').toRow({ head_sha: null, message_created_at: TS }), null)
+})
+
+test('File node re-keys an in-repo path to owner/repo:relpath (relpath case preserved)', () => {
+  const row = rule('node', 'File').toRow({
+    tool_name: 'Edit',
+    tool_args: { file_path: '/home/u/Repo/src/Auth.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(row)
+  assert.equal(row.natural_key, 'acme/repo:src/Auth.py')
+  assert.equal(row.node_id, nodeId('File', 'acme/repo:src/Auth.py'))
+  assert.equal(row.label, 'Auth.py')
+  assert.deepEqual(row.source_keys, { file_path: '/home/u/Repo/src/Auth.py', git_remote: REMOTE })
+})
+
+test('File node falls back to the absolute path when it cannot be relativized', () => {
+  // Outside the repo root.
+  const outside = rule('node', 'File').toRow({
+    tool_name: 'Read',
+    tool_args: { file_path: '/tmp/scratch.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(outside)
+  assert.equal(outside.natural_key, '/tmp/scratch.py', 'out-of-repo file keeps its absolute key')
+  assert.deepEqual(outside.source_keys, { file_path: '/tmp/scratch.py' })
+
+  // No captured repo at all (pre-0032 row / non-git session).
+  const noRepo = rule('node', 'File').toRow({ tool_name: 'Read', tool_args: { file_path: '/repo/x.py' }, message_created_at: TS })
+  assert.ok(noRepo)
+  assert.equal(noRepo.natural_key, '/repo/x.py')
+})
+
+test('File node falls back (does not mint a bogus bridge key) for a path that escapes the root via `..`', () => {
+  // `/home/u/Repo/../secret.py` is *outside* the repo. A raw prefix check would
+  // slice it to `../secret.py` and mint `acme/repo:../secret.py`; normalization
+  // before the containment test collapses it out from under the root, so it
+  // falls back to its absolute key. @ref LLP 0032#file-migration
+  const escaped = rule('node', 'File').toRow({
+    tool_name: 'Edit',
+    tool_args: { file_path: '/home/u/Repo/../secret.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(escaped)
+  assert.notEqual(escaped.natural_key, 'acme/repo:../secret.py', 'no `..` in the bridge key')
+  assert.equal(escaped.natural_key, '/home/u/Repo/../secret.py', 'escaping path keeps its absolute key')
+  assert.deepEqual(escaped.source_keys, { file_path: '/home/u/Repo/../secret.py' })
+})
+
+test('File node still relativizes an in-repo `..` that stays inside the root', () => {
+  const inside = rule('node', 'File').toRow({
+    tool_name: 'Edit',
+    tool_args: { file_path: '/home/u/Repo/src/../Auth.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(inside)
+  assert.equal(inside.natural_key, 'acme/repo:Auth.py', 'in-repo `..` collapses then bridges')
+})
+
+test('touched edge re-keys its File endpoint identically to the File node', () => {
+  const r = rule('edge', 'touched')
+  const row = r.toRow({
+    session_id: 'sess-1',
+    tool_name: 'Write',
+    tool_args: { file_path: '/home/u/Repo/src/Auth.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(row)
+  assert.equal(row.dst_id, nodeId('File', 'acme/repo:src/Auth.py'), 'edge points at the bridged File node')
+  assert.equal(row.src_id, nodeId('Session', 'sess-1'))
+})
+
+test('Session -in-> Repo and Session -at-> Commit wire the bridge nodes', () => {
+  const inRepo = rule('edge', 'in', 0).toRow({ session_id: 'sess-1', git_remote: REMOTE, message_created_at: TS })
+  assert.ok(inRepo)
+  assert.equal(inRepo.src_id, nodeId('Session', 'sess-1'))
+  assert.equal(inRepo.dst_id, nodeId('Repo', 'acme/repo'))
+  assert.equal(inRepo.src_type, 'Session')
+  assert.equal(inRepo.dst_type, 'Repo')
+
+  const atCommit = rule('edge', 'at').toRow({ session_id: 'sess-1', head_sha: SHA, message_created_at: TS })
+  assert.ok(atCommit)
+  assert.equal(atCommit.src_id, nodeId('Session', 'sess-1'))
+  assert.equal(atCommit.dst_id, nodeId('Commit', SHA))
+
+  // Missing endpoints skip.
+  assert.equal(rule('edge', 'in', 0).toRow({ session_id: 'sess-1', git_remote: null, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'at').toRow({ session_id: 'sess-1', head_sha: 'abc123', message_created_at: TS }), null)
+})
+
+test('Commit -in-> Repo is the second `in` edge and converges with the GitHub edge', () => {
+  const commitInRepo = rule('edge', 'in', 1).toRow({ head_sha: SHA, git_remote: REMOTE, message_created_at: TS })
+  assert.ok(commitInRepo)
+  assert.equal(commitInRepo.src_type, 'Commit')
+  assert.equal(commitInRepo.dst_type, 'Repo')
+  const commit = nodeId('Commit', SHA)
+  const repo = nodeId('Repo', 'acme/repo')
+  assert.equal(commitInRepo.src_id, commit)
+  assert.equal(commitInRepo.dst_id, repo)
+  assert.equal(commitInRepo.edge_id, edgeId(commit, 'in', repo))
 })

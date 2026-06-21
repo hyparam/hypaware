@@ -22,6 +22,10 @@ import { createAiGatewayGraphContract } from './graph_contract.js'
  * @ref LLP 0023#contract-contribution [implements] — connector contributes the source's contract via the capability
  */
 export async function activate(ctx) {
+  // ^1.0.0: this connector needs only the engine's generic kit
+  // (`nodeId`/`edgeId`/`makeRowBuilders`). The bridge-key recipe is owned here
+  // (`./graph-keys.js`), not the engine, so requiring `keys` on the kit would
+  // wrongly couple a node-type concern to the generic substrate (LLP 0032).
   const graph = /** @type {ContextGraphCapability} */ (
     ctx.requireCapability('hypaware.context-graph', '^1.0.0')
   )

@@ -302,6 +302,14 @@ function projectedExchangeFromEntries(args) {
   if (clientVersion) exchange.client_version = clientVersion
   if (record?.cwd) exchange.cwd = record.cwd
   if (record?.git_branch) exchange.git_branch = record.git_branch
+  // @ref LLP 0032#capture — repo identity rides the same hook-written
+  // session-context record as cwd/git_branch; the live projector stamps these
+  // too (projector.js), so backfilled and live Claude rows converge identically.
+  // Unlike Codex, the Claude hook captures `git rev-parse --show-toplevel`, so
+  // repo_root is a verified toplevel and File keys bridge safely.
+  if (record?.git_remote) exchange.git_remote = record.git_remote
+  if (record?.head_sha) exchange.head_sha = record.head_sha
+  if (record?.repo_root) exchange.repo_root = record.repo_root
   return exchange
 }
 

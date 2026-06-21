@@ -2,6 +2,8 @@
 
 import { createHash } from 'node:crypto'
 
+import { redactRemoteUserinfo } from './git-remote.js'
+
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CodexLogReader } from './types.d.ts'
@@ -94,6 +96,11 @@ export function createCodexExchangeProjector(opts = {}) {
         conversation_source: resolveConversationSource(provider),
         cwd: recordedContext.cwd,
         git_branch: recordedContext.git_branch,
+        // @ref LLP 0032#capture — repo identity for the graph bridge (Repo/Commit).
+        // repo_root is intentionally omitted for Codex (left null) — see
+        // resolveCodexContext. @ref LLP 0032#codex-repo-root
+        git_remote: codexContext?.git_remote,
+        head_sha: codexContext?.head_sha,
         client_name: recordedContext.client_name,
         client_version: recordedContext.client_version,
         entrypoint: recordedContext.entrypoint,
@@ -493,7 +500,10 @@ function resolveCodexContext(input, provider, path, reqBody) {
   const sandbox = readStringKey(metadata, 'sandbox')
   const turn_started_at_unix_ms = numberValue(readKey(metadata, 'turn_started_at_unix_ms'))
   const window_id = readHeader(input.request_headers, 'x-codex-window-id')
-  const git_origin_url = readStringKey(remoteUrls, 'origin')
+  // Strip any credential userinfo at ingress, before it reaches the first-class
+  // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
+  // @ref LLP 0032#remote-redaction
+  const git_origin_url = redactRemoteUserinfo(readStringKey(remoteUrls, 'origin'))
   const git_commit = readStringKey(workspaceInfo, 'latest_git_commit_hash')
   const has_changes = typeof workspaceInfo?.has_changes === 'boolean'
     ? workspaceInfo.has_changes
@@ -525,6 +535,15 @@ function resolveCodexContext(input, provider, path, reqBody) {
     client_version: client.version,
     entrypoint: originator,
     sandbox,
+    // @ref LLP 0032#capture — repo identity for the graph bridge, already in the
+    // turn metadata (also kept in attributes.codex.* for provenance). Only
+    // git_remote/head_sha are first-class: they feed Repo/Commit convergence and
+    // need no repo root. repo_root is deliberately NOT derived from the workspace
+    // path — Codex exposes no verified git toplevel, and the workspace may be a
+    // repo *subdir*, which would mis-relativize (or collide) File keys. Codex
+    // File nodes therefore keep absolute keys in V1. @ref LLP 0032#codex-repo-root
+    git_remote: git_origin_url,
+    head_sha: git_commit,
     attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
   }
 }
