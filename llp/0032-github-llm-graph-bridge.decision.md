@@ -85,12 +85,18 @@ time, and ride the `ai_gateway_messages` row as three new nullable columns
   `git` in the live cwd for the branch; it now also reads `remote.origin.url`,
   `rev-parse HEAD` (validated full-40-hex), and `rev-parse --show-toplevel`,
   writes them into the session-context record, and the projector stamps them
-  like `cwd`/`git_branch`.
+  like `cwd`/`git_branch`. Claude **backfill** replays the same session-context
+  record, so re-imported Claude sessions stamp the identical three fields and
+  converge with their live rows — backfill and live must stamp the same set or
+  re-imported history silently drops out of the join. Because the hook captures
+  a real `--show-toplevel`, Claude `repo_root` is a **verified** toplevel, so
+  Claude `File` nodes bridge (unlike Codex's — §codex-repo-root).
 - **Codex** — the turn metadata (`x-codex-turn-metadata`) already carried
   `associated_remote_urls.origin` and `latest_git_commit_hash` (kept in
   `attributes.codex.*` for provenance); they are now promoted to the first-class
-  columns, and the workspace path is the repo root. Backfill reads the same
-  facts from the rollout's `session_meta.git` block.
+  `git_remote` / `head_sha` columns. Backfill reads the same facts from the
+  rollout's `session_meta.git` block. Codex does **not** populate `repo_root` —
+  it has no verified toplevel (§codex-repo-root).
 
 The additions are **nullable** and additive, so no partition-label bump or cache
 wipe is needed: a session outside a git repo simply leaves them null, and older
@@ -98,6 +104,31 @@ partitions predate the columns. So that a contract or query reading a new column
 does not throw `ColumnNotFoundError` over a pre-v7 partition, the gateway data
 source exposes its **declared** schema columns (padding absent physical columns
 to null) — `createDataSource` / `withSchemaColumns` in `ai-gateway/dataset.js`.
+
+## Codex repo-root
+
+The `File` bridge key needs the repo **toplevel** (`git rev-parse
+--show-toplevel`) to relativize an absolute path the way the GitHub side does.
+Claude's hook captures exactly that. Codex does **not**: its turn metadata
+exposes a *workspace path* (and backfill a rollout *cwd*), neither of which is a
+verified git toplevel — Codex resolves a workspace's remote by walking up to the
+enclosing repo, so the workspace can sit in a repo **subdir**.
+
+Keying a `File` against a subdir-as-root silently mis-relativizes it
+(`/repo/pkg/a.js` → `owner/repo:a.js` instead of `owner/repo:pkg/a.js`): it both
+fails to converge with the GitHub node **and** can *collide* with a real
+top-level `a.js` from another session, merging two distinct files onto one
+content-addressed node — the same costly-to-reverse orphaning the `File`
+migration incurs, but as silent corruption. Convergence's safety rule is **fall
+back rather than mis-key** (§file-migration): so Codex leaves `repo_root`
+**null**, and its `File` nodes keep absolute-path keys in V1. Codex
+`Repo`/`Commit` nodes still converge — they key on `git_remote`/`head_sha` and
+need no toplevel, so the headline session↔repo and session↔commit joins still
+fire for Codex; only file-level convergence waits.
+
+Lifting Codex File convergence is a future step gated on Codex surfacing a
+verified toplevel (or backfill deriving one from a checked-out repo). Until then
+the fail-safe is a deliberate V1 limit, not an oversight.
 
 ## Remote redaction
 
@@ -148,8 +179,10 @@ It is a deliberate **migration**, sequenced after capture lands.
 **Fallback, not a hard cutover.** A file is re-keyed only when its absolute path
 can be relativized against a captured repo: an in-repo path under a known github
 remote gets `owner/repo:relpath`; a file **outside** the repo (`/tmp`,
-`~/.claude`, another repo), a non-github remote, or a session with no captured
-repo keeps its **absolute-path** key, exactly as before. So `File` keys are
+`~/.claude`, another repo, or a path that escapes the root via `..` — both sides
+are POSIX-normalized before the containment test, so an escaping path can't slice
+to a bogus relpath), a non-github remote, or a session with no captured repo
+keeps its **absolute-path** key, exactly as before. So `File` keys are
 heterogeneous by design, and the `touched` edge derives its `File` endpoint
 through the same helper so it always lands on a node the `File` rule mints.
 

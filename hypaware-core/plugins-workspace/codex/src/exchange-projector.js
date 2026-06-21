@@ -96,10 +96,11 @@ export function createCodexExchangeProjector(opts = {}) {
         conversation_source: resolveConversationSource(provider),
         cwd: recordedContext.cwd,
         git_branch: recordedContext.git_branch,
-        // @ref LLP 0032#capture — repo identity for the graph bridge.
+        // @ref LLP 0032#capture — repo identity for the graph bridge (Repo/Commit).
+        // repo_root is intentionally omitted for Codex (left null) — see
+        // resolveCodexContext. @ref LLP 0032#codex-repo-root
         git_remote: codexContext?.git_remote,
         head_sha: codexContext?.head_sha,
-        repo_root: codexContext?.repo_root,
         client_name: recordedContext.client_name,
         client_version: recordedContext.client_version,
         entrypoint: recordedContext.entrypoint,
@@ -535,11 +536,14 @@ function resolveCodexContext(input, provider, path, reqBody) {
     entrypoint: originator,
     sandbox,
     // @ref LLP 0032#capture — repo identity for the graph bridge, already in the
-    // turn metadata (also kept in attributes.codex.* for provenance). The
-    // workspace path is the repo root, so it relativizes touched-file paths.
+    // turn metadata (also kept in attributes.codex.* for provenance). Only
+    // git_remote/head_sha are first-class: they feed Repo/Commit convergence and
+    // need no repo root. repo_root is deliberately NOT derived from the workspace
+    // path — Codex exposes no verified git toplevel, and the workspace may be a
+    // repo *subdir*, which would mis-relativize (or collide) File keys. Codex
+    // File nodes therefore keep absolute keys in V1. @ref LLP 0032#codex-repo-root
     git_remote: git_origin_url,
     head_sha: git_commit,
-    repo_root: workspace?.path,
     attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
   }
 }

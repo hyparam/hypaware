@@ -267,6 +267,36 @@ test('File node falls back to the absolute path when it cannot be relativized', 
   assert.equal(noRepo.natural_key, '/repo/x.py')
 })
 
+test('File node falls back (does not mint a bogus bridge key) for a path that escapes the root via `..`', () => {
+  // `/home/u/Repo/../secret.py` is *outside* the repo. A raw prefix check would
+  // slice it to `../secret.py` and mint `acme/repo:../secret.py`; normalization
+  // before the containment test collapses it out from under the root, so it
+  // falls back to its absolute key. @ref LLP 0032#file-migration
+  const escaped = rule('node', 'File').toRow({
+    tool_name: 'Edit',
+    tool_args: { file_path: '/home/u/Repo/../secret.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(escaped)
+  assert.notEqual(escaped.natural_key, 'acme/repo:../secret.py', 'no `..` in the bridge key')
+  assert.equal(escaped.natural_key, '/home/u/Repo/../secret.py', 'escaping path keeps its absolute key')
+  assert.deepEqual(escaped.source_keys, { file_path: '/home/u/Repo/../secret.py' })
+})
+
+test('File node still relativizes an in-repo `..` that stays inside the root', () => {
+  const inside = rule('node', 'File').toRow({
+    tool_name: 'Edit',
+    tool_args: { file_path: '/home/u/Repo/src/../Auth.py' },
+    git_remote: REMOTE,
+    repo_root: '/home/u/Repo',
+    message_created_at: TS,
+  })
+  assert.ok(inside)
+  assert.equal(inside.natural_key, 'acme/repo:Auth.py', 'in-repo `..` collapses then bridges')
+})
+
 test('touched edge re-keys its File endpoint identically to the File node', () => {
   const r = rule('edge', 'touched')
   const row = r.toRow({

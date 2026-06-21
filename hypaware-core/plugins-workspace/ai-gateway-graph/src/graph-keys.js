@@ -1,5 +1,7 @@
 // @ts-check
 
+import { posix } from 'node:path'
+
 /**
  * Bridge-key vocabulary for cross-source convergence — owned by this connector.
  *
@@ -204,6 +206,14 @@ export function commitKey(sha) {
  * worktree of a repo has its own root (`git rev-parse --show-toplevel`) but the
  * same file sits at the same relpath, so two worktrees yield one `File` key.
  *
+ * Both sides are POSIX-normalized (`.`/`..` collapsed) **before** the
+ * containment check, so a path that escapes the repo via `..`
+ * (`/repo/../outside`) normalizes out from under the root and falls back to its
+ * absolute key — rather than slicing to a `../outside` relpath that would mint a
+ * bogus bridge key (one that fails to converge, or worse, *collides* with an
+ * unrelated file at that relpath). An in-repo `..` that stays inside
+ * (`/repo/sub/../a` → `a`) still relativizes. @ref LLP 0032#file-migration
+ *
  * @param {unknown} repoRoot  absolute repo root
  * @param {unknown} absPath   absolute file path
  * @returns {string | null}
@@ -212,10 +222,10 @@ export function relativizePath(repoRoot, absPath) {
   const root = str(repoRoot)
   const abs = str(absPath)
   if (!root || !abs) return null
-  const r = trimTrailingSlash(root.replace(/\\/g, '/'))
-  const a = abs.replace(/\\/g, '/')
+  const r = trimTrailingSlash(posix.normalize(root.replace(/\\/g, '/')))
+  const a = posix.normalize(abs.replace(/\\/g, '/'))
   if (a === r) return null // the repo dir itself is not a file
-  if (!a.startsWith(`${r}/`)) return null // outside the repo root
+  if (!a.startsWith(`${r}/`)) return null // outside the repo root (post-normalization)
   return normalizeRelpath(a.slice(r.length + 1))
 }
 

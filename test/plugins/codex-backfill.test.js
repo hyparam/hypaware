@@ -242,12 +242,15 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
     assert.equal(exchange.conversation_started_at, '2026-05-25T19:56:38.942Z')
 
     // LLP 0032: repo identity promoted to first-class fields from session_meta.git
-    // (git_remote ← repository_url, head_sha ← commit_hash, repo_root ← cwd).
-    // The clean URL passes through redaction unchanged; the credential case is
-    // pinned by 'backfill redacts credential userinfo …' below.
+    // (git_remote ← repository_url, head_sha ← commit_hash). The clean URL passes
+    // through redaction unchanged; the credential case is pinned by 'backfill
+    // redacts credential userinfo …' below.
     assert.equal(exchange.git_remote, 'https://github.com/acme/repo.git')
     assert.equal(exchange.head_sha, 'abc123def')
-    assert.equal(exchange.repo_root, '/work/repo')
+    // repo_root stays null: the rollout cwd is NOT a verified git toplevel (may
+    // be a repo subdir), so Codex File keys fall back to absolute rather than
+    // mis-relativizing. @ref LLP 0032#codex-repo-root
+    assert.equal(exchange.repo_root, undefined)
 
     // Codex provenance lives under attributes.codex, including identity_source.
     assert.equal(exchange.attributes.codex.identity_source, 'gateway_fallback')
@@ -277,9 +280,10 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
       assert.equal(row.client_name, 'codex')
       assert.equal(row.cwd, '/work/repo')
       // First-class repo-identity columns survive materialization (LLP 0032).
+      // repo_root is null for Codex (no verified toplevel — §codex-repo-root).
       assert.equal(row.git_remote, 'https://github.com/acme/repo.git')
       assert.equal(row.head_sha, 'abc123def')
-      assert.equal(row.repo_root, '/work/repo')
+      assert.equal(row.repo_root, undefined)
       const attributes = /** @type {any} */ (row.attributes)
       assert.equal(attributes.gateway.source, 'backfill')
       assert.equal(typeof attributes.gateway.source_path_hash, 'string')

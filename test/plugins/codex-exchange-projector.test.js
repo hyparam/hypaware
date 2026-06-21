@@ -478,7 +478,10 @@ test('Codex turn metadata + headers project into first-class columns and codex.*
   // guard mints no Commit node, but the column stays faithful to capture.
   assert.equal(projection.git_remote, 'git@github.com:acme/repo.git')
   assert.equal(projection.head_sha, 'abc123')
-  assert.equal(projection.repo_root, workspace)
+  // repo_root stays null: the workspace path is NOT a verified git toplevel
+  // (it may be a repo subdir), so Codex File keys must not bridge against it —
+  // they fall back to absolute. @ref LLP 0032#codex-repo-root
+  assert.equal(projection.repo_root, undefined)
 
   assert.equal(projection.attributes.codex.thread_id, 'thread-x')
   assert.equal(projection.attributes.codex.session_id, 'session-x')

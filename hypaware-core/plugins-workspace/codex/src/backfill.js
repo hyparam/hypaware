@@ -504,12 +504,14 @@ function projectedExchangeFromSession(args) {
   if (session.startedAtMs !== undefined) exchange.conversation_started_at = new Date(session.startedAtMs).toISOString()
   if (session.cwd) exchange.cwd = session.cwd
   if (session.gitBranch) exchange.git_branch = session.gitBranch
-  // @ref LLP 0032#capture — repo identity for the graph bridge, from the
-  // rollout's session_meta `git` block. The rollout cwd is the repo root, so it
-  // relativizes touched-file paths (commitKey rejects an abbreviated sha).
+  // @ref LLP 0032#capture — repo identity for the graph bridge (Repo/Commit),
+  // from the rollout's session_meta `git` block (commitKey rejects an
+  // abbreviated sha). repo_root is intentionally NOT set from `cwd`: the rollout
+  // records no verified git toplevel, and the cwd may be a repo subdir, which
+  // would mis-relativize File keys. Codex File nodes keep absolute keys in V1,
+  // matching the live Codex path. @ref LLP 0032#codex-repo-root
   if (session.gitOriginUrl) exchange.git_remote = session.gitOriginUrl
   if (session.gitCommit) exchange.head_sha = session.gitCommit
-  if (session.cwd) exchange.repo_root = session.cwd
   if (session.clientVersion) exchange.client_version = session.clientVersion
   if (session.entrypoint) exchange.entrypoint = session.entrypoint
   if (session.threadSource) exchange.user_type = session.threadSource
