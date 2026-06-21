@@ -1,32 +1,36 @@
 // @ts-check
 
 /**
- * Shared graph-key vocabulary for cross-source convergence.
+ * Bridge-key vocabulary for cross-source convergence — owned by this connector.
  *
  * Graph node ids are content-addressed over `(kind, type, natural key)`
  * (LLP 0023 §content-addressed-ids), so the natural key *is* the identity:
  * two contracts converge on one node iff they normalize the **same key
- * identically**. This module is the single home for the bridge-key recipes so
- * that every contract reusing them — today `@hypaware/ai-gateway-graph`, and
- * any future source — derives byte-identical keys instead of re-deriving (and
- * silently diverging from) them per `toRow`.
+ * identically**. The `Repo` / `Commit` / `File` recipes live here, beside the
+ * contract that mints those node types (`graph_contract.js`) — not in the
+ * generic `@hypaware/context-graph` engine, which stays node-type-agnostic. A
+ * node type's identity recipe belongs to the plugin that emits it; the engine
+ * only provides the type-blind `nodeId` / `edgeId` / `makeRowBuilders`
+ * primitives, so the substrate scales to many (incl. unofficial) plugins
+ * without privileging a blessed set of node types.
  *
- * The `Repo` / `Commit` / `File` recipes here are **byte-identical** to
- * `github-hyp-plugin/src/keys.js`: that is what makes a repo, commit, or file
- * seen by both the GitHub source and a recorded Claude/Codex session land on
- * one node. The cross-repo contract is enforced by digest pins on both sides
- * (host: `test/plugins/ai-gateway-graph-bridge.test.js`; GitHub plugin:
- * `test/graph-ids.test.js`) — if either side changes a recipe, the pins
- * mismatch and the change becomes a deliberate, visible decision rather than a
- * silent orphaning. Keep the two in sync by hand; the plugins are decoupled
- * (separate repos), so a shared module isn't an option.
+ * The recipes here are **byte-identical** to `github-hyp-plugin/src/keys.js`:
+ * that is what makes a repo, commit, or file seen by both the GitHub source and
+ * a recorded Claude/Codex session land on one node. This connector is the
+ * host-side twin of that GitHub `keys.js`. The cross-repo contract is enforced
+ * by digest pins on both sides (host: `test/plugins/ai-gateway-graph-bridge.test.js`;
+ * GitHub plugin: `test/graph-ids.test.js`) — if either side changes a recipe,
+ * the pins mismatch and the change becomes a deliberate, visible decision
+ * rather than a silent orphaning. The two are kept in sync by hand; the plugins
+ * are decoupled (separate repos), so a shared module isn't an option — and the
+ * engine is not it either, since convergence is pin-enforced, not engine-hosted.
  *
  * The host adds two reconciliation steps the GitHub side does not need (it
  * receives `owner/repo` and repo-relative paths straight from the API): turning
  * a captured git **remote URL** into `owner/repo`, and a captured **absolute
  * local path** into a repo-relative path against the repo root.
  *
- * @ref LLP 0032#shared-key-vocabulary [implements] — one home for the bridge keys; Repo/Commit/File byte-identical to the GitHub side
+ * @ref LLP 0032#shared-key-vocabulary [implements] — connector-owned bridge keys; Repo/Commit/File byte-identical to the GitHub side
  */
 
 // ---------------------------------------------------------------------------

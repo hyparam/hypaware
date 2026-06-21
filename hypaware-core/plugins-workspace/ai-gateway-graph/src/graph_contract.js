@@ -2,6 +2,8 @@
 
 import path from 'node:path'
 
+import { keys } from './graph-keys.js'
+
 /**
  * @import { ContractRule, GraphKit, GraphKeys } from './types.d.ts'
  */
@@ -24,7 +26,8 @@ const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'
  * hand-authored node/edge mappings that used to live in `@hypaware/context-graph`;
  * they now live here, beside the source they read. Rows are built with the
  * graph plugin's `kit` so the id recipe and provenance columns stay owned by
- * the graph plugin — this connector owns only the SQL + `toRow` semantics.
+ * the graph plugin — this connector owns the SQL + `toRow` semantics and the
+ * bridge-key recipe (`keys`, imported from `./graph-keys.js`).
  *
  * @param {GraphKit} kit
  * @returns {{ name: string, plugin: string, sourceDataset: string, projector: string, projectorVersion: number, rules: ContractRule[] }}
@@ -36,11 +39,6 @@ export function createAiGatewayGraphContract(kit) {
     projector: PROJECTOR,
     projectorVersion: PROJECTOR_VERSION,
   })
-  // The shared bridge-key vocabulary (owned by @hypaware/context-graph). Using
-  // it — never a local key recipe — is what lets a Repo/Commit/File this
-  // contract mints converge with the same entity seen by @hypaware/github.
-  // @ref LLP 0032#shared-key-vocabulary [constrained-by]
-  const { keys } = kit
 
   /** @type {ContractRule[]} */
   const rules = [

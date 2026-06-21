@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { edgeId, keys, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import { edgeId, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 
 // Cross-source convergence guard (LLP 0032). A repo, commit, or file seen by
@@ -11,8 +11,8 @@ import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-worksp
 // graph node — the whole point of the bridge. Convergence is automatic given a
 // shared natural key + a shared id recipe (LLP 0023 §content-addressed-ids), and
 // the GitHub plugin imports THIS repo's id recipe, so the only thing that can
-// break convergence is a key-normalization drift between the two `keys`
-// modules. These digests are lifted verbatim from the GitHub plugin's published
+// break convergence is a key-normalization drift between this connector's
+// `graph-keys.js` and the GitHub side. These digests are lifted verbatim from the GitHub plugin's published
 // pins (`github-hyp-plugin/test/graph-ids.test.js`) for `Octocat/Hello-World`;
 // asserting the HOST bridge mints the same ids from a session's captured
 // remote/sha/path proves the join fires. If a host key recipe drifts, these
@@ -25,7 +25,7 @@ const GITHUB_PINS = {
   commitInRepo: 'f036a2845fc3f585cb6cbfe2', // edgeId(commit, 'in', repo)
 }
 
-const KIT = { nodeId, edgeId, makeRowBuilders, keys }
+const KIT = { nodeId, edgeId, makeRowBuilders }
 const contract = createAiGatewayGraphContract(KIT)
 const TS = '2026-06-18T12:00:00.000Z'
 

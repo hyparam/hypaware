@@ -37,31 +37,40 @@ GitHub plugin: `test/graph-ids.test.js`).
 ## Shared key vocabulary
 
 The host previously chose its graph keys ad hoc, per `toRow`. For sources to
-converge without central coordination, the per-node-type key recipes need one
-home. `hypaware-core/plugins-workspace/context-graph/src/graph-keys.js` is that
-home, exposed on the capability kit as **`kit.keys`** so a contract derives a
-bridge key from the one recipe instead of re-deriving (and risking divergence
-from) it.
+converge without central coordination, a node type's key recipe needs one home —
+and that home is **the plugin that mints the node type**, not the engine.
+`hypaware-core/plugins-workspace/ai-gateway-graph/src/graph-keys.js` is that home
+for `Repo`/`Commit`/`File`: it sits beside the contract (`graph_contract.js`)
+that emits those nodes, so a contract derives a bridge key from the one recipe
+instead of re-deriving (and risking divergence from) it per `toRow`.
 
-Adding `keys` to the kit widens the `hypaware.context-graph` capability
-surface: a connector that calls `kit.keys` cannot run against a provider that
-predates it. So the provider bumps the capability **minor** version
-(`1.0.0` → `1.1.0`) and the `@hypaware/ai-gateway-graph` connector tightens its
-`requireCapability` range to `^1.1.0`. The kernel then fails a stale `1.0.x`
-provider at activation with a clear `cap_missing` error (LLP 0006), instead of
-satisfying activation and only throwing `kit.keys is undefined` deep in
-projection.
+**Why not the engine.** `@hypaware/context-graph` is a generic substrate: it
+hardcodes no node type and its projection/compaction never name
+`Repo`/`Commit`/`File`. Its kit exposes only the type-blind primitives
+(`nodeId`, `edgeId`, `makeRowBuilders`). Hosting Repo/Commit/File-specific
+recipes on `kit.keys` would have given those node types a privileged home the
+engine ships — the wrong precedent for a substrate meant to carry many sources,
+some unofficial, each of which must own its own node types symmetrically. It is
+also unnecessary: cross-source convergence is enforced by **digest pins**, not
+by shared engine code (the GitHub plugin is a separate repo that hand-syncs its
+own `keys.js` and never imports the host's). The only in-repo consumer is this
+one connector, which imports `keys` directly. Keeping the recipe in the connector
+leaves the engine capability surface unchanged — no version bump, no
+`kit.keys`-presence guard — and keeps the engine node-type-agnostic. (Should a
+second host-side connector ever need the same recipe, it belongs in a small
+shared module imported by both connectors in this repo — still not the engine.)
 
 The `Repo`/`Commit`/`File` recipes there are **byte-identical** to
 `github-hyp-plugin/src/keys.js` — owner/repo lowercased, sha full-40-hex
-lowercased, relpath POSIX with no leading `./` or `/`. The host adds two
-reconciliation steps the GitHub side does not need (it gets `owner/repo` and
-repo-relative paths from the API): `ownerRepoFromRemote` (a git **remote URL** →
-`owner/repo`) and `relativizePath` (an **absolute local path** → repo-relative,
-against the repo root). These feed the verbatim recipes, so the resulting keys
-still converge. The two `keys` modules are kept in sync **by hand** — the
-plugins are decoupled (separate repos), so a shared module isn't an option; the
-digest pins are the enforcement.
+lowercased, relpath POSIX with no leading `./` or `/`. This connector is the
+host-side twin of that GitHub `keys.js`. The host adds two reconciliation steps
+the GitHub side does not need (it gets `owner/repo` and repo-relative paths from
+the API): `ownerRepoFromRemote` (a git **remote URL** → `owner/repo`) and
+`relativizePath` (an **absolute local path** → repo-relative, against the repo
+root). These feed the verbatim recipes, so the resulting keys still converge.
+The two `keys` modules are kept in sync **by hand** — the plugins are decoupled
+(separate repos), so a shared module isn't an option; the digest pins are the
+enforcement.
 
 ## Capture
 

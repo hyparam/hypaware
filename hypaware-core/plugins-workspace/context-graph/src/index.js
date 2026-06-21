@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { runGraphCompact, runGraphNeighbors, runGraphProject } from './command.js'
-import { makeRowBuilders, nodeId, edgeId, keys } from './contract-kit.js'
+import { makeRowBuilders, nodeId, edgeId } from './contract-kit.js'
 import { createContractRegistry } from './contract-registry.js'
 import {
   EDGE_DATASET,
@@ -19,21 +19,14 @@ import { setGraphRuntime } from './runtime.js'
  * @import { ContextGraphCapability } from './types.d.ts'
  */
 
-/**
- * The capability version source plugins / connectors require to contribute a
- * contract. Bumped to `1.1.0` when `keys` joined the kit (LLP 0032): a
- * connector that calls `kit.keys` must not bind to a pre-`keys` provider, so
- * the minor bump + the connector's `^1.1.0` range fails a stale provider at
- * activation instead of deep in projection.
- * @ref LLP 0032#shared-key-vocabulary [constrained-by] — widening the kit bumps the capability minor
- */
-const CAPABILITY_VERSION = '1.1.0'
+/** The capability version source plugins / connectors require to contribute a contract. */
+const CAPABILITY_VERSION = '1.0.0'
 
 /**
  * Activate `@hypaware/context-graph`.
  *
  * Registers:
- *  - capability `hypaware.context-graph@1.1.0` — source plugins (or a
+ *  - capability `hypaware.context-graph@1.0.0` — source plugins (or a
  *    connector like `@hypaware/ai-gateway-graph`) call `registerContract` to
  *    contribute a projection contract, and build its rows with the shared
  *    `kit` (id recipe + provenance). The engine runs every registered contract.
@@ -66,9 +59,7 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
-    // @ref LLP 0032#shared-key-vocabulary [implements] — `keys` rides the kit
-    // so a contract derives bridge keys from the one shared recipe, never its own.
-    kit: { nodeId, edgeId, makeRowBuilders, keys },
+    kit: { nodeId, edgeId, makeRowBuilders },
   }
   ctx.provideCapability('hypaware.context-graph', CAPABILITY_VERSION, capability)
 

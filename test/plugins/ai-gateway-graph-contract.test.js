@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { edgeId, keys, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
+import { edgeId, makeRowBuilders, nodeId } from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
 import {
   createAiGatewayGraphContract,
   PROJECTOR,
@@ -12,9 +12,10 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 
 // Build the contract the way the connector's activate() does: from the graph
-// plugin's shared kit. The rules' row identity + provenance are therefore the
+// plugin's generic kit (the bridge-key recipe is the connector's own, imported
+// inside the contract). The rules' row identity + provenance are therefore the
 // real end-to-end ones — these assertions double as the digest-stability guard.
-const KIT = { nodeId, edgeId, makeRowBuilders, keys }
+const KIT = { nodeId, edgeId, makeRowBuilders }
 const contract = createAiGatewayGraphContract(KIT)
 
 /**

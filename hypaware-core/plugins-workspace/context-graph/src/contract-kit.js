@@ -1,9 +1,8 @@
 // @ts-check
 
 import { nodeId, edgeId } from './ids.js'
-import { keys } from './graph-keys.js'
 
-export { nodeId, edgeId, keys }
+export { nodeId, edgeId }
 
 /**
  * @import { NodeSpec, EdgeSpec } from './types.d.ts'
