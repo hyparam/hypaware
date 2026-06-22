@@ -459,6 +459,9 @@ function transcriptEntryFromRow(row) {
     hook_event: stringValue(readKey(attachment, 'hookEvent')) ?? stringValue(row.hookEvent),
     is_compact_summary: typeof row.isCompactSummary === 'boolean' ? row.isCompactSummary : undefined,
     compact_metadata: readKey(row, 'compactMetadata') ?? readKey(row, 'compact_metadata'),
+    // Claude Code writes the API `usage` block onto assistant transcript lines;
+    // backfill surfaces it as attributes.usage to match live capture.
+    usage: readKey(message, 'usage'),
     raw_frame: row,
   }
   if (!entry.messageId && !entry.contentKey && !entry.provider_uuid) return undefined

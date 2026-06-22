@@ -8,6 +8,7 @@ import {
 } from './transcripts.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
+import { anthropicMessageAttributes } from './anthropic.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -403,6 +404,12 @@ function projectedMessageFromEntry(entry, agentMeta) {
       message.attributes = { claude: { spawned_by_tool_use_id: spawnedByToolUseId } }
     }
   }
+  // Mirror live capture: fold the assistant turn's token usage into
+  // attributes.usage (anthropic.js owns the cache_*_input_tokens →
+  // cache_{read,write}_tokens normalization). Merged, not assigned, so a
+  // subagent's `claude.spawned_by_tool_use_id` above survives.
+  const usageAttrs = anthropicMessageAttributes(entry)
+  if (usageAttrs) message.attributes = { ...(message.attributes ?? {}), ...usageAttrs }
   if (entry.attachment_type) message.attachment_type = entry.attachment_type
   if (entry.hook_event) message.hook_event = entry.hook_event
   if (entry.is_compact_summary !== undefined) message.is_compact_summary = entry.is_compact_summary

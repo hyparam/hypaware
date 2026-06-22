@@ -44,6 +44,13 @@ export interface TranscriptEntry {
   hook_event: string | undefined
   is_compact_summary: boolean | undefined
   compact_metadata: unknown
+  /**
+   * The Anthropic `message.usage` block Claude Code writes onto assistant
+   * transcript lines (`input_tokens` / `output_tokens` /
+   * `cache_*_input_tokens`). Backfill folds it into `attributes.usage`, the
+   * same column the live projector stamps from the wire response.
+   */
+  usage: unknown
   raw_frame: unknown
   timestampMs: number | undefined
 }

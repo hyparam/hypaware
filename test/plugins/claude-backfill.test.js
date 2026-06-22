@@ -312,6 +312,107 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
   }
 })
 
+test('assistant token usage is folded into attributes.usage like live capture', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-a', 'sess-1', [
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-user-1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'list the files' },
+        timestamp: '2026-05-20T10:00:00.000Z',
+      },
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-asst-1',
+        parentUuid: 'u-user-1',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure.' }],
+          // The usage block Claude Code stamps onto assistant transcript lines.
+          usage: {
+            input_tokens: 120,
+            output_tokens: 45,
+            cache_read_input_tokens: 1000,
+            cache_creation_input_tokens: 30,
+          },
+        },
+        timestamp: '2026-05-20T10:00:05.000Z',
+      },
+    ])
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+
+    const rows = await materialize(item)
+    const asstRow = rowsByRole(rows, 'assistant')[0]
+    // anthropic.js normalizes cache_read_input_tokens → cache_read_tokens and
+    // cache_creation_input_tokens → cache_write_tokens; backfill matches live.
+    assert.deepEqual(/** @type {any} */ (asstRow.attributes).usage, {
+      input_tokens: 120,
+      output_tokens: 45,
+      cache_read_tokens: 1000,
+      cache_write_tokens: 30,
+    })
+    // The user turn carries no usage block.
+    const userRow = rowsByRole(rows, 'user')[0]
+    assert.equal(/** @type {any} */ (userRow.attributes)?.usage, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('token usage merges with subagent spawn provenance', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-a', 'sess-1', [
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-asst-1',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_spawn', name: 'Agent', input: { subagent_type: 'Explore' } }],
+        },
+        timestamp: '2026-05-20T10:00:00.000Z',
+      },
+    ])
+    await writeSubagent(env, 'repo-a', 'sess-1', 'a7325fc7bf7423540', [
+      {
+        sessionId: 'sess-1',
+        uuid: 'sa-asst-1',
+        parentUuid: null,
+        type: 'assistant',
+        isSidechain: true,
+        agentId: 'a7325fc7bf7423540',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'on it' }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        },
+        timestamp: '2026-05-20T10:00:02.000Z',
+      },
+    ], { agentType: 'Explore', description: 'Find X', toolUseId: 'toolu_spawn' })
+
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const items = await collectItems(provider.run(runContext().ctx))
+    const rows = (await Promise.all(items.map(materialize))).flat()
+
+    const subagentRow = rows.find((r) => r.agent_id === 'a7325fc7bf7423540')
+    assert.ok(subagentRow, 'subagent row present')
+    const attributes = /** @type {any} */ (subagentRow.attributes)
+    // Both the spawn provenance and the token usage survive on one row.
+    assert.equal(attributes.claude.spawned_by_tool_use_id, 'toolu_spawn')
+    assert.deepEqual(attributes.usage, { input_tokens: 10, output_tokens: 5 })
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('native DAG identity is preserved verbatim', async () => {
   const env = await stageEnv()
   try {
