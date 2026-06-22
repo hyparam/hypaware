@@ -18,6 +18,12 @@ export interface TranscriptEntry {
   sessionId: string
   role: string | undefined
   content: unknown
+  /**
+   * The working directory Claude Code stamps on each transcript line. The
+   * backfill recovers a session's repo from it when the session-context record
+   * predates the LLP 0032 git capture (see `git_repo.js`).
+   */
+  cwd: string | undefined
   messageId: string | undefined
   contentKey: string | undefined
   provider_uuid: string | undefined

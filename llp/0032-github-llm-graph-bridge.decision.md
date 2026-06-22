@@ -105,6 +105,37 @@ does not throw `ColumnNotFoundError` over a pre-v7 partition, the gateway data
 source exposes its **declared** schema columns (padding absent physical columns
 to null) — `createDataSource` / `withSchemaColumns` in `ai-gateway/dataset.js`.
 
+### Backfill recovery for pre-capture sessions
+
+A session recorded before this capture landed has a session-context sidecar (and
+transcript) with **no** remote/HEAD/root — the hook that writes them postdates
+the session, so its `Session -in-> Repo` edge never mints and its enrichment
+floats unattributed. Re-import can still recover the repo: the working directory
+(`cwd`) rides every Claude transcript line, so the backfill provider runs git in
+that cwd **at import time** (`git_repo.js` `deriveRepoFromCwd`) whenever the
+session-context record supplied no remote. The live hook still wins when it
+captured one; the cwd probe is a fallback for history.
+
+Recovery derives `git_remote` and `repo_root` only — **never `head_sha`**.
+`rev-parse HEAD` now reports the repo's *current* HEAD, not the commit the
+session sat on, so a recovered sha would mint a wrong `Commit`
+([§repo-commit-nodes](#repo-commit-nodes)); the headline session↔repo join needs
+only the remote, and a toplevel is stable across commits, so both are safe to
+derive after the fact while the sha is not. A cwd that no longer resolves to a
+git repo (a deleted worktree, a moved checkout) recovers nothing and the session
+keeps absolute `File` keys — **fall back rather than mis-key**
+([§file-migration](#file-migration)).
+
+One operational catch: the gateway materializer's **pre-write `part_id` dedupe**
+([LLP 0023](./0023-context-graph-projection.decision.md#pre-write-dedup)) drops
+any row whose `part_id` already exists. Re-importing an already-backfilled
+session re-materializes byte-identical `part_id`s, so the refreshed rows are
+dropped and the recovered `git_remote` never lands. Refreshing pre-capture
+history therefore means **dropping those sessions' existing `ai_gateway_messages`
+rows first**, then re-importing and re-projecting — a deliberate one-shot step,
+like the `File` re-key migration ([§file-migration](#file-migration)), not an
+automatic upgrade.
+
 ## Codex repo-root
 
 The `File` bridge key needs the repo **toplevel** (`git rev-parse
