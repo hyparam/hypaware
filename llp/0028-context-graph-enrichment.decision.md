@@ -112,7 +112,16 @@ The pipeline runs in two regimes that differ only in **session selector** and
   dedup is prospect-vs-prospect ([§curate-clustering](#curate-clustering)). It is
   expensive and one-shot, so it is **never automatic** — running it is a user
   decision, like enabling a completion provider
-  ([§excluded-from-default-activation](#excluded-from-default-activation)).
+  ([§excluded-from-default-activation](#excluded-from-default-activation)). The
+  curate phase accepts a `--since <YYYY-MM-DD>` bound that scopes the pending
+  pool to sessions active on or after that day (and `--dry-run` to preview the
+  pool + cluster count before submitting). This keeps a recent-window run
+  tractable: the cold-regime clustering is per-prospect recall + greedy O(n²)
+  cosine ([§curate-clustering](#curate-clustering)), so an unbounded pool of
+  thousands is intractable, while a two-week slice is a few hundred. The bound
+  is a **read-side filter on `selectPending`, not a mutation** — out-of-window
+  prospects stay pending for a later, separately-scoped run, never deleted or
+  `skip`-drained ([§salience-drain](#salience-drain)).
 - **Ongoing** — an automatic **periodic batch** (default daily). Selector:
   **settled, not-yet-enriched sessions** — latest part older than the run cutoff
   *and* past the session's watermark. "Settled" is a SQL predicate evaluated at

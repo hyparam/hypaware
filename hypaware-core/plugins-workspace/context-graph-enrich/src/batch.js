@@ -44,22 +44,39 @@ import { readState, updateState } from './state.js'
  * synchronous tick when the provider has no batch API.
  *
  * @param {EnrichRuntime} runtime
- * @param {{ signal?: AbortSignal, intervalMs?: number, onProgress?: (s: CompletionBatchStatus) => void }} [opts]
- * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, merged: number, skipped: number, clusters: number, batched: boolean }>}
+ * @param {{ signal?: AbortSignal, intervalMs?: number, onProgress?: (s: CompletionBatchStatus) => void, anchorKeys?: Set<string>, dryRun?: boolean }} [opts]
+ * @returns {Promise<{ pending: number, processed: number, committed: number, rejected: number, merged: number, skipped: number, clusters: number, batched: boolean, dryRun?: boolean }>}
  */
 export async function runCurateBatch(runtime, opts = {}) {
   const completion = getCompletion(runtime)
   const batch = completion.batch
+  // Dry run: build the scoped pool + clusters and report, submitting and writing
+  // nothing — so `--since` scoping and the resulting curator-call count can be
+  // confirmed before the (paid) Batch submit. Independent of the batch API.
+  if (opts.dryRun) {
+    const pending = await selectPending(runtime, { anchorKeys: opts.anchorKeys })
+    const { clusters, skipped } = await buildCurateClusters(runtime, pending, { uncapped: true })
+    return { pending: pending.length, processed: 0, committed: 0, rejected: 0, merged: 0, skipped: skipped.length, clusters: clusters.length, batched: false, dryRun: true }
+  }
   if (!batch) {
     runtime.log.warn('enrich.curate_batch_unavailable', { [Attr.ERROR_KIND]: 'enrich_batch_unavailable', provider: completion.provider })
     const sync = await runCurateTick(runtime, { signal: opts.signal })
     return { ...sync, batched: false }
   }
+  // Crash recovery: if a batch job is already persisted (submitted but not yet
+  // collected), resume it — poll to completion and collect from the persisted
+  // cluster→prospect map — rather than submitting a new (re-billed) batch.
+  const inflight = readState(runtime.stateDir).curate_job
+  if (inflight) {
+    await pollUntilEnded(batch, inflight.id, { signal: opts.signal, intervalMs: opts.intervalMs, onProgress: opts.onProgress })
+    const collected = await collectCurateJob(runtime, opts)
+    return { pending: 0, processed: collected.processed ?? 0, committed: collected.committed ?? 0, rejected: collected.rejected ?? 0, merged: collected.merged ?? 0, skipped: 0, clusters: inflight.clusters?.length ?? 0, batched: true }
+  }
   return withSpan(
     'enrich.curate_batch',
     { [Attr.COMPONENT]: 'plugin', [Attr.OPERATION]: 'enrich.curate_batch', [Attr.PLUGIN]: '@hypaware/context-graph-enrich', status: 'ok' },
     async (span) => {
-      const pending = await selectPending(runtime)
+      const pending = await selectPending(runtime, { anchorKeys: opts.anchorKeys })
       const { clusters, skipped, recallByProspect } = await buildCurateClusters(runtime, pending, { uncapped: true })
       const at = new Date().toISOString()
       /** @type {Record<string, unknown>[]} */
@@ -74,6 +91,10 @@ export async function runCurateBatch(runtime, opts = {}) {
         const built = await buildClusterRequests(runtime, clusters, recallByProspect)
         const status = await batch.submit(built.map((b) => ({ customId: b.customId, request: b.request })), { signal: opts.signal })
         span.setAttribute('batch_id', status.id)
+        // Persist the in-flight job (batch id + cluster→prospect map) so a crash
+        // between submit and collect is recoverable: re-running resumes via the
+        // branch above instead of re-submitting (and re-billing) the batch.
+        updateState(runtime.stateDir, (cur) => ({ ...cur, curate_job: { id: status.id, submitted_at: at, clusters: built.map((b) => ({ customId: b.customId, prospectIds: b.prospectIds })) } }))
         await pollUntilEnded(batch, status.id, { signal: opts.signal, intervalMs: opts.intervalMs, onProgress: opts.onProgress })
         const results = await batch.results(status.id, { signal: opts.signal })
         const byCustom = new Map(results.map((r) => [r.customId, r]))
@@ -89,6 +110,8 @@ export async function runCurateBatch(runtime, opts = {}) {
 
       await appendCommitted(runtime, committedRows)
       await appendResolutions(runtime, resolutionRows)
+      // Results are committed — clear the persisted recovery job.
+      updateState(runtime.stateDir, (cur) => ({ ...cur, curate_job: null }))
 
       span.setAttribute('pending', pending.length)
       span.setAttribute('clusters', clusters.length)
