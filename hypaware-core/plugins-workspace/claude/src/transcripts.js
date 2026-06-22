@@ -437,6 +437,7 @@ function transcriptEntryFromRow(row) {
     sessionId,
     role,
     content,
+    cwd: stringValue(row.cwd),
     timestampMs: timestampMs(row.timestamp),
     messageId: stringValue(readKey(message, 'id')) ?? stringValue(row.messageId),
     contentKey: role ? contentKey(role, normalizeContent(content)) : undefined,

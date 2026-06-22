@@ -592,3 +592,137 @@ test('missing transcript root yields nothing without throwing', async () => {
     await env.cleanup()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Repo recovery for pre-LLP-0032 sessions (deriveRepo fallback)
+// ---------------------------------------------------------------------------
+
+/**
+ * A one-turn session whose transcript line carries a `cwd` (as Claude Code
+ * stamps it) but for which no session-context record exists — the shape of a
+ * session recorded before the hook captured git identity.
+ *
+ * @param {string} sessionId
+ * @param {string} cwd
+ */
+function rowsWithCwd(sessionId, cwd) {
+  return [
+    {
+      sessionId,
+      uuid: `${sessionId}-u1`,
+      parentUuid: null,
+      type: 'user',
+      cwd,
+      message: { role: 'user', content: 'recover my repo' },
+      timestamp: '2026-05-20T10:00:00.000Z',
+    },
+  ]
+}
+
+test('recovers git_remote/repo_root from the transcript cwd when the record predates git capture', async () => {
+  const env = await stageEnv()
+  try {
+    // No session-context record at all — the historical shape.
+    await writeTranscript(env, '-Users-phil-workspace-repo-z', 'sess-z', rowsWithCwd('sess-z', '/Users/phil/workspace/repo-z'))
+
+    /** @type {string[]} */
+    const derivedFor = []
+    const provider = createClaudeBackfillProvider({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      deriveRepo: async (cwd) => {
+        derivedFor.push(/** @type {string} */ (cwd))
+        return cwd === '/Users/phil/workspace/repo-z'
+          ? { git_remote: 'git@github.com:acme/repo-z.git', repo_root: '/Users/phil/workspace/repo-z' }
+          : {}
+      },
+    })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+    const exchange = value(item)
+
+    // cwd recovered from the transcript line; remote + root derived from it.
+    assert.equal(exchange.cwd, '/Users/phil/workspace/repo-z')
+    assert.equal(exchange.git_remote, 'git@github.com:acme/repo-z.git')
+    assert.equal(exchange.repo_root, '/Users/phil/workspace/repo-z')
+    // head_sha is NEVER derived — current HEAD ≠ the session's HEAD.
+    assert.equal(exchange.head_sha, undefined)
+    assert.deepEqual(derivedFor, ['/Users/phil/workspace/repo-z'])
+
+    // The recovered identity survives materialization into canonical rows.
+    const rows = await materialize(item)
+    for (const row of rows) {
+      assert.equal(row.git_remote, 'git@github.com:acme/repo-z.git')
+      assert.equal(row.repo_root, '/Users/phil/workspace/repo-z')
+      assert.equal(row.head_sha, undefined)
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('record-provided remote wins; no derivation is attempted', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeTranscript(env, 'repo-a', 'sess-1', rowsWithCwd('sess-1', '/transcript/cwd'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-1',
+      transcript_path: filePath,
+      cwd: '/work/repo-a',
+      git_branch: 'main',
+      git_remote: 'git@github.com:acme/repo-a.git',
+      head_sha: '0123456789abcdef0123456789abcdef01234567',
+      repo_root: '/work/repo-a',
+      ts: '2026-05-20T10:00:06.000Z',
+    })
+
+    let derivations = 0
+    const provider = createClaudeBackfillProvider({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      deriveRepo: async () => { derivations += 1; return {} },
+    })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+    const exchange = value(item)
+    // The record won across the board; the transcript cwd was not consulted.
+    assert.equal(exchange.cwd, '/work/repo-a')
+    assert.equal(exchange.git_remote, 'git@github.com:acme/repo-a.git')
+    assert.equal(exchange.repo_root, '/work/repo-a')
+    assert.equal(exchange.head_sha, '0123456789abcdef0123456789abcdef01234567')
+    assert.equal(derivations, 0, 'no git derivation when the record already has a remote')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('derivation is memoized per cwd across sessions', async () => {
+  const env = await stageEnv()
+  try {
+    // Three sessions: two share a cwd, one is distinct.
+    await writeTranscript(env, 'p1', 'sess-1', rowsWithCwd('sess-1', '/repo/one'))
+    await writeTranscript(env, 'p1', 'sess-2', rowsWithCwd('sess-2', '/repo/one'))
+    await writeTranscript(env, 'p2', 'sess-3', rowsWithCwd('sess-3', '/repo/two'))
+
+    /** @type {string[]} */
+    const derivedFor = []
+    const provider = createClaudeBackfillProvider({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      deriveRepo: async (cwd) => {
+        derivedFor.push(/** @type {string} */ (cwd))
+        return { git_remote: `remote-for:${cwd}` }
+      },
+    })
+    const items = await collectItems(provider.run(runContext().ctx))
+    assert.equal(items.length, 3)
+    // Two distinct cwds → exactly two derivations despite three sessions.
+    assert.deepEqual(derivedFor.sort(), ['/repo/one', '/repo/two'])
+
+    const byCwd = new Map(items.map((i) => [value(i).cwd, value(i).git_remote]))
+    assert.equal(byCwd.get('/repo/one'), 'remote-for:/repo/one')
+    assert.equal(byCwd.get('/repo/two'), 'remote-for:/repo/two')
+  } finally {
+    await env.cleanup()
+  }
+})

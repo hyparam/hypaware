@@ -7,6 +7,7 @@ import {
   walkTranscriptFiles,
 } from './transcripts.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
+import { deriveRepoFromCwd } from './git_repo.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -63,6 +64,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
  *   projectsDir?: string,
  *   clientName?: string,
  *   pluginName?: string,
+ *   deriveRepo?: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -71,6 +73,10 @@ export function createClaudeBackfillProvider(opts) {
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
   const projectsDir = opts.projectsDir ?? defaultClaudeProjectsDir(opts.homeDir)
   const stateFile = opts.stateFile
+  // @ref LLP 0032#capture — pre-0032 Claude sessions carry no captured remote;
+  // recover it by running git in the session's cwd at backfill time. Injectable
+  // so tests stub the git lookup and stay hermetic.
+  const deriveRepo = opts.deriveRepo ?? deriveRepoFromCwd
 
   return {
     name: clientName,
@@ -78,7 +84,7 @@ export function createClaudeBackfillProvider(opts) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Claude Code transcripts into ai_gateway_messages',
     async *run(ctx) {
-      yield* runClaudeBackfill({ ctx, projectsDir, stateFile, clientName })
+      yield* runClaudeBackfill({ ctx, projectsDir, stateFile, clientName, deriveRepo })
     },
   }
 }
@@ -95,13 +101,29 @@ export function createClaudeBackfillProvider(opts) {
  *   projectsDir: string,
  *   stateFile: string,
  *   clientName: string,
+ *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, stateFile, clientName } = args
+  const { ctx, projectsDir, stateFile, clientName, deriveRepo } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
+  // Many sessions share a cwd (the same repo, often the same checkout), and
+  // each derivation shells git; memoize per cwd so a backfill over thousands of
+  // sessions runs one git probe per distinct directory, not per session.
+  /** @type {Map<string, Promise<{ git_remote?: string, repo_root?: string }>>} */
+  const repoByCwd = new Map()
+  /** @param {string | undefined} cwd */
+  const deriveRepoCached = (cwd) => {
+    if (!cwd) return Promise.resolve({})
+    let pending = repoByCwd.get(cwd)
+    if (!pending) {
+      pending = deriveRepo(cwd)
+      repoByCwd.set(cwd, pending)
+    }
+    return pending
+  }
 
   log.info('claude.backfill.scan_started', {
     component: 'plugin.claude.backfill',
@@ -143,12 +165,13 @@ async function* runClaudeBackfill(args) {
 
     for (const [sessionId, sessionEntries] of groupBySession(entries)) {
       const windowed = filterByWindow(sessionEntries, window)
-      const exchange = projectedExchangeFromEntries({
+      const exchange = await projectedExchangeFromEntries({
         sessionId,
         entries: windowed,
         clientName,
         record: pickLatestMatching(sessionRecords, { sessionId, transcriptPath: filePath }),
         agentMeta,
+        deriveRepo: deriveRepoCached,
       })
       if (!exchange) continue
 
@@ -260,18 +283,25 @@ function groupBySession(entries) {
  *   clientName: string,
  *   record: SessionContextRecord | undefined,
  *   agentMeta: Map<string, { tool_use_id: string }>,
+ *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  * }} args
- * @returns {AiGatewayProjectedExchange | undefined}
+ * @returns {Promise<AiGatewayProjectedExchange | undefined>}
  */
-function projectedExchangeFromEntries(args) {
-  const { sessionId, entries, clientName, record, agentMeta } = args
+async function projectedExchangeFromEntries(args) {
+  const { sessionId, entries, clientName, record, agentMeta, deriveRepo } = args
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   /** @type {string | undefined} */
   let clientVersion
   /** @type {number | undefined} */
   let startedAtMs
+  /** @type {string | undefined} */
+  let transcriptCwd
   for (const entry of entries) {
+    // Capture before the message filter: cwd rides every transcript line, not
+    // only the ones that project to a message, and it's the only repo signal a
+    // pre-0032 session carries.
+    if (!transcriptCwd && entry.cwd) transcriptCwd = entry.cwd
     const message = projectedMessageFromEntry(entry, agentMeta)
     if (!message) continue
     messages.push(message)
@@ -300,7 +330,11 @@ function projectedExchangeFromEntries(args) {
   }
   if (startedAtMs !== undefined) exchange.conversation_started_at = new Date(startedAtMs).toISOString()
   if (clientVersion) exchange.client_version = clientVersion
-  if (record?.cwd) exchange.cwd = record.cwd
+  // The hook-written record wins (it captured cwd in the live session); the
+  // transcript line's cwd is the fallback for sessions whose record predates
+  // cwd capture, so backfilled rows carry a cwd the join can key on.
+  const cwd = record?.cwd ?? transcriptCwd
+  if (cwd) exchange.cwd = cwd
   if (record?.git_branch) exchange.git_branch = record.git_branch
   // @ref LLP 0032#capture — repo identity rides the same hook-written
   // session-context record as cwd/git_branch; the live projector stamps these
@@ -310,6 +344,15 @@ function projectedExchangeFromEntries(args) {
   if (record?.git_remote) exchange.git_remote = record.git_remote
   if (record?.head_sha) exchange.head_sha = record.head_sha
   if (record?.repo_root) exchange.repo_root = record.repo_root
+  // @ref LLP 0032#capture — sessions recorded before the hook captured git
+  // identity have a record with no remote; recover it by running git in the
+  // recovered cwd. Only when the record didn't already supply a remote, and
+  // never head_sha — current HEAD ≠ the session's HEAD (git_repo.js).
+  if (cwd && !exchange.git_remote) {
+    const derived = await deriveRepo(cwd)
+    if (derived.git_remote) exchange.git_remote = derived.git_remote
+    if (derived.repo_root && !exchange.repo_root) exchange.repo_root = derived.repo_root
+  }
   return exchange
 }
 
