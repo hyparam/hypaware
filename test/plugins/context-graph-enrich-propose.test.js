@@ -354,7 +354,7 @@ test('runProposeTick preserves a curate_job submitted concurrently during its aw
     // (curate_job: null), orphaning the batch; the read-modify-write must keep it.
     const onComplete = () => {
       const cur = readState(stateDir)
-      writeState(stateDir, { ...cur, curate_job: { id: 'batch_x', submitted_at: 't', clusters: [] } })
+      writeState(stateDir, { ...cur, curate_job: { id: 'batch_x', submitted_at: 't', source: 'daemon', clusters: [] } })
     }
     const { runtime } = proposeRuntime({ cfg: cfg(), stateDir, source, candidates, onComplete })
 

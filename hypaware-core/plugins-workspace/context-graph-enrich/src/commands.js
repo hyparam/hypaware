@@ -24,6 +24,7 @@ export async function runEnrich(argv, ctx) {
       '  propose   run one T1 propose tick now (ongoing regime: settled sessions)\n' +
       '  curate    run one T2 curate tick now (synchronous)\n' +
       '  backfill  enrich ALL history: propose every session, curate via the Batch API\n' +
+      '            flags: --propose-only | --curate-only | --since <YYYY-MM-DD> | --dry-run\n' +
       '  status    show watermarks and prospect/committed counts\n'
   )
   return 0
@@ -53,8 +54,22 @@ export async function runEnrichBackfill(argv, ctx) {
       ctx.stdout.write(`enrich backfill propose: ${pr.sessions}/${pr.candidates} session(s) → ${pr.prospects} prospect(s)\n`)
     }
     if (!parsed.proposeOnly) {
+      /** @type {Set<string> | undefined} */
+      let anchorKeys
+      if (parsed.since) {
+        anchorKeys = await inWindowSessions(runtime, parsed.since)
+        ctx.stdout.write(`enrich backfill curate: scoped to --since ${parsed.since} → ${anchorKeys.size} in-window session(s)\n`)
+      }
+      if (parsed.dryRun) {
+        const dr = await runCurateBatch(runtime, { anchorKeys, dryRun: true })
+        ctx.stdout.write(
+          `enrich backfill curate (dry run): ${dr.pending} pending prospect(s) → ${dr.clusters} cluster(s), ` +
+            `${dr.skipped} below salience — nothing submitted\n`
+        )
+        return 0
+      }
       ctx.stdout.write(`enrich backfill curate: submitting batch (polls to completion; the Batch API can take up to 24h)…\n`)
-      const cr = await runCurateBatch(runtime, { onProgress: (s) => ctx.stdout.write(`  batch ${s.id}: ${s.status}\n`) })
+      const cr = await runCurateBatch(runtime, { anchorKeys, onProgress: (s) => ctx.stdout.write(`  batch ${s.id}: ${s.status}\n`) })
       const via = cr.batched ? 'batch' : 'synchronous (provider has no batch API)'
       ctx.stdout.write(
         `enrich backfill curate (${via}): ${cr.processed}/${cr.pending} processed over ${cr.clusters} cluster(s) — ` +
@@ -70,24 +85,66 @@ export async function runEnrichBackfill(argv, ctx) {
 }
 
 /**
+ * Resolve the set of session ids ("anchor keys") whose latest source part is on
+ * or after `since` (a `YYYY-MM-DD` day read as UTC midnight) — the in-window
+ * scope the `--since` curate restricts the pending pool to. Config-driven (the
+ * `anchor_key_column` / `timestamp_column`), so it stays source-agnostic like
+ * the rest of the plugin rather than hardcoding `ai_gateway_messages` columns.
+ *
+ * @param {EnrichRuntime} runtime
+ * @param {string} since  YYYY-MM-DD
+ * @returns {Promise<Set<string>>}
+ */
+export async function inWindowSessions(runtime, since) {
+  const cfg = runtime.config
+  const rows = await runSql(
+    runtime,
+    `SELECT ${cfg.anchor_key_column} AS sid, MAX(${cfg.timestamp_column}) AS last_ts FROM ${cfg.source_dataset} GROUP BY ${cfg.anchor_key_column}`
+  )
+  const sinceMs = Date.parse(`${since}T00:00:00Z`)
+  /** @type {Set<string>} */
+  const keys = new Set()
+  for (const r of rows) {
+    const v = r.last_ts
+    const ms = v instanceof Date ? v.getTime() : typeof v === 'number' ? v : typeof v === 'string' ? Date.parse(v) : NaN
+    if (Number.isFinite(ms) && ms >= sinceMs) keys.add(String(r.sid))
+  }
+  return keys
+}
+
+/**
  * Parse `hyp enrich backfill` argv. Pure + deterministic, so it carries its own
  * traditional test (CLAUDE.md: argv/config parsing-and-validation). Accepts the
  * two mutually-exclusive phase flags and rejects unknown flags or any positional.
  *
+ * `--since <YYYY-MM-DD>` bounds the **curate** pool to sessions active on or
+ * after that day (the lever that keeps the cold-backfill clustering tractable);
+ * `--dry-run` reports the scoped pool + cluster count without submitting.
+ *
  * @param {string[]} argv
- * @returns {{ ok: true, proposeOnly: boolean, curateOnly: boolean } | { ok: false, error: string }}
+ * @returns {{ ok: true, proposeOnly: boolean, curateOnly: boolean, since?: string, dryRun: boolean } | { ok: false, error: string }}
  */
 export function parseBackfillArgv(argv) {
   let proposeOnly = false
   let curateOnly = false
-  for (const token of argv) {
+  let dryRun = false
+  /** @type {string | undefined} */
+  let since
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]
     if (token === '--propose-only') proposeOnly = true
     else if (token === '--curate-only') curateOnly = true
-    else if (token.startsWith('--')) return { ok: false, error: `unknown flag ${token}` }
+    else if (token === '--dry-run') dryRun = true
+    else if (token === '--since' || token.startsWith('--since=')) {
+      const val = token.startsWith('--since=') ? token.slice('--since='.length) : argv[++i]
+      if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return { ok: false, error: '--since expects a YYYY-MM-DD date' }
+      since = val
+    } else if (token.startsWith('--')) return { ok: false, error: `unknown flag ${token}` }
     else return { ok: false, error: `unexpected argument ${token} (enrich backfill takes no positional)` }
   }
   if (proposeOnly && curateOnly) return { ok: false, error: '--propose-only and --curate-only are mutually exclusive' }
-  return { ok: true, proposeOnly, curateOnly }
+  if (since && proposeOnly) return { ok: false, error: '--since scopes the curate pool; it does not apply to --propose-only' }
+  return { ok: true, proposeOnly, curateOnly, dryRun, ...(since !== undefined ? { since } : {}) }
 }
 
 /**

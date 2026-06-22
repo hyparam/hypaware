@@ -91,14 +91,30 @@ export async function runCurateTick(runtime, opts = {}) {
 /**
  * The pending curate queue: prospects with no resolution row, deduped by id.
  *
+ * An optional `anchorKeys` allowlist scopes the queue to prospects anchored to
+ * those sessions. This is the lever the bounded `hyp enrich backfill --since`
+ * curate uses to keep the cold-backfill pool — and its per-prospect recall +
+ * greedy O(n²) clustering ({@link buildCurateClusters}) — tractable, *without*
+ * mutating the append-only prospect table: out-of-window prospects stay pending
+ * for a later, separately-scoped run rather than being deleted or skip-drained.
+ *
+ * @ref LLP 0028#curate-clustering [constrained-by]
+ *
  * @param {EnrichRuntime} runtime
+ * @param {{ anchorKeys?: Set<string> }} [opts]
  * @returns {Promise<Record<string, unknown>[]>}
  */
-export async function selectPending(runtime) {
+export async function selectPending(runtime, opts = {}) {
   const resolvedRows = await runSql(runtime, `SELECT prospect_id FROM ${RESOLUTIONS_DATASET}`, { allowMissing: true })
   const resolved = new Set(resolvedRows.map((r) => strField(r.prospect_id)))
   const allProspects = await runSql(runtime, `SELECT * FROM ${PROSPECTS_DATASET}`, { allowMissing: true })
-  return dedupeById(allProspects.filter((p) => !resolved.has(strField(p.prospect_id))))
+  const { anchorKeys } = opts
+  const pending = allProspects.filter((p) => {
+    if (resolved.has(strField(p.prospect_id))) return false
+    if (anchorKeys && !anchorKeys.has(strField(p.anchor_key))) return false
+    return true
+  })
+  return dedupeById(pending)
 }
 
 /**

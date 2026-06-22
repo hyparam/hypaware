@@ -8,7 +8,7 @@ import path from 'node:path'
 
 import { validateEnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/config.js'
 import { collectCurateJob, pollUntilEnded, runCurateBatch, submitCurateJob } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/batch.js'
-import { readState } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/state.js'
+import { readState, writeState } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/state.js'
 
 /**
  * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
@@ -182,6 +182,119 @@ test('runCurateBatch falls back to a synchronous tick when the provider has no b
     assert.equal(r.batched, false)
     assert.equal(getSyncCalls(), 1, 'fell back to the synchronous complete() path')
     assert.equal(tables.enrichment_committed.length, 1)
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+// --- runCurateBatch: --dry-run, resume, and cross-regime ownership ----------
+
+test('runCurateBatch --dry-run reports the scoped pool + clusters and writes nothing', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const prospects = [
+      prospectRow({ prospect_id: 'p1', label: 'Use Redis', anchor_key: 'A' }),
+      prospectRow({ prospect_id: 'p2', label: 'Use Redis', anchor_key: 'B' }),
+    ]
+    const batch = fakeBatch({ decisionsByCustom: { c0: [{ index: 1, decision: 'commit' }] } })
+    const { runtime, tables } = batchRuntime({ cfg: cfg(), stateDir, prospects, batch })
+
+    const r = await runCurateBatch(runtime, { dryRun: true })
+
+    assert.equal(r.dryRun, true)
+    assert.equal(r.batched, false)
+    assert.equal(r.pending, 2, 'both pending prospects counted')
+    assert.equal(r.clusters, 1, 'identical embeddings → one cluster')
+    assert.equal(batch._submitted.length, 0, 'dry run submits no batch')
+    assert.equal(tables.enrichment_committed.length, 0, 'dry run commits nothing')
+    assert.equal(tables.enrichment_resolutions.length, 0, 'dry run writes no resolutions')
+    assert.equal(readState(stateDir).curate_job, null, 'dry run persists no job')
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('runCurateBatch --dry-run scopes the pool to --since anchorKeys', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const prospects = [
+      prospectRow({ prospect_id: 'p1', label: 'X', anchor_key: 'in' }),
+      prospectRow({ prospect_id: 'p2', label: 'Y', anchor_key: 'out' }),
+    ]
+    const { runtime } = batchRuntime({ cfg: cfg(), stateDir, prospects, batch: fakeBatch() })
+
+    const r = await runCurateBatch(runtime, { dryRun: true, anchorKeys: new Set(['in']) })
+
+    assert.equal(r.pending, 1, 'only the in-window prospect is counted')
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('runCurateBatch resumes a pre-persisted backfill job (collects, does not re-submit)', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const prospects = [prospectRow({ prospect_id: 'p1', label: 'Use Redis', anchor_key: 'A' })]
+    // A backfill job already submitted (the crash-before-collect state).
+    writeState(stateDir, {
+      schema_version: 4,
+      session_marks: {},
+      curate_job: { id: 'batch_1', submitted_at: '2026-06-15T00:00:00.000Z', source: 'backfill', clusters: [{ customId: 'c0', prospectIds: ['p1'] }] },
+    })
+    const batch = fakeBatch({ status: 'ended', decisionsByCustom: { c0: [{ index: 1, decision: 'commit', item_key: 'k', item_type: 'Decision' }] } })
+    const { runtime, tables } = batchRuntime({ cfg: cfg(), stateDir, prospects, batch })
+
+    const r = await runCurateBatch(runtime, { intervalMs: 1 })
+
+    assert.equal(r.batched, true)
+    assert.equal(batch._submitted.length, 0, 'resume collects the existing job — no second (re-billed) submit')
+    assert.equal(r.pending, 1, 'pending recomputed from the scoped pool, not a placeholder 0')
+    assert.equal(r.processed, 1)
+    assert.equal(tables.enrichment_committed.length, 1, 'the resumed job committed its result')
+    assert.equal(readState(stateDir).curate_job, null, 'the resumed job is cleared after collection')
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('runCurateBatch refuses to run while a daemon curate job is in flight (no clobber)', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const prospects = [prospectRow({ prospect_id: 'p1', label: 'X' })]
+    writeState(stateDir, {
+      schema_version: 4,
+      session_marks: {},
+      curate_job: { id: 'daemon_99', submitted_at: '2026-06-15T00:00:00.000Z', source: 'daemon', clusters: [{ customId: 'c0', prospectIds: ['p1'] }] },
+    })
+    const batch = fakeBatch({ decisionsByCustom: { c0: [{ index: 1, decision: 'commit' }] } })
+    const { runtime } = batchRuntime({ cfg: cfg(), stateDir, prospects, batch })
+
+    await assert.rejects(() => runCurateBatch(runtime, { intervalMs: 1 }), /daemon curate batch job is in flight/)
+    assert.equal(batch._submitted.length, 0, 'refusal submits nothing')
+    assert.equal(readState(stateDir).curate_job?.id, 'daemon_99', "the daemon's job is left untouched")
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('a daemon tick (collectCurateJob) leaves a backfill job untouched', async () => {
+  const stateDir = tmpStateDir()
+  try {
+    const prospects = [prospectRow({ prospect_id: 'p1', label: 'X' })]
+    writeState(stateDir, {
+      schema_version: 4,
+      session_marks: {},
+      curate_job: { id: 'backfill_7', submitted_at: '2026-06-15T00:00:00.000Z', source: 'backfill', clusters: [{ customId: 'c0', prospectIds: ['p1'] }] },
+    })
+    const batch = fakeBatch({ status: 'ended', decisionsByCustom: { c0: [{ index: 1, decision: 'commit' }] } })
+    const { runtime, tables } = batchRuntime({ cfg: cfg(), stateDir, prospects, batch })
+
+    // Daemon owner (the default) must not collect or clear a backfill-owned job.
+    const r = await collectCurateJob(runtime)
+
+    assert.equal(r.phase, 'foreign')
+    assert.equal(tables.enrichment_committed.length, 0, "the daemon commits nothing from someone else's job")
+    assert.equal(readState(stateDir).curate_job?.id, 'backfill_7', 'the backfill job is left for the backfill command to collect')
   } finally {
     fs.rmSync(stateDir, { recursive: true, force: true })
   }

@@ -112,7 +112,16 @@ The pipeline runs in two regimes that differ only in **session selector** and
   dedup is prospect-vs-prospect ([§curate-clustering](#curate-clustering)). It is
   expensive and one-shot, so it is **never automatic** — running it is a user
   decision, like enabling a completion provider
-  ([§excluded-from-default-activation](#excluded-from-default-activation)).
+  ([§excluded-from-default-activation](#excluded-from-default-activation)). The
+  curate phase accepts a `--since <YYYY-MM-DD>` bound that scopes the pending
+  pool to sessions active on or after that day (and `--dry-run` to preview the
+  pool + cluster count before submitting). This keeps a recent-window run
+  tractable: the cold-regime clustering is per-prospect recall + greedy O(n²)
+  cosine ([§curate-clustering](#curate-clustering)), so an unbounded pool of
+  thousands is intractable, while a two-week slice is a few hundred. The bound
+  is a **read-side filter on `selectPending`, not a mutation** — out-of-window
+  prospects stay pending for a later, separately-scoped run, never deleted or
+  `skip`-drained ([§salience-drain](#salience-drain)).
 - **Ongoing** — an automatic **periodic batch** (default daily). Selector:
   **settled, not-yet-enriched sessions** — latest part older than the run cutoff
   *and* past the session's watermark. "Settled" is a SQL predicate evaluated at
@@ -131,6 +140,20 @@ so a session enriched up to a day after it settles, plus Batch latency, is fine.
 It also keeps the heavy frontier-model work off the daemon's critical path:
 backfill is a command, and the ongoing batch submits-and-collects rather than
 blocking a tick.
+
+Both regimes persist their in-flight batch in **one sidecar slot** (`curate_job`)
+so a crash between submit and collect is recoverable. Because the slot is shared
+and the backfill command can run while the daemon curate source is enabled, the
+job carries a **`source: 'backfill' | 'daemon'` owner tag** and each driver
+touches only its own: a re-run resumes a `backfill` job, a daemon tick collects a
+`daemon` job, and each leaves the other's alone. The single slot cannot hold two
+jobs, so a backfill that finds a daemon job in flight **refuses** rather than
+overwriting it (which would orphan an already-billed batch); a crashed backfill
+job is recovered by re-running backfill, never silently collected by the daemon.
+A legacy job persisted before the tag existed reads as `daemon`, its original
+owner. (Concurrency is otherwise eventual-consistency-safe — committed rows dedup
+at projection and resolution ids dedup in the pending set — so the tag guards
+against a *surprising* cross-regime collect/clobber, not against data loss.)
 
 ## Committed-only projection
 
