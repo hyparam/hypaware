@@ -95,7 +95,7 @@ export async function runEnrichBackfill(argv, ctx) {
  * @param {string} since  YYYY-MM-DD
  * @returns {Promise<Set<string>>}
  */
-async function inWindowSessions(runtime, since) {
+export async function inWindowSessions(runtime, since) {
   const cfg = runtime.config
   const rows = await runSql(
     runtime,

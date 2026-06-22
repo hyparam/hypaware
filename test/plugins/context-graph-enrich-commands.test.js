@@ -3,7 +3,32 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseBackfillArgv } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/commands.js'
+import { validateEnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/config.js'
+import { inWindowSessions, parseBackfillArgv } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/commands.js'
+
+/**
+ * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
+ */
+
+/** @returns {EnrichConfig} */
+function cfg(overrides = {}) {
+  const result = validateEnrichConfig(overrides)
+  if (!result.ok) throw new Error('test config invalid')
+  return result.config
+}
+
+/**
+ * Fake EnrichRuntime whose single `inWindowSessions` query returns `rows`
+ * verbatim (the function issues exactly one GROUP BY over the source dataset).
+ *
+ * @param {Record<string, unknown>[]} rows
+ */
+function windowRuntime(rows) {
+  return /** @type {any} */ ({
+    config: cfg(),
+    execSql: async () => ({ rows }),
+  })
+}
 
 // --- parseBackfillArgv (the `hyp enrich backfill` flag parser) ---------------
 
@@ -78,4 +103,31 @@ test('parseBackfillArgv: an unknown flag is reported even alongside a valid flag
   const r = parseBackfillArgv(['--propose-only', '--bogus'])
   assert.equal(r.ok, false)
   assert.match(/** @type {{ error: string }} */ (r).error, /unknown flag --bogus/)
+})
+
+// --- inWindowSessions (the `--since` UTC-midnight scope) ----------------------
+
+test('inWindowSessions includes a session at exactly the --since UTC midnight and excludes one a second before', async () => {
+  const midnight = Date.parse('2026-06-08T00:00:00Z')
+  const rows = [
+    { sid: 'on-boundary', last_ts: new Date(midnight) },
+    { sid: 'just-before', last_ts: new Date(midnight - 1000) },
+    { sid: 'well-after', last_ts: new Date(midnight + 86_400_000) },
+  ]
+  const keys = await inWindowSessions(windowRuntime(rows), '2026-06-08')
+  assert.deepEqual([...keys].sort(), ['on-boundary', 'well-after'])
+  assert.equal(keys.has('just-before'), false, 'the boundary is inclusive of midnight, exclusive below it')
+})
+
+test('inWindowSessions accepts string and epoch-millis timestamps and drops unparseable ones', async () => {
+  const midnight = Date.parse('2026-06-08T00:00:00Z')
+  const rows = [
+    { sid: 'string-after', last_ts: '2026-06-09T12:00:00Z' },
+    { sid: 'millis-after', last_ts: midnight + 5000 },
+    { sid: 'string-before', last_ts: '2026-06-01T00:00:00Z' },
+    { sid: 'unparseable', last_ts: 'not-a-date' },
+    { sid: 'null-ts', last_ts: null },
+  ]
+  const keys = await inWindowSessions(windowRuntime(rows), '2026-06-08')
+  assert.deepEqual([...keys].sort(), ['millis-after', 'string-after'])
 })

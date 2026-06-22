@@ -11,6 +11,7 @@ import {
   greedyCosineClusters,
   routeDecision,
   runCurateTick,
+  selectPending,
 } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/curate.js'
 
 /**
@@ -235,6 +236,40 @@ function curateRuntime({ cfg, prospects, resolutions = [], decisions, vectorHits
   })
   return { runtime, tables, queries, getCalls: () => calls }
 }
+
+// --- selectPending (the pending queue + the `--since` anchorKeys filter) ------
+
+test('selectPending returns every unresolved prospect when no anchorKeys are given', async () => {
+  const prospects = [
+    prospectRow({ prospect_id: 'p1', anchor_key: 'A' }),
+    prospectRow({ prospect_id: 'p2', anchor_key: 'B' }),
+  ]
+  const { runtime } = curateRuntime({ cfg: cfg(), prospects, decisions: [] })
+  const pending = await selectPending(runtime)
+  assert.deepEqual(pending.map((p) => p.prospect_id).sort(), ['p1', 'p2'])
+})
+
+test('selectPending with anchorKeys scopes the queue to in-window sessions, leaving the rest pending', async () => {
+  const prospects = [
+    prospectRow({ prospect_id: 'p1', anchor_key: 'A' }),
+    prospectRow({ prospect_id: 'p2', anchor_key: 'B' }),
+    prospectRow({ prospect_id: 'p3', anchor_key: 'C' }),
+  ]
+  const { runtime } = curateRuntime({ cfg: cfg(), prospects, decisions: [] })
+  const pending = await selectPending(runtime, { anchorKeys: new Set(['A', 'C']) })
+  assert.deepEqual(pending.map((p) => p.prospect_id).sort(), ['p1', 'p3'], 'out-of-window p2 is filtered out (not deleted)')
+})
+
+test('selectPending excludes already-resolved prospects', async () => {
+  const prospects = [
+    prospectRow({ prospect_id: 'p1', anchor_key: 'A' }),
+    prospectRow({ prospect_id: 'p2', anchor_key: 'A' }),
+  ]
+  const resolutions = [{ prospect_id: 'p1', decision: 'commit' }]
+  const { runtime } = curateRuntime({ cfg: cfg(), prospects, resolutions, decisions: [] })
+  const pending = await selectPending(runtime, { anchorKeys: new Set(['A']) })
+  assert.deepEqual(pending.map((p) => p.prospect_id), ['p2'])
+})
 
 test('runCurateTick curates pending prospects, writes committed + resolution rows, and skips already-resolved', async () => {
   const prospects = [

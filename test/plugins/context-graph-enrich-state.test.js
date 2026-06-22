@@ -32,9 +32,27 @@ test('writeState then readState round-trips the per-session marks', () => {
 
 test('writeState then readState round-trips the in-flight curate job', () => {
   const dir = tmpDir()
-  const job = { id: 'batch_1', submitted_at: '2026-06-18T00:00:00.000Z', clusters: [{ customId: 'c0', prospectIds: ['p1', 'p2'] }] }
+  const job = { id: 'batch_1', submitted_at: '2026-06-18T00:00:00.000Z', source: /** @type {const} */ ('backfill'), clusters: [{ customId: 'c0', prospectIds: ['p1', 'p2'] }] }
   writeState(dir, { schema_version: 4, session_marks: {}, curate_job: job })
   assert.deepEqual(readState(dir).curate_job, job)
+})
+
+test('readState reads a legacy curate job with no source as daemon (the original owner)', () => {
+  const dir = tmpDir()
+  fs.writeFileSync(
+    path.join(dir, STATE_FILE),
+    JSON.stringify({ schema_version: 4, session_marks: {}, curate_job: { id: 'batch_1', submitted_at: '', clusters: [{ customId: 'c0', prospectIds: ['p1'] }] } }),
+  )
+  assert.equal(readState(dir).curate_job?.source, 'daemon')
+})
+
+test('readState coerces an unknown curate job source to daemon', () => {
+  const dir = tmpDir()
+  fs.writeFileSync(
+    path.join(dir, STATE_FILE),
+    JSON.stringify({ schema_version: 4, session_marks: {}, curate_job: { id: 'batch_1', submitted_at: '', source: 'bogus', clusters: [] } }),
+  )
+  assert.equal(readState(dir).curate_job?.source, 'daemon')
 })
 
 test('writeState creates the state dir and persists atomically (no leftover temp files)', () => {

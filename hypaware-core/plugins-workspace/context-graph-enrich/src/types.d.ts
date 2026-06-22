@@ -148,14 +148,21 @@ export interface SessionMark {
 }
 
 /**
- * An in-flight ongoing-regime curate batch job (submit-and-collect). The
- * cluster→prospect mapping is persisted so a later tick can route the job's
- * results without rebuilding clusters against a moved-on pending pool.
- * @ref LLP 0028#two-regimes
+ * An in-flight curate batch job (submit-and-collect). The cluster→prospect
+ * mapping is persisted so a later tick (ongoing) or a re-run (backfill) can route
+ * the job's results without rebuilding clusters against a moved-on pending pool.
+ *
+ * `source` tags which driver owns the job, because both share this one sidecar
+ * slot: the daemon's **ongoing** regime and the **backfill** command. Each driver
+ * resumes/collects/clears only its own job and leaves the other's alone, so a
+ * concurrent backfill and daemon-curate source never collect/clear or clobber
+ * each other's batch. A legacy job persisted before this field existed is read as
+ * `daemon` (the original owner). @ref LLP 0028#two-regimes
  */
 export interface CurateJob {
   id: string
   submitted_at: string
+  source: 'backfill' | 'daemon'
   clusters: Array<{ customId: string, prospectIds: string[] }>
 }
 

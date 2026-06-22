@@ -59,7 +59,11 @@ function readCurateJob(value) {
       clusters.push({ customId: c.customId, prospectIds: c.prospectIds.filter((x) => typeof x === 'string') })
     }
   }
-  return { id: j.id, submitted_at: typeof j.submitted_at === 'string' ? j.submitted_at : '', clusters }
+  // A job persisted before `source` existed (or with a junk value) is read as
+  // `daemon` — the original owner, so legacy in-flight jobs keep being collected
+  // by the daemon and a backfill correctly refuses to clobber them.
+  const source = j.source === 'backfill' ? 'backfill' : 'daemon'
+  return { id: j.id, submitted_at: typeof j.submitted_at === 'string' ? j.submitted_at : '', source, clusters }
 }
 
 /**

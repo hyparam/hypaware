@@ -141,6 +141,20 @@ It also keeps the heavy frontier-model work off the daemon's critical path:
 backfill is a command, and the ongoing batch submits-and-collects rather than
 blocking a tick.
 
+Both regimes persist their in-flight batch in **one sidecar slot** (`curate_job`)
+so a crash between submit and collect is recoverable. Because the slot is shared
+and the backfill command can run while the daemon curate source is enabled, the
+job carries a **`source: 'backfill' | 'daemon'` owner tag** and each driver
+touches only its own: a re-run resumes a `backfill` job, a daemon tick collects a
+`daemon` job, and each leaves the other's alone. The single slot cannot hold two
+jobs, so a backfill that finds a daemon job in flight **refuses** rather than
+overwriting it (which would orphan an already-billed batch); a crashed backfill
+job is recovered by re-running backfill, never silently collected by the daemon.
+A legacy job persisted before the tag existed reads as `daemon`, its original
+owner. (Concurrency is otherwise eventual-consistency-safe — committed rows dedup
+at projection and resolution ids dedup in the pending set — so the tag guards
+against a *surprising* cross-regime collect/clobber, not against data loss.)
+
 ## Committed-only projection
 
 The T0 graph projector is append + dedup-by-id with **no retract path** — the
