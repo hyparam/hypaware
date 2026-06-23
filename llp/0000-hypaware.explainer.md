@@ -76,6 +76,8 @@ plugin that registers a dataset gets query and formatting for free.
 | Remote config & join flow | [0025](./0025-remote-config-join-flow.spec.md) | Spec |
 | Layered config (central + local) | [0031](./0031-layered-config.decision.md) | Decision |
 | Context-graph T1/T2 enrichment + completion | [0028](./0028-context-graph-enrichment.decision.md) | Decision |
+| MCP hosting intrinsic (verbs → tools) | [0034](./0034-mcp-host-intrinsic.decision.md) | Decision |
+| Remote attach (client consumer half) | [0033](./0033-remote-query-attach.spec.md) | Spec |
 
 ## Where to start
 

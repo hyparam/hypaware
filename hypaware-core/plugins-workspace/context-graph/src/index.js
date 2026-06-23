@@ -3,7 +3,8 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { runGraphCompact, runGraphNeighbors, runGraphProject } from './command.js'
+import { runGraphCompact, runGraphProject } from './command.js'
+import { graphNeighborsVerb } from './verb.js'
 import { makeRowBuilders, nodeId, edgeId } from './contract-kit.js'
 import { createContractRegistry } from './contract-registry.js'
 import {
@@ -82,13 +83,10 @@ export async function activate(ctx) {
     run: runGraphCompact,
   })
 
-  ctx.commands.register({
-    name: 'graph neighbors',
-    plugin: PLUGIN_NAME,
-    summary: 'Walk the activity graph from a node out to N hops',
-    usage: 'hyp graph neighbors <node> [--depth N] [--type T] [--edge-type T] [--direction out|in|both] [--limit N] [--json]',
-    run: runGraphNeighbors,
-  })
+  // `graph neighbors` is a verb (LLP 0034 §verbs): registering it projects
+  // both the CLI command and the `graph_neighbors` MCP tool, so the tool
+  // lights up wherever this plugin is active, with no core change.
+  ctx.verbs.register(graphNeighborsVerb)
 
   // Teaches AI clients how to project and query the graph. Registered only
   // when this plugin is active, so `hyp skills install` copies it into

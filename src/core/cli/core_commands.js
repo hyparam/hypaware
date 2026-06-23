@@ -17,10 +17,28 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
-import { applyContextControls, renderResult } from '../query/format.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
-import { executeQuerySql } from '../query/sql.js'
+import { createMcpServer } from '../mcp/server.js'
+import { serveStdio } from '../mcp/stdio.js'
+import { buildOperationContext } from './verb_command.js'
 import { runBackfill, runBackfillList, runBackfillPlan, runBackfillProvider } from '../commands/backfill.js'
+import {
+  runRemoteAdd,
+  runRemoteHelp,
+  runRemoteList,
+  runRemoteLogin,
+  runRemoteRemove,
+} from './remote_commands.js'
+import { CORE_VERBS } from './core_verbs.js'
+import { verbToCommand } from './verb_command.js'
+
+// `query sql` migrated to a verb (LLP 0034 §verbs): it is registered by
+// `registerCoreVerbs` and projected into both a CLI command and an MCP
+// tool, so its parsing/output no longer lives in this command set. The
+// output builder and the render-control defaults moved to their canonical
+// homes; re-export them here for the tests that import them by this path.
+export { buildQuerySqlOutput } from '../query/format.js'
+export { DEFAULT_QUERY_MAX_CELL, DEFAULT_QUERY_MAX_BYTES } from './verb_codec.js'
 import {
   installPlugin,
   listInstalledPlugins,
@@ -46,7 +64,6 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
  * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
- * @import { QueryFormat, RefreshMode } from '../query/types.d.ts'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from './types.d.ts'
  */
@@ -67,6 +84,13 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 export function registerCoreCommands(registry) {
   for (const cmd of buildCoreCommands()) {
     registry.register(cmd)
+  }
+  // Project the intrinsic core verbs (query_sql) as CLI commands here too,
+  // so `hyp --help` — rendered before the kernel boots — lists `query sql`.
+  // The kernel verb registry re-projects them idempotently during boot and
+  // owns the MCP tool surface (LLP 0034 §verbs).
+  for (const verb of CORE_VERBS) {
+    if (!registry.get(verb.name)) registry.register(verbToCommand(verb))
   }
 }
 
@@ -96,12 +120,6 @@ function buildCoreCommands() {
       summary: 'Show cache freshness and dataset registration state',
       usage: 'hyp query status',
       run: runQueryStatus,
-    },
-    {
-      name: 'query sql',
-      summary: 'Run a SQL query against registered datasets',
-      usage: 'hyp query sql <sql> [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]',
-      run: runQuerySql,
     },
     {
       name: 'query refresh',
@@ -319,6 +337,42 @@ function buildCoreCommands() {
       summary: 'Run export maintenance (snapshot expiration; data-file compaction with --compact) on table-format sinks',
       usage: 'hyp sink maintain [instance] [--compact] [--dry-run]',
       run: runSinkMaintain,
+    },
+    {
+      name: 'mcp',
+      summary: 'Serve this host\'s verbs as an MCP server over stdio (for AI clients)',
+      usage: 'hyp mcp [--remote <target>]',
+      run: runMcp,
+    },
+    {
+      name: 'remote',
+      summary: 'Manage remote MCP query targets and their tokens (subcommands: add, login, list, remove)',
+      usage: 'hyp remote <subcommand> [args...]',
+      run: runRemoteHelp,
+    },
+    {
+      name: 'remote add',
+      summary: 'Register a remote MCP query target in local config',
+      usage: 'hyp remote add <name> <url>',
+      run: runRemoteAdd,
+    },
+    {
+      name: 'remote login',
+      summary: 'Store the query-scoped token for a remote target (0600)',
+      usage: 'hyp remote login <name> [--token-file <path>]',
+      run: runRemoteLogin,
+    },
+    {
+      name: 'remote list',
+      summary: 'List remote targets and token status (never the token)',
+      usage: 'hyp remote list [--json]',
+      run: runRemoteList,
+    },
+    {
+      name: 'remote remove',
+      summary: 'Remove a remote target and its stored token',
+      usage: 'hyp remote remove <name>',
+      run: runRemoteRemove,
     },
     {
       name: 'version',
@@ -875,40 +929,6 @@ async function runQueryStatus(_argv, ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runQuerySql(argv, ctx) {
-  const parsed = parseQuerySqlArgv(argv)
-  if (!parsed.ok) {
-    ctx.stderr.write(parsed.error + '\n')
-    return 2
-  }
-  try {
-    const result = await executeQuerySql({
-      query: parsed.sql,
-      registry: ctx.query,
-      storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
-      refresh: parsed.refresh,
-      config: ctx.config,
-    })
-    for (const message of result.freshnessMessages ?? []) {
-      ctx.stderr.write(`${message}\n`)
-    }
-
-    const out = buildQuerySqlOutput({ columns: result.columns, rows: result.rows }, parsed)
-    if (out.file) await fs.writeFile(out.file.path, out.file.content)
-    if (out.stderr) ctx.stderr.write(out.stderr)
-    ctx.stdout.write(out.stdout)
-    return 0
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    ctx.stderr.write(`hyp query sql: ${message}\n`)
-    return 1
-  }
-}
-
-/**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
 async function runQueryRefresh(argv, ctx) {
   const target = argv[0]
   const datasets = ctx.query.listDatasets()
@@ -948,154 +968,6 @@ async function runQueryRefresh(argv, ctx) {
   return 0
 }
 
-
-/**
- * Default per-cell truncation cap (code points) for inline output. Keeps
- * fat JSON/text columns to a peek while leaving scalar columns whole.
- */
-export const DEFAULT_QUERY_MAX_CELL = 200
-
-/**
- * Default context byte budget for inline output. Bounds the total result
- * a query can push into a caller's context; `--output` or `--max-bytes 0`
- * lift it.
- */
-export const DEFAULT_QUERY_MAX_BYTES = 32_768
-
-/**
- * Parse the `hyp query sql` argv tail. Accepts the positional SQL string and
- * `--refresh` / `--format` / `--output` / `--max-cell` / `--max-bytes`
- * flags in any order.
- *
- * `--output <file>` spills the full result to a file and prints a receipt;
- * `--max-cell <n>` caps each string cell (0 = off); `--max-bytes <n>` caps
- * the inline byte budget (0 = off). The cap flags are ignored under
- * `--output`, which is always lossless.
- *
- * @param {string[]} argv
- * @returns {{ ok: true, sql: string, refresh: RefreshMode, format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number } | { ok: false, error: string }}
- */
-export function parseQuerySqlArgv(argv) {
-  /** @type {string[]} */
-  const positional = []
-  /** @type {RefreshMode} */
-  let refresh = 'auto'
-  /** @type {QueryFormat} */
-  let format = 'table'
-  /** @type {string | undefined} */
-  let output
-  let maxCell = DEFAULT_QUERY_MAX_CELL
-  let maxBytes = DEFAULT_QUERY_MAX_BYTES
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (token === '--refresh') {
-      const value = argv[i + 1]
-      if (value !== 'never' && value !== 'auto' && value !== 'always') {
-        return { ok: false, error: `hyp query sql: --refresh expects one of never|auto|always (got ${value ?? '<missing>'})` }
-      }
-      refresh = value
-      i += 1
-    } else if (token === '--format') {
-      const value = argv[i + 1]
-      if (value !== 'table' && value !== 'json' && value !== 'jsonl' && value !== 'markdown') {
-        return { ok: false, error: `hyp query sql: --format expects one of table|json|jsonl|markdown (got ${value ?? '<missing>'})` }
-      }
-      format = value
-      i += 1
-    } else if (token === '--output' || token === '-o') {
-      const value = argv[i + 1]
-      if (value === undefined || value.startsWith('--')) {
-        return { ok: false, error: 'hyp query sql: --output expects a file path' }
-      }
-      output = value
-      i += 1
-    } else if (token === '--max-cell' || token === '--max-bytes') {
-      const value = argv[i + 1]
-      const n = Number(value)
-      if (value === undefined || !Number.isInteger(n) || n < 0) {
-        return { ok: false, error: `hyp query sql: ${token} expects a non-negative integer (got ${value ?? '<missing>'})` }
-      }
-      if (token === '--max-cell') maxCell = n
-      else maxBytes = n
-      i += 1
-    } else {
-      positional.push(token)
-    }
-  }
-
-  if (positional.length === 0) {
-    return { ok: false, error: 'usage: hyp query sql <sql> [--refresh <mode>] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>]' }
-  }
-  const sql = positional.join(' ')
-  return { ok: true, sql, refresh, format, output, maxCell, maxBytes }
-}
-
-/**
- * Decide what `hyp query sql` emits for a completed result, without doing
- * any IO — so the spill-vs-inline behavior is unit-testable. The caller
- * (`runQuerySql`) performs the actual file write and stream writes.
- *
- * - Spill mode (`output` set): the full, un-capped result is rendered for
- *   the file (lossless), and stdout gets only a compact receipt.
- * - Inline mode: context controls cap the result; stdout gets the capped
- *   render and the "rows withheld" notice (if any) goes to stderr, so
- *   stdout stays valid in every format.
- *
- * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
- * @param {{ format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number }} opts
- * @returns {{ stdout: string, stderr: string, file?: { path: string, content: string } }}
- */
-export function buildQuerySqlOutput(full, opts) {
-  if (opts.output) {
-    // Render the file content once and reuse it for both the file and the
-    // receipt's byte count — large dumps are exactly the `--output` case,
-    // so a second full serialization is wasted work and peak memory.
-    const content = renderResult(full, opts.format)
-    return {
-      stdout: renderSpillReceipt(opts.output, full, content),
-      stderr: '',
-      file: { path: opts.output, content },
-    }
-  }
-  const { result: capped, notice } = applyContextControls(full, {
-    maxCell: opts.maxCell,
-    maxBytes: opts.maxBytes,
-  })
-  return {
-    stdout: renderResult(capped, opts.format),
-    stderr: notice ? `${notice}\n` : '',
-  }
-}
-
-/**
- * Render the stdout receipt for `--output` spill mode: where the full
- * result went, its shape, and a small truncated preview so the caller
- * can sanity-check without ingesting the file.
- *
- * @param {string} outputPath
- * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
- * @param {string} content  the already-rendered file content (sized for the receipt)
- * @returns {string}
- */
-function renderSpillReceipt(outputPath, full, content) {
-  const bytes = Buffer.byteLength(content)
-  const cols = full.columns.length > 0 ? full.columns : Object.keys(full.rows[0] ?? {})
-  const lines = [
-    `wrote ${full.rows.length} rows · ${cols.length} cols · ${bytes}B → ${outputPath}`,
-  ]
-  if (cols.length > 0) lines.push(`schema: ${cols.join(', ')}`)
-  const previewRows = full.rows.slice(0, 3)
-  if (previewRows.length > 0) {
-    const { result: preview } = applyContextControls(
-      { columns: full.columns, rows: previewRows },
-      { maxCell: 80, maxBytes: 0 }
-    )
-    lines.push(`preview (first ${previewRows.length}, cells clipped):`)
-    lines.push(renderResult(preview, 'jsonl').trimEnd())
-  }
-  return lines.join('\n') + '\n'
-}
 
 /**
  * @param {string[]} argv
@@ -2257,6 +2129,115 @@ function parseDaemonRunArgs(argv) {
     return r
   }
   return r
+}
+
+/* ---------- mcp ---------- */
+
+/**
+ * `hyp mcp` — serve this host's verbs as an MCP server. The tool surface is
+ * assembled dynamically from the verbs the active plugins registered (LLP
+ * 0034): a bare host offers `query_sql`; add `@hypaware/context-graph` and
+ * `graph_neighbors` appears. Local stdio is local-user trust — same as
+ * running `hyp query` at the terminal — so no auth and operator tools are
+ * exposed.
+ *
+ * stdout is the JSON-RPC channel; the lifecycle line and all logs go to
+ * stderr/telemetry, never stdout.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0034#kernel-wide-not-server-only [implements] — a local gateway exposes its own active plugins' tools to a local AI client
+ */
+async function runMcp(argv, ctx) {
+  const parsed = parseMcpArgv(argv)
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp mcp: ${parsed.error}\n`)
+    return 2
+  }
+  if (parsed.http) {
+    ctx.stderr.write('hyp mcp: --http is a follow-up; only stdio is supported in V1 (LLP 0034 §implementation-sequencing)\n')
+    return 2
+  }
+  if (parsed.remote) {
+    // Fallback for clients without remote-MCP support: a stdio proxy that
+    // injects the stored query-scoped credential (LLP 0034 §proxy-fallback).
+    const { runMcpProxy } = await import('../mcp/proxy.js')
+    return runMcpProxy({ target: parsed.remote, ctx })
+  }
+
+  const require = createRequire(import.meta.url)
+  const { version } = require('../../../package.json')
+  const server = createMcpServer({
+    verbs: ctx.verbs,
+    query: ctx.query,
+    runTool: (verb, params) => Promise.resolve(verb.operation(params, buildOperationContext(ctx, 'auto'))),
+    transport: 'stdio',
+    allowOperator: true,
+    serverVersion: version,
+  })
+
+  const tools = server.listTools()
+  const log = getLogger('mcp')
+  log.info('mcp.serve_start', {
+    [Attr.COMPONENT]: 'mcp',
+    [Attr.OPERATION]: 'mcp.serve',
+    transport: 'stdio',
+    tool_count: tools.length,
+  })
+  // Lifecycle line to stderr — stdout is reserved for the protocol.
+  ctx.stderr.write(`hyp mcp: serving ${tools.length} tool(s) over stdio${tools.length ? ` (${tools.map((t) => t.name).join(', ')})` : ''}\n`)
+
+  const stdin = /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin)
+  await serveStdio({
+    server,
+    stdin,
+    stdout: ctx.stdout,
+    onError: (err) => log.error('mcp.handler_error', {
+      [Attr.COMPONENT]: 'mcp',
+      [Attr.ERROR_KIND]: 'handler_threw',
+      message: err instanceof Error ? err.message : String(err),
+    }),
+  })
+  log.info('mcp.serve_stop', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.serve' })
+  return 0
+}
+
+/**
+ * Parse `hyp mcp` flags: `--remote <target>` (stdio proxy), `--http` /
+ * `--port <n>` (reserved follow-up).
+ *
+ * @param {string[]} argv
+ * @returns {{ ok: true, remote: string | undefined, http: boolean, port: number | undefined } | { ok: false, error: string }}
+ */
+export function parseMcpArgv(argv) {
+  /** @type {string | undefined} */
+  let remote
+  let http = false
+  /** @type {number | undefined} */
+  let port
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === '--remote') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) return { ok: false, error: '--remote expects a target name' }
+      remote = value
+      i += 1
+    } else if (token === '--http') {
+      http = true
+    } else if (token === '--port') {
+      const value = argv[i + 1]
+      const n = Number(value)
+      if (value === undefined || !Number.isInteger(n) || n <= 0) return { ok: false, error: `--port expects a positive integer (got ${value ?? '<missing>'})` }
+      port = n
+      i += 1
+    } else if (token === '--help' || token === '-h') {
+      return { ok: false, error: 'usage: hyp mcp [--remote <target>]' }
+    } else {
+      return { ok: false, error: `unexpected argument '${token}'` }
+    }
+  }
+  return { ok: true, remote, http, port }
 }
 
 /* ---------- version ---------- */

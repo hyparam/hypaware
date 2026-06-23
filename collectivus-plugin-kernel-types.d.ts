@@ -304,6 +304,14 @@ export interface PluginActivationContext {
   sinks: SinkRegistry
   query: QueryRegistry
   /**
+   * Verb registry (kernel-owned). A plugin registers a query-shaped
+   * operation once and the kernel projects it into both a CLI command
+   * and an MCP tool (LLP 0034 §verbs). `@hypaware/context-graph`
+   * registers `graph neighbors` here so it yields its `graph_neighbors`
+   * tool for free.
+   */
+  verbs: VerbRegistry
+  /**
    * Intrinsic storage handle for the kernel-managed query cache.
    * Plugins reach the local Iceberg-backed cache through this — they
    * never construct paths or open files themselves. The kernel owns
@@ -539,6 +547,20 @@ export interface SinkInstanceConfig extends JsonObject {
 
 export interface QueryConfig {
   cache?: QueryCacheConfig
+  /**
+   * Named remote MCP targets for `hyp <verb> --remote <name>` (LLP 0033
+   * §targets). Lives inside the **local-only** `query{}` block, so the
+   * central layer can never inject a remote target (LLP 0031). The URL is
+   * non-secret and committable; the query-scoped token is never config.
+   */
+  remotes?: Record<string, QueryRemoteTarget>
+  /** Default target used by `--remote` with no argument. Must name a key in `remotes`. */
+  default_remote?: string
+}
+
+export interface QueryRemoteTarget {
+  /** The server's MCP endpoint, e.g. `https://hyp.internal/mcp`. */
+  url: string
 }
 
 export interface QueryCacheConfig {
@@ -623,6 +645,12 @@ export interface CommandRunContext {
   capabilities: CapabilityRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
+  /**
+   * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
+   * enumerates this to assemble the MCP tool surface; the projected CLI
+   * commands are already in the command registry (LLP 0034 §verbs).
+   */
+  verbs: VerbRegistry
   /** Intrinsic query cache storage. Populated by the dispatcher. */
   storage: QueryStorageService
   /**
@@ -1113,6 +1141,119 @@ export interface CachePartitionMeta {
   path: string
   epoch: number
   rowCount: number
+}
+
+// =============================================================================
+// Verbs (one declaration → CLI command + MCP tool)
+// =============================================================================
+
+/**
+ * Where a verb is reachable. The default (`cli+mcp`) projects both a CLI
+ * command and an MCP tool. `cli-only` suppresses the tool; `local-only`
+ * keeps the tool on the local stdio host but withholds it from the
+ * remote/HTTP transport — for operations that shouldn't be remotely
+ * invokable. See LLP 0034 §tool-exposure-emergent.
+ */
+export type VerbExposure = 'cli+mcp' | 'cli-only' | 'local-only'
+
+/**
+ * Credential scope a verb's MCP tool requires. `read` (read/compute) is
+ * reachable by the query-scoped credential; `operator` (mutating) needs
+ * the operator token and is never reachable by a query-scoped client.
+ * Gating only applies on an authed (remote/HTTP) transport — the local
+ * stdio host is local-user trust and exposes both. See LLP 0034
+ * §tool-auth-class.
+ */
+export type VerbAuthClass = 'read' | 'operator'
+
+/**
+ * A single typed input property. A deliberately small JSON-Schema subset
+ * — the argv↔schema codec coerces CLI tokens to these types, and the
+ * same object is emitted (minus the CLI-only `positional`/`greedy`
+ * hints) as the MCP tool's `inputSchema`.
+ */
+export interface VerbInputProperty {
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'array'
+  description?: string
+  enum?: string[]
+  default?: string | number | boolean
+  minimum?: number
+  items?: { type: 'string' | 'integer' | 'number' }
+  /** CLI-only: the final string positional absorbs all remaining tokens (e.g. a SQL string). */
+  greedy?: boolean
+}
+
+export interface VerbInputSchema {
+  type: 'object'
+  properties: Record<string, VerbInputProperty>
+  required?: string[]
+  /** Property names bound to CLI positionals, in order. */
+  positional?: string[]
+}
+
+/**
+ * Local-execution context handed to a verb's `operation`. The CLI and
+ * the local MCP host both build this from the kernel runtime; the
+ * operation never touches argv or stdout.
+ */
+export interface VerbOperationContext {
+  query: QueryRegistry
+  storage: QueryStorageService
+  config: HypAwareV2Config
+  env: NodeJS.ProcessEnv
+  log: PluginLogger
+  /** Local cache freshness control (CLI `--refresh`); meaningless remotely. */
+  refresh: 'never' | 'auto' | 'always'
+}
+
+/** CLI render controls parsed by the kernel and passed to `render`. */
+export interface VerbRenderControls {
+  format: 'table' | 'json' | 'jsonl' | 'markdown'
+  json: boolean
+  output?: string
+  maxCell: number
+  maxBytes: number
+}
+
+/** What a verb's `render` returns; the kernel performs the actual IO. */
+export interface VerbRenderResult {
+  stdout: string
+  stderr?: string
+  file?: { path: string, content: string }
+  exitCode?: number
+}
+
+/**
+ * A query-shaped operation — typed params in, structured result out —
+ * declared once. The kernel projects a CLI command (argv→params via
+ * `inputSchema`, run `operation`, `render` to stdout) and an MCP tool
+ * (`inputSchema` + `operation` → structured result) from the same
+ * declaration, so the flag set and the JSON Schema can never drift.
+ * See LLP 0034 §verbs.
+ */
+export interface VerbRegistration {
+  /** CLI command name, e.g. `'graph neighbors'`. */
+  name: string
+  /** MCP tool name, e.g. `'graph_neighbors'`. */
+  tool: string
+  plugin?: PluginName
+  summary: string
+  inputSchema: VerbInputSchema
+  /** Default `'cli+mcp'`. */
+  exposure?: VerbExposure
+  /** Default `'read'`. */
+  authClass?: VerbAuthClass
+  /** The shared core. Identical for the CLI and the MCP tool. */
+  operation(params: Record<string, unknown>, ctx: VerbOperationContext): Promise<unknown> | unknown
+  /** CLI-only: turn a structured result into stdout text + exit code. */
+  render(result: any, controls: VerbRenderControls): VerbRenderResult
+}
+
+export interface VerbRegistry {
+  register(verb: VerbRegistration): void
+  get(name: string): VerbRegistration | undefined
+  getByTool(tool: string): VerbRegistration | undefined
+  list(): VerbRegistration[]
 }
 
 // =============================================================================

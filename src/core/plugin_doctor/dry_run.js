@@ -6,6 +6,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createActivationContext, createKernelRuntime } from '../runtime/activation.js'
+import { createCommandRegistry } from '../registry/commands.js'
+import { createVerbRegistry } from '../registry/verbs.js'
 import { createPluginPaths } from '../runtime/paths.js'
 
 /**
@@ -66,7 +68,17 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
   const snapshot = emptySnapshot()
   const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-'))
   try {
-    const runtime = createKernelRuntime({ cacheRoot: path.join(tmpRoot, 'cache') })
+    // Empty verb registry (no core verbs), so the kernel-projected
+    // `query sql` command never counts as a contribution of the plugin
+    // under test. The plugin's own `ctx.verbs.register` still projects its
+    // commands into this registry, so a plugin that contributes a verb is
+    // diagnosed exactly like one that contributes a command.
+    const commandRegistry = createCommandRegistry()
+    const runtime = createKernelRuntime({
+      cacheRoot: path.join(tmpRoot, 'cache'),
+      commandRegistry,
+      verbRegistry: createVerbRegistry({ commandRegistry }),
+    })
     for (const [name, versions] of knownCapabilities) {
       for (const version of versions) {
         runtime.capabilities.provide(STUB_PROVIDER, name, version, capabilityStub())

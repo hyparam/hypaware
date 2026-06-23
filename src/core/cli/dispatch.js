@@ -181,6 +181,7 @@ export async function dispatch(argv, opts = {}) {
     plugins: activePlugins,
     capabilities: kernel.capabilities,
     query: kernel.query,
+    verbs: kernel.verbs,
     storage: kernel.storage,
     skills: kernel.skills,
     agents: kernel.agents,

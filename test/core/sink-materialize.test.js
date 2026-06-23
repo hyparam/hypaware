@@ -10,6 +10,7 @@ import fs from 'node:fs/promises'
 import { createCapabilityRegistry } from '../../src/core/registry/capabilities.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
+import { createVerbRegistry } from '../../src/core/registry/verbs.js'
 import { createSourceRegistry } from '../../src/core/registry/sources.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createConfigRegistry } from '../../src/core/config/schema.js'
@@ -125,6 +126,7 @@ function makeRuntime(overrides = {}) {
     sources: createSourceRegistry(),
     sinks: overrides.sinks ?? createSinkRegistry(),
     query: createQueryRegistry(),
+    verbs: createVerbRegistry(),
     storage: createQueryStorageService({ cacheRoot }),
     cacheRoot,
     skills: { register() {}, list() { return [] } },
@@ -156,6 +158,7 @@ function registerActivationContext(pluginName, runtime) {
     sources: runtime.sources,
     sinks: runtime.sinks,
     query: runtime.query,
+    verbs: runtime.verbs,
     storage: runtime.storage,
     skills: runtime.skills,
     agents: runtime.agents,

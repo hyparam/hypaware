@@ -10,6 +10,12 @@
 > The intrinsic query surface and the `collect` on-ramp. Decomposed from
 > `hypaware-design.md` (Query and Datasets, Collect Command).
 
+> **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** Because the
+> SQL/dataset surface is intrinsic, the kernel projects it as a `query_sql` MCP
+> tool (and dataset schemas as MCP resources) on every host with a registered
+> dataset — no plugin work. Remote SQL ([LLP 0033](./0033-remote-query-attach.spec.md))
+> calls that tool over MCP and renders with the same formatters.
+
 ## Query is intrinsic
 
 Query and Iceberg storage are intrinsic services. Plugins register datasets;

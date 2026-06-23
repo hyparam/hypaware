@@ -10,6 +10,13 @@
 > What belongs in the kernel vs. a plugin. Decomposed from
 > `hypaware-design.md` (Design Summary, Core vs Plugin Surface).
 
+> **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** MCP hosting
+> is intrinsic too: the kernel assembles an MCP server from the **verbs** active
+> plugins (and core) register, so any host — local gateway or fleet server — can
+> expose its tools. This sits on the same intrinsic/plugin line drawn below: the
+> SQL/dataset surface is intrinsic (a free `query_sql` tool everywhere), other
+> modalities are plugin capabilities (graph/vector tools where present).
+
 ## Principle
 
 Core is the host runtime. It owns the mechanics that should be **identical for
