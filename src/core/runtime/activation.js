@@ -8,6 +8,8 @@ import { createConfigRegistry } from '../config/schema.js'
 import { createCapabilityRegistry } from '../registry/capabilities.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createQueryRegistry } from '../registry/datasets.js'
+import { createVerbRegistry } from '../registry/verbs.js'
+import { registerCoreVerbs } from '../cli/core_verbs.js'
 import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../registry/backfills.js'
 import { createSinkRegistry } from '../registry/sinks.js'
 import { createSourceRegistry } from '../registry/sources.js'
@@ -15,7 +17,7 @@ import { createQueryStorageService } from '../cache/storage.js'
 import { isSafeContributionName } from './contribution_names.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry, VerbRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { KernelRuntime } from './activation.d.ts'
  */
@@ -35,6 +37,7 @@ import { isSafeContributionName } from './contribution_names.js'
  *   capabilityRegistry?: ReturnType<typeof createCapabilityRegistry>,
  *   commandRegistry?: ReturnType<typeof createCommandRegistry>,
  *   queryRegistry?: QueryRegistry,
+ *   verbRegistry?: VerbRegistry,
  *   sourceRegistry?: ReturnType<typeof createSourceRegistry>,
  *   sinkRegistry?: ReturnType<typeof createSinkRegistry>,
  *   backfillRegistry?: BackfillRegistry,
@@ -54,14 +57,21 @@ export function createKernelRuntime(opts = {}) {
     getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
     getSettleHook: (dataset) => query.getDataset(dataset)?.settleBatch,
   })
+  const commands = opts.commandRegistry ?? createCommandRegistry()
+  // The verb registry projects each verb into a CLI command on the shared
+  // command registry; core's intrinsic verbs (query_sql) register here so
+  // their command + MCP tool exist on every boot (LLP 0034 §verbs).
+  const verbs = opts.verbRegistry ?? createVerbRegistry({ commandRegistry: commands })
+  if (!opts.verbRegistry) registerCoreVerbs(verbs)
   return {
     ...(opts.configControl ? { configControl: opts.configControl } : {}),
     capabilities: opts.capabilityRegistry ?? createCapabilityRegistry(),
-    commands: opts.commandRegistry ?? createCommandRegistry(),
+    commands,
     configRegistry: createConfigRegistry(),
     sources: opts.sourceRegistry ?? createSourceRegistry(),
     sinks: opts.sinkRegistry ?? createSinkRegistry(),
     query,
+    verbs,
     storage,
     cacheRoot: storage.cacheRoot,
     skills: createPhase2SkillRegistry(),
@@ -118,6 +128,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     sources: runtime.sources,
     sinks: runtime.sinks,
     query: runtime.query,
+    verbs: runtime.verbs,
     storage: runtime.storage,
     skills: runtime.skills,
     agents: runtime.agents,

@@ -10,8 +10,15 @@ import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { EDGE_COLUMNS, graphDatasetRegistration, NODE_COLUMNS } from '../../hypaware-core/plugins-workspace/context-graph/src/datasets.js'
-import { runGraphNeighbors, runGraphProject } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
+import { runGraphProject } from '../../hypaware-core/plugins-workspace/context-graph/src/command.js'
+import { graphNeighborsVerb } from '../../hypaware-core/plugins-workspace/context-graph/src/verb.js'
+import { verbToCommand } from '../../src/core/cli/verb_command.js'
 import { setGraphRuntime } from '../../hypaware-core/plugins-workspace/context-graph/src/runtime.js'
+
+// `graph neighbors` migrated to a verb (LLP 0034); exercise it through the
+// kernel projection exactly as dispatch would.
+const runGraphNeighbors = (/** @type {string[]} */ argv, /** @type {any} */ ctx) =>
+  verbToCommand(graphNeighborsVerb).run(argv, ctx)
 
 /**
  * A ctx whose stdout/stderr capture into arrays. `storage`/`query` are only
@@ -149,7 +156,7 @@ test('usage errors exit 2 and report the offending argv on stderr', async () => 
   /** @type {[string[], RegExp][]} */
   const cases = [
     [[], /usage: hyp graph neighbors <node>/],
-    [['a', 'b'], /expected one <node>, got 2/],
+    [['a', 'b'], /unexpected argument 'b' \(quote multi-word values\)/],
     [['x', '--bogus'], /unknown flag --bogus/],
     [['x', '--depth'], /--depth expects a value/],
     [['x', '--depth', '--json'], /--depth expects a value/],

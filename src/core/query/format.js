@@ -252,3 +252,69 @@ function formatCell(value) {
 function mdEscape(value) {
   return value.replace(/\|/g, '\\|').replace(/\n/g, ' ')
 }
+
+/**
+ * Decide what a SQL query emits for a completed result, without doing any
+ * IO — so the spill-vs-inline behavior is unit-testable. The caller (the
+ * `query sql` verb's `render`, or `hyp mcp`) performs the actual writes.
+ *
+ * - Spill mode (`output` set): the full, un-capped result is rendered for
+ *   the file (lossless), and stdout gets only a compact receipt.
+ * - Inline mode: context controls cap the result; stdout gets the capped
+ *   render and the "rows withheld" notice (if any) goes to stderr, so
+ *   stdout stays valid in every format.
+ *
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
+ * @param {{ format: QueryFormat, output: string | undefined, maxCell: number, maxBytes: number }} opts
+ * @returns {{ stdout: string, stderr: string, file?: { path: string, content: string } }}
+ */
+export function buildQuerySqlOutput(full, opts) {
+  if (opts.output) {
+    // Render the file content once and reuse it for both the file and the
+    // receipt's byte count — large dumps are exactly the `--output` case,
+    // so a second full serialization is wasted work and peak memory.
+    const content = renderResult(full, opts.format)
+    return {
+      stdout: renderSpillReceipt(opts.output, full, content),
+      stderr: '',
+      file: { path: opts.output, content },
+    }
+  }
+  const { result: capped, notice } = applyContextControls(full, {
+    maxCell: opts.maxCell,
+    maxBytes: opts.maxBytes,
+  })
+  return {
+    stdout: renderResult(capped, opts.format),
+    stderr: notice ? `${notice}\n` : '',
+  }
+}
+
+/**
+ * Render the stdout receipt for `--output` spill mode: where the full
+ * result went, its shape, and a small truncated preview so the caller can
+ * sanity-check without ingesting the file.
+ *
+ * @param {string} outputPath
+ * @param {{ columns: string[], rows: Record<string, unknown>[] }} full
+ * @param {string} content  the already-rendered file content (sized for the receipt)
+ * @returns {string}
+ */
+function renderSpillReceipt(outputPath, full, content) {
+  const bytes = Buffer.byteLength(content)
+  const cols = full.columns.length > 0 ? full.columns : Object.keys(full.rows[0] ?? {})
+  const lines = [
+    `wrote ${full.rows.length} rows · ${cols.length} cols · ${bytes}B → ${outputPath}`,
+  ]
+  if (cols.length > 0) lines.push(`schema: ${cols.join(', ')}`)
+  const previewRows = full.rows.slice(0, 3)
+  if (previewRows.length > 0) {
+    const { result: preview } = applyContextControls(
+      { columns: full.columns, rows: previewRows },
+      { maxCell: 80, maxBytes: 0 }
+    )
+    lines.push(`preview (first ${previewRows.length}, cells clipped):`)
+    lines.push(renderResult(preview, 'jsonl').trimEnd())
+  }
+  return lines.join('\n') + '\n'
+}

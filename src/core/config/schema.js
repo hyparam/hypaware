@@ -483,35 +483,103 @@ function parseSinkEntry(entry, pointer, errors) {
 }
 
 /**
+ * Parse the local-only `query{}` block: `cache`, plus the remote-attach
+ * `remotes` map + `default_remote` (LLP 0033 §targets). Lives in the
+ * structurally local-only section, so the central layer can never inject a
+ * remote target (LLP 0031).
+ *
  * @param {Record<string, unknown>} obj
  * @param {string} pointer
  * @param {ValidationError[]} errors
- * @returns {QueryConfig|undefined}
+ * @returns {QueryConfig}
  */
 function parseQueryConfig(obj, pointer, errors) {
-  if (obj.cache === undefined) return {}
-  if (!isPlainObject(obj.cache)) {
-    errors.push({ pointer: `${pointer}/cache`, message: 'query.cache must be an object' })
-    return undefined
+  /** @type {QueryConfig} */
+  const result = {}
+
+  if (obj.cache !== undefined) {
+    if (!isPlainObject(obj.cache)) {
+      errors.push({ pointer: `${pointer}/cache`, message: 'query.cache must be an object' })
+    } else {
+      const cache = parseQueryCacheConfig(/** @type {Record<string, unknown>} */ (obj.cache), `${pointer}/cache`, errors)
+      if (cache) result.cache = cache
+    }
   }
-  const cache = /** @type {Record<string, unknown>} */ (obj.cache)
+
+  // remotes{} — named MCP targets for `--remote`. The URL is non-secret and
+  // committable; the token is never config (secrets-never-in-config).
+  if (obj.remotes !== undefined) {
+    if (!isPlainObject(obj.remotes)) {
+      errors.push({ pointer: `${pointer}/remotes`, message: 'query.remotes must be an object keyed by target name' })
+    } else {
+      /** @type {Record<string, { url: string }>} */
+      const remotes = {}
+      for (const [name, entry] of Object.entries(/** @type {Record<string, unknown>} */ (obj.remotes))) {
+        const tp = `${pointer}/remotes/${name}`
+        if (!isNonEmptyString(name)) {
+          errors.push({ pointer: `${pointer}/remotes`, message: 'remote target names must be non-empty strings' })
+          continue
+        }
+        if (!isPlainObject(entry)) {
+          errors.push({ pointer: tp, message: 'remote target must be an object with a url' })
+          continue
+        }
+        const url = /** @type {Record<string, unknown>} */ (entry).url
+        if (!isNonEmptyString(url)) {
+          errors.push({ pointer: `${tp}/url`, message: 'remote target url is required and must be a non-empty string' })
+          continue
+        }
+        if (!/^https?:\/\//.test(url)) {
+          errors.push({ pointer: `${tp}/url`, message: 'remote target url must be an http(s) URL' })
+          continue
+        }
+        remotes[name] = { url }
+      }
+      if (Object.keys(remotes).length > 0) result.remotes = remotes
+    }
+  }
+
+  // default_remote must name a defined target, so `--remote` with no arg
+  // never silently resolves to nothing.
+  if (obj.default_remote !== undefined) {
+    if (!isNonEmptyString(obj.default_remote)) {
+      errors.push({ pointer: `${pointer}/default_remote`, message: 'query.default_remote must be a non-empty string' })
+    } else if (!result.remotes || !Object.prototype.hasOwnProperty.call(result.remotes, obj.default_remote)) {
+      errors.push({ pointer: `${pointer}/default_remote`, message: `query.default_remote '${obj.default_remote}' is not a defined remote target` })
+    } else {
+      result.default_remote = obj.default_remote
+    }
+  }
+
+  return result
+}
+
+/**
+ * Parse the `query.cache` sub-block.
+ *
+ * @param {Record<string, unknown>} cache
+ * @param {string} pointer
+ * @param {ValidationError[]} errors
+ * @returns {QueryCacheConfig|undefined}
+ */
+function parseQueryCacheConfig(cache, pointer, errors) {
   /** @type {QueryCacheConfig} */
   const out = {}
   if (cache.dir !== undefined) {
     if (!isNonEmptyString(cache.dir)) {
-      errors.push({ pointer: `${pointer}/cache/dir`, message: 'query.cache.dir must be a non-empty string' })
+      errors.push({ pointer: `${pointer}/dir`, message: 'query.cache.dir must be a non-empty string' })
     } else {
       out.dir = cache.dir
     }
   }
   if (cache.retention !== undefined) {
     if (!isPlainObject(cache.retention)) {
-      errors.push({ pointer: `${pointer}/cache/retention`, message: 'query.cache.retention must be an object' })
+      errors.push({ pointer: `${pointer}/retention`, message: 'query.cache.retention must be an object' })
     } else {
       const ret = /** @type {Record<string, unknown>} */ (cache.retention)
       if (typeof ret.default_days !== 'number' || !Number.isFinite(ret.default_days) || ret.default_days < 0) {
         errors.push({
-          pointer: `${pointer}/cache/retention/default_days`,
+          pointer: `${pointer}/retention/default_days`,
           message: 'query.cache.retention.default_days must be a non-negative number',
         })
       }
@@ -520,7 +588,7 @@ function parseQueryConfig(obj, pointer, errors) {
       if (ret.datasets !== undefined) {
         if (!isPlainObject(ret.datasets)) {
           errors.push({
-            pointer: `${pointer}/cache/retention/datasets`,
+            pointer: `${pointer}/retention/datasets`,
             message: 'query.cache.retention.datasets must be an object of dataset name -> days',
           })
         } else {
@@ -528,7 +596,7 @@ function parseQueryConfig(obj, pointer, errors) {
           for (const [ds, days] of Object.entries(/** @type {Record<string, unknown>} */ (ret.datasets))) {
             if (typeof days !== 'number' || !Number.isFinite(days) || days < 0) {
               errors.push({
-                pointer: `${pointer}/cache/retention/datasets/${ds}`,
+                pointer: `${pointer}/retention/datasets/${ds}`,
                 message: 'dataset retention must be a non-negative number of days',
               })
               continue
@@ -545,14 +613,14 @@ function parseQueryConfig(obj, pointer, errors) {
   }
   if (cache.maintenance !== undefined) {
     if (!isPlainObject(cache.maintenance)) {
-      errors.push({ pointer: `${pointer}/cache/maintenance`, message: 'query.cache.maintenance must be an object' })
+      errors.push({ pointer: `${pointer}/maintenance`, message: 'query.cache.maintenance must be an object' })
     } else {
       const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
       /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').QueryCacheMaintenanceConfig} */
       const maint = {}
       if (m.enabled !== undefined) {
         if (typeof m.enabled !== 'boolean') {
-          errors.push({ pointer: `${pointer}/cache/maintenance/enabled`, message: 'must be a boolean' })
+          errors.push({ pointer: `${pointer}/maintenance/enabled`, message: 'must be a boolean' })
         } else {
           maint.enabled = m.enabled
         }
@@ -564,7 +632,7 @@ function parseQueryConfig(obj, pointer, errors) {
       ])) {
         if (m[key] !== undefined) {
           if (typeof m[key] !== 'number' || !Number.isFinite(/** @type {number} */ (m[key])) || /** @type {number} */ (m[key]) < 0) {
-            errors.push({ pointer: `${pointer}/cache/maintenance/${key}`, message: `must be a non-negative number` })
+            errors.push({ pointer: `${pointer}/maintenance/${key}`, message: `must be a non-negative number` })
           } else {
             maint[key] = /** @type {number} */ (m[key])
           }
@@ -573,7 +641,7 @@ function parseQueryConfig(obj, pointer, errors) {
       out.maintenance = maint
     }
   }
-  return { cache: out }
+  return out
 }
 
 /** @param {unknown} v */

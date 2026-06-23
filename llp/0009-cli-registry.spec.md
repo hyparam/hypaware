@@ -10,6 +10,15 @@
 > Command registration, dispatch, and help. Decomposed from
 > `hypaware-design.md` (CLI Registry).
 
+> **Extended by [LLP 0034](./0034-mcp-host-intrinsic.decision.md).** Query-shaped
+> operations register as **verbs** (`ctx.verbs.register`), from which the kernel
+> projects *both* a CLI command and an MCP tool — one typed `inputSchema`, no CLI
+> ↔ tool drift. Imperative/interactive commands stay `ctx.commands.register`. The
+> core `--remote` flag ([LLP 0033](./0033-remote-query-attach.spec.md)) routes a
+> verb to a remote MCP tool; being core-defined, it does not violate
+> [no cross-plugin option injection](#no-cross-plugin-option-injection). `hyp mcp`
+> (serve) is a core command.
+
 ## Core owns dispatch
 
 Core owns command dispatch and help assembly. Plugins register commands; core

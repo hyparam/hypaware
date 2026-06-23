@@ -13,6 +13,7 @@ import type {
   PluginPaths,
   QueryRegistry,
   SkillRegistry,
+  VerbRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { CapabilityRegistryHandle } from '../registry/capabilities'
 import type { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
@@ -36,6 +37,7 @@ export interface KernelRuntime {
   sources: ExtendedSourceRegistry
   sinks: ExtendedSinkRegistry
   query: QueryRegistry
+  verbs: VerbRegistry
   storage: ExtendedQueryStorageService
   cacheRoot: string
   skills: SkillRegistry
@@ -56,6 +58,7 @@ export interface CreateKernelRuntimeArgs {
   capabilityRegistry?: CapabilityRegistryHandle
   commandRegistry?: CommandRegistry
   queryRegistry?: QueryRegistry
+  verbRegistry?: VerbRegistry
   sourceRegistry?: ExtendedSourceRegistry
   sinkRegistry?: ExtendedSinkRegistry
   backfillRegistry?: BackfillRegistry

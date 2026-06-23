@@ -7,14 +7,16 @@ import test from 'node:test'
 
 import { activate } from '../../hypaware-core/plugins-workspace/context-graph/src/index.js'
 
-test('activate provides the context-graph capability and registers node/edge datasets, the three graph commands, and the hypaware-graph skill', async () => {
+test('activate provides the context-graph capability and registers node/edge datasets, the graph commands + graph_neighbors verb, and the hypaware-graph skill', async () => {
   /** @type {any[]} */ const datasets = []
   /** @type {any[]} */ const commands = []
+  /** @type {any[]} */ const verbs = []
   /** @type {any[]} */ const skills = []
   /** @type {any[]} */ const caps = []
   const ctx = /** @type {any} */ ({
     query: { registerDataset: (d) => datasets.push(d) },
     commands: { register: (c) => commands.push(c) },
+    verbs: { register: (v) => verbs.push(v) },
     skills: { register: (s) => skills.push(s) },
     provideCapability: (name, version, value) => caps.push({ name, version, value }),
     log: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
@@ -32,7 +34,13 @@ test('activate provides the context-graph capability and registers node/edge dat
   assert.equal(typeof caps[0].value.kit.edgeId, 'function')
 
   assert.deepEqual(datasets.map((d) => d.name).sort(), ['edge', 'node'])
-  assert.deepEqual(commands.map((c) => c.name).sort(), ['graph compact', 'graph neighbors', 'graph project'])
+  // `graph neighbors` is now a verb (projects a CLI command + the
+  // graph_neighbors MCP tool); the two imperative graph ops stay commands.
+  assert.deepEqual(commands.map((c) => c.name).sort(), ['graph compact', 'graph project'])
+  assert.equal(verbs.length, 1)
+  assert.equal(verbs[0].name, 'graph neighbors')
+  assert.equal(verbs[0].tool, 'graph_neighbors')
+  assert.equal(verbs[0].authClass, 'read')
 
   assert.equal(skills.length, 1)
   const skill = skills[0]
