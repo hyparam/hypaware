@@ -649,7 +649,10 @@ function expandMessageParts(ctx) {
     conversation_id: ctx.conversationId,
     user_id: ctx.projection.user_id,
     provider: ctx.projection.provider,
-    model: ctx.projection.model,
+    // Per-message model wins when present (backfill stamps it per assistant
+    // line so mixed-model sessions stay accurate); live capture leaves it
+    // unset and falls back to the one-model-per-exchange value.
+    model: stringValue(ctx.message.model) ?? ctx.projection.model,
     system_text: ctx.projection.system_text,
     tools: ctx.projection.tools,
     conversation_started_at: ctx.conversationStarted,
