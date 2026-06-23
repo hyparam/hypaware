@@ -534,6 +534,32 @@ test('two Codex threads sharing a session_id keep separate start time and tool l
   assert.equal(rowsT2[0].tool_name ?? null, null, 'no cross-thread tool-name resolution on a colliding tool_call id')
 })
 
+test('per-message model wins over the exchange model; absent it falls back to the exchange model', () => {
+  // The projector resolves model as `message.model ?? projection.model`. Drive
+  // an exchange whose exchange-level model DIFFERS from a message's own model,
+  // so the assertion fails if the operands were ever reversed. @ref LLP 0026#consequences
+  const rows = aiGatewayRowsFromProjectedExchange({
+    provider: 'anthropic',
+    session_id: 'sess-model-precedence',
+    model: 'exchange-model',
+    messages: [
+      // Per-message model present -> WINS over the exchange model.
+      { role: 'assistant', content: [{ type: 'text', text: 'switched' }], model: 'msg-model', message_id: 'uuid-1' },
+      // No per-message model -> FALLS BACK to the exchange model (the live-capture path).
+      { role: 'assistant', content: [{ type: 'text', text: 'default' }], message_id: 'uuid-2' },
+    ],
+  }, { gatewayId: 'gw' })
+
+  /** @param {string} text */
+  const byText = (text) => {
+    const row = rows.find((r) => r.content_text === text)
+    assert.ok(row, `row for "${text}" present`)
+    return row
+  }
+  assert.equal(byText('switched').model, 'msg-model', 'per-message model wins over the exchange model')
+  assert.equal(byText('default').model, 'exchange-model', 'absent per-message model falls back to the exchange model')
+})
+
 test('restart replay: seeds seen-set from committed part_ids so prior history re-emits zero rows', async () => {
   // Simulate the pre-restart listener committing a session's rows,
   // then a fresh post-restart listener replaying the SAME history through

@@ -423,7 +423,10 @@ test('assistant model is surfaced per message, switches mid-session, and drops <
     assert.equal(byText('still here').model, 'claude-fable-5')
     // The <synthetic> line records no model.
     assert.equal(byText('[interrupted]').model ?? null, null)
-    // A user turn carries no model.
+    // A user turn carries no model: the transcript records `message.model` on
+    // assistant lines only, so backfill model fidelity is assistant-output-only
+    // (LLP 0026 Consequences). Unlike live capture, backfilled user/tool_result
+    // rows are intentionally model-less.
     assert.equal(rowsByRole(rows, 'user')[0].model ?? null, null)
   } finally {
     await env.cleanup()

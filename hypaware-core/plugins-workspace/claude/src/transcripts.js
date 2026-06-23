@@ -526,8 +526,13 @@ function readKey(obj, key) {
 }
 
 /**
- * The model id from an assistant transcript line's `message.model`. Claude
- * Code stamps `<synthetic>` on assistant lines it generates locally (interrupt
+ * The model id from an assistant transcript line's `message.model`.
+ *
+ * @ref LLP 0026#decision [implements] — native per-line granularity: each
+ * assistant line carries its own model, so backfill surfaces it per message
+ * rather than collapsing a session to one model. Only assistant lines record
+ * `message.model`; user-prompt and tool_result lines have none. Claude Code
+ * stamps `<synthetic>` on assistant lines it generates locally (interrupt
  * notices, injected errors) that never hit a model — that is a sentinel, not a
  * model id, so it is dropped to undefined.
  * @param {unknown} message
