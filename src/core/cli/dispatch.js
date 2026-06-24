@@ -88,7 +88,7 @@ export async function dispatch(argv, opts = {}) {
   if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
     const require = createRequire(import.meta.url)
     const { version } = require('../../../package.json')
-    stdout.write(`hyp ${version}\n`)
+    stdout.write(`hypaware ${version}\n`)
     return 0
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
