@@ -56,6 +56,48 @@ test('OpenAI Chat projection: request+response messages roll up into user+assist
   assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'ok' }])
 })
 
+test('OpenAI Chat projection normalizes usage onto the assistant response', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/chat/completions',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+    response_body: JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 5,
+        total_tokens: 17,
+        prompt_tokens_details: { cached_tokens: 7, audio_tokens: 2 },
+        completion_tokens_details: {
+          reasoning_tokens: 3,
+          accepted_prediction_tokens: 1,
+          rejected_prediction_tokens: 4,
+        },
+      },
+    }),
+  }), context()))
+
+  assert.deepEqual(projection.messages[1].attributes, {
+    usage: {
+      // input_tokens is stored NET of cache (12 gross − 7 cached = 5); the
+      // 7 cached reads ride cache_read_tokens, so net + cache_read + output
+      // (5 + 7 + 5) reconciles to total_tokens 17. @ref LLP 0035#net-input
+      input_tokens: 5,
+      output_tokens: 5,
+      total_tokens: 17,
+      cache_read_tokens: 7,
+      input_audio_tokens: 2,
+      reasoning_tokens: 3,
+      accepted_prediction_tokens: 1,
+      rejected_prediction_tokens: 4,
+    },
+  })
+})
+
 test('OpenAI Chat tool messages map to tool_result blocks', () => {
   const projector = createCodexExchangeProjector({ env: {} })
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -102,6 +144,48 @@ test('OpenAI Responses with output_text in the body produces an assistant messag
 
   assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
   assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'because' }])
+})
+
+test('OpenAI Responses body usage is normalized onto one assistant response item', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'list files' }] }],
+    }),
+    response_body: JSON.stringify({
+      id: 'resp_3',
+      output: [
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'on it' }] },
+        { type: 'function_call', call_id: 'call_42', name: 'exec_command', arguments: '{"cmd":"ls"}' },
+      ],
+      usage: {
+        input_tokens: 30,
+        output_tokens: 11,
+        total_tokens: 41,
+        input_tokens_details: { cached_tokens: 18 },
+        output_tokens_details: { reasoning_tokens: 6 },
+      },
+    }),
+  }), context()))
+
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant', 'assistant'])
+  // Response-level usage rides the LAST assistant output item (here the
+  // function_call), not the first — one carrier per response, same row Claude
+  // uses. @ref LLP 0035#one-carrier
+  assert.equal(projection.messages[1].attributes, undefined)
+  assert.deepEqual(projection.messages[2].attributes, {
+    usage: {
+      // 30 gross input − 18 cached = 12 net; 12 + 18 + 11 == 41 total.
+      input_tokens: 12,
+      output_tokens: 11,
+      total_tokens: 41,
+      cache_read_tokens: 18,
+      reasoning_tokens: 6,
+    },
+  })
 })
 
 test('OpenAI Responses captures top-level instructions into system_text', () => {
@@ -159,6 +243,53 @@ test('OpenAI Responses SSE deltas reconstruct the assistant body', () => {
   assert.equal(projection.messages.length, 2)
   assert.deepEqual(projection.messages[1].content, [{ type: 'text', text: 'because' }])
   assert.deepEqual(projection.messages[1].raw_frame, { response_id: 'resp_2' })
+})
+
+test('OpenAI Responses SSE completed usage is normalized onto the assistant response', () => {
+  const projector = createCodexExchangeProjector({ env: {} })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    is_sse: true,
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'why' }] }],
+    }),
+    response_body: '',
+    stream_events: [
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 0, event: 'response.created', data: JSON.stringify({ id: 'resp_2', type: 'response.created' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 5, event: 'response.output_text.delta', data: JSON.stringify({ type: 'response.output_text.delta', delta: 'be' }) },
+      { kind: 'stream_event', exchange_id: 'ex-1', t_ms: 6, event: 'response.output_text.delta', data: JSON.stringify({ type: 'response.output_text.delta', delta: 'cause' }) },
+      {
+        kind: 'stream_event',
+        exchange_id: 'ex-1',
+        t_ms: 9,
+        event: 'response.completed',
+        data: JSON.stringify({
+          type: 'response.completed',
+          id: 'resp_2',
+          status: 'completed',
+          usage: {
+            input_tokens: 8,
+            output_tokens: 4,
+            total_tokens: 12,
+            input_tokens_details: { cached_tokens: 3 },
+            output_tokens_details: { reasoning_tokens: 2 },
+          },
+        }),
+      },
+    ],
+  }), context()))
+
+  assert.deepEqual(projection.messages[1].attributes, {
+    usage: {
+      // 8 gross input − 3 cached = 5 net; 5 + 3 + 4 == 12 total.
+      input_tokens: 5,
+      output_tokens: 4,
+      total_tokens: 12,
+      cache_read_tokens: 3,
+      reasoning_tokens: 2,
+    },
+  })
 })
 
 test('OpenAI Responses function_call in input becomes an assistant tool_use message', () => {

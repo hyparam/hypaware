@@ -165,11 +165,19 @@ user tool_result batches have no API message id, so backfill would have to
 - "Message" in this table means *DAG node*, not *API message*. Counting
   messages per turn yields more rows than before for live Claude data
   (matching what backfill already produced).
-- The API message envelope (`usage`, `stop_reason`, `model`) is duplicated
-  across a group's rows, mirroring the transcript. **Consumers summing token
-  usage must dedupe by API message id, not by row.**
-- `stop_reason`-derived `status.finish_reason` lands on the last block's
-  message of a group.
+- The API message envelope is split between two scopes. `model` (and the raw
+  transcript line) is duplicated across a group's rows, mirroring the
+  transcript. The **response-level** fields — `usage` and `stop_reason` — are
+  NOT: they ride **only the last block's row** of a group, so each API message
+  contributes its `usage` to exactly one row and a `SUM` over rows is not
+  multiplied by the per-block fanout. `stop_reason`-derived
+  `status.finish_reason` lands on that same last-block row.
+  - This supersedes the earlier rule that `usage` was duplicated and consumers
+    "must dedupe by API message id." Usage is now stamped once; a plain
+    per-row `SUM(attributes.usage.*)` is correct, and a dedupe-by-API-message-id
+    query still works (the non-carrier blocks are simply null). See
+    [LLP 0035](./0035-token-usage-normalization.decision.md) for the
+    cross-provider one-carrier invariant and the canonical accounting query.
 - `previous_message_id` stores only the **immediate predecessor** (a 0/1-element
   array), not the full ancestry. The split multiplies the rows carrying this
   column, and a full per-row chain is O(N) per message → O(N²) per thread; as a
@@ -204,6 +212,8 @@ user tool_result batches have no API message id, so backfill would have to
 - [LLP 0012](./0012-sources.spec.md) — sources (live + backfill paths)
 - [LLP 0016](./0016-ai-gateway.decision.md) — gateway owns the schema;
   adapters own message shape
+- [LLP 0035](./0035-token-usage-normalization.decision.md) — revises the
+  `usage` duplication consequence: usage now lands once, on the last block
 - `hypaware-core/plugins-workspace/claude/src/projector.js` — the splitter
   and the `aux_kind` tagging (decision point 6)
 - `hypaware-core/plugins-workspace/claude/src/anthropic.js` — `claudeAuxKind`,

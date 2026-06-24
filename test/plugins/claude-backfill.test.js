@@ -365,6 +365,55 @@ test('assistant token usage is folded into attributes.usage like live capture', 
   }
 })
 
+test('usage lands once — on the last block of a split assistant API message', async () => {
+  const env = await stageEnv()
+  try {
+    // Claude Code writes one transcript line per content block; both lines of
+    // one API response share message.id and repeat the usage envelope. Usage is
+    // response-level, so it must land on exactly one row. @ref LLP 0035#one-carrier
+    const usage = { input_tokens: 200, output_tokens: 60, cache_read_input_tokens: 500 }
+    await writeTranscript(env, 'repo-split', 'sess-split', [
+      {
+        sessionId: 'sess-split', uuid: 'u-user', parentUuid: null, type: 'user',
+        message: { role: 'user', content: 'do it' }, timestamp: '2026-05-20T10:00:00.000Z',
+      },
+      {
+        sessionId: 'sess-split', uuid: 'u-text', parentUuid: 'u-user', type: 'assistant',
+        message: { id: 'msg-split', role: 'assistant', content: [{ type: 'text', text: 'on it' }], usage },
+        timestamp: '2026-05-20T10:00:05.000Z',
+      },
+      {
+        sessionId: 'sess-split', uuid: 'u-tool', parentUuid: 'u-text', type: 'assistant',
+        message: {
+          id: 'msg-split', role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }],
+          usage,
+        },
+        timestamp: '2026-05-20T10:00:06.000Z',
+      },
+    ])
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+
+    const rows = await materialize(item)
+    // The two assistant blocks are distinct rows; usage rides only the last
+    // (the tool_call), the earlier text block carries none.
+    const textRow = rows.find((r) => r.role === 'assistant' && r.part_type === 'text')
+    const toolRow = rows.find((r) => r.role === 'assistant' && r.part_type === 'tool_call')
+    assert.ok(textRow)
+    assert.ok(toolRow)
+    assert.equal(/** @type {any} */ (textRow.attributes)?.usage, undefined)
+    assert.deepEqual(/** @type {any} */ (toolRow.attributes).usage, {
+      input_tokens: 200,
+      output_tokens: 60,
+      cache_read_tokens: 500,
+    })
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('token usage merges with subagent spawn provenance', async () => {
   const env = await stageEnv()
   try {

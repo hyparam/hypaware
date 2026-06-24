@@ -378,12 +378,14 @@ function projectAssistantMessage(args) {
       match = findTranscriptMatch(transcriptIndex, { role: 'assistant', content: unitContent, agentId })
     }
     applyTranscriptMatch(projected, match)
-    if (messageAttrs) projected.attributes = messageAttrs
-    if (stopReason && i === unitCount - 1) {
-      // The gateway core reads `stop_reason` off the projected message;
-      // on a split turn it rides the last block's message so
-      // `status.finish_reason` lands exactly once per API message.
-      projected.stop_reason = stopReason
+    if (i === unitCount - 1) {
+      // `usage` and `stop_reason` are response-level envelope fields, not
+      // per-block. On a split turn they ride ONLY the last block's message so
+      // each API message contributes its usage to exactly one row (a SUM over
+      // rows isn't multiplied by the per-block fanout) and `finish_reason`
+      // lands once. @ref LLP 0035#one-carrier @ref LLP 0026#consequences
+      if (messageAttrs) projected.attributes = messageAttrs
+      if (stopReason) projected.stop_reason = stopReason
     }
     out.push(projected)
   }

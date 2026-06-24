@@ -220,6 +220,8 @@ function openAiChatMessages(reqBody, responseBody) {
       if (assistant) {
         const finish = stringValue(choice.finish_reason)
         if (finish) assistant.raw_frame = { ...assistant.raw_frame, finish_reason: finish }
+        const usageAttributes = openAiUsageAttributes(readOpenAiUsage(responseBody))
+        if (usageAttributes) assistant.attributes = mergeJsonObjects(assistant.attributes, usageAttributes)
         messages.push(assistant)
       }
     }
@@ -279,6 +281,10 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
   const messages = responsesInputMessages(reqBody.input)
   let assistant = responsesAssistantMessagesFromBody(responseBody)
   if (assistant.length === 0) assistant = responsesAssistantMessagesFromStream(streamEvents)
+  const usageAttributes = openAiUsageAttributes(
+    readOpenAiUsage(responseBody) ?? readOpenAiUsageFromResponsesStream(streamEvents)
+  )
+  stampUsageOnLastAssistant(assistant, usageAttributes)
   for (const msg of assistant) messages.push(msg)
   return messages
 }
@@ -452,6 +458,135 @@ function responsesAssistantMessagesFromStream(streamEvents) {
     for (const msg of messages) msg.raw_frame = { ...msg.raw_frame, response_id: responseId }
   }
   return messages
+}
+
+// ---------------------------------------------------------------------
+// Usage extraction
+// ---------------------------------------------------------------------
+
+/**
+ * @param {unknown} responseBody
+ * @returns {Record<string, unknown> | undefined}
+ */
+function readOpenAiUsage(responseBody) {
+  if (!isPlainObject(responseBody)) return undefined
+  const usage = readKey(responseBody, 'usage')
+  return isPlainObject(usage) ? usage : undefined
+}
+
+/**
+ * Pull usage from terminal Responses streaming events. The public
+ * Responses API carries usage on `response.completed.response.usage`;
+ * ChatGPT Codex has used the same event family while sometimes placing
+ * the response fields directly on the payload, so accept both shapes.
+ *
+ * @param {Array<{ event: string, data: string }>} streamEvents
+ * @returns {Record<string, unknown> | undefined}
+ */
+function readOpenAiUsageFromResponsesStream(streamEvents) {
+  /** @type {Record<string, unknown> | undefined} */
+  let found
+  for (const row of streamEvents) {
+    const payload = parseEventData(row.data)
+    if (!isPlainObject(payload)) continue
+    const type = stringValue(payload.type) ?? stringValue(row.event)
+    if (type !== 'response.completed' && type !== 'response.incomplete' && type !== 'response.failed') continue
+    const response = isPlainObject(payload.response) ? payload.response : payload
+    const usage = readOpenAiUsage(response)
+    if (usage) found = usage
+  }
+  return found
+}
+
+/**
+ * Normalize OpenAI Chat Completions and Responses usage into the
+ * `attributes.usage` shape already used by Claude rows. The provider's
+ * usage object is response-scoped, so callers stamp it onto exactly one
+ * response assistant message — the LAST one — rather than every fanned-out
+ * output item. @ref LLP 0035#one-carrier
+ *
+ * @param {Record<string, unknown> | undefined} rawUsage
+ * @returns {JsonObject | undefined}
+ */
+function openAiUsageAttributes(rawUsage) {
+  if (!isPlainObject(rawUsage)) return undefined
+  /** @type {JsonObject} */
+  const usage = {}
+
+  // @ref LLP 0035#net-input — OpenAI/Codex report input_tokens INCLUSIVE of
+  // cached prompt reads; HypAware stores input_tokens NET of cache so it never
+  // double-counts against cache_read_tokens and matches the Claude convention
+  // (input + cache_read [+ cache_write] = total prompt). total_tokens stays the
+  // provider's raw value, so net_input + cache_read + output == total holds.
+  const inputDetails = firstPlainObject(
+    readKey(rawUsage, 'input_tokens_details'),
+    readKey(rawUsage, 'prompt_tokens_details')
+  )
+  const cachedInput = inputDetails ? numberValue(inputDetails.cached_tokens) : undefined
+  const grossInput = numberValue(rawUsage.input_tokens) ?? numberValue(rawUsage.prompt_tokens)
+  if (grossInput !== undefined) {
+    usage.input_tokens = cachedInput !== undefined ? Math.max(0, grossInput - cachedInput) : grossInput
+  }
+  if (cachedInput !== undefined) usage.cache_read_tokens = cachedInput
+
+  copyNumberAlias(rawUsage, usage, 'output_tokens', 'output_tokens')
+  copyNumberAlias(rawUsage, usage, 'completion_tokens', 'output_tokens')
+  copyNumberAlias(rawUsage, usage, 'total_tokens', 'total_tokens')
+
+  if (inputDetails) {
+    copyNumberAlias(inputDetails, usage, 'audio_tokens', 'input_audio_tokens')
+  }
+
+  const outputDetails = firstPlainObject(
+    readKey(rawUsage, 'output_tokens_details'),
+    readKey(rawUsage, 'completion_tokens_details')
+  )
+  if (outputDetails) {
+    copyNumberAlias(outputDetails, usage, 'reasoning_tokens', 'reasoning_tokens')
+    copyNumberAlias(outputDetails, usage, 'audio_tokens', 'output_audio_tokens')
+    copyNumberAlias(outputDetails, usage, 'accepted_prediction_tokens', 'accepted_prediction_tokens')
+    copyNumberAlias(outputDetails, usage, 'rejected_prediction_tokens', 'rejected_prediction_tokens')
+  }
+
+  return Object.keys(usage).length === 0 ? undefined : { usage }
+}
+
+/**
+ * Stamp response-level usage onto the LAST assistant message of the response
+ * (the terminal output item — a tool_use on tool-calling turns, else the final
+ * text). One carrier per response keeps a SUM over rows honest, and "last"
+ * matches the Claude projector so the table reads identically for both
+ * providers. @ref LLP 0035#one-carrier
+ *
+ * @param {AiGatewayProjectedMessage[]} messages
+ * @param {JsonObject | undefined} usageAttributes
+ */
+function stampUsageOnLastAssistant(messages, usageAttributes) {
+  if (!usageAttributes) return
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== 'assistant') continue
+    messages[i].attributes = mergeJsonObjects(messages[i].attributes, usageAttributes)
+    return
+  }
+}
+
+/**
+ * @param {unknown[]} values
+ * @returns {Record<string, unknown> | undefined}
+ */
+function firstPlainObject(...values) {
+  return values.find(isPlainObject)
+}
+
+/**
+ * @param {Record<string, unknown>} source
+ * @param {JsonObject} target
+ * @param {string} sourceKey
+ * @param {string} targetKey
+ */
+function copyNumberAlias(source, target, sourceKey, targetKey) {
+  const value = numberValue(source[sourceKey])
+  if (value !== undefined) target[targetKey] = value
 }
 
 // ---------------------------------------------------------------------
@@ -891,6 +1026,26 @@ function parseEventData(data) {
 function parseMaybeJson(value) {
   if (typeof value !== 'string') return value
   try { return JSON.parse(value) } catch { return value }
+}
+
+/**
+ * @param {JsonObject | undefined} a
+ * @param {JsonObject | undefined} b
+ * @returns {JsonObject | undefined}
+ */
+function mergeJsonObjects(a, b) {
+  if (!a) return b
+  if (!b) return a
+  /** @type {JsonObject} */
+  const out = { ...a }
+  for (const [key, value] of Object.entries(b)) {
+    if (isPlainObject(value) && isPlainObject(out[key])) {
+      out[key] = { ...(/** @type {JsonObject} */ (out[key])), ...value }
+    } else {
+      out[key] = value
+    }
+  }
+  return out
 }
 
 /**

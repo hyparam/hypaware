@@ -78,6 +78,7 @@ plugin that registers a dataset gets query and formatting for free.
 | Context-graph T1/T2 enrichment + completion | [0028](./0028-context-graph-enrichment.decision.md) | Decision |
 | MCP hosting intrinsic (verbs → tools) | [0034](./0034-mcp-host-intrinsic.decision.md) | Decision |
 | Remote attach (client consumer half) | [0033](./0033-remote-query-attach.spec.md) | Spec |
+| Token-usage normalization (net input) | [0035](./0035-token-usage-normalization.decision.md) | Decision |
 
 ## Where to start
 

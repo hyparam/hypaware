@@ -637,6 +637,12 @@ function expandMessageParts(ctx) {
   const finishReason = mapFinishReason(stringValue(ctx.message.stop_reason))
   const messageCreatedAt = stringValue(ctx.message.message_created_at) ?? ctx.tsStart
   const messageAttributes = ctx.message.attributes
+  // @ref LLP 0035#one-carrier [implements] — response-level `usage` is
+  // per-response, so a multi-block carrier message must not replicate it onto
+  // every part. Strip `usage` from all but the last part; the last block (the
+  // terminal output item, which also carries `stop_reason`/status) is the sole
+  // carrier. Closes the residual edge LLP 0035 assumed wasn't produced.
+  const nonCarrierAttributes = stripUsage(messageAttributes)
   const baseClientAttributes = withClientAttributes(
     undefined,
     stringValue(ctx.projection.client_version),
@@ -718,7 +724,7 @@ function expandMessageParts(ctx) {
         : undefined,
       is_error: readKey(block, 'is_error') === true ? true : undefined,
       status: buildStatus(block, isLast, ctx.role, finishReason),
-      attributes: mergeJsonObjects(baseClientAttributes, messageAttributes),
+      attributes: mergeJsonObjects(baseClientAttributes, isLast ? messageAttributes : nonCarrierAttributes),
       raw_frame: isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
     }
     if (
@@ -959,6 +965,22 @@ function buildGatewayAttributes(exchange) {
     error: stringValue(exchange.error ?? undefined),
   }
   return attrs
+}
+
+/**
+ * Drop response-level `usage` from a message's attributes, for the
+ * non-carrier parts of a multi-block message. Returns the input
+ * unchanged when there's no `usage`, and `undefined` when `usage` was
+ * the only key (so non-carrier parts fall back to client attributes).
+ *
+ * @ref LLP 0035#one-carrier — usage is per-response; only the last part carries it.
+ * @param {Record<string, unknown> | undefined} attributes
+ * @returns {Record<string, unknown> | undefined}
+ */
+function stripUsage(attributes) {
+  if (!isPlainObject(attributes) || attributes.usage === undefined) return attributes
+  const { usage, ...rest } = attributes
+  return Object.keys(rest).length > 0 ? rest : undefined
 }
 
 /**
