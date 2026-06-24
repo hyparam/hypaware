@@ -34,11 +34,11 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1074.0",
+    "@aws-sdk/client-s3": "3.1075.0",
     "@aws-sdk/credential-provider-ini": "3.972.56",
     "hyparquet": "1.26.1",
     "hyparquet-compressors": "1.1.1",
-    "icebird": "0.8.10",
+    "icebird": "0.8.11",
     "squirreling": "0.12.24"
   },
   "optionalDependencies": {
@@ -51,7 +51,7 @@
     "squirreling": "0.12.24"
   },
   "devDependencies": {
-    "@types/node": "26.0.0",
+    "@types/node": "26.0.1",
     "typescript": "6.0.3"
   }
 }

@@ -558,6 +558,26 @@ function clampTickInterval(value) {
 }
 
 /**
+ * Turn a raw source-start error into an operator-actionable message.
+ * The common failure is a port collision (EADDRINUSE): a second
+ * HypAware daemon or an unrelated service already holds the gateway
+ * port. The bare Node string ("listen EADDRINUSE ... 127.0.0.1:8787")
+ * doesn't say what to do, so this appends the remedy.
+ *
+ * @param {unknown} err
+ * @param {string} source
+ * @returns {string}
+ */
+function describeSourceStartError(err, source) {
+  const base = err instanceof Error ? err.message : String(err)
+  if (/EADDRINUSE/.test(base)) {
+    const addr = base.match(/[\d.]+:\d+/)?.[0] ?? 'its configured address'
+    return `${base}. Source '${source}' could not bind ${addr}; another process (a second HypAware daemon or an unrelated service) already holds it. Stop that process or change the listen address, then restart the daemon.`
+  }
+  return base
+}
+
+/**
  * Start every registered source that has not auto-started during
  * `activate()`. Returns one snapshot per source — including the
  * already-started ones so the status file lists everything the
@@ -612,7 +632,7 @@ async function startConfiguredSources({ runtime, log, fileLog, sourcePluginByNam
         details,
       })
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = describeSourceStartError(err, contribution.name)
       fileLog.error('daemon.source_start_failed', {
         source: contribution.name,
         plugin,

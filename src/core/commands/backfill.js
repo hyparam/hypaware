@@ -69,8 +69,14 @@ export async function runBackfill(argv, ctx) {
   if (selected.providers.length === 0) {
     if (parsed.json) {
       ctx.stdout.write(JSON.stringify({ run_id: devRunId, providers: [] }, null, 2) + '\n')
+    } else if (ctx.backfills.list().length > 0) {
+      ctx.stdout.write(
+        'No backfill providers matched your active config. Providers are registered but none are enabled here. Run `hyp backfill list` to see them, or name one explicitly (e.g. `hyp backfill claude`).\n'
+      )
     } else {
-      ctx.stdout.write('No backfill providers selected. Run `hyp backfill list` for the registered set.\n')
+      ctx.stdout.write(
+        'No backfill providers registered. No active plugin contributes one; check enabled plugins with `hyp daemon status`, and if you just joined a fleet the config may still be syncing.\n'
+      )
     }
     return 0
   }
@@ -157,6 +163,9 @@ export async function runBackfillList(argv, ctx) {
   }
   if (providers.length === 0) {
     ctx.stdout.write('No backfill providers registered.\n')
+    ctx.stdout.write(
+      'No active plugin contributes a backfill provider. Check enabled plugins with `hyp daemon status`; if you just joined a fleet, the config may still be syncing.\n'
+    )
     return 0
   }
   ctx.stdout.write('Backfill providers:\n')
