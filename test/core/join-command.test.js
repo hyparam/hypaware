@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import { centralSeedPath } from '../../src/core/config/apply.js'
+import { centralSeedPath, resolveCentralLayerPath } from '../../src/core/config/apply.js'
 
 /** @param {string} hypHome */
 function seedPathFor(hypHome) {
@@ -98,6 +98,53 @@ test('join never touches an existing local config (#111 regression)', async () =
   const stat = await fs.lstat(localPath)
   assert.ok(!stat.isSymbolicLink())
   await fs.stat(seedPathFor(hypHome))
+})
+
+test('join supersedes a stale active slot so the fresh token is honored (#139)', async () => {
+  const { hypHome, stdout, opts } = await makeDispatchOpts()
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+
+  // Simulate a previously-joined host whose applied central config lost
+  // its identity (the JWT broke, prompting a re-join). The active slot's
+  // central sink carries an empty identity — no bootstrap token — so on
+  // its own it can never bootstrap. Before the fix, boot resolution
+  // preferred this slot over the freshly written seed and the new token
+  // was silently ignored.
+  const staleSlot = {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: {
+      central: {
+        plugin: '@hypaware/central',
+        config: { url: 'https://central.example', identity: {} },
+      },
+    },
+  }
+  await fs.writeFile(path.join(controlDir, 'config.b.json'), JSON.stringify(staleSlot, null, 2) + '\n')
+  await fs.writeFile(path.join(controlDir, 'config.b.etag'), 'stale-etag\n')
+  await fs.symlink('config.b.json', path.join(controlDir, 'active'))
+
+  const code = await dispatch(
+    ['join', 'https://central.example', 'fresh-token', '--no-daemon'],
+    opts
+  )
+  assert.equal(code, 0, stdout.text())
+
+  // The central layer the daemon will boot must resolve to the fresh seed
+  // (carrying the new token), not the stale active slot that shadowed it.
+  const resolved = resolveCentralLayerPath({ stateRoot })
+  assert.equal(resolved, seedPathFor(hypHome))
+  const central = JSON.parse(await fs.readFile(/** @type {string} */ (resolved), 'utf8'))
+  assert.equal(central.sinks.central.config.identity.bootstrap_token, 'fresh-token')
+
+  // The host is back in genuine seed-config mode: the active-slot pointer
+  // and the stale slot artifacts are gone, so the apply engine's
+  // first-apply path recreates the slots on the next pull.
+  await assert.rejects(fs.lstat(path.join(controlDir, 'active')))
+  await assert.rejects(fs.stat(path.join(controlDir, 'config.b.json')))
+  assert.match(stdout.text(), /superseded a stale applied config/)
 })
 
 test('join reads the token from --token-file', async () => {

@@ -181,6 +181,19 @@ Consequences:
   the local layer is untouched, so a rolled-back gateway *keeps recording
   locally* — strictly better than today, where rollback-to-seed left a
   central-only host collecting nothing.
+- **Re-join resets to seed mode**: `join` writing a seed only takes effect when
+  the seed is what boot resolves (central = active slot **else** seed). On a
+  *first* join there is no active slot, so the seed wins. On a **re-enrollment**
+  (the operator re-runs `join` because identity broke), a prior enrollment may
+  have left a stale active slot whose `identity` carries no bootstrap token; that
+  slot would shadow the freshly-written seed, the new token would be silently
+  ignored, and identity bootstrap would keep failing
+  ([#139](https://github.com/hyparam/hypaware/issues/139)). So `join` clears the
+  active-slot pointer, the A/B slots + etag sidecars, and the apply state right
+  after writing the seed, returning the host to genuine seed-config mode. A
+  re-join then behaves exactly like a first join: boot reads the seed, bootstraps
+  from its token, pulls, and the apply engine recreates the slots and retires the
+  seed (`resetCentralLayerToSeed` in `apply.js`, called from `runJoin`).
 - **No field migration.** Joined-under-the-old-model hosts (where
   `hypaware-config.json` is a symlink to a slot) do not exist in the field; at
   most a trivial defensive boot-time fixup, not a migration path. Non-joined
