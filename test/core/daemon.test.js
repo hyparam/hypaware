@@ -330,6 +330,86 @@ test('runDaemon reload re-merges the central layer (does not re-read local alone
   }
 })
 
+test('runDaemon health event derives from aggregate state and excludes failed sources (#138)', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-degraded-health-'))
+  let handle
+  try {
+    const installDir = await stageFailingSourcePlugin(hypHome)
+    await writeLock(path.join(hypHome, 'hypaware'), {
+      schema_version: 1,
+      plugins: {
+        '@third-party/failing-fixture': {
+          name: '@third-party/failing-fixture',
+          version: '0.1.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-05-22T00:00:00.000Z',
+        },
+      },
+    })
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@third-party/failing-fixture' }],
+    }))
+
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'degraded-health-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    // The aggregate state written to status.json reports degraded with the
+    // bad source marked failed and the good source started.
+    const snap = handle.snapshot()
+    assert.equal(snap.state, 'degraded')
+    const byName = new Map(snap.sources.map((s) => [s.name, s.state]))
+    assert.equal(byName.get('ok-source'), 'started')
+    assert.equal(byName.get('failing-source'), 'failed')
+
+    // Flush the log by stopping cleanly before inspecting daemon.log.
+    await handle.stop()
+    await handle.done
+    handle = undefined
+
+    const logPath = path.join(hypHome, 'hypaware', 'logs', 'daemon.log')
+    const raw = await fs.readFile(logPath, 'utf8')
+    const events = raw
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+
+    // (a) The boot health event reflects degraded — NOT daemon.healthy.
+    assert.equal(
+      events.some((e) => e.event === 'daemon.healthy'),
+      false,
+      'degraded boot must not emit daemon.healthy'
+    )
+    const degraded = events.find((e) => e.event === 'daemon.degraded')
+    assert.ok(degraded, 'degraded boot must emit daemon.degraded')
+
+    // (b) The health event lists only sources that came up; the failed
+    // source is excluded from `sources` (and surfaced under failed_sources).
+    assert.deepEqual(degraded.sources, ['ok-source'])
+    assert.ok(
+      Array.isArray(degraded.failed_sources) &&
+        degraded.failed_sources.includes('failing-source')
+    )
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 /**
  * @param {string} hypHome
  * @returns {Promise<string>}
@@ -365,6 +445,49 @@ export async function activate(ctx) {
         },
         async stop() {},
       }
+    },
+  })
+}
+`
+  )
+  return installDir
+}
+
+/**
+ * Stage a plugin registering two sources: one that starts cleanly and one
+ * whose `start()` throws (mirroring an EADDRINUSE bind failure). Used to
+ * drive a degraded boot for the #138 health-event regression.
+ *
+ * @param {string} hypHome
+ * @returns {Promise<string>}
+ */
+async function stageFailingSourcePlugin(hypHome) {
+  const installDir = path.join(hypHome, 'hypaware', 'plugins', '@third-party/failing-fixture')
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1,
+    name: '@third-party/failing-fixture',
+    version: '0.1.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+  }))
+  await fs.writeFile(
+    path.join(installDir, 'index.js'),
+    `
+export async function activate(ctx) {
+  ctx.sources.register({
+    name: 'ok-source',
+    plugin: '@third-party/failing-fixture',
+    async start() {
+      return { async stop() {} }
+    },
+  })
+  ctx.sources.register({
+    name: 'failing-source',
+    plugin: '@third-party/failing-fixture',
+    async start() {
+      throw new Error('listen EADDRINUSE: address already in use 127.0.0.1:8787')
     },
   })
 }

@@ -236,7 +236,7 @@ export async function runDaemon(opts = {}) {
     fileLog.error('daemon.boot_failed', { message })
     persist({ state: 'degraded', warnings: [`boot_failed: ${message}`] })
     clearPidFile(stateRoot)
-    fileLog.close()
+    await fileLog.close()
     throw err
   }
 
@@ -287,10 +287,31 @@ export async function runDaemon(opts = {}) {
 
   status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, sinkPluginByInstance: new Map() })
   persist()
-  fileLog.info('daemon.healthy', {
-    sources: sourceSnapshots.map((s) => s.name),
-    sinks: status.sinks.map((s) => s.instance),
-  })
+  // Derive the boot health event from the SAME aggregate written to
+  // status.json: a degraded boot (any source failed to start) must not log
+  // `daemon.healthy` — monitoring keyed off that event would read a false
+  // positive — and a health event never lists a source that failed to
+  // start; it reports only the sources that actually came up.
+  // @ref LLP 0017#the-primary-daemon [implements] — the boot health event reports the same state as `hyp daemon status`
+  const startedSourceNames = sourceSnapshots
+    .filter((s) => s.state !== 'failed')
+    .map((s) => s.name)
+  if (status.state === 'healthy') {
+    fileLog.info('daemon.healthy', {
+      state: status.state,
+      sources: startedSourceNames,
+      sinks: status.sinks.map((s) => s.instance),
+    })
+  } else {
+    fileLog.warn('daemon.degraded', {
+      state: status.state,
+      sources: startedSourceNames,
+      failed_sources: sourceSnapshots
+        .filter((s) => s.state === 'failed')
+        .map((s) => s.name),
+      sinks: status.sinks.map((s) => s.instance),
+    })
+  }
 
   // ----- Tick loop -----
   async function runTick() {
@@ -431,7 +452,10 @@ export async function runDaemon(opts = {}) {
     const stoppedAt = new Date()
     persist({ state: 'stopped', stoppedAt: stoppedAt.toISOString() })
     fileLog.info('daemon.stopped')
-    fileLog.close()
+    // Await the flush before resolving `done`: a caller (or the #138
+    // regression test) that reads `daemon.log` right after the daemon stops
+    // must see every line, not a buffer the process abandoned on exit.
+    await fileLog.close()
     clearPidFile(stateRoot)
 
     if (installSignals) {

@@ -28,6 +28,15 @@ V1 introduces a primary daemon that boots the kernel and runs the steady state:
 The source registry and sink driver exist independently; the daemon is the
 long-lived host that drives them together.
 
+The boot health event the daemon writes to `daemon.log` is derived from the
+**same aggregate** that `status.json` reports: a clean boot logs
+`daemon.healthy`; a boot where any configured source failed to start logs
+`daemon.degraded` (matching `state: "degraded"`), never `daemon.healthy`. The
+event lists only the sources that actually came up; a source that failed is
+surfaced separately (`failed_sources`) and is never reported as active. This
+keeps monitoring keyed off `daemon.healthy` from reading a false positive on a
+degraded boot.
+
 ## Staged restart for config replacement
 
 When the operative config is **replaced wholesale** — remote config apply
