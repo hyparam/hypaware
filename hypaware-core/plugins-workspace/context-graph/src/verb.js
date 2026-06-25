@@ -104,8 +104,10 @@ function renderNeighbors(result) {
   // A long `natural_key` is tail-truncated, so two colliders that share a long
   // path suffix would still render identically — the same-row bug, surviving for
   // deep paths. Count the disambiguated rows too; any that *still* collide fall
-  // back to the unique content-addressed node_id, the same escape `disambiguator`
-  // already uses when the key adds nothing.
+  // back to the full `node_id`: the graph's content-addressed primary key, so
+  // distinct nodes have distinct ids. This is the one suffix that *guarantees*
+  // the tie breaks; a `shortId` prefix would not, since two ids can share their
+  // leading 12 chars.
   const shownCounts = new Map()
   for (const n of result.neighbors) {
     const text = display(n.node)
@@ -120,7 +122,7 @@ function renderNeighbors(result) {
     let shown = text
     if (labelCounts.get(text) > 1) {
       shown = `${text} (${disambiguator(n.node)})`
-      if (shownCounts.get(shown) > 1) shown = `${text} (${shortId(n.node.node_id)})`
+      if (shownCounts.get(shown) > 1) shown = `${text} (${n.node.node_id})`
     }
     out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }

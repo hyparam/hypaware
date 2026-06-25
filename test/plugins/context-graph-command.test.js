@@ -289,6 +289,30 @@ test('TEXT renderer keeps deep same-suffix Files distinct when the path tail is 
   assert.notEqual(fileRows[0], fileRows[1], 'deep same-suffix Files must not render byte-identical')
 })
 
+test('TEXT renderer breaks the tie with the full node_id when shortId prefixes also collide', () => {
+  // The residual fallback must use the full content-addressed node_id, not a
+  // 12-char prefix. Two Files with an identical long path tail (so the path-tail
+  // disambiguator collides) whose node_ids share their leading 12 hex chars: a
+  // shortId(node_id) fallback would render byte-identical, the bug surviving one
+  // layer deeper. Only the full id guarantees the rows differ.
+  const suffix = '/packages/server/src/components/common/widgets/Button/index.js'
+  const result = {
+    ...COLLIDING_RESULT,
+    neighbors: [
+      neighborOf({ node: { node_id: 'a1b2c3d4e5f6111111111111', node_type: 'File', natural_key: `/Users/alice/work${suffix}`, label: 'index.js' } }),
+      neighborOf({ node: { node_id: 'a1b2c3d4e5f6222222222222', node_type: 'File', natural_key: `/Users/bob/projects/acme${suffix}`, label: 'index.js' } }),
+    ],
+  }
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (result), /** @type {any} */ ({ json: false }))
+  const text = String(stdout)
+  const fileRows = text.split('\n').filter((l) => l.includes('File'))
+  assert.equal(fileRows.length, 2)
+  assert.notEqual(fileRows[0], fileRows[1], 'shortId-prefix collision must still render distinct rows')
+  // The full id, not just its shared 12-char prefix, must reach the output.
+  assert.match(text, /a1b2c3d4e5f6111111111111/, 'first row carries the full node_id')
+  assert.match(text, /a1b2c3d4e5f6222222222222/, 'second row carries the full node_id')
+})
+
 test('TEXT renderer leaves a non-colliding label readable (no disambiguator)', () => {
   const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
   const toolRow = String(stdout).split('\n').find((l) => l.includes('Tool'))
