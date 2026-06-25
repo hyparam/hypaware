@@ -391,6 +391,10 @@ function projectedMessageFromEntry(entry, agentMeta) {
   if (entry.prompt_id) message.prompt_id = entry.prompt_id
   if (entry.provider_type) message.provider_type = entry.provider_type
   if (entry.provider_subtype) message.provider_subtype = entry.provider_subtype
+  // Per-message model: live capture sets one model per exchange, but a
+  // backfilled session can switch models mid-stream, so stamp it per assistant
+  // line and let the gateway prefer it over the exchange model.
+  if (entry.model) message.model = entry.model
   if (entry.entrypoint) message.entrypoint = entry.entrypoint
   if (entry.user_type) message.user_type = entry.user_type
   if (entry.permission_mode) message.permission_mode = entry.permission_mode

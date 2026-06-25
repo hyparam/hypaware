@@ -649,7 +649,14 @@ function expandMessageParts(ctx) {
     conversation_id: ctx.conversationId,
     user_id: ctx.projection.user_id,
     provider: ctx.projection.provider,
-    model: ctx.projection.model,
+    // @ref LLP 0026#consequences [implements] — the message envelope (incl.
+    // model) mirrors the transcript: backfill records the per-line model on
+    // assistant messages only, so the per-message value wins where present and
+    // mixed-model sessions stay accurate. When a message has no model the row
+    // falls back to the exchange model — which for live capture is the one
+    // model per exchange (landing on user rows too), and for backfill is unset
+    // (backfilled user/tool_result rows carry no model, by design).
+    model: stringValue(ctx.message.model) ?? ctx.projection.model,
     system_text: ctx.projection.system_text,
     tools: ctx.projection.tools,
     conversation_started_at: ctx.conversationStarted,
