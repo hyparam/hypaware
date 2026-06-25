@@ -1,7 +1,7 @@
 # LLP 0037: Backfill on join
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Config, Sources, Daemon
 **Author:** Phil / Claude
 **Date:** 2026-06-25

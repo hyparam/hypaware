@@ -1,7 +1,7 @@
 # LLP 0036: Central-config-driven client actions
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Config, Daemon, Onboarding
 **Author:** Phil / Claude
 **Date:** 2026-06-25
