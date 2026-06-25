@@ -88,7 +88,9 @@ export class IdentityClient {
   async bootstrap() {
     const token = this.bootstrapToken
     if (typeof token !== 'string' || token.length === 0) {
-      throw new Error('identity bootstrap failed: identity.bootstrap_token is not set')
+      throw new Error(
+        'identity bootstrap failed: identity.bootstrap_token is not set. Run `hyp join <central-url> <token>` to enroll this host, or remove the central sink if you only capture locally'
+      )
     }
     const url = joinUrl(this.centralUrl, '/v1/identity/bootstrap')
     const body = JSON.stringify({ bootstrap_token: token })

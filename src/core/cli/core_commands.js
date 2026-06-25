@@ -2250,7 +2250,7 @@ async function runVersion(_argv, ctx) {
   const require = createRequire(import.meta.url)
   const { version } = require('../../../package.json')
   const { hypHome } = readObservabilityEnv(ctx.env)
-  ctx.stdout.write(`hyp ${version}\n`)
+  ctx.stdout.write(`hypaware ${version}\n`)
   ctx.stdout.write(`  node:     ${process.version}\n`)
   ctx.stdout.write(`  platform: ${process.platform} ${process.arch}\n`)
   ctx.stdout.write(`  hyp_home: ${hypHome}\n`)

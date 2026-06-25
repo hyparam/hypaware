@@ -33,6 +33,27 @@ const HELP_FLAGS = new Set(['--help', '-h', 'help'])
 const VERSION_FLAGS = new Set(['--version', '-V'])
 
 /**
+ * Map a sink materialization failure to a one-line, actionable hint.
+ * The raw `[errorKind]: message` line stays for operators; this adds a
+ * "what do I do about it" line for the common, confusing cases: a host
+ * that hasn't joined a fleet, and the expected-but-noisy plugin-not-active
+ * warning that read-only commands emit because they don't load sink
+ * writer plugins.
+ *
+ * @param {{ instance: string, errorKind: string, message: string }} err
+ * @returns {string | undefined}
+ */
+function sinkWarningHint(err) {
+  if (/bootstrap_token is not set/.test(err.message)) {
+    return "this host hasn't joined a fleet. Run `hyp join <central-url> <token>` to enable the central sink, or ignore this warning if you only capture locally"
+  }
+  if (err.errorKind === 'sink_plugin_not_active') {
+    return `expected for read-only commands (the writer/destination plugin for '${err.instance}' isn't loaded here); the running daemon is unaffected`
+  }
+  return undefined
+}
+
+/**
  * Boot the kernel CLI and dispatch `argv` to a registered command.
  *
  * Lifecycle:
@@ -88,7 +109,7 @@ export async function dispatch(argv, opts = {}) {
   if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
     const require = createRequire(import.meta.url)
     const { version } = require('../../../package.json')
-    stdout.write(`hyp ${version}\n`)
+    stdout.write(`hypaware ${version}\n`)
     return 0
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
@@ -132,6 +153,8 @@ export async function dispatch(argv, opts = {}) {
       stderr.write(
         `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
       )
+      const hint = sinkWarningHint(err)
+      if (hint) stderr.write(`  → ${hint}\n`)
     }
   }
 

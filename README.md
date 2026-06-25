@@ -8,6 +8,8 @@ logs / traces / metrics into a local query cache and optional Parquet
 exports. Everything runs on the local machine — no central server is
 required for V1.
 
+> Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
+
 ## Quickstart
 
 ```sh
