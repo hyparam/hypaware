@@ -101,10 +101,27 @@ function renderNeighbors(result) {
     const text = display(n.node)
     labelCounts.set(text, (labelCounts.get(text) ?? 0) + 1)
   }
+  // A long `natural_key` is tail-truncated, so two colliders that share a long
+  // path suffix would still render identically — the same-row bug, surviving for
+  // deep paths. Count the disambiguated rows too; any that *still* collide fall
+  // back to the unique content-addressed node_id, the same escape `disambiguator`
+  // already uses when the key adds nothing.
+  const shownCounts = new Map()
+  for (const n of result.neighbors) {
+    const text = display(n.node)
+    if (labelCounts.get(text) > 1) {
+      const shown = `${text} (${disambiguator(n.node)})`
+      shownCounts.set(shown, (shownCounts.get(shown) ?? 0) + 1)
+    }
+  }
   for (const n of result.neighbors) {
     const arrow = n.direction === 'out' ? `-${n.edge_type}→` : `←${n.edge_type}-`
     const text = display(n.node)
-    const shown = labelCounts.get(text) > 1 ? `${text} (${disambiguator(n.node)})` : text
+    let shown = text
+    if (labelCounts.get(text) > 1) {
+      shown = `${text} (${disambiguator(n.node)})`
+      if (shownCounts.get(shown) > 1) shown = `${text} (${shortId(n.node.node_id)})`
+    }
     out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }
   if (result.truncated) {

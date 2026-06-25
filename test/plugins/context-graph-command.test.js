@@ -271,6 +271,24 @@ test('TEXT renderer disambiguates two Files sharing a basename into distinct row
   assert.notEqual(fileRows[0], fileRows[1], 'same-basename Files render as distinct rows')
 })
 
+test('TEXT renderer keeps deep same-suffix Files distinct when the path tail is truncated', () => {
+  // Two checkouts of one tree: same long relative suffix, differing only in the
+  // root — so a fixed 47-char tail truncation drops the distinguishing prefix.
+  // The rows must still differ (fall back to node_id), not regress to identical.
+  const suffix = '/packages/server/src/components/common/widgets/Button/index.js'
+  const result = {
+    ...COLLIDING_RESULT,
+    neighbors: [
+      neighborOf({ node: { node_id: 'n-deep-1', node_type: 'File', natural_key: `/Users/alice/work${suffix}`, label: 'index.js' } }),
+      neighborOf({ node: { node_id: 'n-deep-2', node_type: 'File', natural_key: `/Users/bob/projects/acme-checkout-two${suffix}`, label: 'index.js' } }),
+    ],
+  }
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (result), /** @type {any} */ ({ json: false }))
+  const fileRows = String(stdout).split('\n').filter((l) => l.includes('File'))
+  assert.equal(fileRows.length, 2)
+  assert.notEqual(fileRows[0], fileRows[1], 'deep same-suffix Files must not render byte-identical')
+})
+
 test('TEXT renderer leaves a non-colliding label readable (no disambiguator)', () => {
   const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
   const toolRow = String(stdout).split('\n').find((l) => l.includes('Tool'))
