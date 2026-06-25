@@ -68,6 +68,19 @@ This is the decision recorded in [LLP 0002](./0002-v1-scope.decision.md#daemon-i
 Pointing the service at the stable global binary is what makes the installed
 daemon survive across npx cache eviction and package updates.
 
+### Reinstall waits for launchd release
+
+`launchctl bootout` is **asynchronous**: launchd may still be tearing the
+service down after the command returns. Reinstalling over a still-loaded agent
+can bootstrap into a half-removed state and fail with
+`Bootstrap failed: 5: Input/output error`. The macOS installer therefore, after
+booting out an already-loaded agent, **polls `launchctl print` until launchd has
+released the label** before writing the new plist and bootstrapping, and
+**retries the transient EIO (`error 5`) a bounded number of times**. A genuine
+load/config error (any non-EIO failure) is *not* retried — it surfaces
+immediately as a `LaunchAgentError`. This makes "reinstall over a live agent"
+reliable without masking real failures.
+
 ## Attach is idempotent and reversible
 
 Client attach/detach (Claude Code, Codex) performed during install must be
