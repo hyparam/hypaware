@@ -156,6 +156,134 @@ test('join throws HypAwareCommandError for an invalid url', async () => {
   )
 })
 
+test('join rejects dryRun instead of silently writing the seed', async () => {
+  const hypHome = await freshHome()
+  await assert.rejects(
+    () =>
+      join('https://central.example', 'policy-token', {
+        hypHome,
+        // @ts-expect-error dryRun is intentionally not part of join's options
+        dryRun: true,
+      }),
+    (err) => {
+      assert.ok(err instanceof HypAwareCommandError)
+      assert.match(err.message, /dry-run/)
+      return true
+    }
+  )
+  // The whole point: a dry-run caller must not have mutated state.
+  const seedPath = centralSeedPath(path.join(hypHome, 'hypaware'))
+  await assert.rejects(() => fs.stat(seedPath), (err) => {
+    assert.equal(/** @type {NodeJS.ErrnoException} */ (err).code, 'ENOENT')
+    return true
+  })
+})
+
+test('attach rejects the "all" target instead of dropping results', async () => {
+  const { registry, kernel, calls } = fakeClientKernel()
+  const hypHome = await freshHome()
+  await assert.rejects(
+    () =>
+      attach('all', {
+        hypHome,
+        // @ts-expect-error test-only kernel injection
+        registry,
+        kernel,
+      }),
+    (err) => {
+      assert.ok(err instanceof HypAwareCommandError)
+      assert.match(err.message, /all/)
+      return true
+    }
+  )
+  // The guard fires before dispatch, so no client was touched.
+  assert.deepEqual(calls, [])
+})
+
+test('detach rejects the "all" target instead of dropping results', async () => {
+  const { registry, kernel, calls } = fakeClientKernel()
+  const hypHome = await freshHome()
+  await assert.rejects(
+    () =>
+      detach('all', {
+        hypHome,
+        // @ts-expect-error test-only kernel injection
+        registry,
+        kernel,
+      }),
+    (err) => {
+      assert.ok(err instanceof HypAwareCommandError)
+      assert.match(err.message, /all/)
+      return true
+    }
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('run is the escape hatch for multi-client attach (every client surfaces)', async () => {
+  const { registry, kernel } = fakeClientKernel()
+  const hypHome = await freshHome()
+  const result = await run(['attach', 'all', '--json'], {
+    hypHome,
+    // @ts-expect-error test-only kernel injection
+    registry,
+    kernel,
+  })
+  assert.equal(result.code, 0)
+  const clients = result.stdout
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line).client)
+    .sort()
+  assert.deepEqual(clients, ['claude', 'codex'])
+  // run().json keeps only the final line — exactly why attach()/detach()
+  // reject 'all' rather than route the fan-out through that single result.
+  assert.equal(/** @type {{ client: string }} */ (result.json).client, 'codex')
+})
+
+test('run().json recovers the JSON object past trailing non-JSON prose', async () => {
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  kernel.capabilities.provide('test', 'hypaware.ai-gateway', '2.0.0', {
+    registerUpstreamPreset() {},
+    registerClient() {},
+    registerExchangeProjector() {},
+    localEndpoint() {
+      return 'http://127.0.0.1:4388'
+    },
+    /** @param {string} name */
+    getClient(name) {
+      if (name !== 'claude') return undefined
+      return {
+        name: 'claude',
+        /** @param {any} ctx */
+        async attach(ctx) {
+          ctx.stdout.write(
+            JSON.stringify({ status: 'ok', action: 'attach', client: 'claude', changed: true }) + '\n'
+          )
+          // A trailing human line after the JSON would defeat a last-line-only parser.
+          ctx.stdout.write('✓ Claude Code attached (/tmp/claude/settings.json)\n')
+        },
+      }
+    },
+    listClients() {
+      return [{ name: 'claude' }]
+    },
+  })
+  const hypHome = await freshHome()
+  const result = await run(['attach', 'claude', '--json'], {
+    hypHome,
+    // @ts-expect-error test-only kernel injection
+    registry,
+    kernel,
+  })
+  const json = /** @type {{ status: string, client: string } | null} */ (result.json)
+  assert.ok(json, 'expected the JSON object to be recovered past the trailing prose')
+  assert.equal(json.status, 'ok')
+  assert.equal(json.client, 'claude')
+})
+
 test('run exposes raw code and captured streams', async () => {
   const result = await run(['--help'])
   assert.equal(result.code, 0)

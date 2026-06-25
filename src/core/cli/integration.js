@@ -52,9 +52,11 @@ function makeBuffer() {
 }
 
 /**
- * Parse the last non-empty line of `text` as JSON. Commands invoked with
- * `--json` emit a single JSON object per affected target on its own line;
- * the final line is the one callers care about for a single target.
+ * Return the last line of `text` that parses as JSON, scanning backward
+ * past blank lines and trailing non-JSON prose. Commands invoked with
+ * `--json` emit one JSON object per affected target on its own line, and
+ * may print human prose afterwards; for a single target the final JSON
+ * line is the one callers care about. Returns `null` when no line parses.
  *
  * @param {string} text
  * @returns {unknown}
@@ -67,7 +69,7 @@ function parseLastJsonLine(text) {
     try {
       return JSON.parse(line)
     } catch {
-      return null
+      continue
     }
   }
   return null
@@ -127,6 +129,18 @@ export async function run(argv, opts = {}) {
  * @returns {Promise<ClientResult>}
  */
 async function runClient(verb, client, opts) {
+  // `hyp <verb> all` fans out to one JSON line per registered client, but
+  // this helper returns a single `ClientResult`, so it would silently drop
+  // every result but the last. Refuse it: callers that want every client
+  // should invoke once per client, or drop to `run([verb, 'all', '--json'])`
+  // and parse each stdout line themselves.
+  if (client === 'all') {
+    throw new HypAwareCommandError(
+      `hyp ${verb} all: this helper returns one ClientResult and cannot represent every client; ` +
+        `call ${verb}() once per client, or use run(['${verb}', 'all', '--json']) and parse each stdout line`,
+      { code: 2, stdout: '', stderr: '', json: null }
+    )
+  }
   const argv = [verb, client, '--json']
   if (opts.dryRun) argv.push('--dry-run')
   const result = await run(argv, opts)
@@ -153,6 +167,10 @@ async function runClient(verb, client, opts) {
  * editing its settings file. Resolves the gateway port from the effective
  * config / live daemon; no port argument is needed.
  *
+ * Pass a single client name. `'all'` is rejected because this helper
+ * returns one {@link ClientResult}; fan out per client, or use
+ * `run(['attach', 'all', '--json'])` for the multi-client form.
+ *
  * @param {string} [client]
  * @param {IntegrationOptions} [opts]
  * @returns {Promise<ClientResult>}
@@ -163,6 +181,10 @@ export function attach(client = 'claude', opts = {}) {
 
 /**
  * Detach a previously attached client, restoring its prior settings.
+ *
+ * Pass a single client name. `'all'` is rejected because this helper
+ * returns one {@link ClientResult}; fan out per client, or use
+ * `run(['detach', 'all', '--json'])` for the multi-client form.
  *
  * @param {string} [client]
  * @param {IntegrationOptions} [opts]
@@ -179,12 +201,31 @@ export function detach(client = 'claude', opts = {}) {
  * installs no launchd/systemd unit — the host's already-running daemon
  * picks up the seed and pulls its configuration.
  *
+ * `token` may be omitted when the caller supplies it another way (e.g. a
+ * `--token-file` argv via {@link run}); the CLI also accepts it on stdin.
+ *
+ * `dryRun` is intentionally not part of this surface: `hyp join` has no
+ * dry-run path and always writes the seed. Passing `dryRun: true` throws
+ * rather than silently writing — unlike {@link attach}/{@link detach},
+ * which do honor it.
+ *
  * @param {string} url
- * @param {string} token
- * @param {IntegrationOptions & { noDaemon?: boolean }} [opts]
+ * @param {string} [token]
+ * @param {Omit<IntegrationOptions, 'dryRun'> & { noDaemon?: boolean }} [opts]
  * @returns {Promise<CommandResult>}
+ * @ref LLP 0025#seed-config-mode [implements] — embedded join writes only the central seed; the host's daemon pulls config
+ * @ref LLP 0017#the-primary-daemon [constrained-by] — noDaemon defaults true: the daemon is a service unit, never hosted in-process
  */
 export async function join(url, token, opts = {}) {
+  // `hyp join` always writes the central seed — there is no dry-run path.
+  // Refuse a dryRun request instead of writing anyway, so a preview caller
+  // never mutates state. Forward-compatible: a real dry-run can land later.
+  if (/** @type {IntegrationOptions} */ (opts).dryRun) {
+    throw new HypAwareCommandError(
+      'hyp join: dry-run is not supported (join always writes the central seed); omit dryRun',
+      { code: 2, stdout: '', stderr: '', json: null }
+    )
+  }
   const argv = ['join', url]
   if (token) argv.push(token)
   if (opts.noDaemon ?? true) argv.push('--no-daemon')
