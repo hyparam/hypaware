@@ -13,6 +13,7 @@
     "./core/observability": "./src/core/observability/index.js",
     "./core/sinks": "./src/core/sinks/index.js",
     "./core/query": "./src/core/query/index.js",
+    "./integration": "./src/core/cli/integration.js",
     "./tui": "./src/core/cli/tui/index.js"
   },
   "imports": {
