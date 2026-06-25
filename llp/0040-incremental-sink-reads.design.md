@@ -83,7 +83,7 @@ Why it does not generalize to the forward/blob source-read problem:
   **full re-read after every compaction** — and compaction fires on routine
   file-count thresholds. Rejected on (B).
 
-### Candidate B — monotonic per-row ingest sequence column (**recommended**)
+### Candidate B — monotonic per-row ingest sequence column (**recommended**) {#ingest-seq-column}
 
 Add a kernel-assigned, append-monotonic `int64` column `_hyp_ingest_seq`,
 stamped at the same chokepoint as `_hyp_cache_row_id` (fact 3) and carried as an
@@ -126,7 +126,7 @@ and does not survive a source compaction; the content-addressed set is correct
 but cannot meet the bounded-read goal. A row-resident, totally-ordered,
 stats-prunable sequence is the one shape that clears all three constraints.
 
-## 2. Storage API extension
+## 2. Storage API extension {#storage-api-extension}
 
 `QueryStorageService.readRows` today
 (`collectivus-plugin-kernel-types.d.ts`, impl in `src/core/cache/storage.js`):
@@ -281,7 +281,8 @@ instead of the whole partition.
    reserved in blocks in `cursor.json`) must **never go backwards** across a
    crash/resume — a new row stamped `≤ watermark` would be skipped forever.
    Duplicate seqs across a crash boundary are tolerable (strict `>` plus row-id
-   dedup); regressions are not.
+   dedup); regressions are not. The allocator that satisfies this is specified
+   in [§7](#seq-allocator).
 3. **Interleaving weakens file-level pruning.** Multiple sources/late arrivals
    in one partition can scatter seq ranges across files, so a tick reads more
    than *N* (still correct, just less cheap). Acceptable; flagged.
@@ -299,3 +300,28 @@ instead of the whole partition.
    per-chunk watermark are two retry mechanisms; they should compose (the outbox
    replays the partition; the watermark ensures the replay reads only the
    un-acked suffix), but this needs an explicit test.
+
+## 7. Seq allocator (as built, T1) {#seq-allocator}
+
+Refines risk #2. The `_hyp_ingest_seq` counter is **cache-global**, persisted at
+`<cacheRoot>/_hyp_ingest_seq.json` (`{ v, nextSeq, updatedAt }`, atomic
+write-rename) — **not** in a per-partition `cursor.json`. Two reasons:
+
+- `decorateRow` runs **before** rows are grouped into `source=<…>` destination
+  partitions (fact 3 + the flush re-grouping in `appendChunk`), so at the stamp
+  point there is no destination partition cursor to write.
+- Two distinct spool table paths — live capture (`datasets/<ds>`) and `backfill`
+  (`datasets/<ds>/<backfill-seg>`) — flush into the **same** destination
+  partition. Only a single cache-wide counter guarantees every partition
+  observes a strictly-increasing seq subsequence; a per-partition counter would
+  interleave two independent sequences and could regress.
+
+Reservation is **block-wise** (`createIngestSeqAllocator`, default block 1024):
+a whole block is durably reserved (persisted `nextSeq` advanced) **before** any
+seq in it is stamped onto a row. A crash therefore abandons at most the unused
+tail of the current block (a harmless gap in the sequence) and can never
+re-issue a seq `≤` one already stamped. Seqs start at 1, so a null/`0` watermark
+("exported nothing") is `< ` every real row's seq. In-process concurrency (two
+flushes sharing the one allocator) is serialized through a promise-chain mutex;
+cross-process concurrent flush of one cache is out of scope (the daemon owns the
+cache, matching the existing single-writer write-rename idiom).
