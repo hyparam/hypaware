@@ -79,7 +79,13 @@ LLM querying the data, which is HypAware's primary consumer.
     block.
   - Codex live (`exchange-projector.js#stampUsageOnLastAssistant`) and backfill
     (`backfill.js#stampUsageOnTurn`, last eligible) — switched from first to
-    last so the carrier row matches Claude.
+    last so the carrier row matches Claude. Both apply the **same** eligibility
+    predicate (`hasTextOrToolUse`: the last assistant row carrying text or a
+    tool_use, skipping reasoning-only rows), so the two paths select the same
+    carrier *by rule* rather than by the coincidence that a live Responses reply
+    never ends in a reasoning-only assistant message. A turn with no eligible
+    assistant (e.g. windowed out) drops its usage rather than mis-attributing
+    it to an earlier row.
 
   Two payoffs: a plain `SUM(attributes.usage.*)` over rows is correct with no
   dedupe, and a human scanning the table sees one identical shape for both

@@ -553,10 +553,17 @@ function openAiUsageAttributes(rawUsage) {
 
 /**
  * Stamp response-level usage onto the LAST assistant message of the response
- * (the terminal output item — a tool_use on tool-calling turns, else the final
- * text). One carrier per response keeps a SUM over rows honest, and "last"
- * matches the Claude projector so the table reads identically for both
- * providers. @ref LLP 0035#one-carrier
+ * that carries text or a tool_use (the terminal output item — a tool_use on
+ * tool-calling turns, else the final text). One carrier per response keeps a
+ * SUM over rows honest, and "last text/tool_use assistant" is the SAME
+ * predicate the backfill path applies (`backfill.js#stampUsageOnTurn` →
+ * `hasTextOrToolUse`), so live and backfilled rows fold usage onto the same
+ * logical row and dedupe to one. Sharing the predicate means the rule no longer
+ * rests on the implicit invariant that a live Responses reply never ends in a
+ * reasoning-only assistant message — today it never does (reasoning isn't
+ * projected as an assistant message live), and if that ever changed the usage
+ * would be dropped rather than mis-attributed, exactly as backfill does.
+ * @ref LLP 0035#one-carrier
  *
  * @param {AiGatewayProjectedMessage[]} messages
  * @param {JsonObject | undefined} usageAttributes
@@ -564,10 +571,26 @@ function openAiUsageAttributes(rawUsage) {
 function stampUsageOnLastAssistant(messages, usageAttributes) {
   if (!usageAttributes) return
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role !== 'assistant') continue
-    messages[i].attributes = mergeJsonObjects(messages[i].attributes, usageAttributes)
+    const message = messages[i]
+    if (message.role !== 'assistant' || !hasTextOrToolUse(message)) continue
+    message.attributes = mergeJsonObjects(message.attributes, usageAttributes)
     return
   }
+}
+
+/**
+ * A message is an eligible usage carrier when it has a text or tool_use block.
+ * Mirrors `backfill.js#hasTextOrToolUse` so the live and backfill carrier
+ * predicates stay identical. @ref LLP 0035#one-carrier
+ *
+ * @param {AiGatewayProjectedMessage} message
+ */
+function hasTextOrToolUse(message) {
+  if (!Array.isArray(message.content)) return false
+  return message.content.some((block) => {
+    const type = isPlainObject(block) ? block.type : undefined
+    return type === 'text' || type === 'tool_use'
+  })
 }
 
 /**
