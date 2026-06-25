@@ -169,7 +169,7 @@ readRowsSince(tablePath: string, opts: { since?: SinkContinuation, columns?: str
   latest snapshot; `since` becomes a predicate (ideally pushed to icebird as a
   `seq > x` file/row-group skip, falling back to a yielded-row filter).
 
-## 3. Persisted watermark contract
+## 3. Persisted watermark contract {#watermark-contract}
 
 - **One watermark per `(sink instance, partition)`.** Stored under the sink
   plugin's `PluginPaths.stateDir` (the kernel already threads `ctx.paths` to
