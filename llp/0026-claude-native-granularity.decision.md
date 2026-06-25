@@ -178,6 +178,19 @@ user tool_result batches have no API message id, so backfill would have to
     query still works (the non-carrier blocks are simply null). See
     [LLP 0035](./0035-token-usage-normalization.decision.md) for the
     cross-provider one-carrier invariant and the canonical accounting query.
+- **`model` granularity differs by path, by design.** Live capture has one
+  model per exchange and the gateway stamps it on every row (user, assistant,
+  and tool_result alike). Backfill has no exchange-level model — a session can
+  switch models mid-stream — so it surfaces the per-line `message.model`, which
+  Claude Code records on assistant lines only; the gateway prefers that
+  per-message value over the exchange model and falls back to the exchange
+  model where a row has none. Consequently backfilled user-prompt and
+  tool_result rows carry **no** model: backfill model fidelity is
+  assistant-output-only, so a query filtering backfilled rows by model matches
+  the assistant outputs, not the user turns that prompted them. (Propagating a
+  responding assistant's model onto its user turn would have to choose among
+  several responses after a mid-turn switch — ambiguous — and is deliberately
+  out of scope; the per-line `message.model` is the unambiguous native unit.)
 - `previous_message_id` stores only the **immediate predecessor** (a 0/1-element
   array), not the full ancestry. The split multiplies the rows carrying this
   column, and a full per-row chain is O(N) per message → O(N²) per thread; as a

@@ -414,6 +414,74 @@ test('usage lands once — on the last block of a split assistant API message', 
   }
 })
 
+test('assistant model is surfaced per message, switches mid-session, and drops <synthetic>', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-a', 'sess-1', [
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-user-1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'hello' },
+        timestamp: '2026-05-20T10:00:00.000Z',
+      },
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-asst-1',
+        parentUuid: 'u-user-1',
+        type: 'assistant',
+        // The model Claude Code stamps onto each assistant transcript line.
+        message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }], model: 'claude-opus-4-8' },
+        timestamp: '2026-05-20T10:00:05.000Z',
+      },
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-asst-2',
+        parentUuid: 'u-asst-1',
+        type: 'assistant',
+        // A mid-session model switch must be preserved per message, not
+        // collapsed to one value for the whole session.
+        message: { role: 'assistant', content: [{ type: 'text', text: 'still here' }], model: 'claude-fable-5' },
+        timestamp: '2026-05-20T10:00:06.000Z',
+      },
+      {
+        sessionId: 'sess-1',
+        uuid: 'u-asst-3',
+        parentUuid: 'u-asst-2',
+        type: 'assistant',
+        // `<synthetic>` is a sentinel for locally-generated assistant lines
+        // that never hit a model — it must not land in the model column.
+        message: { role: 'assistant', content: [{ type: 'text', text: '[interrupted]' }], model: '<synthetic>' },
+        timestamp: '2026-05-20T10:00:07.000Z',
+      },
+    ])
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+
+    const rows = await materialize(item)
+    const asstRows = rowsByRole(rows, 'assistant')
+    /** @param {string} text */
+    const byText = (text) => {
+      const row = asstRows.find((r) => r.content_text === text)
+      assert.ok(row, `assistant row for "${text}" present`)
+      return row
+    }
+    assert.equal(byText('hi').model, 'claude-opus-4-8')
+    assert.equal(byText('still here').model, 'claude-fable-5')
+    // The <synthetic> line records no model.
+    assert.equal(byText('[interrupted]').model ?? null, null)
+    // A user turn carries no model: the transcript records `message.model` on
+    // assistant lines only, so backfill model fidelity is assistant-output-only
+    // (LLP 0026 Consequences). Unlike live capture, backfilled user/tool_result
+    // rows are intentionally model-less.
+    assert.equal(rowsByRole(rows, 'user')[0].model ?? null, null)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('token usage merges with subagent spawn provenance', async () => {
   const env = await stageEnv()
   try {

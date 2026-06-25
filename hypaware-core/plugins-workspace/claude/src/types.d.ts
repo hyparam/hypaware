@@ -34,6 +34,16 @@ export interface TranscriptEntry {
   prompt_id: string | undefined
   provider_type: string | undefined
   provider_subtype: string | undefined
+  /**
+   * The model Claude Code stamps on each assistant transcript line. Backfill
+   * surfaces it per message so the gateway `model` column reflects the model
+   * that served each assistant message, including sessions that switch models
+   * mid-stream. Only assistant lines record `message.model`, so user-prompt
+   * and tool_result entries have none. The `<synthetic>` sentinel
+   * (locally-generated assistant lines that never hit a model) is dropped to
+   * undefined.
+   */
+  model: string | undefined
   entrypoint: string | undefined
   client_version: string | undefined
   user_type: string | undefined

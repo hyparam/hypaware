@@ -1563,6 +1563,19 @@ export interface AiGatewayProjectedMessage {
   prompt_id?: string
   provider_type?: string
   provider_subtype?: string
+  /**
+   * Per-message model id. Live capture sets one model per exchange (one
+   * request, one model) and the gateway stamps it on every row of the
+   * exchange, user rows included. A backfilled exchange spans a whole session
+   * that can switch models mid-stream, so backfill stamps the model per
+   * assistant message instead, mirroring the transcript — which records
+   * `message.model` on assistant lines only. Backfilled user-prompt and
+   * tool_result rows therefore carry no model (model fidelity in backfill is
+   * assistant-output-only). The gateway prefers this per-message value over
+   * the exchange `model` when present and falls back to the exchange model
+   * otherwise.
+   */
+  model?: string
   entrypoint?: string
   user_type?: string
   permission_mode?: string

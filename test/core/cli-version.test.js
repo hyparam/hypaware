@@ -44,14 +44,14 @@ test('hyp --version prints version and exits 0', async () => {
   const opts = makeDispatchOpts()
   const code = await dispatch(['--version'], opts)
   assert.equal(code, 0)
-  assert.equal(opts.stdout.text(), `hyp ${pkg.version}\n`)
+  assert.equal(opts.stdout.text(), `hypaware ${pkg.version}\n`)
 })
 
 test('hyp -V prints version and exits 0', async () => {
   const opts = makeDispatchOpts()
   const code = await dispatch(['-V'], opts)
   assert.equal(code, 0)
-  assert.equal(opts.stdout.text(), `hyp ${pkg.version}\n`)
+  assert.equal(opts.stdout.text(), `hypaware ${pkg.version}\n`)
 })
 
 test('hyp version prints version info and exits 0', async () => {
@@ -59,7 +59,7 @@ test('hyp version prints version info and exits 0', async () => {
   const code = await dispatch(['version'], opts)
   assert.equal(code, 0)
   const out = opts.stdout.text()
-  assert.ok(out.startsWith(`hyp ${pkg.version}\n`))
+  assert.ok(out.startsWith(`hypaware ${pkg.version}\n`))
   assert.ok(out.includes('node:'))
   assert.ok(out.includes('platform:'))
   assert.ok(out.includes('hyp_home:'))
@@ -69,6 +69,6 @@ test('version string matches package.json', async () => {
   const opts = makeDispatchOpts()
   const code = await dispatch(['--version'], opts)
   assert.equal(code, 0)
-  const version = opts.stdout.text().trim().replace('hyp ', '')
+  const version = opts.stdout.text().trim().replace('hypaware ', '')
   assert.equal(version, pkg.version)
 })
