@@ -233,3 +233,60 @@ test('--json emits the structured result on stdout', async () => {
     assert.equal(errs.join(''), '')
   })
 })
+
+// --- Display: same-basename neighbors render as distinct rows (issue #123) ---
+
+/** @param {Partial<Record<string, unknown>>} o */
+function neighborOf(o) {
+  return { hop: 1, edge_type: 'touched', direction: 'out', from: 'n-sess', ...o }
+}
+
+// A session that touched two distinct Files sharing the `sink.js` basename, plus
+// a non-colliding Tool. The renderer is the unit-addressable surface here.
+const COLLIDING_RESULT = {
+  ok: /** @type {const} */ (true),
+  depth: 1,
+  direction: /** @type {const} */ ('out'),
+  seed: { node_id: 'n-sess', node_type: 'Session', natural_key: 'conv-1', label: null },
+  neighbors: [
+    neighborOf({ node: { node_id: 'n-f1', node_type: 'File', natural_key: '/repo/sink.js', label: 'sink.js' } }),
+    neighborOf({ node: { node_id: 'n-f2', node_type: 'File', natural_key: '/other/sink.js', label: 'sink.js' } }),
+    neighborOf({ edge_type: 'used', node: { node_id: 'n-tool', node_type: 'Tool', natural_key: 'Bash', label: 'Bash' } }),
+  ],
+  reachable: 3,
+  truncated: false,
+  totalNodes: 4,
+  totalEdges: 3,
+}
+
+test('TEXT renderer disambiguates two Files sharing a basename into distinct rows', () => {
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
+  const text = String(stdout)
+  // Both full paths must appear so the colliding rows are visibly distinct.
+  assert.match(text, /\/repo\/sink\.js/, 'first file disambiguated by its full path')
+  assert.match(text, /\/other\/sink\.js/, 'second file disambiguated by its full path')
+  // And the two File rows must not be byte-identical (the bug: both said "sink.js").
+  const fileRows = text.split('\n').filter((l) => l.includes('File'))
+  assert.equal(fileRows.length, 2)
+  assert.notEqual(fileRows[0], fileRows[1], 'same-basename Files render as distinct rows')
+})
+
+test('TEXT renderer leaves a non-colliding label readable (no disambiguator)', () => {
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
+  const toolRow = String(stdout).split('\n').find((l) => l.includes('Tool'))
+  assert.ok(toolRow, 'tool row present')
+  assert.match(toolRow, /Bash\s*$/, 'unique label stays bare — no path/id appended')
+})
+
+test('--json output is unchanged by the collision: node.natural_key is the path, labels untouched', () => {
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: true }))
+  const parsed = JSON.parse(String(stdout))
+  const files = parsed.neighbors.filter((/** @type {any} */ n) => n.node.node_type === 'File')
+  assert.equal(files.length, 2)
+  // JSON disambiguates by natural_key already; labels are the bare basename, untouched.
+  assert.deepEqual(files.map((/** @type {any} */ n) => n.node.label).sort(), ['sink.js', 'sink.js'])
+  assert.deepEqual(
+    files.map((/** @type {any} */ n) => n.node.natural_key).sort(),
+    ['/other/sink.js', '/repo/sink.js'],
+  )
+})
