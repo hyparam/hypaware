@@ -97,6 +97,45 @@ export function resolveCentralLayerPath({ stateRoot }) {
 }
 
 /**
+ * Reset the central layer to **seed-config mode**: remove the active-slot
+ * pointer, both A/B slot files and their etag sidecars, and the
+ * apply-engine state (probation / bad-etag / last-rollback). Best-effort
+ * and ENOENT-tolerant, so on a never-joined or first-join host (no
+ * pointer, no slots) it is a no-op.
+ *
+ * `hyp join` calls this right after writing a fresh seed. A re-enrollment
+ * — the operator re-runs `join` because identity broke — writes a new
+ * bootstrap token into the seed, but a prior enrollment may have left a
+ * stale active slot whose `identity` carries no token. Boot resolution
+ * prefers the active slot over the seed ({@link resolveCentralLayerPath}),
+ * so without this reset the fresh token is silently shadowed and identity
+ * bootstrap keeps failing (#139). Clearing the slot returns the host to
+ * genuine seed-config mode, so a re-join behaves exactly like a first
+ * join: boot reads the seed, bootstraps identity from its token, pulls the
+ * central config, and the apply engine recreates the slots (`commit`'s
+ * `activeSlot() === null` first-apply path) and retires the seed.
+ *
+ * @param {string} stateRoot
+ * @returns {{ supersededActiveSlot: boolean }} whether a stale active slot was cleared
+ * @ref LLP 0031#physical-layout [implements] — re-join resets to seed mode so a stale active slot never shadows the fresh seed token
+ */
+export function resetCentralLayerToSeed(stateRoot) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const supersededActiveSlot = readActiveSlot(controlDir) !== null
+  for (const name of [
+    ACTIVE_BASENAME,
+    STATE_BASENAME,
+    'config.a.json',
+    'config.b.json',
+    'config.a.etag',
+    'config.b.etag',
+  ]) {
+    fs.rmSync(path.join(controlDir, name), { force: true })
+  }
+  return { supersededActiveSlot }
+}
+
+/**
  * Build the kernel config apply engine: shape-check → install pinned
  * plugins → validate against the post-install catalog → persist to an
  * A/B slot → flip the operative pointer → staged restart, plus

@@ -9,7 +9,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
-import { centralSeedPath } from '../config/apply.js'
+import { centralSeedPath, resetCentralLayerToSeed } from '../config/apply.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -3037,6 +3037,20 @@ async function runJoin(argv, ctx) {
       await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
       await fs.rename(tmp, seedPath)
       ctx.stdout.write(`✓ Wrote seed config ${seedPath}\n`)
+
+      // A re-enrollment (identity broke, operator re-runs `join`) writes a
+      // fresh bootstrap token into the seed, but a prior enrollment may
+      // have left a stale active config slot that boot resolution prefers
+      // over the seed — silently shadowing the new token, so identity
+      // bootstrap keeps failing with no explanation (#139). Reset to
+      // seed-config mode so the freshly written token is honored; on a
+      // first join (no slot) this is a no-op.
+      // @ref LLP 0031#physical-layout [implements] — join supersedes a stale active slot so the fresh seed wins
+      const reset = resetCentralLayerToSeed(obsEnv.stateDir)
+      span.setAttribute('superseded_active_slot', reset.supersededActiveSlot)
+      if (reset.supersededActiveSlot) {
+        ctx.stdout.write('  superseded a stale applied config so the new join token takes effect\n')
+      }
 
       if (parsed.noDaemon) {
         ctx.stdout.write('  daemon install skipped (--no-daemon); run `hyp daemon install` to finish joining\n')
