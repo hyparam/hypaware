@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/codex",
   "version": "2.0.0",
-  "description": "OpenAI Codex client adapter for HypAware. Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query helper skill.",
+  "description": "OpenAI Codex client adapter for HypAware. Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query helper skill plus the AI adoption/improvement/security/spend report skills.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -30,7 +30,11 @@
       "required_upstreams": ["openai", "chatgpt"]
     },
     "skills": [
-      { "name": "hypaware-query", "clients": ["codex"] }
+      { "name": "hypaware-query", "clients": ["codex"] },
+      { "name": "hypaware-ai-adoption-report", "clients": ["codex"] },
+      { "name": "hypaware-ai-improvement-report", "clients": ["codex"] },
+      { "name": "hypaware-ai-security-report", "clients": ["codex"] },
+      { "name": "hypaware-ai-spend-report", "clients": ["codex"] }
     ]
   }
 }

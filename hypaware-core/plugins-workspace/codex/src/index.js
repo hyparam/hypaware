@@ -24,7 +24,8 @@ const CHATGPT_UPSTREAM_NAME = 'chatgpt'
  *
  * Resolves the `hypaware.ai-gateway` capability, registers the
  * OpenAI-compatible upstream preset, wires Codex's config.toml
- * attach/detach, and contributes the `hypaware-query` skill for
+ * attach/detach, and contributes the `hypaware-query` skill plus
+ * the AI report skills (adoption/improvement/security/spend) for
  * Codex installs.
  *
  * Each attach/detach emits a `client.attach`/`client.detach` span
@@ -211,12 +212,20 @@ export async function activate(ctx) {
   })
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
-  ctx.skills.register({
-    name: 'hypaware-query',
-    plugin: PLUGIN_NAME,
-    clients: ['codex'],
-    sourceDir: path.join(skillsRoot, 'hypaware-query'),
-  })
+  for (const skillName of [
+    'hypaware-query',
+    'hypaware-ai-adoption-report',
+    'hypaware-ai-improvement-report',
+    'hypaware-ai-security-report',
+    'hypaware-ai-spend-report',
+  ]) {
+    ctx.skills.register({
+      name: skillName,
+      plugin: PLUGIN_NAME,
+      clients: ['codex'],
+      sourceDir: path.join(skillsRoot, skillName),
+    })
+  }
 }
 
 /**
