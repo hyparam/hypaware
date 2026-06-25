@@ -1110,6 +1110,29 @@ export interface QueryScope {
 }
 
 /**
+ * Opaque, versioned continuation token marking a sink's incremental-read
+ * watermark: the highest `_hyp_ingest_seq` a `(sink instance, partition)` has
+ * durably exported. `seq` is an int64 encoded as a decimal string to dodge
+ * bigint/JSON precision hazards. Opaque + versioned so the underlying watermark
+ * mechanism can change without invalidating persisted watermarks. See LLP 0040 §2.
+ */
+export interface SinkContinuation {
+  v: 1
+  seq: string
+}
+
+/** Options for the back-compatible incremental extension to `readRows`. */
+export interface ReadRowsOptions {
+  /**
+   * Yield only rows newer than this watermark (`_hyp_ingest_seq > since.seq`).
+   * Rows with a null `_hyp_ingest_seq` (pre-upgrade "legacy" rows) are always
+   * yielded — treated as new — so the one-time migration is at worst a full
+   * re-export, never silent data loss. Absent ⇒ full scan (today's behaviour).
+   */
+  since?: SinkContinuation
+}
+
+/**
  * Intrinsic storage service exposed by core to plugins that materialize
  * rows into the local Iceberg-backed cache. Plugins do not configure
  * storage — the cache root is HypAware-managed.
@@ -1132,7 +1155,20 @@ export interface QueryStorageService {
   discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string
-  readRows(tablePath: string, columns?: string[]): AsyncIterable<Record<string, unknown>>
+  readRows(tablePath: string, columns?: string[], opts?: ReadRowsOptions): AsyncIterable<Record<string, unknown>>
+  /**
+   * Cursor-aware sibling of `readRows` for sinks that must advance a
+   * per-(sink instance, partition) watermark. Pairs each internal-stripped row
+   * with the `after` continuation to persist ONCE that row is durably exported.
+   * The internal `_hyp_ingest_seq` never reaches the row payload — it is read to
+   * derive `after`, then stripped. `after` is a monotonic high-water mark, so a
+   * null-seq legacy row carries the prior watermark forward unchanged. See
+   * LLP 0040 §2.
+   */
+  readRowsSince(
+    tablePath: string,
+    opts: { since?: SinkContinuation; columns?: string[] },
+  ): AsyncIterable<{ row: Record<string, unknown>; after: SinkContinuation }>
 }
 
 export interface CachePartitionMeta {
