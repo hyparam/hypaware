@@ -227,17 +227,66 @@ export function planLaunchAgentInstall(options) {
 }
 
 /**
- * Install or refresh a HypAware LaunchAgent. Idempotent: if the agent
- * is already loaded, it is booted out first before the new plist is
- * written and bootstrapped back in.
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function defaultSleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms) })
+}
+
+const UNLOAD_POLL_ATTEMPTS = 30 // ~3s ceiling at 100ms each
+const UNLOAD_POLL_INTERVAL_MS = 100
+const BOOTSTRAP_MAX_RETRIES = 3
+const BOOTSTRAP_RETRY_PAUSE_MS = 150
+
+/**
+ * Poll `launchctl print <target>` until the agent is gone (non-zero exit)
+ * or the bound elapses. `launchctl bootout` is asynchronous: launchd may
+ * still be tearing the service down after the command returns. Waiting for
+ * the service to actually disappear closes the bootout→bootstrap race.
  *
- * @param {PlanLaunchAgentInstallOptions & { launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ * @param {LaunchctlAdapter} launchctl
+ * @param {string} target
+ * @param {(ms: number) => Promise<void>} sleep
+ * @returns {Promise<void>}
+ */
+async function waitUntilUnloaded(launchctl, target, sleep) {
+  for (let i = 0; i < UNLOAD_POLL_ATTEMPTS; i += 1) {
+    const res = await launchctl.print([target])
+    if (res.exitCode !== 0) return // launchd has released it
+    await sleep(UNLOAD_POLL_INTERVAL_MS)
+  }
+}
+
+/**
+ * Is a failed bootstrap the transient EIO launchd returns while a prior
+ * instance is still being released (`Bootstrap failed: 5: Input/output
+ * error`)? Those are safe to retry; a genuine config/load error is not.
+ *
+ * @param {LaunchctlResult} res
+ * @returns {boolean}
+ */
+function isTransientBootstrapError(res) {
+  return res.exitCode === 5 || /\b5:\s*Input\/output|Input\/output error/i.test(res.stderr || '')
+}
+
+/**
+ * Install or refresh a HypAware LaunchAgent. Idempotent: if the agent is
+ * already loaded it is booted out first — and we wait for launchd to fully
+ * release it — before the new plist is written and bootstrapped back in.
+ * Bootstrap retries the transient EIO (`error 5`) launchd raises while an
+ * unfinished teardown still holds the label, so a reinstall over a live
+ * agent doesn't fail; genuine load errors still surface immediately.
+ *
+ * @param {PlanLaunchAgentInstallOptions & { launchctl?: LaunchctlAdapter, userDomain?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<LaunchAgentInstallPlan>}
+ * @ref LLP 0017#reinstall-waits-for-launchd-release [implements] — bootout is async; poll until released + bounded EIO retry
  */
 export async function installLaunchAgent(options) {
   const plan = planLaunchAgentInstall(options)
   const launchctl = options.launchctl ?? realLaunchctl
   const userDomain = options.userDomain ?? defaultUserDomain()
+  const sleep = options.sleep ?? defaultSleep
   const target = `${userDomain}/${plan.label}`
 
   fs.mkdirSync(plan.plistDir, { recursive: true })
@@ -246,11 +295,21 @@ export async function installLaunchAgent(options) {
   const printRes = await launchctl.print([target])
   if (printRes.exitCode === 0) {
     await launchctl.bootout([target]).catch(function() { /* best-effort */ })
+    await waitUntilUnloaded(launchctl, target, sleep)
   }
 
   atomicWrite(plan.targetPath, plan.content)
 
-  const bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
+  let bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
+  for (
+    let attempt = 0;
+    attempt < BOOTSTRAP_MAX_RETRIES && bootstrapRes.exitCode !== 0 && isTransientBootstrapError(bootstrapRes);
+    attempt += 1
+  ) {
+    await waitUntilUnloaded(launchctl, target, sleep)
+    await sleep(BOOTSTRAP_RETRY_PAUSE_MS)
+    bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
+  }
   if (bootstrapRes.exitCode !== 0) {
     throw new LaunchAgentError(
       `failed to bootstrap LaunchAgent ${plan.label}: ${bootstrapRes.stderr.trim() || `exit ${bootstrapRes.exitCode}`}`,
