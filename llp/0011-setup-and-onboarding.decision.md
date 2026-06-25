@@ -61,3 +61,11 @@ config (central plugin only) and performs the non-interactive daemon install;
 the full config arrives from the server at join. It is sugar over "write the
 config file + install the daemon", not a separate path. See
 [LLP 0025](./0025-remote-config-join-flow.spec.md#seed-config-mode).
+
+The interactive walkthrough seeds a source's local history with a one-shot
+backfill in its finale; `join` reaches the same parity without a finale via
+**backfill on join** — once the joined config is confirmed, the daemon imports
+each backfill-capable source's pre-join history once, driven by the source
+plugin's own `config.backfill`. See [LLP 0037](./0037-backfill-on-join.decision.md),
+an instance of the central-config-driven client-action seam in
+[LLP 0036](./0036-central-config-driven-client-actions.decision.md).

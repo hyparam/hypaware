@@ -312,8 +312,12 @@ order, each landing its motivating LLP/code edits together:
 - **Fleet-enforced retention policy** — central ownership of
   `query.cache.retention` as an explicit sub-key (min/max semantics), deferred
   until there is demand. See [Query is local-only](#query-is-local-only).
-- **Central-managed client attach semantics** — `attach` also performs
-  machine-side effects (`ANTHROPIC_BASE_URL`, hooks) independent of config; when
-  the gateway is centrally managed these may be redundant or conflicting.
-  Warn-and-write covers the config layer; the side-effect interaction is a noted
-  follow-up.
+- **Central-managed client actions** — `attach` (and, later, backfill) perform
+  machine-side effects independent of declarative topology. The *mechanism* for
+  these is now owned by
+  [LLP 0036 — Central-config-driven client actions](./0036-central-config-driven-client-actions.decision.md):
+  a daemon-side reconciler that runs such effects when the central config calls
+  for them. Backfill-on-join is its first instance
+  ([LLP 0037](./0037-backfill-on-join.decision.md)); the attach side-effect
+  interaction (`ANTHROPIC_BASE_URL`, hooks — warn-and-write already covers its
+  config layer here) is the next, still-open instance under that seam.

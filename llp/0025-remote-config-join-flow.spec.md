@@ -296,6 +296,15 @@ Rollback from the **first** applied config lands back on the seed config —
 fine by construction: seed-config mode is a legitimate polling steady state,
 and the bad-etag backoff prevents a re-apply loop.
 
+A **confirmed** config (probation cleared) is also the trigger point for
+**central-config-driven client actions** — daemon-side machine effects the
+config calls for, run only after confirmation so an irreversible effect never
+fires for a config about to roll back. The apply engine itself stays unchanged;
+the action reconciler is separate kernel surface. See
+[LLP 0036](./0036-central-config-driven-client-actions.decision.md), with
+backfill-on-join ([LLP 0037](./0037-backfill-on-join.decision.md)) as the first
+instance.
+
 ## Wire contract amendments (`proto.md`)
 
 `hypaware-core/plugins-workspace/central/proto.md` is the authoritative wire
