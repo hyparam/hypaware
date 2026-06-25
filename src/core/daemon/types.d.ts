@@ -405,7 +405,8 @@ export interface DaemonLogger {
   info(event: string, fields?: Record<string, unknown>): void
   warn(event: string, fields?: Record<string, unknown>): void
   error(event: string, fields?: Record<string, unknown>): void
-  close(): void
+  /** Flush all buffered lines and close the file; resolves when durable. */
+  close(): Promise<void>
 }
 
 export interface PidFileEntry {

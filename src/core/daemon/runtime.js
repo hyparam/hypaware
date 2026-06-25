@@ -236,7 +236,7 @@ export async function runDaemon(opts = {}) {
     fileLog.error('daemon.boot_failed', { message })
     persist({ state: 'degraded', warnings: [`boot_failed: ${message}`] })
     clearPidFile(stateRoot)
-    fileLog.close()
+    await fileLog.close()
     throw err
   }
 
@@ -452,7 +452,10 @@ export async function runDaemon(opts = {}) {
     const stoppedAt = new Date()
     persist({ state: 'stopped', stoppedAt: stoppedAt.toISOString() })
     fileLog.info('daemon.stopped')
-    fileLog.close()
+    // Await the flush before resolving `done`: a caller (or the #138
+    // regression test) that reads `daemon.log` right after the daemon stops
+    // must see every line, not a buffer the process abandoned on exit.
+    await fileLog.close()
     clearPidFile(stateRoot)
 
     if (installSignals) {

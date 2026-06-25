@@ -65,7 +65,20 @@ export function openDaemonLog({ stateRoot, runId, mode }) {
     warn: (event, fields) => emit('warn', event, fields),
     error: (event, fields) => emit('error', event, fields),
     close() {
-      try { stream.end() } catch { /* see emit() */ }
+      // Resolve only once the stream has flushed every buffered line to
+      // disk. The daemon awaits this before resolving `done` / exiting, so a
+      // boot health event or shutdown line written moments earlier is never
+      // lost to a half-flushed buffer — under load `stream.end()` alone
+      // returns before the writes land, which intermittently dropped the
+      // `daemon.degraded` line the #138 regression reads back.
+      return new Promise((resolve) => {
+        try {
+          stream.once('error', () => resolve())
+          stream.end(() => resolve())
+        } catch {
+          resolve()
+        }
+      })
     },
   }
 }
