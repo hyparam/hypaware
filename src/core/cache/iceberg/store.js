@@ -30,6 +30,7 @@ import {
   partitionSpecForDeclaration,
   validatePartitionSpecStability,
 } from '../../iceberg/partition-spec.js'
+import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -283,22 +284,70 @@ export async function readRowsFromTable(tablePath) {
  * time so callers (in particular `QueryStorageService.readRows`) never
  * materialize the full table in memory.
  *
+ * When `opts.since` is set (a bigint `_hyp_ingest_seq` watermark) only rows
+ * NEWER than the watermark are yielded: a row is kept iff its `_hyp_ingest_seq`
+ * is `null`/absent — a pre-column "legacy" row, treated as NEW so the one-time
+ * upgrade never silently skips it (LLP 0040 risk #1, the data-loss hazard) — OR
+ * its seq is strictly `> since`. The seq column is force-projected so the
+ * predicate can be evaluated even when the caller asked for a narrower set;
+ * `QueryStorageService` strips it from the row afterwards.
+ *
+ * The predicate is applied as a yielded-row filter rather than pushed into
+ * icebird's `scan({ where })`. icebird couples file/row-group pruning with a
+ * per-row match that DROPS nulls (`null > since` is false in both hyparquet's
+ * matcher and JS), which would skip exactly the legacy null-seq rows the
+ * migration must preserve. The design (LLP 0040 §2) names this yielded-row
+ * filter as the fallback; a future null-aware icebird filter can layer the
+ * file-skip optimization on top without changing this contract.
+ *
+ * @ref LLP 0040#storage-api-extension [implements] — since-filtered incremental scan; null-seq = new
  * @param {string} tablePath
  * @param {string[]} [columns]
+ * @param {{ since?: bigint }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
-export async function* scanRowsFromTable(tablePath, columns) {
+export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (!tableExists(tablePath)) return
+  const since = opts?.since
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return
   const source = await icebergDataSource({ tableUrl: url, metadata, resolver, lister })
-  const projected = columns && columns.length > 0 ? columns : source.columns
+  // A table that has never been flushed under the seq-column schema carries no
+  // seq field: every row is implicitly null-seq (new), so there is nothing to
+  // project or filter — yield the whole table.
+  const hasSeq = since !== undefined && source.columns.includes(INGEST_SEQ_COLUMN.name)
+  let projected = columns && columns.length > 0 ? columns : source.columns
+  if (hasSeq && !projected.includes(INGEST_SEQ_COLUMN.name)) {
+    projected = [...projected, INGEST_SEQ_COLUMN.name]
+  }
   const scan = source.scan({ columns: projected })
   for await (const row of scan.rows()) {
-    yield await resolveAsyncRow(row, projected)
+    const resolved = await resolveAsyncRow(row, projected)
+    if (hasSeq) {
+      const seq = seqValue(resolved[INGEST_SEQ_COLUMN.name])
+      if (seq !== null && seq <= /** @type {bigint} */ (since)) continue
+    }
+    yield resolved
   }
+}
+
+/**
+ * Decode a raw `_hyp_ingest_seq` cell to a bigint, or `null` when the row has
+ * no usable seq — a pre-column legacy row (null/absent), or an unparseable
+ * value. Returning `null` for an unparseable value is the safe direction: the
+ * caller treats `null` as a NEW row and never skips it (LLP 0040 risk #1).
+ *
+ * @param {unknown} raw
+ * @returns {bigint | null}
+ */
+export function seqValue(raw) {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw === 'bigint') return raw
+  if (typeof raw === 'number' && Number.isInteger(raw)) return BigInt(raw)
+  if (typeof raw === 'string' && /^-?\d+$/.test(raw)) return BigInt(raw)
+  return null
 }
 
 /**

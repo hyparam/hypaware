@@ -4,6 +4,7 @@ import { Attr, getLogger, getMeter, withSpan } from '../observability/index.js'
 import {
   dataSourceForTable,
   scanRowsFromTable,
+  seqValue,
   tableExists as icebergTableExists,
   tableUrl as icebergTableUrl,
 } from './iceberg/store.js'
@@ -19,15 +20,33 @@ import {
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
-import { INTERNAL_FIELDS } from './streaming-reader.js'
+import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 
 import path from 'node:path'
 
 /**
- * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from './types.d.ts'
  * @import { AsyncCells } from 'squirreling'
  */
+
+/**
+ * Decode a persisted `SinkContinuation` into its int64 `_hyp_ingest_seq`
+ * watermark. Absent ⇒ `0n` ("exported nothing"): the allocator starts seqs at
+ * 1, so `0` is strictly below every real row and a fresh sink reads the whole
+ * table. The token is opaque + versioned so the watermark mechanism can change
+ * later without invalidating persisted watermarks (LLP 0040 §2).
+ *
+ * @param {SinkContinuation | undefined} since
+ * @returns {bigint}
+ */
+function continuationToSeq(since) {
+  if (since === undefined || since === null) return 0n
+  if (since.v !== 1 || typeof since.seq !== 'string' || !/^\d+$/.test(since.seq)) {
+    throw new Error(`readRows: invalid SinkContinuation ${JSON.stringify(since)}`)
+  }
+  return BigInt(since.seq)
+}
 
 /**
  * Resolve a tablePath to the Iceberg table directory.
@@ -179,11 +198,40 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       return icebergTableUrl(resolveIcebergDir(tablePath))
     },
 
-    async *readRows(tablePath, columns) {
+    // @ref LLP 0040#storage-api-extension [implements] — back-compatible
+    // `opts.since`: absent ⇒ byte-for-byte the pre-existing full scan, so every
+    // current caller is untouched until it opts in. When set, the scan yields
+    // only rows newer than the watermark (null-seq legacy rows always yielded).
+    async *readRows(tablePath, columns, opts) {
+      const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected)) {
+      const scanOpts = since !== undefined ? { since } : undefined
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, scanOpts)) {
         for (const f of INTERNAL_FIELDS) delete row[f]
         yield row
+      }
+    },
+
+    // @ref LLP 0040#storage-api-extension [implements] — cursor-aware sibling
+    // for sinks that advance a per-(sink, partition) watermark. `_hyp_ingest_seq`
+    // is an INTERNAL_FIELD stripped from the row, so a sink reading `readRows`
+    // can't learn the high-water seq; `readRowsSince` reads it to derive the
+    // `after` token, then strips it so the seq never reaches the wire payload.
+    async *readRowsSince(tablePath, opts = {}) {
+      const since = continuationToSeq(opts.since)
+      const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      // Running high-water of REAL (non-null) seqs seen so far, seeded with the
+      // incoming watermark. `after` is this monotonic max, so a null-seq legacy
+      // row never advances the watermark and progress never regresses even when
+      // the scan visits seqs out of order (interleaved sources; LLP 0040 risk #3).
+      let high = since
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { since })) {
+        const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
+        if (seq !== null && seq > high) high = seq
+        for (const f of INTERNAL_FIELDS) delete row[f]
+        /** @type {SinkContinuation} */
+        const after = { v: 1, seq: high.toString() }
+        yield { row, after }
       }
     },
 
