@@ -234,12 +234,18 @@ export interface ConfigControlStatus {
  */
 export interface ConfigControl extends ConfigControlFacade {
   /**
-   * Evaluate probation state before plugin activation: discard
-   * orphaned markers (apply never committed), roll back expired ones
-   * (flips the operative config in place; no restart needed since the
-   * kernel has not loaded it yet).
+   * Evaluate probation state before plugin activation: recover a wedged
+   * active slot whose etag is marked bad (#141), discard orphaned markers
+   * (apply never committed), roll back expired ones (flips the operative
+   * config in place; no restart needed since the kernel has not loaded it
+   * yet). `rollback_no_target` reports an expired probation with no
+   * distinct slot to roll back to; `recovered_bad_active` reports the
+   * consistency guard firing, with `recovery` naming how it recovered.
    */
-  evaluateAtBoot(): Promise<{ action: 'none' | 'cleared_orphan' | 'rolled_back' }>
+  evaluateAtBoot(): Promise<{
+    action: 'none' | 'cleared_orphan' | 'rolled_back' | 'rollback_no_target' | 'recovered_bad_active'
+    recovery?: 'seed' | 'repull'
+  }>
   /** Attach post-boot apply dependencies; `stage()` fails before this. */
   attachApplyDeps(deps: ConfigApplyDeps): void
   /** Arm the in-process probation watchdog timer when a marker is active. */

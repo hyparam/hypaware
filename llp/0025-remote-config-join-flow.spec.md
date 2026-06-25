@@ -254,6 +254,23 @@ file records what is installed, not what is active — the operative config
 defines the active set — and keeping the artifacts makes re-apply after a
 fixed revision cheaper.
 
+**Invariant: the active slot's etag is never the remembered bad etag**
+([#141](https://github.com/hyparam/hypaware/issues/141)). A rollback needs a
+**distinct** slot to flip to. With only one usable slot (a first apply on a host
+with no seed leaves `previous_slot` null), the "rollback" is a no-op flip that
+leaves the failed config operative — and recording *its* etag as the bad etag
+wedges the gateway: the bad-etag backoff then refuses to re-apply the running
+revision, probation bookkeeping never clears, and a boot does not recover. So a
+rollback with no distinct `previous_slot` **does not record a bad etag** and
+**does not request a staged restart** (restarting onto the unchanged config just
+re-probates and re-fails); it clears probation, surfaces a clear error
+(`config.rollback_no_target`), and the gateway keeps running the only config it
+has. Independently, **boot re-derives consistency before activation**: if the
+active slot's etag is already marked bad (a host wedged by older code, or
+hand-edited state), boot recovers — fall back to the seed if one survives, else
+drop the contradictory bad etag so the next poll can re-pull — rather than
+persisting the contradiction.
+
 ### Post-apply probation
 
 Because apply is a process restart, the apply engine writes a **probation
