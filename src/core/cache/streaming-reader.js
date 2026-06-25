@@ -13,6 +13,21 @@ export const BATCH_BYTE_LIMIT = 128 * 1024 * 1024
 export const BATCH_ROW_LIMIT = 100_000
 
 /**
+ * Internal append-monotonic ingest sequence column. Hidden, nullable, and
+ * additive: it is stamped on every flushed row at the `decorateRow`
+ * chokepoint, carried verbatim through compaction (it is a row-resident
+ * value, so a generation-swap rewrite copies it into the new table), and
+ * stripped from every query/`readRows` consumer via `INTERNAL_FIELDS`.
+ *
+ * Nullable so it rides existing tables as an additive schema change — rows
+ * written before the column existed read back as `null`.
+ *
+ * @ref LLP 0040#ingest-seq-column [implements] — row-resident monotonic int64 watermark column
+ * @type {ColumnSpec}
+ */
+export const INGEST_SEQ_COLUMN = { name: '_hyp_ingest_seq', type: 'INT64', nullable: true }
+
+/**
  * Read a rotated spool file as a stream, yielding batches of rows that
  * respect both a byte-size ceiling and a row-count ceiling. Partial
  * trailing lines are left in the buffer — the caller should treat them
@@ -23,6 +38,12 @@ export const BATCH_ROW_LIMIT = 100_000
  * Each emitted row is decorated with:
  * - `_hyp_cache_row_id`  — SHA-256 of the serialized row (stable dedup key)
  * - `_hyp_cache_batch_id` — caller-supplied batch identifier
+ * - `_hyp_ingest_seq`     — monotonic int64 from `nextSeq` (null when absent)
+ *
+ * The decorated chunk's `columns` carry an extra nullable `_hyp_ingest_seq`
+ * `ColumnSpec` so the value lands in the Iceberg schema (additive, never
+ * required). The `_hyp_cache_row_id` hash is computed over the ORIGINAL row,
+ * before any decoration, so the seq does not perturb the dedup identity.
  *
  * Resume support: if `startOffset` > 0 the reader seeks past already-
  * flushed bytes and continues from there. After each yielded batch the
@@ -35,6 +56,7 @@ export const BATCH_ROW_LIMIT = 100_000
  *   startOffset?: number,
  *   batchByteLimit?: number,
  *   batchRowLimit?: number,
+ *   nextSeq?: () => Promise<bigint>,
  * }} opts
  * @returns {AsyncGenerator<{
  *   chunk: FlushChunk,
@@ -49,6 +71,7 @@ export async function* streamFlushFile(opts) {
     startOffset = 0,
     batchByteLimit = BATCH_BYTE_LIMIT,
     batchRowLimit = BATCH_ROW_LIMIT,
+    nextSeq,
   } = opts
 
   const stream = createReadStream(filePath, {
@@ -72,7 +95,7 @@ export async function* streamFlushFile(opts) {
    */
   function sealBatch() {
     if (!currentColumns || currentRows.length === 0) return null
-    const chunk = { columns: currentColumns, rows: currentRows }
+    const chunk = { columns: withIngestSeqColumn(currentColumns), rows: currentRows }
     currentColumns = null
     currentSignature = ''
     currentRows = []
@@ -127,7 +150,11 @@ export async function* streamFlushFile(opts) {
 
       for (let idx = 0; idx < envelope.rows.length; idx++) {
         const row = envelope.rows[idx]
-        const decorated = decorateRow(row, batchId)
+        // Reserve-before-stamp: each seq is durably reserved (allocator
+        // advances the persisted nextSeq one block ahead) before it reaches
+        // a row, so a resumed flush never re-issues a seq it already stamped.
+        const seq = nextSeq ? await nextSeq() : null
+        const decorated = decorateRow(row, batchId, seq)
         const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
         currentRows.push(decorated)
         currentBatchBytes += rowBytes
@@ -161,16 +188,31 @@ export async function* streamFlushFile(opts) {
 /**
  * @param {Record<string, unknown>} row
  * @param {string} batchId
+ * @param {bigint | null} seq monotonic ingest sequence, or `null` when no
+ *   allocator is wired (the seq is then absent and reads back as null)
  * @returns {Record<string, unknown>}
  */
-function decorateRow(row, batchId) {
+function decorateRow(row, batchId, seq) {
   const serialized = JSON.stringify(row, stableReplacer)
   const hash = createHash('sha256').update(serialized).digest('hex')
   return {
     ...row,
     _hyp_cache_row_id: hash,
     _hyp_cache_batch_id: batchId,
+    [INGEST_SEQ_COLUMN.name]: seq,
   }
+}
+
+/**
+ * Append the nullable `_hyp_ingest_seq` column to a chunk's column list so the
+ * stamped value lands in the Iceberg schema. Idempotent — never double-adds.
+ *
+ * @param {readonly ColumnSpec[]} columns
+ * @returns {ColumnSpec[]}
+ */
+function withIngestSeqColumn(columns) {
+  if (columns.some((c) => c.name === INGEST_SEQ_COLUMN.name)) return [...columns]
+  return [...columns, INGEST_SEQ_COLUMN]
 }
 
 /**
@@ -243,6 +285,11 @@ function progressPath(spoolFilePath) {
 }
 
 /**
- * Internal-field names that should be hidden from query output.
+ * Internal-field names that should be hidden from query output and from every
+ * `readRows` consumer (forward/blob sinks, query, projectors). `_hyp_ingest_seq`
+ * is included so the sink-read watermark column never leaks to the wire payload
+ * or query results — `readRowsSince` (T2) re-exposes it as an opaque token only.
+ *
+ * @ref LLP 0040#storage-api-extension [constrained-by] — internal, stripped on read
  */
-export const INTERNAL_FIELDS = ['_hyp_cache_row_id', '_hyp_cache_batch_id']
+export const INTERNAL_FIELDS = ['_hyp_cache_row_id', '_hyp_cache_batch_id', INGEST_SEQ_COLUMN.name]
