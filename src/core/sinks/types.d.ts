@@ -3,8 +3,45 @@ import type {
   HypAwareV2Config,
   QueryRegistry,
   QueryStorageService,
+  SinkContinuation,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ExtendedSinkRegistry } from '../registry/types.d.ts'
+
+/**
+ * Stable logical identity of a partition for watermark storage: the partition's
+ * directory relative to `<cacheRoot>/datasets/`, split into the dataset and the
+ * (sanitized, `/`-joined) partition path — never the physical `tableDir`.
+ */
+export interface SinkWatermarkKey {
+  dataset: string
+  partitionKey: string
+}
+
+/**
+ * On-disk per-`(sink instance, partition)` incremental-read watermark.
+ * `continuation` is the highest `_hyp_ingest_seq` durably exported.
+ */
+export interface SinkWatermarkRecord {
+  v: 1
+  continuation: SinkContinuation
+  exportedRowCount: number
+  updatedAt: string
+}
+
+/**
+ * Persisted watermark store scoped to one sink instance via its `stateDir`.
+ * Files live at `<stateDir>/watermarks/<dataset>/<partition-key>.json`; `write`
+ * is atomic write-rename.
+ */
+export interface SinkWatermarkStore {
+  keyFor(cacheRoot: string, tablePath: string): SinkWatermarkKey
+  filePath(key: SinkWatermarkKey): string
+  read(key: SinkWatermarkKey): Promise<SinkWatermarkRecord | null>
+  write(
+    key: SinkWatermarkKey,
+    update: { continuation: SinkContinuation; exportedRowCount?: number },
+  ): Promise<SinkWatermarkRecord>
+}
 
 export interface DriverOptions {
   sinkRegistry: ExtendedSinkRegistry
