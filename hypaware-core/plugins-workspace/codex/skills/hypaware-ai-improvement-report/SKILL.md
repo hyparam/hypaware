@@ -45,11 +45,20 @@ Focus on these signals:
    - **Inefficiency** (reuse the spend spine) — model over-spec, context bloat (no
      `is_compact_summary`), low cache-read (`cache_read/(cache_read+input)`), redo loops.
 3. **Collect, dedup, prioritize.** Gather the candidates into a list of possible
-   improvements; drop anything the inventory already covers. For each, suggest a likely form
+   improvements; drop anything an existing artifact already covers — a quick scan of the
+   repo's `.claude/skills/`, subagents, and AGENTS.md/CLAUDE.md (the only repo read — every
+   other signal is the logs), used to dedup and to mark each survivor **new** vs **edit to
+   an existing artifact**. For each, suggest a likely form
    where one obviously fits — a **skill**, a **subagent**, or an **AGENTS.md/CLAUDE.md
    edit** (propose the concrete line(s) as a diff, not "consider documenting") — but don't
    force a mapping. Attach evidence (frequency/impact + distinct gateways + token prize) and
    rank by it.
+   - **Size the token prize** off the spend spine (deduped `max()` per `message_id`; a plain
+     `SUM` overcounts ~3×). Give two numbers, kept distinct: **exposure (measured)** — tokens
+     currently flowing through the issue (sum across a repeated cluster, or tokens in
+     error/retry/abandoned turns) — and **est. saving (assumption)** only where the
+     counterfactual is clean (cache-read ratio, model right-size). Both are floors — capture
+     is partial; never present a saving as if it were measured.
 
 ## Output — SAVE A MARKDOWN FILE
 - **Path:** `hypaware-reports/<YYYY-MM-DD>-improvement-review.md` (create the dir
@@ -57,10 +66,12 @@ Focus on these signals:
 - **Bottom line (1 sentence):** "Create/edit these N things and what it will improve.".
 - **Improvements (ranked table):** one row per improvement — **what** · **suggested form**
   (skill / subagent / AGENTS.md edit, where one fits) · **evidence** (recurs N× across G
-  gateways, sticking-point impact, or token prize) · **where it lands**. Highest-leverage first.
-- **Then the detail**, in these sections: **Inventory (what exists) · Basis · Skill
-  candidates · Subagent candidates (fan-out + roles) · AGENTS.md/CLAUDE.md edits ·
-  Efficiency → setup changes · Caveats** — plus the proposed AGENTS.md lines verbatim.
+  gateways, sticking-point impact) · **token prize** (exposure measured / est. saving,
+  labeled) · **where it lands**. Highest-leverage first.
+- **Then the detail**, in these sections: **Basis · Skill candidates · Subagent candidates
+  (fan-out + roles) · AGENTS.md/CLAUDE.md edits · Efficiency → setup changes · Caveats** —
+  plus the proposed AGENTS.md lines verbatim. Each candidate is marked **new** or **edit to
+  <artifact>**; don't list artifacts that aren't being changed.
 - **Formatting (human-readable):** every candidate states its evidence inline; show
   AGENTS.md edits as real diffs/code blocks, not prose; **bold** the artifact type; keep
   it a ~1-minute read.
