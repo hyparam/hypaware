@@ -371,8 +371,10 @@ function parseLegacyDoc(text, filePath) {
 /**
  * Modern rollout: line-delimited `{ timestamp, type, payload }` records —
  * one `session_meta`, zero+ `turn_context`, and the conversation's
- * `response_item`s. `event_msg` / `compacted` and any unknown line types are
- * skipped. A blank or truncated line never aborts the parse.
+ * `response_item`s. A `token_count` `event_msg` carries the turn's token
+ * usage and is captured as a synthetic turn-boundary marker (no message);
+ * all other `event_msg` / `compacted` and unknown line types are skipped. A
+ * blank or truncated line never aborts the parse.
  *
  * @param {string} text
  * @param {string} filePath
@@ -407,6 +409,15 @@ function parseJsonlRollout(text, filePath) {
       turnPayloads.push(payload)
     } else if (type === 'response_item' && payload) {
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
+    } else if (type === 'event_msg' && payload) {
+      // The one event_msg we keep: token_count. It is NOT a message — it is a
+      // turn-boundary marker carrying that turn's normalized usage. Its slot in
+      // the items stream is preserved (so the projector can attribute it to the
+      // preceding assistant message), but it never projects a row of its own.
+      const usageAttributes = codexUsageFromTokenCount(payload)
+      if (usageAttributes) {
+        items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
+      }
     }
   }
 
@@ -475,7 +486,19 @@ function projectedExchangeFromSession(args) {
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   let nativeIdCount = 0
+  // Index in `messages` where the current turn began. A token_count marker
+  // closes the turn: its usage is stamped onto that turn's LAST assistant
+  // message (mirroring the live projector's stampUsageOnLastAssistant), then
+  // the next turn starts. Reasoning-only assistant messages are skipped as
+  // stamp targets so live and backfilled rows carry usage on the same logical
+  // message and dedupe to one row. @ref LLP 0035#per-turn
+  let turnStartIndex = 0
   for (const item of items) {
+    if (item.usageAttributes) {
+      stampUsageOnTurn(messages, turnStartIndex, item.usageAttributes)
+      turnStartIndex = messages.length
+      continue
+    }
     const message = projectedMessageFromItem(item)
     if (!message) continue
     if (message.message_id) nativeIdCount += 1
@@ -679,6 +702,90 @@ function reasoningItemToProjected(payload) {
   const text = reasoningText(payload.summary) ?? reasoningText(payload.content)
   if (!text) return undefined
   return { role: 'assistant', content: [{ type: 'thinking', thinking: text }] }
+}
+
+// ---------------------------------------------------------------------
+// Usage extraction
+// ---------------------------------------------------------------------
+
+/**
+ * Pull a turn's normalized token usage from a `token_count` event_msg
+ * payload. Reads the per-turn delta (`info.last_token_usage`), NOT the
+ * cumulative session running total (`info.total_token_usage`) — stamping the
+ * cumulative would multiply-count when usage is summed across a conversation.
+ * Returns `undefined` for any other event_msg or a usage-less payload.
+ *
+ * @param {Record<string, unknown>} payload
+ * @returns {JsonObject | undefined}
+ */
+function codexUsageFromTokenCount(payload) {
+  if (stringValue(payload.type) !== 'token_count') return undefined
+  const info = payload.info
+  if (!isPlainObject(info)) return undefined
+  return codexUsageAttributes(info.last_token_usage)
+}
+
+/**
+ * Normalize a Codex `last_token_usage` block into the gateway's
+ * `attributes.usage` shape, matching the live Codex projector and Claude.
+ *
+ * @param {unknown} rawUsage
+ * @returns {JsonObject | undefined}
+ */
+function codexUsageAttributes(rawUsage) {
+  if (!isPlainObject(rawUsage)) return undefined
+  /** @type {JsonObject} */
+  const usage = {}
+
+  // @ref LLP 0035#net-input — Codex `input_tokens` is gross (it includes
+  // `cached_input_tokens`); HypAware stores input_tokens NET of cache so it
+  // never double-counts against cache_read_tokens and matches the Claude /
+  // live-Codex convention. total_tokens stays raw, so net + cache_read +
+  // output == total.
+  const cachedInput = numberValue(rawUsage.cached_input_tokens)
+  const grossInput = numberValue(rawUsage.input_tokens)
+  if (grossInput !== undefined) {
+    usage.input_tokens = cachedInput !== undefined ? Math.max(0, grossInput - cachedInput) : grossInput
+  }
+  if (cachedInput !== undefined) usage.cache_read_tokens = cachedInput
+
+  copyNumberAlias(rawUsage, usage, 'output_tokens', 'output_tokens')
+  copyNumberAlias(rawUsage, usage, 'reasoning_output_tokens', 'reasoning_tokens')
+  copyNumberAlias(rawUsage, usage, 'total_tokens', 'total_tokens')
+
+  return Object.keys(usage).length === 0 ? undefined : { usage }
+}
+
+/**
+ * Stamp a turn's usage onto the LAST assistant message at or after
+ * `startIndex` that carries text or a tool_use — the same target the live
+ * projector picks (its terminal output item), so live and backfilled rows fold
+ * usage onto the one logical message and dedupe cleanly, and the row carrying
+ * usage is the response's last assistant row for both Codex and Claude.
+ * Reasoning-only (thinking) messages are skipped; if the turn produced no
+ * eligible message (e.g. windowed out) the usage is dropped rather than
+ * mis-attributed. @ref LLP 0035#one-carrier
+ *
+ * @param {AiGatewayProjectedMessage[]} messages
+ * @param {number} startIndex
+ * @param {JsonObject} usageAttributes
+ */
+function stampUsageOnTurn(messages, startIndex, usageAttributes) {
+  for (let i = messages.length - 1; i >= startIndex; i--) {
+    const message = messages[i]
+    if (message.role !== 'assistant' || !hasTextOrToolUse(message)) continue
+    message.attributes = { ...(message.attributes ?? {}), ...usageAttributes }
+    return
+  }
+}
+
+/** @param {AiGatewayProjectedMessage} message */
+function hasTextOrToolUse(message) {
+  if (!Array.isArray(message.content)) return false
+  return message.content.some((block) => {
+    const type = isPlainObject(block) ? block.type : undefined
+    return type === 'text' || type === 'tool_use'
+  })
 }
 
 // ---------------------------------------------------------------------
@@ -886,6 +993,27 @@ function stringValue(value) {
 /** @param {unknown} value @returns {boolean | undefined} */
 function boolValue(value) {
   return typeof value === 'boolean' ? value : undefined
+}
+
+/** @param {unknown} value @returns {number | undefined} */
+function numberValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+/**
+ * @param {Record<string, unknown>} source
+ * @param {JsonObject} target
+ * @param {string} sourceKey
+ * @param {string} targetKey
+ */
+function copyNumberAlias(source, target, sourceKey, targetKey) {
+  const value = numberValue(source[sourceKey])
+  if (value !== undefined) target[targetKey] = value
 }
 
 /** @param {JsonObject} target @param {string} key @param {string | undefined} value */

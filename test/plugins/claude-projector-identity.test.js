@@ -84,6 +84,53 @@ test('native DAG identity: uuid from JSONL transcript becomes message_id and pro
   }
 })
 
+test('live: response-level usage lands once, on the last block of a split turn', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    // Transcript splits the assistant turn one line per block (text, then
+    // tool_use), both sharing message id msg_u.
+    await writeTranscript(env, 'sess-u', [
+      jsonlRow({ sessionId: 'sess-u', uuid: 'u-user', parentUuid: null, type: 'user', message: { role: 'user', content: 'go' }, timestamp: '2026-05-22T10:00:00.000Z' }),
+      jsonlRow({ sessionId: 'sess-u', uuid: 'u-text', parentUuid: 'u-user', type: 'assistant', message: { role: 'assistant', id: 'msg_u', content: [{ type: 'text', text: 'on it' }] }, timestamp: '2026-05-22T10:00:01.000Z' }),
+      jsonlRow({ sessionId: 'sess-u', uuid: 'u-tool', parentUuid: 'u-text', type: 'assistant', message: { role: 'assistant', id: 'msg_u', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] }, timestamp: '2026-05-22T10:00:02.000Z' }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-u' }) },
+        messages: [{ role: 'user', content: 'go' }],
+      },
+      // Wire response carries both blocks and one response-level usage block.
+      responseBody: {
+        id: 'msg_u',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'on it' },
+          { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } },
+        ],
+        stop_reason: 'tool_use',
+        usage: { input_tokens: 200, output_tokens: 60, cache_read_input_tokens: 500 },
+      },
+    })
+
+    // The turn fans into two assistant rows; usage rides ONLY the last block
+    // (the tool_call), not the text block. @ref LLP 0035#one-carrier
+    const textRow = rows.find((r) => r.role === 'assistant' && r.part_type === 'text')
+    const toolRow = rows.find((r) => r.role === 'assistant' && r.part_type === 'tool_call')
+    assert.ok(textRow)
+    assert.ok(toolRow)
+    assert.equal(readAttrPath(textRow, ['attributes', 'usage']), undefined)
+    assert.deepEqual(readAttrPath(toolRow, ['attributes', 'usage']), {
+      input_tokens: 200,
+      output_tokens: 60,
+      cache_read_tokens: 500,
+    })
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('root message gets previous_message_id = [] when parentUuid is null', async () => {
   const env = await stageClaudeEnv()
   try {

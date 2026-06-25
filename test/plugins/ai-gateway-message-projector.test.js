@@ -494,6 +494,46 @@ test('row output is stripped to the schema (no extra fields leak)', async () => 
   }
 })
 
+test('a multi-block usage-bearing message stamps usage on only the last part', () => {
+  // @ref LLP 0035#one-carrier — Claude backfill emits multi-block carrier
+  // messages (e.g. reasoning + parallel tool_use under one messageId). Usage is
+  // per-response, so it must ride exactly one row (the last block), not every
+  // block, or a plain SUM(attributes.usage.*) over-counts within the message.
+  const rows = aiGatewayRowsFromProjectedExchange({
+    provider: 'anthropic',
+    session_id: 'sess-usage',
+    messages: [
+      {
+        role: 'assistant',
+        message_id: 'msg-multiblock',
+        attributes: { usage: { input_tokens: 100, output_tokens: 42, cache_read_tokens: 9 } },
+        content: [
+          { type: 'thinking', thinking: 'hmm', signature: 'sig' },
+          { type: 'tool_use', id: 'call-a', name: 'Bash', input: {} },
+          { type: 'tool_use', id: 'call-b', name: 'Bash', input: {} },
+        ],
+      },
+    ],
+  }, { gatewayId: 'gw', state: createAiGatewayConversationState() })
+
+  assert.equal(rows.length, 3)
+  const usageRows = rows.filter((r) => isPlainObject(r.attributes) && r.attributes.usage !== undefined)
+  assert.equal(usageRows.length, 1, 'exactly one row carries usage')
+  // The carrier is the last block (highest part_index), where stop_reason rides too.
+  const carrier = usageRows[0]
+  assert.equal(carrier.part_index, 2)
+  assert.equal(carrier.part_type, 'tool_call')
+  const usage = isPlainObject(carrier.attributes) ? carrier.attributes.usage : undefined
+  assert.deepEqual(usage, { input_tokens: 100, output_tokens: 42, cache_read_tokens: 9 })
+  // A plain SUM over the message's rows equals the single response's usage —
+  // no per-block over-count.
+  const summedOutput = rows.reduce((acc, r) => {
+    const u = isPlainObject(r.attributes) ? r.attributes.usage : undefined
+    return acc + (isPlainObject(u) && typeof u.output_tokens === 'number' ? u.output_tokens : 0)
+  }, 0)
+  assert.equal(summedOutput, 42)
+})
+
 test('two Codex threads sharing a session_id keep separate start time and tool lookup', () => {
   // A Codex session_id can carry several thread conversation_ids. Per-thread
   // state (conversation_started_at, tool_call→tool_name) must scope by the

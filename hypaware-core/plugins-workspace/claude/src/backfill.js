@@ -298,12 +298,26 @@ async function projectedExchangeFromEntries(args) {
   let startedAtMs
   /** @type {string | undefined} */
   let transcriptCwd
-  for (const entry of entries) {
+  // Usage is a response-level (per API message) figure that Claude Code
+  // duplicates onto every block line of an assistant turn. Record the last
+  // block line per API message id so usage is stamped on only that one block —
+  // matching the live projector, so each response contributes usage to exactly
+  // one row and live/backfill dedupe onto the same row. @ref LLP 0035#one-carrier
+  /** @type {Map<string, number>} */
+  const lastBlockIndexByMessageId = new Map()
+  entries.forEach((entry, index) => {
+    if (entry.messageId) lastBlockIndexByMessageId.set(entry.messageId, index)
+  })
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]
     // Capture before the message filter: cwd rides every transcript line, not
     // only the ones that project to a message, and it's the only repo signal a
     // pre-0032 session carries.
     if (!transcriptCwd && entry.cwd) transcriptCwd = entry.cwd
-    const message = projectedMessageFromEntry(entry, agentMeta)
+    // A line with no API message id is its own single-block message → keep its
+    // usage; otherwise only the last block of the message carries it.
+    const stampUsage = !entry.messageId || lastBlockIndexByMessageId.get(entry.messageId) === index
+    const message = projectedMessageFromEntry(entry, agentMeta, stampUsage)
     if (!message) continue
     messages.push(message)
     if (!clientVersion && entry.client_version) clientVersion = entry.client_version
@@ -366,9 +380,11 @@ async function projectedExchangeFromEntries(args) {
  *
  * @param {TranscriptEntry} entry
  * @param {Map<string, { tool_use_id: string }>} agentMeta
+ * @param {boolean} stampUsage  fold attributes.usage onto this block (true only
+ *   for the last block of an API message, so usage lands once per response)
  * @returns {AiGatewayProjectedMessage | undefined}
  */
-function projectedMessageFromEntry(entry, agentMeta) {
+function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
   const role = entry.role
   if (!role) return undefined
 
@@ -410,9 +426,10 @@ function projectedMessageFromEntry(entry, agentMeta) {
   }
   // Mirror live capture: fold the assistant turn's token usage into
   // attributes.usage (anthropic.js owns the cache_*_input_tokens →
-  // cache_{read,write}_tokens normalization). Merged, not assigned, so a
-  // subagent's `claude.spawned_by_tool_use_id` above survives.
-  const usageAttrs = anthropicMessageAttributes(entry)
+  // cache_{read,write}_tokens normalization), but only on the last block of the
+  // API message so usage lands once per response. Merged, not assigned, so a
+  // subagent's `claude.spawned_by_tool_use_id` above survives. @ref LLP 0035#one-carrier
+  const usageAttrs = stampUsage ? anthropicMessageAttributes(entry) : undefined
   if (usageAttrs) message.attributes = { ...(message.attributes ?? {}), ...usageAttrs }
   if (entry.attachment_type) message.attachment_type = entry.attachment_type
   if (entry.hook_event) message.hook_event = entry.hook_event
