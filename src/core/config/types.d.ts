@@ -462,4 +462,47 @@ export interface CreateActionReconcilerOptions {
   log?: PluginLogger
 }
 
+// =============================================================================
+// Backfill action handler (LLP 0037 / LLP 0041 Part 2)
+// =============================================================================
+
+/**
+ * Result of one spawned `hyp backfill` child. `status` is the exit code
+ * (`null` when the child was killed by a signal); `stdout` is the captured
+ * `--json` payload; `error` is set when the spawn itself failed (ENOENT,
+ * etc.). The reconciler turns a non-zero / errored result into a `failed`
+ * marker that the next pass retries (LLP 0041 §failure is surfaced).
+ */
+export interface BackfillSpawnResult {
+  status: number | null
+  stdout: string
+  error?: Error
+}
+
+/** Arguments handed to the injectable backfill spawn seam. */
+export interface BackfillSpawnArgs {
+  /**
+   * The `hyp` argv after the bin path — e.g.
+   * `['backfill', 'claude', '--since', '<iso>', '--json']`. The default
+   * implementation prepends `process.execPath` and the resolved
+   * `bin/hypaware.js` path (the `runSmoke` spawn pattern).
+   */
+  args: string[]
+  /** Environment for the child; the daemon's own env (notably `HYP_HOME`). */
+  env: NodeJS.ProcessEnv
+}
+
+/**
+ * The subprocess seam the backfill handler launches `hyp backfill` through.
+ * Injected in tests so the spawned argv + marker writes can be asserted
+ * without a real child (LLP 0041 — "testable with the spawn injected").
+ */
+export type BackfillSpawn = (args: BackfillSpawnArgs) => Promise<BackfillSpawnResult>
+
+export interface CreateBackfillHandlerOptions {
+  /** Subprocess seam; defaults to a real async `hyp backfill` spawn. */
+  spawn?: BackfillSpawn
+  log?: PluginLogger
+}
+
 export type { ConfigStageResult, ConfigApplyErrorKind }
