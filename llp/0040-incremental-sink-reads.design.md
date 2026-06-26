@@ -243,7 +243,7 @@ but that is out of scope. The **server idempotency ledger is retained** as the
 in-flight retry net (spec requirement); it now backstops only a bounded suffix
 instead of the whole partition.
 
-## 5. Exactly-once argument
+## 5. Exactly-once argument {#exactly-once-argument}
 
 - **No new rows.** `readRowsSince(since=watermark)` yields nothing → forward
   sends 0 chunks; blob writes no file. Watermark unchanged. ≈0 bytes.
