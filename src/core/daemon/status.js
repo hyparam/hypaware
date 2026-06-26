@@ -7,6 +7,8 @@ import process from 'node:process'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
+import { readClientActionStatus } from '../config/action_reconciler.js'
+import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
@@ -34,8 +36,8 @@ import {
 
 /**
  * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
- * @import { ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
+ * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
  * @import { LoadedManifest } from '../manifest.js'
@@ -477,6 +479,27 @@ export async function collectHypAwareStatus(opts = {}) {
     })
   }
 
+  // ----- client-action reconciler state (LLP 0036 / 0041) -----
+  // Read-only marker view; `hyp status` never runs a reconcile pass. A
+  // failed backfill is surfaced here (its own section, below) but is
+  // deliberately NOT a degrading diagnostic — the gateway runs fine on a
+  // valid config (LLP 0041 §failure-is-surfaced-not-fatal).
+  // @ref LLP 0041#failure-is-surfaced-not-fatal [implements] — surface client-action failure as its own line, never an outage signal
+  /** @type {ClientActionsReport | null} */
+  let clientActions = null
+  try {
+    const actionStatus = readClientActionStatus({ stateRoot })
+    // Backfill-capable plugins, derived statically from the catalog's client
+    // descriptors (claude/codex). Status cannot see the runtime backfill
+    // registry without activating plugins, so the client descriptors are the
+    // honest static proxy for "this enabled plugin imports on join".
+    /** @type {Set<string>} */
+    const backfillPlugins = new Set(
+      [...(catalog?.clientDescriptors?.values() ?? [])].map((d) => d.plugin)
+    )
+    clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral, backfillPlugins })
+  } catch { /* best-effort probe */ }
+
   // ----- recent errors -----
   const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
   if (recentErrorCount > 0) {
@@ -492,7 +515,11 @@ export async function collectHypAwareStatus(opts = {}) {
   // "set up" should degrade overall — config errors, v1 inconsistencies,
   // and the "no config at all yet" case. `client_attach_missing` /
   // `recent_errors` stay informational so a perfectly-configured-but-
-  // not-yet-attached install can still report healthy.
+  // not-yet-attached install can still report healthy. A failed
+  // client-action (e.g. backfill-on-join) is likewise excluded — it has
+  // its own status line but never flips `overall` (LLP 0041
+  // §failure-is-surfaced-not-fatal); note it is not even a diagnostic, so
+  // it cannot reach this computation.
   const degradingKinds = new Set(['config_missing', 'config_unreadable'])
   const overall =
     diagnostics.some((d) => d.severity === 'error') ? 'degraded'
@@ -516,7 +543,110 @@ export async function collectHypAwareStatus(opts = {}) {
     diagnostics,
     overall,
     remoteConfig,
+    clientActions,
   }
+}
+
+/**
+ * Build the client-action reconciler section for `hyp status` from the
+ * persisted marker store and the effective config. Pure: it reads markers
+ * and config and never runs a reconcile pass (LLP 0041 — the status surface
+ * "reads the marker file, it never runs a pass"). Returns null when nothing
+ * applies so the V1 status surface is unchanged on an ordinary host.
+ *
+ * Per-provider state:
+ * - `done` / `failed` come straight from a persisted marker (any request
+ *   key, even one whose plugin has since left the config).
+ * - `pending` / `n/a` are derived for *declared* backfill targets — a
+ *   plugin entry carrying its own `config.backfill` block. Backfill
+ *   capability is a runtime fact (a registered `BackfillContribution`,
+ *   LLP 0041 §per-plugin-capability) the status collector cannot see
+ *   without activating plugins, so the declared policy is the honest,
+ *   provider-agnostic signal: `on_join: false` or a non-joined host →
+ *   `n/a` (the reconciler is a no-op); otherwise desired-but-unrun →
+ *   `pending`.
+ *
+ * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean, backfillPlugins?: Set<string> }} args
+ * @returns {ClientActionsReport | null}
+ * @ref LLP 0041#idempotency-and-completion-state [implements] — per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
+ */
+function buildClientActionsReport({ status, config, hasCentral, backfillPlugins }) {
+  /** @type {ClientActionReport[]} */
+  const actions = []
+  const byKind = status?.byKind ?? {}
+  const backfillCapable = backfillPlugins ?? new Set()
+
+  // Declared backfill targets: enabled plugin entries that drive
+  // backfill-on-join (LLP 0037 — policy rides the owning plugin). Two cases:
+  //   1. An explicit `config.backfill` block (any host).
+  //   2. *Default-on*: a known backfill provider with no explicit block — on
+  //      a joined host `backfillHandler.desired()` still emits for it, so it
+  //      is a real (pending) target. Status mirrors that here; without this
+  //      the default-on case was invisible. It is gated on `hasCentral` so a
+  //      non-joined host (where the reconciler never runs) keeps its
+  //      V1-unchanged surface — a bare `claude`/`codex` install shows nothing.
+  /** @type {Map<string, { onJoin: boolean }>} */
+  const declared = new Map()
+  for (const entry of config?.plugins ?? []) {
+    if (entry.enabled === false) continue
+    const raw = entry.config?.backfill
+    const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
+    if (hasBlock) {
+      // Use the shared tri-state read so status can never disagree with the
+      // reconciler about what a block means: a malformed `on_join` (e.g. the
+      // string "false") is an opt-out, not default-on. `onJoin: undefined`
+      // (block present, `on_join` absent) is default-on → not suppressed.
+      const onJoin = readBackfillPolicy(entry).onJoin !== false
+      declared.set(entry.name, { onJoin })
+    } else if (hasCentral && backfillCapable.has(entry.name)) {
+      declared.set(entry.name, { onJoin: true })
+    }
+  }
+
+  // Kinds to render: every kind the markers record, plus `backfill` when
+  // any target is declared (so a configured-but-unrun target still shows).
+  /** @type {Set<string>} */
+  const kinds = new Set(Object.keys(byKind))
+  if (declared.size > 0) kinds.add('backfill')
+
+  for (const kind of [...kinds].sort()) {
+    const markers = byKind[kind] ?? {}
+    /** @type {Set<string>} */
+    const keys = new Set(Object.keys(markers))
+    if (kind === 'backfill') for (const name of declared.keys()) keys.add(name)
+    for (const requestKey of [...keys].sort()) {
+      const marker = markers[requestKey]
+      if (marker && marker.status === 'failed') {
+        actions.push({
+          kind,
+          requestKey,
+          state: 'failed',
+          ...(typeof marker.reason === 'string' ? { reason: marker.reason } : {}),
+          ...(typeof marker.last_attempt === 'string' ? { lastAttempt: marker.last_attempt } : {}),
+          ...(typeof marker.attempts === 'number' ? { attempts: marker.attempts } : {}),
+        })
+      } else if (marker) {
+        // `done` (run-once) or `applied` (reversible) — the effect is in place.
+        actions.push({
+          kind,
+          requestKey,
+          state: 'done',
+          ...(typeof marker.rows === 'number' ? { rows: marker.rows } : {}),
+          ...(typeof marker.at === 'string' ? { at: marker.at } : {}),
+        })
+      } else {
+        // No marker: a declared backfill target. Suppressed (on_join:false)
+        // or inert (host never joined → the reconciler is a no-op) → n/a;
+        // otherwise desired and simply not run yet → pending.
+        const decl = declared.get(requestKey)
+        const suppressed = decl ? !decl.onJoin : false
+        const state = suppressed || !hasCentral ? 'n/a' : 'pending'
+        actions.push({ kind, requestKey, state })
+      }
+    }
+  }
+
+  return actions.length > 0 ? { actions } : null
 }
 
 /**
