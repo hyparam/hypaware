@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-25
 **Related:** LLP 0003, LLP 0011, LLP 0017, LLP 0025, LLP 0031; LLP 0037 (first instance — backfill on join)
+**Extended-by:** LLP 0044 — client attach on join (the reversible instance; settles the deferred attach consent gate)
 
 > Some things a fleet operator wants a joined machine to do are not expressible
 > as **topology**. Applying a central config can start a source or wire a sink,
