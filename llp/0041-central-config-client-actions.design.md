@@ -5,6 +5,7 @@
 **Systems:** Config, Daemon, Onboarding, Sources
 **Generated-by:** neutral
 **Related:** LLP 0036, LLP 0037
+**Extended-by:** LLP 0044 (attach decision), LLP 0045 (attach implementation design — the reversible-instance counterpart to this doc)
 
 > [LLP 0036](./0036-central-config-driven-client-actions.decision.md) accepted a
 > single seam — a daemon-side, idempotent **action reconciler** that performs a
