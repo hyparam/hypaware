@@ -614,6 +614,21 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         bad_etag: report.remoteConfig.badEtag,
       }
       : null,
+    // Client-action reconciler state (LLP 0036 / 0041). Null until a
+    // backfill-on-join target is configured or a pass has run; a `failed`
+    // entry is informational and never affects `overall`.
+    client_actions: report.clientActions
+      ? report.clientActions.actions.map((a) => ({
+        kind: a.kind,
+        request_key: a.requestKey,
+        state: a.state,
+        ...(a.rows !== undefined ? { rows: a.rows } : {}),
+        ...(a.at ? { at: a.at } : {}),
+        ...(a.reason ? { reason: a.reason } : {}),
+        ...(a.lastAttempt ? { last_attempt: a.lastAttempt } : {}),
+        ...(a.attempts !== undefined ? { attempts: a.attempts } : {}),
+      }))
+      : null,
     diagnostics: report.diagnostics.map((d) => ({
       severity: d.severity,
       kind: d.kind,
@@ -736,6 +751,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
     if (rc.badEtag) {
       stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+    }
+  }
+
+  // Client-action reconciler section (LLP 0036 / 0041). Appears only once a
+  // backfill-on-join target is configured or a pass has run; a `failed`
+  // line is loud but informational — it never degrades `overall`.
+  if (report.clientActions && report.clientActions.actions.length > 0) {
+    stdout.write('  client actions:\n')
+    for (const a of report.clientActions.actions) {
+      let detail = ''
+      if (a.state === 'done') {
+        const bits = []
+        if (a.rows !== undefined) bits.push(`${a.rows} rows`)
+        if (a.at) bits.push(`at ${a.at}`)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      } else if (a.state === 'failed') {
+        const bits = []
+        if (a.reason) bits.push(a.reason)
+        if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
+        if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      }
+      stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
     }
   }
 
