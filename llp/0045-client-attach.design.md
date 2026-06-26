@@ -1,7 +1,7 @@
 # LLP 0045: Client attach on join — implementation design
 
 **Type:** design
-**Status:** Accepted
+**Status:** Active
 **Systems:** Config, Daemon, Onboarding, Sources, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-06-26
