@@ -246,6 +246,7 @@ export async function bootKernel(opts = {}) {
           mode,
           runId,
           skipped,
+          clientDescriptors: catalog.clientDescriptors,
         }
       }
 
@@ -299,6 +300,7 @@ export async function bootKernel(opts = {}) {
         mode,
         runId,
         skipped,
+        clientDescriptors: catalog.clientDescriptors,
       }
     },
     { component: 'kernel' }

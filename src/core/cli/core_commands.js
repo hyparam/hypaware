@@ -18,6 +18,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -3456,45 +3457,6 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
       `No HypAware marker found${settingsPath !== undefined ? ` in ${settingsPath}` : ''}; nothing to do.\n`
     )
   }
-}
-
-/**
- * Resolve the gateway endpoint from the active config when the gateway
- * source is not live in this process yet. This is the normal shape for
- * commands like `hyp attach`, which only need to write client settings
- * to the same fixed port the daemon will bind later.
- *
- * @param {HypAwareV2Config} config
- * @returns {string | undefined}
- */
-function configuredGatewayEndpoint(config) {
-  const entry = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
-  const cfg = entry?.config
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return undefined
-  const listen = /** @type {Record<string, unknown>} */ (cfg).listen
-  if (typeof listen !== 'string') return undefined
-  return endpointFromListen(listen)
-}
-
-/**
- * @param {string} listen
- * @returns {string | undefined}
- */
-function endpointFromListen(listen) {
-  const idx = listen.lastIndexOf(':')
-  if (idx === -1) return undefined
-  const rawHost = listen.slice(0, idx)
-  const rawPort = listen.slice(idx + 1)
-  const port = Number.parseInt(rawPort, 10)
-  if (!Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== rawPort) {
-    return undefined
-  }
-  const host = rawHost.startsWith('[') && rawHost.endsWith(']')
-    ? rawHost.slice(1, -1)
-    : rawHost
-  if (host.length === 0) return undefined
-  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-  return `http://${formattedHost}:${port}`
 }
 
 /**
