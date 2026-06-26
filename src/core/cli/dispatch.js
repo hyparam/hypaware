@@ -186,6 +186,26 @@ export async function dispatch(argv, opts = {}) {
 
   const matched = registry.match(argv)
   if (!matched) {
+    // No command owns this argv. Before failing, see whether the leading
+    // tokens name a *group* — a prefix shared by registered subcommands
+    // (e.g. `graph`, with `graph neighbors`/`graph project` registered) —
+    // and synthesize group help for it. A group that registers an explicit
+    // bare command (`query`, `remote`, …) never reaches here: it matched
+    // above and renders its own help, so the explicit registration wins.
+    const group = resolveGroupHelp(registry, argv)
+    if (group) {
+      if (group.unknownSub !== undefined) {
+        stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
+        stderr.write(`  expected one of: ${group.subcommands.join(', ')}\n`)
+      } else {
+        stdout.write(`usage: hyp ${group.prefix} <subcommand> [args...]\n`)
+        stdout.write(`  subcommands: ${group.subcommands.join(', ')}\n`)
+      }
+      if (ownsKernel) {
+        await stopBootStartedSources(kernel)
+      }
+      return group.unknownSub !== undefined ? 2 : 0
+    }
     stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
     stderr.write(`run 'hyp --help' for the list of available commands\n`)
     if (ownsKernel) {
@@ -303,6 +323,57 @@ async function runCommandByName(name, rest, ctx) {
     registry: ctx.registry,
     kernel: ctx.kernel,
   })
+}
+
+/**
+ * Resolve group-level help for an argv that matched no command.
+ *
+ * A "group" is a command-name prefix shared by registered subcommands but
+ * with no command of its own — e.g. `graph`, when `graph neighbors` and
+ * `graph project` are registered but `graph` is not. Walk the leading
+ * non-flag tokens from longest to shortest and return the longest prefix
+ * that has registered children, so `hyp graph`, `hyp graph --help`, and
+ * `hyp graph bogus` all resolve to the `graph` group.
+ *
+ * Runs only on the dispatch miss path (`registry.match` returned
+ * undefined), so it costs nothing on the hot path: a single pass over the
+ * registry right before the process renders help and exits. Hidden
+ * commands are excluded so they stay out of synthesized help exactly as
+ * they stay out of top-level help.
+ *
+ * @param {ReturnType<typeof createCommandRegistry>} registry
+ * @param {string[]} argv
+ * @returns {{ prefix: string, subcommands: string[], unknownSub: string | undefined } | undefined}
+ * @ref LLP 0009#core-owns-dispatch — core renders group help; plugins only register the leaf subcommands
+ */
+function resolveGroupHelp(registry, argv) {
+  /** @type {string[]} */
+  const lead = []
+  for (const token of argv) {
+    if (typeof token !== 'string' || token.startsWith('-')) break
+    lead.push(token)
+  }
+  if (lead.length === 0) return undefined
+  const names = registry
+    .list()
+    .filter((c) => !c.hidden)
+    .map((c) => c.name)
+  for (let depth = lead.length; depth >= 1; depth -= 1) {
+    const prefix = lead.slice(0, depth).join(' ')
+    const childPrefix = `${prefix} `
+    const direct = new Set()
+    for (const name of names) {
+      if (name.startsWith(childPrefix)) direct.add(name.slice(childPrefix.length).split(' ')[0])
+    }
+    if (direct.size > 0) {
+      return {
+        prefix,
+        subcommands: [...direct].sort(),
+        unknownSub: depth < lead.length ? lead[depth] : undefined,
+      }
+    }
+  }
+  return undefined
 }
 
 /** @param {unknown} stream */

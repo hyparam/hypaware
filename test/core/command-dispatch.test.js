@@ -239,6 +239,79 @@ test('top-level help omits plugin commands when the plugin is disabled', async (
   assert.equal(stdout.text().includes('graph project'), false)
 })
 
+function groupKernelAndRegistry() {
+  const registry = createCommandRegistry()
+  for (const name of ['graph neighbors', 'graph project', 'graph compact']) {
+    registry.register({
+      name,
+      summary: `test ${name}`,
+      usage: `hyp ${name}`,
+      async run() {
+        return 0
+      },
+    })
+  }
+  registry.register({
+    name: 'graph secret',
+    summary: 'hidden subcommand',
+    usage: 'hyp graph secret',
+    hidden: true,
+    async run() {
+      return 0
+    },
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  return { kernel, registry }
+}
+
+test('bare group with no command of its own renders synthesized group help', async () => {
+  const { kernel, registry } = groupKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['graph'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  // Direct children, sorted; the hidden `secret` subcommand is omitted.
+  assert.equal(stdout.text(), 'usage: hyp graph <subcommand> [args...]\n  subcommands: compact, neighbors, project\n')
+})
+
+test('group --help renders synthesized group help', async () => {
+  const { kernel, registry } = groupKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['graph', '--help'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /usage: hyp graph <subcommand>/)
+})
+
+test('group with an unknown subcommand reports it and exits 2', async () => {
+  const { kernel, registry } = groupKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['graph', 'bogus'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 2)
+  assert.equal(stdout.text(), '')
+  assert.match(stderr.text(), /hyp graph: unknown subcommand 'bogus'/)
+  assert.match(stderr.text(), /expected one of: compact, neighbors, project/)
+})
+
+test('a token that is neither a command nor a group prefix still errors', async () => {
+  const { kernel, registry } = groupKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['totallybogus'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /hyp: unknown command 'totallybogus'/)
+})
+
 test('dispatch surfaces boot-path sink materialization warnings', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-sink-warning-'))
   const configPath = path.join(hypHome, 'hypaware-config.json')
