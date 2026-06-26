@@ -154,7 +154,7 @@ export function resetCentralLayerToSeed(stateRoot) {
  * @ref LLP 0025#apply-engine-is-kernel-surface [implements] — the engine is kernel-owned; plugins only see the narrow facade
  */
 export function createConfigControl(opts) {
-  const { stateRoot, requestRestart } = opts
+  const { stateRoot, requestRestart, onConfirmed } = opts
   const now = opts.now ?? Date.now
   const log = getLogger('config-control')
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
@@ -426,6 +426,13 @@ export function createConfigControl(opts) {
     return { action: /** @type {const} */ ('none') }
   }
 
+  // Confirmation edge: clear the post-apply probation marker on the first
+  // authenticated poll, then fire `onConfirmed` *only* when a marker was
+  // actually cleared — the active→cleared transition, not every poll. The
+  // early `!state.probation` return makes this exactly the edge, so the
+  // daemon can schedule one reconcile pass per confirmation without polling
+  // status each tick. apply.js stays ignorant of the reconciler.
+  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — onConfirmed fires once on the probation active→cleared edge so the daemon schedules a reconcile pass without per-tick status polling
   function confirmPoll() {
     const state = readState()
     if (!state.probation) return
@@ -439,6 +446,7 @@ export function createConfigControl(opts) {
       config_etag: etag,
       status: 'ok',
     })
+    if (onConfirmed) onConfirmed(etag)
   }
 
   /**
