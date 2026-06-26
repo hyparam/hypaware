@@ -81,8 +81,23 @@ export function createActionReconciler(opts) {
    * @ref LLP 0041#the-reconciler-component [implements] — reconcile() is level-triggered: diff desired() against the marker, act only on the gap; a done marker short-circuits
    */
   async function reconcile(input) {
+    // Thread the daemon-resolved client seam (LLP 0045 §Part 1) onto the
+    // context unchanged — the reconciler core stays ignorant of what they mean
+    // ("knows nothing about Claude vs Codex"); only a client handler
+    // (`action_attach`) reads `clientDescriptors`/`clients`/`endpoint`. Absent
+    // on a plain CLI boot, so any client handler stays inert.
+    // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — clientDescriptors/clients/endpoint live on the context, not a handler closure
     /** @type {ActionContext} */
-    const ctx = { config: input.config, backfills: input.backfills, env: input.env, now, log }
+    const ctx = {
+      config: input.config,
+      backfills: input.backfills,
+      env: input.env,
+      clientDescriptors: input.clientDescriptors,
+      clients: input.clients,
+      endpoint: input.endpoint,
+      now,
+      log,
+    }
     const store = readStore()
     /** @type {ReconcileActionResult[]} */
     const results = []

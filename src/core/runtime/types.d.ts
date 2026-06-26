@@ -8,6 +8,7 @@ import type {
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
 import type { LoadedManifest, FailedManifest } from '../manifest.d.ts'
+import type { ClientDescriptor } from '../plugin_catalog.js'
 import type { KernelRuntime } from './activation.d.ts'
 import type { ActivationResult } from './loader.d.ts'
 
@@ -76,6 +77,15 @@ export interface BootKernelResult {
   runId: string
   /** Bundled plugins available but not activated this boot. */
   skipped: PluginName[]
+  /**
+   * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
+   * derived from the very manifests this boot discovered. The daemon threads
+   * it onto the client-action reconcile context so the attach handler can
+   * enumerate `desired()` and reach each descriptor's `attachProbe` for the
+   * disk-driven undo (LLP 0045 §Part 1). Always present — empty when no plugin
+   * contributes a client.
+   */
+  clientDescriptors: Map<string, ClientDescriptor>
 }
 
 export interface DiscoverBundledResult {

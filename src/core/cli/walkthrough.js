@@ -6,6 +6,7 @@ import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
+import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
@@ -1424,44 +1425,6 @@ async function stopFinaleStartedSources(sources) {
     // Best-effort. The dispatcher cleanup will make the same call on
     // command exit; this early stop is only to avoid daemon port races.
   }
-}
-
-/**
- * Resolve the gateway endpoint from the just-written config. Init
- * attaches clients before the daemon's gateway source is live in this
- * process, so `localEndpoint()` cannot be the only source of truth.
- *
- * @param {HypAwareV2Config} config
- * @returns {string | undefined}
- */
-function configuredGatewayEndpoint(config) {
-  const entry = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
-  const cfg = entry?.config
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return undefined
-  const listen = /** @type {Record<string, unknown>} */ (cfg).listen
-  if (typeof listen !== 'string') return undefined
-  return endpointFromListen(listen)
-}
-
-/**
- * @param {string} listen
- * @returns {string | undefined}
- */
-function endpointFromListen(listen) {
-  const idx = listen.lastIndexOf(':')
-  if (idx === -1) return undefined
-  const rawHost = listen.slice(0, idx)
-  const rawPort = listen.slice(idx + 1)
-  const port = Number.parseInt(rawPort, 10)
-  if (!Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== rawPort) {
-    return undefined
-  }
-  const host = rawHost.startsWith('[') && rawHost.endsWith(']')
-    ? rawHost.slice(1, -1)
-    : rawHost
-  if (host.length === 0) return undefined
-  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-  return `http://${formattedHost}:${port}`
 }
 
 /**
