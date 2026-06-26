@@ -264,6 +264,15 @@ export interface CreateConfigControlOptions {
   stateRoot: string
   /** Staged restart hook; the daemon exits with the restart code. */
   requestRestart(reason: string): void
+  /**
+   * Confirmation-edge hook, fired by `confirmPoll()` exactly once on the
+   * probation active→cleared transition (never on a no-probation poll).
+   * `etag` is the revision whose probation just cleared. The daemon wires
+   * this to schedule an action-reconciler pass; `apply.js` stays ignorant
+   * of the reconciler and only emits the edge event (LLP 0041). Optional —
+   * a plain CLI boot leaves it unset and the edge is a no-op.
+   */
+  onConfirmed?: (etag: string) => void
   now?: () => number
 }
 
