@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
@@ -22,6 +23,19 @@ const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
 const UPSTREAM_NAME = 'anthropic'
 const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
+
+/**
+ * The plugin's `config_sections` validator, surfaced as a side-effect-free
+ * export so the kernel apply path can validate this plugin's `config` block
+ * (the `backfill` policy) *before* the plugin is ever activated — e.g. a
+ * central config that first introduces `@hypaware/claude`. It is the same
+ * registration `activate()` hands `ctx.configRegistry.registerSection`;
+ * importing this module never runs `activate()`, so discovery is safe.
+ *
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the plugin owns + exposes its own `backfill` validator
+ * @type {{ section: string, validate: typeof validateClaudeConfig }}
+ */
+export const configSection = { section: CLAUDE_CONFIG_SECTION, validate: validateClaudeConfig }
 
 /**
  * Resolve the canonical session-context state file the Claude hook
@@ -54,6 +68,17 @@ export function claudeSessionContextFile(ctx) {
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream preset
  */
 export async function activate(ctx) {
+  // Validate the plugin's own `config` block — currently just the
+  // optional `backfill` policy ({ on_join, window_days }) that drives
+  // backfill-on-join. Registered so the kernel runs it via
+  // `runPerPluginSectionValidators`; no top-level core schema change.
+  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the source plugin owns and validates its `backfill` config
+  ctx.configRegistry.registerSection({
+    plugin: PLUGIN_NAME,
+    section: CLAUDE_CONFIG_SECTION,
+    validate: validateClaudeConfig,
+  })
+
   /** @type {AiGatewayCapability} */
   const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 

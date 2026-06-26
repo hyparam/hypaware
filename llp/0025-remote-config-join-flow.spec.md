@@ -254,6 +254,23 @@ file records what is installed, not what is active — the operative config
 defines the active set — and keeping the artifacts makes re-apply after a
 fixed revision cheaper.
 
+**Invariant: the active slot's etag is never the remembered bad etag**
+([#141](https://github.com/hyparam/hypaware/issues/141)). A rollback needs a
+**distinct** slot to flip to. With only one usable slot (a first apply on a host
+with no seed leaves `previous_slot` null), the "rollback" is a no-op flip that
+leaves the failed config operative — and recording *its* etag as the bad etag
+wedges the gateway: the bad-etag backoff then refuses to re-apply the running
+revision, probation bookkeeping never clears, and a boot does not recover. So a
+rollback with no distinct `previous_slot` **does not record a bad etag** and
+**does not request a staged restart** (restarting onto the unchanged config just
+re-probates and re-fails); it clears probation, surfaces a clear error
+(`config.rollback_no_target`), and the gateway keeps running the only config it
+has. Independently, **boot re-derives consistency before activation**: if the
+active slot's etag is already marked bad (a host wedged by older code, or
+hand-edited state), boot recovers — fall back to the seed if one survives, else
+drop the contradictory bad etag so the next poll can re-pull — rather than
+persisting the contradiction.
+
 ### Post-apply probation
 
 Because apply is a process restart, the apply engine writes a **probation
@@ -295,6 +312,15 @@ the block doesn't set one.
 Rollback from the **first** applied config lands back on the seed config —
 fine by construction: seed-config mode is a legitimate polling steady state,
 and the bad-etag backoff prevents a re-apply loop.
+
+A **confirmed** config (probation cleared) is also the trigger point for
+**central-config-driven client actions** — daemon-side machine effects the
+config calls for, run only after confirmation so an irreversible effect never
+fires for a config about to roll back. The apply engine itself stays unchanged;
+the action reconciler is separate kernel surface. See
+[LLP 0036](./0036-central-config-driven-client-actions.decision.md), with
+backfill-on-join ([LLP 0037](./0037-backfill-on-join.decision.md)) as the first
+instance.
 
 ## Wire contract amendments (`proto.md`)
 

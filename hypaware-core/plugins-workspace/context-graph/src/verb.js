@@ -90,9 +90,41 @@ function renderNeighbors(result) {
     out.push(`  (no ${dir}neighbors within ${result.depth} hop(s))`)
     return { stdout: out.join('\n') + '\n' }
   }
+  // Distinct nodes can share a display label — most often Files with the same
+  // basename but different paths, a genuine distinction the graph preserves
+  // rather than collapses. Rendered by label alone they look like duplicate
+  // rows. Disambiguate only the colliders (≥2 neighbors with one display text)
+  // so unique labels stay readable; `--json` already carries `natural_key`.
+  // @ref LLP 0026#query-reads-the-published-surface — same-basename Files are genuine distinct nodes, not duplicates to fold
+  const labelCounts = new Map()
+  for (const n of result.neighbors) {
+    const text = display(n.node)
+    labelCounts.set(text, (labelCounts.get(text) ?? 0) + 1)
+  }
+  // A long `natural_key` is tail-truncated, so two colliders that share a long
+  // path suffix would still render identically — the same-row bug, surviving for
+  // deep paths. Count the disambiguated rows too; any that *still* collide fall
+  // back to the full `node_id`: the graph's content-addressed primary key, so
+  // distinct nodes have distinct ids. This is the one suffix that *guarantees*
+  // the tie breaks; a `shortId` prefix would not, since two ids can share their
+  // leading 12 chars.
+  const shownCounts = new Map()
+  for (const n of result.neighbors) {
+    const text = display(n.node)
+    if (labelCounts.get(text) > 1) {
+      const shown = `${text} (${disambiguator(n.node)})`
+      shownCounts.set(shown, (shownCounts.get(shown) ?? 0) + 1)
+    }
+  }
   for (const n of result.neighbors) {
     const arrow = n.direction === 'out' ? `-${n.edge_type}→` : `←${n.edge_type}-`
-    out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${display(n.node)}`)
+    const text = display(n.node)
+    let shown = text
+    if (labelCounts.get(text) > 1) {
+      shown = `${text} (${disambiguator(n.node)})`
+      if (shownCounts.get(shown) > 1) shown = `${text} (${n.node.node_id})`
+    }
+    out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }
   if (result.truncated) {
     out.push(`${result.neighbors.length} of ${result.reachable} neighbor(s) within ${result.depth} hop(s) — truncated; raise --limit`)
@@ -114,6 +146,23 @@ function renderNeighbors(result) {
 function display(node) {
   const text = node.label ?? node.natural_key
   return text.length > 48 ? `${text.slice(0, 47)}…` : text
+}
+
+/**
+ * A suffix that tells two same-label nodes apart. The `natural_key` is the real
+ * distinguisher (a File's full path vs its basename label); keep its tail when
+ * long, since the distinguishing part of a path is the end. Fall back to a short
+ * node_id when the key adds nothing over the label.
+ *
+ * @param {{ label: string | null, natural_key: string, node_id: string }} node
+ * @returns {string}
+ */
+function disambiguator(node) {
+  const key = node.natural_key
+  if (key && key !== node.label) {
+    return key.length > 48 ? `…${key.slice(key.length - 47)}` : key
+  }
+  return shortId(node.node_id)
 }
 
 /**

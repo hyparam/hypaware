@@ -1,4 +1,4 @@
-import type { AiGatewayExchangeInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { AiGatewayExchangeInput, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
 
 export interface CodexLogReader {
   /** Identifier used in telemetry and de-dup. */
@@ -58,6 +58,14 @@ export interface CodexRolloutItem {
   payload: Record<string, unknown>
   /** Envelope timestamp in epoch millis, when present (modern JSONL only). */
   timestampMs?: number
+  /**
+   * Per-turn token usage recovered from a `token_count` event_msg, already
+   * normalized into the gateway's `{ usage: {...} }` attributes shape. Present
+   * only on the synthetic marker item the parser inserts at a turn boundary;
+   * the projector consumes it to stamp usage onto that turn's assistant
+   * message rather than projecting a message of its own.
+   */
+  usageAttributes?: JsonObject
 }
 
 export interface CodexAttachOptions {

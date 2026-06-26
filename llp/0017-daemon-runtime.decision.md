@@ -28,6 +28,15 @@ V1 introduces a primary daemon that boots the kernel and runs the steady state:
 The source registry and sink driver exist independently; the daemon is the
 long-lived host that drives them together.
 
+The boot health event the daemon writes to `daemon.log` is derived from the
+**same aggregate** that `status.json` reports: a clean boot logs
+`daemon.healthy`; a boot where any configured source failed to start logs
+`daemon.degraded` (matching `state: "degraded"`), never `daemon.healthy`. The
+event lists only the sources that actually came up; a source that failed is
+surfaced separately (`failed_sources`) and is never reported as active. This
+keeps monitoring keyed off `daemon.healthy` from reading a false positive on a
+degraded boot.
+
 ## Staged restart for config replacement
 
 When the operative config is **replaced wholesale** — remote config apply
@@ -67,6 +76,19 @@ binary** — never at an ephemeral npx path:
 This is the decision recorded in [LLP 0002](./0002-v1-scope.decision.md#daemon-install).
 Pointing the service at the stable global binary is what makes the installed
 daemon survive across npx cache eviction and package updates.
+
+### Reinstall waits for launchd release
+
+`launchctl bootout` is **asynchronous**: launchd may still be tearing the
+service down after the command returns. Reinstalling over a still-loaded agent
+can bootstrap into a half-removed state and fail with
+`Bootstrap failed: 5: Input/output error`. The macOS installer therefore, after
+booting out an already-loaded agent, **polls `launchctl print` until launchd has
+released the label** before writing the new plist and bootstrapping, and
+**retries the transient EIO (`error 5`) a bounded number of times**. A genuine
+load/config error (any non-EIO failure) is *not* retried — it surfaces
+immediately as a `LaunchAgentError`. This makes "reinstall over a live agent"
+reliable without masking real failures.
 
 ## Attach is idempotent and reversible
 

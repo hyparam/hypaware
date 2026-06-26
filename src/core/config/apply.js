@@ -97,6 +97,45 @@ export function resolveCentralLayerPath({ stateRoot }) {
 }
 
 /**
+ * Reset the central layer to **seed-config mode**: remove the active-slot
+ * pointer, both A/B slot files and their etag sidecars, and the
+ * apply-engine state (probation / bad-etag / last-rollback). Best-effort
+ * and ENOENT-tolerant, so on a never-joined or first-join host (no
+ * pointer, no slots) it is a no-op.
+ *
+ * `hyp join` calls this right after writing a fresh seed. A re-enrollment
+ * — the operator re-runs `join` because identity broke — writes a new
+ * bootstrap token into the seed, but a prior enrollment may have left a
+ * stale active slot whose `identity` carries no token. Boot resolution
+ * prefers the active slot over the seed ({@link resolveCentralLayerPath}),
+ * so without this reset the fresh token is silently shadowed and identity
+ * bootstrap keeps failing (#139). Clearing the slot returns the host to
+ * genuine seed-config mode, so a re-join behaves exactly like a first
+ * join: boot reads the seed, bootstraps identity from its token, pulls the
+ * central config, and the apply engine recreates the slots (`commit`'s
+ * `activeSlot() === null` first-apply path) and retires the seed.
+ *
+ * @param {string} stateRoot
+ * @returns {{ supersededActiveSlot: boolean }} whether a stale active slot was cleared
+ * @ref LLP 0031#physical-layout [implements] — re-join resets to seed mode so a stale active slot never shadows the fresh seed token
+ */
+export function resetCentralLayerToSeed(stateRoot) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const supersededActiveSlot = readActiveSlot(controlDir) !== null
+  for (const name of [
+    ACTIVE_BASENAME,
+    STATE_BASENAME,
+    'config.a.json',
+    'config.b.json',
+    'config.a.etag',
+    'config.b.etag',
+  ]) {
+    fs.rmSync(path.join(controlDir, name), { force: true })
+  }
+  return { supersededActiveSlot }
+}
+
+/**
  * Build the kernel config apply engine: shape-check → install pinned
  * plugins → validate against the post-install catalog → persist to an
  * A/B slot → flip the operative pointer → staged restart, plus
@@ -115,7 +154,7 @@ export function resolveCentralLayerPath({ stateRoot }) {
  * @ref LLP 0025#apply-engine-is-kernel-surface [implements] — the engine is kernel-owned; plugins only see the narrow facade
  */
 export function createConfigControl(opts) {
-  const { stateRoot, requestRestart } = opts
+  const { stateRoot, requestRestart, onConfirmed } = opts
   const now = opts.now ?? Date.now
   const log = getLogger('config-control')
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
@@ -183,16 +222,42 @@ export function createConfigControl(opts) {
    * (the per-slot etag sidecar reverts with it), clear probation,
    * remember the bad etag, and record the structured rollback reason.
    *
+   * A rollback needs a **distinct** slot to land on. With no distinct
+   * `previous_slot` the only "rollback" available is a no-op flip that
+   * leaves the failed config operative — and recording its etag as
+   * `bad_etag` while it stays active wedges central: the bad-etag backoff
+   * then refuses to re-apply the very revision that is running, probation
+   * bookkeeping never clears, and a boot does not recover (#141). Refuse
+   * to manufacture that contradiction — clear probation, surface a clear
+   * error, and leave recovery to boot's consistency guard / the next
+   * pull. Returns whether the pointer was actually flipped, so callers
+   * don't request a staged restart onto the unchanged config (an
+   * infinite restart loop).
+   *
    * @param {ProbationMarker} marker
    * @param {ConfigRollbackReason} reason
    * @param {string} [detail]
-   * @ref LLP 0025#last-known-good-rollback [implements] — flip back + remembered bad etag + structured reason, recorded client-side from day one
+   * @returns {boolean} whether the pointer was flipped to a distinct slot
+   * @ref LLP 0025#last-known-good-rollback [implements] — flip back + remembered bad etag + structured reason; a bad_etag is never recorded for the still-active slot (#141)
    */
   function rollback(marker, reason, detail) {
-    if (marker.previous_slot) {
-      flipPointer(marker.previous_slot)
-    }
     const at = new Date(now()).toISOString()
+    if (!marker.previous_slot || marker.previous_slot === marker.slot) {
+      const state = readState()
+      delete state.probation
+      writeState(state)
+      log.error('config.rollback_no_target', {
+        [Attr.COMPONENT]: 'config-control',
+        [Attr.OPERATION]: 'config.rollback',
+        [Attr.ERROR_KIND]: reason,
+        config_etag: marker.etag,
+        status: 'failed',
+        hyp_reason: 'no_distinct_previous_slot',
+        ...(detail ? { detail } : {}),
+      })
+      return false
+    }
+    flipPointer(marker.previous_slot)
     const state = readState()
     delete state.probation
     state.bad_etag = { etag: marker.etag, reason, recorded_at: at }
@@ -208,10 +273,71 @@ export function createConfigControl(opts) {
       [Attr.OPERATION]: 'config.rollback',
       [Attr.ERROR_KIND]: reason,
       config_etag: marker.etag,
-      rolled_back_to_slot: marker.previous_slot ?? 'none',
+      rolled_back_to_slot: marker.previous_slot,
       ...(detail ? { detail } : {}),
       status: 'ok',
     })
+    return true
+  }
+
+  /**
+   * Boot consistency guard (#141). The active slot's etag must never
+   * equal a remembered `bad_etag`: that contradiction — a config marked
+   * bad yet still operative — wedges central, because the bad-etag
+   * backoff then refuses to re-apply the running revision and no boot
+   * recovers. It is produced by a no-op rollback that had no distinct
+   * slot to flip to (the rollback guard above now prevents new ones, but
+   * existing wedged hosts and hand-edited state must still recover).
+   * Recover by falling back to the join seed if one survives, else
+   * dropping the contradictory `bad_etag` so the next poll can re-pull —
+   * the operative config keeps running either way.
+   *
+   * @param {ConfigControlState} state
+   * @returns {{ action: 'recovered_bad_active', recovery: 'seed' | 'repull' } | null}
+   * @ref LLP 0025#last-known-good-rollback [constrained-by] — the active slot may never carry a bad_etag; recover instead of persisting the contradiction (#141)
+   */
+  function recoverBadActiveEtag(state) {
+    if (!state.bad_etag) return null
+    const activeEtag = runningEtag()
+    if (!activeEtag || activeEtag !== state.bad_etag.etag) return null
+
+    let seedRaw = null
+    try {
+      seedRaw = fs.readFileSync(seedPath, 'utf8')
+    } catch (err) {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
+    }
+
+    delete state.bad_etag
+    delete state.probation
+
+    if (seedRaw !== null) {
+      // Drop the active pointer so boot resolves the central layer from
+      // the surviving seed (a legitimate polling steady state).
+      fs.rmSync(activePath, { force: true })
+      writeState(state)
+      log.error('config.bad_etag_active_recovered', {
+        [Attr.COMPONENT]: 'config-control',
+        [Attr.OPERATION]: 'config.bad_etag_active_recovered',
+        config_etag: activeEtag,
+        status: 'ok',
+        hyp_reason: 'fell_back_to_seed',
+      })
+      return { action: /** @type {const} */ ('recovered_bad_active'), recovery: /** @type {const} */ ('seed') }
+    }
+
+    // No seed to fall back to: the operative config is all the gateway
+    // has, so keep it running but drop the contradictory backoff so the
+    // next pull can re-validate / converge instead of staying wedged.
+    writeState(state)
+    log.error('config.bad_etag_active_recovered', {
+      [Attr.COMPONENT]: 'config-control',
+      [Attr.OPERATION]: 'config.bad_etag_active_recovered',
+      config_etag: activeEtag,
+      status: 'ok',
+      hyp_reason: 'cleared_for_repull',
+    })
+    return { action: /** @type {const} */ ('recovered_bad_active'), recovery: /** @type {const} */ ('repull') }
   }
 
   function disarmProbationWatchdog() {
@@ -244,9 +370,14 @@ export function createConfigControl(opts) {
         config_etag: marker.etag,
         status: 'failed',
       })
-      rollback(current, 'probation_expired')
-      restartPending = true
-      requestRestart('probation_expired')
+      // Only restart when there was somewhere distinct to roll back to;
+      // a no-op rollback leaves the same config active, so restarting
+      // onto it would just re-probate and re-fail forever (#141).
+      const rolledBack = rollback(current, 'probation_expired')
+      if (rolledBack) {
+        restartPending = true
+        requestRestart('probation_expired')
+      }
     }, remainingMs)
     if (typeof watchdog.unref === 'function') watchdog.unref()
   }
@@ -260,6 +391,14 @@ export function createConfigControl(opts) {
    */
   async function evaluateAtBoot() {
     const state = readState()
+
+    // Consistency guard first (#141): recover before anything else if the
+    // active slot's etag is already marked bad. This case can carry no
+    // live probation marker (the wedge clears probation), so it must run
+    // independently of the marker handling below.
+    const recovered = recoverBadActiveEtag(state)
+    if (recovered) return recovered
+
     const marker = state.probation
     if (!marker) return { action: /** @type {const} */ ('none') }
 
@@ -279,12 +418,21 @@ export function createConfigControl(opts) {
     }
 
     if (Date.parse(marker.until) <= now()) {
-      rollback(marker, 'probation_expired')
-      return { action: /** @type {const} */ ('rolled_back') }
+      const rolledBack = rollback(marker, 'probation_expired')
+      return rolledBack
+        ? { action: /** @type {const} */ ('rolled_back') }
+        : { action: /** @type {const} */ ('rollback_no_target') }
     }
     return { action: /** @type {const} */ ('none') }
   }
 
+  // Confirmation edge: clear the post-apply probation marker on the first
+  // authenticated poll, then fire `onConfirmed` *only* when a marker was
+  // actually cleared — the active→cleared transition, not every poll. The
+  // early `!state.probation` return makes this exactly the edge, so the
+  // daemon can schedule one reconcile pass per confirmation without polling
+  // status each tick. apply.js stays ignorant of the reconciler.
+  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — onConfirmed fires once on the probation active→cleared edge so the daemon schedules a reconcile pass without per-tick status polling
   function confirmPoll() {
     const state = readState()
     if (!state.probation) return
@@ -298,6 +446,7 @@ export function createConfigControl(opts) {
       config_etag: etag,
       status: 'ok',
     })
+    if (onConfirmed) onConfirmed(etag)
   }
 
   /**

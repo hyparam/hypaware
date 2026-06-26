@@ -48,6 +48,12 @@
         "name": "claude-and-otel-local",
         "summary": "Capture Claude Code + OTLP locally, export to Parquet under HYP_HOME/exports"
       }
+    ],
+    "config_sections": [
+      {
+        "section": "claude",
+        "summary": "Claude adapter config, including the optional backfill-on-join policy { on_join, window_days }."
+      }
     ]
   }
 }

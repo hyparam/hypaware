@@ -35,6 +35,12 @@
       { "name": "hypaware-ai-improvement-report", "clients": ["codex"] },
       { "name": "hypaware-ai-security-report", "clients": ["codex"] },
       { "name": "hypaware-ai-spend-report", "clients": ["codex"] }
+    ],
+    "config_sections": [
+      {
+        "section": "codex",
+        "summary": "Codex adapter config, including the optional backfill-on-join policy { on_join, window_days }."
+      }
     ]
   }
 }

@@ -97,12 +97,15 @@ function makeDeps(opts = {}) {
 function makeControl({ stateRoot, now }) {
   /** @type {string[]} */
   const restarts = []
+  /** @type {string[]} */
+  const confirmedEdges = []
   const control = createConfigControl({
     stateRoot,
     requestRestart: (reason) => { restarts.push(reason) },
+    onConfirmed: (etag) => { confirmedEdges.push(etag) },
     ...(now ? { now } : {}),
   })
-  return { control, restarts }
+  return { control, restarts, confirmedEdges }
 }
 
 test('stage applies a document: slot persisted, pointer flipped, etag staged, probation armed, restart requested', async () => {
@@ -309,6 +312,26 @@ test('confirmPoll clears probation', async () => {
   assert.equal(status.runningEtag, 'etag-1')
   // Idempotent.
   control.confirmPoll()
+})
+
+test('onConfirmed fires exactly on the probation active→cleared edge, not on a no-probation poll', async () => {
+  const { stateRoot } = await makeFixture()
+
+  // A poll before anything is under probation is not an edge.
+  const idle = makeControl({ stateRoot })
+  idle.control.attachApplyDeps(makeDeps())
+  idle.control.confirmPoll()
+  assert.deepEqual(idle.confirmedEdges, [])
+
+  // Apply puts a revision under probation; the first confirming poll is the
+  // active→cleared edge and fires the hook once with the cleared etag.
+  await idle.control.stage(REMOTE_CONFIG, 'etag-1')
+  idle.control.confirmPoll()
+  assert.deepEqual(idle.confirmedEdges, ['etag-1'])
+
+  // Further polls with no active probation do not re-fire the edge.
+  idle.control.confirmPoll()
+  assert.deepEqual(idle.confirmedEdges, ['etag-1'])
 })
 
 test('chained applies alternate slots and roll back one revision', async () => {

@@ -181,6 +181,19 @@ Consequences:
   the local layer is untouched, so a rolled-back gateway *keeps recording
   locally* — strictly better than today, where rollback-to-seed left a
   central-only host collecting nothing.
+- **Re-join resets to seed mode**: `join` writing a seed only takes effect when
+  the seed is what boot resolves (central = active slot **else** seed). On a
+  *first* join there is no active slot, so the seed wins. On a **re-enrollment**
+  (the operator re-runs `join` because identity broke), a prior enrollment may
+  have left a stale active slot whose `identity` carries no bootstrap token; that
+  slot would shadow the freshly-written seed, the new token would be silently
+  ignored, and identity bootstrap would keep failing
+  ([#139](https://github.com/hyparam/hypaware/issues/139)). So `join` clears the
+  active-slot pointer, the A/B slots + etag sidecars, and the apply state right
+  after writing the seed, returning the host to genuine seed-config mode. A
+  re-join then behaves exactly like a first join: boot reads the seed, bootstraps
+  from its token, pulls, and the apply engine recreates the slots and retires the
+  seed (`resetCentralLayerToSeed` in `apply.js`, called from `runJoin`).
 - **No field migration.** Joined-under-the-old-model hosts (where
   `hypaware-config.json` is a symlink to a slot) do not exist in the field; at
   most a trivial defensive boot-time fixup, not a migration path. Non-joined
@@ -312,8 +325,12 @@ order, each landing its motivating LLP/code edits together:
 - **Fleet-enforced retention policy** — central ownership of
   `query.cache.retention` as an explicit sub-key (min/max semantics), deferred
   until there is demand. See [Query is local-only](#query-is-local-only).
-- **Central-managed client attach semantics** — `attach` also performs
-  machine-side effects (`ANTHROPIC_BASE_URL`, hooks) independent of config; when
-  the gateway is centrally managed these may be redundant or conflicting.
-  Warn-and-write covers the config layer; the side-effect interaction is a noted
-  follow-up.
+- **Central-managed client actions** — `attach` (and, later, backfill) perform
+  machine-side effects independent of declarative topology. The *mechanism* for
+  these is now owned by
+  [LLP 0036 — Central-config-driven client actions](./0036-central-config-driven-client-actions.decision.md):
+  a daemon-side reconciler that runs such effects when the central config calls
+  for them. Backfill-on-join is its first instance
+  ([LLP 0037](./0037-backfill-on-join.decision.md)); the attach side-effect
+  interaction (`ANTHROPIC_BASE_URL`, hooks — warn-and-write already covers its
+  config layer here) is the next, still-open instance under that seam.

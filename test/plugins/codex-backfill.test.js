@@ -41,10 +41,14 @@ async function stageEnv() {
  *
  * @param {{ homeDir: string }} env
  * @param {string} relPath  path under the sessions dir (may include subdirs)
+ * Each item's envelope `type` defaults to `response_item`; pass an explicit
+ * `type` (e.g. `event_msg`) to interleave non-message records like
+ * `token_count` in stream order.
+ *
  * @param {{
  *   meta: Record<string, unknown>,
  *   turns?: Array<Record<string, unknown>>,
- *   items: Array<{ timestamp?: string, payload: Record<string, unknown> }>,
+ *   items: Array<{ type?: string, timestamp?: string, payload: Record<string, unknown> }>,
  * }} doc
  */
 async function writeModernRollout(env, relPath, doc) {
@@ -57,7 +61,7 @@ async function writeModernRollout(env, relPath, doc) {
     lines.push(JSON.stringify({ type: 'turn_context', timestamp: doc.meta.timestamp, payload: turn }))
   }
   for (const item of doc.items) {
-    lines.push(JSON.stringify({ type: 'response_item', timestamp: item.timestamp, payload: item.payload }))
+    lines.push(JSON.stringify({ type: item.type ?? 'response_item', timestamp: item.timestamp, payload: item.payload }))
   }
   await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
   return filePath
@@ -309,6 +313,193 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
     assert.equal(resultRow.content_text, 'file-a\nfile-b')
     // Tool name is back-filled from the earlier call within the conversation.
     assert.equal(resultRow.tool_name, 'shell')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('token_count event folds per-turn usage (net of cache) onto the turn assistant message', async () => {
+  const env = await stageEnv()
+  try {
+    // One turn: reasoning, assistant text, a tool call + its output, then the
+    // turn's token_count event_msg. The per-turn delta is `last_token_usage`;
+    // `total_token_usage` is the session's cumulative running total. They are
+    // set to DIFFERENT (and deliberately larger) values here so a regression
+    // that read the cumulative total — the multiply-count trap — would fail the
+    // net-input assertion below instead of passing by coincidence.
+    // @ref LLP 0035#per-turn
+    const lastUsage = {
+      input_tokens: 13761, // gross — includes the 9600 cached
+      cached_input_tokens: 9600,
+      output_tokens: 484,
+      reasoning_output_tokens: 189,
+      total_tokens: 14245,
+    }
+    // Cumulative total (as if prior turns were folded in). NOT the stamped value.
+    const cumulativeUsage = {
+      input_tokens: 90000,
+      cached_input_tokens: 50000,
+      output_tokens: 4000,
+      reasoning_output_tokens: 1200,
+      total_tokens: 99999,
+    }
+    await writeModernRollout(env, '2026/06/23/rollout-usage.jsonl', {
+      meta: { id: 'sess-usage', timestamp: '2026-06-23T00:00:00.000Z' },
+      items: [
+        { timestamp: '2026-06-23T00:00:01.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] } },
+        { timestamp: '2026-06-23T00:00:02.000Z', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking' }] } },
+        { timestamp: '2026-06-23T00:00:03.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'on it' }] } },
+        { timestamp: '2026-06-23T00:00:04.000Z', payload: { type: 'function_call', name: 'shell', call_id: 'c1', arguments: '{"command":"ls"}' } },
+        { timestamp: '2026-06-23T00:00:05.000Z', payload: { type: 'function_call_output', call_id: 'c1', output: 'a' } },
+        {
+          type: 'event_msg',
+          timestamp: '2026-06-23T00:00:06.000Z',
+          payload: { type: 'token_count', info: { total_token_usage: cumulativeUsage, last_token_usage: lastUsage } },
+        },
+      ],
+    })
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    assert.equal(items.length, 1)
+    const item = items[0]
+    assert.ok(item)
+    const exchange = value(item)
+
+    // The token_count marker does NOT add a message: user, reasoning, assistant
+    // text, assistant tool_use, tool result = 5.
+    assert.equal(exchange.messages.length, 5)
+
+    // Usage lands on the LAST text/tool_use assistant message of the turn (the
+    // function_call here), one carrier per response — same row Claude uses.
+    // Derived from `last_token_usage` (NOT the cumulative `total_token_usage`):
+    // NET of cache 13761 − 9600 = 4161; 4161 + 9600 + 484 == 14245 total. Were
+    // the cumulative read instead, input would be 90000 − 50000 = 40000 here.
+    // @ref LLP 0035#one-carrier @ref LLP 0035#per-turn
+    const toolUseMsg = exchange.messages.find(
+      (/** @type {any} */ m) => m.role === 'assistant' && m.content[0].type === 'tool_use'
+    )
+    assert.deepEqual(toolUseMsg.attributes, {
+      usage: {
+        input_tokens: 4161,
+        cache_read_tokens: 9600,
+        output_tokens: 484,
+        reasoning_tokens: 189,
+        total_tokens: 14245,
+      },
+    })
+
+    // The earlier assistant text and the reasoning (thinking) message carry no usage.
+    const textMsg = exchange.messages.find((/** @type {any} */ m) => m.role === 'assistant' && m.content[0].type === 'text')
+    assert.equal(textMsg.attributes, undefined)
+    const thinkingMsg = exchange.messages.find((/** @type {any} */ m) => m.content[0].type === 'thinking')
+    assert.equal(thinkingMsg.attributes, undefined)
+
+    // Usage survives materialization onto the assistant tool_call row.
+    const rows = await materialize(item)
+    const toolRow = rows.find((r) => r.part_type === 'tool_call' && r.role === 'assistant')
+    assert.ok(toolRow)
+    assert.deepEqual(/** @type {any} */ (toolRow.attributes).usage, {
+      input_tokens: 4161,
+      cache_read_tokens: 9600,
+      output_tokens: 484,
+      reasoning_tokens: 189,
+      total_tokens: 14245,
+    })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('multi-turn token_count: each turn stamps its own per-turn delta on its own last assistant row', async () => {
+  const env = await stageEnv()
+  try {
+    // Three turns in one session, each closed by a token_count marker. The
+    // turnStartIndex advance is what stops a later turn's usage from being
+    // stamped onto (or summed into) an earlier turn's row. Each token_count
+    // carries a distinct per-turn `last_token_usage` delta and a cumulative
+    // `total_token_usage` running total; the projector must read the delta.
+    // @ref LLP 0035#per-turn @ref LLP 0035#one-carrier
+    const turn1Delta = { input_tokens: 13761, cached_input_tokens: 9600, output_tokens: 484, reasoning_output_tokens: 189, total_tokens: 14245 }
+    const turn2Delta = { input_tokens: 5000, cached_input_tokens: 1000, output_tokens: 200, reasoning_output_tokens: 50, total_tokens: 5200 }
+    const turn3Delta = { input_tokens: 7000, cached_input_tokens: 2000, output_tokens: 300, reasoning_output_tokens: 80, total_tokens: 7600 }
+    // Cumulative running totals (what `total_token_usage` actually carries).
+    // Set so that reading them instead of the delta would yield wrong numbers:
+    // e.g. turn 2 cumulative net input is 18761 − 10600 = 8161, never 4000.
+    const turn1Total = turn1Delta
+    const turn2Total = { input_tokens: 18761, cached_input_tokens: 10600, output_tokens: 684, reasoning_output_tokens: 239, total_tokens: 19445 }
+    const turn3Total = { input_tokens: 25761, cached_input_tokens: 12600, output_tokens: 984, reasoning_output_tokens: 319, total_tokens: 27045 }
+
+    await writeModernRollout(env, '2026/06/24/rollout-multiturn.jsonl', {
+      meta: { id: 'sess-multi', timestamp: '2026-06-24T00:00:00.000Z' },
+      items: [
+        // Turn 1: reasoning + assistant text + a tool call; last eligible = tool_use.
+        { timestamp: '2026-06-24T00:00:01.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn one' }] } },
+        { timestamp: '2026-06-24T00:00:02.000Z', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking 1' }] } },
+        { timestamp: '2026-06-24T00:00:03.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'on it' }] } },
+        { timestamp: '2026-06-24T00:00:04.000Z', payload: { type: 'function_call', name: 'shell', call_id: 'c1', arguments: '{"command":"ls"}' } },
+        { timestamp: '2026-06-24T00:00:05.000Z', payload: { type: 'function_call_output', call_id: 'c1', output: 'a' } },
+        { type: 'event_msg', timestamp: '2026-06-24T00:00:06.000Z', payload: { type: 'token_count', info: { total_token_usage: turn1Total, last_token_usage: turn1Delta } } },
+        // A non-token_count event_msg must be skipped entirely (no row, no usage).
+        { type: 'event_msg', timestamp: '2026-06-24T00:00:07.000Z', payload: { type: 'agent_reasoning', text: 'internal note' } },
+        // Turn 2: a single assistant text reply; last eligible = that text.
+        { timestamp: '2026-06-24T00:00:08.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn two' }] } },
+        { timestamp: '2026-06-24T00:00:09.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'final answer' }] } },
+        { type: 'event_msg', timestamp: '2026-06-24T00:00:10.000Z', payload: { type: 'token_count', info: { total_token_usage: turn2Total, last_token_usage: turn2Delta } } },
+        // Turn 3: reasoning ONLY — no text/tool_use assistant in range, so its
+        // usage is DROPPED rather than mis-attributed to an earlier turn's row.
+        { timestamp: '2026-06-24T00:00:11.000Z', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking 3' }] } },
+        { type: 'event_msg', timestamp: '2026-06-24T00:00:12.000Z', payload: { type: 'token_count', info: { total_token_usage: turn3Total, last_token_usage: turn3Delta } } },
+      ],
+    })
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    assert.equal(items.length, 1)
+    const item = items[0]
+    assert.ok(item)
+    const exchange = value(item)
+
+    // Messages: u1, think1, asst"on it", tool_use, tool_result, u2,
+    // asst"final answer", think3 = 8. The three token_count markers and the
+    // stray agent_reasoning event_msg add no messages.
+    assert.equal(exchange.messages.length, 8)
+
+    const findMsg = (/** @type {(m: any) => boolean} */ pred) => exchange.messages.find(pred)
+
+    // Turn 1's usage rides its tool_use (last eligible), net of cache.
+    const turn1Carrier = findMsg((m) => m.role === 'assistant' && m.content[0].type === 'tool_use')
+    assert.deepEqual(turn1Carrier.attributes, {
+      usage: { input_tokens: 4161, cache_read_tokens: 9600, output_tokens: 484, reasoning_tokens: 189, total_tokens: 14245 },
+    })
+
+    // Turn 2's usage rides its own text reply — its own delta, NOT turn 1's and
+    // NOT the cumulative total (which would give input 8161, output 684).
+    const turn2Carrier = findMsg((m) => m.role === 'assistant' && m.content[0].type === 'text' && m.content[0].text === 'final answer')
+    assert.deepEqual(turn2Carrier.attributes, {
+      usage: { input_tokens: 4000, cache_read_tokens: 1000, output_tokens: 200, reasoning_tokens: 50, total_tokens: 5200 },
+    })
+
+    // Turn 1's earlier text ("on it") and both reasoning messages carry NO usage.
+    // Crucially, turn 1's carrier was NOT overwritten by turn 2 or turn 3 (asserted
+    // above), and turn 3's dropped usage never leaked onto an earlier row.
+    const turn1Text = findMsg((m) => m.role === 'assistant' && m.content[0].type === 'text' && m.content[0].text === 'on it')
+    assert.equal(turn1Text.attributes, undefined)
+    for (const m of exchange.messages.filter((/** @type {any} */ x) => x.content[0].type === 'thinking')) {
+      assert.equal(m.attributes, undefined)
+    }
+
+    // No row anywhere carries turn 3's delta (it was dropped, not mis-stamped).
+    const stamped = exchange.messages.filter((/** @type {any} */ m) => m.attributes?.usage)
+    assert.equal(stamped.length, 2, 'exactly two carrier rows — turns 1 and 2')
+    for (const m of stamped) {
+      assert.notEqual(/** @type {any} */ (m.attributes).usage.total_tokens, 7600, 'turn 3 usage never stamped')
+    }
+
+    // Survives materialization: exactly two assistant rows carry usage.
+    const rows = await materialize(item)
+    const usageRows = rows.filter((r) => /** @type {any} */ (r.attributes)?.usage)
+    assert.equal(usageRows.length, 2)
   } finally {
     await env.cleanup()
   }

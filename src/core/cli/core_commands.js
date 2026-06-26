@@ -9,7 +9,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
-import { centralSeedPath } from '../config/apply.js'
+import { centralSeedPath, resetCentralLayerToSeed } from '../config/apply.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -614,6 +614,21 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         bad_etag: report.remoteConfig.badEtag,
       }
       : null,
+    // Client-action reconciler state (LLP 0036 / 0041). Null until a
+    // backfill-on-join target is configured or a pass has run; a `failed`
+    // entry is informational and never affects `overall`.
+    client_actions: report.clientActions
+      ? report.clientActions.actions.map((a) => ({
+        kind: a.kind,
+        request_key: a.requestKey,
+        state: a.state,
+        ...(a.rows !== undefined ? { rows: a.rows } : {}),
+        ...(a.at ? { at: a.at } : {}),
+        ...(a.reason ? { reason: a.reason } : {}),
+        ...(a.lastAttempt ? { last_attempt: a.lastAttempt } : {}),
+        ...(a.attempts !== undefined ? { attempts: a.attempts } : {}),
+      }))
+      : null,
     diagnostics: report.diagnostics.map((d) => ({
       severity: d.severity,
       kind: d.kind,
@@ -736,6 +751,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
     if (rc.badEtag) {
       stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+    }
+  }
+
+  // Client-action reconciler section (LLP 0036 / 0041). Appears only once a
+  // backfill-on-join target is configured or a pass has run; a `failed`
+  // line is loud but informational — it never degrades `overall`.
+  if (report.clientActions && report.clientActions.actions.length > 0) {
+    stdout.write('  client actions:\n')
+    for (const a of report.clientActions.actions) {
+      let detail = ''
+      if (a.state === 'done') {
+        const bits = []
+        if (a.rows !== undefined) bits.push(`${a.rows} rows`)
+        if (a.at) bits.push(`at ${a.at}`)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      } else if (a.state === 'failed') {
+        const bits = []
+        if (a.reason) bits.push(a.reason)
+        if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
+        if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      }
+      stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
     }
   }
 
@@ -3037,6 +3075,20 @@ async function runJoin(argv, ctx) {
       await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
       await fs.rename(tmp, seedPath)
       ctx.stdout.write(`✓ Wrote seed config ${seedPath}\n`)
+
+      // A re-enrollment (identity broke, operator re-runs `join`) writes a
+      // fresh bootstrap token into the seed, but a prior enrollment may
+      // have left a stale active config slot that boot resolution prefers
+      // over the seed — silently shadowing the new token, so identity
+      // bootstrap keeps failing with no explanation (#139). Reset to
+      // seed-config mode so the freshly written token is honored; on a
+      // first join (no slot) this is a no-op.
+      // @ref LLP 0031#physical-layout [implements] — join supersedes a stale active slot so the fresh seed wins
+      const reset = resetCentralLayerToSeed(obsEnv.stateDir)
+      span.setAttribute('superseded_active_slot', reset.supersededActiveSlot)
+      if (reset.supersededActiveSlot) {
+        ctx.stdout.write('  superseded a stale applied config so the new join token takes effect\n')
+      }
 
       if (parsed.noDaemon) {
         ctx.stdout.write('  daemon install skipped (--no-daemon); run `hyp daemon install` to finish joining\n')
