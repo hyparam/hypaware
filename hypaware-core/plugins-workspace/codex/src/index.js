@@ -21,6 +21,19 @@ const UPSTREAM_NAME = 'openai'
 const CHATGPT_UPSTREAM_NAME = 'chatgpt'
 
 /**
+ * The plugin's `config_sections` validator, surfaced as a side-effect-free
+ * export so the kernel apply path can validate this plugin's `config` block
+ * (the `backfill` policy) *before* the plugin is ever activated — e.g. a
+ * central config that first introduces `@hypaware/codex`. It is the same
+ * registration `activate()` hands `ctx.configRegistry.registerSection`;
+ * importing this module never runs `activate()`, so discovery is safe.
+ *
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the plugin owns + exposes its own `backfill` validator
+ * @type {{ section: string, validate: typeof validateCodexConfig }}
+ */
+export const configSection = { section: CODEX_CONFIG_SECTION, validate: validateCodexConfig }
+
+/**
  * Activate the `@hypaware/codex` adapter plugin.
  *
  * Resolves the `hypaware.ai-gateway` capability, registers the

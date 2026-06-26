@@ -8,6 +8,7 @@ import process from 'node:process'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
+import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
@@ -591,7 +592,11 @@ function buildClientActionsReport({ status, config, hasCentral, backfillPlugins 
     const raw = entry.config?.backfill
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
     if (hasBlock) {
-      const onJoin = /** @type {Record<string, unknown>} */ (raw).on_join !== false
+      // Use the shared tri-state read so status can never disagree with the
+      // reconciler about what a block means: a malformed `on_join` (e.g. the
+      // string "false") is an opt-out, not default-on. `onJoin: undefined`
+      // (block present, `on_join` absent) is default-on → not suppressed.
+      const onJoin = readBackfillPolicy(entry).onJoin !== false
       declared.set(entry.name, { onJoin })
     } else if (hasCentral && backfillCapable.has(entry.name)) {
       declared.set(entry.name, { onJoin: true })

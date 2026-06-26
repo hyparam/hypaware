@@ -27,8 +27,13 @@ function env(hypHome) {
   return { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' }
 }
 
-/** Boot ai-gateway + claude from a local config so the claude section registers. */
-async function bootWithClaude() {
+/**
+ * Boot a kernel from a local config with the given plugin list, returning the
+ * booted runtime so apply deps can be built against the live registry.
+ *
+ * @param {string[]} pluginNames
+ */
+async function bootWith(pluginNames) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-section-validators-'))
   const stateRoot = path.join(hypHome, 'hypaware')
   const configPath = defaultConfigPath(hypHome)
@@ -37,11 +42,16 @@ async function bootWithClaude() {
     configPath,
     JSON.stringify({
       version: 2,
-      plugins: [{ name: '@hypaware/ai-gateway' }, { name: '@hypaware/claude' }],
+      plugins: pluginNames.map((name) => ({ name })),
     }) + '\n'
   )
   const boot = await bootKernel({ hypHome, configPath, env: env(hypHome), mode: 'cli' })
   return { hypHome, stateRoot, boot, cleanup: () => fs.rm(hypHome, { recursive: true, force: true }) }
+}
+
+/** Boot ai-gateway + claude from a local config so the claude section registers. */
+function bootWithClaude() {
+  return bootWith(['@hypaware/ai-gateway', '@hypaware/claude'])
 }
 
 test('apply validation rejects a malformed plugin backfill block via the live section validator', async () => {
@@ -95,12 +105,71 @@ test('apply validation rejects a malformed plugin backfill block via the live se
   }
 })
 
-test('without the live registry the per-plugin validator is dead (the bug this fixes)', async () => {
-  const fx = await bootWithClaude()
+test('apply validates a backfill block for a plugin the document INTRODUCES but is not active yet', async () => {
+  // Round-2 regression: the live registry only carries validators for
+  // *already-active* plugins. A central config that first introduces a
+  // backfill-capable plugin (the realistic join/fleet path) would skip its
+  // `config.backfill` validation. The apply path now discovers the introduced
+  // plugin's section validator from disk (side-effect-free — never activates
+  // it), so the malformed block is rejected, not silently accepted.
+  //
+  // Boot WITHOUT claude/codex so neither section is in the live registry.
+  const fx = await bootWith(['@hypaware/ai-gateway'])
   try {
-    // Same malformed document, but apply deps built WITHOUT the registry —
-    // exactly the pre-fix call shape. The cross-plugin checks pass and the
-    // dead section validator never runs, so the bad block slips through.
+    const registry = /** @type {{ list(): Array<{ plugin: string }> }} */ (
+      /** @type {unknown} */ (fx.boot.runtime.configRegistry)
+    )
+    const live = registry.list().map((s) => s.plugin)
+    assert.ok(
+      !live.includes('@hypaware/claude') && !live.includes('@hypaware/codex'),
+      `neither client section should be live-registered, got ${JSON.stringify(live)}`
+    )
+
+    const deps = buildConfigApplyDeps({
+      stateRoot: fx.stateRoot,
+      configRegistry: fx.boot.runtime.configRegistry,
+    })
+
+    // A doc that first introduces claude + codex, claude's backfill malformed.
+    const badDoc = {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway' },
+        { name: '@hypaware/claude', config: { backfill: { on_join: 'false', window_days: -3 } } },
+        { name: '@hypaware/codex' },
+      ],
+    }
+    const res = await deps.validateDocument(badDoc)
+    assert.equal(res.ok, false, 'an introduced plugin with a malformed backfill block must be rejected')
+    const kinds = /** @type {Array<{ errorKind?: string }>} */ (res.errors).map((e) => e.errorKind)
+    assert.ok(
+      kinds.includes('config_section_invalid'),
+      `expected a config_section_invalid error, got ${JSON.stringify(kinds)}`
+    )
+
+    // The same introduce-claude/codex doc with well-formed blocks validates.
+    const goodDoc = {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway' },
+        { name: '@hypaware/claude', config: { backfill: { on_join: false, window_days: 30 } } },
+        { name: '@hypaware/codex', config: { backfill: { on_join: true } } },
+      ],
+    }
+    const ok = await deps.validateDocument(goodDoc)
+    assert.equal(ok.ok, true, JSON.stringify(ok.errors))
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('introduced-plugin discovery rejects a malformed block even without the live registry', async () => {
+  // Even with NO live registry passed (a non-daemon caller), the apply path
+  // discovers the introduced plugin's validator from disk and rejects the bad
+  // block. (Before round-2 this exact shape silently accepted it — the
+  // per-plugin validator was dead without the live registry.)
+  const fx = await bootWith(['@hypaware/ai-gateway'])
+  try {
     const depsNoRegistry = buildConfigApplyDeps({ stateRoot: fx.stateRoot })
     const badDoc = {
       version: 2,
@@ -110,7 +179,9 @@ test('without the live registry the per-plugin validator is dead (the bug this f
       ],
     }
     const res = await depsNoRegistry.validateDocument(badDoc)
-    assert.equal(res.ok, true, 'pre-fix shape accepts the malformed backfill block')
+    assert.equal(res.ok, false, 'disk discovery rejects the malformed block with no live registry')
+    const kinds = /** @type {Array<{ errorKind?: string }>} */ (res.errors).map((e) => e.errorKind)
+    assert.ok(kinds.includes('config_section_invalid'), JSON.stringify(kinds))
   } finally {
     await fx.cleanup()
   }

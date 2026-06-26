@@ -336,6 +336,16 @@ export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, know
   const merged = resolveLayeredConfig({
     central: centralConfig,
     local: localConfig,
+    // No `configRegistry` here on purpose. This merge-time validation runs
+    // during config *resolution* — before `activatePlugins`, which is when
+    // each plugin registers its `config_sections` validator. At this point in
+    // boot the runtime's `configRegistry` exists but is *empty*, so threading
+    // it would dispatch `runPerPluginSectionValidators` against zero
+    // registered sections: a no-op that gives false confidence. Per-plugin
+    // section validation is enforced where the registry is actually populated
+    // — the daemon's apply path (`buildConfigApplyDeps`), which also discovers
+    // validators for plugins a document introduces but that aren't active yet.
+    // Boot's merge stays limited to the cross-plugin/structural checks.
     validate: (cfg) => collectConfigErrors(cfg, {
       ...(knownPlugins ? { knownPlugins } : {}),
       ...(knownDatasets ? { knownDatasets } : {}),

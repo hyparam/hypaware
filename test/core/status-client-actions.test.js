@@ -107,6 +107,36 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
   assert.ok(report.clientActions.actions.every((a) => a.kind === 'backfill'))
 })
 
+test('a malformed on_join block renders n/a (not pending) on a joined host', async () => {
+  // Regression (round-2): a *present but malformed* `on_join` (the JSON typo
+  // `on_join: "false"`) is an opt-out, exactly as `backfillHandler.desired()`
+  // reads it — so the reconciler never writes a marker and the honest state is
+  // `n/a`. Status used to read `on_join !== false` inline, so the string
+  // "false" (!== the boolean false) showed `pending` forever. Both consumers
+  // now share `readBackfillPolicy`, so they agree.
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      // Malformed opt-out: the string "false", not the boolean false.
+      { name: '@hypaware/claude', config: { backfill: { on_join: 'false' } } },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(report.clientActions, 'the malformed-opt-out target is surfaced')
+  const m = byKey(report.clientActions.actions)
+  assert.equal(m.get('@hypaware/claude')?.state, 'n/a')
+})
+
 test('a default-on backfill target (enabled client, no explicit block) shows pending on a joined host', async () => {
   // Regression: backfillHandler.desired() emits for an enabled provider even
   // with no `config.backfill` block (default-on). Status used to require an

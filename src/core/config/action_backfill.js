@@ -2,6 +2,7 @@
 
 import { Attr } from '../observability/index.js'
 import { selectProviders } from '../commands/backfill.js'
+import { readBackfillPolicy } from './backfill_policy.js'
 
 /**
  * @import {
@@ -13,7 +14,6 @@ import { selectProviders } from '../commands/backfill.js'
  *   CreateBackfillHandlerOptions,
  *   DesiredAction,
  * } from './types.d.ts'
- * @import { PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const MS_PER_DAY = 86_400_000
@@ -167,47 +167,6 @@ export function createBackfillHandler(opts = {}) {
 export const backfillHandler = createBackfillHandler()
 
 /* ------------------------------- Internals ------------------------------- */
-
-/**
- * Read the owning plugin entry's `backfill` policy block. A *missing* block
- * is the default (on_join on, no window) — `desired()` is the reconcile path
- * and must not throw on a config the plugin validator (T5) already accepted.
- *
- * A block that is *present but malformed* must not fail open, though: a
- * non-boolean `on_join` (e.g. the JSON typo `on_join: "false"`) is treated
- * as an opt-out (`onJoin: false`), never as "default on". The operator
- * clearly intended to set the flag, and a potentially months-deep import is
- * the wrong thing to run on a malformed opt-out. (With the per-plugin
- * validator now live — see apply/boot wiring — such a config is rejected at
- * apply time anyway; this is the belt-and-braces reconcile-path read.)
- *
- * @param {PluginConfigInstance | undefined} entry
- * @returns {{ onJoin: boolean | undefined, windowDays: number | undefined }}
- */
-function readBackfillPolicy(entry) {
-  const config = entry?.config
-  const backfill =
-    config && typeof config === 'object' && !Array.isArray(config)
-      ? /** @type {Record<string, unknown>} */ (config).backfill
-      : undefined
-  if (!backfill || typeof backfill !== 'object' || Array.isArray(backfill)) {
-    return { onJoin: undefined, windowDays: undefined }
-  }
-  const raw = /** @type {Record<string, unknown>} */ (backfill)
-  // Absent → default on (undefined). Present-and-boolean → that value.
-  // Present-but-non-boolean → opt-out (false): do not fail open.
-  const onJoin =
-    raw.on_join === undefined
-      ? undefined
-      : typeof raw.on_join === 'boolean'
-        ? raw.on_join
-        : false
-  const windowDays =
-    typeof raw.window_days === 'number' && Number.isInteger(raw.window_days) && raw.window_days > 0
-      ? raw.window_days
-      : undefined
-  return { onJoin, windowDays }
-}
 
 /**
  * Sum `providers[].rows_written` out of a `hyp backfill --json` payload.

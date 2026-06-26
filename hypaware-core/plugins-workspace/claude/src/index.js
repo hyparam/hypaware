@@ -25,6 +25,19 @@ const UPSTREAM_NAME = 'anthropic'
 const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
+ * The plugin's `config_sections` validator, surfaced as a side-effect-free
+ * export so the kernel apply path can validate this plugin's `config` block
+ * (the `backfill` policy) *before* the plugin is ever activated — e.g. a
+ * central config that first introduces `@hypaware/claude`. It is the same
+ * registration `activate()` hands `ctx.configRegistry.registerSection`;
+ * importing this module never runs `activate()`, so discovery is safe.
+ *
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the plugin owns + exposes its own `backfill` validator
+ * @type {{ section: string, validate: typeof validateClaudeConfig }}
+ */
+export const configSection = { section: CLAUDE_CONFIG_SECTION, validate: validateClaudeConfig }
+
+/**
  * Resolve the canonical session-context state file the Claude hook
  * appends to and the projector reads from. Centralised so attach()
  * and the projector activation path can never disagree on the path.
