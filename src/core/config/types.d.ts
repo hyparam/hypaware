@@ -11,7 +11,9 @@ import type {
   BackfillRegistry,
   PluginLogger,
   JsonObject,
+  AiGatewayCapability,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { ClientDescriptor } from '../plugin_catalog.js'
 
 /**
  * Outcome of the `init` overwrite guard (LLP 0031). `proceed` is true
@@ -374,6 +376,29 @@ export interface ActionContext {
    * `process.env.HYP_HOME` happened to be (LLP 0041 §Run-once flow step 2).
    */
   env: NodeJS.ProcessEnv
+  /**
+   * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
+   * derived from manifests by `buildPluginCatalog`. The attach handler
+   * enumerates `desired()` off this map — the runtime `clients` registry
+   * carries no owning-plugin field, so descriptors are the source of truth
+   * for "is this client's plugin enabled?" and hand the disk-driven undo the
+   * `attachProbe` it replays from (LLP 0045 §Part 1, §Part 3). Daemon-only —
+   * a plain CLI boot leaves it unset and any client handler stays inert.
+   */
+  clientDescriptors?: Map<string, ClientDescriptor>
+  /**
+   * Runtime gateway capability, used only to *invoke* a client's effect
+   * (`getClient(name).attach(...)`). Present when the AI gateway plugin is
+   * enabled; `desired()` guards on `getClient(name)` so it never names a
+   * client `perform()` cannot reach (LLP 0045 §Part 1).
+   */
+  clients?: AiGatewayCapability
+  /**
+   * The local gateway base URL clients attach to, resolved from
+   * `gateway.localEndpoint()` with the configured-`listen` fallback the CLI
+   * uses. Set whenever `clients` is (LLP 0045 §Part 1).
+   */
+  endpoint?: string
   /** Injectable clock (test seam). */
   now: () => number
   log: PluginLogger
@@ -414,6 +439,23 @@ export interface ReconcileInput {
    * diverge from `process.env` (the direct-`runDaemon`/hermetic-smoke path).
    */
   env: NodeJS.ProcessEnv
+  /**
+   * Static client→plugin map the daemon resolves from the plugin catalog and
+   * threads onto {@link ActionContext} so a client handler can enumerate
+   * `desired()` and read each descriptor's `attachProbe` (LLP 0045 §Part 1).
+   * Absent on a plain CLI boot.
+   */
+  clientDescriptors?: Map<string, ClientDescriptor>
+  /**
+   * Runtime gateway capability for invoking a client's attach effect, present
+   * when the AI gateway plugin is enabled (LLP 0045 §Part 1).
+   */
+  clients?: AiGatewayCapability
+  /**
+   * The local gateway base URL clients attach to; set whenever `clients` is
+   * (LLP 0045 §Part 1).
+   */
+  endpoint?: string
 }
 
 /** What the reconciler did with one (handler, requestKey) unit on a pass. */
