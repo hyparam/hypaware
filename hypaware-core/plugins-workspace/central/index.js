@@ -2,7 +2,7 @@
 
 import path from 'node:path'
 
-import { createSinkWatermarkStore } from '../../../src/core/sinks/watermarks.js'
+import { createInstanceWatermarkStore } from '../../../src/core/sinks/incremental.js'
 
 import { validateCentralConfig } from './src/config.js'
 import { createConfigPullLoop } from './src/config_client.js'
@@ -62,11 +62,14 @@ export async function activate(ctx) {
         hyp_identity_source: source,
       })
 
-      // Per-(sink instance, partition) incremental-read watermarks live
-      // under this sink instance's stateDir, so each forward sink reads
-      // only rows added since its own last successful export.
-      // @ref LLP 0040#watermark-contract [implements] — watermark store scoped to the sink instance via PluginPaths.stateDir
-      const watermarks = createSinkWatermarkStore({ stateDir: sinkCtx.paths.stateDir })
+      // Per-(sink instance, partition) incremental-read watermarks. The plugin
+      // `stateDir` is per-PLUGIN, so two `@hypaware/central` instances would
+      // share — and clobber — one watermark file and skip each other's rows;
+      // `createInstanceWatermarkStore` namespaces by the instance name, matching
+      // local-fs/s3. Each forward instance then reads only rows added since its
+      // own last successful export.
+      // @ref LLP 0040#watermark-contract [implements] — one watermark per (sink instance, partition), scoped by instance name
+      const watermarks = createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
 
       const sink = createForwardSink({
         config,

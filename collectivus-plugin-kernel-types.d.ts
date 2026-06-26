@@ -1125,11 +1125,18 @@ export interface SinkContinuation {
 export interface ReadRowsOptions {
   /**
    * Yield only rows newer than this watermark (`_hyp_ingest_seq > since.seq`).
-   * Rows with a null `_hyp_ingest_seq` (pre-upgrade "legacy" rows) are always
-   * yielded — treated as new — so the one-time migration is at worst a full
-   * re-export, never silent data loss. Absent ⇒ full scan (today's behaviour).
+   * Absent ⇒ full scan (today's behaviour).
    */
   since?: SinkContinuation
+  /**
+   * Disposition of pre-upgrade null-seq "legacy" rows when `since` is set.
+   * `true` (default) treats them as new (one-time backlog export); `false`
+   * treats them as already-exported (skip). A sink passes `false` once it has a
+   * durable watermark, so the legacy backlog re-exports exactly once instead of
+   * on every tick (LLP 0040 §6 risk #1). No new null-seq row can appear
+   * post-upgrade, so excluding them after the first export never skips live data.
+   */
+  includeLegacy?: boolean
 }
 
 /**
@@ -1167,7 +1174,7 @@ export interface QueryStorageService {
    */
   readRowsSince(
     tablePath: string,
-    opts: { since?: SinkContinuation; columns?: string[] },
+    opts: { since?: SinkContinuation; columns?: string[]; includeLegacy?: boolean },
   ): AsyncIterable<{ row: Record<string, unknown>; after: SinkContinuation }>
 }
 

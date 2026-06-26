@@ -205,7 +205,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async *readRows(tablePath, columns, opts) {
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanOpts = since !== undefined ? { since } : undefined
+      const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, scanOpts)) {
         for (const f of INTERNAL_FIELDS) delete row[f]
         yield row
@@ -217,6 +217,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // is an INTERNAL_FIELD stripped from the row, so a sink reading `readRows`
     // can't learn the high-water seq; `readRowsSince` reads it to derive the
     // `after` token, then strips it so the seq never reaches the wire payload.
+    // `includeLegacy` (default true) governs pre-upgrade null-seq rows: a sink
+    // with no durable watermark passes true (export the backlog once); once it
+    // has a watermark it passes false (the backlog is already shipped), so the
+    // one-time migration never re-exports on every tick (LLP 0040 §6 risk #1).
     async *readRowsSince(tablePath, opts = {}) {
       const since = continuationToSeq(opts.since)
       const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
@@ -225,7 +229,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // row never advances the watermark and progress never regresses even when
       // the scan visits seqs out of order (interleaved sources; LLP 0040 risk #3).
       let high = since
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { since })) {
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { since, includeLegacy: opts.includeLegacy })) {
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
         for (const f of INTERNAL_FIELDS) delete row[f]

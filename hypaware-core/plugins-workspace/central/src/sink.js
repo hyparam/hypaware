@@ -172,9 +172,15 @@ function signalForPartition(query, partition) {
  * failure, re-streaming from the same watermark reproduces the same chunk
  * boundaries, so the unchanged prefix chunks hash to the same ids and the
  * server's idempotency ledger (server LLP 0001) acks them `202` without
- * re-storing. The watermark advances per acked chunk (ship first, advance
- * second), so the server ledger now only backstops a bounded in-flight
- * suffix instead of the whole partition.
+ * re-storing. The watermark advances ONCE, after the whole partition's chunks
+ * are acked (ship first, advance second), to the partition's high-water `after`
+ * — never mid-partition. A partial partition (an early chunk acked, a later one
+ * failed) therefore never checkpoints, so a crash/failure re-reads the whole
+ * partition next tick and the server ledger dedupes the already-acked prefix.
+ * Mid-partition advance is unsafe because the scan is NOT seq-ordered (LLP 0040
+ * §4 risk #3): `after` is a running max, so a chunk that physically precedes a
+ * lower-seq chunk would advance the watermark past rows still un-acked in a
+ * later chunk, silently skipping them forever on a between-chunk failure.
  *
  * @param {{
  *   partition: QueryPartition,
@@ -227,11 +233,15 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
 
   let bytesWritten = 0
   let chunkIndex = 0
+  // Rows acked across THIS partition's chunks. Accumulated as each chunk POSTs
+  // so the single end-of-partition watermark write carries an accurate count.
+  let shippedRowCount = 0
   /** @type {string[]} */
   let lines = []
   let pendingBytes = 0
-  // `after` token of the most recently buffered row; at flush time it is
-  // the last row in the chunk, the watermark to persist once it is acked.
+  // `after` token of the most recently buffered row; after the loop it is the
+  // partition's high-water `after`, the watermark to persist once every chunk
+  // is acked.
   /** @type {SinkContinuation | undefined} */
   let lastAfter
   // The seq this chunk starts AFTER — the `since` watermark for the first
@@ -279,20 +289,21 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     })
     bytesWritten += bytes
     chunkIndex += 1
+    shippedRowCount += rows
     // The next chunk starts after this chunk's last row, so its batch id keys
     // off this chunk's `after` — keeping ids stable whether a tick streams the
     // whole partition or a respool replays only the un-acked suffix.
     if (after) chunkStartSeq = after.seq
     lines = []
     pendingBytes = 0
-    // @ref LLP 0040#watermark-contract [implements] — ship first, advance second: the chunk POST is acked, so persist this chunk's last `after`. A crash before this re-sends at most this one chunk next tick; the server ledger dedupes the redelivered prefix.
-    if (watermarkKey && after) {
-      exportedRowCount += rows
-      await watermarks.write(watermarkKey, { continuation: after, exportedRowCount })
-    }
   }
 
-  for await (const { row, after } of storage.readRowsSince(tablePath, { since })) {
+  // @ref LLP 0040#storage-api-extension [implements] — pre-upgrade null-seq rows
+  // are "new" only on a sink with no durable watermark (export the backlog once);
+  // once a watermark exists they are already shipped, so exclude them and the
+  // legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
+  const includeLegacy = since === undefined
+  for await (const { row, after } of storage.readRowsSince(tablePath, { since, includeLegacy })) {
     const line = JSON.stringify(serializeRow(row))
     lines.push(line)
     lastAfter = after
@@ -304,6 +315,22 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     }
   }
   await flushChunk()
+
+  // @ref LLP 0040#watermark-contract [implements] — ship first, advance second,
+  // but advance ONLY at end-of-partition (like the blob sink). Every chunk is
+  // acked by the time we reach here (a failed POST throws out of flushChunk
+  // before this), so persisting the partition's high-water `after` can never
+  // checkpoint past an un-acked row. A between-chunk failure leaves the
+  // watermark untouched: the next tick re-reads the whole partition and the
+  // server ledger dedupes the already-acked prefix. Advancing per chunk to the
+  // running-max `after` would skip lower-seq rows in a later un-acked chunk
+  // whenever the scan is not seq-ordered (LLP 0040 §4 risk #3).
+  if (watermarkKey && lastAfter && shippedRowCount > 0) {
+    await watermarks.write(watermarkKey, {
+      continuation: lastAfter,
+      exportedRowCount: exportedRowCount + shippedRowCount,
+    })
+  }
   return bytesWritten
 }
 

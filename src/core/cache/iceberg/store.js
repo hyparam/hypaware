@@ -285,12 +285,24 @@ export async function readRowsFromTable(tablePath) {
  * materialize the full table in memory.
  *
  * When `opts.since` is set (a bigint `_hyp_ingest_seq` watermark) only rows
- * NEWER than the watermark are yielded: a row is kept iff its `_hyp_ingest_seq`
- * is `null`/absent — a pre-column "legacy" row, treated as NEW so the one-time
- * upgrade never silently skips it (LLP 0040 risk #1, the data-loss hazard) — OR
- * its seq is strictly `> since`. The seq column is force-projected so the
- * predicate can be evaluated even when the caller asked for a narrower set;
- * `QueryStorageService` strips it from the row afterwards.
+ * NEWER than the watermark are yielded. A row whose `_hyp_ingest_seq` is
+ * `null`/absent is a pre-column "legacy" row; its disposition is governed by
+ * `opts.includeLegacy`:
+ *
+ * - `includeLegacy` true (default) — legacy rows are treated as NEW (yielded).
+ *   This is the safe migration default: a fresh sink with no durable watermark
+ *   exports the pre-upgrade backlog once rather than silently skipping it
+ *   (LLP 0040 risk #1, the data-loss hazard).
+ * - `includeLegacy` false — legacy rows are treated as ALREADY EXPORTED
+ *   (skipped). A sink passes this once it HAS a durable watermark, so the
+ *   pre-upgrade backlog is re-exported exactly once, never on every subsequent
+ *   tick (LLP 0040 §6 risk #1). No new null-seq row can appear post-upgrade —
+ *   the `decorateRow` chokepoint stamps a real seq on every flushed row — so
+ *   excluding legacy rows after the first export is safe.
+ *
+ * A real seq is yielded iff strictly `> since`. The seq column is force-projected
+ * so the predicate can be evaluated even when the caller asked for a narrower
+ * set; `QueryStorageService` strips it from the row afterwards.
  *
  * The predicate is applied as a yielded-row filter rather than pushed into
  * icebird's `scan({ where })`. icebird couples file/row-group pruning with a
@@ -300,34 +312,42 @@ export async function readRowsFromTable(tablePath) {
  * filter as the fallback; a future null-aware icebird filter can layer the
  * file-skip optimization on top without changing this contract.
  *
- * @ref LLP 0040#storage-api-extension [implements] — since-filtered incremental scan; null-seq = new
+ * @ref LLP 0040#storage-api-extension [implements] — since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
- * @param {{ since?: bigint }} [opts]
+ * @param {{ since?: bigint, includeLegacy?: boolean }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (!tableExists(tablePath)) return
   const since = opts?.since
+  const filtering = since !== undefined
+  const includeLegacy = opts?.includeLegacy !== false
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return
   const source = await icebergDataSource({ tableUrl: url, metadata, resolver, lister })
   // A table that has never been flushed under the seq-column schema carries no
-  // seq field: every row is implicitly null-seq (new), so there is nothing to
-  // project or filter — yield the whole table.
-  const hasSeq = since !== undefined && source.columns.includes(INGEST_SEQ_COLUMN.name)
+  // seq field: every row is implicitly null-seq, so the seq is read as `null`
+  // and the `includeLegacy` policy decides it.
+  const hasSeqColumn = source.columns.includes(INGEST_SEQ_COLUMN.name)
   let projected = columns && columns.length > 0 ? columns : source.columns
-  if (hasSeq && !projected.includes(INGEST_SEQ_COLUMN.name)) {
+  if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
   const scan = source.scan({ columns: projected })
   for await (const row of scan.rows()) {
     const resolved = await resolveAsyncRow(row, projected)
-    if (hasSeq) {
-      const seq = seqValue(resolved[INGEST_SEQ_COLUMN.name])
-      if (seq !== null && seq <= /** @type {bigint} */ (since)) continue
+    if (filtering) {
+      const seq = hasSeqColumn ? seqValue(resolved[INGEST_SEQ_COLUMN.name]) : null
+      if (seq === null) {
+        // Legacy (pre-upgrade) row: new on a fresh sink, already-exported once a
+        // durable watermark exists.
+        if (!includeLegacy) continue
+      } else if (seq <= /** @type {bigint} */ (since)) {
+        continue
+      }
     }
     yield resolved
   }

@@ -28,6 +28,8 @@ import path from 'node:path'
 import os from 'node:os'
 
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
+import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { readCursorSync, discoverCachePartitions } from '../../src/core/cache/partition.js'
@@ -40,6 +42,7 @@ import { activate as activateLocalFs } from '../../hypaware-core/plugins-workspa
 
 /**
  * @import { ColumnSpec, QueryPartition, SinkEncoder } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 const DATASET = 'proxy'
@@ -104,6 +107,29 @@ async function logicalPartition(cacheRoot) {
   const part = parts.find((p) => p.dataset === DATASET)
   assert.ok(part, 'expected a committed proxy partition after flush')
   return { dataset: DATASET, partition: { source: SOURCE }, tablePath: part.path }
+}
+
+/**
+ * Build a committed partition table DIRECTLY at the stable logical partition
+ * path (no spool, no cursor) so the seq values — including pre-upgrade nulls —
+ * are controlled exactly. This reproduces a migration-era cache: some rows
+ * pre-date the `_hyp_ingest_seq` column (null), some carry real seqs. `seq:null`
+ * stamps a legacy row; a bigint stamps a real one.
+ *
+ * @param {string} cacheRoot
+ * @param {{ id: number, seq: bigint | null }[]} spec
+ * @returns {Promise<QueryPartition>}
+ */
+async function buildLegacyPartition(cacheRoot, spec) {
+  const dir = path.join(cacheRoot, 'datasets', DATASET, `source=${SOURCE}`)
+  /** @type {ColumnSpec[]} */
+  const cols = [{ name: 'id', type: 'INT64', nullable: false }, INGEST_SEQ_COLUMN]
+  await appendRowsToTable(
+    dir,
+    cols,
+    spec.map((s) => ({ id: s.id, [INGEST_SEQ_COLUMN.name]: s.seq })),
+  )
+  return { dataset: DATASET, partition: { source: SOURCE }, tablePath: dir }
 }
 
 // --------------------------------------------------------------------------
@@ -211,7 +237,7 @@ async function listBlobs(destDir) {
   const out = []
   /** @param {string} dir */
   async function walk(dir) {
-    /** @type {import('node:fs').Dirent[]} */
+    /** @type {Dirent[]} */
     let entries
     try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
     for (const e of entries) {
@@ -591,6 +617,175 @@ test('blob sink: a lost watermark after a durable PUT re-PUTs the same object ke
     assert.equal(after2.length, 1, 'idempotent re-PUT: still exactly one blob, not a duplicate')
     assert.equal(after2[0].name, firstName, 'same object key re-PUT')
     assert.deepEqual(after2[0].ids.sort((a, b) => a - b), [0, 1, 2])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// ==========================================================================
+// One-time legacy backlog re-export (LLP 0040 §6 risk #1).
+// Pre-upgrade rows carry a null `_hyp_ingest_seq`. A fresh sink (no watermark)
+// exports them ONCE; once it has a durable watermark it treats them as
+// already-shipped, so the backlog never re-exports on every tick (which would
+// also duplicate after a compaction reorders the body).
+// ==========================================================================
+
+test('forward sink: a pure-legacy partition re-exports the null-seq backlog exactly once', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const part = await buildLegacyPartition(cacheRoot, [
+      { id: 0, seq: null }, { id: 1, seq: null }, { id: 2, seq: null },
+    ])
+    const watermarks = createInstanceWatermarkStore({
+      paths: /** @type {any} */ ({ stateDir: path.join(cacheRoot, 'state') }),
+      instanceName: 'forward',
+    })
+    const { sink, calls } = makeForwardSink({ storage: svc, watermarks })
+
+    // Tick 1: the legacy backlog ships once.
+    const r1 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r1.status, 'exported')
+    assert.deepEqual(ackedIds(calls).sort((a, b) => a - b), [0, 1, 2])
+    assert.ok((r1.bytesWritten ?? 0) > 0)
+
+    // Tick 2: the backlog does NOT re-export — zero POSTs, zero bytes.
+    calls.length = 0
+    const r2 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r2.status, 'exported')
+    assert.equal(r2.bytesWritten, 0, 'legacy backlog re-exports once, not every tick')
+    assert.equal(calls.length, 0, 'second tick makes zero POSTs')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('forward sink: a mixed legacy+real partition ships everything once, then steady-state', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const part = await buildLegacyPartition(cacheRoot, [
+      { id: 0, seq: null }, { id: 1, seq: null }, // legacy
+      { id: 10, seq: 5n }, { id: 11, seq: 10n }, // real
+    ])
+    const watermarks = createInstanceWatermarkStore({
+      paths: /** @type {any} */ ({ stateDir: path.join(cacheRoot, 'state') }),
+      instanceName: 'forward',
+    })
+    const { sink, calls } = makeForwardSink({ storage: svc, watermarks })
+
+    const r1 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r1.status, 'exported')
+    assert.deepEqual(ackedIds(calls).sort((a, b) => a - b), [0, 1, 10, 11], 'first tick ships legacy + real')
+
+    calls.length = 0
+    const r2 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r2.status, 'exported')
+    assert.equal(r2.bytesWritten, 0, 'no re-export of legacy or already-shipped real rows')
+    assert.equal(calls.length, 0)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('blob sink: a pure-legacy partition writes one blob, then no blob', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const part = await buildLegacyPartition(cacheRoot, [
+      { id: 0, seq: null }, { id: 1, seq: null }, { id: 2, seq: null },
+    ])
+    const destDir = path.join(cacheRoot, 'blob-out')
+    const sink = await makeBlobSink({ storage: svc, destDir, stateDir: path.join(cacheRoot, 'state'), instanceName: 'archive' })
+
+    const r1 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r1.status, 'exported')
+    let blobs = await listBlobs(destDir)
+    assert.equal(blobs.length, 1)
+    assert.deepEqual(blobs[0].ids.sort((a, b) => a - b), [0, 1, 2])
+
+    // Second tick: the backlog is already shipped → no new blob, 0 bytes.
+    const r2 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r2.status, 'exported')
+    assert.equal(r2.bytesWritten, 0)
+    blobs = await listBlobs(destDir)
+    assert.equal(blobs.length, 1, 'no second blob for the legacy backlog')
+    // No id is duplicated across artifacts.
+    const all = blobs.flatMap((b) => b.ids)
+    assert.equal(new Set(all).size, all.length, 'no row in two blobs')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('blob sink: a mixed legacy+real partition writes one blob, then no blob', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const part = await buildLegacyPartition(cacheRoot, [
+      { id: 0, seq: null }, { id: 1, seq: null },
+      { id: 10, seq: 5n }, { id: 11, seq: 10n },
+    ])
+    const destDir = path.join(cacheRoot, 'blob-out')
+    const sink = await makeBlobSink({ storage: svc, destDir, stateDir: path.join(cacheRoot, 'state'), instanceName: 'archive' })
+
+    const r1 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r1.status, 'exported')
+    let blobs = await listBlobs(destDir)
+    assert.equal(blobs.length, 1)
+    assert.deepEqual(blobs[0].ids.sort((a, b) => a - b), [0, 1, 10, 11])
+
+    const r2 = await sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(r2.status, 'exported')
+    assert.equal(r2.bytesWritten, 0)
+    blobs = await listBlobs(destDir)
+    assert.equal(blobs.length, 1, 'no second blob')
+    const all = blobs.flatMap((b) => b.ids)
+    assert.equal(new Set(all).size, all.length, 'no row in two blobs')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// ==========================================================================
+// Per-(sink INSTANCE, partition) watermark scoping (LLP 0040 §3).
+// Two `@hypaware/central` instances of one plugin share a `stateDir`; their
+// watermarks must NOT collide, or one instance's advance would make the other
+// skip rows it never exported. `createInstanceWatermarkStore` namespaces by the
+// instance name (the fix for the central sink using the per-PLUGIN store).
+// ==========================================================================
+
+test('forward sink: two instances on one partition keep independent watermarks (no cross-instance skip)', async () => {
+  const cacheRoot = await makeTmpDir()
+  try {
+    const svc = createQueryStorageService({ cacheRoot })
+    const spoolPath = svc.cacheTablePath(DATASET, ['all'])
+    await flushBatch(svc, spoolPath, rows([0, 1, 2], isoDaysAgo(1)))
+    const part = await logicalPartition(cacheRoot)
+
+    // SAME plugin stateDir, two instance names — the per-plugin store would
+    // collapse these onto one file and let A's advance clobber B's cursor.
+    const stateDir = path.join(cacheRoot, 'state')
+    const wmA = createInstanceWatermarkStore({ paths: /** @type {any} */ ({ stateDir }), instanceName: 'fleet-a' })
+    const wmB = createInstanceWatermarkStore({ paths: /** @type {any} */ ({ stateDir }), instanceName: 'fleet-b' })
+    assert.notEqual(
+      wmA.filePath(wmA.keyFor(svc.cacheRoot, part.tablePath ?? '')),
+      wmB.filePath(wmB.keyFor(svc.cacheRoot, part.tablePath ?? '')),
+      'each instance gets its own watermark file',
+    )
+
+    // Instance A ships all three rows and advances ITS watermark.
+    const a = makeForwardSink({ storage: svc, watermarks: wmA })
+    const ra = await a.sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(ra.status, 'exported')
+    assert.deepEqual(ackedIds(a.calls).sort((x, y) => x - y), [0, 1, 2])
+
+    // Instance B, fresh: must STILL see all three rows — A's advance must not
+    // have clobbered B's (independent) watermark.
+    const b = makeForwardSink({ storage: svc, watermarks: wmB })
+    const rb = await b.sink.exportBatch(/** @type {any} */ ({ partitions: [part] }), /** @type {any} */ ({}))
+    assert.equal(rb.status, 'exported')
+    assert.deepEqual(ackedIds(b.calls).sort((x, y) => x - y), [0, 1, 2], 'instance B is not skipped by instance A')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

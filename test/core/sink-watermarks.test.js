@@ -11,6 +11,10 @@ import {
   deriveWatermarkKey,
 } from '../../src/core/sinks/watermarks.js'
 
+/**
+ * @import { SinkContinuation } from '../../collectivus-plugin-kernel-types.d.ts'
+ */
+
 /** @returns {Promise<string>} */
 async function makeTmpDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sink-wm-'))
@@ -18,7 +22,7 @@ async function makeTmpDir() {
 
 /**
  * @param {string} seq
- * @returns {import('../../collectivus-plugin-kernel-types.d.ts').SinkContinuation}
+ * @returns {SinkContinuation}
  */
 function cont(seq) {
   return { v: 1, seq }

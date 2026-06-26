@@ -59,11 +59,15 @@ else parallelizes. The seam is:
    other once T2+T3 land:
    - **Forward sink** (`hypaware-core/plugins-workspace/central/src/sink.js`,
      `forwardPartition`): swap the full `readRows(tablePath)` loop for
-     `readRowsSince({ since })`; advance the watermark to the **last acked chunk's**
-     `after` token. The existing `MAX_CHUNK_ROWS`/`MAX_CHUNK_BYTES` chunking,
-     `batchIdForChunk` derivation, and the `Retry-After` backpressure loop
-     (LLP 0014) are untouched; the server ledger keeps backstopping a bounded
-     in-flight suffix.
+     `readRowsSince({ since })`; advance the watermark **once, at end-of-partition**
+     (after every chunk acks), to the partition's high-water `after` token — never
+     per-chunk, because the scan is not seq-ordered so a per-chunk advance to the
+     running-max `after` could skip lower-seq rows in a later un-acked chunk
+     (design §3/§4). The existing `MAX_CHUNK_ROWS`/`MAX_CHUNK_BYTES` chunking, the
+     `batchIdForChunk` derivation (keyed by chunk **start seq**, stable across a
+     respool), and the `Retry-After` backpressure loop (LLP 0014) are untouched;
+     a partial partition does not checkpoint, so a failure re-reads the whole
+     partition and the server ledger dedupes the already-acked prefix.
    - **Core blob sink** (`src/core/sinks/materialize.js` →
      `local-fs`/`s3` destination `index.js` → `src/core/sinks/encoder.js`): feed
      `readRowsSince({ since })` into the unchanged `encodePartition` contract; an
@@ -95,6 +99,6 @@ retry net, now backstopping a bounded suffix rather than the whole partition.
 - id: T1  branch: task/incremental-sink-reads/T1  deps: []        -- Stamp internal nullable int64 `_hyp_ingest_seq` at the `decorateRow` flush chokepoint via a crash-safe never-regressing allocator (cursor.json `nextSeq`, reserve-before-stamp); add to `INTERNAL_FIELDS`; additive nullable schema that rides compaction verbatim
 - id: T2  branch: task/incremental-sink-reads/T2  deps: [T1]       -- Extend storage read contract: back-compat `readRows(...,opts.since)` + cursor-aware `readRowsSince` emitting `{row, after}`; push `seq>since` predicate through `scanRowsFromTable`/icebird with yielded-row fallback; null-seq = new (one-time migration, never skipped); update kernel-types decl
 - id: T3  branch: task/incremental-sink-reads/T3  deps: [T2]       -- Persisted per-(sink instance, partition) watermark store under sink `stateDir/watermarks/<dataset>/<partition-key>.json`, keyed by the stable LOGICAL partition path (not `tableDir`); atomic write-rename
-- id: T4  branch: task/incremental-sink-reads/T4  deps: [T2, T3]   -- Wire central forward sink (`forwardPartition`) to `readRowsSince({ since })`; advance watermark to the last acked chunk's `after`; chunking/backpressure/`batchIdForChunk` unchanged; server ledger backstops the suffix
+- id: T4  branch: task/incremental-sink-reads/T4  deps: [T2, T3]   -- Wire central forward sink (`forwardPartition`) to `readRowsSince({ since })`; advance watermark ONCE at end-of-partition (every chunk acked) to the high-water `after`, never per-chunk (unordered scan would skip lower-seq rows in a later un-acked chunk); chunking/backpressure/`batchIdForChunk` (keyed by chunk start seq) unchanged; server ledger dedupes the re-read prefix on failure
 - id: T5  branch: task/incremental-sink-reads/T5  deps: [T2, T3]   -- Wire core blob sink (local-fs + s3 destinations) to `readRowsSince({ since })`; skip empty new-row set (no blob); embed `[sinceSeq,lastSeq]` in filename for idempotent re-PUT; advance watermark after durable PUT
 - id: T6  branch: task/incremental-sink-reads/T6  deps: [T4, T5]   -- Exactly-once acceptance tests/smoke across retention front-prune + compaction generation swap for both sinks; assert ≈0 bytes on no-new-rows and ≈N on N-new; cover watermark vs. driver-outbox respool composition

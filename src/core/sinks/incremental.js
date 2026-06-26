@@ -113,9 +113,14 @@ export async function openIncrementalRows(storage, partition, since) {
     lastAfter: since ?? { v: 1, seq: sinceSeq },
   }
 
+  // @ref LLP 0040#storage-api-extension [implements] — pre-upgrade null-seq rows
+  // are "new" only on a sink with no durable watermark (export the backlog once);
+  // once a watermark exists (`since` set) they are already shipped, so exclude
+  // them and the legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
+  const includeLegacy = since === undefined
   const tablePath = partition.tablePath
   const iterator = tablePath && storage.tableExists(tablePath)
-    ? storage.readRowsSince(tablePath, { since })[Symbol.asyncIterator]()
+    ? storage.readRowsSince(tablePath, { since, includeLegacy })[Symbol.asyncIterator]()
     : null
 
   /** @type {IteratorResult<{ row: Record<string, unknown>, after: SinkContinuation }> | null} */

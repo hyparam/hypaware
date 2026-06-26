@@ -21,6 +21,7 @@ import { readCursorSync } from '../../../src/core/cache/partition.js'
 
 /**
  * @import { ActivePlugin, ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Dirent } from 'node:fs'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -206,7 +207,7 @@ async function readBlobs(destDir) {
   const out = []
   /** @param {string} dir */
   async function walk(dir) {
-    /** @type {import('node:fs').Dirent[]} */
+    /** @type {Dirent[]} */
     let entries
     try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
     for (const e of entries) {
