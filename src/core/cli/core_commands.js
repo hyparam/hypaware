@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -16,6 +17,8 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { createMcpServer } from '../mcp/server.js'
@@ -3189,13 +3192,15 @@ async function runAttach(argv, ctx) {
 /**
  * `hyp detach [client] [--client <name>]`
  *
- * Resolves the gateway capability, looks up the named client, and
- * dispatches to its `detach()`. `detach()` is invoked with the
- * adapter's config slice (currently empty until per-adapter config
- * lands) plus stdout/stderr.
+ * Reverses a client's attach. Unlike `attach`, detach does **not**
+ * dispatch to a per-adapter hook: it routes through the single core,
+ * disk-driven undo (`detachClientFromDisk`), resolved per client via its
+ * `clientDescriptor`. That one undo is shared with the daemon
+ * reconciler's `reverse()`, so the two can never drift.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach routes through the one core undo via the clientDescriptor, not a per-adapter detach()
  */
 async function runDetach(argv, ctx) {
   return runClientLifecycle('detach', argv, ctx)
@@ -3261,6 +3266,11 @@ async function runClientLifecycle(action, argv, ctx) {
     return 1
   }
 
+  // Detach is the single core disk-driven undo, resolved per client via
+  // its static descriptor (owning plugin + attach_probe) — not a
+  // per-adapter detach() hook (LLP 0045 §Part 3). Build the map once.
+  const clientDescriptors = action === 'detach' ? await buildClientDescriptorMap() : undefined
+
   let exitCode = 0
   for (const name of clientNames) {
     const client = gateway.getClient(name)
@@ -3300,12 +3310,12 @@ async function runClientLifecycle(action, argv, ctx) {
           json: parsed.json,
         })
       } else {
-        await client.detach({
-          config: {},
-          stdout: ctx.stdout,
-          stderr: ctx.stderr,
+        await detachClientViaCore({
+          name,
+          descriptor: clientDescriptors?.get(name),
           dryRun: parsed.dryRun,
           json: parsed.json,
+          ctx,
         })
       }
     } catch (err) {
@@ -3315,6 +3325,137 @@ async function runClientLifecycle(action, argv, ctx) {
     }
   }
   return exitCode
+}
+
+/**
+ * Reverse a client's attach from disk — the single core undo
+ * (`detachClientFromDisk`). The manual `hyp detach` command and the
+ * daemon reconciler's `reverse()` both route through this one
+ * implementation, resolved per client via its `descriptor` (owning
+ * plugin + `attach_probe`), so there is no per-adapter detach for the
+ * one undo to drift from. Emits a `client.detach` span and the same
+ * `done`/`no-op` output shape callers grep.
+ *
+ * @param {{
+ *   name: string,
+ *   descriptor: ClientDescriptor | undefined,
+ *   dryRun: boolean,
+ *   json: boolean,
+ *   ctx: CommandRunContext,
+ * }} args
+ * @returns {Promise<void>}
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
+ */
+async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
+  if (!descriptor) {
+    throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
+  }
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  return withSpan(
+    'client.detach',
+    {
+      [Attr.PLUGIN]: descriptor.plugin,
+      [Attr.OPERATION]: 'client.detach',
+      client_name: name,
+      hyp_client: name,
+      dry_run: dryRun === true,
+    },
+    async (span) => {
+      if (dryRun) {
+        span.setAttribute('status', 'ok')
+        span.setAttribute('restored', false)
+        const settingsPath = descriptor.attachProbe
+          ? resolveClientSettingsPath(name, descriptor.attachProbe.settings_file, ctx.env, homeDir)
+          : undefined
+        if (json) {
+          ctx.stdout.write(
+            JSON.stringify({
+              status: 'ok',
+              action: 'detach',
+              client: name,
+              dry_run: true,
+              ...(settingsPath !== undefined ? { settings_path: settingsPath } : {}),
+              changed: false,
+            }) + '\n'
+          )
+        } else {
+          ctx.stdout.write(
+            `(dry-run) Would detach ${name}${settingsPath !== undefined ? ` from ${settingsPath}` : ''}\n`
+          )
+        }
+        return
+      }
+      try {
+        const result = await detachClientFromDisk({ descriptor, homeDir, env: ctx.env })
+        const restored = result.changed === true
+        span.setAttribute('status', 'ok')
+        span.setAttribute('restored', restored)
+        if (restored) {
+          getLogger('cmd-detach').info('client.detach.write', {
+            hyp_client: name,
+            hyp_plugin: descriptor.plugin,
+            settings_path: result.settingsPath,
+            changed: true,
+          })
+        }
+        writeCoreDetachOutput({ ctx, name, json, result })
+      } catch (err) {
+        span.setAttribute('status', 'failed')
+        span.setAttribute('restored', false)
+        throw err
+      }
+    },
+    { component: 'cmd-detach' }
+  )
+}
+
+/**
+ * Render the core detach output: machine-readable JSON when `json` is
+ * set, otherwise human prose. The shape mirrors the retired adapter
+ * output (`status`/`action`/`client`/`settings_path`/`changed`) so
+ * callers that grepped it keep working.
+ *
+ * @param {{
+ *   ctx: CommandRunContext,
+ *   name: string,
+ *   json: boolean,
+ *   result: {
+ *     changed: boolean,
+ *     settingsPath?: string,
+ *     removed?: string,
+ *     restoredValue?: string,
+ *     warning?: string,
+ *   },
+ * }} args
+ */
+function writeCoreDetachOutput({ ctx, name, json, result }) {
+  const settingsPath = result.settingsPath
+  if (json) {
+    /** @type {Record<string, unknown>} */
+    const payload = {
+      status: 'ok',
+      action: 'detach',
+      client: name,
+      dry_run: false,
+      changed: result.changed === true,
+    }
+    if (settingsPath !== undefined) payload.settings_path = settingsPath
+    if (result.removed !== undefined) payload.removed = result.removed
+    if (result.restoredValue !== undefined) payload.restored_value = result.restoredValue
+    if (result.warning !== undefined) payload.warning = result.warning
+    ctx.stdout.write(JSON.stringify(payload) + '\n')
+    return
+  }
+  if (result.changed === true) {
+    ctx.stdout.write(`✓ Detached ${name}${settingsPath !== undefined ? ` (${settingsPath})` : ''}\n`)
+    if (result.removed !== undefined) ctx.stdout.write(`  Removed ${result.removed}\n`)
+    if (result.restoredValue !== undefined) ctx.stdout.write(`  Restored ${result.restoredValue}\n`)
+    if (result.warning !== undefined) ctx.stdout.write(`  warning: ${result.warning}\n`)
+  } else {
+    ctx.stdout.write(
+      `No HypAware marker found${settingsPath !== undefined ? ` in ${settingsPath}` : ''}; nothing to do.\n`
+    )
+  }
 }
 
 /**

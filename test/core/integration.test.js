@@ -100,10 +100,14 @@ test('attach returns the parsed structured result', async () => {
   assert.deepEqual(calls, [{ action: 'attach', client: 'claude', json: true }])
 })
 
-test('detach returns the parsed structured result', async () => {
+test('detach returns the parsed structured result (core disk undo)', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
+  // Isolate HOME/CODEX_HOME so the disk-driven detach targets a temp tree
+  // (no marker present → a clean no-op) rather than the developer's files.
+  const home = await freshHome()
   const result = await detach('codex', {
-    hypHome: await freshHome(),
+    hypHome: home,
+    env: { ...process.env, HOME: home, CODEX_HOME: home },
     // @ts-expect-error test-only kernel injection
     registry,
     kernel,
@@ -111,7 +115,9 @@ test('detach returns the parsed structured result', async () => {
   assert.equal(result.status, 'ok')
   assert.equal(result.action, 'detach')
   assert.equal(result.client, 'codex')
-  assert.deepEqual(calls, [{ action: 'detach', client: 'codex', json: true }])
+  // Detach is the single core disk-driven undo (LLP 0045 §Part 3), not a
+  // per-adapter hook — the fake client's detach() is never dispatched.
+  assert.deepEqual(calls, [])
 })
 
 test('attach throws HypAwareCommandError for an unknown client', async () => {

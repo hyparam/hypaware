@@ -226,24 +226,31 @@ test('attach accepts a positional client name', async () => {
   ])
 })
 
-test('unattach alias accepts a positional client name', async () => {
+test('unattach alias routes a positional client through the core disk undo', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
   const stdout = makeBuf()
   const stderr = makeBuf()
+  // Isolate HOME/CODEX_HOME so the disk-driven detach targets a temp tree
+  // (no marker present → a clean no-op) rather than the developer's files.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-unattach-'))
 
   const code = await dispatch(['unattach', 'claude', '--json'], {
     stdout,
     stderr,
     registry,
     kernel,
-    env: { ...process.env, HYP_HOME: await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-unattach-')) },
+    env: { ...process.env, HOME: home, CODEX_HOME: home, HYP_HOME: home },
   })
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
-  assert.deepEqual(calls, [
-    { action: 'detach', client: 'claude', dryRun: false, json: true },
-  ])
+  // Detach no longer dispatches to a per-adapter hook — it is the single
+  // core disk-driven undo (LLP 0045 §Part 3), so the fake client's
+  // detach() is never called.
+  assert.deepEqual(calls, [])
+  const out = JSON.parse(stdout.text().trim())
+  assert.equal(out.action, 'detach')
+  assert.equal(out.client, 'claude')
 })
 
 test('attach rejects conflicting positional and flag client names', async () => {

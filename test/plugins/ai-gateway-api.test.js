@@ -112,37 +112,38 @@ test('registerUpstreamPreset replaces an existing entry with the same name', () 
   assert.equal(state.presets.get('echo')?.base_url, 'http://b')
 })
 
-test('registerClient validates name, defaultUpstream, and attach/detach', () => {
+test('registerClient validates name, defaultUpstream, and attach', () => {
   const state = createGatewayState()
   const api = createAiGatewayApi(state)
+  // An adapter owns only attach(); the reversing detach is the single
+  // core disk-driven undo (LLP 0045 §Part 3), so detach is not required.
   const ok = {
     name: 'codex',
     defaultUpstream: 'openai',
     attach: async () => {},
-    detach: async () => {},
   }
   api.registerClient(ok)
   assert.equal(state.clients.get('codex')?.defaultUpstream, 'openai')
 
   assert.throws(
-    () => api.registerClient(/** @type {any} */ ({ defaultUpstream: 'u', attach() {}, detach() {} })),
+    () => api.registerClient(/** @type {any} */ ({ defaultUpstream: 'u', attach() {} })),
     /name is required/
   )
   assert.throws(
-    () => api.registerClient(/** @type {any} */ ({ name: 'x', attach() {}, detach() {} })),
+    () => api.registerClient(/** @type {any} */ ({ name: 'x', attach() {} })),
     /defaultUpstream is required/
   )
   assert.throws(
-    () => api.registerClient(/** @type {any} */ ({ name: 'x', defaultUpstream: 'u', attach() {} })),
-    /attach\(\)\/detach\(\) are required/
+    () => api.registerClient(/** @type {any} */ ({ name: 'x', defaultUpstream: 'u' })),
+    /attach\(\) is required/
   )
 })
 
 test('getClient and listClients expose the registered clients', () => {
   const state = createGatewayState()
   const api = createAiGatewayApi(state)
-  const claude = { name: 'claude', defaultUpstream: 'anthropic', attach: async () => {}, detach: async () => {} }
-  const codex = { name: 'codex', defaultUpstream: 'openai', attach: async () => {}, detach: async () => {} }
+  const claude = { name: 'claude', defaultUpstream: 'anthropic', attach: async () => {} }
+  const codex = { name: 'codex', defaultUpstream: 'openai', attach: async () => {} }
   api.registerClient(claude)
   api.registerClient(codex)
   assert.equal(api.getClient('claude'), claude)
