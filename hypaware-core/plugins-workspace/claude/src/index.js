@@ -279,7 +279,15 @@ export async function activate(ctx) {
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
   // @ref LLP 0011#interactive-walkthrough [implements] — contributes client skills the first-run walkthrough installs
-  for (const skillName of ['hypaware-query', 'hypaware-ignore', 'hypaware-unignore']) {
+  for (const skillName of [
+    'hypaware-query',
+    'hypaware-ignore',
+    'hypaware-unignore',
+    'hypaware-ai-adoption-report',
+    'hypaware-ai-improvement-report',
+    'hypaware-ai-security-report',
+    'hypaware-ai-spend-report',
+  ]) {
     ctx.skills.register({
       name: skillName,
       plugin: PLUGIN_NAME,
