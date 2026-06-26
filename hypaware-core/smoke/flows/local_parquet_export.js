@@ -177,8 +177,17 @@ export async function run({ harness, expect }) {
   )
 
   // ----- Inspect the Parquet artifact written by `good` -----
+  // Incremental sink reads (LLP 0040) embed the exported `[sinceSeq, lastSeq]`
+  // ingest-seq range in the filename, so the blob is
+  // `partition=all.<since>-<last>.parquet` (first export starts at 0).
   const goodPartitionDir = path.join(goodDir, 'logs', 'partition=all')
-  const goodFile = path.join(goodPartitionDir, 'partition=all.parquet')
+  const goodBlobs = (await fs.readdir(goodPartitionDir)).filter((n) => /^partition=all\.\d+-\d+\.parquet$/.test(n))
+  expect.that(
+    `good sink: exactly one ranged parquet blob under ${goodPartitionDir}`,
+    goodBlobs,
+    (names) => Array.isArray(names) && names.length === 1,
+  )
+  const goodFile = path.join(goodPartitionDir, goodBlobs[0] ?? 'partition=all.0-0.parquet')
   const goodStat = await fs.stat(goodFile)
   expect.that(
     `good sink: ${goodFile} is a non-empty Parquet file`,

@@ -202,7 +202,7 @@ readRowsSince(tablePath: string, opts: { since?: SinkContinuation, columns?: str
   between the two re-exports a bounded suffix next tick (at-least-once); §5
   shows dedup makes it exactly-once.
 
-## 4. Applying it to both sinks
+## 4. Applying it to both sinks {#applying-it-to-both-sinks}
 
 **Forward sink** (`hypaware-core/plugins-workspace/central/src/sink.js`,
 `forwardPartition`): load the continuation for `(instance, partition-key)`;
