@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 
 import {
   CODEX_CONFIG_SECTION,
+  validateAttachSection,
   validateBackfillSection,
   validateCodexConfig,
 } from '../../hypaware-core/plugins-workspace/codex/src/config.js'
@@ -55,6 +56,42 @@ test('validateBackfillSection mounts pointers under the supplied prefix', () => 
   const errors = validateBackfillSection({ window_days: -1 }, '/plugins/0/config/backfill')
   assert.equal(errors.length, 1)
   assert.equal(errors[0].pointer, '/plugins/0/config/backfill/window_days')
+})
+
+test('validateCodexConfig accepts an attach block', () => {
+  assert.deepEqual(validateCodexConfig({ attach: { on_join: true } }), { ok: true })
+  assert.deepEqual(validateCodexConfig({ attach: { on_join: false } }), { ok: true })
+  assert.deepEqual(validateCodexConfig({ attach: {} }), { ok: true })
+  assert.deepEqual(
+    validateCodexConfig({ backfill: { on_join: true }, attach: { on_join: false } }),
+    { ok: true }
+  )
+})
+
+test('validateCodexConfig rejects a malformed attach block', () => {
+  /** @type {Array<[unknown, string]>} */
+  const cases = [
+    [{ attach: [] }, '/attach'],
+    [{ attach: 42 }, '/attach'],
+    [{ attach: null }, '/attach'],
+    [{ attach: { on_join: 'yes' } }, '/attach/on_join'],
+    [{ attach: { on_join: 0 } }, '/attach/on_join'],
+    [{ attach: { window_days: 7 } }, '/attach/window_days'],
+    [{ attach: { on_joins: true } }, '/attach/on_joins'],
+  ]
+  for (const [config, pointer] of cases) {
+    const result = validateCodexConfig(config)
+    assert.equal(result.ok, false, `${JSON.stringify(config)} must fail`)
+    if (result.ok) continue
+    assert.equal(result.errors[0].pointer, pointer, `${JSON.stringify(config)} pointer`)
+  }
+})
+
+test('validateAttachSection mounts pointers under the supplied prefix', () => {
+  assert.deepEqual(validateAttachSection(undefined, '/attach'), [])
+  const errors = validateAttachSection({ on_join: 'no' }, '/plugins/0/config/attach')
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].pointer, '/plugins/0/config/attach/on_join')
 })
 
 test('the registered codex section drives validatePluginConfig', () => {
