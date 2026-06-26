@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { attach, defaultSettingsPath, detach } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
@@ -54,6 +55,17 @@ export function claudeSessionContextFile(ctx) {
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream preset
  */
 export async function activate(ctx) {
+  // Validate the plugin's own `config` block — currently just the
+  // optional `backfill` policy ({ on_join, window_days }) that drives
+  // backfill-on-join. Registered so the kernel runs it via
+  // `runPerPluginSectionValidators`; no top-level core schema change.
+  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the source plugin owns and validates its `backfill` config
+  ctx.configRegistry.registerSection({
+    plugin: PLUGIN_NAME,
+    section: CLAUDE_CONFIG_SECTION,
+    validate: validateClaudeConfig,
+  })
+
   /** @type {AiGatewayCapability} */
   const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
