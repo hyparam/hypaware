@@ -14,6 +14,7 @@ import type {
   AiGatewayCapability,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ClientDescriptor } from '../plugin_catalog.js'
+import type { DetachFromDiskResult } from './client_detach_disk.js'
 
 /**
  * Outcome of the `init` overwrite guard (LLP 0031). `proceed` is true
@@ -558,6 +559,35 @@ export type BackfillSpawn = (args: BackfillSpawnArgs) => Promise<BackfillSpawnRe
 export interface CreateBackfillHandlerOptions {
   /** Subprocess seam; defaults to a real async `hyp backfill` spawn. */
   spawn?: BackfillSpawn
+  log?: PluginLogger
+}
+
+// =============================================================================
+// Attach action handler (LLP 0044 / LLP 0045 Part 2)
+// =============================================================================
+
+/**
+ * The disk-driven undo seam the attach handler's `reverse()` invokes — the
+ * single core detach (`detachClientFromDisk`, LLP 0045 §Part 3). Injected in
+ * tests so `reverse()` can be exercised against a fixture / fake without a live
+ * gateway; the default is the real `detachClientFromDisk`. The seam only needs
+ * the fields the handler passes (`descriptor` + the daemon-resolved `env`); the
+ * real implementation accepts more (an injectable `fs` / `homeDir`), so it is
+ * assignable to this narrower type.
+ */
+export type ClientDetachFromDisk = (args: {
+  descriptor: ClientDescriptor
+  homeDir?: string
+  env?: NodeJS.ProcessEnv
+}) => Promise<DetachFromDiskResult>
+
+export interface CreateAttachHandlerOptions {
+  /**
+   * The disk-driven undo seam `reverse()` calls; defaults to the real
+   * `detachClientFromDisk`. Injected in tests to assert the undo runs without
+   * touching `ctx.clients` (which lacks the dropped client at reverse time).
+   */
+  detach?: ClientDetachFromDisk
   log?: PluginLogger
 }
 
