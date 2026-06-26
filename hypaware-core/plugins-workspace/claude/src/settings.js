@@ -15,6 +15,13 @@ import path from 'node:path'
  * concurrent edit is detected instead of silently overwritten. The
  * `_hypaware` marker is what `detach()` keys off to know which keys
  * it inserted and is safe to remove.
+ *
+ * The marker is also a **self-describing undo record**: it records
+ * `prev_base_url` (the restore target) and the managed
+ * `env.ANTHROPIC_BASE_URL` / session-context hook entries it added, so
+ * a format-aware but plugin-agnostic core routine can reverse the
+ * attach from disk alone — with the plugin unloaded. See LLP 0045
+ * Part 3.
  */
 
 /**
@@ -73,25 +80,46 @@ export async function attach(opts) {
   validateStateFile(stateFile)
 
   const { value, mtimeMs } = await readSettings(settingsPath)
+  const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
   const env = ensureObject(value, 'env')
-  const previous = env.ANTHROPIC_BASE_URL
-  const prevValue = typeof previous === 'string' ? previous : undefined
+  const liveBaseUrl = typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : undefined
+  // Preserve the recorded original across a re-attach: once we own the
+  // URL the live value is *our* gateway URL, so keep the marker's
+  // recorded `prev_base_url` rather than backing up the gateway URL
+  // over it. A first attach backs up whatever was live.
+  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by] — the marker IS the backup restored on leave
+  const prevBaseUrl = priorMarker
+    ? (typeof priorMarker.prev_base_url === 'string' ? priorMarker.prev_base_url : undefined)
+    : liveBaseUrl
 
-  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`
-  installSessionContextHooks(value, managedHookCommand(binPath, stateFile))
+  const baseUrl = `http://127.0.0.1:${port}`
+  const command = managedHookCommand(binPath, stateFile)
+
+  env.ANTHROPIC_BASE_URL = baseUrl
+  installSessionContextHooks(value, command)
+  // Self-describing undo record: enough for the format-aware core undo
+  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, strip the managed
+  // hook entries, and delete the marker without loading this plugin —
+  // leaving no orphaned `hyp claude-hook` entries.
+  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,
     port,
     state_file: stateFile,
+    managed: {
+      env: { ANTHROPIC_BASE_URL: baseUrl },
+      hooks: managedHookEntries(command),
+    },
+    ...(prevBaseUrl !== undefined ? { prev_base_url: prevBaseUrl } : {}),
   }
 
   await writeAtomic(settingsPath, value, mtimeMs)
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
-  if (prevValue !== undefined) result.prevValue = prevValue
+  if (prevBaseUrl !== undefined) result.prevValue = prevBaseUrl
   return result
 }
 
@@ -301,6 +329,23 @@ function removeSessionContextHooks(value) {
 
 function managedHookEvents() {
   return [...new Set(MANAGED_HOOK_SPECS.map((spec) => spec.event))]
+}
+
+/**
+ * The managed session-context hook entries this attach installs,
+ * recorded into the marker's undo record so the core undo can strip
+ * exactly what `installSessionContextHooks` added without re-deriving
+ * them from the (possibly unloaded) plugin.
+ *
+ * @param {string} command
+ * @returns {{ event: string, matcher?: string, command: string }[]}
+ */
+function managedHookEntries(command) {
+  return MANAGED_HOOK_SPECS.map((spec) => ({
+    event: spec.event,
+    ...(spec.matcher ? { matcher: spec.matcher } : {}),
+    command,
+  }))
 }
 
 /** @param {unknown} group */
