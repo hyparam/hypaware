@@ -39,6 +39,7 @@ async function makeFixture() {
 const INPUT = {
   config: /** @type {any} */ ({ version: 2, plugins: [] }),
   backfills: /** @type {any} */ ({ register() {}, get() { return undefined }, list() { return [] } }),
+  env: process.env,
 }
 
 function markerPath(stateRoot) {
@@ -249,6 +250,37 @@ test('a thrown perform is normalized to a failed marker', async () => {
     const file = readMarkerFile(stateRoot)
     assert.equal(file.backfill['@hypaware/claude'].status, 'failed')
     assert.equal(file.backfill['@hypaware/claude'].reason, 'spawn ENOENT')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('a corrupt marker file does not wedge reconcile (treated as empty, pass still runs)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // Write garbage where the atomic marker store should be. `hyp status`
+    // already swallows this (readClientActionStatus), but reconcile() read
+    // it through a bare JSON.parse — a corrupt marker wedged ALL actions
+    // while status reported clean. It must now degrade to an empty store.
+    const controlDir = path.join(stateRoot, 'config-control')
+    fs.mkdirSync(controlDir, { recursive: true })
+    fs.writeFileSync(path.join(controlDir, 'client-actions.json'), '{ this is not: json,,,')
+
+    const handler = countingHandler()
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+
+    const report = await reconciler.reconcile(INPUT)
+    // The pass ran the desired unit instead of throwing on the corrupt file.
+    assert.equal(handler.performCalls, 1)
+    assert.equal(report.results[0].outcome, 'done')
+    // The corrupt file was overwritten with a clean, parseable marker store.
+    const file = readMarkerFile(stateRoot)
+    assert.equal(file.backfill['@hypaware/claude'].status, 'done')
+    // The standalone status reader agrees (both tolerate corruption).
+    assert.equal(
+      readClientActionStatus({ stateRoot }).byKind.backfill['@hypaware/claude'].status,
+      'done'
+    )
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

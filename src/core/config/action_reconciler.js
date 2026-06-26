@@ -82,7 +82,7 @@ export function createActionReconciler(opts) {
    */
   async function reconcile(input) {
     /** @type {ActionContext} */
-    const ctx = { config: input.config, backfills: input.backfills, now, log }
+    const ctx = { config: input.config, backfills: input.backfills, env: input.env, now, log }
     const store = readStore()
     /** @type {ReconcileActionResult[]} */
     const results = []
@@ -263,8 +263,16 @@ async function runOutcome(fn) {
 
 /**
  * Read the persisted marker store. ENOENT (no action has ever run) is the
- * empty store; a non-object document is treated as empty. Mirrors
- * `readControlState` in `apply.js`.
+ * empty store; an unparseable or non-object document is treated as empty.
+ * Mirrors `readControlState` in `apply.js`.
+ *
+ * Corruption tolerance is load-bearing: `reconcile()` reads the marker on
+ * every pass, so a `JSON.parse` throw here would wedge *all* client actions
+ * while `hyp status` (which already swallows the error in
+ * `readClientActionStatus`) reports clean. An empty store means the next
+ * pass simply re-derives the gap from `desired()` and rewrites a clean
+ * marker — losing only the (recoverable) completion record, never running a
+ * pass it should not.
  *
  * @param {string} markerPath
  * @returns {ActionMarkerStore}
@@ -277,7 +285,12 @@ function readMarkerStore(markerPath) {
     if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return {}
     throw err
   }
-  const parsed = JSON.parse(raw)
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return {}
+  }
   return parsed && typeof parsed === 'object' ? /** @type {ActionMarkerStore} */ (parsed) : {}
 }
 

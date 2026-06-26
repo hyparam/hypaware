@@ -10,7 +10,7 @@ import { installPlugin, loadLock } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
 
 /**
- * @import { PluginConfigInstance, PluginName, ValidationError } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigRegistry, PluginConfigInstance, PluginName, ValidationError } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ConfigApplyDeps, PinnedInstallResult } from './types.d.ts'
  */
 
@@ -22,11 +22,18 @@ import { getEntry } from '../plugin_install/lock.js'
  * bundled manifest set) and attached via
  * `configControl.attachApplyDeps()`.
  *
- * @param {{ stateRoot: string, workspaceDir?: string }} opts
+ * The live `configRegistry` (the kernel registry the active plugins
+ * registered their `config_sections` validators into during boot) is
+ * threaded through so apply-time validation actually dispatches to those
+ * per-plugin validators. Omitting it makes them dead — a served config with
+ * a malformed plugin `config` block (e.g. claude/codex `backfill`) would be
+ * accepted instead of rejected (LLP 0037).
+ *
+ * @param {{ stateRoot: string, workspaceDir?: string, configRegistry?: ConfigRegistry }} opts
  * @returns {ConfigApplyDeps}
  */
 export function buildConfigApplyDeps(opts) {
-  const { stateRoot, workspaceDir } = opts
+  const { stateRoot, workspaceDir, configRegistry } = opts
   const log = getLogger('config-control')
 
   /**
@@ -56,6 +63,10 @@ export function buildConfigApplyDeps(opts) {
     const result = await validateConfig(shape.config, {
       knownPlugins: catalog.pluginMetadata,
       knownDatasets: catalog.knownDatasets,
+      // Pass the live registry so per-plugin `config_sections` validators run
+      // (LLP 0037). Absent (e.g. a non-daemon caller) it degrades to the
+      // cross-plugin checks only, exactly as before.
+      ...(configRegistry ? { configRegistry } : {}),
     })
     return { ok: result.ok, errors: /** @type {ValidationError[]} */ (result.errors) }
   }

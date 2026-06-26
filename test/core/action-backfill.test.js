@@ -20,6 +20,9 @@ const NOOP_LOG = { debug() {}, info() {}, warn() {}, error() {} }
 
 const FIXED_NOW = Date.parse('2026-06-25T00:00:00.000Z')
 
+/** The HYP_HOME the daemon resolves and threads into the reconcile input. */
+const RESOLVED_HYP_HOME = '/resolved/hyp/home'
+
 /**
  * A fake backfill registry over a fixed provider list.
  * @param {Partial<BackfillContribution>[]} list
@@ -50,6 +53,9 @@ function makeCtx(opts = {}) {
   return {
     config: /** @type {any} */ ({ version: 2, plugins: opts.plugins ?? [] }),
     backfills: /** @type {any} */ (fakeBackfills(opts.providers ?? [CLAUDE_PROVIDER])),
+    // The daemon threads its resolved env (HYP_HOME forced to the daemon's
+    // hypHome) down to the spawn; tests assert the child inherits it.
+    env: { ...process.env, HYP_HOME: RESOLVED_HYP_HOME },
     now: () => FIXED_NOW,
     log: NOOP_LOG,
   }
@@ -110,6 +116,22 @@ test('desired() honors an explicit on_join:false opt-out (no action)', () => {
   assert.deepEqual(desired, [])
 })
 
+test('desired() does not fail open on a non-boolean on_join (treats it as opt-out)', () => {
+  // The typo'd JSON string `"false"` is not a boolean; pre-fix it fell
+  // through to default-on and ran backfill anyway. It must now suppress.
+  const handler = createBackfillHandler({ spawn: recordingSpawn([]).spawn })
+  const stringFalse = handler.desired(
+    makeCtx({ plugins: [{ name: '@hypaware/claude', enabled: true, config: { backfill: { on_join: 'false' } } }] })
+  )
+  assert.deepEqual(stringFalse, [], 'on_join:"false" (string) must not run backfill')
+  // A truthy non-boolean is equally malformed and equally suppressed —
+  // only a real boolean true (or an absent flag) runs the import.
+  const numberOne = handler.desired(
+    makeCtx({ plugins: [{ name: '@hypaware/claude', enabled: true, config: { backfill: { on_join: 1 } } }] })
+  )
+  assert.deepEqual(numberOne, [], 'on_join:1 (number) must not run backfill')
+})
+
 test('desired() carries window_days through to params when present', () => {
   const handler = createBackfillHandler({ spawn: recordingSpawn([]).spawn })
   const desired = handler.desired(
@@ -143,6 +165,29 @@ test('perform() resolves window_days to a --since flag (assert spawned argv)', a
   assert.equal(calls.length, 1)
   const expectedSince = new Date(FIXED_NOW - 30 * 86_400_000).toISOString()
   assert.deepEqual(calls[0].args, ['backfill', 'claude', '--since', expectedSince, '--json'])
+})
+
+test('perform() spawns with the daemon-resolved env (HYP_HOME), not process.env', async () => {
+  // Regression for the LLP 0041 §Run-once flow step 2 hazard: the child must
+  // import into the daemon's resolved HYP_HOME, not whatever process.env
+  // names. Diverge process.env.HYP_HOME from the ctx env so a regression
+  // (spawning with process.env) is unambiguous.
+  const original = process.env.HYP_HOME
+  process.env.HYP_HOME = '/some/other/process/home'
+  try {
+    const { spawn, calls } = recordingSpawn([{ status: 0, stdout: jsonPayload(1) }])
+    const handler = createBackfillHandler({ spawn })
+    await handler.perform(
+      { requestKey: '@hypaware/claude', params: { provider: 'claude', plugin: '@hypaware/claude' } },
+      makeCtx()
+    )
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].env.HYP_HOME, RESOLVED_HYP_HOME)
+    assert.notEqual(calls[0].env.HYP_HOME, process.env.HYP_HOME)
+  } finally {
+    if (original === undefined) delete process.env.HYP_HOME
+    else process.env.HYP_HOME = original
+  }
 })
 
 test('perform() omits --since when window_days is absent (retention fallback)', async () => {
@@ -228,6 +273,7 @@ test('driven through the reconciler: a failed perform writes a failed marker, th
         plugins: [{ name: '@hypaware/claude', enabled: true, config: { backfill: { window_days: 7 } } }],
       }),
       backfills: /** @type {any} */ (fakeBackfills([CLAUDE_PROVIDER])),
+      env: { ...process.env, HYP_HOME: RESOLVED_HYP_HOME },
     }
     const reconciler = createActionReconciler({
       stateRoot,
@@ -242,9 +288,11 @@ test('driven through the reconciler: a failed perform writes a failed marker, th
     let marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'))
     assert.equal(marker.backfill['@hypaware/claude'].status, 'failed')
     assert.equal(marker.backfill['@hypaware/claude'].attempts, 1)
-    // The first spawn carried the resolved --since for a 7-day window.
+    // The first spawn carried the resolved --since for a 7-day window, and
+    // the daemon-resolved HYP_HOME threaded through the reconcile input.
     const expectedSince = new Date(FIXED_NOW - 7 * 86_400_000).toISOString()
     assert.deepEqual(calls[0].args, ['backfill', 'claude', '--since', expectedSince, '--json'])
+    assert.equal(calls[0].env.HYP_HOME, RESOLVED_HYP_HOME)
 
     const p2 = await reconciler.reconcile(input)
     assert.equal(p2.results[0].outcome, 'done')

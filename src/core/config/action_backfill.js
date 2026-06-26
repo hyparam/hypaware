@@ -131,7 +131,12 @@ export function createBackfillHandler(opts = {}) {
       /** @type {BackfillSpawnResult} */
       let result
       try {
-        result = await spawn({ args, env: process.env })
+        // Spawn with the daemon's resolved env (HYP_HOME forced to the
+        // daemon's hypHome upstream in the reconcile input) — NOT
+        // `process.env`, which can name a different HYP_HOME on the
+        // direct-`runDaemon`/hermetic-smoke path and import into the wrong
+        // cache. @ref LLP 0041#run-once-flow-backfill-handler [constrained-by]
+        result = await spawn({ args, env: ctx.env })
       } catch (err) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
       }
@@ -164,10 +169,17 @@ export const backfillHandler = createBackfillHandler()
 /* ------------------------------- Internals ------------------------------- */
 
 /**
- * Read the owning plugin entry's `backfill` policy block. Absent / malformed
- * blocks degrade to defaults (on_join on, no window) — `desired()` is the
- * reconcile path and must not throw on a config the plugin validator (T5)
- * already accepted; a missing block is simply the default.
+ * Read the owning plugin entry's `backfill` policy block. A *missing* block
+ * is the default (on_join on, no window) — `desired()` is the reconcile path
+ * and must not throw on a config the plugin validator (T5) already accepted.
+ *
+ * A block that is *present but malformed* must not fail open, though: a
+ * non-boolean `on_join` (e.g. the JSON typo `on_join: "false"`) is treated
+ * as an opt-out (`onJoin: false`), never as "default on". The operator
+ * clearly intended to set the flag, and a potentially months-deep import is
+ * the wrong thing to run on a malformed opt-out. (With the per-plugin
+ * validator now live — see apply/boot wiring — such a config is rejected at
+ * apply time anyway; this is the belt-and-braces reconcile-path read.)
  *
  * @param {PluginConfigInstance | undefined} entry
  * @returns {{ onJoin: boolean | undefined, windowDays: number | undefined }}
@@ -182,7 +194,14 @@ function readBackfillPolicy(entry) {
     return { onJoin: undefined, windowDays: undefined }
   }
   const raw = /** @type {Record<string, unknown>} */ (backfill)
-  const onJoin = typeof raw.on_join === 'boolean' ? raw.on_join : undefined
+  // Absent → default on (undefined). Present-and-boolean → that value.
+  // Present-but-non-boolean → opt-out (false): do not fail open.
+  const onJoin =
+    raw.on_join === undefined
+      ? undefined
+      : typeof raw.on_join === 'boolean'
+        ? raw.on_join
+        : false
   const windowDays =
     typeof raw.window_days === 'number' && Number.isInteger(raw.window_days) && raw.window_days > 0
       ? raw.window_days

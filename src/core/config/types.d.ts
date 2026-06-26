@@ -367,6 +367,13 @@ export interface ActionContext {
   config: HypAwareV2Config
   /** Kernel backfill registry — `list()` yields enabled-or-not providers. */
   backfills: BackfillRegistry
+  /**
+   * The daemon's resolved environment, threaded down to any spawned child
+   * (notably `hyp backfill`). The daemon forces `HYP_HOME=hypHome` so the
+   * child imports into the *same* cache the daemon resolved — not whatever
+   * `process.env.HYP_HOME` happened to be (LLP 0041 §Run-once flow step 2).
+   */
+  env: NodeJS.ProcessEnv
   /** Injectable clock (test seam). */
   now: () => number
   log: PluginLogger
@@ -400,6 +407,13 @@ export interface ActionHandler {
 export interface ReconcileInput {
   config: HypAwareV2Config
   backfills: BackfillRegistry
+  /**
+   * The daemon's resolved environment for any child a handler spawns. The
+   * daemon forces `HYP_HOME=hypHome` so a spawned `hyp backfill` writes the
+   * same cache the daemon resolved, even when `opts.env`/`opts.hypHome`
+   * diverge from `process.env` (the direct-`runDaemon`/hermetic-smoke path).
+   */
+  env: NodeJS.ProcessEnv
 }
 
 /** What the reconciler did with one (handler, requestKey) unit on a pass. */

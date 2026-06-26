@@ -488,7 +488,15 @@ export async function collectHypAwareStatus(opts = {}) {
   let clientActions = null
   try {
     const actionStatus = readClientActionStatus({ stateRoot })
-    clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral })
+    // Backfill-capable plugins, derived statically from the catalog's client
+    // descriptors (claude/codex). Status cannot see the runtime backfill
+    // registry without activating plugins, so the client descriptors are the
+    // honest static proxy for "this enabled plugin imports on join".
+    /** @type {Set<string>} */
+    const backfillPlugins = new Set(
+      [...(catalog?.clientDescriptors?.values() ?? [])].map((d) => d.plugin)
+    )
+    clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral, backfillPlugins })
   } catch { /* best-effort probe */ }
 
   // ----- recent errors -----
@@ -557,25 +565,36 @@ export async function collectHypAwareStatus(opts = {}) {
  *   `n/a` (the reconciler is a no-op); otherwise desired-but-unrun →
  *   `pending`.
  *
- * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean }} args
+ * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean, backfillPlugins?: Set<string> }} args
  * @returns {ClientActionsReport | null}
  * @ref LLP 0041#idempotency-and-completion-state [implements] — per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
  */
-function buildClientActionsReport({ status, config, hasCentral }) {
+function buildClientActionsReport({ status, config, hasCentral, backfillPlugins }) {
   /** @type {ClientActionReport[]} */
   const actions = []
   const byKind = status?.byKind ?? {}
+  const backfillCapable = backfillPlugins ?? new Set()
 
-  // Declared backfill targets: enabled plugin entries with their own
-  // `config.backfill` block (LLP 0037 — policy rides the owning plugin).
+  // Declared backfill targets: enabled plugin entries that drive
+  // backfill-on-join (LLP 0037 — policy rides the owning plugin). Two cases:
+  //   1. An explicit `config.backfill` block (any host).
+  //   2. *Default-on*: a known backfill provider with no explicit block — on
+  //      a joined host `backfillHandler.desired()` still emits for it, so it
+  //      is a real (pending) target. Status mirrors that here; without this
+  //      the default-on case was invisible. It is gated on `hasCentral` so a
+  //      non-joined host (where the reconciler never runs) keeps its
+  //      V1-unchanged surface — a bare `claude`/`codex` install shows nothing.
   /** @type {Map<string, { onJoin: boolean }>} */
   const declared = new Map()
   for (const entry of config?.plugins ?? []) {
     if (entry.enabled === false) continue
     const raw = entry.config?.backfill
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
+    if (hasBlock) {
       const onJoin = /** @type {Record<string, unknown>} */ (raw).on_join !== false
       declared.set(entry.name, { onJoin })
+    } else if (hasCentral && backfillCapable.has(entry.name)) {
+      declared.set(entry.name, { onJoin: true })
     }
   }
 

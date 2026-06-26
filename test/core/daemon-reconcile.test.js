@@ -258,3 +258,86 @@ test('runDaemon does not run the boot pass while probation is still active (fres
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
+
+test('the confirmation edge during active probation drives exactly one reconcile pass (fresh-join path)', async () => {
+  // The primary LLP 0037 path: a fresh join boots under active probation
+  // (no boot pass — covered above) and the FIRST authenticated config poll
+  // clears probation, firing the confirmation edge that schedules backfill.
+  // Previously only the no-fire half was tested; this drives the edge through
+  // the real configControl seam and asserts the pass actually runs once.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-reconcile-confirm-'))
+  let handle
+  try {
+    const stateRoot = path.join(hypHome, 'hypaware')
+    const controlDir = path.join(stateRoot, 'config-control')
+    await fs.mkdir(controlDir, { recursive: true })
+
+    // Applied central slot 'a' under active, unexpired probation (the
+    // fresh-join case): the boot pass must NOT fire yet.
+    const central = JSON.stringify({ version: 2, plugins: [] }) + '\n'
+    await fs.writeFile(path.join(controlDir, 'config.a.json'), central)
+    await fs.writeFile(path.join(controlDir, 'config.a.etag'), 'etag-1')
+    await fs.symlink('config.a.json', path.join(controlDir, 'active'))
+    const until = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
+    await fs.writeFile(
+      path.join(controlDir, 'state.json'),
+      JSON.stringify({
+        probation: {
+          etag: 'etag-1',
+          applied_at: new Date().toISOString(),
+          until,
+          slot: 'a',
+          previous_slot: 'a',
+        },
+      }) + '\n'
+    )
+
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+    const { reconciler, calls } = makeFakeReconciler()
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'reconcile-confirm-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+      actionReconciler: reconciler,
+    })
+
+    // Probation is active → no boot pass.
+    await tick()
+    await tick()
+    assert.equal(calls.length, 0, 'no pass while probation is outstanding')
+
+    // Drive the confirmation edge through the same configControl seam the
+    // central plugin's poll loop uses in production: probation active→cleared
+    // fires onConfirmed → schedules exactly one reconcile pass.
+    const configControl = /** @type {{ confirmPoll(): void } | undefined} */ (
+      handle.runtime.configControl
+    )
+    assert.ok(configControl, 'the daemon runtime exposes the configControl seam')
+    configControl.confirmPoll()
+
+    await waitFor(() => calls.length === 1)
+    // A second confirmPoll is a no-op (probation already cleared) — no extra pass.
+    configControl.confirmPoll()
+    await tick()
+    await tick()
+    assert.equal(calls.length, 1, 'exactly one pass per confirmation edge')
+
+    // The pass carried the effective config + the kernel backfill registry,
+    // and the daemon's resolved HYP_HOME threaded into the input.
+    assert.ok(calls[0].config)
+    assert.equal(typeof calls[0].backfills.list, 'function')
+    assert.equal(calls[0].env.HYP_HOME, hypHome)
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})

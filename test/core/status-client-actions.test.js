@@ -107,6 +107,50 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
   assert.ok(report.clientActions.actions.every((a) => a.kind === 'backfill'))
 })
 
+test('a default-on backfill target (enabled client, no explicit block) shows pending on a joined host', async () => {
+  // Regression: backfillHandler.desired() emits for an enabled provider even
+  // with no `config.backfill` block (default-on). Status used to require an
+  // explicit block, so the default-on case was invisible. On a joined host
+  // it must now surface as pending.
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      // No `config.backfill` block at all → default-on.
+      { name: '@hypaware/claude' },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(report.clientActions, 'the default-on target is surfaced')
+  const m = byKey(report.clientActions.actions)
+  assert.equal(m.get('@hypaware/claude')?.state, 'pending')
+  assert.equal(m.get('@hypaware/claude')?.kind, 'backfill')
+  // ai-gateway is enabled but is not a backfill provider — it must not appear.
+  assert.equal(m.has('@hypaware/ai-gateway'), false)
+})
+
+test('a default-on client on a NON-joined host keeps the V1 surface (no spurious action)', async () => {
+  // The reconciler never runs on a non-joined host, so a bare local claude
+  // install must not grow a new status line.
+  const hypHome = await makeHome()
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway' }, { name: '@hypaware/claude' }],
+  }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.clientActions, null)
+})
+
 test('a failed backfill does not flip overall to degraded', async () => {
   const hypHome = await makeHome()
 

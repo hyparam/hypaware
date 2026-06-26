@@ -278,7 +278,15 @@ export async function runDaemon(opts = {}) {
   // sink's pull loop may deliver a document immediately after its
   // bootstrap, and `stage()` refuses to run without a validator. The
   // watchdog re-arms here on every relaunch that boots mid-probation.
-  configControl.attachApplyDeps(buildConfigApplyDeps({ stateRoot }))
+  // The live per-plugin config registry is threaded in so apply-time
+  // validation actually runs the section validators the active plugins
+  // registered (e.g. claude/codex `backfill` blocks). Without it the
+  // per-plugin validators are dead in production: a served config with a
+  // malformed `backfill` block would be accepted instead of rolled back.
+  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — apply-time validation dispatches to the source plugin's own config-section validator
+  configControl.attachApplyDeps(
+    buildConfigApplyDeps({ stateRoot, configRegistry: boot.runtime.configRegistry })
+  )
   configControl.armProbationWatchdog()
 
   // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041) -----
@@ -320,6 +328,12 @@ export async function runDaemon(opts = {}) {
         const report = await actionReconciler.reconcile({
           config,
           backfills: boot.runtime.backfills,
+          // Thread the daemon's resolved env, forcing HYP_HOME to the
+          // hypHome this daemon actually booted against, so a spawned
+          // `hyp backfill` imports into the same cache rather than whatever
+          // process.env.HYP_HOME happened to be (LLP 0041 §Run-once flow).
+          // @ref LLP 0041#run-once-flow-backfill-handler [implements] — the child runs against the daemon's resolved HYP_HOME, not process.env
+          env: { ...env, HYP_HOME: hypHome },
         })
         fileLog.info('daemon.reconcile_pass', {
           hyp_reason: reason,
