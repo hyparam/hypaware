@@ -8,6 +8,9 @@ import type {
   CapabilityName,
   ConfigRegistry,
   ValidationError,
+  BackfillRegistry,
+  PluginLogger,
+  JsonObject,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 
 /**
@@ -265,6 +268,189 @@ export interface CreateConfigControlOptions {
   /** Staged restart hook; the daemon exits with the restart code. */
   requestRestart(reason: string): void
   now?: () => number
+}
+
+// =============================================================================
+// Client-action reconciler (LLP 0036 / LLP 0041)
+// =============================================================================
+
+/**
+ * Recorded state of a single reconciled action, persisted in
+ * `config-control/client-actions.json`.
+ *
+ * - `done` — run-once terminal state; the action is never auto-run again
+ *   (the marker is what makes every subsequent boot cheap). See LLP 0036
+ *   §Idempotency.
+ * - `failed` — not terminal; the next reconcile pass retries it.
+ * - `applied` — current applied state of a reconciled/reversible handler
+ *   (attach, future); `reverse()` runs on leave when the config stops
+ *   naming the effect.
+ */
+export type ActionMarkerStatus = 'done' | 'failed' | 'applied'
+
+/**
+ * One persisted action marker, namespaced by handler `kind` then keyed by
+ * `request_key` inside `config-control/client-actions.json`. The key is a
+ * structured object (not a bare boolean) so a later refinement can add a
+ * high-water input without a format break (LLP 0036 §request-key,
+ * LLP 0041 §Idempotency-and-completion-state). Handlers may attach extra
+ * fields via `ActionOutcome.detail`.
+ */
+export interface ActionMarker {
+  status: ActionMarkerStatus
+  /** The reconciled unit's request key (echoed for self-describing files). */
+  request_key: string
+  /** ISO time the action reached `done`. */
+  at?: string
+  /** Rows written by a run-once import (recorded on `done`). */
+  rows?: number
+  /** Human-readable failure reason (recorded on `failed`). */
+  reason?: string
+  /** ISO time of the most recent attempt (recorded on `failed`). */
+  last_attempt?: string
+  /** Attempts so far; bumped each `failed` pass (recorded on `failed`). */
+  attempts?: number
+  /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
+  [extra: string]: unknown
+}
+
+/**
+ * Persisted marker store: the whole `client-actions.json` document,
+ * namespaced by handler `kind` (e.g. `backfill`) then keyed by request key
+ * (e.g. the owning plugin name).
+ */
+export type ActionMarkerStore = Record<string, Record<string, ActionMarker>>
+
+/**
+ * A unit the reconciler should converge, emitted by `ActionHandler.desired()`.
+ * `params` is handler-specific and not persisted — it is passed straight to
+ * `perform()` (e.g. backfill carries `{ plugin, windowDays }`).
+ */
+export interface DesiredAction {
+  requestKey: string
+  params?: Record<string, unknown>
+}
+
+/**
+ * Result of an `ActionHandler.perform()` / `reverse()` call. The reconciler
+ * turns this into the persisted {@link ActionMarker} (adding timestamps and
+ * the attempt counter); `detail` is merged onto the marker verbatim.
+ */
+export interface ActionOutcome {
+  /** `done` = the effect applied/reversed cleanly; `failed` = retry next pass. */
+  status: 'done' | 'failed'
+  /** Rows written (run-once import); recorded on the `done` marker. */
+  rows?: number
+  /** Failure reason; recorded on the `failed` marker. */
+  reason?: string
+  /** Extra handler-specific fields merged into the persisted marker. */
+  detail?: JsonObject
+}
+
+/**
+ * Context handed to every handler hook on each pass. It is the
+ * {@link ReconcileInput} (effective config + kernel registries) augmented
+ * with the reconciler's injected clock and logger so a handler need not
+ * close over them itself.
+ */
+export interface ActionContext {
+  /** Effective (merged) config the daemon booted (LLP 0031). */
+  config: HypAwareV2Config
+  /** Kernel backfill registry — `list()` yields enabled-or-not providers. */
+  backfills: BackfillRegistry
+  /** Injectable clock (test seam). */
+  now: () => number
+  log: PluginLogger
+}
+
+/**
+ * A registered detect / perform / (optional) reverse triple — the unit the
+ * reconciler drives. The reconciler is generic: it knows nothing about
+ * Claude vs Codex, only this interface (LLP 0036 §Options-3, LLP 0041).
+ */
+export interface ActionHandler {
+  /** Marker namespace + status section key (e.g. `backfill`). */
+  kind: string
+  /**
+   * Enumerate the units this handler wants reconciled, given the effective
+   * config + registries. Pure — no effects.
+   */
+  desired(ctx: ActionContext): DesiredAction[]
+  /** Run the effect for one desired action (subprocess or in-proc). */
+  perform(action: DesiredAction, ctx: ActionContext): Promise<ActionOutcome>
+  /**
+   * Undo a previously-applied effect whose request key the config no longer
+   * names (leave/detach). Run-once handlers (backfill) omit this — imported
+   * data stays and the marker is kept. Reversible handlers (attach, future)
+   * implement it.
+   */
+  reverse?(requestKey: string, ctx: ActionContext): Promise<ActionOutcome>
+}
+
+/** Arguments to one {@link ActionReconciler.reconcile} pass. */
+export interface ReconcileInput {
+  config: HypAwareV2Config
+  backfills: BackfillRegistry
+}
+
+/** What the reconciler did with one (handler, requestKey) unit on a pass. */
+export interface ReconcileActionResult {
+  kind: string
+  requestKey: string
+  /**
+   * - `done` — `perform()` succeeded this pass; marker advanced to `done`.
+   * - `skipped` — a `done` marker already existed (run-once short-circuit).
+   * - `failed` — `perform()`/`reverse()` failed; marker recorded `failed`.
+   * - `reversed` — `reverse()` succeeded; marker removed.
+   */
+  outcome: 'done' | 'skipped' | 'failed' | 'reversed'
+  rows?: number
+  reason?: string
+  attempts?: number
+}
+
+/** Summary of one reconcile pass. */
+export interface ReconcileReport {
+  results: ReconcileActionResult[]
+}
+
+/**
+ * Read-only client-action status for `hyp status`, usable from any process
+ * (it never constructs the reconciler). Mirrors `ConfigControlStatus`.
+ */
+export interface ClientActionStatus {
+  /** Persisted markers, namespaced by handler kind. Empty when none ran. */
+  byKind: ActionMarkerStore
+}
+
+/**
+ * Daemon-only handle to the action reconciler. Constructed like
+ * `createConfigControl`; the daemon wires its `reconcile()` to the
+ * config-confirmation edge and the after-activation already-confirmed pass.
+ */
+export interface ActionReconciler {
+  /**
+   * Level-triggered: for each handler, diff `desired()` against the
+   * persisted markers and act only on the gap (a missed run is recovered on
+   * the next pass). Safe to call repeatedly; a `done` marker short-circuits.
+   */
+  reconcile(input: ReconcileInput): Promise<ReconcileReport>
+  /** Current persisted markers (same shape as `readClientActionStatus`). */
+  readStatus(): ClientActionStatus
+}
+
+export interface CreateActionReconcilerOptions {
+  /**
+   * Kernel state root (`<HYP_HOME>/hypaware`). The marker file lives at
+   * `<stateRoot>/config-control/client-actions.json`, alongside the apply
+   * engine's `state.json` (LLP 0041 — the reconciler is kernel surface).
+   */
+  stateRoot: string
+  /** Ordered handlers; v1 ships `[backfillHandler]`. */
+  handlers: ActionHandler[]
+  /** Injectable clock (test seam); defaults to `Date.now`. */
+  now?: () => number
+  log?: PluginLogger
 }
 
 export type { ConfigStageResult, ConfigApplyErrorKind }
