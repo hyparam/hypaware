@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
-import { attach, defaultSettingsPath, detach } from './settings.js'
+import { attach, defaultSettingsPath } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
 import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
@@ -16,7 +16,7 @@ import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'
@@ -53,16 +53,17 @@ export function claudeSessionContextFile(ctx) {
  *
  * Resolves the `hypaware.ai-gateway@^2.0.0` capability, registers
  * the Anthropic upstream preset (path + header signature match) and
- * the full Anthropic exchange projector, wires attach/detach against
+ * the full Anthropic exchange projector, wires `attach()` against
  * `~/.claude/settings.json`, and contributes the three Claude-targeted
  * helper skills. The projector reads
  * `<stateDir>/session-context.jsonl` (written by the managed Claude
  * hook) for `cwd` / `git_branch` and walks the local Claude JSONL
  * transcripts under `<HOME>/.claude/projects` for native DAG identity.
  *
- * Each attach/detach emits a `client.attach`/`client.detach` span
- * tagged with `hyp_plugin`, `client_name`, `status`, and
- * `restored=true|false`.
+ * `attach()` emits a `client.attach` span tagged with `hyp_plugin`,
+ * `client_name`, `status`, and `restored=true|false`. The reversing
+ * detach is the single core disk-driven undo (LLP 0045 §Part 3), not a
+ * per-adapter hook.
  *
  * @param {PluginActivationContext} ctx
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream preset
@@ -194,68 +195,6 @@ export async function activate(ctx) {
               changed: result.changed === true,
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
-                : undefined,
-            })
-          } catch (err) {
-            span.setAttribute('status', 'failed')
-            span.setAttribute('restored', false)
-            throw err
-          }
-        },
-        { component: 'plugin.claude' }
-      )
-    },
-    /** @param {AiGatewayClientDetachContext} detachCtx */
-    async detach(detachCtx) {
-      const homeDir = ctx.env.HOME ?? os.homedir()
-      const settingsPath = defaultSettingsPath(homeDir)
-
-      return withSpan(
-        'client.detach',
-        {
-          [Attr.PLUGIN]: PLUGIN_NAME,
-          [Attr.OPERATION]: 'client.detach',
-          client_name: CLIENT_NAME,
-          hyp_client: CLIENT_NAME,
-          dry_run: detachCtx.dryRun === true,
-        },
-        async (span) => {
-          if (detachCtx.dryRun) {
-            span.setAttribute('status', 'ok')
-            span.setAttribute('restored', false)
-            writeDetachOutput(detachCtx, {
-              status: 'ok',
-              client: CLIENT_NAME,
-              dryRun: true,
-              settingsPath,
-              changed: false,
-            })
-            return
-          }
-          try {
-            const result = await detach({ settingsPath })
-            const restored = result.changed === true
-            span.setAttribute('status', 'ok')
-            span.setAttribute('restored', restored)
-            if (restored) {
-              logger.info('client.detach.write', {
-                hyp_plugin: PLUGIN_NAME,
-                hyp_client: CLIENT_NAME,
-                settings_path: settingsPath,
-                changed: true,
-              })
-            }
-            writeDetachOutput(detachCtx, {
-              status: 'ok',
-              client: CLIENT_NAME,
-              dryRun: false,
-              settingsPath,
-              changed: restored,
-              removed: result.changed && result.removed !== undefined
-                ? result.removed
-                : undefined,
-              warning: result.changed && result.warning !== undefined
-                ? result.warning
                 : undefined,
             })
           } catch (err) {
@@ -514,51 +453,3 @@ function writeAttachOutput(attachCtx, fields) {
   }
 }
 
-/**
- * Render detach output: machine-readable JSON when `json` is set,
- * otherwise the human prose. Keeps the JSON shape stable so callers
- * can grep it.
- *
- * @param {AiGatewayClientDetachContext} detachCtx
- * @param {{
- *   status: 'ok' | 'failed',
- *   client: string,
- *   dryRun: boolean,
- *   settingsPath: string,
- *   changed: boolean,
- *   removed?: string,
- *   warning?: string,
- * }} fields
- */
-function writeDetachOutput(detachCtx, fields) {
-  if (detachCtx.json) {
-    /** @type {Record<string, unknown>} */
-    const payload = {
-      status: fields.status,
-      action: 'detach',
-      client: fields.client,
-      dry_run: fields.dryRun,
-      settings_path: fields.settingsPath,
-      changed: fields.changed,
-    }
-    if (fields.removed !== undefined) payload.removed = fields.removed
-    if (fields.warning !== undefined) payload.warning = fields.warning
-    detachCtx.stdout.write(JSON.stringify(payload) + '\n')
-    return
-  }
-  if (fields.dryRun) {
-    detachCtx.stdout.write(`(dry-run) Would detach Claude Code from ${fields.settingsPath}\n`)
-    return
-  }
-  if (fields.changed) {
-    detachCtx.stdout.write(`✓ Claude Code reverted (${fields.settingsPath})\n`)
-    if (fields.removed !== undefined) {
-      detachCtx.stdout.write(`  Removed ANTHROPIC_BASE_URL=${fields.removed}\n`)
-    }
-    if (fields.warning !== undefined) {
-      detachCtx.stdout.write(`  warning: ${fields.warning}\n`)
-    }
-  } else {
-    detachCtx.stdout.write(`No HypAware marker found in ${fields.settingsPath}; nothing to do.\n`)
-  }
-}

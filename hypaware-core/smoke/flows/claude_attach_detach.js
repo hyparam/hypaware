@@ -220,9 +220,9 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && v.length === 0
     )
     expect.that(
-      'stdout: hyp detach reported the revert',
+      'stdout: hyp detach reported the revert (core disk-driven undo, plugin-agnostic prose)',
       detachStdout.text(),
-      (v) => typeof v === 'string' && v.includes('Claude Code reverted')
+      (v) => typeof v === 'string' && v.includes('Detached claude') && v.includes(settingsPath)
     )
 
     const afterDetach = await fs.readFile(settingsPath, 'utf8')
