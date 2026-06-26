@@ -167,6 +167,78 @@ test('hidden Claude hook command is omitted from top-level help', async () => {
   assert.equal(stdout.text().includes('claude-hook'), false)
 })
 
+test('top-level help lists commands declared by config-active plugins', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-plugins-'))
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({
+      version: 2,
+      plugins: [{ name: '@hypaware/context-graph' }, { name: '@hypaware/vector-search' }],
+    })
+  )
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome } })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  const out = stdout.text()
+  // context-graph is in the default surface; vector-search is excluded
+  // from default but config-enabled here — both must appear, with the
+  // summary pulled from the manifest's `contributes.commands`.
+  assert.match(out, /graph project\s+Project every registered source contract/)
+  assert.match(out, /graph neighbors\s+Walk the activity graph/)
+  assert.match(out, /vector search\s+Similarity search across configured vector indexes/)
+  // A plugin whose name is not in the config must stay out of help.
+  assert.equal(out.includes('enrich'), false)
+})
+
+test('top-level help lists a local plugin addition on a fleet-joined host', async () => {
+  // Regression: help must resolve the effective config the same way
+  // `bootKernel` does — with the discovered plugin catalog. A joined host
+  // has a central layer; the merge validator, run WITHOUT the catalog,
+  // treats every bundled plugin as unknown and drops the local `plugins[]`
+  // addition (`@hypaware/context-graph`) — so help would hide `graph`
+  // commands that actually dispatch.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-joined-'))
+  const controlDir = path.join(hypHome, 'hypaware', 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  // Central layer (authoritative, fleet-owned) — does NOT include the graph.
+  await fs.writeFile(
+    path.join(controlDir, 'seed.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/local-fs' }] })
+  )
+  // Local layer (user-owned, additive) adds the graph.
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/context-graph' }] })
+  )
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome } })
+
+  assert.equal(code, 0)
+  assert.match(stdout.text(), /graph project\s+Project every registered source contract/)
+})
+
+test('top-level help omits plugin commands when the plugin is disabled', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-disabled-'))
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/context-graph', enabled: false }] })
+  )
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome } })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  assert.equal(stdout.text().includes('graph project'), false)
+})
+
 test('dispatch surfaces boot-path sink materialization warnings', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-dispatch-sink-warning-'))
   const configPath = path.join(hypHome, 'hypaware-config.json')

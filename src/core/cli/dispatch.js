@@ -18,7 +18,10 @@ import {
 } from '../observability/index.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
-import { bootKernel } from '../runtime/boot.js'
+import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { materializeSinks } from '../sinks/materialize.js'
@@ -103,8 +106,18 @@ export async function dispatch(argv, opts = {}) {
   const obsEnv = readObservabilityEnv(env)
   const cacheRoot = path.join(obsEnv.stateDir, 'cache')
 
+  // Inputs the help path uses to list plugin commands without booting.
+  // `obsEnv.stateDir` is `<HYP_HOME>/hypaware` — the same `stateRoot`
+  // boot derives — so manifest discovery and config resolution see the
+  // exact plugin set and effective config dispatch would activate.
+  const helpDiscovery = {
+    workspaceDir: opts.workspaceDir,
+    stateRoot: obsEnv.stateDir,
+    configPath: resolveConfigPath({ env, hypHome: obsEnv.hypHome }),
+  }
+
   if (argv.length === 0 && !isInteractiveStream(stdout)) {
-    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0 })
+    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0, discovery: helpDiscovery })
   }
   if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
     const require = createRequire(import.meta.url)
@@ -113,7 +126,7 @@ export async function dispatch(argv, opts = {}) {
     return 0
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
-    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length })
+    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length, discovery: helpDiscovery })
   }
 
   // Boot the kernel so plugin-contributed commands, sources, sinks,
@@ -351,10 +364,11 @@ async function stopBootStartedSources(kernel) {
  *   registry: ReturnType<typeof createCommandRegistry>,
  *   devRunId: string | undefined,
  *   argvCount: number,
+ *   discovery?: { workspaceDir?: string, stateRoot: string, configPath: string },
  * }} args
  * @returns {Promise<number>}
  */
-async function runHelp({ stdout, registry, devRunId, argvCount }) {
+async function runHelp({ stdout, registry, devRunId, argvCount, discovery }) {
   const attrs = buildAttrs({
     [Attr.COMPONENT]: 'cmd-dispatch',
     [Attr.OPERATION]: 'command.run',
@@ -375,11 +389,13 @@ async function runHelp({ stdout, registry, devRunId, argvCount }) {
         const start = performance.now()
         let exitCode = 0
         try {
+          const pluginCommands = discovery ? await collectPluginHelpCommands(discovery) : []
           getLogger('cli').info('cli.help_rendered', {
             [Attr.COMPONENT]: 'cmd-dispatch',
             command_count: registry.size(),
+            plugin_command_count: pluginCommands.length,
           })
-          renderHelp({ stdout, registry })
+          renderHelp({ stdout, registry, pluginCommands })
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error))
           span.recordException(err)
@@ -412,21 +428,107 @@ async function runHelp({ stdout, registry, devRunId, argvCount }) {
 
 /**
  * Render the help text. Lists visible commands (sorted) with their
- * summary; hidden commands are dropped.
+ * summary; hidden commands are dropped. Plugin-contributed commands
+ * (gathered from manifests by {@link collectPluginHelpCommands}) are
+ * merged in alongside core commands; a core command always wins a name
+ * collision so its registered summary is authoritative.
  *
- * @param {{ stdout: { write(chunk: string): unknown }, registry: ReturnType<typeof createCommandRegistry> }} args
+ * @param {{
+ *   stdout: { write(chunk: string): unknown },
+ *   registry: ReturnType<typeof createCommandRegistry>,
+ *   pluginCommands?: { name: string, summary: string }[],
+ * }} args
  */
-function renderHelp({ stdout, registry }) {
-  const visible = registry.list().filter((c) => !c.hidden)
+function renderHelp({ stdout, registry, pluginCommands = [] }) {
+  const core = registry
+    .list()
+    .filter((c) => !c.hidden)
+    .map((c) => ({ name: c.name, summary: c.summary }))
+  const coreNames = new Set(core.map((c) => c.name))
+  const merged = [...core, ...pluginCommands.filter((c) => !coreNames.has(c.name))].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  )
+
   stdout.write('hyp — HypAware kernel CLI\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
   stdout.write('Commands:\n')
-  const nameWidth = Math.max(...visible.map((c) => c.name.length), 8)
-  for (const cmd of visible) {
+  const nameWidth = Math.max(...merged.map((c) => c.name.length), 8)
+  for (const cmd of merged) {
     stdout.write(`  ${cmd.name.padEnd(nameWidth)}  ${cmd.summary}\n`)
   }
   stdout.write('\n')
   stdout.write(`Run 'hyp <command> --help' for command-specific help.\n`)
+}
+
+/**
+ * Collect the listable plugin commands for top-level help, WITHOUT
+ * activating any plugin.
+ *
+ * Help renders before `bootKernel`, so it cannot read the activated
+ * command registry — doing so would cost a full boot: importing every
+ * plugin entrypoint and binding the gateway/OTLP listeners some plugins
+ * open during activation (the same reason `decideBootProfile` uses an
+ * empty activation set for `daemon`/`status`/`version`). Instead help
+ * reads the two cheap inputs boot uses for *discovery* — plugin
+ * manifests (plain JSON) and the effective config — and lists the
+ * commands each config-active plugin *declares* in its manifest
+ * `contributes.commands`. That scope matches dispatch's `config` boot
+ * profile, so every command shown here is one that will actually
+ * dispatch.
+ *
+ * Best-effort: any failure (missing workspace, unreadable config or
+ * lock file) degrades to "no plugin commands" rather than failing
+ * `--help`.
+ *
+ * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
+ * @returns {Promise<{ name: string, summary: string }[]>}
+ * @ref LLP 0005#declarative [implements] — manifest lists commands before any plugin code is loaded
+ */
+async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }) {
+  try {
+    const [bundled, installed] = await Promise.all([
+      discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {}),
+      discoverInstalledPlugins({ stateDir: stateRoot }),
+    ])
+    // Resolve the effective config the SAME way `bootKernel` does — with
+    // the discovered plugin catalog. Without it the merge validator treats
+    // every bundled plugin as unknown and drops local `plugins[]` additions
+    // (e.g. `@hypaware/context-graph`) from a fleet-joined host's effective
+    // config, so help would hide commands that actually dispatch.
+    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
+    const merged = await resolveLayeredConfigFromDisk({
+      stateRoot,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+    const enabled = new Set(
+      (merged.effective?.plugins ?? []).filter((p) => p.enabled !== false).map((p) => p.name)
+    )
+    if (enabled.size === 0) return []
+
+    // Include the excluded-from-default bundled set: a config may enable
+    // one (e.g. `@hypaware/vector-search`), in which case its commands
+    // are runnable and belong in help.
+    const manifests = [...bundled.loaded, ...bundled.excluded, ...installed.loaded]
+    /** @type {Map<string, { name: string, summary: string }>} */
+    const out = new Map()
+    for (const entry of manifests) {
+      if (!enabled.has(entry.manifest.name)) continue
+      for (const cmd of entry.manifest.contributes?.commands ?? []) {
+        if (!cmd || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
+        out.set(cmd.name, {
+          name: cmd.name,
+          summary: typeof cmd.summary === 'string' ? cmd.summary : '',
+        })
+      }
+    }
+    return [...out.values()]
+  } catch {
+    // Help must never fail because plugin discovery did. Fall back to
+    // core commands only.
+    return []
+  }
 }
