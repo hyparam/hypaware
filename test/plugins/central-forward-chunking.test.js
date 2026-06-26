@@ -550,6 +550,35 @@ test('a mid-partition failure leaves the watermark at the last acked chunk', asy
   assert.equal(watermarks.record?.continuation.seq, '5000')
 })
 
+test('a respooled suffix re-sends the un-acked chunk with the SAME batch-id (ledger-dedup safe)', async () => {
+  // Regression for the cross-tick idempotency hole: tick 1 acks chunk 0 (seq
+  // 5000) and advances the watermark, then chunk 1 fails AFTER the server may
+  // have committed it. Tick 2 respools from the advanced watermark and re-streams
+  // that same suffix. The re-sent chunk MUST carry the batch-id it had in tick 1
+  // so the server ledger drops the redelivery; an id keyed on the per-tick chunk
+  // ordinal would re-number it to 0 and double-store the committed chunk.
+  let n = 0
+  const built = buildSink({ count: 12_000, responder: () => (++n === 2 ? 500 : 202) })
+  const r1 = await built.sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(r1.status, 'failed')
+  assert.equal(built.calls.length, 2) // chunk 0 (202) + chunk 1 (500), then stop
+  assert.equal(built.watermarks.record?.continuation.seq, '5000')
+  const failedChunkBatchId = built.calls[1].batchId
+
+  // Tick 2: same sink/watermark, server now healthy. The respool reads only the
+  // un-acked suffix (seq > 5000) and replays it.
+  const r2 = await built.sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(r2.status, 'exported')
+  const tick2 = built.calls.slice(2)
+  assert.equal(tick2[0].rowCount, 5000, 'respool resumes at the un-acked suffix, not the whole partition')
+  assert.equal(
+    tick2[0].batchId,
+    failedChunkBatchId,
+    'respooled chunk keeps its batch-id across the watermark advance (server dedupes the redelivery)'
+  )
+  assert.equal(built.watermarks.record?.continuation.seq, '12000')
+})
+
 test('a fresh partition (no watermark) reads from the start and advances', async () => {
   // No persisted watermark -> since undefined -> full read (the safe
   // at-least-once direction), then the watermark is created.

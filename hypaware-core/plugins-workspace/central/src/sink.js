@@ -234,11 +234,22 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // the last row in the chunk, the watermark to persist once it is acked.
   /** @type {SinkContinuation | undefined} */
   let lastAfter
+  // The seq this chunk starts AFTER — the `since` watermark for the first
+  // chunk, then the previous chunk's last `after` seq. The idempotency key is
+  // derived from THIS (not the per-tick `chunkIndex`) so a chunk's id is stable
+  // across watermark advances: once an earlier chunk is acked and the watermark
+  // moves, a respool re-reads the un-acked suffix from that same watermark, the
+  // re-streamed chunk reproduces the same `[startSeq, body]`, and the server
+  // ledger dedupes the redelivery. Keying on `chunkIndex` would re-number the
+  // suffix from 0 and mint a NEW id for an already-committed-but-unacked chunk,
+  // double-storing it on the server.
+  let chunkStartSeq = since?.seq ?? '0'
 
   const flushChunk = async () => {
     if (lines.length === 0) return
     const body = lines.join('\n') + '\n'
-    const batchId = batchIdForChunk(signal, tablePath, chunkIndex, body)
+    // @ref LLP 0040#applying-it-to-both-sinks [implements] — stable per-chunk batch id keyed by the chunk's start seq, so a post-watermark-advance respool reproduces the same id and the server ledger dedupes.
+    const batchId = batchIdForChunk(signal, tablePath, chunkStartSeq, body)
     const bytes = Buffer.byteLength(body, 'utf8')
     const rows = lines.length
     const after = lastAfter
@@ -268,6 +279,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     })
     bytesWritten += bytes
     chunkIndex += 1
+    // The next chunk starts after this chunk's last row, so its batch id keys
+    // off this chunk's `after` — keeping ids stable whether a tick streams the
+    // whole partition or a respool replays only the un-acked suffix.
+    if (after) chunkStartSeq = after.seq
     lines = []
     pendingBytes = 0
     // @ref LLP 0040#watermark-contract [implements] — ship first, advance second: the chunk POST is acked, so persist this chunk's last `after`. A crash before this re-sends at most this one chunk next tick; the server ledger dedupes the redelivered prefix.
@@ -294,23 +309,31 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
 
 /**
  * Deterministic idempotency key for one chunk. Hashes the signal, the
- * partition identity (`tablePath`), the chunk's ordinal position, and
- * its exact bytes. Re-streaming a partition reproduces the same chunk
- * boundaries and order, so a re-sent chunk hashes to the same id (the
- * server dedupes it); two byte-identical chunks at different positions —
- * or in different partitions — get distinct ids and are both stored.
+ * partition identity (`tablePath`), the seq this chunk starts AFTER, and its
+ * exact bytes.
+ *
+ * Keying on `chunkStartSeq` (the watermark the chunk resumes from) rather than a
+ * per-tick ordinal is what keeps the id stable across a watermark advance: when
+ * an earlier chunk is acked the watermark moves, and a respool re-reads only the
+ * un-acked suffix — which reproduces the same `[startSeq, body]` and so the same
+ * id, letting the server ledger dedupe a chunk that committed but whose ack was
+ * lost. (An ordinal would re-number the suffix from 0 and mint a fresh id for an
+ * already-stored chunk, double-storing it.) Two byte-identical chunks at
+ * different positions still get distinct ids because a row's `_hyp_ingest_seq`
+ * is unique, so their start seqs differ; chunks in different partitions differ
+ * on `tablePath`.
  *
  * @param {string} signal
  * @param {string} tablePath
- * @param {number} chunkIndex
+ * @param {string} chunkStartSeq decimal `_hyp_ingest_seq` the chunk starts after
  * @param {string} body
  * @returns {string}
  */
-function batchIdForChunk(signal, tablePath, chunkIndex, body) {
+function batchIdForChunk(signal, tablePath, chunkStartSeq, body) {
   return createHash('sha256')
     .update(signal).update('\0')
     .update(tablePath).update('\0')
-    .update(String(chunkIndex)).update('\0')
+    .update(chunkStartSeq).update('\0')
     .update(body)
     .digest('hex').slice(0, 32)
 }
