@@ -3,7 +3,7 @@ import type {
   CapabilityRegistry,
   QueryRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
-import type { ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
+import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
 import type { ExtendedSourceRegistry } from '../registry/sources.js'
 import type { ExtendedSinkRegistry } from '../registry/sinks.js'
 import type { KernelRuntime } from '../runtime/activation.js'
@@ -450,6 +450,13 @@ export interface RunDaemonOptions {
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
   tmpRoot?: string
+  /**
+   * Injected client-action reconciler (LLP 0041). Defaults to one built with
+   * the v1 `[backfillHandler]`; tests pass a fake to drive the boot
+   * already-confirmed pass and the confirmation-edge wiring without a real
+   * `hyp backfill` subprocess.
+   */
+  actionReconciler?: ActionReconciler
 }
 
 export interface DaemonLogger {

@@ -13,6 +13,8 @@ import {
 import { readObservabilityEnv } from '../observability/env.js'
 import { createConfigControl } from '../config/apply.js'
 import { buildConfigApplyDeps } from '../config/apply_deps.js'
+import { createActionReconciler } from '../config/action_reconciler.js'
+import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
@@ -134,6 +136,14 @@ export async function runDaemon(opts = {}) {
   const done = new Promise((resolve) => { resolveDone = resolve })
   /** @type {(() => Promise<void>) | null} */
   let triggerReload = null
+  // Forward reference to the client-action reconcile scheduler. It can only
+  // be built after `boot` resolves (it needs the effective config + the
+  // kernel backfill registry), but the confirmation-edge hook below is wired
+  // into `configControl` before boot — so the hook calls through this ref and
+  // an edge that fires before the scheduler exists is recovered by the
+  // after-activation already-confirmed pass (mirrors `pendingRestart`).
+  /** @type {((reason: string) => void) | null} */
+  let scheduleReconcile = null
   let healthyAtMs = 0
 
   // PID file is written before any plugin activation: that way a
@@ -170,6 +180,17 @@ export async function runDaemon(opts = {}) {
       } else {
         pendingRestart = true
       }
+    },
+    // The confirmation edge (probation active→cleared on the first
+    // authenticated poll): the running config is now the confirmed one, so
+    // schedule one reconcile pass. The pull loop's immediate pull can race
+    // the tail of runDaemon, so an edge before the scheduler is wired is
+    // dropped here and recovered by the after-activation already-confirmed
+    // pass (probation is cleared by then) — same race handling as
+    // `pendingRestart`.
+    // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — the daemon wires onConfirmed to schedule a reconcile pass per confirmation edge; apply.js stays ignorant of the reconciler
+    onConfirmed: () => {
+      if (scheduleReconcile) scheduleReconcile('confirm-edge')
     },
   })
   const bootEval = await configControl.evaluateAtBoot()
@@ -259,6 +280,77 @@ export async function runDaemon(opts = {}) {
   // watchdog re-arms here on every relaunch that boots mid-probation.
   configControl.attachApplyDeps(buildConfigApplyDeps({ stateRoot }))
   configControl.armProbationWatchdog()
+
+  // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041) -----
+  // The daemon is the only host with `configControl`, so a reconciler
+  // attached here is daemon-only by construction: `hyp status` (a plain CLI
+  // boot) never performs a machine effect. v1 ships one handler, the
+  // run-once backfill-on-join. Constructed only after boot because a pass
+  // needs the effective config + the kernel backfill registry.
+  // @ref LLP 0041#the-reconciler-component [implements] — construct the reconciler with [backfillHandler] in the daemon
+  const actionReconciler =
+    opts.actionReconciler ??
+    createActionReconciler({
+      stateRoot,
+      handlers: [backfillHandler],
+      log: getLogger('action-reconciler'),
+    })
+
+  /**
+   * Run one reconcile pass against the effective config + backfill registry.
+   * Never throws — a failed handler is surfaced as a `failed` marker by the
+   * reconciler, and any unexpected error is logged here, so the single-flight
+   * scheduler's rerun loop is never aborted by a pass.
+   * @param {string} reason
+   */
+  async function runReconcilePass(reason) {
+    const config = boot.config
+    // No effective config (neither layer present) → nothing to reconcile.
+    if (!config) return
+    await withSpan(
+      'client_action.reconcile',
+      {
+        [Attr.COMPONENT]: 'daemon',
+        [Attr.OPERATION]: 'client_action.reconcile',
+        [Attr.DEV_RUN_ID]: runId,
+        hyp_reason: reason,
+        status: 'ok',
+      },
+      async () => {
+        const report = await actionReconciler.reconcile({
+          config,
+          backfills: boot.runtime.backfills,
+        })
+        fileLog.info('daemon.reconcile_pass', {
+          hyp_reason: reason,
+          results: report.results.length,
+        })
+      },
+      { component: 'daemon' }
+    ).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err)
+      fileLog.error('daemon.reconcile_failed', { hyp_reason: reason, message })
+    })
+  }
+
+  // The single-flight guard: only one pass runs at a time, off the tick loop.
+  const reconcileScheduler = createReconcilePassScheduler({
+    run: runReconcilePass,
+    log: fileLog,
+  })
+  scheduleReconcile = reconcileScheduler.schedule
+
+  // After-activation already-confirmed pass: if a central layer is present
+  // and the running config already cleared probation on a prior boot (no
+  // active probation marker now), run one pass to recover anything missed
+  // while a previous probation was outstanding. A fresh join — probation
+  // still active — instead waits for the `confirmPoll` edge above. A
+  // non-joined host has no central layer, so the reconciler stays a no-op.
+  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — after-activation already-confirmed pass, gated on a present central layer and no active probation
+  const bootControlStatus = await configControl.status()
+  if (boot.centralConfigPath != null && !bootControlStatus.probation) {
+    reconcileScheduler.schedule('boot-already-confirmed')
+  }
 
   // ----- Materialize config-backed sinks -----
   const sinkResult = await materializeSinks(boot.runtime, boot.config, {
@@ -418,6 +510,10 @@ export async function runDaemon(opts = {}) {
     if (maintenanceInFlight) {
       await maintenanceInFlight
     }
+    // Let any in-flight reconcile pass finish so the daemon never exits
+    // mid-import — abandoning a pass would orphan the spawned `hyp backfill`
+    // child and interrupt the marker write.
+    await reconcileScheduler.settle()
     persist({ state: 'stopping' })
     fileLog.info('daemon.stopping', { reason })
 
@@ -569,6 +665,74 @@ export async function runDaemon(opts = {}) {
     reload: () => triggerReload ? triggerReload() : Promise.resolve(),
     runtime: boot.runtime,
   }
+}
+
+/**
+ * Single-flight scheduler for client-action reconcile passes.
+ *
+ * Each confirmation edge — and the after-activation already-confirmed check —
+ * calls `schedule()`, which runs `run()` as its own async task **off the
+ * caller's stack**: `schedule()` returns synchronously, so a reconcile pass
+ * (which may spawn a multi-minute `hyp backfill` import) never delays the
+ * sink tick loop or the apply engine's confirm poll. Only one pass runs at a
+ * time; an edge that arrives while a pass is in flight sets a "re-run when
+ * done" flag, coalescing any number of edges during a pass into exactly one
+ * more pass. Coalescing is lossless because the reconciler is level-triggered
+ * — the next pass reads the latest config + markers and converges the gap.
+ *
+ * `settle()` resolves when no pass is in flight; the shutdown path awaits it
+ * so the daemon never exits mid-pass.
+ *
+ * @param {{ run: (reason: string) => Promise<void>, log?: { error(message: string, attributes?: Record<string, unknown>): void } }} args
+ * @returns {{ schedule: (reason: string) => void, settle: () => Promise<void> }}
+ * @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — single-flight guard: one pass at a time, an edge during a pass re-runs once when done, and the pass is its own async task off the tick loop
+ */
+export function createReconcilePassScheduler({ run, log }) {
+  let running = false
+  let rerun = false
+  /** @type {Promise<void>} */
+  let idle = Promise.resolve()
+  /** @type {(() => void) | null} */
+  let resolveIdle = null
+
+  /** @param {string} reason */
+  function schedule(reason) {
+    if (running) {
+      // A pass is already running off the tick loop; coalesce this edge into
+      // a single re-run rather than starting a concurrent pass.
+      rerun = true
+      return
+    }
+    running = true
+    idle = new Promise((resolve) => { resolveIdle = resolve })
+    void pump(reason)
+  }
+
+  /** @param {string} reason */
+  async function pump(reason) {
+    let nextReason = reason
+    try {
+      do {
+        // Clear the flag before awaiting: any edge during this `run` flips it
+        // back on (the only interleaving point), driving exactly one re-run.
+        rerun = false
+        await run(nextReason)
+        nextReason = 'rerun'
+      } while (rerun)
+    } catch (err) {
+      log?.error('daemon.reconcile_pass_failed', {
+        [Attr.COMPONENT]: 'daemon',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      running = false
+      const resolve = resolveIdle
+      resolveIdle = null
+      resolve?.()
+    }
+  }
+
+  return { schedule, settle: () => idle }
 }
 
 /**
