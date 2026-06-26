@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto'
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.d.ts'
  * @import { IdentityClient } from './identity_client.js'
  * @import { CentralSinkConfig } from './types.d.ts'
  */
@@ -47,6 +48,7 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
  *   identityClient: IdentityClient,
  *   query: QueryRegistry,
  *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
@@ -54,7 +56,7 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
  * @returns {Sink}
  */
 export function createForwardSink(args) {
-  const { config, identityClient, query, storage, log } = args
+  const { config, identityClient, query, storage, watermarks, log } = args
   const fetchFn = args.fetchFn ?? fetch
   // Injectable so tests drive backpressure pacing without real waits.
   const sleepFn = args.sleepFn ?? abortableSleep
@@ -90,7 +92,7 @@ export function createForwardSink(args) {
         const signal = signalForPartition(query, partition)
         try {
           bytesWritten += await forwardPartition({
-            partition, signal, config, identityClient, storage, fetchFn, log,
+            partition, signal, config, identityClient, storage, watermarks, fetchFn, log,
             abortSignal: abortController.signal, sleepFn,
           })
           partitionsExported += 1
@@ -158,16 +160,21 @@ function signalForPartition(query, partition) {
 
 /**
  * Stream one partition's rows to `/v1/ingest/{signal}` in bounded
- * chunks, never materializing the whole table. Each chunk POSTs with an
- * `X-Hyp-Batch-Id` derived from the signal, the partition identity, the
- * chunk's position, and its bytes (see {@link batchIdForChunk}): stable
- * across retries of that exact chunk, yet distinct for any other chunk —
- * so two byte-identical chunks never collide. When the driver re-hands a
- * partition after a transport failure, re-streaming reproduces the same
- * chunk boundaries, so the unchanged prefix chunks hash to the same ids
- * and the server's idempotency ledger (server LLP 0001) acks them `202`
- * without re-storing. A partial-then-retried partition thus converges to
- * exactly-once instead of duplicating every already-delivered row.
+ * chunks, never materializing the whole table. Only rows added since the
+ * last durable export are read: the `(sink instance, partition)`
+ * watermark is loaded up front and handed to `readRowsSince({ since })`,
+ * so a tick with no new rows reads zero rows and sends zero chunks. Each
+ * chunk POSTs with an `X-Hyp-Batch-Id` derived from the signal, the
+ * partition identity, the chunk's position, and its bytes (see
+ * {@link batchIdForChunk}): stable across retries of that exact chunk,
+ * yet distinct for any other chunk — so two byte-identical chunks never
+ * collide. When the driver re-hands a partition after a transport
+ * failure, re-streaming from the same watermark reproduces the same chunk
+ * boundaries, so the unchanged prefix chunks hash to the same ids and the
+ * server's idempotency ledger (server LLP 0001) acks them `202` without
+ * re-storing. The watermark advances per acked chunk (ship first, advance
+ * second), so the server ledger now only backstops a bounded in-flight
+ * suffix instead of the whole partition.
  *
  * @param {{
  *   partition: QueryPartition,
@@ -175,6 +182,7 @@ function signalForPartition(query, partition) {
  *   config: CentralSinkConfig,
  *   identityClient: IdentityClient,
  *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
  *   fetchFn: typeof fetch,
  *   log: PluginLogger,
  *   abortSignal: AbortSignal,
@@ -182,7 +190,7 @@ function signalForPartition(query, partition) {
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, fetchFn, log, abortSignal, sleepFn }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn }) {
   if (!KNOWN_SIGNALS.has(signal)) {
     throw new Error(`central.forward: unknown signal '${signal}' (expected logs|traces|metrics|proxy)`)
   }
@@ -193,11 +201,39 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const tablePath = partition.tablePath
   await flushPartition(storage, tablePath, 'sink_export')
 
+  // @ref LLP 0040#watermark-contract [implements] — load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip.
+  /** @type {SinkContinuation | undefined} */
+  let since
+  /** @type {SinkWatermarkKey | undefined} */
+  let watermarkKey
+  let exportedRowCount = 0
+  try {
+    watermarkKey = watermarks.keyFor(storage.cacheRoot, tablePath)
+    const record = await watermarks.read(watermarkKey)
+    since = record?.continuation
+    exportedRowCount = record?.exportedRowCount ?? 0
+  } catch (err) {
+    // An underivable key or unreadable watermark must not wedge the sink:
+    // fall back to a full scan (the server ledger dedupes the redelivery)
+    // and skip watermark writes for this partition this tick.
+    watermarkKey = undefined
+    since = undefined
+    exportedRowCount = 0
+    log.warn('central.forward.watermark_read_failed', {
+      hyp_dataset: partition.dataset,
+      message: err instanceof Error ? err.message : String(err),
+    })
+  }
+
   let bytesWritten = 0
   let chunkIndex = 0
   /** @type {string[]} */
   let lines = []
   let pendingBytes = 0
+  // `after` token of the most recently buffered row; at flush time it is
+  // the last row in the chunk, the watermark to persist once it is acked.
+  /** @type {SinkContinuation | undefined} */
+  let lastAfter
 
   const flushChunk = async () => {
     if (lines.length === 0) return
@@ -205,6 +241,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     const batchId = batchIdForChunk(signal, tablePath, chunkIndex, body)
     const bytes = Buffer.byteLength(body, 'utf8')
     const rows = lines.length
+    const after = lastAfter
     try {
       await postNdjson({
         centralUrl: config.url, signal, body, batchId, identityClient, fetchFn, log, abortSignal, sleepFn,
@@ -233,11 +270,17 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     chunkIndex += 1
     lines = []
     pendingBytes = 0
+    // @ref LLP 0040#watermark-contract [implements] — ship first, advance second: the chunk POST is acked, so persist this chunk's last `after`. A crash before this re-sends at most this one chunk next tick; the server ledger dedupes the redelivered prefix.
+    if (watermarkKey && after) {
+      exportedRowCount += rows
+      await watermarks.write(watermarkKey, { continuation: after, exportedRowCount })
+    }
   }
 
-  for await (const row of storage.readRows(tablePath)) {
+  for await (const { row, after } of storage.readRowsSince(tablePath, { since })) {
     const line = JSON.stringify(serializeRow(row))
     lines.push(line)
+    lastAfter = after
     // Count UTF-8 bytes (not UTF-16 code units) so the budget bounds the
     // actual wire size for multibyte payloads, e.g. CJK `content_text`.
     pendingBytes += Buffer.byteLength(line, 'utf8') + 1
