@@ -31,6 +31,12 @@
     },
     "skills": [
       { "name": "hypaware-query", "clients": ["codex"] }
+    ],
+    "config_sections": [
+      {
+        "section": "codex",
+        "summary": "Codex adapter config, including the optional backfill-on-join policy { on_join, window_days }."
+      }
     ]
   }
 }
