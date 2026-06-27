@@ -159,6 +159,79 @@ test('claude undo strips marker + managed keys/hooks from a hand-written fixture
   }
 })
 
+test('claude undo of a LEGACY pre-upgrade marker (no managed record) detaches fully', async () => {
+  const home = await stageHome()
+  try {
+    // The old marker shape attach wrote before the self-describing `managed`
+    // undo record existed: {attached_at,version,port,state_file} only, no
+    // `managed`/`prev_base_url`. Reached by a manual `hyp detach` after upgrade.
+    // The undo must fall back to the original convention — remove the gateway
+    // base URL, strip the `claude-hook session-context` hooks — so nothing is
+    // left orphaned (deleting the marker alone is non-retryable half-reversal).
+    const command = "hyp claude-hook session-context --state-file '/abs/session-context.jsonl'"
+    const fixture = {
+      env: { ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' },
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command }] }],
+        CwdChanged: [{ hooks: [{ type: 'command', command }] }],
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command }] }],
+        PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command }] }],
+      },
+      _hypaware: {
+        attached_at: '2026-06-26T00:00:00.000Z',
+        version: '0.2.0',
+        port: 4123,
+        state_file: '/abs/session-context.jsonl',
+      },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal(result.removed, 'http://127.0.0.1:4123')
+    assert.equal('restoredValue' in result, false) // legacy markers recorded no prior
+
+    const raw = await fs.readFile(settingsPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    assert.equal('_hypaware' in parsed, false) // marker gone
+    assert.equal('ANTHROPIC_BASE_URL' in (parsed.env ?? {}), false) // no orphaned base URL
+    assert.equal(parsed.env.ANTHROPIC_API_KEY, 'sk-x') // unrelated env preserved
+    assert.equal('hooks' in parsed, false) // every managed hook group pruned
+    assert.equal(raw.includes('claude-hook'), false) // no orphaned hyp hooks
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo of a LEGACY marker preserves a user hook and an externally-overridden base URL', async () => {
+  const home = await stageHome()
+  try {
+    const command = "hyp claude-hook session-context --state-file '/abs/session-context.jsonl'"
+    const fixture = {
+      env: { ANTHROPIC_BASE_URL: 'https://someone-else.example' }, // user re-pointed it
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: 'echo hello' }] }, // user's own
+          { hooks: [{ type: 'command', command }] }, // ours (legacy-installed)
+        ],
+      },
+      _hypaware: { version: '0.2.0', port: 4123 }, // legacy shape, no managed record
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.match(String(result.warning), /overridden externally/)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal('_hypaware' in parsed, false) // marker still removed
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://someone-else.example') // user value untouched
+    assert.deepEqual(parsed.hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'echo hello' }] }])
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('claude undo leaves an externally-overridden base URL in place with a warning', async () => {
   const home = await stageHome()
   try {

@@ -3257,31 +3257,39 @@ async function runClientLifecycle(action, argv, ctx) {
   /** @type {AiGatewayCapability} */
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
-  const clientNames = expandClientName(parsed.client, gateway)
+  // Detach is the single core disk-driven undo, resolved per client via its
+  // static descriptor (owning plugin + attach_probe) — not a per-adapter
+  // detach() hook and not the live gateway registry, so it reverses an on-disk
+  // attach even for a client whose adapter has been dropped/unloaded (LLP 0045
+  // §Part 3). Build the bundled+installed descriptor map once and resolve from
+  // it; attach still needs the live adapter, so it resolves from the gateway.
+  const clientDescriptors = action === 'detach' ? await buildClientDescriptorMap(ctx) : undefined
+
+  const clientNames = action === 'detach'
+    ? expandDetachClientNames(parsed.client, clientDescriptors)
+    : expandClientName(parsed.client, gateway)
   if (clientNames.length === 0) {
+    const known = action === 'detach'
+      ? [...(clientDescriptors?.keys() ?? [])]
+      : gateway.listClients().map((c) => c.name)
     ctx.stderr.write(
-      `error: unknown client '${parsed.client}'. Registered clients: ${
-        gateway.listClients().map((c) => c.name).join(', ') || '(none)'
-      }\n`
+      `error: unknown client '${parsed.client}'. ${
+        action === 'detach' ? 'Known' : 'Registered'
+      } clients: ${known.join(', ') || '(none)'}\n`
     )
     return 1
   }
 
-  // Detach is the single core disk-driven undo, resolved per client via
-  // its static descriptor (owning plugin + attach_probe) — not a
-  // per-adapter detach() hook (LLP 0045 §Part 3). Build the map once.
-  const clientDescriptors = action === 'detach' ? await buildClientDescriptorMap() : undefined
-
   let exitCode = 0
   for (const name of clientNames) {
-    const client = gateway.getClient(name)
-    if (!client) {
-      ctx.stderr.write(`error: unknown client '${name}'\n`)
-      exitCode = 1
-      continue
-    }
     try {
       if (action === 'attach') {
+        const client = gateway.getClient(name)
+        if (!client) {
+          ctx.stderr.write(`error: unknown client '${name}'\n`)
+          exitCode = 1
+          continue
+        }
         // In dry-run mode the gateway source may not be started yet,
         // so `localEndpoint()` could throw. Fall back to a placeholder
         // endpoint — adapters are expected to short-circuit before
@@ -3311,9 +3319,15 @@ async function runClientLifecycle(action, argv, ctx) {
           json: parsed.json,
         })
       } else {
+        const descriptor = clientDescriptors?.get(name)
+        if (!descriptor) {
+          ctx.stderr.write(`error: unknown client '${name}'\n`)
+          exitCode = 1
+          continue
+        }
         await detachClientViaCore({
           name,
-          descriptor: clientDescriptors?.get(name),
+          descriptor,
           dryRun: parsed.dryRun,
           json: parsed.json,
           ctx,
@@ -3533,6 +3547,22 @@ function expandClientName(requested, gateway) {
 }
 
 /**
+ * Resolve `--client all` to every known client name from the descriptor map
+ * (bundled+installed) for the disk-driven detach; otherwise return the
+ * requested name verbatim (validated against the map at the call site). Detach
+ * must not consult the live gateway registry — a client whose adapter was
+ * dropped/unloaded still has an on-disk attach to reverse (LLP 0045 §Part 3).
+ *
+ * @param {string} requested
+ * @param {Map<string, ClientDescriptor> | undefined} descriptors
+ * @returns {string[]}
+ */
+function expandDetachClientNames(requested, descriptors) {
+  if (requested === 'all') return [...(descriptors?.keys() ?? [])]
+  return [requested]
+}
+
+/**
  * @param {string[]} _argv
  * @param {CommandRunContext} ctx
  */
@@ -3571,7 +3601,7 @@ async function runSkillsInstall(argv, ctx) {
     return 1
   }
 
-  const descriptorMap = await buildClientDescriptorMap()
+  const descriptorMap = await buildClientDescriptorMap(ctx)
 
   let count = 0
   for (const skill of skills) {
@@ -3629,7 +3659,7 @@ async function runAgentsInstall(argv, ctx) {
     return 1
   }
 
-  const descriptorMap = await buildClientDescriptorMap()
+  const descriptorMap = await buildClientDescriptorMap(ctx)
 
   let count = 0
   for (const agent of agents) {
@@ -3668,18 +3698,36 @@ async function runAgentsInstall(argv, ctx) {
  * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
  * / `.claude/agents` in core.
  *
+ * Built from the same **bundled + installed** catalog that `boot.js` and
+ * `status.js` use, so an installed (non-bundled) client adapter that can
+ * attach-on-join is also resolvable here — its `hyp detach` / skill / agent
+ * install must not silently miss the descriptor.
+ *
+ * @param {CommandRunContext} ctx
  * @returns {Promise<Map<string, ClientDescriptor>>}
  */
-async function buildClientDescriptorMap() {
+async function buildClientDescriptorMap(ctx) {
   /** @type {Map<string, ClientDescriptor>} */
   const map = new Map()
+  /** @type {import('../manifest.js').LoadedManifest[]} */
+  let bundledLoaded = []
+  /** @type {import('../manifest.js').LoadedManifest[]} */
+  let installedLoaded = []
   try {
     const bundled = await discoverBundledPlugins()
-    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+    bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+  } catch { /* bundled discovery failure is non-fatal */ }
+  try {
+    const stateDir = pluginStateDir(ctx)
+    const installed = await discoverInstalledPlugins({ stateDir })
+    installedLoaded = installed.loaded
+  } catch { /* installed discovery failure is non-fatal */ }
+  try {
+    const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
     for (const [clientName, descriptor] of catalog.clientDescriptors) {
       map.set(clientName, descriptor)
     }
-  } catch { /* discovery failure → empty map → warnings per contribution */ }
+  } catch { /* catalog build failure → empty map → warnings per contribution */ }
   return map
 }
 

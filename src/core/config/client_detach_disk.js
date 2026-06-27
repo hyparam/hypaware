@@ -10,6 +10,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 /**
  * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor } from '../plugin_catalog.js'
+ * @import { DetachFromDiskResult } from './types.d.ts'
  */
 
 /**
@@ -69,15 +70,6 @@ export class ClientDetachError extends Error {
 }
 
 /**
- * @typedef {object} DetachFromDiskResult
- * @property {boolean} changed   True when the settings file was rewritten.
- * @property {string} [settingsPath]  The resolved settings path (when one exists).
- * @property {string} [removed]       The managed value deleted (e.g. the gateway base URL) when there was no prior to restore.
- * @property {string} [restoredValue] The prior value restored from the undo record.
- * @property {string} [warning]       Set when the managed value was overridden externally and left in place.
- */
-
-/**
  * Reverse a client's attach from disk, driven by the descriptor's
  * `attachProbe` and the settings-file marker. No-op (`{ changed: false }`) when
  * the descriptor has no probe, the file is absent, or it carries no marker.
@@ -124,6 +116,24 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   const value = read.value
   const marker = value[markerKey]
   if (!isPlainObject(marker)) return { changed: false, settingsPath }
+
+  // Pre-upgrade markers have the legacy shape {attached_at,version,port,
+  // state_file} with no self-describing `managed` undo record. There is no
+  // record to replay, so reverse them by the original (now-retired) convention
+  // instead of just deleting the marker — otherwise env.ANTHROPIC_BASE_URL and
+  // the `hyp claude-hook session-context` entries it wrote would orphan, and the
+  // detach is non-retryable once the marker is gone.
+  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — legacy markers predate the undo record; fall back to the convention attach used before it
+  if (!isPlainObject(marker.managed)) {
+    return await detachLegacyJsonMarker({
+      settingsPath,
+      markerKey,
+      value,
+      marker,
+      mtimeMs: read.mtimeMs,
+      fs,
+    })
+  }
 
   const managed = isPlainObject(marker.managed) ? marker.managed : {}
   const managedEnv = isPlainObject(managed.env) ? managed.env : {}
@@ -237,6 +247,114 @@ function groupMatcherEquals(group, matcher) {
  */
 function isManagedHandler(handler, command) {
   return isPlainObject(handler) && handler.type === 'command' && handler.command === command
+}
+
+/* ----------------------------- legacy JSON marker ---------------------------- */
+
+const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+session-context\b/
+
+/**
+ * Reverse a pre-upgrade legacy `json` marker — the old Claude marker shape
+ * `{attached_at,version,port,state_file}` that predates the self-describing
+ * `managed` undo record. We can't replay a record the marker never wrote, so we
+ * fall back to the convention `attach()` used before the record existed:
+ * remove `env.ANTHROPIC_BASE_URL` only when it still equals the recorded
+ * `http://127.0.0.1:${port}` gateway URL (never clobbering a later user edit),
+ * and strip the session-context hooks by the `claude-hook session-context`
+ * command pattern. Legacy JSON markers were only ever written by Claude, so the
+ * key/pattern are safe to assume here. Moved from the retired claude-adapter
+ * `detach()` so the one core undo owns this reversal too.
+ *
+ * @param {{
+ *   settingsPath: string,
+ *   markerKey: string,
+ *   value: Record<string, unknown>,
+ *   marker: Record<string, unknown>,
+ *   mtimeMs: number | undefined,
+ *   fs: typeof fsp,
+ * }} args
+ * @returns {Promise<DetachFromDiskResult>}
+ */
+async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, mtimeMs, fs }) {
+  const markerPort = typeof marker.port === 'number' ? marker.port : undefined
+
+  delete value[markerKey]
+  stripLegacyClaudeHooks(value)
+
+  /** @type {string | undefined} */
+  let removed
+  /** @type {string | undefined} */
+  let warning
+  if (isPlainObject(value.env)) {
+    const envObj = /** @type {Record<string, unknown>} */ (value.env)
+    const current = envObj.ANTHROPIC_BASE_URL
+    if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
+      removed = typeof current === 'string' ? current : String(current)
+      delete envObj.ANTHROPIC_BASE_URL
+    } else if (typeof current === 'string') {
+      warning = 'ANTHROPIC_BASE_URL was overridden externally; leaving in place'
+    }
+    if (Object.keys(envObj).length === 0) delete value.env
+  }
+
+  await writeJsonAtomic(settingsPath, value, mtimeMs, fs)
+
+  /** @type {DetachFromDiskResult} */
+  const result = { changed: true, settingsPath }
+  if (removed !== undefined) result.removed = removed
+  if (warning !== undefined) result.warning = warning
+  return result
+}
+
+/**
+ * Strip the legacy Claude session-context hooks — matched by the
+ * `claude-hook session-context` command pattern rather than the marker's undo
+ * record (a legacy marker recorded no hook entries). Empty groups, emptied
+ * event arrays, and an emptied `hooks` root are pruned, so no orphaned `hyp …`
+ * hooks survive. Preserves a user's own non-managed handlers for the same event.
+ *
+ * @param {Record<string, unknown>} value
+ */
+function stripLegacyClaudeHooks(value) {
+  const hooksRoot = value.hooks
+  if (!isPlainObject(hooksRoot)) return
+
+  for (const event of Object.keys(hooksRoot)) {
+    const groups = hooksRoot[event]
+    if (!Array.isArray(groups)) continue
+
+    /** @type {unknown[]} */
+    const nextGroups = []
+    for (const group of groups) {
+      if (!isPlainObject(group) || !Array.isArray(group.hooks)) {
+        nextGroups.push(group)
+        continue
+      }
+      const keptHandlers = group.hooks.filter((h) => !isLegacyClaudeHandler(h))
+      if (keptHandlers.length === group.hooks.length) {
+        nextGroups.push(group) // nothing matched — leave untouched
+      } else if (keptHandlers.length > 0) {
+        nextGroups.push({ ...group, hooks: keptHandlers })
+      }
+      // else: the group held only legacy managed handlers — drop it entirely.
+    }
+
+    if (nextGroups.length > 0) {
+      hooksRoot[event] = nextGroups
+    } else {
+      delete hooksRoot[event]
+    }
+  }
+
+  if (Object.keys(hooksRoot).length === 0) delete value.hooks
+}
+
+/** @param {unknown} handler */
+function isLegacyClaudeHandler(handler) {
+  return isPlainObject(handler) &&
+    handler.type === 'command' &&
+    typeof handler.command === 'string' &&
+    LEGACY_CLAUDE_HOOK_PATTERN.test(handler.command)
 }
 
 /* ------------------------------- TOML format ------------------------------ */

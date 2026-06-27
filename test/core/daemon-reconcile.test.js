@@ -356,10 +356,10 @@ test('the confirmation edge during active probation drives exactly one reconcile
 })
 
 // ---------------------------------------------------------------------------
-// Client-attach daemon wiring (LLP 0045 §Part 7 / T7)
+// Client-attach daemon wiring (LLP 0045 §Module / seam breakdown item 7 / T7)
 // ---------------------------------------------------------------------------
 
-test('the daemon registers [attachHandler, backfillHandler] — attach first (LLP 0045 §Part 7)', () => {
+test('the daemon registers [attachHandler, backfillHandler] — attach first (LLP 0045 §Module / seam breakdown item 7)', () => {
   // The order is a unit-testable invariant: attach (in-process) must lead the
   // backfill subprocess so live-capture wiring is not stranded behind a
   // multi-minute historical import.

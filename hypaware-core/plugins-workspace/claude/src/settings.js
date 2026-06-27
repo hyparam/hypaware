@@ -6,15 +6,17 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * Claude Code settings.json attach/detach writer. Ported from the
+ * Claude Code settings.json attach writer. Ported from the
  * Collectivus donor `src/claude-code/settings.js`, with the managed
  * marker key renamed `_collectivus` → `_hypaware` and the embedded
  * hook command pointed at `hyp` instead of `ctvs`.
  *
  * Writes are atomic (temp file + rename) and gated on mtime so a
  * concurrent edit is detected instead of silently overwritten. The
- * `_hypaware` marker is what `detach()` keys off to know which keys
- * it inserted and is safe to remove.
+ * `_hypaware` marker is the self-describing undo record the single core
+ * undo (`detachClientFromDisk`, LLP 0045 §Part 3) replays — there is no
+ * adapter `detach()`; the reverse lives in core so it survives the
+ * plugin being unloaded (legacy pre-record markers included).
  *
  * The marker is also a **self-describing undo record**: it records
  * `prev_base_url` (the restore target) and the managed
@@ -25,7 +27,7 @@ import path from 'node:path'
  */
 
 /**
- * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.d.ts'
+ * @import { ClaudeAttachOptions, ClaudeAttachResult } from './types.d.ts'
  * @import { FileHandle } from 'node:fs/promises'
  */
 
@@ -120,53 +122,6 @@ export async function attach(opts) {
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
   if (prevBaseUrl !== undefined) result.prevValue = prevBaseUrl
-  return result
-}
-
-/**
- * Reverse a previous `attach`. No-op when settings.json is absent or
- * has no `_hypaware` marker. Removes `env.ANTHROPIC_BASE_URL` only
- * when it still matches the recorded port; otherwise leaves it and
- * surfaces a warning.
- *
- * @param {ClaudeDetachOptions} [opts]
- * @returns {Promise<ClaudeDetachResult>}
- */
-export async function detach(opts = {}) {
-  const { settingsPath = defaultSettingsPath() } = opts
-  const { value, existed, mtimeMs } = await readSettings(settingsPath)
-
-  if (!existed) return { changed: false }
-
-  const marker = value[MARKER_KEY]
-  if (!isPlainObject(marker)) return { changed: false }
-
-  const markerPort = typeof marker.port === 'number' ? marker.port : undefined
-  delete value[MARKER_KEY]
-  removeSessionContextHooks(value)
-
-  /** @type {string | undefined} */
-  let removed
-  /** @type {string | undefined} */
-  let warning
-  if (isPlainObject(value.env)) {
-    const env = /** @type {Record<string, unknown>} */ (value.env)
-    const current = env.ANTHROPIC_BASE_URL
-    if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
-      removed = /** @type {string} */ (current)
-      delete env.ANTHROPIC_BASE_URL
-    } else if (typeof current === 'string') {
-      warning = 'ANTHROPIC_BASE_URL was overridden externally; leaving in place'
-    }
-    if (Object.keys(env).length === 0) delete value.env
-  }
-
-  await writeAtomic(settingsPath, value, mtimeMs)
-
-  /** @type {ClaudeDetachResult} */
-  const result = { changed: true }
-  if (removed !== undefined) result.removed = removed
-  if (warning !== undefined) result.warning = warning
   return result
 }
 
@@ -306,32 +261,6 @@ function installSessionContextHooks(value, command) {
 }
 
 /**
- * @param {Record<string, unknown>} value
- */
-function removeSessionContextHooks(value) {
-  const hooksRoot = value.hooks
-  if (!isPlainObject(hooksRoot)) return
-  for (const event of managedHookEvents()) {
-    const existing = hooksRoot[event]
-    if (!Array.isArray(existing)) continue
-    const groups = existing
-      .filter((group) => !isManagedHookGroup(group))
-      .map(removeManagedHandlers)
-      .filter((group) => !isEmptyHookGroup(group))
-    if (groups.length > 0) {
-      hooksRoot[event] = groups
-    } else {
-      delete hooksRoot[event]
-    }
-  }
-  if (Object.keys(hooksRoot).length === 0) delete value.hooks
-}
-
-function managedHookEvents() {
-  return [...new Set(MANAGED_HOOK_SPECS.map((spec) => spec.event))]
-}
-
-/**
  * The managed session-context hook entries this attach installs,
  * recorded into the marker's undo record so the core undo can strip
  * exactly what `installSessionContextHooks` added without re-deriving
@@ -366,11 +295,6 @@ function isManagedHookGroup(group) {
   return Array.isArray(handlers) &&
     handlers.length > 0 &&
     handlers.every(isManagedHookHandler)
-}
-
-/** @param {unknown} group */
-function isEmptyHookGroup(group) {
-  return isPlainObject(group) && Array.isArray(group.hooks) && group.hooks.length === 0
 }
 
 /** @param {unknown} handler */

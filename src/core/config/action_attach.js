@@ -230,8 +230,9 @@ export function createAttachHandler(opts = {}) {
  * The default `attachHandler` the daemon registers the reconciler with — first
  * in the `[attachHandler, backfillHandler]` order so in-process live-capture
  * wiring starts ahead of the (possibly multi-minute) backfill subprocess
- * (LLP 0045 §Part 7). Uses the real `detachClientFromDisk`; tests build their
- * own via {@link createAttachHandler} with an injected `detach`.
+ * (LLP 0045 §Module / seam breakdown item 7). Uses the real
+ * `detachClientFromDisk`; tests build their own via {@link createAttachHandler}
+ * with an injected `detach`.
  *
  * @type {ActionHandler}
  */

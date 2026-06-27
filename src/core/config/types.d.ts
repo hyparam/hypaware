@@ -14,7 +14,6 @@ import type {
   AiGatewayCapability,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ClientDescriptor } from '../plugin_catalog.js'
-import type { DetachFromDiskResult } from './client_detach_disk.js'
 
 /**
  * Outcome of the `init` overwrite guard (LLP 0031). `proceed` is true
@@ -575,6 +574,24 @@ export interface CreateBackfillHandlerOptions {
  * real implementation accepts more (an injectable `fs` / `homeDir`), so it is
  * assignable to this narrower type.
  */
+/**
+ * Outcome of the single core disk-driven undo (`detachClientFromDisk`, LLP 0045
+ * §Part 3). Defined here (not as a `@typedef` in the implementation) so it is a
+ * shared `interface` other modules import via `@import`.
+ */
+export interface DetachFromDiskResult {
+  /** True when the settings file was rewritten. */
+  changed: boolean
+  /** The resolved settings path (when one exists). */
+  settingsPath?: string
+  /** The managed value deleted (e.g. the gateway base URL) when there was no prior to restore. */
+  removed?: string
+  /** The prior value restored from the undo record. */
+  restoredValue?: string
+  /** Set when the managed value was overridden externally and left in place. */
+  warning?: string
+}
+
 export type ClientDetachFromDisk = (args: {
   descriptor: ClientDescriptor
   homeDir?: string
