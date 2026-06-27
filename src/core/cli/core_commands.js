@@ -63,6 +63,7 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ClientDescriptor } from '../plugin_catalog.js'
+ * @import { LoadedManifest } from '../manifest.js'
  * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
  * @import { PluginMetadata } from '../config/types.d.ts'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
@@ -3220,6 +3221,50 @@ async function runClientLifecycle(action, argv, ctx) {
     return 2
   }
 
+  // Detach is the single core, disk-driven undo (LLP 0045 §Part 3): it reverses
+  // an on-disk attach from the static client descriptor map (owning plugin +
+  // attach_probe), never the live gateway registry. So it must keep working
+  // with the @hypaware/ai-gateway capability absent/unloaded — resolve and
+  // reverse here, AHEAD of the gateway gate. Attach genuinely needs the live
+  // adapter, so it stays gated below.
+  if (action === 'detach') {
+    const clientDescriptors = await buildClientDescriptorMap(ctx)
+    const clientNames = expandDetachClientNames(parsed.client, clientDescriptors)
+    if (clientNames.length === 0) {
+      const known = [...clientDescriptors.keys()]
+      ctx.stderr.write(
+        `error: unknown client '${parsed.client}'. Known clients: ${known.join(', ') || '(none)'}\n`
+      )
+      return 1
+    }
+    let exitCode = 0
+    for (const name of clientNames) {
+      try {
+        const descriptor = clientDescriptors.get(name)
+        if (!descriptor) {
+          ctx.stderr.write(`error: unknown client '${name}'\n`)
+          exitCode = 1
+          continue
+        }
+        await detachClientViaCore({
+          name,
+          descriptor,
+          dryRun: parsed.dryRun,
+          json: parsed.json,
+          ctx,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`error: detach client '${name}' failed: ${message}\n`)
+        exitCode = 1
+      }
+    }
+    return exitCode
+  }
+
+  // Attach dispatches to the per-adapter attach() hook and threads the
+  // gateway's localEndpoint(), so it requires the live @hypaware/ai-gateway
+  // capability.
   if (!ctx.capabilities.has('hypaware.ai-gateway')) {
     await withSpan(
       `client.${action}`,
@@ -3257,25 +3302,11 @@ async function runClientLifecycle(action, argv, ctx) {
   /** @type {AiGatewayCapability} */
   const gateway = ctx.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
 
-  // Detach is the single core disk-driven undo, resolved per client via its
-  // static descriptor (owning plugin + attach_probe) — not a per-adapter
-  // detach() hook and not the live gateway registry, so it reverses an on-disk
-  // attach even for a client whose adapter has been dropped/unloaded (LLP 0045
-  // §Part 3). Build the bundled+installed descriptor map once and resolve from
-  // it; attach still needs the live adapter, so it resolves from the gateway.
-  const clientDescriptors = action === 'detach' ? await buildClientDescriptorMap(ctx) : undefined
-
-  const clientNames = action === 'detach'
-    ? expandDetachClientNames(parsed.client, clientDescriptors)
-    : expandClientName(parsed.client, gateway)
+  const clientNames = expandClientName(parsed.client, gateway)
   if (clientNames.length === 0) {
-    const known = action === 'detach'
-      ? [...(clientDescriptors?.keys() ?? [])]
-      : gateway.listClients().map((c) => c.name)
+    const known = gateway.listClients().map((c) => c.name)
     ctx.stderr.write(
-      `error: unknown client '${parsed.client}'. ${
-        action === 'detach' ? 'Known' : 'Registered'
-      } clients: ${known.join(', ') || '(none)'}\n`
+      `error: unknown client '${parsed.client}'. Registered clients: ${known.join(', ') || '(none)'}\n`
     )
     return 1
   }
@@ -3283,56 +3314,40 @@ async function runClientLifecycle(action, argv, ctx) {
   let exitCode = 0
   for (const name of clientNames) {
     try {
-      if (action === 'attach') {
-        const client = gateway.getClient(name)
-        if (!client) {
-          ctx.stderr.write(`error: unknown client '${name}'\n`)
-          exitCode = 1
-          continue
-        }
-        // In dry-run mode the gateway source may not be started yet,
-        // so `localEndpoint()` could throw. Fall back to a placeholder
-        // endpoint — adapters are expected to short-circuit before
-        // touching it.
-        let endpoint
-        if (parsed.dryRun) {
-          try {
-            endpoint = gateway.localEndpoint()
-          } catch {
-            endpoint = configuredGatewayEndpoint(ctx.config) ?? 'http://127.0.0.1:0'
-          }
-        } else {
-          try {
-            endpoint = gateway.localEndpoint()
-          } catch (err) {
-            const configured = configuredGatewayEndpoint(ctx.config)
-            if (!configured) throw err
-            endpoint = configured
-          }
-        }
-        await client.attach({
-          endpoint,
-          config: {},
-          stdout: ctx.stdout,
-          stderr: ctx.stderr,
-          dryRun: parsed.dryRun,
-          json: parsed.json,
-        })
-      } else {
-        const descriptor = clientDescriptors?.get(name)
-        if (!descriptor) {
-          ctx.stderr.write(`error: unknown client '${name}'\n`)
-          exitCode = 1
-          continue
-        }
-        await detachClientViaCore({
-          name,
-          descriptor,
-          dryRun: parsed.dryRun,
-          json: parsed.json,
-          ctx,
-        })
+      const client = gateway.getClient(name)
+      if (!client) {
+        ctx.stderr.write(`error: unknown client '${name}'\n`)
+        exitCode = 1
+        continue
       }
+      // In dry-run mode the gateway source may not be started yet,
+      // so `localEndpoint()` could throw. Fall back to a placeholder
+      // endpoint — adapters are expected to short-circuit before
+      // touching it.
+      let endpoint
+      if (parsed.dryRun) {
+        try {
+          endpoint = gateway.localEndpoint()
+        } catch {
+          endpoint = configuredGatewayEndpoint(ctx.config) ?? 'http://127.0.0.1:0'
+        }
+      } else {
+        try {
+          endpoint = gateway.localEndpoint()
+        } catch (err) {
+          const configured = configuredGatewayEndpoint(ctx.config)
+          if (!configured) throw err
+          endpoint = configured
+        }
+      }
+      await client.attach({
+        endpoint,
+        config: {},
+        stdout: ctx.stdout,
+        stderr: ctx.stderr,
+        dryRun: parsed.dryRun,
+        json: parsed.json,
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       ctx.stderr.write(`error: ${action} client '${name}' failed: ${message}\n`)
@@ -3709,9 +3724,9 @@ async function runAgentsInstall(argv, ctx) {
 async function buildClientDescriptorMap(ctx) {
   /** @type {Map<string, ClientDescriptor>} */
   const map = new Map()
-  /** @type {import('../manifest.js').LoadedManifest[]} */
+  /** @type {LoadedManifest[]} */
   let bundledLoaded = []
-  /** @type {import('../manifest.js').LoadedManifest[]} */
+  /** @type {LoadedManifest[]} */
   let installedLoaded = []
   try {
     const bundled = await discoverBundledPlugins()

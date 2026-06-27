@@ -339,6 +339,13 @@ export async function runDaemon(opts = {}) {
   //    configured-`listen` fallback the CLI uses.
   // All three stay undefined on a non-gateway boot, leaving the attach handler
   // inert by construction.
+  //
+  // Resolved ONCE here and then closed over by `runReconcilePass` below: the
+  // same `clientSeam` is reused, unchanged, for every reconcile pass for the
+  // daemon's lifetime — it is never re-derived per pass. So a pass can never
+  // observe a half-resolved seam (e.g. a transiently-empty `clients`); the
+  // attach handler's `desired()` always reads the fully-resolved-at-boot value,
+  // and reversal can never over-fire on a momentary `clients` gap.
   // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — daemon resolves clientDescriptors from the catalog, clients/endpoint from boot.runtime.capabilities when the gateway is enabled
   const clientSeam = resolveClientActionSeam({ boot, fileLog })
 

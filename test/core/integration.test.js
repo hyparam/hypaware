@@ -89,6 +89,19 @@ function fakeClientKernel({ clientNames = ['claude', 'codex'] } = {}) {
   return { registry, kernel, calls }
 }
 
+/**
+ * A kernel with NO `hypaware.ai-gateway` capability — models the gateway
+ * plugin being uninstalled/unloaded. Detach must still run (it is the
+ * disk-driven core undo resolved from the static descriptor map, LLP 0045
+ * §Part 3); attach stays gated and fails cap_missing.
+ */
+function fakeKernelWithoutGateway() {
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  return { registry, kernel }
+}
+
 /** @returns {Promise<string>} */
 async function freshHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-integration-'))
@@ -211,6 +224,48 @@ test('detach resolves an INSTALLED (non-bundled) client adapter from the bundled
   assert.equal(result.action, 'detach')
   assert.equal(result.client, 'widget')
   assert.equal(result.changed, false)
+})
+
+test('detach works with the @hypaware/ai-gateway capability absent (disk-driven undo, LLP 0045 §Part 3)', async () => {
+  // The gateway plugin is not installed/loaded, so the capability is absent.
+  // Detach is a pure on-disk undo resolved from the static descriptor map, so
+  // it must still succeed — it is NOT gated on the live gateway. (Attach stays
+  // gated; the next test proves it still fails cap_missing.)
+  const { registry, kernel } = fakeKernelWithoutGateway()
+  const home = await freshHome()
+  const result = await detach('codex', {
+    hypHome: home,
+    env: { ...process.env, HOME: home, CODEX_HOME: home },
+    // @ts-expect-error test-only kernel injection
+    registry,
+    kernel,
+  })
+  // Resolved 'codex' from the bundled descriptor map and ran the disk undo to a
+  // clean no-op (no marker on the temp tree) — not a cap_missing failure.
+  assert.equal(result.status, 'ok')
+  assert.equal(result.action, 'detach')
+  assert.equal(result.client, 'codex')
+  assert.equal(result.changed, false)
+})
+
+test('attach stays gated on the @hypaware/ai-gateway capability (cap_missing)', async () => {
+  // The counterpart to the detach-without-gateway test: attach genuinely needs
+  // the live adapter, so with the capability absent it must fail cap_missing
+  // rather than silently no-op.
+  const { registry, kernel } = fakeKernelWithoutGateway()
+  const home = await freshHome()
+  const result = await run(['attach', 'codex', '--json'], {
+    hypHome: home,
+    env: { ...process.env, HOME: home, CODEX_HOME: home },
+    // @ts-expect-error test-only kernel injection
+    registry,
+    kernel,
+  })
+  assert.equal(result.code, 1)
+  const json = /** @type {any} */ (result.json)
+  assert.equal(json.status, 'failed')
+  assert.equal(json.action, 'attach')
+  assert.equal(json.error_kind, 'cap_missing')
 })
 
 test('attach throws HypAwareCommandError for an unknown client', async () => {

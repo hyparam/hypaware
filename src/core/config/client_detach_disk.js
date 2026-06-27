@@ -679,6 +679,18 @@ async function readJson(settingsPath, fs) {
  * @returns {Promise<{ content: string, existed: boolean, mtimeMs: number | undefined }>}
  */
 async function readText(settingsPath, fs) {
+  // Stat BEFORE reading the content so the captured mtime never post-dates the
+  // bytes we return. If we stat'd after the read, a concurrent edit landing in
+  // the read→stat window would leave us holding stale content paired with the
+  // *new* mtime — and the write-time guard would then pass and silently clobber
+  // that edit. Stat-first instead makes the guard err toward CONCURRENT_EDIT.
+  let stat
+  try {
+    stat = await fs.stat(settingsPath)
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return { content: '', existed: false, mtimeMs: undefined }
+    throw new ClientDetachError(`failed to stat ${settingsPath}: ${errMsg(err)}`, { cause: err })
+  }
   /** @type {string} */
   let raw
   try {
@@ -686,12 +698,6 @@ async function readText(settingsPath, fs) {
   } catch (err) {
     if (errCode(err) === 'ENOENT') return { content: '', existed: false, mtimeMs: undefined }
     throw new ClientDetachError(`failed to read ${settingsPath}: ${errMsg(err)}`, { cause: err })
-  }
-  let stat
-  try {
-    stat = await fs.stat(settingsPath)
-  } catch (err) {
-    throw new ClientDetachError(`failed to stat ${settingsPath}: ${errMsg(err)}`, { cause: err })
   }
   return { content: raw, existed: true, mtimeMs: stat.mtimeMs }
 }
