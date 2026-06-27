@@ -125,8 +125,14 @@ The daemon (`runDaemon` in [`src/core/daemon/runtime.js`](../src/core/daemon/run
 resolves all three from boot: `clientDescriptors` from the plugin catalog,
 `clients` from `boot.runtime.capabilities` when the gateway plugin is enabled
 (`capabilities.has('hypaware.ai-gateway', '^2.0.0')` guards the lookup), and
-`endpoint` from `gateway.localEndpoint()` with the configured-`listen` fallback
-the CLI already uses (`configuredGatewayEndpoint`). A client adapter plugin
+`endpoint` from `gateway.localEndpoint()` — a **proven-bound** URL. (Hardening,
+#179 round-3: the daemon path takes `localEndpoint()` and *only* that. If it
+throws — the gateway never bound — the daemon leaves `endpoint` undefined and the
+attach handler stays inert this pass rather than recording a base URL for a port
+nothing bound; it attaches once a later boot observes a bound gateway. The
+configured-`listen` fallback (`configuredGatewayEndpoint`) is kept only for the
+**manual** `hyp attach`/`init` paths, where the user asked explicitly.) A client
+adapter plugin
 *requires* the gateway capability ([LLP 0016](./0016-ai-gateway.decision.md)), so
 whenever a client plugin is enabled the gateway is too and the client is
 registered; `desired()` still guards on `ctx.clients.getClient(name)` being

@@ -439,3 +439,58 @@ test('undo is a no-op for a descriptor without an attachProbe', async () => {
   })
   assert.equal(result.changed, false)
 })
+
+/* ------------------------- atomic-write temp cleanup ------------------------- */
+
+/**
+ * An `fs` double that delegates to the real `node:fs/promises` for everything
+ * except the temp-file handle's `sync()`, which throws — simulating a
+ * write/fsync failure *after* the uniquely-named temp file is created but
+ * *before* the final rename. Used to prove the atomic writer never orphans the
+ * temp file on a partial write.
+ * @returns {any}
+ */
+function makeSyncFailingFs() {
+  return /** @type {any} */ ({
+    stat: (/** @type {string} */ p) => fs.stat(p),
+    readFile: (/** @type {string} */ p, /** @type {any} */ enc) => fs.readFile(p, enc),
+    mkdir: (/** @type {string} */ p, /** @type {any} */ opts) => fs.mkdir(p, opts),
+    rename: (/** @type {string} */ a, /** @type {string} */ b) => fs.rename(a, b),
+    rm: (/** @type {string} */ p, /** @type {any} */ opts) => fs.rm(p, opts),
+    async open(/** @type {string} */ p, /** @type {any} */ flags, /** @type {any} */ mode) {
+      const handle = await fs.open(p, flags, mode)
+      return {
+        writeFile: (/** @type {any} */ data, /** @type {any} */ enc) => handle.writeFile(data, enc),
+        sync: async () => { throw new Error('boom: simulated fsync failure') },
+        close: () => handle.close(),
+      }
+    },
+  })
+}
+
+test('the atomic write unlinks the temp file on a partial write — no orphaned .tmp', async () => {
+  const home = await stageHome()
+  try {
+    const original = { env: { ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_BASE_URL: 'https://foreign.example/api' } }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(original, null, 2) + '\n')
+    // Real self-describing marker, so the undo proceeds all the way to the write.
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const dir = path.dirname(settingsPath)
+    const before = (await fs.readdir(dir)).sort()
+
+    // The injected fs fails the fsync — after the temp file exists, before rename.
+    await assert.rejects(
+      detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home, fs: makeSyncFailingFs() }),
+      /simulated fsync failure/
+    )
+
+    const after = (await fs.readdir(dir)).sort()
+    // No uniquely-named temp file left behind by the failed write.
+    assert.equal(after.some((e) => e.endsWith('.tmp')), false, `orphaned tmp files: ${after.join(', ')}`)
+    // The rename never ran, so the directory is exactly as it was pre-write.
+    assert.deepEqual(after, before)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

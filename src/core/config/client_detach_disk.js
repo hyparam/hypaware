@@ -746,20 +746,33 @@ async function writeTextAtomic(filePath, body, expectedMtimeMs, fs) {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
 
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
-  /** @type {FileHandle | undefined} */
-  let handle
+  // The uniquely-named temp file must never outlive a *failed* write: a
+  // write/sync/close error before the final rename would otherwise orphan it on
+  // disk (these names are unique per call, so a leak accumulates rather than
+  // being overwritten on retry). Track whether the rename committed and
+  // best-effort unlink the temp on every other exit — swallowing the unlink
+  // error so a cleanup hiccup never masks the real write/rename failure.
+  let renamed = false
   try {
-    handle = await fs.open(tmpPath, 'w', 0o600)
-    await handle.writeFile(body, 'utf8')
-    await handle.sync()
-  } finally {
-    if (handle) await handle.close()
-  }
-  try {
+    /** @type {FileHandle | undefined} */
+    let handle
+    try {
+      handle = await fs.open(tmpPath, 'w', 0o600)
+      await handle.writeFile(body, 'utf8')
+      await handle.sync()
+    } finally {
+      if (handle) await handle.close()
+    }
     await fs.rename(tmpPath, filePath)
-  } catch (err) {
-    await fs.rm(tmpPath, { force: true })
-    throw err
+    renamed = true
+  } finally {
+    if (!renamed) {
+      try {
+        await fs.rm(tmpPath, { force: true })
+      } catch {
+        // Best-effort: a leaked temp file is preferable to losing the original error.
+      }
+    }
   }
 }
 

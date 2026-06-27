@@ -16,7 +16,6 @@ import { buildConfigApplyDeps } from '../config/apply_deps.js'
 import { createActionReconciler } from '../config/action_reconciler.js'
 import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
-import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
@@ -335,8 +334,9 @@ export async function runDaemon(opts = {}) {
   //    plugins (the static catalog the boot already built);
   //  - `clients` is the runtime gateway capability used only to invoke a
   //    client's attach effect, present only when the gateway plugin is enabled;
-  //  - `endpoint` is the local gateway base URL, from `localEndpoint()` with the
-  //    configured-`listen` fallback the CLI uses.
+  //  - `endpoint` is the proven-bound local gateway base URL from
+  //    `localEndpoint()` (no configured-`listen` fallback on the daemon path —
+  //    auto-attach must never record a URL for a port nothing bound).
   // All three stay undefined on a non-gateway boot, leaving the attach handler
   // inert by construction.
   //
@@ -813,15 +813,21 @@ export function createReconcilePassScheduler({ run, log }) {
  * too; on a non-gateway boot `clients`/`endpoint` stay undefined and the attach
  * handler is inert by construction.
  *
- * `endpoint` prefers the live `localEndpoint()` (the gateway source is already
- * bound by the time the reconciler is constructed — `startConfiguredSources`
- * ran during boot) and falls back to the configured-`listen` URL, the same
- * fallback `hyp attach` uses, so a not-yet-bound gateway still points clients at
- * the right port.
+ * `endpoint` is the live `localEndpoint()` and *only* that — a **proven-bound**
+ * gateway URL. The gateway source is already bound by the time the reconciler is
+ * constructed (`startConfiguredSources` ran during boot), so `localEndpoint()`
+ * returns the real bound port. If it throws — the gateway never bound (e.g. its
+ * listen failed) — the daemon must **not** fall back to the configured-`listen`
+ * URL: auto-attach is involuntary, and recording a base URL for a port nothing
+ * bound would point clients at a dead endpoint. Instead `endpoint` stays
+ * undefined and the attach handler's `perform()` guard keeps it inert this pass
+ * (attaching once the gateway is proven-bound on a later boot). Manual
+ * `hyp attach`/`init` keep the configured-`listen` fallback — there the user
+ * asked explicitly (`core_commands.js`).
  *
  * @param {{ boot: BootKernelResult, fileLog: ReturnType<typeof openDaemonLog> }} args
  * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: AiGatewayCapability | undefined, endpoint: string | undefined }}
- * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability
+ * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability; daemon endpoint requires a proven-bound localEndpoint() (no configured-listen fallback — that's the manual path's)
  */
 function resolveClientActionSeam({ boot, fileLog }) {
   const clientDescriptors = boot.clientDescriptors
@@ -837,13 +843,16 @@ function resolveClientActionSeam({ boot, fileLog }) {
     try {
       endpoint = clients.localEndpoint()
     } catch {
-      // The gateway source may not be bound yet (e.g. its listen failed); fall
-      // back to the configured port so attach still writes the right URL.
-      endpoint = boot.config ? configuredGatewayEndpoint(boot.config) : undefined
+      // The gateway never bound (e.g. its listen failed). Unlike manual
+      // `hyp attach`, the daemon does NOT fall back to the configured-`listen`
+      // URL — auto-attach must never record a base URL for an unbound port.
+      // Leave `endpoint` undefined; the handler stays inert until a later boot
+      // observes a proven-bound gateway.
+      endpoint = undefined
     }
     if (!endpoint) {
       fileLog.warn('daemon.attach_endpoint_unresolved', {
-        hyp_reason: 'no_local_endpoint_and_no_configured_listen',
+        hyp_reason: 'no_bound_local_endpoint',
       })
     }
   }
@@ -1077,4 +1086,5 @@ function sleep(ms) {
 export {
   pidFilePath,
   statusFilePath,
+  resolveClientActionSeam,
 }

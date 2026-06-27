@@ -6,11 +6,13 @@
 
 /**
  * Resolve the gateway endpoint from the active config's `@hypaware/ai-gateway`
- * `listen` directive, for callers that need the URL before the gateway source
- * is live in this process (`hyp attach`, the `init` walkthrough, and the
- * daemon's attach reconciler when `localEndpoint()` is not yet bindable). It is
- * the configured-`listen` fallback shared by all three so they can never derive
- * a different port from the same config.
+ * `listen` directive, for **manual** callers that need the URL before the
+ * gateway source is live in this process (`hyp attach` and the `init`
+ * walkthrough). It is the configured-`listen` fallback shared by both so they
+ * can never derive a different port from the same config. The daemon's
+ * auto-attach path deliberately does *not* use this fallback — involuntary
+ * attach requires a proven-bound `localEndpoint()` so it never records a URL for
+ * a port nothing bound (see `resolveClientActionSeam` in `daemon/runtime.js`).
  *
  * Returns `undefined` when the gateway plugin is absent, its config is not an
  * object, or `listen` is missing/malformed — the caller then falls back to a
