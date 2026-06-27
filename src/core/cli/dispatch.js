@@ -18,7 +18,7 @@ import {
 } from '../observability/index.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
-import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
@@ -575,19 +575,28 @@ async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }
       knownPlugins: catalog.pluginMetadata,
       knownDatasets: catalog.knownDatasets,
     })
-    const enabled = new Set(
-      (merged.effective?.plugins ?? []).filter((p) => p.enabled !== false).map((p) => p.name)
-    )
-    if (enabled.size === 0) return []
 
-    // Include the excluded-from-default bundled set: a config may enable
-    // one (e.g. `@hypaware/vector-search`), in which case its commands
-    // are runnable and belong in help.
-    const manifests = [...bundled.loaded, ...bundled.excluded, ...installed.loaded]
+    // Reuse boot's plugin SELECTION (the same pure computation `bootKernel`
+    // runs) so help lists only the manifests dispatch would actually
+    // activate. Dispatch boots ordinary commands with the `config` profile,
+    // so select with it too. This replicates the two boot selection rules a
+    // hand-rolled pool would miss: an installed plugin that *shadows* a
+    // bundled first-party name (boot rejects — nothing dispatches) and an
+    // installed plugin that *replaces* a same-named excluded bundled
+    // skeleton (its commands win, the skeleton's don't).
+    const { shadowing, selectedManifests } = selectBootPlugins({
+      discovered: bundled,
+      installed,
+      config: merged.effective,
+      bootProfile: 'config',
+    })
+    // A shadow collision makes real boot throw before any command
+    // dispatches; advertise no plugin commands rather than ones boot rejects.
+    if (shadowing.length > 0) return []
+
     /** @type {Map<string, { name: string, summary: string }>} */
     const out = new Map()
-    for (const entry of manifests) {
-      if (!enabled.has(entry.manifest.name)) continue
+    for (const entry of selectedManifests) {
       for (const cmd of entry.manifest.contributes?.commands ?? []) {
         if (!cmd || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
         out.set(cmd.name, {

@@ -107,14 +107,9 @@ export async function bootKernel(opts = {}) {
       // plugin by name. The override policy is intentionally deferred
       // (see hy-gh-2 design): reject boot with a clear, telemetry-tagged
       // error so the operator removes the installed copy before booting.
-      const bundledNames = new Set(discovered.loaded.map((m) => m.manifest.name))
-      /** @type {PluginName[]} */
-      const shadowing = []
-      for (const m of installed.loaded) {
-        if (bundledNames.has(m.manifest.name)) {
-          shadowing.push(/** @type {PluginName} */ (m.manifest.name))
-        }
-      }
+      // The same detection feeds the shared `selectBootPlugins` so help
+      // knows to advertise no commands when boot would reject.
+      const shadowing = detectShadowedPlugins({ discovered, installed })
       if (shadowing.length > 0) {
         span.setAttribute('installed_shadow_collisions', shadowing.length)
         span.setAttribute('error_kind', 'installed_shadows_bundled')
@@ -183,20 +178,18 @@ export async function bootKernel(opts = {}) {
         if (merged.drops.length > 0) span.setAttribute('local_entries_dropped', merged.drops.length)
       }
 
-      // Full plugin pool: V1 allowlist + excluded-from-default set +
-      // installed plugins. Excluded plugins are in the pool so they
-      // activate when named in config or an init preset — the allowlist
-      // only governs default activation, not discoverability.
-      const installedNames = new Set(installed.loaded.map((m) => m.manifest.name))
-      const excludedAvailable = discovered.excluded.filter(
-        (m) => !installedNames.has(/** @type {PluginName} */ (m.manifest.name))
-      )
-      const available = [...discovered.loaded, ...excludedAvailable, ...installed.loaded]
-      const selected = computeSelectedPlugins({
-        bootProfile,
+      // Full plugin pool + selection (shared with help so `hyp --help`
+      // advertises exactly the command set this boot would activate and
+      // dispatch): V1 allowlist + excluded-from-default set + installed
+      // plugins, with an installed plugin replacing a same-named excluded
+      // bundled skeleton. Excluded plugins are in the pool so they activate
+      // when named in config or an init preset — the allowlist only governs
+      // default activation, not discoverability.
+      const { installedNames, selected, selectedManifests } = selectBootPlugins({
+        discovered,
+        installed,
         config,
-        discovered: available,
-        installedNames,
+        bootProfile,
       })
 
       const log = getLogger('kernel')
@@ -248,9 +241,6 @@ export async function bootKernel(opts = {}) {
           skipped,
         }
       }
-
-      const selectedManifests = available
-        .filter((m) => selected.has(/** @type {PluginName} */ (m.manifest.name)))
 
       const resolution = await resolveDependencies(selectedManifests.map((m) => m.manifest))
       span.setAttribute('resolve_order_hash', resolution.resolveOrderHash)
@@ -400,6 +390,82 @@ export function resolveConfigPath({ explicit, env, hypHome }) {
   if (explicit) return path.resolve(explicit)
   if (env.HYP_CONFIG) return path.resolve(env.HYP_CONFIG)
   return defaultConfigPath(hypHome)
+}
+
+/**
+ * Detect installed plugins that shadow a bundled first-party plugin by
+ * name. Pure (manifests only — no I/O, telemetry, or throw). Shared
+ * between `bootKernel`'s hard reject guard and `selectBootPlugins` so the
+ * shadow rule has a single definition.
+ *
+ * @param {{ discovered: { loaded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
+ * @returns {PluginName[]}
+ */
+export function detectShadowedPlugins({ discovered, installed }) {
+  const bundledNames = new Set(discovered.loaded.map((m) => m.manifest.name))
+  /** @type {PluginName[]} */
+  const shadowing = []
+  for (const m of installed.loaded) {
+    if (bundledNames.has(m.manifest.name)) {
+      shadowing.push(/** @type {PluginName} */ (m.manifest.name))
+    }
+  }
+  return shadowing
+}
+
+/**
+ * Compute the boot-equivalent plugin selection from the cheap discovery
+ * inputs boot already reads — bundled + installed plugin manifests and
+ * the effective config. Pure: no I/O, no activation, no telemetry, no
+ * throw.
+ *
+ * This is the single source of truth for *which* plugins boot would
+ * activate, *from which manifest pool*. Both `bootKernel` (which then
+ * activates `selectedManifests`) and `collectPluginHelpCommands` (which
+ * lists the commands those manifests declare) call it, so `hyp --help`
+ * advertises exactly the command set dispatch would run. In particular it
+ * encodes the two selection rules help must not skip:
+ *
+ *  - `shadowing`: installed plugins whose name collides with a bundled
+ *    first-party plugin. Boot rejects on these; help advertises no plugin
+ *    commands rather than phantoms that will never dispatch.
+ *  - excluded-bundled-vs-installed: an installed plugin replaces a
+ *    same-named excluded bundled skeleton in the pool, so its commands —
+ *    not the skeleton's — are what dispatch sees.
+ *
+ * @param {{
+ *   discovered: { loaded: LoadedManifest[], excluded: LoadedManifest[] },
+ *   installed: { loaded: LoadedManifest[] },
+ *   config: HypAwareV2Config | null,
+ *   bootProfile?: BootProfile,
+ * }} args
+ * @returns {{
+ *   shadowing: PluginName[],
+ *   installedNames: Set<PluginName>,
+ *   pool: LoadedManifest[],
+ *   selected: Set<PluginName>,
+ *   selectedManifests: LoadedManifest[],
+ * }}
+ */
+export function selectBootPlugins({ discovered, installed, config, bootProfile = 'config' }) {
+  const shadowing = detectShadowedPlugins({ discovered, installed })
+  const installedNames = new Set(
+    installed.loaded.map((m) => /** @type {PluginName} */ (m.manifest.name))
+  )
+  const excludedAvailable = discovered.excluded.filter(
+    (m) => !installedNames.has(/** @type {PluginName} */ (m.manifest.name))
+  )
+  const pool = [...discovered.loaded, ...excludedAvailable, ...installed.loaded]
+  const selected = computeSelectedPlugins({
+    bootProfile,
+    config,
+    discovered: pool,
+    installedNames,
+  })
+  const selectedManifests = pool.filter((m) =>
+    selected.has(/** @type {PluginName} */ (m.manifest.name))
+  )
+  return { shadowing, installedNames, pool, selected, selectedManifests }
 }
 
 /**

@@ -11,6 +11,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { runClaudeSessionContextHook } from '../../hypaware-core/plugins-workspace/claude/src/hook_command.js'
 
 function hookKernelAndRegistry() {
@@ -179,7 +180,7 @@ test('top-level help lists commands declared by config-active plugins', async ()
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome } })
+  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
@@ -217,7 +218,7 @@ test('top-level help lists a local plugin addition on a fleet-joined host', asyn
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome } })
+  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
 
   assert.equal(code, 0)
   assert.match(stdout.text(), /graph project\s+Project every registered source contract/)
@@ -232,11 +233,163 @@ test('top-level help omits plugin commands when the plugin is disabled', async (
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome } })
+  const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   assert.equal(stdout.text().includes('graph project'), false)
+})
+
+/**
+ * Stage a synthetic bundled plugin under `workspaceDir` whose manifest
+ * declares the given help commands. Mirrors the shape `discoverBundledPlugins`
+ * walks (a directory holding `hypaware.plugin.json`).
+ *
+ * @param {{ workspaceDir: string, name: string, commands: { name: string, summary: string }[] }} args
+ */
+async function stageBundledPlugin({ workspaceDir, name, commands }) {
+  const dir = path.join(workspaceDir, name.replace(/^@hypaware\//, ''))
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(
+    path.join(dir, 'hypaware.plugin.json'),
+    JSON.stringify({
+      schema_version: 1,
+      name,
+      version: '0.0.1',
+      hypaware_api: '^1.0.0',
+      runtime: 'node',
+      entrypoint: './index.js',
+      contributes: { commands },
+    })
+  )
+  await fs.writeFile(path.join(dir, 'index.js'), 'export async function activate() {}\n')
+}
+
+/**
+ * Stage an installed plugin under `<hypHome>/hypaware/plugins/<name>` and
+ * register it in `plugin-lock.json`, with a manifest declaring the given
+ * help commands. Mirrors what `hyp plugin install` lands on disk.
+ *
+ * @param {{ hypHome: string, name: string, commands: { name: string, summary: string }[] }} args
+ */
+async function stageInstalledPlugin({ hypHome, name, commands }) {
+  const stateDir = path.join(hypHome, 'hypaware')
+  const installDir = path.join(stateDir, 'plugins', name)
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(
+    path.join(installDir, 'hypaware.plugin.json'),
+    JSON.stringify({
+      schema_version: 1,
+      name,
+      version: '1.0.0',
+      hypaware_api: '^1.0.0',
+      runtime: 'node',
+      entrypoint: './index.js',
+      contributes: { commands },
+    })
+  )
+  await fs.writeFile(path.join(installDir, 'index.js'), 'export async function activate() {}\n')
+  await writeLock(stateDir, {
+    schema_version: 1,
+    plugins: {
+      [name]: {
+        name,
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: installDir, path: installDir },
+        install_dir: installDir,
+        content_hash: 'a'.repeat(64),
+        manifest_hash: 'b'.repeat(64),
+        installed_at: '2026-05-21T00:00:00.000Z',
+      },
+    },
+  })
+}
+
+test('top-level help lists the installed plugin that replaces an excluded bundled skeleton, not the skeleton it shadows', async () => {
+  // Regression: help must replicate boot's plugin SELECTION. An installed
+  // plugin whose name matches an excluded bundled skeleton (`@hypaware/gascity`)
+  // *replaces* it in the boot pool, so dispatch runs the installed plugin's
+  // commands. A hand-rolled help pool that kept both would advertise the
+  // skeleton's commands as phantoms that never dispatch.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-replace-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/gascity',
+    commands: [
+      { name: 'gascity attach', summary: 'attach (bundled skeleton)' },
+      { name: 'gascity phantom', summary: 'only the skeleton declares this' },
+    ],
+  })
+  await stageInstalledPlugin({
+    hypHome,
+    name: '@hypaware/gascity',
+    commands: [
+      { name: 'gascity attach', summary: 'attach (installed winner)' },
+      { name: 'gascity real', summary: 'only the installed plugin declares this' },
+    ],
+  })
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/gascity' }] })
+  )
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['--help'], {
+    stdout,
+    stderr,
+    workspaceDir,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+  })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  const out = stdout.text()
+  // The installed plugin is the boot winner: its commands (incl. the
+  // colliding `gascity attach` summary) are what dispatch would run.
+  assert.match(out, /gascity attach\s+attach \(installed winner\)/)
+  assert.match(out, /gascity real\s+only the installed plugin declares this/)
+  // The replaced skeleton's commands never dispatch — they must not appear.
+  assert.equal(out.includes('gascity phantom'), false)
+  assert.equal(out.includes('bundled skeleton'), false)
+})
+
+test('top-level help advertises no commands for an installed plugin that shadows a bundled first-party name', async () => {
+  // Regression: an installed plugin shadowing a bundled first-party plugin
+  // makes real boot reject before any command dispatches. Help must not
+  // advertise either side's commands — none of them will ever run.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-shadow-'))
+  const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  await stageBundledPlugin({
+    workspaceDir,
+    name: '@hypaware/ai-gateway',
+    commands: [{ name: 'gateway bundled', summary: 'bundled gateway command' }],
+  })
+  await stageInstalledPlugin({
+    hypHome,
+    name: '@hypaware/ai-gateway',
+    commands: [{ name: 'gateway installed', summary: 'installed gateway command' }],
+  })
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/ai-gateway' }] })
+  )
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['--help'], {
+    stdout,
+    stderr,
+    workspaceDir,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+  })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  const out = stdout.text()
+  assert.equal(out.includes('gateway bundled'), false)
+  assert.equal(out.includes('gateway installed'), false)
 })
 
 function groupKernelAndRegistry() {
