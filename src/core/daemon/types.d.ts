@@ -8,7 +8,7 @@ import type {
   ExtendedSinkRegistry,
   ExtendedSourceRegistry,
 } from '../registry/types.d.ts'
-import type { BootKernelResult, KernelRuntime } from '../runtime/types.d.ts'
+import type { KernelRuntime } from '../runtime/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
