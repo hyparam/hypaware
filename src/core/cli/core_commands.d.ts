@@ -1,6 +1,6 @@
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { QueryFormat } from '../query/types.d.ts'
-import type { InitFlags, PickerExport, PickerExportOrigin } from './types.d.ts'
+import type { ConfiguredMenuOption, InitFlags, PickerExport, PickerExportOrigin } from './types.d.ts'
 import type { HypAwareStatusReport } from '../daemon/types.d.ts'
 
 export declare function registerCoreCommands(
@@ -37,12 +37,6 @@ export declare function renderStatusText(args: {
   cacheRoot: string
   stdout: { write(chunk: string): unknown }
 }): void
-
-interface ConfiguredMenuOption {
-  value: string
-  label: string
-  summary?: string
-}
 
 /** Build the configured-install action menu. Exported for tests. */
 export declare function buildConfiguredMenuOptions(

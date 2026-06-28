@@ -22,7 +22,7 @@ import { rowsToColumnSources } from '../../plugins-workspace/format-parquet/src/
 
 /**
  * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.d.ts'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))

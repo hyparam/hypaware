@@ -533,7 +533,7 @@ export interface RequestSinkConfigInstance {
   config?: SinkInstanceConfig
 }
 
-export interface SinkInstanceConfig extends JsonObject {
+export interface SinkInstanceConfig {
   /** Export cadence — standard 5-field cron expression (e.g. "0 * * * *"). */
   schedule?: string
   /**
@@ -543,6 +543,8 @@ export interface SinkInstanceConfig extends JsonObject {
    * writers (their format is intrinsic).
    */
   encoder?: PluginName
+  /** Arbitrary plugin-specific settings; serializable like any `JsonObject`. */
+  [key: string]: JsonValue | undefined
 }
 
 export interface QueryConfig {

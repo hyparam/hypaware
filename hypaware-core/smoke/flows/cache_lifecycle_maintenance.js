@@ -16,7 +16,7 @@ import { maintainCache, cacheStatus } from '../../../src/core/cache/maintenance.
 
 /**
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../../../src/core/runtime/activation.d.ts'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.d.ts'
  */
 

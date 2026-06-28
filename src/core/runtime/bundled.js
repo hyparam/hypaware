@@ -7,7 +7,7 @@ import { loadManifests } from '../manifest.js'
 
 /**
  * @import { PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { FailedManifest, LoadedManifest } from '../manifest.js'
+ * @import { FailedManifest, LoadedManifest } from '../types.d.ts'
  * @import { DiscoverBundledResult } from './types.d.ts'
  */
 

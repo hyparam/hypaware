@@ -7,7 +7,7 @@ import { Attr, getLogger, withSpan } from './observability/index.js'
 
 /**
  * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from './manifest.d.ts'
+ * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from './types.d.ts'
  */
 
 const MANIFEST_BASENAME = 'hypaware.plugin.json'

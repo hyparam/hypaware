@@ -40,7 +40,7 @@ import {
  * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
  * @import { Dirent } from 'node:fs'
  * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
- * @import { LoadedManifest } from '../manifest.js'
+ * @import { LoadedManifest } from '../types.d.ts'
  */
 
 /**
@@ -384,7 +384,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const runtimeSources = opts.runtime?.sources?.list?.() ?? []
   if (runtimeSources.length > 0) {
     for (const contribution of runtimeSources) {
-      const started = opts.runtime?.sources.started?.(contribution.name)
+      const started = opts.runtime?.sources?.started?.(contribution.name)
       sources.push({
         name: contribution.name,
         plugin: contribution.plugin,

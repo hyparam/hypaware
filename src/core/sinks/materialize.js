@@ -19,7 +19,7 @@ import {
  *   PluginActivationContext,
  *   TableFormatProvider,
  * } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../runtime/activation.d.ts'
+ * @import { KernelRuntime } from '../runtime/types.d.ts'
  * @import { ExtendedSinkHandle } from '../registry/types.d.ts'
  */
 

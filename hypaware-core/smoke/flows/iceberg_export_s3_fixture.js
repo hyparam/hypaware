@@ -27,7 +27,7 @@ import {
 
 /**
  * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.d.ts'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))

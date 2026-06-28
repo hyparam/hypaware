@@ -12,7 +12,7 @@ import { getEntry } from '../plugin_install/lock.js'
 
 /**
  * @import { ConfigRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from '../manifest.js'
+ * @import { LoadedManifest } from '../types.d.ts'
  * @import { ConfigApplyDeps, PinnedInstallResult } from './types.d.ts'
  */
 

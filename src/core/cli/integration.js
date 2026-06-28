@@ -13,7 +13,7 @@
 import { dispatch } from './dispatch.js'
 
 /**
- * @import { IntegrationOptions, CommandResult, ClientResult } from './integration.d.ts'
+ * @import { IntegrationOptions, IntegrationCommandResult, ClientResult } from './types.d.ts'
  */
 
 /**
@@ -94,7 +94,7 @@ function resolveEnv(opts) {
  *
  * @param {string[]} argv
  * @param {IntegrationOptions} [opts]
- * @returns {Promise<CommandResult>}
+ * @returns {Promise<IntegrationCommandResult>}
  */
 export async function run(argv, opts = {}) {
   const stdout = makeBuffer()
@@ -212,7 +212,7 @@ export function detach(client = 'claude', opts = {}) {
  * @param {string} url
  * @param {string} [token]
  * @param {Omit<IntegrationOptions, 'dryRun'> & { noDaemon?: boolean }} [opts]
- * @returns {Promise<CommandResult>}
+ * @returns {Promise<IntegrationCommandResult>}
  * @ref LLP 0025#seed-config-mode [implements] — embedded join writes only the central seed; the host's daemon pulls config
  * @ref LLP 0017#the-primary-daemon [constrained-by] — noDaemon defaults true: the daemon is a service unit, never hosted in-process
  */

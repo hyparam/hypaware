@@ -29,7 +29,7 @@ import { materializeSinks } from '../sinks/materialize.js'
 /**
  * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
  * @import { BootProfile } from '../runtime/types.d.ts'
- * @import { DispatchOptions } from './dispatch.d.ts'
+ * @import { DispatchOptions } from './types.d.ts'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
