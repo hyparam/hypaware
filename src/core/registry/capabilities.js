@@ -5,7 +5,7 @@ import { matchesSemverRange } from '../semver.js'
 
 /**
  * @import { CapabilityRegistration, CapabilityRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { InternalRegistration } from './types.d.ts'
+ * @import { CapabilityRegistryHandle, InternalRegistration } from './types.d.ts'
  */
 
 /**
@@ -16,7 +16,7 @@ import { matchesSemverRange } from '../semver.js'
  * intentionally not handled here — dep_graph inspects `list()` after
  * provides and emits the `cap_version_clash` rejection.
  *
- * @returns {CapabilityRegistry & { _registrations: () => InternalRegistration[] }}
+ * @returns {CapabilityRegistryHandle}
  */
 export function createCapabilityRegistry() {
   /** @type {InternalRegistration[]} */
