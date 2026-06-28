@@ -12,7 +12,7 @@ import { readCursorSync } from '../../../src/core/cache/partition.js'
 
 /**
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../../../src/core/runtime/activation.d.ts'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.d.ts'
  * @import { Dirent } from 'node:fs'
  */

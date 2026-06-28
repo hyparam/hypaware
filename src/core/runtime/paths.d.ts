@@ -1,17 +1,5 @@
-import type {
-  PluginName,
-  PluginPaths,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
-
-export type { PluginPaths }
-
-export interface CreatePluginPathsArgs {
-  pluginName: PluginName
-  rootDir: string
-  stateRoot: string
-  runId: string
-  tmpRoot?: string
-}
+import type { PluginPaths } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { CreatePluginPathsArgs } from './types.d.ts'
 
 /**
  * Build the four standard plugin directories and create them on disk.

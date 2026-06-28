@@ -1,35 +1,8 @@
+import type { PluginManifest } from '../../collectivus-plugin-kernel-types.d.ts'
 import type {
-  PluginManifest,
-  PluginName,
-} from '../../collectivus-plugin-kernel-types.d.ts'
-import type { CapabilityRegistryHandle } from './registry/capabilities'
-
-export type DepGraphErrorKind =
-  | 'cycle'
-  | 'plugin_missing'
-  | 'cap_missing'
-  | 'cap_version_clash'
-
-export interface UnsatisfiedRequirement {
-  plugin: PluginName
-  errorKind: DepGraphErrorKind
-  detail?: string
-}
-
-export interface DepGraphResolution {
-  /** Topo-sorted activation order; eliminated plugins are not included. */
-  order: PluginName[]
-  unsatisfied: UnsatisfiedRequirement[]
-  /** Short stable hash of `order.join('\n')` for boot-to-boot drift checks. */
-  resolveOrderHash: string
-  pluginCount: number
-  capabilityCount: number
-  registry: CapabilityRegistryHandle
-}
-
-export interface ResolveDependenciesOptions {
-  registry?: CapabilityRegistryHandle
-}
+  DepGraphResolution,
+  ResolveDependenciesOptions,
+} from './types.d.ts'
 
 /**
  * Resolve a topological activation order over manifests' `requires.plugins`

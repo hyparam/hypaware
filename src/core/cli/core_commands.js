@@ -68,6 +68,7 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
  * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.d.ts'
  * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
+ * @import { LoadedManifest } from '../types.d.ts'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
  * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from './types.d.ts'
  */
@@ -1160,9 +1161,9 @@ function pluginStateDir(ctx) {
  * @returns {Promise<{ knownPlugins: Map<import('../../../collectivus-plugin-kernel-types.d.ts').PluginName, import('../config/types.d.ts').PluginMetadata>, knownDatasets: Set<string> }>}
  */
 async function buildKnownPluginsForCtx(ctx) {
-  /** @type {import('../manifest.js').LoadedManifest[]} */
+  /** @type {LoadedManifest[]} */
   let bundledLoaded = []
-  /** @type {import('../manifest.js').LoadedManifest[]} */
+  /** @type {LoadedManifest[]} */
   let installedLoaded = []
   try {
     const bundled = await discoverBundledPlugins()

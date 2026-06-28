@@ -6,7 +6,7 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "noEmit": true,
-    "skipLibCheck": true,
+    "skipLibCheck": false,
     "strict": false,
     "strictNullChecks": true,
     "target": "es2022",

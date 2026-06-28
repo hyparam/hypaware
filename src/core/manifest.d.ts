@@ -1,63 +1,10 @@
+import type { PluginManifest } from '../../collectivus-plugin-kernel-types.d.ts'
 import type {
-  PluginManifest,
-  PluginRequirements,
-  PluginProvides,
-  PluginContributionManifest,
-  PluginCommandManifest,
-  PluginConfigSectionManifest,
-  PluginSourceManifest,
-  PluginSinkManifest,
-  PluginDatasetManifest,
-  PluginSkillManifest,
-  PluginInitPresetManifest,
-  PluginSkillClient,
-  PluginSourceKind,
-  PluginSourceSpec,
-  PluginLockFile,
-  PluginLockEntry,
-  PluginUpdateState,
-  SinkSupportTag,
-} from '../../collectivus-plugin-kernel-types.d.ts'
-
-export type {
-  PluginManifest,
-  PluginRequirements,
-  PluginProvides,
-  PluginContributionManifest,
-  PluginCommandManifest,
-  PluginConfigSectionManifest,
-  PluginSourceManifest,
-  PluginSinkManifest,
-  PluginDatasetManifest,
-  PluginSkillManifest,
-  PluginInitPresetManifest,
-  PluginSkillClient,
-  PluginSourceKind,
-  PluginSourceSpec,
-  PluginLockFile,
-  PluginLockEntry,
-  PluginUpdateState,
-  SinkSupportTag,
-}
-
-export type ManifestErrorKind = 'manifest_invalid'
-
-export interface LoadedManifest {
-  ok: true
-  manifest: PluginManifest
-  manifestPath: string
-  rootDir: string
-}
-
-export interface FailedManifest {
-  ok: false
-  errorKind: ManifestErrorKind
-  message: string
-  manifestPath: string
-  rootDir: string
-}
-
-export type ManifestLoadResult = LoadedManifest | FailedManifest
+  FailedManifest,
+  LoadedManifest,
+  ManifestErrorKind,
+  ManifestLoadResult,
+} from './types.d.ts'
 
 /** Validate a parsed JSON value against the V1 `PluginManifest` shape. */
 export function validateManifest(

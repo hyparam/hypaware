@@ -8,7 +8,7 @@ import { createConfigRegistry } from './schema.js'
 
 /**
  * @import { ConfigRegistry, ConfigSectionRegistration, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from '../manifest.js'
+ * @import { LoadedManifest } from '../types.d.ts'
  */
 
 /**

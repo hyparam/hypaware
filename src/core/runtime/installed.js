@@ -7,7 +7,7 @@ import { loadManifest } from '../manifest.js'
 
 /**
  * @import { PluginLockEntry, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { FailedManifest, LoadedManifest } from '../manifest.js'
+ * @import { FailedManifest, LoadedManifest } from '../types.d.ts'
  * @import { DiscoverInstalledResult } from './types.d.ts'
  */
 

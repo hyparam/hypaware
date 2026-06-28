@@ -2,7 +2,7 @@
 
 /**
  * @import { CapabilityName, PluginAttachProbeManifest, PluginContributionManifest, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from './manifest.js'
+ * @import { LoadedManifest } from './types.d.ts'
  * @import { PluginMetadata } from './config/types.d.ts'
  */
 

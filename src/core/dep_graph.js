@@ -8,8 +8,8 @@ import { matchesSemverRange } from './semver.js'
 
 /**
  * @import { PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { DepGraphResolution, UnsatisfiedRequirement } from './dep_graph.d.ts'
- * @import { CapabilityRegistryHandle } from './registry/capabilities.d.ts'
+ * @import { DepGraphResolution, UnsatisfiedRequirement } from './types.d.ts'
+ * @import { CapabilityRegistryHandle } from './registry/types.d.ts'
  */
 
 /**

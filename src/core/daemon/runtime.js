@@ -30,7 +30,7 @@ import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
  * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../runtime/activation.js'
+ * @import { KernelRuntime } from '../runtime/types.d.ts'
  * @import { BootKernelResult } from '../runtime/types.d.ts'
  */
 
