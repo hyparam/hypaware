@@ -4,8 +4,8 @@ import { buildQuerySqlOutput } from './format.js'
 import { executeQuerySql } from './sql.js'
 
 /**
- * @import { VerbRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
+ * @import { VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  */
 
 /**

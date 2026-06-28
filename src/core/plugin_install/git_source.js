@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { GitSourceParts } from './types.d.ts'
+ * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { GitSourceParts } from '../../../src/core/plugin_install/types.js'
  */
 
 const HTTPS_GITHUB_RE = /^https?:\/\/(?:[^@/\s]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:#(.+))?$/i

@@ -32,8 +32,8 @@ import {
 } from '../../iceberg/partition-spec.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AppendOptions, CachePartitioningDeclaration } from '../types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AppendOptions, CachePartitioningDeclaration } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */

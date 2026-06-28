@@ -19,7 +19,7 @@ import {
  *   BuildPlistOptions,
  *   PlanLaunchAgentInstallOptions,
  *   LaunchAgentInstallPlan,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 export class LaunchAgentError extends Error {

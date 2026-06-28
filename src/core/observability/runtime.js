@@ -472,5 +472,5 @@ function randomHex(bytes) {
 }
 
 /**
- * @import { LogRecord, MetricRecord } from './types.d.ts'
+ * @import { LogRecord, MetricRecord } from '../../../src/core/observability/types.js'
  */

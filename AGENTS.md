@@ -39,6 +39,18 @@ actually shipped in V1.
   the file with `@import` JSDoc comments, then reference the bare names.
 - Do not use `@typedef` in JSDoc. Define shared types as `interface`s in
   `.d.ts` files and import them via `@import`.
+- **Type-import specifiers are repo-root-anchored `.js` paths.** Inside `src/`,
+  write `@import { Foo } from '../../src/core/types.js'` (route up to the repo
+  root, then back down through `src/...`, with a `.js` extension), not
+  `from './types.d.ts'`. The published declaration build (`npm run build:types`,
+  `tsconfig.build.json`, `rootDir: src` to `outDir: types`) emits `.d.ts` into a
+  parallel `types/` tree; a root-anchored specifier resolves identically from
+  both `src/<P>/x.js` and the generated `types/<P>/x.d.ts`, so consumers of the
+  published package get real types instead of `any`. A bare `./types.d.ts`
+  resolves in `src` but dangles in `types/`. Imports of the root kernel contract
+  (`collectivus-plugin-kernel-types.js`) and `hypaware-core/...` already reach
+  the root, so they only need the `.js` extension. This is the icebird-style
+  no-copy convention.
 
 ## Development Checks
 

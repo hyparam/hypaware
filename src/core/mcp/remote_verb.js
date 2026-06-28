@@ -5,7 +5,7 @@ import { resolveToken } from '../remote/credentials.js'
 import { createHttpMcpClient } from './client.js'
 
 /**
- * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

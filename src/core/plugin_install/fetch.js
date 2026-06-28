@@ -9,7 +9,7 @@ import { fetchGitSource } from './git_fetch.js'
 import { pluginInstallDir } from './paths.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -19,7 +19,7 @@ import { pluginInstallDir } from './paths.js'
  *   FetchResult,
  *   FetchErrorKind,
  *   BeforeCommitCallback,
- * } from './types.d.ts'
+ * } from '../../../src/core/plugin_install/types.js'
  */
 
 const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])

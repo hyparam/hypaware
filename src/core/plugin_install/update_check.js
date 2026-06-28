@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import { Attr, getKernelInstruments, SpanStatusCode, withSpan } from '../observability/index.js'
 
 /**
- * @import { PluginLockEntry, PluginUpdateState } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginLockEntry, PluginUpdateState } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000

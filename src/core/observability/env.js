@@ -8,7 +8,7 @@ const DEFAULT_HYP_HOME_DIRNAME = '.hyp'
 const HYP_STATE_SUBDIR = 'hypaware'
 
 /**
- * @import { ObservabilityEnv } from './types.d.ts'
+ * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
 
 /**

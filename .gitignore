@@ -8,5 +8,9 @@
 node_modules/
 package-lock.json
 
+# Generated declaration output (built by `npm run build:types`, shipped via the
+# package `files` allowlist; never committed).
+types/
+
 # Donor/reference codebase kept out of the active HypAware repo
 collectivus/

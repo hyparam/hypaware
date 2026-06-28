@@ -6,9 +6,9 @@ import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 
 /**
- * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
- * @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from './types.d.ts'
+ * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from '../../../src/core/query/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
 

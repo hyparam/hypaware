@@ -19,7 +19,7 @@ import {
  *   BuildUnitOptions,
  *   PlanSystemdInstallOptions,
  *   SystemdInstallPlan,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 export class SystemdUnitError extends Error {

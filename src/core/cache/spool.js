@@ -7,8 +7,8 @@ import path from 'node:path'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from '../../../src/core/cache/types.js'
  */
 
 export const SPOOL_DIR = '_hypaware_spool'

@@ -8,8 +8,8 @@ import { isValidRange, isValidSemver, matchesSemverRange } from '../semver.js'
 import { dryRunActivate } from './dry_run.js'
 
 /**
- * @import { PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { DoctorReport, DryRunResult, PluginDiagnostic, RegisteredSnapshot } from './types.d.ts'
+ * @import { PluginManifest } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { DoctorReport, DryRunResult, PluginDiagnostic, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
 const GUIDE = 'docs/PLUGIN_AUTHORING.md'

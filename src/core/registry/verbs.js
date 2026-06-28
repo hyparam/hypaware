@@ -3,7 +3,7 @@
 import { verbToCommand } from '../cli/verb_command.js'
 
 /**
- * @import { CommandRegistry, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRegistry, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

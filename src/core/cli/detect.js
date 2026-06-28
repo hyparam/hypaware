@@ -7,7 +7,7 @@ import path from 'node:path'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 
 /**
- * @import { PickerSource } from './types.d.ts'
+ * @import { PickerSource } from '../../../src/core/cli/types.js'
  */
 
 /**

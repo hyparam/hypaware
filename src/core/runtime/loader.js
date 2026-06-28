@@ -13,9 +13,9 @@ import { createPluginPaths } from './paths.js'
 import { createActivationContext, createKernelRuntime } from './activation.js'
 
 /**
- * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from './types.d.ts'
- * @import { ActivationFailure, ActivationResult, ActivationSuccess, PluginActivationEntry } from './types.d.ts'
+ * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { ActivationFailure, ActivationResult, ActivationSuccess, PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 /**

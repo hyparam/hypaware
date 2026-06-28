@@ -11,9 +11,9 @@ import { createVerbRegistry } from '../registry/verbs.js'
 import { createPluginPaths } from '../runtime/paths.js'
 
 /**
- * @import { ActivePlugin, PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSinkRegistry } from '../registry/types.d.ts'
- * @import { DryRunResult, RegisteredSnapshot } from './types.d.ts'
+ * @import { ActivePlugin, PluginManifest } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
+ * @import { DryRunResult, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
 const DRY_RUN_ID = 'doctor-dryrun'

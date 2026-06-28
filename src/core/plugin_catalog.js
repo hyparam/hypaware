@@ -1,9 +1,9 @@
 // @ts-check
 
 /**
- * @import { CapabilityName, PluginAttachProbeManifest, PluginContributionManifest, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from './types.d.ts'
- * @import { PluginMetadata } from './config/types.d.ts'
+ * @import { CapabilityName, PluginAttachProbeManifest, PluginContributionManifest, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.js'
+ * @import { LoadedManifest } from '../../src/core/types.js'
+ * @import { PluginMetadata } from '../../src/core/config/types.js'
  */
 
 /**

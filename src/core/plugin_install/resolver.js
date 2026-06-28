@@ -5,7 +5,7 @@ import path from 'node:path'
 import { applyGitSourceFlags, parseGitSource, redactRawSource } from './git_source.js'
 
 /**
- * @import { PluginSourceKind, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginSourceKind, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i

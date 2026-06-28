@@ -37,7 +37,7 @@ function defaultLabelFor(platform) {
  *   DaemonInstallOptions,
  *   DaemonUninstallOptions,
  *   DaemonServiceOptions,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 export class DaemonInstallError extends Error {

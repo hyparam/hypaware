@@ -19,7 +19,7 @@ import { Attr, getLogger } from '../observability/index.js'
  *   ReconcileActionResult,
  *   ReconcileInput,
  *   ReconcileReport,
- * } from './types.d.ts'
+ * } from '../../../src/core/config/types.js'
  */
 
 /**
