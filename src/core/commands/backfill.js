@@ -16,8 +16,8 @@ import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { BackfillProviderResult } from './types.d.ts'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
  */
 
 /**

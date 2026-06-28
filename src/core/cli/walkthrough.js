@@ -25,10 +25,10 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
  * @import { ClientDescriptor } from '../plugin_catalog.js'
- * @import { DaemonInstallOptions } from '../daemon/types.d.ts'
- * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
+ * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 
 /**
@@ -49,7 +49,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   WalkthroughOptions,
  *   WalkthroughQuestion,
  *   WalkthroughResult,
- * } from './types.d.ts'
+ * } from '../../../src/core/cli/types.js'
  */
 
 const DEFAULT_RETENTION_DAYS = 30

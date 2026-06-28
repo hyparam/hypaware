@@ -26,12 +26,12 @@ import {
 import { discoverInstalledPlugins } from './installed.js'
 
 /**
- * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from '../types.d.ts'
- * @import { KernelRuntime } from './types.d.ts'
- * @import { ActivationResult } from './types.d.ts'
- * @import { BootKernelOptions, BootKernelResult, BootProfile } from './types.d.ts'
- * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../config/types.d.ts'
+ * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { ActivationResult } from '../../../src/core/runtime/types.js'
+ * @import { BootKernelOptions, BootKernelResult, BootProfile } from '../../../src/core/runtime/types.js'
+ * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../../../src/core/config/types.js'
  */
 
 /**

@@ -13,7 +13,7 @@
 import { dispatch } from './dispatch.js'
 
 /**
- * @import { IntegrationOptions, IntegrationCommandResult, ClientResult } from './types.d.ts'
+ * @import { IntegrationOptions, IntegrationCommandResult, ClientResult } from '../../../src/core/cli/types.js'
  */
 
 /**

@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { DoctorReport } from './types.d.ts'
+ * @import { DoctorReport } from '../../../src/core/plugin_doctor/types.js'
  */
 
 /**

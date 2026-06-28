@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

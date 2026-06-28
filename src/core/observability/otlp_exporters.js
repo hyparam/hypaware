@@ -3,7 +3,7 @@
 import { hrTimeToUnixNano, SpanStatusCode } from './runtime.js'
 
 /**
- * @import { LogRecord, MetricRecord } from './types.d.ts'
+ * @import { LogRecord, MetricRecord } from '../../../src/core/observability/types.js'
  * @import { Span } from './runtime.js'
  */
 

@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * @import { PluginName, PluginPaths } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginName, PluginPaths } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

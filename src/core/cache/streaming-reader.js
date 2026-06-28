@@ -5,8 +5,8 @@ import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { FlushChunk, ProgressState } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { FlushChunk, ProgressState } from '../../../src/core/cache/types.js'
  */
 
 export const BATCH_BYTE_LIMIT = 128 * 1024 * 1024

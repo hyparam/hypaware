@@ -5,7 +5,7 @@
 // alike, so it is core surface, not a cache internal (LLP 0003). [implements]
 
 /**
- * @import { CachePartitioningDeclaration } from './types.d.ts'
+ * @import { CachePartitioningDeclaration } from '../../../src/core/iceberg/types.js'
  * @import { Field, PartitionSpec, PartitionTransform, Schema } from 'icebird/src/types.js'
  */
 

@@ -18,9 +18,9 @@ import {
  *   SinkEncoder,
  *   PluginActivationContext,
  *   TableFormatProvider,
- * } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../runtime/types.d.ts'
- * @import { ExtendedSinkHandle } from '../registry/types.d.ts'
+ * } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  */
 
 /**

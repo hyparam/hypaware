@@ -13,7 +13,7 @@ import { readBackfillPolicy } from './backfill_policy.js'
  *   BackfillSpawnResult,
  *   CreateBackfillHandlerOptions,
  *   DesiredAction,
- * } from './types.d.ts'
+ * } from '../../../src/core/config/types.js'
  */
 
 const MS_PER_DAY = 86_400_000

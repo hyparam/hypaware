@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
 
 /**
- * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

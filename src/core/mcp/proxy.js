@@ -10,7 +10,7 @@ import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

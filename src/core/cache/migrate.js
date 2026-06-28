@@ -13,8 +13,8 @@ import { readRowsFromTable } from './iceberg/store.js'
 import { datasetsRoot } from './paths.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitionMeta } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta } from '../../../src/core/cache/types.js'
  */
 
 /**

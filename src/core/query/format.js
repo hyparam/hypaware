@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ContextControls, ContextControlsResult, QueryFormat, QueryResultSet } from './types.d.ts'
+ * @import { ContextControls, ContextControlsResult, QueryFormat, QueryResultSet } from '../../../src/core/query/types.js'
  */
 
 /**

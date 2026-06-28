@@ -11,7 +11,7 @@ import { provenanceFromUrl } from './git_source.js'
 import { pluginInstallDir } from './paths.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
  * @import { Dirent } from 'node:fs'
  */
 
@@ -34,7 +34,7 @@ const SKIPPED_DIR_NAMES = new Set([
  *   GitFetchErrorKind,
  *   GitFetchStaged,
  *   BeforeCommitCallback,
- * } from './types.d.ts'
+ * } from '../../../src/core/plugin_install/types.js'
  */
 
 /**

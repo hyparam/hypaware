@@ -29,9 +29,9 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
- * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../runtime/types.d.ts'
- * @import { BootKernelResult } from '../runtime/types.d.ts'
+ * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -42,7 +42,7 @@ import { statusFilePath, writeStatusFile } from './status.js'
  *   SinkSnapshot,
  *   DaemonHandle,
  *   RunDaemonOptions,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000

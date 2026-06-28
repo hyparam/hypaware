@@ -27,9 +27,9 @@ import { registerCoreCommands } from './core_commands.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { BootProfile } from '../runtime/types.d.ts'
- * @import { DispatchOptions } from './types.d.ts'
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BootProfile } from '../../../src/core/runtime/types.js'
+ * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
