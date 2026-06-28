@@ -17,6 +17,7 @@ export type {
 } from './types.d.ts'
 
 export declare class HypAwareCommandError extends Error {
+  constructor(message: string, detail: { code: number; stdout: string; stderr: string; json: unknown })
   code: number
   stdout: string
   stderr: string
