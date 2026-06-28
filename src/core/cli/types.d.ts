@@ -10,8 +10,8 @@ import type {
   ExtendedSinkRegistry,
   ExtendedSourceRegistry,
 } from '../registry/types.d.ts'
+import type { KernelRuntime } from '../runtime/types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
-import type { createKernelRuntime } from '../runtime/activation.js'
 
 export type AsyncPickPrompt = (question: WalkthroughQuestion) => Promise<string[]>
 export type AsyncRetentionPrompt = (prompt: string, defaultDays: number) => Promise<number>
@@ -269,7 +269,7 @@ export interface DispatchOptions {
   /** Override the local plugin workspace */
   workspaceDir?: string
   registry?: ReturnType<typeof createCommandRegistry>
-  kernel?: ReturnType<typeof createKernelRuntime>
+  kernel?: KernelRuntime
 }
 
 // --- core_commands ---

@@ -24,8 +24,8 @@ import { INTERNAL_FIELDS } from './streaming-reader.js'
 import path from 'node:path'
 
 /**
- * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from './types.d.ts'
+ * @import { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { AsyncCells } from 'squirreling'
  */
 

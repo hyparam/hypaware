@@ -19,7 +19,7 @@ import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 
 /**
- * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.js'
  * @import {
  *   CachePartitionMeta,
  *   CacheStatusPartition,
@@ -32,9 +32,9 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTab
  *   PartitionCursor,
  *   AppendOptions,
  *   SettleContext,
- * } from './types.d.ts'
- * @import { QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * } from '../../../src/core/cache/types.js'
+ * @import { QueryStorageService } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
  */

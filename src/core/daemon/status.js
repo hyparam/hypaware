@@ -35,12 +35,12 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
+ * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../../../src/core/config/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
- * @import { LoadedManifest } from '../types.d.ts'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
  */
 
 /**

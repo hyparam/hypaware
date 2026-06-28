@@ -4,8 +4,8 @@ import { Attr, getKernelInstruments, getLogger } from '../observability/index.js
 import { matchesSemverRange } from '../semver.js'
 
 /**
- * @import { CapabilityRegistration, CapabilityRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CapabilityRegistryHandle, InternalRegistration } from './types.d.ts'
+ * @import { CapabilityRegistration, CapabilityRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CapabilityRegistryHandle, InternalRegistration } from '../../../src/core/registry/types.js'
  */
 
 /**

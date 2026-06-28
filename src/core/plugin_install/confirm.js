@@ -3,8 +3,8 @@
 import readline from 'node:readline/promises'
 
 /**
- * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from './types.d.ts'
+ * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from '../../../src/core/plugin_install/types.js'
  */
 
 /**

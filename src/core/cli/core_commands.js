@@ -61,16 +61,16 @@ import { renderReport } from '../plugin_doctor/render.js'
 import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 
 /**
- * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.js'
  * @import { ClientDescriptor } from '../plugin_catalog.js'
- * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
- * @import { PluginMetadata } from '../config/types.d.ts'
- * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
- * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.d.ts'
- * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
- * @import { LoadedManifest } from '../types.d.ts'
- * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
- * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from './types.d.ts'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { PluginMetadata } from '../../../src/core/config/types.js'
+ * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../../../src/core/daemon/types.js'
+ * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.js'
+ * @import { ConfirmInstall } from '../../../src/core/plugin_install/types.js'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
+ * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from '../../../src/core/cli/types.js'
  */
 
 /**
@@ -2439,9 +2439,11 @@ async function runSinkMaintain(argv, ctx) {
     return 2
   }
 
-  const { maintainExportTables } = await import(
-    '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
-  )
+  // Indirect the specifier so the declaration build (rootDir=src) does not
+  // pull this hypaware-core runtime module under src's emit root (TS6059).
+  // The module is loaded lazily and only when `sink maintain` runs.
+  const maintenanceModule = '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
+  const { maintainExportTables } = await import(maintenanceModule)
 
   const allHandles = /** @type {any} */ (ctx.sinks).listHandles?.() ?? []
   const tableFormatHandles = allHandles.filter(

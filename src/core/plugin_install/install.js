@@ -26,7 +26,7 @@ import { resolveSource } from './resolver.js'
 import { checkForPluginUpdate } from './update_check.js'
 
 /**
- * @import { PluginLockEntry, PluginLockFile, PluginName, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginLockEntry, PluginLockFile, PluginName, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
  * @import { FetchResult } from './fetch.js'
  */
 
@@ -37,7 +37,7 @@ import { checkForPluginUpdate } from './update_check.js'
  *   InstallSuccess,
  *   InstallFailure,
  *   InstallResult,
- * } from './types.d.ts'
+ * } from '../../../src/core/plugin_install/types.js'
  */
 
 /**

@@ -3,7 +3,7 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -14,7 +14,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  *   InstantiateArgs,
  *   ExtendedSinkHandle,
  *   ExtendedSinkRegistry,
- * } from './types.d.ts'
+ * } from '../../../src/core/registry/types.js'
  */
 
 /**

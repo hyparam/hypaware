@@ -17,7 +17,7 @@ export function daemonLogDir(stateRoot) {
 }
 
 /**
- * @import { DaemonLogger } from './types.d.ts'
+ * @import { DaemonLogger } from '../../../src/core/daemon/types.js'
  */
 
 /**

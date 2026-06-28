@@ -6,10 +6,10 @@ import path from 'node:path'
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../collectivus-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
- * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types.d.ts'
- * @import { DriverOptions, TickOptions, TickReport } from './types.d.ts'
+ * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
+ * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
  */
 
 /**

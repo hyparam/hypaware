@@ -3,8 +3,8 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { PluginActivationContext, SourceContribution, SourceRegistry, SourceStatus, StartedSource } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from './types.d.ts'
+ * @import { PluginActivationContext, SourceContribution, SourceRegistry, SourceStatus, StartedSource } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 
 /**

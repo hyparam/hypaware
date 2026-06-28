@@ -7,9 +7,9 @@ import { createCapabilityRegistry } from './registry/capabilities.js'
 import { matchesSemverRange } from './semver.js'
 
 /**
- * @import { PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { DepGraphResolution, UnsatisfiedRequirement } from './types.d.ts'
- * @import { CapabilityRegistryHandle } from './registry/types.d.ts'
+ * @import { PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.js'
+ * @import { DepGraphResolution, UnsatisfiedRequirement } from '../../src/core/types.js'
+ * @import { CapabilityRegistryHandle } from '../../src/core/registry/types.js'
  */
 
 /**

@@ -20,8 +20,8 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
- * @import { DatasetRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from './types.d.ts'
+ * @import { DatasetRegistration } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from '../../../src/core/cache/types.js'
  * @import { Manifest, ManifestEntry, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 

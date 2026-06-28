@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
- * @import { ScaffoldKind, ScaffoldResult } from './types.d.ts'
+ * @import { ScaffoldKind, ScaffoldResult } from '../../../src/core/plugin_doctor/types.js'
  */
 
 /** @type {ScaffoldKind[]} */

@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration } from '../cache/types.d.ts'
+ * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../../src/core/cache/types.js'
  */
 
 /**

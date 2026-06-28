@@ -7,7 +7,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { parseConfigShape } from './schema.js'
 
 /**
- * @import { ConfigApplyErrorKind, ConfigControlFacade, ConfigStageResult, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ConfigApplyErrorKind, ConfigControlFacade, ConfigStageResult, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
  * @import {
  *   ConfigApplyDeps,
  *   ConfigControl,
@@ -17,7 +17,7 @@ import { parseConfigShape } from './schema.js'
  *   ConfigSlot,
  *   CreateConfigControlOptions,
  *   ProbationMarker,
- * } from './types.d.ts'
+ * } from '../../../src/core/config/types.js'
  */
 
 /**
