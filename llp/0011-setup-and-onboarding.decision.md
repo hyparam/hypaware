@@ -35,8 +35,8 @@ the daemon can load.
 The walkthrough is the **first-run** path, not the every-run path. Once a
 valid config exists, re-running `hypaware` with no args (or `hyp init`) must
 not behave as if starting fresh. Instead it prints a short, friendly summary
-of the current setup — what's collected, where it's saved, daemon state, cache
-size and retention — and offers a small single-select menu:
+of the current setup (what's collected, where it's saved, daemon state, cache
+size and retention) and offers a small single-select menu:
 
 ```text
 HypAware is set up.
@@ -58,8 +58,8 @@ accident. `Reconfigure` re-enters the walkthrough above; `See full status`
 defers to `hyp status` for the full diagnostic surface.
 
 A **centrally-managed** install (one that has joined a fleet, i.e. the merged
-config has a central layer — [LLP 0031](./0031-layered-config.decision.md)) is
-locked locally, so a local reconfigure would be a no-op. The summary says so
+config has a central layer; see [LLP 0031](./0031-layered-config.decision.md))
+is locked locally, so a local reconfigure would be a no-op. The summary says so
 ("managed by your fleet") and the menu drops `Reconfigure`, leaving only
 status and quit.
 

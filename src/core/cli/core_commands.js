@@ -2594,16 +2594,16 @@ function buildPickerBackfillRunner(ctx) {
  * Re-running `hypaware` on a working install used to jump straight into
  * the first-run picker as if starting fresh. Instead, when a valid config
  * is present, print a short friendly summary of what's set up and offer a
- * small menu: reconfigure, see full status, or quit (the default — a bare
+ * small menu: reconfigure, see full status, or quit (the default; a bare
  * enter changes nothing).
  *
  * @ref LLP 0011#returning-to-a-configured-install [implements] — the picker
  *   stays the first-run path; this gate only fronts it once a config exists.
  *
  * Returns:
- *  - `'first-run'` — no valid config; caller runs the walkthrough as before
- *  - `'reconfigure'` — user chose to re-run the picker
- *  - `'done'` — user quit or viewed status; caller should exit 0
+ *  - `'first-run'`: no valid config; caller runs the walkthrough as before
+ *  - `'reconfigure'`: user chose to re-run the picker
+ *  - `'done'`: user quit or viewed status; caller should exit 0
  *
  * @param {CommandRunContext} ctx
  * @returns {Promise<'first-run' | 'reconfigure' | 'done'>}
@@ -2741,7 +2741,7 @@ const FRIENDLY_SINK_LABELS = /** @type {Record<string, string>} */ ({
  * @param {{ report: HypAwareStatusReport, locked: boolean, stdout: CommandRunContext['stdout'] }} args
  */
 export function renderConfigSummary({ report, locked, stdout }) {
-  stdout.write(locked ? 'HypAware is set up — managed by your fleet.\n\n' : 'HypAware is set up.\n\n')
+  stdout.write(locked ? 'HypAware is set up (managed by your fleet).\n\n' : 'HypAware is set up.\n\n')
   stdout.write(`  Collecting:  ${summariseCollecting(report)}\n`)
   stdout.write(`  Saving to:   ${summariseSinks(report)}\n`)
   stdout.write(`  Daemon:      ${summariseDaemon(report.daemon)}\n`)
@@ -2811,7 +2811,7 @@ function formatBytesShort(bytes) {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
   if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${bytes} B`
+  return `${Math.round(bytes)} B`
 }
 
 async function runInit(argv, ctx) {

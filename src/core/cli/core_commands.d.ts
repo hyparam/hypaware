@@ -37,3 +37,27 @@ export declare function renderStatusText(args: {
   cacheRoot: string
   stdout: { write(chunk: string): unknown }
 }): void
+
+interface ConfiguredMenuOption {
+  value: string
+  label: string
+  summary?: string
+}
+
+/** Build the configured-install action menu. Exported for tests. */
+export declare function buildConfiguredMenuOptions(
+  locked: boolean
+): ConfiguredMenuOption[]
+
+/** Numbered readline fallback for the configured-install menu. Exported for tests. */
+export declare function legacyConfiguredActionPrompt(
+  ctx: { stdin?: unknown; stdout: { write(chunk: string): unknown } },
+  options: ConfiguredMenuOption[]
+): Promise<string>
+
+/** Render the compact friendly summary of a configured install. Exported for tests. */
+export declare function renderConfigSummary(args: {
+  report: HypAwareStatusReport
+  locked: boolean
+  stdout: { write(chunk: string): unknown }
+}): void
