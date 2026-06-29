@@ -50,7 +50,7 @@ test('picker pre-checks detected sources, labels them, and defaults export to lo
   assert.notEqual(codex?.checked, true)
   assert.doesNotMatch(codex?.label ?? '', /detected/)
 
-  // The export question is no longer asked — local-parquet is the
+  // The export question is no longer asked: local-parquet is the
   // unconditional default.
   assert.equal(seen.find((q) => q.pickType === 'sinks'), undefined, 'export question must not be asked')
 

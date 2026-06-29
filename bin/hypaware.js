@@ -12,7 +12,7 @@ const argv = process.argv.slice(2)
 // tmpdir). Routing it through the dispatcher would lock the tracer to
 // the parent process's HYP_HOME before the harness can change it.
 //
-// Users never type `__smoke_internal` directly — they run
+// Users never type `__smoke_internal` directly. They run
 // `hyp smoke <flow>`, which goes through the dispatcher and spawns us
 // here with a clean process state.
 if (argv[0] === '__smoke_internal') {

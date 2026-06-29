@@ -45,7 +45,7 @@ test('createReconcilePassScheduler runs exactly one pass per idle edge', async (
   await sched.settle()
   assert.equal(runs, 1)
 
-  // A second edge after the first pass settles runs again — one pass per edge.
+  // A second edge after the first pass settles runs again: one pass per edge.
   sched.schedule('edge-2')
   await sched.settle()
   assert.equal(runs, 2)
@@ -64,7 +64,7 @@ test('createReconcilePassScheduler is single-flight and coalesces concurrent edg
   const sched = createReconcilePassScheduler({ run })
 
   sched.schedule('edge-1') // starts pass 1, blocks on its release
-  // schedule() returned while pass 1 is still in flight — proof the pass runs
+  // schedule() returned while pass 1 is still in flight: proof the pass runs
   // off the caller's stack (it never blocks the tick loop / confirm poll).
   assert.equal(runs, 1)
 
@@ -85,7 +85,7 @@ test('createReconcilePassScheduler is single-flight and coalesces concurrent edg
 
 test('createReconcilePassScheduler.settle resolves immediately when no pass is in flight', async () => {
   const sched = createReconcilePassScheduler({ run: async () => {} })
-  await sched.settle() // never scheduled — resolves without hanging
+  await sched.settle() // never scheduled: resolves without hanging
   assert.ok(true)
 })
 
@@ -98,7 +98,7 @@ test('createReconcilePassScheduler keeps scheduling after a pass throws', async 
   sched.schedule('edge-1')
   await sched.settle()
   assert.equal(runs, 1)
-  // A throw must not wedge the guard — the next edge still runs.
+  // A throw must not wedge the guard: the next edge still runs.
   sched.schedule('edge-2')
   await sched.settle()
   assert.equal(runs, 2)
@@ -261,7 +261,7 @@ test('runDaemon does not run the boot pass while probation is still active (fres
 
 test('the confirmation edge during active probation drives exactly one reconcile pass (fresh-join path)', async () => {
   // The primary LLP 0037 path: a fresh join boots under active probation
-  // (no boot pass — covered above) and the FIRST authenticated config poll
+  // (no boot pass: covered above) and the FIRST authenticated config poll
   // clears probation, firing the confirmation edge that schedules backfill.
   // Previously only the no-fire half was tested; this drives the edge through
   // the real configControl seam and asserts the pass actually runs once.
@@ -322,7 +322,7 @@ test('the confirmation edge during active probation drives exactly one reconcile
     configControl.confirmPoll()
 
     await waitFor(() => calls.length === 1)
-    // A second confirmPoll is a no-op (probation already cleared) — no extra pass.
+    // A second confirmPoll is a no-op (probation already cleared): no extra pass.
     configControl.confirmPoll()
     await tick()
     await tick()

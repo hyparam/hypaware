@@ -1,6 +1,6 @@
 // @ts-check
 
-// @ref LLP 0022#shared-core-helpers — partition-spec derivation promoted out of
+// @ref LLP 0022#shared-core-helpers: partition-spec derivation promoted out of
 // the cache; consumed by the cache and the @hypaware/format-iceberg export
 // alike, so it is core surface, not a cache internal (LLP 0003). [implements]
 
@@ -77,19 +77,19 @@ export function validatePartitionSpecStability(declaration, existingSpec, schema
     const existing = existingSpec.fields.find(f => f.name === expected.name)
     if (!existing) {
       throw new Error(
-        `cache-iceberg: partition field "${expected.name}" is new — adding a partition field is spec evolution and requires an explicit migration`
+        `cache-iceberg: partition field "${expected.name}" is new - adding a partition field is spec evolution and requires an explicit migration`
       )
     }
     if (existing.transform !== expected.transform) {
       throw new Error(
-        `cache-iceberg: partition field "${expected.name}" changed transform from ${existing.transform} to ${expected.transform} — partition spec changes require an explicit migration`
+        `cache-iceberg: partition field "${expected.name}" changed transform from ${existing.transform} to ${expected.transform} - partition spec changes require an explicit migration`
       )
     }
   }
   for (const existing of existingSpec.fields) {
     if (!expectedNames.has(existing.name)) {
       throw new Error(
-        `cache-iceberg: partition field "${existing.name}" was removed — removing a partition field is spec evolution and requires an explicit migration`
+        `cache-iceberg: partition field "${existing.name}" was removed - removing a partition field is spec evolution and requires an explicit migration`
       )
     }
   }

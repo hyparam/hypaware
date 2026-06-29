@@ -14,7 +14,7 @@
  * @property {string} [name]      Special name: 'up', 'down', 'space',
  *                                 'return', 'escape', 'backspace', or a
  *                                 single character ('a', '1', ...).
- * @property {string} [sequence]  Raw character(s) — used for printable
+ * @property {string} [sequence]  Raw character(s): used for printable
  *                                 text input in `text` mode and the y/n
  *                                 chars in `confirm` mode.
  * @property {boolean} [ctrl]

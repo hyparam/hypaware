@@ -11,13 +11,13 @@ import { executeQuerySql } from '../../../../src/core/query/sql.js'
  *
  * Missing-dataset tolerance is **opt-in** via `allowMissing`, mirroring the
  * graph projector's pre-write dedup (LLP 0023#pre-write-dedup): a not-yet-written
- * plugin-owned enrichment table — or the published `node`/`edge` surface before
- * its first projection — is benign, so those callers pass `allowMissing: true`
+ * plugin-owned enrichment table (or the published `node`/`edge` surface before
+ * its first projection) is benign, so those callers pass `allowMissing: true`
  * and get `[]`. The configured *source* dataset is read **fail-fast** (the
  * default): a missing or misspelled `source_dataset` must surface as an
  * actionable error, never silently make `enrich propose` a no-op forever.
  *
- * @ref LLP 0028#operability — tolerate own tables, fail-fast on the source.
+ * @ref LLP 0028#operability: tolerate own tables, fail-fast on the source.
  *
  * @param {EnrichRuntime} runtime
  * @param {string} query
@@ -87,13 +87,13 @@ export function sqlQuote(v) {
  * `require_text` drops rows whose text column is null/empty: they contribute
  * nothing to the model yet consume the per-tick row budget, and they include
  * the signature-only thinking/reasoning parts a proxy does not persist.
- * `exclude_part_types` drops whole part kinds — default `tool_result`, i.e. raw
+ * `exclude_part_types` drops whole part kinds: default `tool_result`, i.e. raw
  * tool/file/command output, the bulk of the corpus but not durable knowledge.
  *
  * The column names are validated SQL identifiers and the part-type values are
  * `sqlQuote`'d literals, so this introduces no injection surface.
  *
- * @ref LLP 0028#row-selection — enrichment scans signal, not plumbing.
+ * @ref LLP 0028#row-selection: enrichment scans signal, not plumbing.
  *
  * @param {EnrichConfig} cfg
  * @returns {string[]}

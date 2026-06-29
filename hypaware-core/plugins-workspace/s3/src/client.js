@@ -28,12 +28,12 @@
 /**
  * Resolve which credential branch the SDK will use without actually
  * resolving the credentials themselves. We never log the resolved
- * access key id, session token, or any signed value — only the
+ * access key id, session token, or any signed value, only the
  * `kind` token, which is safe to expose.
  *
  * Precedence matches the AWS SDK v3 default chain. We don't sniff the
  * web-identity / sso / process / metadata branches deeply (they require
- * a network request) — `unknown` falls back to `metadata` because that
+ * a network request). `unknown` falls back to `metadata` because that
  * is the last link in the chain.
  *
  * @param {S3ClientOptions} opts

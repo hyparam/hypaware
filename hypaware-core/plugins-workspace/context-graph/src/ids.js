@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto'
  *
  * Hash-input segments are joined with NUL (`\0`, written as the
  * two-character escape so this file stays plain text): NUL cannot appear
- * in the JS strings fed in here, so the join is collision-free — no
+ * in the JS strings fed in here, so the join is collision-free, no
  * (type, key) pair can be confused with another by crafting keys that
  * contain the delimiter. Changing the delimiter changes every id, which
  * would orphan all committed graph rows; test/plugins/context-graph-ids.test.js
@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
  *
  * @param {string} value
  * @returns {string}
- * @ref LLP 0023#content-addressed-ids [implements] — changing the recipe orphans every committed graph row
+ * @ref LLP 0023#content-addressed-ids [implements] - changing the recipe orphans every committed graph row
  */
 function sha(value) {
   return createHash('sha256').update(value).digest('hex').slice(0, 24)

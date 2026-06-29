@@ -156,7 +156,7 @@ function asObject(value) {
 /**
  * Stamp `listen_host` and `listen_port` onto the currently-active
  * `source.start` span. Called by `source.js` once the HTTP listener has
- * bound — the kernel opens the span for us, and we just enrich it.
+ * bound: the kernel opens the span for us, and we just enrich it.
  *
  * @param {string} host
  * @param {number} port

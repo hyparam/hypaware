@@ -25,14 +25,14 @@ import { parseConfigShape } from './schema.js'
  * parsed and persisted wholesale, so a stated cap bounds memory and
  * disk regardless of what an authenticated server sends. 1 MiB is
  * orders of magnitude above any real config.
- * @ref LLP 0025#config-pull-loop [implements] — max accepted config document size, settled at 1 MiB
+ * @ref LLP 0025#config-pull-loop [implements] - max accepted config document size, settled at 1 MiB
  */
 export const MAX_CONFIG_DOCUMENT_BYTES = 1024 * 1024
 
 /**
  * Default config pull cadence (seconds) when the staged document's
  * central sink does not set `poll_interval_seconds`. Mirrors the
- * central plugin's own default — the kernel needs the value to size
+ * central plugin's own default: the kernel needs the value to size
  * the probation window without asking the plugin.
  */
 export const DEFAULT_POLL_INTERVAL_SECONDS = 300
@@ -41,7 +41,7 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 300
  * Probation window floor (seconds). The window is
  * `max(3 × poll_interval_seconds, floor)` so a fast poll cadence still
  * leaves room for daemon relaunch + identity refresh + one retry.
- * @ref LLP 0025#post-apply-probation [implements] — window formula with the floor settled at 120s
+ * @ref LLP 0025#post-apply-probation [implements] - window formula with the floor settled at 120s
  */
 export const PROBATION_FLOOR_SECONDS = 120
 
@@ -52,16 +52,16 @@ const STATE_BASENAME = 'state.json'
  * The active-slot pointer. A relative symlink under `config-control/`
  * pointing at the live `config.{a,b}.json` slot. Relocated here (off the
  * user-facing `hypaware-config.json` path) so the local layer can be a
- * plain user file — the atomic symlink-flip crash-safety is preserved.
- * @ref LLP 0031#physical-layout [constrained-by] — active-slot pointer relocated into config-control/
+ * plain user file: the atomic symlink-flip crash-safety is preserved.
+ * @ref LLP 0031#physical-layout [constrained-by] - active-slot pointer relocated into config-control/
  */
 const ACTIVE_BASENAME = 'active'
 
 /**
  * The join seed: the initial central layer, written by `hyp join` (mode
- * 0600 — it holds the policy token). Read once on the first apply to
+ * 0600: it holds the policy token). Read once on the first apply to
  * preserve it as the rollback target, then retired.
- * @ref LLP 0031#physical-layout [implements] — dedicated central-seed file, not hypaware-config.json
+ * @ref LLP 0031#physical-layout [implements] - dedicated central-seed file, not hypaware-config.json
  */
 const SEED_BASENAME = 'seed.json'
 
@@ -81,11 +81,11 @@ export function centralSeedPath(stateRoot) {
  * Resolve the central layer's source file for boot, read-only: the
  * active applied slot if the pointer is set, **else** the join seed,
  * **else** null (a host that never joined). Reading is safe in any boot
- * (CLI or daemon) — only the daemon's apply engine ever *writes* here.
+ * (CLI or daemon): only the daemon's apply engine ever *writes* here.
  *
  * @param {{ stateRoot: string }} args
  * @returns {string | null}
- * @ref LLP 0031#physical-layout [implements] — central = active slot else seed else none
+ * @ref LLP 0031#physical-layout [implements] - central = active slot else seed else none
  */
 export function resolveCentralLayerPath({ stateRoot }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
@@ -104,7 +104,7 @@ export function resolveCentralLayerPath({ stateRoot }) {
  * pointer, no slots) it is a no-op.
  *
  * `hyp join` calls this right after writing a fresh seed. A re-enrollment
- * — the operator re-runs `join` because identity broke — writes a new
+ * - the operator re-runs `join` because identity broke - writes a new
  * bootstrap token into the seed, but a prior enrollment may have left a
  * stale active slot whose `identity` carries no token. Boot resolution
  * prefers the active slot over the seed ({@link resolveCentralLayerPath}),
@@ -117,7 +117,7 @@ export function resolveCentralLayerPath({ stateRoot }) {
  *
  * @param {string} stateRoot
  * @returns {{ supersededActiveSlot: boolean }} whether a stale active slot was cleared
- * @ref LLP 0031#physical-layout [implements] — re-join resets to seed mode so a stale active slot never shadows the fresh seed token
+ * @ref LLP 0031#physical-layout [implements] - re-join resets to seed mode so a stale active slot never shadows the fresh seed token
  */
 export function resetCentralLayerToSeed(stateRoot) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
@@ -145,13 +145,13 @@ export function resetCentralLayerToSeed(stateRoot) {
  * file under `<stateRoot>/config-control/`, with the served ETag in a
  * per-slot sidecar written *before* the flip. The operative config
  * path becomes a symlink to the active slot, replaced atomically via
- * tmp+rename — so the config document and its etag transition together
+ * tmp+rename: so the config document and its etag transition together
  * in both directions (apply and rollback), and last-known-good is
  * crash-safe by construction (the previous slot is never modified).
  *
  * @param {CreateConfigControlOptions} opts
  * @returns {ConfigControl}
- * @ref LLP 0025#apply-engine-is-kernel-surface [implements] — the engine is kernel-owned; plugins only see the narrow facade
+ * @ref LLP 0025#apply-engine-is-kernel-surface [implements] - the engine is kernel-owned; plugins only see the narrow facade
  */
 export function createConfigControl(opts) {
   const { stateRoot, requestRestart, onConfirmed } = opts
@@ -199,12 +199,12 @@ export function createConfigControl(opts) {
   /**
    * Atomically point the active-slot pointer at `slot`. A relative
    * symlink is created at a tmp path and renamed over the pointer, so a
-   * crash leaves either the old or the new pointer — never neither. The
+   * crash leaves either the old or the new pointer: never neither. The
    * pointer lives inside `config-control/` (not at the user-facing
    * config path), so the local layer is never a symlink.
    *
    * @param {ConfigSlot} slot
-   * @ref LLP 0031#physical-layout [constrained-by] — pointer relocated into config-control/, atomic flip preserved
+   * @ref LLP 0031#physical-layout [constrained-by] - pointer relocated into config-control/, atomic flip preserved
    */
   function flipPointer(slot) {
     const tmp = `${activePath}.tmp.${process.pid}.${now()}`
@@ -224,11 +224,11 @@ export function createConfigControl(opts) {
    *
    * A rollback needs a **distinct** slot to land on. With no distinct
    * `previous_slot` the only "rollback" available is a no-op flip that
-   * leaves the failed config operative — and recording its etag as
+   * leaves the failed config operative, and recording its etag as
    * `bad_etag` while it stays active wedges central: the bad-etag backoff
    * then refuses to re-apply the very revision that is running, probation
    * bookkeeping never clears, and a boot does not recover (#141). Refuse
-   * to manufacture that contradiction — clear probation, surface a clear
+   * to manufacture that contradiction: clear probation, surface a clear
    * error, and leave recovery to boot's consistency guard / the next
    * pull. Returns whether the pointer was actually flipped, so callers
    * don't request a staged restart onto the unchanged config (an
@@ -238,7 +238,7 @@ export function createConfigControl(opts) {
    * @param {ConfigRollbackReason} reason
    * @param {string} [detail]
    * @returns {boolean} whether the pointer was flipped to a distinct slot
-   * @ref LLP 0025#last-known-good-rollback [implements] — flip back + remembered bad etag + structured reason; a bad_etag is never recorded for the still-active slot (#141)
+   * @ref LLP 0025#last-known-good-rollback [implements] - flip back + remembered bad etag + structured reason; a bad_etag is never recorded for the still-active slot (#141)
    */
   function rollback(marker, reason, detail) {
     const at = new Date(now()).toISOString()
@@ -282,19 +282,19 @@ export function createConfigControl(opts) {
 
   /**
    * Boot consistency guard (#141). The active slot's etag must never
-   * equal a remembered `bad_etag`: that contradiction — a config marked
-   * bad yet still operative — wedges central, because the bad-etag
+   * equal a remembered `bad_etag`: that contradiction: a config marked
+   * bad yet still operative: wedges central, because the bad-etag
    * backoff then refuses to re-apply the running revision and no boot
    * recovers. It is produced by a no-op rollback that had no distinct
    * slot to flip to (the rollback guard above now prevents new ones, but
    * existing wedged hosts and hand-edited state must still recover).
    * Recover by falling back to the join seed if one survives, else
-   * dropping the contradictory `bad_etag` so the next poll can re-pull —
+   * dropping the contradictory `bad_etag` so the next poll can re-pull -
    * the operative config keeps running either way.
    *
    * @param {ConfigControlState} state
    * @returns {{ action: 'recovered_bad_active', recovery: 'seed' | 'repull' } | null}
-   * @ref LLP 0025#last-known-good-rollback [constrained-by] — the active slot may never carry a bad_etag; recover instead of persisting the contradiction (#141)
+   * @ref LLP 0025#last-known-good-rollback [constrained-by] - the active slot may never carry a bad_etag; recover instead of persisting the contradiction (#141)
    */
   function recoverBadActiveEtag(state) {
     if (!state.bad_etag) return null
@@ -350,9 +350,9 @@ export function createConfigControl(opts) {
   /**
    * Arm the in-process probation timer for the active marker, if any.
    * Expiry rolls back and requests a staged restart onto
-   * last-known-good. The kernel owns this timer — a wedged central
+   * last-known-good. The kernel owns this timer: a wedged central
    * sink is exactly the failure probation must catch.
-   * @ref LLP 0025#post-apply-probation [implements] — kernel-owned watchdog, independent of the central plugin functioning
+   * @ref LLP 0025#post-apply-probation [implements] - kernel-owned watchdog, independent of the central plugin functioning
    */
   function armProbationWatchdog() {
     disarmProbationWatchdog()
@@ -387,7 +387,7 @@ export function createConfigControl(opts) {
    * kernel-killing-but-valid config can crashloop under the service
    * manager faster than any in-process timer fires, so each relaunch
    * checks the marker first.
-   * @ref LLP 0025#post-apply-probation [implements] — probation expiry is evaluated at boot, before plugin activation
+   * @ref LLP 0025#post-apply-probation [implements] - probation expiry is evaluated at boot, before plugin activation
    */
   async function evaluateAtBoot() {
     const state = readState()
@@ -403,7 +403,7 @@ export function createConfigControl(opts) {
     if (!marker) return { action: /** @type {const} */ ('none') }
 
     // A marker whose slot is not the operative pointer means the apply
-    // crashed between persisting the marker and flipping — the new
+    // crashed between persisting the marker and flipping: the new
     // config never took effect, so there is nothing to probe.
     if (activeSlot() !== marker.slot) {
       delete state.probation
@@ -428,11 +428,11 @@ export function createConfigControl(opts) {
 
   // Confirmation edge: clear the post-apply probation marker on the first
   // authenticated poll, then fire `onConfirmed` *only* when a marker was
-  // actually cleared — the active→cleared transition, not every poll. The
+  // actually cleared: the active→cleared transition, not every poll. The
   // early `!state.probation` return makes this exactly the edge, so the
   // daemon can schedule one reconcile pass per confirmation without polling
   // status each tick. apply.js stays ignorant of the reconciler.
-  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — onConfirmed fires once on the probation active→cleared edge so the daemon schedules a reconcile pass without per-tick status polling
+  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] - onConfirmed fires once on the probation active→cleared edge so the daemon schedules a reconcile pass without per-tick status polling
   function confirmPoll() {
     const state = readState()
     if (!state.probation) return
@@ -513,11 +513,11 @@ export function createConfigControl(opts) {
         // Shape-gate, then install, then full validation. Catalog-backed
         // validation can only know a plugin once it is installed, so a
         // served config naming a not-yet-installed plugin must install
-        // first — but install must not act on an arbitrary document, so
+        // first: but install must not act on an arbitrary document, so
         // the shape (including the pin fields' types) is checked before
         // anything is fetched, and the hash pin bounds what an install
         // can bring in.
-        // @ref LLP 0025#install-on-config-hash-pinned [implements] — shape-gate → install pinned plugins → validate against the post-install catalog
+        // @ref LLP 0025#install-on-config-hash-pinned [implements] - shape-gate → install pinned plugins → validate against the post-install catalog
         const shape = parseConfigShape(document)
         if (!shape.ok) {
           const first = shape.errors[0]
@@ -600,7 +600,7 @@ export function createConfigControl(opts) {
    * @param {HypAwareV2Config} config
    * @param {string} serialized
    * @param {string} etag
-   * @ref LLP 0025#apply-semantics-staged-restart [implements] — A/B slots with an atomic pointer; never live-mutate; restart does the activation
+   * @ref LLP 0025#apply-semantics-staged-restart [implements] - A/B slots with an atomic pointer; never live-mutate; restart does the activation
    */
   function commit(config, serialized, etag) {
     fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
@@ -647,11 +647,11 @@ export function createConfigControl(opts) {
 
     flipPointer(target)
 
-    // First successful apply retires the seed file — its bytes survive
+    // First successful apply retires the seed file: its bytes survive
     // in slot 'a' as the rollback target, and the policy token it
     // carried no longer needs to sit on disk (identity.json carries the
     // JWT from here on).
-    // @ref LLP 0031#physical-layout [implements] — seed retired after first successful apply
+    // @ref LLP 0031#physical-layout [implements] - seed retired after first successful apply
     if (firstApplyOverSeed) {
       fs.rmSync(seedPath, { force: true })
     }
@@ -730,13 +730,13 @@ function readRunningEtag(controlDir) {
 }
 
 /**
- * Read-only view of the apply engine's state for `hypaware status` —
+ * Read-only view of the apply engine's state for `hypaware status`:
  * usable from any process (the CLI is not the daemon), so it never
  * constructs the engine or takes its hooks.
  *
  * @param {{ stateRoot: string }} args
  * @returns {ConfigControlStatus}
- * @ref LLP 0025#last-known-good-rollback [implements] — operator-visible probation/rollback/bad-etag state without log spelunking
+ * @ref LLP 0025#last-known-good-rollback [implements] - operator-visible probation/rollback/bad-etag state without log spelunking
  */
 export function readConfigControlStatus({ stateRoot }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
@@ -745,7 +745,7 @@ export function readConfigControlStatus({ stateRoot }) {
   try {
     state = readControlState(path.join(controlDir, STATE_BASENAME))
   } catch {
-    // unreadable state surfaces as empty — status is best-effort
+    // unreadable state surfaces as empty: status is best-effort
   }
   return {
     probation: state.probation ?? null,
@@ -758,7 +758,7 @@ export function readConfigControlStatus({ stateRoot }) {
 /**
  * Extract the config pull cadence from the staged document's central
  * sink block to size the probation window. The window must track the
- * *new* config's cadence — that is the sink that will (or won't)
+ * *new* config's cadence: that is the sink that will (or won't)
  * confirm the poll. Knowing the first-party plugin name here mirrors
  * the client-descriptor precedent in `plugin_catalog.js`.
  *

@@ -22,7 +22,7 @@ import { context, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
  * @param {(span: Span) => T|Promise<T>} fn
  * @param {{ component?: string }} [opts]
  * @returns {Promise<T>}
- * @ref LLP 0021#span-helpers [implements] — inherits active context as parent; records status + error_kind
+ * @ref LLP 0021#span-helpers [implements]: inherits active context as parent; records status + error_kind
  */
 export async function withSpan(name, attrs, fn, opts = {}) {
   const tracer = getTracer(opts.component ?? 'kernel')
@@ -50,8 +50,8 @@ export async function withSpan(name, attrs, fn, opts = {}) {
 }
 
 /**
- * Run `fn` inside a fresh root span — no parent context, no propagated
- * trace. Used for unit-of-work that is logically a kernel boot or a
+ * Run `fn` inside a fresh root span (no parent context, no propagated
+ * trace). Used for unit-of-work that is logically a kernel boot or a
  * top-level command invocation.
  *
  * @template T
@@ -60,7 +60,7 @@ export async function withSpan(name, attrs, fn, opts = {}) {
  * @param {(span: Span) => T|Promise<T>} fn
  * @param {{ component?: string }} [opts]
  * @returns {Promise<T>}
- * @ref LLP 0021#span-helpers [implements] — fresh root span (no parent) for boots / top-level commands
+ * @ref LLP 0021#span-helpers [implements]: fresh root span (no parent) for boots / top-level commands
  */
 export async function runRoot(name, attrs, fn, opts = {}) {
   const tracer = getTracer(opts.component ?? 'kernel')

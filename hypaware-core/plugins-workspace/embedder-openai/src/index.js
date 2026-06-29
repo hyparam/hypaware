@@ -15,7 +15,7 @@ const CAPABILITY_VERSION = '1.0.0'
  * `hypaware.embedder@1` capability backed by an OpenAI-compatible
  * `POST /v1/embeddings` client.
  *
- * Activation itself performs no network IO and reads no credentials —
+ * Activation itself performs no network IO and reads no credentials:
  * the API key resolves from the environment per request. Enabling this
  * plugin is the explicit opt-in that allows captured content (indexed
  * text and query strings) to leave the machine when `base_url` points
@@ -23,7 +23,7 @@ const CAPABILITY_VERSION = '1.0.0'
  * local.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0024#embedding-is-a-separate-capability [implements] — embedding is its own capability; choosing this provider is an explicit `plugins[]` config decision
+ * @ref LLP 0024#embedding-is-a-separate-capability [implements]: embedding is its own capability; choosing this provider is an explicit `plugins[]` config decision
  */
 export async function activate(ctx) {
   ctx.configRegistry.registerSection({
@@ -35,7 +35,7 @@ export async function activate(ctx) {
   const validated = validateEmbedderConfig(ctx.config)
   if (!validated.ok) {
     const detail = validated.errors.map((e) => `${e.pointer || '/'}: ${e.message}`).join('; ')
-    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config — ${detail}`))
+    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config - ${detail}`))
     err.hypErrorKind = 'embedder_config_invalid'
     throw err
   }

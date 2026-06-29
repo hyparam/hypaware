@@ -10,7 +10,7 @@ import { Attr, withSpan } from '../observability/index.js'
  * Derive the cluster columns for a dataset from its Iceberg partition fields
  * (e.g. `conversation_id`/`cwd`/`date`). Blob destinations pass these into the
  * encode context so columnar encoders can keep each row group low-cardinality
- * — which keeps wide, heavily-repeated columns (`tools`, `system_text`)
+ * which keeps wide, heavily-repeated columns (`tools`, `system_text`)
  * dictionary-encoded instead of falling back to PLAIN. Returns undefined for
  * datasets without a partition declaration (encoders then use default row
  * grouping). Shared by the `local-fs` and `s3` blob destinations.
@@ -34,7 +34,7 @@ export function clusterColumnsForDataset(query, dataset) {
 /**
  * Wrap a single `encoder.encodePartition` call in a
  * `sink.encode_partition` span. Blob-sink `Sink.exportBatch`
- * implementations use this so the kernel — not each plugin — owns the
+ * implementations use this so the kernel, not each plugin, owns the
  * observability contract for encoder calls (format/extension/row_count/
  * bytes_written attributes, status, error_kind).
  *

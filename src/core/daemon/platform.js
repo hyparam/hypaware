@@ -101,7 +101,7 @@ export function daemonKindLabel(platform = process.platform) {
 /**
  * @param {NodeJS.Platform} [platform]
  * @returns {boolean}
- * @ref LLP 0017#install-global-package-then-service-manager [constrained-by] — V1 service install targets macOS launchd + Linux systemd only
+ * @ref LLP 0017#install-global-package-then-service-manager [constrained-by]: V1 service install targets macOS launchd + Linux systemd only
  */
 export function platformIsSupported(platform = process.platform) {
   return platform === 'darwin' || platform === 'linux'

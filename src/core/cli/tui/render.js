@@ -5,7 +5,7 @@
  * that should be written to stdout to display the current frame.
  *
  * The returned string ends with a trailing newline. Lines are joined
- * with `\n` (no `\r\n` — runtime uses raw mode where `\n` advances a
+ * with `\n` (no `\r\n`; runtime uses raw mode where `\n` advances a
  * row without resetting the column, and the runtime emits an explicit
  * `\r` before redrawing).
  *

@@ -15,7 +15,7 @@ const NOW_SEC = 1_900_000_000
 const now = () => NOW_SEC * 1000
 
 /**
- * Minimal unsigned JWT carrying a `sub` claim — the client decodes (does
+ * Minimal unsigned JWT carrying a `sub` claim: the client decodes (does
  * not verify) it to recover the gateway id.
  * @param {string} sub
  */

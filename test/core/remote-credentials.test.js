@@ -63,7 +63,7 @@ test('resolveToken errors with guidance when neither env nor file has a token', 
   const dir = await tmpState()
   const r = await resolveToken({ target: 'prod', env: {}, stateDir: dir })
   assert.equal(r.ok, false)
-  assert.match(/** @type {any} */ (r).error, /no token for 'prod' — run 'hyp remote login prod'/)
+  assert.match(/** @type {any} */ (r).error, /no token for 'prod' - run 'hyp remote login prod'/)
   assert.match(/** @type {any} */ (r).error, /HYP_REMOTE_TOKEN_PROD/)
 })
 

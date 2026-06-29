@@ -26,29 +26,29 @@ import { Attr, getLogger } from '../observability/index.js'
  * The kernel state subdirectory the reconciler shares with the apply
  * engine. Must match `CONTROL_DIRNAME` in `apply.js`: the marker is kernel
  * surface and belongs beside `state.json`, not in a plugin state dir
- * (LLP 0041 — "the action marker belongs here too, not in a plugin state
- * dir — the reconciler is kernel surface").
+ * (LLP 0041: "the action marker belongs here too, not in a plugin state
+ * dir, the reconciler is kernel surface").
  */
 const CONTROL_DIRNAME = 'config-control'
 
 /**
  * The action-marker file. Namespaced per handler kind and keyed by request
  * key; written atomically (tmp+rename, mode 0600) exactly like `state.json`.
- * @ref LLP 0041#idempotency-and-completion-state [implements] — marker file config-control/client-actions.json, atomic tmp+rename, namespaced per handler kind
+ * @ref LLP 0041#idempotency-and-completion-state [implements]: marker file config-control/client-actions.json, atomic tmp+rename, namespaced per handler kind
  */
 const CLIENT_ACTIONS_BASENAME = 'client-actions.json'
 
 /**
  * Build the generic, daemon-constructed action reconciler. It is the
  * run-once / reconcile-on-config machinery and knows nothing about Claude
- * vs Codex — only the {@link ActionHandler} interface. The daemon wires
+ * vs Codex: only the {@link ActionHandler} interface. The daemon wires
  * its `reconcile()` to the config-confirmation edge and the
  * after-activation already-confirmed pass.
  *
  * @param {CreateActionReconcilerOptions} opts
  * @returns {ActionReconciler}
- * @ref LLP 0041#the-reconciler-component [implements] — createActionReconciler(opts) → { reconcile, readStatus }, constructed by the daemon like createConfigControl
- * @ref LLP 0036 — central-config-driven client action seam (the decision this realizes)
+ * @ref LLP 0041#the-reconciler-component [implements]: createActionReconciler(opts) → { reconcile, readStatus }, constructed by the daemon like createConfigControl
+ * @ref LLP 0036: central-config-driven client action seam (the decision this realizes)
  */
 export function createActionReconciler(opts) {
   const { stateRoot, handlers } = opts
@@ -78,7 +78,7 @@ export function createActionReconciler(opts) {
    *
    * @param {ReconcileInput} input
    * @returns {Promise<ReconcileReport>}
-   * @ref LLP 0041#the-reconciler-component [implements] — reconcile() is level-triggered: diff desired() against the marker, act only on the gap; a done marker short-circuits
+   * @ref LLP 0041#the-reconciler-component [implements]: reconcile() is level-triggered: diff desired() against the marker, act only on the gap; a done marker short-circuits
    */
   async function reconcile(input) {
     /** @type {ActionContext} */
@@ -178,7 +178,7 @@ export function createActionReconciler(opts) {
 
       // Reverse gap: only reversible handlers undo a previously-applied key
       // the config no longer names (leave/detach). Run-once handlers
-      // (backfill) omit reverse() — imported data stays, the marker is kept,
+      // (backfill) omit reverse(): imported data stays, the marker is kept,
       // and this loop is skipped (LLP 0041 §Undo on leave).
       const reverse = handler.reverse
       if (typeof reverse === 'function') {
@@ -187,7 +187,7 @@ export function createActionReconciler(opts) {
           const marker = markers[requestKey]
           if (!marker || marker.status === 'failed') {
             // A failed marker for a no-longer-desired key never applied an
-            // effect, so there is nothing to undo — just drop it.
+            // effect, so there is nothing to undo: just drop it.
             delete markers[requestKey]
             mutated = true
             continue
@@ -245,7 +245,7 @@ export function createActionReconciler(opts) {
 /**
  * Invoke a handler hook and normalize a throw into a `failed` outcome, so a
  * handler that rejects is treated identically to one that returns
- * `{ status: 'failed' }` — the marker records the failure and the next pass
+ * `{ status: 'failed' }`: the marker records the failure and the next pass
  * retries.
  *
  * @param {() => Promise<ActionOutcome>} fn
@@ -271,7 +271,7 @@ async function runOutcome(fn) {
  * while `hyp status` (which already swallows the error in
  * `readClientActionStatus`) reports clean. An empty store means the next
  * pass simply re-derives the gap from `desired()` and rewrites a clean
- * marker — losing only the (recoverable) completion record, never running a
+ * marker: losing only the (recoverable) completion record, never running a
  * pass it should not.
  *
  * @param {string} markerPath
@@ -295,13 +295,13 @@ function readMarkerStore(markerPath) {
 }
 
 /**
- * Read-only view of the client-action markers for `hyp status` — usable
+ * Read-only view of the client-action markers for `hyp status`: usable
  * from any process (the CLI is not the daemon), so it never constructs the
  * reconciler or takes its handlers. Mirrors `readConfigControlStatus`.
  *
  * @param {{ stateRoot: string }} args
  * @returns {ClientActionStatus}
- * @ref LLP 0041#idempotency-and-completion-state [implements] — read-only marker view for the status surface, no engine construction
+ * @ref LLP 0041#idempotency-and-completion-state [implements]: read-only marker view for the status surface, no engine construction
  */
 export function readClientActionStatus({ stateRoot }) {
   const markerPath = path.join(stateRoot, CONTROL_DIRNAME, CLIENT_ACTIONS_BASENAME)
@@ -310,7 +310,7 @@ export function readClientActionStatus({ stateRoot }) {
   try {
     store = readMarkerStore(markerPath)
   } catch {
-    // unreadable markers surface as empty — status is best-effort
+    // unreadable markers surface as empty: status is best-effort
   }
   return { byKind: store }
 }

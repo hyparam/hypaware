@@ -33,7 +33,7 @@ export async function runVector(_argv, ctx) {
 /**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0024#cli-surface [implements] — contributed through the CLI registry; results format through the intrinsic formatter
+ * @ref LLP 0024#cli-surface [implements]: contributed through the CLI registry; results format through the intrinsic formatter
  */
 export async function runVectorSearch(argv, ctx) {
   const parsed = parseVectorSearchArgv(argv)

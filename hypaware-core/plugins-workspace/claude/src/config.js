@@ -3,7 +3,7 @@
 /**
  * Config validation for the `@hypaware/claude` plugin's own `config`
  * block. v1 validates only the optional `backfill` sub-object that drives
- * backfill-on-join — `{ on_join, window_days }`. Every other key (e.g.
+ * backfill-on-join: `{ on_join, window_days }`. Every other key (e.g.
  * `proxy`) passes through untouched so existing configs keep working;
  * there is no top-level `backfill` section and nothing new for core to
  * validate.
@@ -23,7 +23,7 @@ export const CLAUDE_CONFIG_SECTION = 'claude'
  * `backfill` policy block is checked; unknown sibling keys are ignored so
  * the validator stays additive over the existing config surface.
  *
- * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] —
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]:
  *   backfill policy ({ on_join, window_days }) lives in and is validated
  *   by the source plugin's own config section; the kernel reconciler adds
  *   no top-level schema.
@@ -47,7 +47,7 @@ export function validateClaudeConfig(value) {
  * backfill-capable source plugin: `on_join` (whether to import on join,
  * boolean) and `window_days` (how far back, positive integer). Both are
  * optional; unknown keys are rejected so a typo (`window_day`) surfaces
- * instead of being silently ignored. Pure — the caller chooses where the
+ * instead of being silently ignored. Pure: the caller chooses where the
  * returned pointers mount.
  *
  * @param {unknown} value

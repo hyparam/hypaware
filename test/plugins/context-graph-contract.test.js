@@ -43,7 +43,7 @@ test('makeRowBuilders normalizes first_seen and prunes empty props to null', () 
   assert.equal(buildNode({ type: 'A', key: 'k', props: {}, firstSeen: TS, sourceKeys: {} }).props, null)
 })
 
-test('the id recipe is source-agnostic — same (type, key) converges across sources', () => {
+test('the id recipe is source-agnostic - same (type, key) converges across sources', () => {
   const imsg = makeRowBuilders({ sourceDataset: 'imessage', projector: 'imsg.t0', projectorVersion: 1 })
   const aigw = makeRowBuilders({ sourceDataset: 'ai_gateway_messages', projector: 'ai-gateway.t0', projectorVersion: 1 })
   const a = imsg.buildNode({ type: 'Actor', key: 'phil', firstSeen: TS, sourceKeys: {} })
@@ -90,7 +90,7 @@ test('contract registry rejects malformed contracts', () => {
 test('contract registry rejects malformed rules, naming the offending rule index', () => {
   const reg = createContractRegistry()
   const ok = { kind: 'node', type: 'T', sql: 'SELECT 1', toRow: () => null }
-  // A good rule at 0, a bad one at 1 — the error pins which rule and which field,
+  // A good rule at 0, a bad one at 1: the error pins which rule and which field,
   // so a connector typo fails at registration with a locatable message rather
   // than mid-projection (or by silently routing rows into the wrong target map).
   assert.throws(() => reg.register(sampleContract({ rules: [ok, { ...ok, kind: 'vertex' }] })), /rule 1 kind/)

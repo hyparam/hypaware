@@ -35,7 +35,7 @@ async function makeFixture() {
   return { tmp, stateRoot }
 }
 
-/** A minimal reconcile input — handlers under test ignore these. */
+/** A minimal reconcile input: handlers under test ignore these. */
 const INPUT = {
   config: /** @type {any} */ ({ version: 2, plugins: [] }),
   backfills: /** @type {any} */ ({ register() {}, get() { return undefined }, list() { return [] } }),
@@ -95,7 +95,7 @@ test('reconcile runs a desired action once and short-circuits on the done marker
       [['@hypaware/claude', 'done']]
     )
 
-    // Second pass: the done marker short-circuits — perform is not re-run.
+    // Second pass: the done marker short-circuits, so perform is not re-run.
     clock += 1000
     const second = await reconciler.reconcile(INPUT)
     assert.equal(handler.performCalls, 1, 'perform must not run again on a done marker')
@@ -118,7 +118,7 @@ test('a missed pass (no marker yet) runs on the next reconcile call', async () =
   const { tmp, stateRoot } = await makeFixture()
   try {
     // Handler wants nothing on the first pass (the join hasn't confirmed),
-    // then names a unit on the second — the gap is picked up.
+    // then names a unit on the second pass, and the gap is picked up.
     let active = false
     /** @type {ActionHandler & { performCalls: number }} */
     const handler = {
@@ -159,7 +159,7 @@ test('atomic marker read/write round-trips through readClientActionStatus and re
       log: NOOP_LOG,
     })
 
-    // Empty before any pass — both the standalone reader and the handle agree.
+    // Empty before any pass: both the standalone reader and the handle agree.
     assert.deepEqual(readClientActionStatus({ stateRoot }), { byKind: {} })
     assert.deepEqual(reconciler.readStatus(), { byKind: {} })
 
@@ -208,7 +208,7 @@ test('a failed perform writes a failed marker (not done) and retries with bumped
     assert.equal(file.backfill['@hypaware/codex'].reason, 'transcript dir missing')
     assert.equal(file.backfill['@hypaware/codex'].attempts, 1)
 
-    // A failed marker is not terminal — the next pass retries and bumps attempts.
+    // A failed marker is not terminal: the next pass retries and bumps attempts.
     const p2 = await reconciler.reconcile(INPUT)
     assert.equal(handler.performCalls, 2)
     assert.equal(p2.results[0].outcome, 'failed')
@@ -260,7 +260,7 @@ test('a corrupt marker file does not wedge reconcile (treated as empty, pass sti
   try {
     // Write garbage where the atomic marker store should be. `hyp status`
     // already swallows this (readClientActionStatus), but reconcile() read
-    // it through a bare JSON.parse — a corrupt marker wedged ALL actions
+    // it through a bare JSON.parse: a corrupt marker wedged ALL actions
     // while status reported clean. It must now degrade to an empty store.
     const controlDir = path.join(stateRoot, 'config-control')
     fs.mkdirSync(controlDir, { recursive: true })

@@ -25,7 +25,7 @@ import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/lo
 /**
  * Build a real `@hypaware/local-fs` BlobStore over a fresh temp dir.
  * The commit module runs through icebird, which needs real bytes on
- * disk — an in-memory shim doesn't exercise the metadata read/write
+ * disk: an in-memory shim doesn't exercise the metadata read/write
  * cycle, so the test pins the contract by writing to disk.
  *
  * @returns {Promise<{ blobStore: BlobStore, baseDir: string, cleanup: () => Promise<void> }>}
@@ -143,8 +143,8 @@ test('commitBatch retries past a transient metadata precondition collision', asy
 
     // Wrap the underlying blob-store so the FIRST conditional metadata
     // put surfaces blob_precondition_failed (a 412 the writer maps to
-    // iceberg_commit_conflict). The retry attempt is allowed through —
-    // icebird should reload metadata, re-stage, and succeed.
+    // iceberg_commit_conflict). The retry attempt is allowed through.
+    // Icebird should reload metadata, re-stage, and succeed.
     /** @type {{ key: string, ifNoneMatch?: string }[]} */
     const puts = []
     let firstConditionalMetadataAttempt = true
@@ -392,7 +392,7 @@ test('probeTable propagates transient metadata read failures instead of masking 
       // to fetch it. Raise a non-fatal transient error: not in the
       // FATAL_KINDS set, no `code='ENOENT'`. The reader will wrap
       // this as iceberg_metadata_read_failed without an ENOENT
-      // marker — exactly the shape the previous probeTable masked.
+      // marker, exactly the shape the previous probeTable masked.
       const err = /** @type {Error & { errorKind?: string }} */ (
         new Error(`simulated transient read failure for ${input.key}`)
       )

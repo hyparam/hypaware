@@ -6,7 +6,7 @@
 
 /**
  * Read a plugin entry's `backfill` policy block (LLP 0037) as a
- * tri-state. The single source of truth for interpreting the block —
+ * tri-state. The single source of truth for interpreting the block:
  * shared by the reconciler (`action_backfill.js`, which decides whether to
  * run an import) and the status surface (`status.js`, which renders
  * `pending`/`n/a`) so the two can never disagree on what a given block
@@ -21,12 +21,12 @@
  * as an opt-out (`onJoin: false`), never as "default on". The operator
  * clearly intended to set the flag, and a potentially months-deep import is
  * the wrong thing to run on a malformed opt-out. (With the per-plugin
- * validator now live — see apply/boot wiring — such a config is rejected at
+ * validator now live (see apply/boot wiring), such a config is rejected at
  * apply time anyway; this is the belt-and-braces read both consumers share.)
  *
  * @param {PluginConfigInstance | undefined} entry
  * @returns {{ onJoin: boolean | undefined, windowDays: number | undefined }}
- * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [constrained-by] — backfill policy ({ on_join, window_days }) is owned by the plugin; the kernel only reads it
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [constrained-by]: backfill policy ({ on_join, window_days }) is owned by the plugin; the kernel only reads it
  */
 export function readBackfillPolicy(entry) {
   const config = entry?.config

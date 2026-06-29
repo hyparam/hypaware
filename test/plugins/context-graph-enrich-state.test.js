@@ -59,7 +59,7 @@ test('writeState creates the state dir and persists atomically (no leftover temp
   const dir = path.join(tmpDir(), 'nested', 'state')
   writeState(dir, { schema_version: 4, session_marks: {}, curate_job: null })
   const entries = fs.readdirSync(dir)
-  assert.deepEqual(entries, [STATE_FILE], 'only the final file remains — temp was renamed')
+  assert.deepEqual(entries, [STATE_FILE], 'only the final file remains - temp was renamed')
 })
 
 test('readState falls back to an empty state on malformed JSON', () => {

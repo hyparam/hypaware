@@ -44,7 +44,7 @@ export function icebergSchemaForColumns(columns) {
 /**
  * Reconcile a `ColumnSpec[]` schema with an existing Iceberg table
  * schema so subsequent appends keep field ids stable. The result is
- * the schema to pass back into `icebergAppend` — same fields as
+ * the schema to pass back into `icebergAppend`, same fields as
  * `icebergSchemaForColumns` but with ids re-bound to whatever the
  * existing table already carries.
  *

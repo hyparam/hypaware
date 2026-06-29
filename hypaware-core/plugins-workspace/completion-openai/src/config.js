@@ -18,12 +18,12 @@ export const DEFAULT_BASE_URL = 'https://api.openai.com'
 export const DEFAULT_MODEL = 'gpt-4o-mini'
 export const DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'
 export const DEFAULT_MAX_TOKENS = 4096
-// Generation can run far longer than embedding — default well above the
+// Generation can run far longer than embedding. Default well above the
 // embedder's 30s so a slow model isn't cut off mid-response.
 export const DEFAULT_TIMEOUT_MS = 120_000
 
 /**
- * Validate the plugin's config slice. Every field is optional — the
+ * Validate the plugin's config slice. Every field is optional. The
  * zero-config default targets OpenAI with `OPENAI_API_KEY`.
  *
  * @param {unknown} value

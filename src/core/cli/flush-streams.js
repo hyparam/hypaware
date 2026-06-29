@@ -11,7 +11,7 @@
  * never blocked.
  *
  * `process.exit()` terminates synchronously and drops whatever is still
- * buffered in stdout/stderr — for a pipe that means output past the ~64KiB
+ * buffered in stdout/stderr: for a pipe that means output past the ~64KiB
  * pipe buffer is silently truncated. Awaiting this on stdout/stderr before
  * exiting guarantees every byte reached the OS first. (Writing to a file
  * never hit this because file writes complete synchronously.)

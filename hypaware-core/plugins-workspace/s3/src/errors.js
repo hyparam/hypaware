@@ -73,7 +73,7 @@ export function classifyAwsError(err) {
  * Render a safe, non-credential-bearing diagnostic message for an
  * error_kind. The original `err.message` can carry signed URLs,
  * access key ids, or session tokens in some AWS SDK error paths, so
- * we never log it directly — only the classified kind plus a short
+ * we never log it directly, only the classified kind plus a short
  * human description.
  *
  * @param {S3ErrorKind} errorKind

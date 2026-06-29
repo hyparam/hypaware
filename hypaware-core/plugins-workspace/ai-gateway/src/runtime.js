@@ -6,7 +6,7 @@
  * source listener share, and a `started` flag the smoke / future
  * commands can consult before driving a source start vs. reload.
  *
- * The shape mirrors `@hypaware/gascity`'s runtime — same lifecycle hook
+ * The shape mirrors `@hypaware/gascity`'s runtime: same lifecycle hook
  * pattern, same "saved-ctx-as-source-of-truth" convention so reloads
  * read the latest config from `runtime.ctx.config`.
  */
@@ -34,7 +34,7 @@ export function setAiGatewayRuntime(value) {
  */
 export function requireAiGatewayRuntime() {
   if (!runtime) {
-    throw new Error('@hypaware/ai-gateway: not activated yet — runtime singleton is empty')
+    throw new Error('@hypaware/ai-gateway: not activated yet - runtime singleton is empty')
   }
   return runtime
 }

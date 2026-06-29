@@ -28,7 +28,7 @@ const PLUGIN_VERSION = '1.0.0'
  * Activate `@hypaware/s3`. Provides `hypaware.blob-store@1` as a full
  * `BlobStore` (put/get/list/delete; put supports `ifNoneMatch` via
  * S3's `If-None-Match` header) AND contributes a single `s3` sink. The
- * sink contribution is untouched by the BlobStore migration — existing
+ * sink contribution is untouched by the BlobStore migration. Existing
  * encoder-writer + s3 sinks keep working unchanged.
  *
  * BlobStore resolution:
@@ -37,18 +37,18 @@ const PLUGIN_VERSION = '1.0.0'
  *    config shape. Test wiring may inject a fake client factory by
  *    setting `ctx.config.__blobStoreClientFactory`.
  *  - If no `bucket` is configured at plugin level, activation provides
- *    a sentinel BlobStore that throws an actionable error on any call
- *    — the capability is still discoverable but its use without
+ *    a sentinel BlobStore that throws an actionable error on any call.
+ *    The capability is still discoverable but its use without
  *    configuration is a programming error, not a silent fallback.
  *
  * Test/smoke wiring can override the sink's client factory by passing
  * `clientFactory` on `SinkCreateContext.config` (under the
  * intentionally-prefixed key `__clientFactory`). Production configs
- * never carry this key — it lives outside the validated config shape
+ * never carry this key. It lives outside the validated config shape
  * specifically so it cannot be set from JSON config files.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] — one blob-store for parquet or iceberg bytes; format stays separable
+ * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] one blob-store for parquet or iceberg bytes, format stays separable
  */
 export async function activate(ctx) {
   const blobStore = await resolveBlobStore(ctx)
@@ -120,7 +120,7 @@ export async function activate(ctx) {
  * Register a kernel query dataset for each configured `query_sources`
  * entry, so `hyp query sql` can read parquet / Iceberg data back from
  * S3. No-op when the plugin config carries no `query_sources`. Invalid
- * `query_sources` config fails activation — a misconfigured read target
+ * `query_sources` config fails activation. A misconfigured read target
  * should surface at boot, not at query time.
  *
  * @param {PluginActivationContext} ctx
@@ -156,8 +156,8 @@ async function registerQuerySources(ctx) {
 
 /**
  * Build a `BlobStore` for a query source. It is rooted exactly where the
- * sink writes — the plugin-level `prefix` when reading the plugin's own
- * bucket — and `source.prefix` names the dataset path relative to that
+ * sink writes. The plugin-level `prefix` when reading the plugin's own
+ * bucket, and `source.prefix` names the dataset path relative to that
  * root. This matters for Iceberg: its manifests embed data-file paths
  * relative to the writer's table URL base, so the reader must reproduce
  * the same (bucket, root-prefix) split or the data files won't resolve.
@@ -176,7 +176,7 @@ async function buildQuerySourceBlobStore(ctx, source) {
   const bucket = source.bucket ?? optString(config.bucket)
   if (!bucket) {
     throw new Error(
-      `${PLUGIN_NAME}: query_source '${source.name}' has no bucket — set query_sources[].bucket or a plugin-level bucket`
+      `${PLUGIN_NAME}: query_source '${source.name}' has no bucket - set query_sources[].bucket or a plugin-level bucket`
     )
   }
   // Same bucket as the plugin → inherit the plugin prefix as the root so
@@ -336,8 +336,8 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
       if (lastConfigFailure !== undefined) {
         // Only the partitions that actually failed should be retried.
         // Without this, the driver's fallback in src/core/sinks/driver.js
-        // outboxes every partition in the batch — including ones already
-        // PUT to S3 — when a terminal error trips mid-batch.
+        // outboxes every partition in the batch, including ones already
+        // sent to S3, when a terminal error trips mid-batch.
         return {
           status: 'failed',
           partitionsExported: exported,
@@ -388,7 +388,7 @@ function errorKindFor(err) {
 
 /**
  * Configuration / credential / region-mismatch / bucket-missing errors
- * are not transient — retrying the same partition will fail the same
+ * are not transient. Retrying the same partition will fail the same
  * way next tick. Return `status=failed` so the sink driver does not
  * loop on them.
  *
@@ -464,8 +464,8 @@ async function materializeBytes(bytes) {
 
 /**
  * Build the s3 plugin's BlobStore from plugin-level config. When no
- * `bucket` is configured the activation provides a sentinel BlobStore
- * — callers see a clear `s3_blob_store_unconfigured` error instead of
+ * `bucket` is configured the activation provides a sentinel BlobStore.
+ * Callers see a clear `s3_blob_store_unconfigured` error instead of
  * the capability silently no-op-ing.
  *
  * @param {PluginActivationContext} ctx

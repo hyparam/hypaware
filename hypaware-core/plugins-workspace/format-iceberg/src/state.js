@@ -78,7 +78,7 @@ export async function loadMarker(blobStore, key) {
 
 /**
  * Write an export marker. Writes are non-conditional because the marker
- * is the *result* of a successful commit — overwriting a stale marker
+ * is the *result* of a successful commit. Overwriting a stale marker
  * is the desired behavior when a later snapshot subsumes the one the
  * marker referred to.
  *
@@ -117,7 +117,7 @@ export async function writeMarker(blobStore, key, marker) {
  * @param {ExportMarker | null} marker
  * @param {ProbeStateLike | string | undefined} state
  *   The current probe state. A bare snapshot id string is accepted for
- *   backward compatibility — without metadata ancestry can only be
+ *   backward compatibility, without metadata ancestry can only be
  *   proven via equality.
  * @returns {boolean}
  */
@@ -146,7 +146,7 @@ function normalizeProbeState(state) {
 /**
  * Walk `parent-snapshot-id` from `currentSnapshotId` looking for
  * `markerSnapshotId`. Returns true iff the marker's snapshot is a
- * strict ancestor of current — i.e. a commit landed on top of the
+ * strict ancestor of current, i.e. a commit landed on top of the
  * marker's snapshot via the usual single-writer linear history.
  *
  * Iceberg snapshot ids are random 64-bit longs, so a numeric compare

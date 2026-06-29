@@ -76,9 +76,9 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
 
 /**
  * A partition needs migration unless it is already in the source-table
- * layout (`source=<x>` partition key).  Everything else — direct Iceberg
+ * layout (`source=<x>` partition key). Everything else - direct Iceberg
  * tables without cursors, bare table names (`proxy_messages_v4`, `all`),
- * and the old `client=<x>/date=<y>` epoch layout — is legacy.
+ * and the old `client=<x>/date=<y>` epoch layout - is legacy.
  *
  * @param {CachePartitionMeta} partition
  * @returns {boolean}

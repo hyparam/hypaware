@@ -32,7 +32,7 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  *   live kernel;
  * - roots all plugin paths in a fresh `mkdtemp` directory that is
  *   removed before returning, so no state leaks into `<HYP_HOME>`;
- * - passes an empty config — a well-behaved plugin registers its
+ * - passes an empty config. A well-behaved plugin registers its
  *   contributions during `activate()` and defers config reads to
  *   `start()`/`create()`. A plugin that throws on missing config at
  *   activation surfaces as `activate_threw`, which is itself a finding;
@@ -52,7 +52,7 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  * Note: the entrypoint is loaded with dynamic `import()`, which caches
  * by resolved URL. Each CLI invocation is a fresh process so this never
  * bites in normal use; within one long-lived process (tests/smokes),
- * re-doctoring the *same* path returns the first-loaded module — point
+ * re-doctoring the *same* path returns the first-loaded module. Point
  * such callers at distinct directories.
  *
  * @param {PluginManifest} manifest
@@ -117,7 +117,7 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
     try {
       await mod.activate(ctx)
     } catch (err) {
-      // Snapshot whatever registered before the throw — partial output
+      // Snapshot whatever registered before the throw. Partial output
       // still helps locate the failing registration.
       return {
         ok: false,
@@ -162,13 +162,13 @@ function snapshotRegistry(runtime) {
 /**
  * A permissive no-op stand-in for a capability handle that another
  * plugin would normally provide. Real adapters (e.g. `@hypaware/claude`)
- * call methods on the handle *during* `activate()` —
- * `gateway.registerUpstreamPreset(...)`, `registerClient(...)`. A plain
+ * call methods on the handle *during* `activate()`, such as
+ * `gateway.registerUpstreamPreset(...)` and `registerClient(...)`. A plain
  * object would throw on the first such call and abort activation before
  * the plugin registers its own contributions. This Proxy answers every
  * property access (and call) with itself, so activation runs to
  * completion and the declared-vs-registered diff stays meaningful. It
- * deliberately does NOT model real behavior — the doctor only checks
+ * deliberately does NOT model real behavior. The doctor only checks
  * what the plugin registers via `ctx.*`, not what it does with a
  * capability it requires.
  *

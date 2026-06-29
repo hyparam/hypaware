@@ -4,7 +4,7 @@
  * Convert a squirreling `WHERE` clause AST into a hyparquet
  * `ParquetQueryFilter` (a MongoDB-style predicate) so the scan can push
  * the predicate down to the parquet reader. Returns `undefined` whenever
- * the expression cannot be fully and faithfully converted — the caller
+ * the expression cannot be fully and faithfully converted. The caller
  * must then leave `appliedWhere` false and let the SQL engine filter the
  * rows itself.
  *
@@ -70,7 +70,7 @@ function convertBinary(node, negate) {
   }
   if (op === 'OR') {
     // `$nor` already expresses NOT(a OR b), so the children are converted
-    // un-negated and the wrapper carries the negation — propagating
+    // un-negated and the wrapper carries the negation, propagating
     // `negate` into them as well would double-negate.
     const leftFilter = convertExpr(left, false)
     const rightFilter = convertExpr(right, false)

@@ -15,7 +15,7 @@ export const PLUGIN_NAME = '@hypaware/ai-gateway-graph'
 export const SOURCE_DATASET = 'ai_gateway_messages'
 /** Projector id stamped into every row's provenance. */
 export const PROJECTOR = 'ai-gateway.t0'
-/** Projector version, stamped into provenance to mark which projector generation minted a row (not a re-projection trigger — ids are content-addressed; see LLP 0023 §inline-provenance). */
+/** Projector version, stamped into provenance to mark which projector generation minted a row (not a re-projection trigger: ids are content-addressed; see LLP 0023 §inline-provenance). */
 export const PROJECTOR_VERSION = 1
 
 /** Tools whose args name a concrete file. */
@@ -26,12 +26,12 @@ const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'
  * hand-authored node/edge mappings that used to live in `@hypaware/context-graph`;
  * they now live here, beside the source they read. Rows are built with the
  * graph plugin's `kit` so the id recipe and provenance columns stay owned by
- * the graph plugin — this connector owns the SQL + `toRow` semantics and the
+ * the graph plugin. This connector owns the SQL + `toRow` semantics and the
  * bridge-key recipe (`keys`, imported from `./graph-keys.js`).
  *
  * @param {GraphKit} kit
  * @returns {{ name: string, plugin: string, sourceDataset: string, projector: string, projectorVersion: number, rules: ContractRule[] }}
- * @ref LLP 0023#contract-contribution [implements] — a source's contract, contributed via the capability; engine + kit stay central
+ * @ref LLP 0023#contract-contribution [implements]: a source's contract, contributed via the capability; engine + kit stay central
  */
 export function createAiGatewayGraphContract(kit) {
   const { buildNode, buildEdge } = kit.makeRowBuilders({
@@ -44,7 +44,7 @@ export function createAiGatewayGraphContract(kit) {
   const rules = [
     // --- nodes ---
 
-    // Session per session_id. @ref LLP 0030#decision — session_id is the
+    // Session per session_id. @ref LLP 0030#decision: session_id is the
     // session container (always present); conversation_id is null for
     // Claude, so the Session node must key on session_id, not
     // conversation_id.
@@ -153,7 +153,7 @@ export function createAiGatewayGraphContract(kit) {
 
     // --- edges ---
 
-    // Session -via-> App. @ref LLP 0030#decision — Session keyed on
+    // Session -via-> App. @ref LLP 0030#decision: Session keyed on
     // session_id (conversation_id is null for Claude).
     {
       kind: 'edge',
@@ -250,7 +250,7 @@ export function createAiGatewayGraphContract(kit) {
     },
   ]
 
-  // @ref LLP 0026#decision [implements] — tag-don't-drop: the gateway now
+  // @ref LLP 0026#decision [implements]: tag-don't-drop: the gateway now
   // RETAINS Claude harness aux exchanges (security monitor, etc.) tagged
   // `attributes.claude.aux_kind` instead of dropping them. That traffic is
   // real but not user conversation, so it must not mint graph
@@ -306,8 +306,8 @@ function auxKindOf(attributes) {
 
 /**
  * Resolve a touched file's graph key + label + provenance. Prefers the bridge
- * key `owner/repo:relpath` — which converges with @hypaware/github AND across
- * worktrees of one repo (each worktree has its own root but the same relpath) —
+ * key `owner/repo:relpath` (which converges with @hypaware/github AND across
+ * worktrees of one repo, each worktree has its own root but the same relpath)
  * and falls back to the absolute path when the file can't be relativized
  * (outside the repo, a non-github remote, or a session with no captured repo).
  * The label is always the basename; `sourceKeys` records the absolute path for

@@ -61,13 +61,13 @@ function sinkWarningHint(err) {
  *
  * Lifecycle:
  *
- * 1. `installObservability()` (idempotent — shares state with smoke
+ * 1. `installObservability()` (idempotent: shares state with smoke
  *    harnesses and prior dispatch calls within the same process).
  * 2. Assemble a `CommandRegistry`. Core commands register directly;
  *    plugin-contributed commands land during `bootKernel` below.
  * 3. Render help and exit when argv is empty on a non-TTY stdout or
  *    begins with a help flag (no kernel boot required).
- * 4. Otherwise call `bootKernel({ ... })` — the single shared boot
+ * 4. Otherwise call `bootKernel({ ... })`: the single shared boot
  *    path that loads the config, discovers bundled plugin manifests,
  *    resolves dependencies, and activates the selected plugins
  *    *before* command dispatch. Active plugins land on
@@ -107,8 +107,8 @@ export async function dispatch(argv, opts = {}) {
   const cacheRoot = path.join(obsEnv.stateDir, 'cache')
 
   // Inputs the help path uses to list plugin commands without booting.
-  // `obsEnv.stateDir` is `<HYP_HOME>/hypaware` — the same `stateRoot`
-  // boot derives — so manifest discovery and config resolution see the
+  // `obsEnv.stateDir` is `<HYP_HOME>/hypaware`: the same `stateRoot`
+  // boot derives; so manifest discovery and config resolution see the
   // exact plugin set and effective config dispatch would activate.
   const helpDiscovery = {
     workspaceDir: opts.workspaceDir,
@@ -187,8 +187,8 @@ export async function dispatch(argv, opts = {}) {
   const matched = registry.match(argv)
   if (!matched) {
     // No command owns this argv. Before failing, see whether the leading
-    // tokens name a *group* — a prefix shared by registered subcommands
-    // (e.g. `graph`, with `graph neighbors`/`graph project` registered) —
+    // tokens name a *group*: a prefix shared by registered subcommands
+    // (e.g. `graph`, with `graph neighbors`/`graph project` registered)
     // and synthesize group help for it. A group that registers an explicit
     // bare command (`query`, `remote`, …) never reaches here: it matched
     // above and renders its own help, so the explicit registration wins.
@@ -329,7 +329,7 @@ async function runCommandByName(name, rest, ctx) {
  * Resolve group-level help for an argv that matched no command.
  *
  * A "group" is a command-name prefix shared by registered subcommands but
- * with no command of its own — e.g. `graph`, when `graph neighbors` and
+ * with no command of its own; e.g. `graph`, when `graph neighbors` and
  * `graph project` are registered but `graph` is not. Walk the leading
  * non-flag tokens from longest to shortest and return the longest prefix
  * that has registered children, so `hyp graph`, `hyp graph --help`, and
@@ -344,7 +344,7 @@ async function runCommandByName(name, rest, ctx) {
  * @param {ReturnType<typeof createCommandRegistry>} registry
  * @param {string[]} argv
  * @returns {{ prefix: string, subcommands: string[], unknownSub: string | undefined } | undefined}
- * @ref LLP 0009#core-owns-dispatch — core renders group help; plugins only register the leaf subcommands
+ * @ref LLP 0009#core-owns-dispatch core renders group help; plugins only register the leaf subcommands
  */
 function resolveGroupHelp(registry, argv) {
   /** @type {string[]} */
@@ -520,7 +520,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0
   )
 
-  stdout.write('hyp — HypAware kernel CLI\n')
+  stdout.write('hyp - HypAware kernel CLI\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
@@ -538,12 +538,12 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
  * activating any plugin.
  *
  * Help renders before `bootKernel`, so it cannot read the activated
- * command registry — doing so would cost a full boot: importing every
+ * command registry; doing so would cost a full boot: importing every
  * plugin entrypoint and binding the gateway/OTLP listeners some plugins
  * open during activation (the same reason `decideBootProfile` uses an
  * empty activation set for `daemon`/`status`/`version`). Instead help
- * reads the two cheap inputs boot uses for *discovery* — plugin
- * manifests (plain JSON) and the effective config — and lists the
+ * reads the two cheap inputs boot uses for *discovery*: plugin
+ * manifests (plain JSON) and the effective config, and lists the
  * commands each config-active plugin *declares* in its manifest
  * `contributes.commands`. That scope matches dispatch's `config` boot
  * profile, so every command shown here is one that will actually
@@ -555,7 +555,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
  * @returns {Promise<{ name: string, summary: string }[]>}
- * @ref LLP 0005#declarative [implements] — manifest lists commands before any plugin code is loaded
+ * @ref LLP 0005#declarative [implements] manifest lists commands before any plugin code is loaded
  */
 async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }) {
   try {
@@ -563,7 +563,7 @@ async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }
       discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {}),
       discoverInstalledPlugins({ stateDir: stateRoot }),
     ])
-    // Resolve the effective config the SAME way `bootKernel` does — with
+    // Resolve the effective config the SAME way `bootKernel` does: with
     // the discovered plugin catalog. Without it the merge validator treats
     // every bundled plugin as unknown and drops local `plugins[]` additions
     // (e.g. `@hypaware/context-graph`) from a fleet-joined host's effective
@@ -581,7 +581,7 @@ async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }
     // activate. Dispatch boots ordinary commands with the `config` profile,
     // so select with it too. This replicates the two boot selection rules a
     // hand-rolled pool would miss: an installed plugin that *shadows* a
-    // bundled first-party name (boot rejects — nothing dispatches) and an
+    // bundled first-party name (boot rejects; nothing dispatches) and an
     // installed plugin that *replaces* a same-named excluded bundled
     // skeleton (its commands win, the skeleton's don't).
     const { shadowing, selectedManifests } = selectBootPlugins({

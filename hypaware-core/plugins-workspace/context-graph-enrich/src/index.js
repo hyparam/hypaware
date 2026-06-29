@@ -22,7 +22,7 @@ const PLUGIN_NAME = '@hypaware/context-graph-enrich'
  * committed-only projection contract with the graph; and starts the T1
  * propose and T2 curate daemon sources.
  *
- * The prospect lifecycle lives in this plugin's datasets — only committed
+ * The prospect lifecycle lives in this plugin's datasets. Only committed
  * knowledge is projected, so a rejected prospect never reaches the graph.
  * Projection itself runs via `hyp graph project` (the connector pattern):
  * `projectGraph` is internal to the graph plugin, so this plugin contributes
@@ -40,13 +40,13 @@ export async function activate(ctx) {
   const validated = validateEnrichConfig(ctx.config)
   if (!validated.ok) {
     const detail = validated.errors.map((e) => `${e.pointer || '/'}: ${e.message}`).join('; ')
-    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config — ${detail}`))
+    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config - ${detail}`))
     err.hypErrorKind = 'enrich_config_invalid'
     throw err
   }
   const config = validated.config
 
-  // Resolve only the graph capability eagerly — registerContract + the kit
+  // Resolve only the graph capability eagerly: registerContract + the kit
   // are needed now, and context-graph is ordered before this plugin. The
   // vector-search + completion capabilities are resolved lazily on first
   // tick/command (see runtime.getVector/getCompletion): the resolver orders

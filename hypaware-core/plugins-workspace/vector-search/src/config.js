@@ -12,7 +12,7 @@
 // Deliberately longer than cache maintenance's 60-minute default: index
 // freshness is a background nicety, and every tick can spend embedding
 // API tokens.
-// @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements] — own interval + max_tick_ms budget, modeled on the maintenance tick
+// @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements]: own interval + max_tick_ms budget, modeled on the maintenance tick
 export const REFRESH_DEFAULTS = Object.freeze({
   enabled: true,
   interval_minutes: 240,
@@ -20,7 +20,7 @@ export const REFRESH_DEFAULTS = Object.freeze({
   // Per-tick embedding spend bound (rows). Soft: checked before each
   // shard build so one oversized partition can overshoot once rather
   // than starve forever.
-  // @ref LLP 0024#open-questions [implements] — per-tick row budget resolves the cost-visibility question for the daemon timer
+  // @ref LLP 0024#open-questions [implements]: per-tick row budget resolves the cost-visibility question for the daemon timer
   max_rows_per_tick: 5_000,
 })
 
@@ -33,7 +33,7 @@ const INDEX_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
  *
  * @param {unknown} value
  * @returns {VectorConfigResult}
- * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — index definitions are portable config, not per-host state
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements]: index definitions are portable config, not per-host state
  */
 export function validateVectorSearchConfig(value) {
   /** @type {VectorConfigError[]} */

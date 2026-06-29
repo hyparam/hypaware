@@ -58,7 +58,7 @@ test('join writes the central seed (mode 0600) and skips daemon install with --n
   )
   assert.equal(code, 0, stdout.text())
 
-  // The seed is the central layer — written under config-control/, never
+  // The seed is the central layer: written under config-control/, never
   // to the user-owned hypaware-config.json (the #111 fix).
   const seedPath = seedPathFor(hypHome)
   const stat = await fs.stat(seedPath)
@@ -108,7 +108,7 @@ test('join supersedes a stale active slot so the fresh token is honored (#139)',
 
   // Simulate a previously-joined host whose applied central config lost
   // its identity (the JWT broke, prompting a re-join). The active slot's
-  // central sink carries an empty identity — no bootstrap token — so on
+  // central sink carries an empty identity: no bootstrap token, so on
   // its own it can never bootstrap. Before the fix, boot resolution
   // preferred this slot over the freshly written seed and the new token
   // was silently ignored.

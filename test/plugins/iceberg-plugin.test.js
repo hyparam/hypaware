@@ -55,7 +55,7 @@ test('discoverBundledPlugins surfaces format-iceberg from the workspace', async 
   assert.ok(names.includes('@hypaware/format-iceberg'),
     `expected loaded names to include @hypaware/format-iceberg, got ${names.join(', ')}`)
   // The unknown-directory bin must NOT contain our plugin even when the
-  // allowlist or excludeSet changes — the discovery scan goes through
+  // allowlist or excludeSet changes, the discovery scan goes through
   // the allowlist branch.
   assert.ok(
     !result.unknownDirs.some((dir) => dir.endsWith('format-iceberg')),

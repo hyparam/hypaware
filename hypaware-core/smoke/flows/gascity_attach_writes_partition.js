@@ -29,8 +29,8 @@ import { loadManifests } from '../../../src/core/manifest.js'
  * - cache: `cache.append` spans for `hyp_dataset=gascity_messages`
  *
  * The fixture supervisor lives entirely in this file and is wired to
- * the plugin via `globalThis[Symbol.for('hypaware-gascity:transport')]`
- * — the well-known escape hatch documented in
+ * the plugin via `globalThis[Symbol.for('hypaware-gascity:transport')]`,
+ * the well-known escape hatch documented in
  * `plugins-workspace/gascity/src/transport.js`.
  *
  * @param {{ harness: any, expect: any }} args
@@ -39,7 +39,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'gascity_attach_writes_partition: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'gascity_attach_writes_partition: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -83,11 +83,11 @@ export async function run({ harness, expect }) {
     }
   )
 
-  // First attach — drives `source.start`.
+  // First attach: drives `source.start`.
   await dispatchCommand(['gascity', 'attach', 'hyptown'], { kernel, registry, harness })
   await fixture.flush()
 
-  // Second attach — drives `source.reload`.
+  // Second attach: drives `source.reload`.
   await dispatchCommand(['gascity', 'attach', 'hypburb'], { kernel, registry, harness })
   await fixture.flush()
 

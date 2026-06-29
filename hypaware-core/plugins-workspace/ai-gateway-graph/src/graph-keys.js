@@ -3,13 +3,13 @@
 import { posix } from 'node:path'
 
 /**
- * Bridge-key vocabulary for cross-source convergence — owned by this connector.
+ * Bridge-key vocabulary for cross-source convergence: owned by this connector.
  *
  * Graph node ids are content-addressed over `(kind, type, natural key)`
  * (LLP 0023 §content-addressed-ids), so the natural key *is* the identity:
  * two contracts converge on one node iff they normalize the **same key
  * identically**. The `Repo` / `Commit` / `File` recipes live here, beside the
- * contract that mints those node types (`graph_contract.js`) — not in the
+ * contract that mints those node types (`graph_contract.js`), not in the
  * generic `@hypaware/context-graph` engine, which stays node-type-agnostic. A
  * node type's identity recipe belongs to the plugin that emits it; the engine
  * only provides the type-blind `nodeId` / `edgeId` / `makeRowBuilders`
@@ -21,10 +21,10 @@ import { posix } from 'node:path'
  * a recorded Claude/Codex session land on one node. This connector is the
  * host-side twin of that GitHub `keys.js`. The cross-repo contract is enforced
  * by digest pins on both sides (host: `test/plugins/ai-gateway-graph-bridge.test.js`;
- * GitHub plugin: `test/graph-ids.test.js`) — if either side changes a recipe,
+ * GitHub plugin: `test/graph-ids.test.js`). If either side changes a recipe,
  * the pins mismatch and the change becomes a deliberate, visible decision
  * rather than a silent orphaning. The two are kept in sync by hand; the plugins
- * are decoupled (separate repos), so a shared module isn't an option — and the
+ * are decoupled (separate repos), so a shared module isn't an option. And the
  * engine is not it either, since convergence is pin-enforced, not engine-hosted.
  *
  * The host adds two reconciliation steps the GitHub side does not need (it
@@ -32,12 +32,12 @@ import { posix } from 'node:path'
  * a captured git **remote URL** into `owner/repo`, and a captured **absolute
  * local path** into a repo-relative path against the repo root.
  *
- * @ref LLP 0032#shared-key-vocabulary [implements] — connector-owned bridge keys; Repo/Commit/File byte-identical to the GitHub side
+ * @ref LLP 0032#shared-key-vocabulary [implements]: connector-owned bridge keys; Repo/Commit/File byte-identical to the GitHub side
  */
 
 // ---------------------------------------------------------------------------
-// Verbatim from github-hyp-plugin/src/keys.js — KEEP IN SYNC.
-// @ref LLP 0032#shared-key-vocabulary [constrained-by] — byte-identical to the GitHub side or the join silently stops converging
+// Verbatim from github-hyp-plugin/src/keys.js. KEEP IN SYNC.
+// @ref LLP 0032#shared-key-vocabulary [constrained-by]: byte-identical to the GitHub side or the join silently stops converging
 // ---------------------------------------------------------------------------
 
 /**
@@ -72,8 +72,8 @@ export function normalizeRelpath(value) {
 }
 
 /**
- * `Repo` key — `owner/repo`, lowercased. Accepts either `(owner, repo)` or a
- * single `owner/repo` string. github.com is implied in V1 (no host segment —
+ * `Repo` key: `owner/repo`, lowercased. Accepts either `(owner, repo)` or a
+ * single `owner/repo` string. github.com is implied in V1 (no host segment:
  * see LLP 0032 §github-only-v1).
  *
  * @param {unknown} ownerOrFull
@@ -95,7 +95,7 @@ export function repoKey(ownerOrFull, repo) {
 }
 
 /**
- * `File` key — `owner/repo:relpath`. The repo half is normalized via
+ * `File` key: `owner/repo:relpath`. The repo half is normalized via
  * {@link repoKey}, the path via {@link normalizeRelpath}. A rename is a new
  * `File` (T0 keys path, not content). The `relpath` here is already
  * repo-relative; see {@link fileKeyFromParts} for the local-absolute form.
@@ -143,7 +143,7 @@ const GITHUB_HOSTS = new Set(['github.com', 'www.github.com'])
  *  - `https://github.com/owner/repo.git` (with optional `user:token@`)
  *  - `git://github.com/owner/repo.git`
  *
- * V1 is **github.com only** — a non-github remote returns null (no bridge-ready
+ * V1 is **github.com only**: a non-github remote returns null (no bridge-ready
  * `Repo`; the file/commit stay keyed on their fallbacks). Host-qualified keys
  * for other forges are a reserved migration (LLP 0032 §github-only-v1), not a
  * silent same-`owner/repo` collision across forges.
@@ -177,11 +177,11 @@ export function repoKeyFromRemote(remote) {
 }
 
 /**
- * `Commit` key — full 40-hex `sha`, lowercased. Unlike the GitHub side (which
+ * `Commit` key: full 40-hex `sha`, lowercased. Unlike the GitHub side (which
  * trusts the API to return full shas), the host validates the length: a
  * captured **abbreviated** sha (e.g. Codex's `latest_git_commit_hash`, which
  * may be short) must NOT mint a `Commit` node, because an abbreviated key would
- * never converge with the GitHub side's full-sha node — it would mint a
+ * never converge with the GitHub side's full-sha node: it would mint a
  * distinct, dangling node instead. The guard only gates *whether* a key is
  * produced; for a full 40-hex sha the output is byte-identical to the GitHub
  * side. @ref LLP 0032#abbreviated-sha-guard
@@ -199,7 +199,7 @@ export function commitKey(sha) {
 /**
  * Reconcile an absolute local path to a repo-relative POSIX path against the
  * repo root. Returns null when the path is outside the repo root (a touched
- * file in `/tmp`, `~/.claude`, or another repo) — the caller then falls back to
+ * file in `/tmp`, `~/.claude`, or another repo). The caller then falls back to
  * keying that `File` on its absolute path, exactly as before the migration.
  *
  * Worktree convergence (LLP 0032 §worktree-convergence) rides on this: each
@@ -209,7 +209,7 @@ export function commitKey(sha) {
  * Both sides are POSIX-normalized (`.`/`..` collapsed) **before** the
  * containment check, so a path that escapes the repo via `..`
  * (`/repo/../outside`) normalizes out from under the root and falls back to its
- * absolute key — rather than slicing to a `../outside` relpath that would mint a
+ * absolute key, rather than slicing to a `../outside` relpath that would mint a
  * bogus bridge key (one that fails to converge, or worse, *collides* with an
  * unrelated file at that relpath). An in-repo `..` that stays inside
  * (`/repo/sub/../a` → `a`) still relativizes. @ref LLP 0032#file-migration
@@ -234,8 +234,8 @@ export function relativizePath(repoRoot, absPath) {
  * absolute local path. Composes {@link repoKeyFromRemote} +
  * {@link relativizePath} + {@link fileKey} so the result is byte-identical to
  * the GitHub side's `fileKey(owner/repo, relpath)`. Null when the file can't be
- * bridged (non-github remote, missing repo root, or path outside the repo) —
- * the caller keeps the absolute-path fallback.
+ * bridged (non-github remote, missing repo root, or path outside the repo).
+ * The caller keeps the absolute-path fallback.
  *
  * @param {unknown} remote
  * @param {unknown} repoRoot

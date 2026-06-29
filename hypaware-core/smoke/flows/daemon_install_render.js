@@ -37,7 +37,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'daemon_install_render: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'daemon_install_render: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

@@ -16,7 +16,7 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 300
 
 /**
  * Transport-level cap on a pulled config body. Mirrors the kernel's
- * `MAX_CONFIG_DOCUMENT_BYTES` — the apply engine enforces it again,
+ * `MAX_CONFIG_DOCUMENT_BYTES`: the apply engine enforces it again,
  * but an oversized body is dropped before it is buffered whole: an
  * oversized `Content-Length` is rejected without reading, and a
  * chunked body is read through a byte counter that cancels the stream
@@ -33,8 +33,8 @@ export const DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 
 /**
  * How long `stop()` lets an in-flight poll drain before aborting it
- * (seconds). A healthy poll finishes in this window — a mid-flight
- * apply should commit rather than be cancelled — while a stalled
+ * (seconds). A healthy poll finishes in this window: a mid-flight
+ * apply should commit rather than be cancelled, while a stalled
  * request is cut off so shutdown stays prompt.
  */
 export const DEFAULT_STOP_GRACE_SECONDS = 1
@@ -46,7 +46,7 @@ const LEGACY_404_BACKOFF_SECONDS = 300
  * The config pull loop: poll `GET /v1/config` with `If-None-Match` set
  * to the *running* config's etag, confirm successful polls to the
  * kernel (clearing post-apply probation), and hand 200 bodies to the
- * apply facade. Transport only — validation, persistence, restart,
+ * apply facade. Transport only: validation, persistence, restart,
  * probation, and rollback are all kernel-owned behind `configControl`.
  *
  * The loop is a self-rescheduling timeout rather than an interval so
@@ -62,8 +62,8 @@ const LEGACY_404_BACKOFF_SECONDS = 300
  * exit condition.
  *
  * Every poll runs under its own `AbortController` with a hard
- * deadline: a stalled config GET must not be able to wedge `stop()` —
- * and through it daemon shutdown or a staged restart — so a poll that
+ * deadline: a stalled config GET must not be able to wedge `stop()`,
+ * and through it daemon shutdown or a staged restart, so a poll that
  * outlives the deadline is aborted, and `stop()` aborts an in-flight
  * poll after a short drain grace.
  *
@@ -77,7 +77,7 @@ const LEGACY_404_BACKOFF_SECONDS = 300
  *   log: PluginLogger,
  *   fetchFn?: typeof fetch,
  * }} args
- * @ref LLP 0025#config-pull-loop [implements] — immediate pull on bootstrap success, then a steady plugin-internal timer
+ * @ref LLP 0025#config-pull-loop [implements]: immediate pull on bootstrap success, then a steady plugin-internal timer
  */
 export function createConfigPullLoop(args) {
   const { centralUrl, identityClient, configControl, log } = args
@@ -261,7 +261,7 @@ export function createConfigPullLoop(args) {
         ...(retryAfter !== undefined ? { retry_after_seconds: retryAfter } : {}),
       })
       // Honor only a *positive* Retry-After. A legal `0` or a past HTTP-date
-      // parses to 0 — rescheduling at 0s would re-poll immediately and spin;
+      // parses to 0: rescheduling at 0s would re-poll immediately and spin;
       // fall through to the ladder ('retry_backoff') instead.
       return retryAfter ? retryAfter : 'retry_backoff'
     }
@@ -287,7 +287,7 @@ export function createConfigPullLoop(args) {
         signal,
         headers: {
           authorization: `Bearer ${jwt}`,
-          // If-None-Match always reflects the *running* config — the
+          // If-None-Match always reflects the *running* config: the
           // server reads it as the fleet-convergence signal, so a
           // gateway mid-apply keeps presenting its old etag.
           ...(runningEtag ? { 'if-none-match': runningEtag } : {}),
@@ -306,7 +306,7 @@ export function createConfigPullLoop(args) {
     /**
      * Stop polling. Lets an in-flight poll drain for a short grace
      * (a mid-flight apply should commit, not be cancelled), then
-     * aborts it — so the wait is bounded even against a stalled
+     * aborts it, so the wait is bounded even against a stalled
      * server or a `fetchFn` that ignores abort signals.
      */
     async stop() {
@@ -373,7 +373,7 @@ async function readBodyCapped(response, maxBytes, signal) {
 }
 
 /**
- * Await `promise`, but reject as soon as `signal` aborts — even when
+ * Await `promise`, but reject as soon as `signal` aborts, even when
  * the underlying promise never settles. A misbehaving `fetchFn` (or a
  * server that stalls mid-body) must not be able to wedge `stop()`,
  * and through it daemon shutdown.

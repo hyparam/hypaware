@@ -315,12 +315,12 @@ const FIELD_RANGES = /** @type {const} */ ([
 ])
 
 /**
- * `cronMatches(expr, now)` — true if `now` (UTC) satisfies the 5-field
+ * `cronMatches(expr, now)` - true if `now` (UTC) satisfies the 5-field
  * cron expression. Supports `*`, comma lists, ranges (`1-5`), and
  * step values like every-N (`STAR/N`) or `0-10/2`. Day-of-month and
  * day-of-week obey the standard OR-when-both-restricted rule.
  *
- * The kernel only needs evaluation, not iteration — the driver's host
+ * The kernel only needs evaluation, not iteration: the driver's host
  * is responsible for ticking on a reasonable cadence (typically once
  * per minute). The smoke harness calls `tick({ now })` directly with a
  * `now` that aligns with `"* * * * *"`, so this evaluator is exercised

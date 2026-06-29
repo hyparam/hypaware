@@ -14,7 +14,7 @@ import { createConfigRegistry } from './schema.js'
 /**
  * Discover the per-plugin `config_sections` validators a set of plugins
  * expose, WITHOUT activating them. A plugin opts in by exporting a
- * `configSection` (`{ section, validate }`) from its manifest entrypoint —
+ * `configSection` (`{ section, validate }`) from its manifest entrypoint:
  * the same registration it hands `ctx.configRegistry.registerSection` at
  * activation, surfaced as a side-effect-free export.
  *
@@ -27,18 +27,18 @@ import { createConfigRegistry } from './schema.js'
  *
  * Used by the apply path so a central config that *introduces* a
  * backfill-capable plugin (e.g. `@hypaware/claude`) has its `config.backfill`
- * block validated even though that plugin isn't active yet — closing the gap
+ * block validated even though that plugin isn't active yet, closing the gap
  * where the live registry only carries validators for already-active plugins
  * (LLP 0037).
  *
  * Best-effort: an entrypoint that can't be imported, or that exports no
- * `configSection`, contributes nothing and is logged but never throws —
+ * `configSection`, contributes nothing and is logged but never throws:
  * discovery must never fail an apply on its own; real activation at the next
  * boot remains the backstop.
  *
  * @param {{ manifests: LoadedManifest[] }} args
  * @returns {Promise<ConfigRegistry>}
- * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — discover the owning plugin's `backfill` validator for not-yet-active plugins, side-effect-free
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]: discover the owning plugin's `backfill` validator for not-yet-active plugins, side-effect-free
  */
 export async function discoverConfigSectionValidators({ manifests }) {
   const registry = createConfigRegistry()

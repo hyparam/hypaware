@@ -40,13 +40,13 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *    span whose `status=failed` and `error_kind=cap_missing`.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0017#attach-is-idempotent-and-reversible [tests] — re-running attach is a no-op; detach restores prior settings
+ * @ref LLP 0017#attach-is-idempotent-and-reversible [tests]: re-running attach is a no-op; detach restores prior settings
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'client_attach_idempotent: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'client_attach_idempotent: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -68,7 +68,7 @@ export async function run({ harness, expect }) {
   await fs.writeFile(claudeSettingsPath, seedClaudeBody, 'utf8')
 
   const seedCodexBody = [
-    '# user preferences — must survive attach/detach',
+    '# user preferences - must survive attach/detach',
     'model = "gpt-5-codex"',
     '',
     '[history]',

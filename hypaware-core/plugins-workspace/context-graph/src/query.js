@@ -12,7 +12,7 @@ import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
 
 /**
  * Resolve a seed token to exactly one node, in tiers: exact `node_id`, then
- * exact `natural_key`, then `label` — each optionally narrowed by `type`. The
+ * exact `natural_key`, then `label`, each optionally narrowed by `type`. The
  * tiers exist because content-addressed ids are unguessable, so a human seed is
  * almost always a natural key or label. Multiple matches is an ambiguity error
  * carrying the candidates, never a silent pick.
@@ -21,7 +21,7 @@ import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
  * @param {string} token
  * @param {string | undefined} type
  * @returns {{ ok: true, node: GraphNode } | TraversalErr}
- * @ref LLP 0026#seed-resolution [implements] — node_id → natural_key → label, ambiguity lists candidates
+ * @ref LLP 0026#seed-resolution [implements] - node_id → natural_key → label, ambiguity lists candidates
  */
 export function resolveSeed(nodes, token, type) {
   const ofType = (n) => !type || n.node_type === type
@@ -35,7 +35,7 @@ export function resolveSeed(nodes, token, type) {
     if (matches.length > 1) {
       return {
         ok: false,
-        error: `ambiguous seed ${JSON.stringify(token)} — ${matches.length} nodes match by ${field}; narrow with --type or pass an exact node_id/natural_key`,
+        error: `ambiguous seed ${JSON.stringify(token)} - ${matches.length} nodes match by ${field}; narrow with --type or pass an exact node_id/natural_key`,
         candidates: matches,
       }
     }
@@ -46,17 +46,17 @@ export function resolveSeed(nodes, token, type) {
 
 /**
  * Breadth-first walk from a seed to `depth` hops over in-memory node/edge
- * arrays. Pure — no IO — so the traversal logic is unit-testable directly.
+ * arrays. Pure, no IO, so the traversal logic is unit-testable directly.
  *
  * `direction` 'out' follows src→dst, 'in' follows dst→src, 'both' follows
  * either (recording which way each neighbor was reached). A non-empty
  * `edgeTypes` restricts which edge types are traversable. The full reachable
  * set within `depth` is collected, then `limit` slices it in BFS order with
- * `truncated`/`reachable` reporting the drop — never a silent cap.
+ * `truncated`/`reachable` reporting the drop: never a silent cap.
  *
  * @param {{ nodes: GraphNode[], edges: GraphEdge[], seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string }} args
  * @returns {TraversalOk | TraversalErr}
- * @ref LLP 0026#thin-in-memory-traversal [implements] — whole-graph-in-RAM BFS is the deliberate basic tier; persisted index is the deferred fast path
+ * @ref LLP 0026#thin-in-memory-traversal [implements] - whole-graph-in-RAM BFS is the deliberate basic tier; persisted index is the deferred fast path
  */
 export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direction = 'both', limit = Infinity, type }) {
   const resolved = resolveSeed(nodes, seed, type)
@@ -117,25 +117,25 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
 
 /**
  * Load the published `node`/`edge` datasets through the query surface and walk
- * them. Reads only the registered datasets — never the projection's internals —
+ * them. Reads only the registered datasets, never the projection's internals,
  * so an alternate query path stays possible.
  *
  * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config, seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string }} args
  * @returns {Promise<TraversalOk | TraversalErr>}
- * @ref LLP 0026#query-reads-the-published-surface [implements] — reads node/edge via the registry, not project.js state
+ * @ref LLP 0026#query-reads-the-published-surface [implements] - reads node/edge via the registry, not project.js state
  */
 export async function queryNeighbors({ query, storage, config, seed, depth, edgeTypes, direction, limit, type }) {
   const edgeRows = await loadRows(query, storage, config, `SELECT src_id, dst_id, edge_type FROM ${EDGE_DATASET}`)
   const nodeRows = await loadRows(query, storage, config, `SELECT node_id, node_type, natural_key, label FROM ${NODE_DATASET}`)
 
   // Fold by graph identity before handing clean arrays to the pure traversal.
-  // The published surface can carry pre-compaction duplicates — the same
+  // The published surface can carry pre-compaction duplicates: the same
   // content-addressed id committed twice by concurrent projections or a
   // partial failure. `hyp graph compact` merges them, but a read must not
   // depend on it having run: two physical copies of one node must resolve as
   // a single seed (not a false "ambiguous"), and a doubled edge must not be
   // walked twice. Node identity is `node_id`; edge identity is
-  // `(src_id, edge_type, dst_id)` — exactly the digest `edgeId()` hashes.
+  // `(src_id, edge_type, dst_id)`: exactly the digest `edgeId()` hashes.
   /** @type {Map<string, GraphNode>} */
   const nodeById = new Map()
   for (const r of nodeRows) {

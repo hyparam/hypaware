@@ -31,10 +31,10 @@ export async function runEnrich(argv, ctx) {
 }
 
 /**
- * `hyp enrich backfill` — the deliberate, out-of-daemon backfill over **all**
+ * `hyp enrich backfill`: the deliberate, out-of-daemon backfill over **all**
  * sessions ([§two-regimes](LLP 0028)), mirroring `hyp graph project`. Proposes
  * every session (T1, synchronous) then curates the whole pending pool through
- * the Anthropic **Batch API**, polling to completion. Expensive and one-shot —
+ * the Anthropic **Batch API**, polling to completion. Expensive and one-shot:
  * never automatic.
  *
  * @param {string[]} argv
@@ -64,7 +64,7 @@ export async function runEnrichBackfill(argv, ctx) {
         const dr = await runCurateBatch(runtime, { anchorKeys, dryRun: true })
         ctx.stdout.write(
           `enrich backfill curate (dry run): ${dr.pending} pending prospect(s) → ${dr.clusters} cluster(s), ` +
-            `${dr.skipped} below salience — nothing submitted\n`
+            `${dr.skipped} below salience - nothing submitted\n`
         )
         return 0
       }
@@ -72,7 +72,7 @@ export async function runEnrichBackfill(argv, ctx) {
       const cr = await runCurateBatch(runtime, { anchorKeys, onProgress: (s) => ctx.stdout.write(`  batch ${s.id}: ${s.status}\n`) })
       const via = cr.batched ? 'batch' : 'synchronous (provider has no batch API)'
       ctx.stdout.write(
-        `enrich backfill curate (${via}): ${cr.processed}/${cr.pending} processed over ${cr.clusters} cluster(s) — ` +
+        `enrich backfill curate (${via}): ${cr.processed}/${cr.pending} processed over ${cr.clusters} cluster(s) - ` +
           `${cr.committed} committed, ${cr.merged} merged, ${cr.rejected} rejected, ${cr.skipped} skipped\n`
       )
     }
@@ -86,7 +86,7 @@ export async function runEnrichBackfill(argv, ctx) {
 
 /**
  * Resolve the set of session ids ("anchor keys") whose latest source part is on
- * or after `since` (a `YYYY-MM-DD` day read as UTC midnight) — the in-window
+ * or after `since` (a `YYYY-MM-DD` day read as UTC midnight): the in-window
  * scope the `--since` curate restricts the pending pool to. Config-driven (the
  * `anchor_key_column` / `timestamp_column`), so it stays source-agnostic like
  * the rest of the plugin rather than hardcoding `ai_gateway_messages` columns.
@@ -174,7 +174,7 @@ export async function runEnrichCurate(_argv, ctx) {
     const runtime = requireEnrichRuntime()
     const r = await runCurateTick(runtime)
     ctx.stdout.write(
-      `enrich curate: ${r.processed}/${r.pending} processed in ${r.calls} call(s) over ${r.clusters} cluster(s) — ` +
+      `enrich curate: ${r.processed}/${r.pending} processed in ${r.calls} call(s) over ${r.clusters} cluster(s) - ` +
         `${r.committed} committed, ${r.merged} merged, ${r.rejected} rejected, ${r.skipped} skipped\n` +
         `run 'hyp graph project' to project committed knowledge into the graph\n`
     )

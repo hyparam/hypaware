@@ -131,7 +131,7 @@ test('validateEnrichConfig gates the default tool_result filter to the default s
   assert.equal(dflt.config.require_text, true)
 
   // ...but a custom source defaults to no part-type filter (it may lack a
-  // `part_type` column), while require_text — which only reads text_column —
+  // `part_type` column), while require_text (which only reads text_column)
   // stays on.
   const custom = validateEnrichConfig({ source_dataset: 'my_logs', text_column: 'body' })
   assert.equal(custom.ok, true)

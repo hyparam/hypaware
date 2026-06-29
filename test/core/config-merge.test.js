@@ -123,7 +123,7 @@ test('resolveLayeredConfig: a valid-in-isolation local addition that invalidates
 })
 
 test('resolveLayeredConfig: an error the central layer carries alone never drops a local entry', () => {
-  // Central is already ambiguous on its own — that is apply-time's concern.
+  // Central is already ambiguous on its own: that is apply-time's concern.
   // The local layer is blameless, so nothing local is dropped.
   const central = {
     version: 2,

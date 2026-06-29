@@ -14,12 +14,12 @@ import { createAiGatewayGraphContract } from './graph_contract.js'
  * registers the `ai_gateway_messages → graph` contract, building its rows with
  * the capability's shared kit. It declares plugin + capability dependencies on
  * both `@hypaware/ai-gateway` (the source it exists for) and the graph plugin,
- * so both activate first — neither of them depends on the other or on this.
+ * so both activate first: neither of them depends on the other or on this.
  * Install this connector to project the gateway's data into the graph; omit it
  * and the gateway runs exactly as before.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0023#contract-contribution [implements] — connector contributes the source's contract via the capability
+ * @ref LLP 0023#contract-contribution [implements]: connector contributes the source's contract via the capability
  */
 export async function activate(ctx) {
   // ^1.0.0: this connector needs only the engine's generic kit

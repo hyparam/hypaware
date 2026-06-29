@@ -10,7 +10,7 @@ import { computeShardStates, readShardMetas } from './shards.js'
 /**
  * Per-index, per-partition shard coverage: state, model, dimension,
  * row counts, build time. Works without the optional hypvector
- * dependency — everything here reads sidecar metas and the cache
+ * dependency. Everything here reads sidecar metas and the cache
  * partition listing only.
  *
  * @param {VectorSearchRuntime} runtime

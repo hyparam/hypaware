@@ -23,7 +23,7 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *  4. `hyp status --json` emits a stable JSON document listing the
  *     configured sources, sinks, clients, and active plugins. Because
  *     neither `@hypaware/central` nor `@hypaware/gascity` is in this
- *     config, they must not appear — they are excluded from default
+ *     config, they must not appear as they are excluded from default
  *     activation but remain discoverable through the plugin catalog and
  *     activatable via explicit config or init presets.
  *
@@ -42,7 +42,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'cli_bundled_plugins_activated: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'cli_bundled_plugins_activated: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -50,7 +50,7 @@ export async function run({ harness, expect }) {
   // plugins. `@hypaware/format-jsonl`, `@hypaware/s3`, and
   // `@hypaware/format-iceberg` are intentionally omitted so the smoke
   // can assert the "skipped" log surface. `@hypaware/central` and
-  // `@hypaware/gascity` are not in this config — they are excluded from
+  // `@hypaware/gascity` are not in this config, they are excluded from
   // default activation but activatable via explicit config.
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
@@ -262,7 +262,7 @@ export async function run({ harness, expect }) {
   )
   // Skipped = allowlist plugins this flow's config does not name (the
   // excluded-from-default set never reaches the skip loop). Bumps
-  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST — most
+  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST, most
   // recently @hypaware/context-graph (3 -> 4).
   expect.that(
     'traces: at least one config-profile boot reports plugins_skipped=4',

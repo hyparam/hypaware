@@ -23,7 +23,7 @@ import {
  * Hy-gh-1 smoke. Builds a local bare git repo containing a tiny
  * `@hypaware/git-url-fixture` plugin and installs it through the CLI
  * dispatcher via `file://<bare-repo>` so the install exercises the
- * SAME git fetch path remote URLs would take — there is no
+ * SAME git fetch path remote URLs would take. There is no
  * special-case for `file://`. After the install we verify:
  *
  *  - `plugin-lock.json` has a `source.kind="git"` entry.
@@ -40,7 +40,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'plugin_install_git_url: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'plugin_install_git_url: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -300,7 +300,7 @@ export async function run({ harness, expect }) {
 /**
  * Drop a minimal fixture plugin under `dir`. The shape mirrors a tiny
  * remote-installable plugin: a manifest and an entrypoint, nothing
- * else. The smoke does not activate the plugin — installing it
+ * else. The smoke does not activate the plugin, but installing it
  * through the git path is enough to exercise the §hy-gh-1 contract.
  *
  * @param {string} dir

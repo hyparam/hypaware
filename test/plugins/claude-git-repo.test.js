@@ -7,7 +7,7 @@ import { deriveRepoFromCwd } from '../../hypaware-core/plugins-workspace/claude/
 
 /**
  * Unit tests for the backfill-time repo recovery helper. The git runner is
- * injected so the derivation is hermetic — no real repo on disk.
+ * injected so the derivation is hermetic. No real repo on disk.
  */
 
 /**
@@ -45,7 +45,7 @@ test('derives redacted remote and repo_root, and never asks for HEAD', async () 
   assert.equal(out.repo_root, '/Users/phil/workspace/repo')
   assert.equal(/** @type {any} */ (out).head_sha, undefined)
 
-  // It must never run `rev-parse HEAD` — a backfilled head_sha would be
+  // It must never run `rev-parse HEAD`. A backfilled head_sha would be
   // anachronistic. Only remote + toplevel are probed.
   const subcommands = calls.map((a) => (a[2] === 'rev-parse' ? `rev-parse ${a[3]}` : a[2]))
   assert.deepEqual(subcommands.sort(), ['config', 'rev-parse --show-toplevel'])

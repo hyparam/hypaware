@@ -78,7 +78,7 @@ const QUERY_SOURCES = [
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
-    throw new Error('s3_query_roundtrip: tracer provider not installed — expected HYP_DEV_TELEMETRY=1')
+    throw new Error('s3_query_roundtrip: tracer provider not installed - expected HYP_DEV_TELEMETRY=1')
   }
 
   const cacheRoot = path.join(harness.stateDir, 'cache')
@@ -163,7 +163,7 @@ export async function run({ harness, expect }) {
       const { loaded, failed } = await loadManifests([parquetDir, s3Dir, icebergDir, fixtureDir])
       if (failed.length > 0) {
         throw new Error(
-          `s3_query_roundtrip: manifest failures — ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`
+          `s3_query_roundtrip: manifest failures - ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`
         )
       }
       /** @type {PluginActivationEntry[]} */

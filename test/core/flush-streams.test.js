@@ -17,7 +17,7 @@ function fakeStream({ writableLength, mode }) {
     write(_chunk, cb) {
       if (mode === 'drain') queueMicrotask(() => cb())
       else if (mode === 'error') queueMicrotask(() => handlers.error?.())
-      // mode 'hang' never invokes either — used with a timeout race
+      // mode 'hang' never invokes either. Used with a timeout race
     },
   }
 }

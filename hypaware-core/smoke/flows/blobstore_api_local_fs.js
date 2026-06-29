@@ -31,7 +31,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
  *   - `ifNoneMatch='*'` precondition; assert a conflicting put
  *                   rejects with the canonical error_kind
  *
- * The smoke deliberately exercises the BlobStore API DIRECTLY — no
+ * The smoke deliberately exercises the BlobStore API DIRECTLY: no
  * sink instance is instantiated, no `driver.tick()` is fired. The
  * sink-instance code path is already exercised by
  * `blob_sink_parquet_local_fs.js`; this smoke proves the new
@@ -44,7 +44,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'blobstore_api_local_fs: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'blobstore_api_local_fs: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

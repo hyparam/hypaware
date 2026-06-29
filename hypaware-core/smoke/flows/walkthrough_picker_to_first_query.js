@@ -55,7 +55,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'walkthrough_picker_to_first_query: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'walkthrough_picker_to_first_query: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

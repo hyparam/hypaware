@@ -96,7 +96,7 @@ async function createDataSource(source, blobStore, partitions) {
 
 /**
  * Read an Iceberg table from S3 by adapting the BlobStore into the
- * `Resolver`/`Lister` pair icebird speaks — the same path the local
+ * `Resolver`/`Lister` pair icebird speaks, the same path the local
  * cache uses, only the bytes come from S3. The `@hypaware/format-iceberg`
  * adapter and `icebird` are imported lazily so parquet-only deployments
  * never load them.
@@ -107,7 +107,7 @@ async function createDataSource(source, blobStore, partitions) {
  */
 async function createIcebergDataSource(source, blobStore) {
   // Guard against a missing/empty table the way the local cache does
-  // (`tableExists` before load) — without it, loading catalog metadata
+  // (`tableExists` before load). Without it, loading catalog metadata
   // for a table that was never written can throw instead of reading as
   // an empty result.
   if (!(await icebergTableHasMetadata(blobStore, source.prefix))) {
@@ -139,7 +139,7 @@ async function icebergTableHasMetadata(blobStore, prefix) {
 
 /**
  * Materialize an S3 object into an in-memory `AsyncBuffer`. This reads
- * the whole object — fine for the modest parquet files HypAware writes;
+ * the whole object (fine for the modest parquet files HypAware writes);
  * range-based reads can be layered on later by extending `getObject`.
  *
  * @param {BlobStore} blobStore

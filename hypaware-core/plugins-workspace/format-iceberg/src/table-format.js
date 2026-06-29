@@ -196,7 +196,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
     return { partitionsExported: partitions.length, bytesWritten: 0, status: 'skipped' }
   }
 
-  // @ref LLP 0022#partition-derivation — derived per dataset at commit time
+  // @ref LLP 0022#partition-derivation: derived per dataset at commit time
   // because `createSink` runs once for a sink that exports many datasets, so
   // the spec cannot be resolved up front. [implements]
   const partitioning = derivePartitioning(ctx.query.getDataset(dataset), columns)
@@ -289,7 +289,7 @@ async function exportDataset({ ctx, batch, dataset, partitions, prefix, log, mai
         hyp_dataset: dataset,
         hyp_batch_id: batch.batchId,
         encoder_format: ctx.encoder.format,
-        // @ref LLP 0022#observability — surface the resolved layout so a smoke
+        // @ref LLP 0022#observability: surface the resolved layout so a smoke
         // can assert what was written, not just that rows landed.
         hyp_partition_spec: partitioning?.partitionSpecLabel ?? 'unpartitioned',
         hyp_sort_order: partitioning?.sortOrderLabel ?? '',
@@ -478,7 +478,7 @@ function collectPartitionKeys(partitions) {
   const out = {}
   for (const partition of partitions) {
     for (const [k, v] of Object.entries(partition.partition ?? {})) {
-      // Preserve the first non-empty value per key — different
+      // Preserve the first non-empty value per key, different
       // partitions may share the same key (e.g. `partition=all`).
       if (typeof v === 'string' && v.length > 0 && !(k in out)) out[k] = v
     }

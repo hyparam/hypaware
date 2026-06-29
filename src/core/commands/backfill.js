@@ -9,7 +9,7 @@ import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
  * Base partition segment for backfilled writes. `storage.appendRows`
  * re-routes each row to its real source partition using the dataset's
  * registered `cachePartitioning` declaration, so this segment only
- * names the spool bucket and the dataset-attribution path — it keeps
+ * names the spool bucket and the dataset-attribution path; it keeps
  * backfill spool state distinct from the live capture spool while
  * landing rows in the exact same per-source Iceberg tables.
  */
@@ -132,10 +132,10 @@ export async function runBackfill(argv, ctx) {
 }
 
 /**
- * `hyp backfill list [--json]` — enumerate every registered provider.
+ * `hyp backfill list [--json]`: enumerate every registered provider.
  *
  * Unlike `hyp backfill <provider...>`, list does NOT filter to the
- * active config — discovery is the whole point of the command, and a
+ * active config; discovery is the whole point of the command, and a
  * later run may opt into an explicit provider name.
  *
  * @param {string[]} argv
@@ -338,7 +338,7 @@ function markProviderFailed(result, error) {
  * Emits `backfill.provider_*` / `backfill.scan` / `backfill.materialize`
  * / `backfill.write` / `backfill.flush` lifecycle spans, all carrying
  * `dev_run_id` and `provider`. Failures abort the provider but do not
- * abort sibling providers — the runner walks them sequentially.
+ * abort sibling providers; the runner walks them sequentially.
  *
  * @param {{
  *   provider: BackfillContribution,
@@ -552,7 +552,7 @@ async function materializeItem(args) {
 /**
  * Append rows to the dataset's intrinsic cache table. The runner
  * resolves the table path via the kernel `QueryRegistry`. Datasets
- * without a registered table path are logged and skipped — provider
+ * without a registered table path are logged and skipped; provider
  * authors should not yield items for unregistered datasets.
  *
  * @param {{
@@ -594,7 +594,7 @@ async function writeRows(args) {
       }
       // `appendRows` derives the dataset from the path and re-routes
       // rows into per-source partitions via the registered
-      // `cachePartitioning` declaration — the same write path the live
+      // `cachePartitioning` declaration; the same write path the live
       // gateway recorder uses. We only need a dataset-attributable base
       // path plus the dataset's schema columns.
       const tablePath = ctx.storage.cacheTablePath(dataset, [BACKFILL_PARTITION_SEGMENT])
@@ -609,7 +609,7 @@ async function writeRows(args) {
 /**
  * Flush each touched dataset so `hyp query` immediately sees the
  * imported rows. Storage layers without an explicit flush helper get
- * a logged skip — append still committed to the spool path.
+ * a logged skip; append still committed to the spool path.
  *
  * @param {{
  *   dataset: string,
@@ -634,7 +634,7 @@ async function flushDataset(args) {
     async () => {
       const registered = ctx.query.getDataset?.(dataset)
       // `flushTable` lives on the extended storage service, not the
-      // public `QueryStorageService` surface — feature-detect it. The
+      // public `QueryStorageService` surface; feature-detect it. The
       // flushed path must match the base path `writeRows` appended to
       // so the same spool bucket is committed.
       /** @type {any} */

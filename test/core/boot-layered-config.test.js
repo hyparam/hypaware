@@ -109,7 +109,7 @@ test('a local plugin that invalidates the merge (capability tie) is dropped; cen
     plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/format-parquet' }],
   }) + '\n')
 
-  // Local adds a second encoder (ties with central — capability_ambiguous,
+  // Local adds a second encoder (ties with central: capability_ambiguous,
   // dropped) plus a clean additive client (kept).
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,

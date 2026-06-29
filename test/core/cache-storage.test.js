@@ -291,7 +291,7 @@ test('readSpooledRows yields unflushed rows and goes empty after flush', async (
       { id: 2, value: 'b' },
     ])
 
-    // Before flush, the rows live only in the spool — invisible to the
+    // Before flush, the rows live only in the spool, invisible to the
     // committed-partition scan but visible to readSpooledRows.
     const pending = await drain(storage.readSpooledRows('my_ds'))
     assert.equal(pending.length, 2)
@@ -329,8 +329,8 @@ test('readSpooledRows projects to requested columns and filters by dataset', asy
 test('readSpooledRows skips a parseable envelope missing columns, matching what flush drops', async () => {
   // A parseable spool line whose envelope lacks `columns` is malformed:
   // streamFlushFile drops it and never commits its rows. readSpooledRows
-  // must skip the same rows, or backfill would dedupe against — and so
-  // refuse to materialize — rows that flush will never commit.
+  // must skip the same rows, or backfill would dedupe against (and thus
+  // refuse to materialize) rows that flush will never commit.
   const cacheRoot = await makeTmpDir('spool-read-malformed')
   try {
     const storage = createQueryStorageService({ cacheRoot })

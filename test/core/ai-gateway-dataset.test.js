@@ -42,7 +42,7 @@ test('ai-gateway registers cache partitioning for source columns and iceberg fie
   assert.ok(dataset.cachePartitioning)
   assert.deepEqual(dataset.cachePartitioning.source.columns, ['client_name', 'conversation_source', 'provider'])
   assert.equal(dataset.cachePartitioning.source.fallback, 'unknown')
-  // @ref LLP 0030#breaking — the required identity partition field is
+  // @ref LLP 0030#breaking: the required identity partition field is
   // session_id (always present), not conversation_id (now nullable);
   // conversation_id rides along as a secondary, non-required field.
   assert.equal(dataset.cachePartitioning.iceberg.fields.length, 4)
@@ -222,11 +222,11 @@ test('ai-gateway createDataSource pads declared schema columns absent from an ol
   // physically lacks it must surface as a null-valued column, not throw
   // ColumnNotFoundError. `withSchemaColumns` is the only thing guaranteeing
   // this, and every other test stages partitions that already carry all
-  // columns — so without this test a regression dropping the padding would pass
+  // columns. So without this test a regression dropping the padding would pass
   // the suite while breaking real queries over old data. @ref LLP 0032#capture
   const cacheRoot = await makeTmpDir('schema-pad')
   try {
-    // Stage a partition with ONLY id/date — no repo-identity columns at all.
+    // Stage a partition with ONLY id/date: no repo-identity columns at all.
     await appendRowsToSourceTable(
       cacheRoot, DATASET_NAME, ['source=claude'],
       TEST_COLUMNS, [{ id: 1, date: '2026-05-26' }]

@@ -43,7 +43,7 @@ async function readJsonlByPrefix(dir, prefix) {
 /**
  * Build the `expect` toolkit handed to each smoke flow. Each method
  * returns plain records read straight off disk so the flow can use
- * ordinary array filters — exactly the language used in the design's
+ * ordinary array filters: exactly the language used in the design's
  * SQL assertions, ahead of `hyp query` existing.
  *
  * @param {{ telemetryDir: string, runId: string, smokeName: string }} ctx
@@ -88,7 +88,7 @@ function assertionError(ctx, message, value, cause) {
   const err = new Error(
     `${message}\n  value=${valuePreview}\n  smoke=${ctx.smokeName} dev_run_id=${ctx.runId}\n  telemetry=${ctx.telemetryDir}${causeLine}`
   )
-  // @ts-ignore — attach context for the harness to surface
+  // @ts-ignore: attach context for the harness to surface
   err.detail = `re-open: ls ${ctx.telemetryDir}`
   return err
 }

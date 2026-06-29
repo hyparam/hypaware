@@ -2,7 +2,7 @@
 
 /**
  * Shared retry/backoff primitives for the central plugin's two HTTP
- * loops — the config pull ({@link ./config_client.js}) and the forward
+ * loops: the config pull ({@link ./config_client.js}) and the forward
  * sink's ingest POSTs ({@link ./sink.js}). Both face the same server
  * contract: `429`/`503` carry a `Retry-After` the client honors, and a
  * linear ladder is the fallback when the header is absent or garbage
@@ -17,7 +17,7 @@ export const RETRY_BACKOFF_SECONDS = [30, 60, 120, 300]
  * HTTP-date, anything unparseable → `undefined`. A literal `0` or a past
  * HTTP-date faithfully parses to `0`. Callers must treat any non-positive
  * (or `undefined`) result as "no useful pacing" and fall back to the
- * backoff ladder — never honor it as a zero-delay retry, which would spin
+ * backoff ladder: never honor it as a zero-delay retry, which would spin
  * the retry loop.
  *
  * @param {string | null} value
@@ -33,7 +33,7 @@ export function parseRetryAfter(value) {
 }
 
 /**
- * Sleep `ms`, but reject as soon as `signal` aborts — so an in-flight
+ * Sleep `ms`, but reject as soon as `signal` aborts, so an in-flight
  * backpressure wait inside `exportBatch` cannot wedge sink `close()` or,
  * through it, daemon shutdown. With no signal it is a plain timed sleep.
  * The timer is not unref'd: an export deliberately pausing for the

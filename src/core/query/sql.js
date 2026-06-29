@@ -16,7 +16,7 @@ import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
  * Run a read-only SELECT against the kernel's dataset registry. The
  * caller (the `hyp query sql` command or a future server endpoint)
  * supplies the registry and storage; this function never reads from
- * disk directly — every byte of cache IO goes through the storage
+ * disk directly; every byte of cache IO goes through the storage
  * service so spans and metrics are attributed correctly.
  *
  * Wraps the entire run in a `query.execute_sql` span and emits one
@@ -25,7 +25,7 @@ import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
  *
  * @param {ExecuteSqlOptions} args
  * @returns {Promise<ExecuteSqlResult>}
- * @ref LLP 0015#query-is-intrinsic [implements] — core-owned read-only SQL over the registry; IO only via the storage service
+ * @ref LLP 0015#query-is-intrinsic [implements]: core-owned read-only SQL over the registry; IO only via the storage service
  */
 export async function executeQuerySql(args) {
   const { query, registry, storage } = args

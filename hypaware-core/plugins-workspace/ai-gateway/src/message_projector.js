@@ -17,8 +17,8 @@ const DATASET_NAME = 'ai_gateway_messages'
  *
  * The row shape is the contract the dataset advertises and downstream
  * queries lock onto. The gateway always emits this column set, regardless
- * of which adapter projector produced the messages — projector-defined
- * fields map onto these named columns directly. `schema_version` 7 added
+ * of which adapter projector produced the messages (projector-defined
+ * fields map onto these named columns directly). `schema_version` 7 added
  * the `git_remote` / `head_sha` / `repo_root` capture columns (LLP 0032);
  * the additions are nullable, so old partitions read them as null and no
  * partition-label bump is needed.
@@ -28,7 +28,7 @@ const DATASET_NAME = 'ai_gateway_messages'
 export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'gateway_id', type: 'STRING', nullable: false },
   { name: 'schema_version', type: 'INT32', nullable: false },
-  // @ref LLP 0030#decision — session_id is the partition key and the
+  // @ref LLP 0030#decision: session_id is the partition key and the
   // session container (Claude session / Codex metadata.session_id),
   // always present; conversation_id is the thread WITHIN it (Codex
   // thread; null for Claude) and is therefore nullable.
@@ -44,7 +44,7 @@ export const AI_GATEWAY_MESSAGE_COLUMNS = Object.freeze([
   { name: 'client_name', type: 'STRING', nullable: true },
   { name: 'cwd', type: 'STRING', nullable: true },
   { name: 'git_branch', type: 'STRING', nullable: true },
-  // @ref LLP 0032#capture — captured repo identity for the GitHub↔LLM graph
+  // @ref LLP 0032#capture: captured repo identity for the GitHub↔LLM graph
   // bridge: the git remote URL, full HEAD sha, and repo root (the prefix that
   // relativizes a touched file's absolute path). Nullable: a session may run
   // outside a git repo, and older partitions predate these columns (read null).
@@ -108,14 +108,14 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     return `undefined`, or return an invalid shape are warned and
  *     skipped.
  *  4. Applies fallback identity (hash `message_id`) ONLY when the
- *     chosen projection omitted identity — projector-supplied IDs are
- *     authoritative. `previous_message_id` is gateway-owned either
+ *     chosen projection omitted identity (projector-supplied IDs are
+ *     authoritative). `previous_message_id` is gateway-owned either
  *     way: unless the projector supplied explicit history, every row
  *     gets its IMMEDIATE predecessor in the THREAD (a 0/1-element
- *     array) — scoped to `(conversation_id ?? session_id, agent_id)` so
+ *     array), scoped to `(conversation_id ?? session_id, agent_id)` so
  *     a Claude subagent's chain (conversation_id null, scopes by
  *     session) and a Codex thread (scopes by its own conversation_id)
- *     stay separate from the main loop's — so enriched and fallback
+ *     stay separate from the main loop's, so enriched and fallback
  *     rows stay query-compatible. The full
  *     ancestry is the transitive closure of these links (storing it per
  *     row was quadratic).
@@ -124,9 +124,9 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *     `attributes.gateway.*` provenance, and strips to schema columns.
  *
  * If no projector matches or every match fails, the dispatcher
- * returns an empty row array — the source still emits pass-through
+ * returns an empty row array (the source still emits pass-through
  * telemetry (`aigw.exchange` log + `aigw.exchange_bytes` meter), it
- * just does not write any rows.
+ * just does not write any rows).
  *
  * @param {{
  *   gatewayId: string,
@@ -174,7 +174,7 @@ export function createAiGatewayMessageProjector(opts) {
         return []
       }
 
-      // @ref LLP 0030#decision — seed by session_id (the partition key,
+      // @ref LLP 0030#decision: seed by session_id (the partition key,
       // always present). Claude `conversation_id` is null, so seeding on it
       // would never dedup a replayed Claude session.
       await seedSeenMessagesForSession(
@@ -195,7 +195,7 @@ export function createAiGatewayMessageProjector(opts) {
   }
 }
 
-// @ref LLP 0026#consequences [implements] — closes the "durable live dedup
+// @ref LLP 0026#consequences [implements]: closes the "durable live dedup
 // across daemon restarts (seed the seen-set from committed part_ids)" gap:
 // the in-memory seen-set is rebuilt empty on every restart/reload, so a
 // replay of already-committed history would re-emit same-part_id rows.
@@ -203,10 +203,10 @@ export function createAiGatewayMessageProjector(opts) {
  * Lazily pre-populate `state.seenMessages` with the `message_id`s already
  * committed for one session, the FIRST time that session is projected in
  * this listener's lifetime. Seeds one session at a time (a large cache
- * holds millions of part_ids — a global preload is a memory and scan
+ * holds millions of part_ids (a global preload is a memory and scan
  * problem), and only once per session per listener.
  *
- * Scopes on `session_id` — the partition key (LLP 0030), always present.
+ * Scopes on `session_id`: the partition key (LLP 0030), always present.
  * Claude `conversation_id` is null, so a conversation-scoped seed would
  * never dedup a replayed Claude session; the session partition holds all
  * of a session's committed rows across its threads.
@@ -243,9 +243,9 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
  *
  * Best-effort throughout: a missing storage handle (unit-test stubs), a
  * missing table, or an unreadable partition degrades to "not seeded" and
- * NEVER throws — a seeding miss only risks the duplicate this guards
+ * NEVER throws (a seeding miss only risks the duplicate this guards
  * against (which settlement/compaction can still collapse), whereas
- * throwing would drop a real row. The promise still resolves on a
+ * throwing would drop a real row). The promise still resolves on a
  * partial/failed scan, so it is cached and not retried on every exchange.
  *
  * @param {string} sessionId
@@ -273,8 +273,8 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
     // The dataset is Iceberg-partitioned by `session_id` (LLP 0030), so a
-    // partition naming a different session cannot hold this one's rows —
-    // skip it without a read. The row-level `session_id` filter below is
+    // partition naming a different session cannot hold this one's rows (so
+    // skip it without a read). The row-level `session_id` filter below is
     // the correctness backstop for source-partitioned or legacy partitions
     // that don't carry the key in their path.
     const partitionSession = part.partition?.session_id
@@ -334,7 +334,7 @@ export function createAiGatewayConversationState() {
  * session_id`: a subagent (agent_id set) gets its own chain, separate
  * from the main loop, while agent_id null reuses the plain thread key.
  * Claude has conversation_id null, so it scopes by session; Codex keeps
- * scoping by its thread (conversation_id) — both unchanged from before
+ * scoping by its thread (conversation_id), both unchanged from before
  * the split, since Claude's old conversation_id WAS the session id.
  *
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
@@ -577,12 +577,12 @@ function isValidProjection(value) {
  *   conversationMessageIds: string[],
  * }} ctx
  */
-// @ref LLP 0026#consequences [implements] — store only the immediate
+// @ref LLP 0026#consequences [implements]: store only the immediate
 // predecessor, not the full ancestry; full chain is reconstructable by
 // walking links, and the prior O(N) chain made the column quadratic.
 function resolveIdentity(ctx) {
   // `previous_message_id` carries the IMMEDIATE predecessor in this
-  // THREAD (a 0- or 1-element array) — scoped to (conversation_id,
+  // THREAD (a 0- or 1-element array), scoped to (conversation_id,
   // agent_id) by the caller's `conversationMessageIds`, whether
   // `message_id` was projector-supplied (transcript uuid) or
   // hash-synthesized here. The full ancestry is the transitive closure
@@ -637,7 +637,7 @@ function expandMessageParts(ctx) {
   const finishReason = mapFinishReason(stringValue(ctx.message.stop_reason))
   const messageCreatedAt = stringValue(ctx.message.message_created_at) ?? ctx.tsStart
   const messageAttributes = ctx.message.attributes
-  // @ref LLP 0035#one-carrier [implements] — response-level `usage` is
+  // @ref LLP 0035#one-carrier [implements]: response-level `usage` is
   // per-response, so a multi-block carrier message must not replicate it onto
   // every part. Strip `usage` from all but the last part; the last block (the
   // terminal output item, which also carries `stop_reason`/status) is the sole
@@ -655,13 +655,13 @@ function expandMessageParts(ctx) {
     conversation_id: ctx.conversationId,
     user_id: ctx.projection.user_id,
     provider: ctx.projection.provider,
-    // @ref LLP 0026#consequences [implements] — the message envelope (incl.
+    // @ref LLP 0026#consequences [implements]: the message envelope (incl.
     // model) mirrors the transcript: backfill records the per-line model on
     // assistant messages only, so the per-message value wins where present and
     // mixed-model sessions stay accurate. When a message has no model the row
-    // falls back to the exchange model — which for live capture is the one
+    // falls back to the exchange model (which for live capture is the one
     // model per exchange (landing on user rows too), and for backfill is unset
-    // (backfilled user/tool_result rows carry no model, by design).
+    // (backfilled user/tool_result rows carry no model, by design)).
     model: stringValue(ctx.message.model) ?? ctx.projection.model,
     system_text: ctx.projection.system_text,
     tools: ctx.projection.tools,
@@ -670,7 +670,7 @@ function expandMessageParts(ctx) {
     client_name: stringValue(ctx.projection.client_name),
     cwd: ctx.projection.cwd,
     git_branch: ctx.projection.git_branch,
-    // @ref LLP 0032#capture — repo identity for the graph bridge, exchange-level
+    // @ref LLP 0032#capture: repo identity for the graph bridge, exchange-level
     // like cwd/git_branch (captured by the Claude hook / Codex turn metadata).
     git_remote: ctx.projection.git_remote,
     head_sha: ctx.projection.head_sha,
@@ -750,9 +750,9 @@ function expandMessageParts(ctx) {
  * before hashing: clients move the `cache_control` prompt-cache
  * breakpoint between exchanges, so hashing it would give the same
  * logical message a new id on every replay where the breakpoint
- * shifted — each one a duplicate row the seen-set cannot catch.
+ * shifted (each one a duplicate row the seen-set cannot catch).
  *
- * // @ref LLP 0030#decision — the thread scope is `conversation_id ??
+ * // @ref LLP 0030#decision: the thread scope is `conversation_id ??
  * // session_id`: for Claude (conversation_id null) that is the session
  * // id, the same value the pre-split conversation_id held, so Claude
  * // fallback ids are unchanged; for Codex it is the thread. agent_id
@@ -779,7 +779,7 @@ export function computeMessageId(threadScope, role, content, agentId) {
  * `cache_control` is a wire-only prompt-cache breakpoint that moves
  * between exchanges. `caller` is a tool_use annotation that rides the
  * assistant *response* stream and the transcript but is dropped from
- * the *request-input* echo of the same turn — so the one logical
+ * the *request-input* echo of the same turn, so the one logical
  * tool_use hashes with-or-without `caller` depending on which
  * representation reaches this fallback. This MUST strip the same set
  * the claude plugin's `contentKey` strips, so the fallback id and the
@@ -789,8 +789,8 @@ export function computeMessageId(threadScope, role, content, agentId) {
  * canonicalizer would be the first static link across that boundary and
  * isn't worth it.
  *
- * Reached only for an *unmatched* assistant tool_use — a matched one
- * carries its native uuid and skips this fallback — so the split is
+ * Reached only for an *unmatched* assistant tool_use (a matched one
+ * carries its native uuid and skips this fallback), so the split is
  * rare, but stripping `caller` keeps the two representations from
  * landing as duplicate fallback rows when it does happen.
  *
@@ -934,8 +934,8 @@ function buildStatus(block, isLastPart, role, finishReason) {
  * Stamp `attributes.client.{name,version}` on every emitted row when
  * the projector supplied client identity. The 1.x gateway carried a
  * special-case for Anthropic's `claude_version` field; that wart is
- * gone — adapters now choose what `client.name` is and the gateway
- * just propagates it.
+ * gone (adapters now choose what `client.name` is and the gateway
+ * just propagates it).
  *
  * @param {Record<string, unknown> | undefined} attributes
  * @param {string | undefined} clientVersion
@@ -980,7 +980,7 @@ function buildGatewayAttributes(exchange) {
  * unchanged when there's no `usage`, and `undefined` when `usage` was
  * the only key (so non-carrier parts fall back to client attributes).
  *
- * @ref LLP 0035#one-carrier — usage is per-response; only the last part carries it.
+ * @ref LLP 0035#one-carrier: usage is per-response; only the last part carries it.
  * @param {Record<string, unknown> | undefined} attributes
  * @returns {Record<string, unknown> | undefined}
  */

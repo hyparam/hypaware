@@ -138,15 +138,15 @@ export async function discoverExportDatasets(blobStore, prefix) {
  * 0.8.10 preserves v3 row lineage across the rewrite, which matters
  * because export tables are created with `formatVersion: 3`).
  *
- * @ref LLP 0022#compaction — this is the *out-of-band* rewrite the spec
+ * @ref LLP 0022#compaction - this is the *out-of-band* rewrite the spec
  * reserves: it must only run from an explicit, manual invocation
  * (`hyp sink maintain --compact`), never from the daemon loop or the
  * sink tick, because a full read-rewrite in the daemon process is the
  * OOM/blocking failure mode already seen with the parquet encoder.
  *
  * The rewrite is skipped while the table's live data-file count is below
- * `compactFileCount` — for a day-partitioned archive the files are
- * already large, so most tables never reach the threshold — and when the
+ * `compactFileCount` - for a day-partitioned archive the files are
+ * already large, so most tables never reach the threshold - and when the
  * current snapshot's `total-files-size` exceeds `compactMaxBytes`
  * (icebird's rewrite holds every live row in memory; see DEFAULTS).
  *
@@ -156,7 +156,7 @@ export async function discoverExportDatasets(blobStore, prefix) {
  * latest metadata is re-loaded BEFORE any cleanup: a timeout after the
  * conditional PUT durably landed, or an SDK-internal retry of its own
  * successful write surfacing 412, both leave the staged rewrite as the
- * table's current snapshot — deleting its data files then would corrupt
+ * table's current snapshot. Deleting its data files then would corrupt
  * the export. Only when the reload confirms the staged snapshot did not
  * land is a conflict's staged output deleted best-effort (icebird's
  * `icebergRewrite` leaves it orphaned, which is why this stages and
@@ -165,7 +165,7 @@ export async function discoverExportDatasets(blobStore, prefix) {
  *
  * Every non-compaction outcome is discriminated by `reason` so the CLI
  * can tell an idle table from a failed rewrite (a swallowed failure here
- * would misreport as "below threshold" — the one manual compaction tool
+ * would misreport as "below threshold" - the one manual compaction tool
  * misdiagnosing itself). A metadata *load* failure is only reported as
  * `no-table` when the table verifiably does not exist; auth/IO failures
  * surface as `error` so the CLI exits nonzero instead of printing an
@@ -271,14 +271,14 @@ async function compactExportTableInner({ tableUrl, resolver, lister, compactFile
   //
   // The stage phase itself writes data files, a manifest, and a
   // manifest list one by one, and icebird only reports `writtenFiles`
-  // on a StagedUpdate that completed — so a failure after the first
+  // on a StagedUpdate that completed. A failure after the first
   // write would leak everything written before it. Track every path
   // whose write finished through a wrapped resolver and reclaim them
   // when staging dies mid-flight.
   /** @type {string[]} */
   const stagedPaths = []
   // `Resolver.writer` is optional; a resolver without one can't stage
-  // anything, so there's nothing to track — let icebergStageRewrite
+  // anything, so there's nothing to track. Let icebergStageRewrite
   // surface its own failure through the catch below.
   const baseWriter = resolver.writer
   /** @type {Resolver} */
@@ -349,7 +349,7 @@ async function compactExportTableInner({ tableUrl, resolver, lister, compactFile
     // A 412 means the conditional write was rejected, so once the reload
     // confirms the staged snapshot is absent the staged files are safe
     // to reclaim. Any other shape (network error, reload failure) could
-    // still be an in-flight commit — leave the bounded orphans rather
+    // still be an in-flight commit: leave the bounded orphans rather
     // than risk deleting data files a landed commit references.
     if (outcome === 'lost' && isCommitConflict(err)) {
       span.setAttribute('staged_files_reclaimed', staged.writtenFiles.length)
@@ -366,7 +366,7 @@ async function compactExportTableInner({ tableUrl, resolver, lister, compactFile
       compacted: false,
       reason: 'error',
       error:
-        `${describeError(err)}; commit outcome unverified — ` +
+        `${describeError(err)}; commit outcome unverified - ` +
         `${staged.writtenFiles.length} staged rewrite file(s) left under the table ` +
         '(deleting them could corrupt the table if the commit actually landed)',
       dataFilesBefore,
@@ -464,10 +464,10 @@ function describeError(err) {
 
 /**
  * Run export maintenance on all datasets under a prefix: snapshot
- * expiration per dataset, plus — only when `compact` is set — the
+ * expiration per dataset, plus (only when `compact` is set) the
  * out-of-band data-file rewrite ({@link compactExportTable}).
  *
- * @ref LLP 0022#compaction — `compact` defaults to false; the daemon
+ * @ref LLP 0022#compaction: `compact` defaults to false; the daemon
  * and the sink tick never set it. Only the manual CLI path
  * (`hyp sink maintain --compact`) opts in.
  *

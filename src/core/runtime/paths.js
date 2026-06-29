@@ -15,9 +15,9 @@ import path from 'node:path'
  *
  * Per LLP 0004#state-directories:
  * - `rootDir`  the plugin's installed directory (where the manifest lives).
- * - `stateDir` `<state>/plugins/<name>` — durable per-plugin state.
- * - `cacheDir` `<state>/cache/plugins/<name>` — derivable per-plugin cache.
- * - `tempDir`  `<os-tmp>/<name>-<run-id>` — ephemeral per-boot scratch.
+ * - `stateDir` `<state>/plugins/<name>` (durable per-plugin state).
+ * - `cacheDir` `<state>/cache/plugins/<name>` (derivable per-plugin cache).
+ * - `tempDir`  `<os-tmp>/<name>-<run-id>` (ephemeral per-boot scratch).
  *
  * Plugin names may contain a scope (`@hypaware/dummy-a`). The kernel
  * preserves the literal name in state/cache layouts (matching the npm
@@ -38,7 +38,7 @@ import path from 'node:path'
  * @param {string}     args.runId       Kernel boot identifier (DEV_RUN_ID or similar).
  * @param {string}     [args.tmpRoot]   Override the OS temp root (tests).
  * @returns {Promise<PluginPaths>}
- * @ref LLP 0004#state-directories [implements] — kernel-owned scoped per-plugin dirs; plugins never reach into each other's
+ * @ref LLP 0004#state-directories [implements]: kernel-owned scoped per-plugin dirs; plugins never reach into each other's
  */
 export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId, tmpRoot }) {
   if (!pluginName) throw new Error('createPluginPaths: pluginName is required')

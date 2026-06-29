@@ -14,8 +14,8 @@ import { loadManifest } from '../manifest.js'
 /**
  * Walk the kernel state's `plugin-lock.json` and load the manifest from
  * every lock entry's `install_dir`. Mirrors `discoverBundledPlugins`
- * but skips the V1 allowlist — anything that landed in the lock is
- * user-installed and was reviewed at install time.
+ * but skips the V1 allowlist (anything that landed in the lock is
+ * user-installed and was reviewed at install time).
  *
  * Missing lock file → empty result. Per-entry manifest failures are
  * surfaced via `failed[]` (mirroring `loadManifests`) and additionally
@@ -50,7 +50,7 @@ export async function discoverInstalledPlugins({ stateDir }) {
   for (const { entry, result } of results) {
     if (result.ok) {
       if (result.manifest.name !== entry.name) {
-        // Lock entry name and manifest name disagree — boot cannot
+        // Lock entry name and manifest name disagree. Boot cannot
         // trust this entry. Surface it as failed so the caller can
         // decide; we log explicitly because the bare manifest.reject
         // log does not carry the lock-entry context.

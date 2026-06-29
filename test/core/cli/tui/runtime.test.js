@@ -39,7 +39,7 @@ function makeTty() {
   Object.defineProperty(stdin, 'isTTY', { value: true })
   Object.defineProperty(stdout, 'isTTY', { value: true })
   Object.defineProperty(stdin, 'isRaw', { value: false, writable: true })
-  // @ts-expect-error — PassThrough does not declare setRawMode but the runtime probes for it.
+  // @ts-expect-error: PassThrough does not declare setRawMode but the runtime probes for it.
   stdin.setRawMode = (enabled) => {
     /** @type {any} */ (stdin).isRaw = enabled
   }
@@ -332,7 +332,7 @@ test('runtime: redraw moves up by physical (wrapped) rows on a narrow terminal',
   Object.defineProperty(stdout, 'isTTY', { value: true })
   Object.defineProperty(stdout, 'columns', { value: 24 })
   Object.defineProperty(stdin, 'isRaw', { value: false, writable: true })
-  // @ts-expect-error — PassThrough has no setRawMode; the runtime probes for it.
+  // @ts-expect-error: PassThrough has no setRawMode; the runtime probes for it.
   stdin.setRawMode = (enabled) => { /** @type {any} */ (stdin).isRaw = enabled }
   /** @type {string[]} */
   const chunks = []
@@ -359,7 +359,7 @@ test('runtime: redraw moves up by physical (wrapped) rows on a narrow terminal',
   assert.ok(firstFrame, 'first frame not captured')
   assert.ok(redrawFrame, 'redraw frame not captured')
   // The redraw's cursor-up count must equal the wrapped row count of the
-  // first frame — otherwise stale rows are left on screen (duplication).
+  // first frame, otherwise stale rows are left on screen (duplication).
   assert.equal(cursorUpCount(redrawFrame), countPhysicalRows(firstFrame, 24))
   // And that count must exceed the naive newline count, proving wrapping
   // actually occurred in this fixture.

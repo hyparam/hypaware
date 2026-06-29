@@ -48,7 +48,7 @@ const PREFIX = 'hypaware'
  *     appears in any captured log, span, or metric attribute.
  *
  * The injection seam is `sinkCtx.config.__clientFactory`. Production
- * configs never carry this key — it lives outside the validated config
+ * configs never carry this key: it lives outside the validated config
  * shape so it cannot be set via JSON config files.
  *
  * @param {{ harness: any, expect: any }} args
@@ -56,10 +56,10 @@ const PREFIX = 'hypaware'
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
-    throw new Error('s3_sink_export_fixture: tracer provider not installed — expected HYP_DEV_TELEMETRY=1')
+    throw new Error('s3_sink_export_fixture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1')
   }
   if (!obs.meter.provider) {
-    throw new Error('s3_sink_export_fixture: meter provider not installed — expected HYP_DEV_TELEMETRY=1')
+    throw new Error('s3_sink_export_fixture: meter provider not installed - expected HYP_DEV_TELEMETRY=1')
   }
 
   const cacheRoot = path.join(harness.stateDir, 'cache')
@@ -89,7 +89,7 @@ export async function run({ harness, expect }) {
       const { loaded, failed } = await loadManifests([parquetDir, s3Dir, fixtureDir])
       if (failed.length > 0) {
         throw new Error(
-          `s3_sink_export_fixture: manifest failures — ${failed
+          `s3_sink_export_fixture: manifest failures - ${failed
             .map((f) => `${f.manifestPath}: ${f.message}`)
             .join('; ')}`
         )
@@ -130,7 +130,7 @@ export async function run({ harness, expect }) {
   // Build the fake S3 client. The factory records every PutObject input
   // so we can assert on bucket/key/body content downstream, and returns
   // a synthetic `ETag` to mimic AWS SDK behavior. The factory itself
-  // is the injection seam — production never carries `__clientFactory`.
+  // is the injection seam. Production never carries `__clientFactory`.
   /** @type {Array<{ Bucket: string, Key: string, Body: Uint8Array, ContentType?: string, StorageClass?: string }>} */
   const recordedPuts = []
   const fakeClientFactory = async (opts) => {

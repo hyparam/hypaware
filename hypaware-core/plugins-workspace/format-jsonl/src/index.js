@@ -18,7 +18,7 @@ const COMPRESSION = 'GZIP'
 /**
  * Activate `@hypaware/format-jsonl`. Registers the `hypaware.encoder@1`
  * capability with a gzipped JSONL encoder. The encoder's `supports`
- * list is empty by design — pairing JSONL with `@hypaware/local-fs`
+ * list is empty by design: pairing JSONL with `@hypaware/local-fs`
  * resolves to a non-queryable sink (the design's "Parquet+local-fs is
  * queryable, JSONL+local-fs is not" rule). It is still useful as a
  * grep-friendly archive sink.

@@ -14,7 +14,7 @@ const PLUGIN_NAME = '@hypaware/completion-openai'
  * Build the `hypaware.completion` capability value: an HTTP client for
  * the OpenAI-compatible Chat Completions API (`POST /v1/chat/completions`).
  *
- * There is deliberately no retry layer — callers run on their own
+ * There is deliberately no retry layer: callers run on their own
  * cadence, so a failed request surfaces immediately. The API key resolves
  * from the environment at call time and is sent only as a Bearer header;
  * an unset key sends no Authorization header so localhost servers (Ollama,

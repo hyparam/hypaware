@@ -4,7 +4,7 @@
  * Module-local activation state, mirroring the `@hypaware/gascity`
  * pattern: `activate()` captures what command bodies and the refresh
  * source need (paths, validated config, the resolved embedder), and
- * they read it back here — `CommandRunContext` deliberately does not
+ * they read it back here. `CommandRunContext` deliberately does not
  * carry per-plugin paths.
  */
 
@@ -25,7 +25,7 @@ export function setVectorSearchRuntime(value) {
  */
 export function getVectorSearchRuntime() {
   if (!runtime) {
-    throw new Error('@hypaware/vector-search: runtime not initialized — plugin is not activated')
+    throw new Error('@hypaware/vector-search: runtime not initialized - plugin is not activated')
   }
   return runtime
 }

@@ -7,12 +7,12 @@ import { randomUUID } from 'node:crypto'
 /**
  * Per-host watermark state for the enrichment proposer, persisted as a single
  * sidecar JSON under the plugin's state dir (the same approach vector-search
- * uses for shard metadata). The watermark is a **per-session high-water mark** —
+ * uses for shard metadata). The watermark is a **per-session high-water mark**:
  * one (timestamp, row-unique id) tuple per session, "this session has been
- * enriched through here" — which replaces the original single global keyset
+ * enriched through here", which replaces the original single global keyset
  * cursor. Backfill seeds the marks, the ongoing batch advances them, and a
  * resumed session re-qualifies when its latest part moves past its mark. Curate
- * has no mark — its queue is "prospects with no resolution", computed by query.
+ * has no mark: its queue is "prospects with no resolution", computed by query.
  *
  * @ref LLP 0028#per-session-watermark [implements]
  *
@@ -34,7 +34,7 @@ export function readState(stateDir) {
       return { schema_version: SCHEMA_VERSION, session_marks: readMarks(parsed.session_marks), curate_job: readCurateJob(parsed.curate_job) }
     }
   } catch {
-    // Missing, malformed, or an older schema — start from the beginning. An
+    // Missing, malformed, or an older schema: start from the beginning. An
     // older sidecar carries no per-session marks or job, so it is discarded
     // rather than migrated (a fresh ongoing run re-settles every session).
   }
@@ -60,7 +60,7 @@ function readCurateJob(value) {
     }
   }
   // A job persisted before `source` existed (or with a junk value) is read as
-  // `daemon` — the original owner, so legacy in-flight jobs keep being collected
+  // `daemon`: the original owner, so legacy in-flight jobs keep being collected
   // by the daemon and a backfill correctly refuses to clobber them.
   const source = j.source === 'backfill' ? 'backfill' : 'daemon'
   return { id: j.id, submitted_at: typeof j.submitted_at === 'string' ? j.submitted_at : '', source, clusters }
@@ -119,7 +119,7 @@ export function writeState(stateDir, state) {
  * owns a disjoint field (propose advances `session_marks`, curate owns
  * `curate_job`). Both have long `await` windows (frontier-model calls, batch
  * submit/poll); a writer that captured a snapshot *before* its await and wrote it
- * *after* would clobber the field the other source advanced in between — a lost
+ * *after* would clobber the field the other source advanced in between: a lost
  * update that orphans a submitted batch (results never collected) and lets the
  * next tick double-submit. Every mutation of the sidecar therefore goes through
  * here, merging into the latest on-disk state.

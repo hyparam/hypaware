@@ -32,13 +32,13 @@ import { loadManifests } from '../../../src/core/manifest.js'
  * - traces: at least one `cache.append` for `hyp_dataset=logs`
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0012#source-kinds [tests] — OTLP receiver source ingests a signal and writes cache rows
+ * @ref LLP 0012#source-kinds [tests] - OTLP receiver source ingests a signal and writes cache rows
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'otel_listener_writes_rows: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'otel_listener_writes_rows: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -257,7 +257,7 @@ export async function run({ harness, expect }) {
  * in the log record's `attributes`. The harness pipes the run id
  * through so the smoke can `select count(*) ... where dev_run_id=...`
  * without colliding with rows from a previous smoke that shared the
- * same on-disk cache (we don't — but the assertion is still strict).
+ * same on-disk cache (we don't, but the assertion is still strict).
  *
  * @param {string} devRunId
  */

@@ -24,7 +24,7 @@ import { setGascityRuntime } from './runtime.js'
  *  - init preset `gascity`
  *  - skill `hypaware-gascity`
  *
- * Activation does NOT start the source — `gascity attach` is the
+ * Activation does NOT start the source: `gascity attach` is the
  * lifecycle trigger, mirroring the donor's "configure first, attach
  * on demand" UX. The source starts on the first attach and reloads
  * on every subsequent attach/detach.

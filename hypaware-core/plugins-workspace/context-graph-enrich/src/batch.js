@@ -22,9 +22,9 @@ import { readState, updateState } from './state.js'
  * calls go through the Anthropic **Batch API** (50% off, async). Two drivers
  * share one cluster-building + routing core (from curate.js):
  *
- * - **backfill** (`hyp enrich backfill`) — {@link runCurateBatch} submits the
+ * - **backfill** (`hyp enrich backfill`) - {@link runCurateBatch} submits the
  *   whole eligible pool and **polls to completion in one run** (out of daemon).
- * - **ongoing** (daemon source) — {@link submitCurateJob} submits on one tick
+ * - **ongoing** (daemon source) - {@link submitCurateJob} submits on one tick
  *   and {@link collectCurateJob} collects on a later tick, carrying the job in
  *   the sidecar, so the frontier work never blocks a daemon tick.
  *
@@ -40,7 +40,7 @@ import { readState, updateState } from './state.js'
 /**
  * Run a complete curate batch end-to-end: cluster the whole pending pool,
  * submit, poll to completion, collect, route, append. Blocks until the job
- * finishes (≤24h) — the deliberate backfill-command path. Falls back to a
+ * finishes (≤24h): the deliberate backfill-command path. Falls back to a
  * synchronous tick when the provider has no batch API.
  *
  * @param {EnrichRuntime} runtime
@@ -51,7 +51,7 @@ export async function runCurateBatch(runtime, opts = {}) {
   const completion = getCompletion(runtime)
   const batch = completion.batch
   // Dry run: build the scoped pool + clusters and report, submitting and writing
-  // nothing — so `--since` scoping and the resulting curator-call count can be
+  // nothing, so `--since` scoping and the resulting curator-call count can be
   // confirmed before the (paid) Batch submit. Independent of the batch API.
   if (opts.dryRun) {
     const pending = await selectPending(runtime, { anchorKeys: opts.anchorKeys })
@@ -64,16 +64,16 @@ export async function runCurateBatch(runtime, opts = {}) {
     return { ...sync, batched: false }
   }
   // Crash recovery: if *our own* (backfill) batch job is already persisted
-  // (submitted but not yet collected), resume it — poll to completion and collect
-  // from the persisted cluster→prospect map — rather than submitting a new
+  // (submitted but not yet collected), resume it: poll to completion and collect
+  // from the persisted cluster→prospect map, rather than submitting a new
   // (re-billed) batch. A daemon-owned job belongs to the ongoing regime's
   // submit-and-collect; this one shared slot can't hold two jobs, so overwriting
   // it would orphan the daemon's already-billed batch. Refuse instead of clobber.
-  // @ref LLP 0028#two-regimes [constrained-by] — shared curate_job slot ownership
+  // @ref LLP 0028#two-regimes [constrained-by] - shared curate_job slot ownership
   const inflight = readState(runtime.stateDir).curate_job
   if (inflight) {
     if (inflight.source !== 'backfill') {
-      throw new Error(`a daemon curate batch job is in flight (id ${inflight.id}); refusing to run backfill curate concurrently — disable the daemon curate source (or wait for it to collect) and retry`)
+      throw new Error(`a daemon curate batch job is in flight (id ${inflight.id}); refusing to run backfill curate concurrently - disable the daemon curate source (or wait for it to collect) and retry`)
     }
     // Recompute the scoped pending count so the caller's `N/M processed` line is
     // truthful on the resume path (the pool is still unresolved pre-collect),
@@ -122,7 +122,7 @@ export async function runCurateBatch(runtime, opts = {}) {
 
       await appendCommitted(runtime, committedRows)
       await appendResolutions(runtime, resolutionRows)
-      // Results are committed — clear the persisted recovery job.
+      // Results are committed, clear the persisted recovery job.
       updateState(runtime.stateDir, (cur) => ({ ...cur, curate_job: null }))
 
       span.setAttribute('pending', pending.length)
@@ -137,7 +137,7 @@ export async function runCurateBatch(runtime, opts = {}) {
 }
 
 /**
- * Submit a curate batch for the ongoing regime and record it in the sidecar —
+ * Submit a curate batch for the ongoing regime and record it in the sidecar:
  * **does not block** waiting for results ({@link collectCurateJob} picks them up
  * on a later tick). Below-salience prospects get their terminal `skip`
  * resolutions now (batch-independent). No-op when a job is already in flight;
@@ -193,7 +193,7 @@ export async function submitCurateJob(runtime, opts = {}) {
  *
  * Collects only the caller's own job: `owner` (default `daemon`) must match the
  * persisted job's `source`. A foreign job (e.g. a backfill job a daemon tick
- * sees, or vice-versa) is left untouched — `phase: 'foreign'` — so the two
+ * sees, or vice-versa) is left untouched: `phase: 'foreign'`, so the two
  * drivers never collect/clear each other's batch.
  *
  * @param {EnrichRuntime} runtime
@@ -273,7 +273,7 @@ async function buildClusterRequests(runtime, clusters, recallByProspect) {
 
 /**
  * Poll a batch job until `status === 'ended'`, sleeping `intervalMs` between
- * polls (default 10s; `maxWaitMs` caps the total wait, default 24h — the Batch
+ * polls (default 10s; `maxWaitMs` caps the total wait, default 24h: the Batch
  * API's own ceiling).
  *
  * @param {CompletionBatch} batch
@@ -299,8 +299,8 @@ export async function pollUntilEnded(batch, id, opts = {}) {
 /**
  * A cancellable inter-poll wait. The timer is deliberately **not** `unref`'d:
  * unlike the daemon source intervals (which unref so they never block shutdown),
- * this delay is *awaited* inside {@link pollUntilEnded}'s run-to-completion loop —
- * the only thing the `hyp enrich backfill` command is doing while it waits — so
+ * this delay is *awaited* inside {@link pollUntilEnded}'s run-to-completion loop,
+ * the only thing the `hyp enrich backfill` command is doing while it waits, so
  * it must keep the event loop alive. An unref'd timer here would let the process
  * exit mid-poll (abandoning the batch) and leaves an awaited promise pending when
  * the loop drains, which the node:test runner reports as a failure ("Promise
@@ -322,7 +322,7 @@ function delay(ms, signal) {
 /**
  * Daemon source for the **ongoing** curate regime: a coarse-interval
  * submit-and-collect timer. Each tick either collects an in-flight job (and
- * waits if it is still running) or submits a fresh one — so the frontier
+ * waits if it is still running) or submits a fresh one, so the frontier
  * curator work never blocks a tick. @ref LLP 0028#two-regimes
  *
  * @returns {Promise<StartedSource>}

@@ -39,7 +39,7 @@ function validateCachePartitioning(decl, schema, datasetName) {
  * activation context and as `kernel.query` for the dispatcher.
  *
  * @returns {QueryRegistry}
- * @ref LLP 0015#query-is-intrinsic [implements] — core hard-codes no dataset names; plugins register every one
+ * @ref LLP 0015#query-is-intrinsic [implements]: core hard-codes no dataset names; plugins register every one
  */
 export function createQueryRegistry() {
   /** @type {Map<string, DatasetRegistration>} */
