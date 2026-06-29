@@ -8,7 +8,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 
 import { runMcpProxy } from '../../src/core/mcp/proxy.js'
-import { writeSession, readCredentials } from '../../src/core/remote/credentials.js'
+import { writeSession, readCredentials, remoteCredentialsPath } from '../../src/core/remote/credentials.js'
 
 const MCP_URL = 'https://hyp.internal/mcp'
 const TOKEN_URL = 'https://hyp.internal/v1/identity/token'
@@ -114,6 +114,34 @@ test('a stale JWT at startup refreshes once (lazily on the first message), not t
   assert.equal(code, 0)
   assert.equal(refreshCalls, 1)
   assert.match(out.join(''), /"ok":\s*true/)
+})
+
+test('proxy surfaces a failed forced refresh instead of a bare HTTP 401', async (t) => {
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+
+  const hypHome = await tmpHome()
+  const stateDir = path.join(hypHome, 'hypaware')
+  // Fresh JWT (probe + first resolve succeed), but the MCP side rejects it and,
+  // as a side effect, the stored record vanishes (e.g. a concurrent logout), so
+  // the forced refresh returns ok:false rather than throwing.
+  await writeSession(stateDir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-fresh', expiresAt: FUTURE, org: 'acme' })
+
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url, /** @type {any} */ init) => {
+    if (url === MCP_URL) {
+      await fs.rm(remoteCredentialsPath(stateDir), { force: true })
+      const body = JSON.parse(init.body)
+      return reply({ jsonrpc: '2.0', id: body.id }, 401)
+    }
+    return reply({}, 500)
+  })
+
+  const { ctx, out } = makeCtx({ hypHome, lines: [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x' } }] })
+  const code = await runMcpProxy({ target: 'prod', ctx })
+  assert.equal(code, 0)
+  // The refresh failure reason rides back, not a generic "remote returned HTTP 401".
+  assert.match(out.join(''), /no token for 'prod'/)
+  assert.doesNotMatch(out.join(''), /remote returned HTTP 401/)
 })
 
 test('proxy surfaces re-login guidance when the refresh is rejected (invalid_grant)', async (t) => {

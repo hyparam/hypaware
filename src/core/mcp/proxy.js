@@ -121,6 +121,12 @@ export async function runMcpProxy({ target, ctx }) {
           } catch (err) {
             return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
           }
+        } else {
+          // The forced refresh could not produce a token (e.g. no identity
+          // endpoint). Surface that reason rather than letting the stale 401
+          // fall through to a generic "remote returned HTTP 401" with no
+          // guidance, mirroring the one-shot verb path.
+          return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, refreshed.error)
         }
       }
 
