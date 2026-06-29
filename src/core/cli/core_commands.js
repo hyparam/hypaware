@@ -417,10 +417,8 @@ function buildCoreCommands() {
 async function runStatus(argv, ctx) {
   const json = argv.includes('--json')
 
-  /** @type {ExtendedSourceRegistry} */
-  const sources = /** @type {any} */ (ctx.sources)
-  /** @type {ExtendedSinkRegistry} */
-  const sinks = /** @type {any} */ (ctx.sinks)
+  const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
+  const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
 
   const runtimeClientNames = listClientNames(ctx.capabilities)
 
@@ -2377,7 +2375,7 @@ async function runSinkForce(argv, ctx) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const { createSinkDriver } = await import('../sinks/driver.js')
   const driver = createSinkDriver({
-    sinkRegistry: /** @type {any} */ (ctx.sinks),
+    sinkRegistry: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
     queryRegistry: ctx.query,
     storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
     stateRoot: obsEnv.stateDir,
@@ -2444,9 +2442,8 @@ async function runSinkMaintain(argv, ctx) {
   const maintenanceModule = '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
   const { maintainExportTables } = await import(maintenanceModule)
 
-  const allHandles = /** @type {any} */ (ctx.sinks).listHandles?.() ?? []
+  const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
   const tableFormatHandles = allHandles.filter(
-    /** @param {any} h */
     (h) => h.kind === 'table-format' && h.tableFormat === 'iceberg' && h.blobStore
   )
 
@@ -2614,8 +2611,8 @@ async function runConfiguredEntry(ctx) {
   const report = await collectHypAwareStatus({
     env: ctx.env,
     runtime: {
-      sources: /** @type {any} */ (ctx.sources),
-      sinks: /** @type {any} */ (ctx.sinks),
+      sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
+      sinks: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
       capabilities: ctx.capabilities,
       query: ctx.query,
       storage: ctx.storage,
@@ -3069,7 +3066,7 @@ async function runPickerInit(flags, ctx) {
 
   const result = await runPickerWalkthrough({
     capabilities: ctx.capabilities,
-    sources: /** @type {any} */ (ctx.sources),
+    sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
     skills: /** @type {any} */ (ctx.skills),
     agents: /** @type {any} */ (ctx.agents),
     stdout: ctx.stdout,

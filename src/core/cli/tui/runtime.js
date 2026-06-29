@@ -8,6 +8,7 @@ import { render } from './render.js'
 
 /**
  * @import { State, Key, RunOpts } from '../../../../src/core/cli/tui/types.js'
+ * @import { Key as ReadlineKey } from 'node:readline'
  */
 
 const CURSOR_HIDE  = '\x1b[?25l'
@@ -35,14 +36,13 @@ export async function run(initialState, io) {
 
   const color = env.NO_COLOR ? false : true
   const clearOnResolve = io.clearOnResolve === true
-  /** @type {NodeJS.ReadStream} */
-  const stdin = /** @type {any} */ (io.stdin)
-  const stdout = io.stdout
+  const stdin = /** @type {NodeJS.ReadStream} */ (io.stdin)
+  const stdout = /** @type {NodeJS.WriteStream} */ (io.stdout)
 
   /** @type {State} */
   let state = initialState
   let previousLineCount = 0
-  /** @type {((s: any, k: any) => void) | null} */
+  /** @type {((s: string | undefined, k: ReadlineKey) => void) | null} */
   let onKeypress = null
   let cleanedUp = false
 
@@ -135,20 +135,21 @@ function ensureTty(stdin, stdout, env) {
   if (env.HYP_NO_TUI === '1') {
     throw new Error('TUI prompt requires a TTY; got non-TTY stdin/stdout')
   }
-  const inTty  = stdin  && /** @type {any} */ (stdin).isTTY  === true
-  const outTty = stdout && /** @type {any} */ (stdout).isTTY === true
+  const inTty  = stdin  && /** @type {NodeJS.ReadStream} */ (stdin).isTTY  === true
+  const outTty = stdout && /** @type {NodeJS.WriteStream} */ (stdout).isTTY === true
   if (!inTty || !outTty) {
     throw new Error('TUI prompt requires a TTY; got non-TTY stdin/stdout')
   }
 }
 
 /**
- * @param {unknown} str
- * @param {unknown} key
+ * @param {string | undefined} str
+ * @param {ReadlineKey | undefined} key
  * @returns {Key}
  */
 function normalizeKey(str, key) {
-  const k = /** @type {any} */ (key) ?? {}
+  /** @type {ReadlineKey} */
+  const k = key ?? {}
   /** @type {Key} */
   const out = {
     ctrl:  !!k.ctrl,
@@ -165,11 +166,11 @@ function normalizeKey(str, key) {
  * Resolve the terminal width in columns, defaulting to 80 when the
  * stream does not expose a usable `.columns` (non-TTY mocks, pipes).
  *
- * @param {NodeJS.WritableStream} stdout
+ * @param {NodeJS.WriteStream} stdout
  * @returns {number}
  */
 function terminalColumns(stdout) {
-  const cols = /** @type {any} */ (stdout).columns
+  const cols = stdout.columns
   return typeof cols === 'number' && cols > 0 ? cols : 80
 }
 
