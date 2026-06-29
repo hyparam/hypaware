@@ -104,6 +104,14 @@ surfaces the existing "re-run `hyp remote login`" guidance, now meaning re-run t
 browser flow. Rejected refreshing eagerly on every call (needless token-endpoint
 traffic). The per-target env override (`HYP_REMOTE_TOKEN_<TARGET>`) still wins for CI.
 
+Because the `0600` store is shared by concurrent `hyp` processes (a second MCP client,
+or a verb call beside a running proxy), an `invalid_grant` is not unconditionally
+terminal: with one-time-use refresh tokens, the loser of a refresh race sees
+`invalid_grant` only because the winner already rotated the row. The resolver re-reads
+the store once on `invalid_grant`; if the stored refresh token changed, it adopts the
+winner's freshly-minted session instead of forcing a re-login. An unchanged token is a
+genuine revocation and still surfaces the re-login guidance.
+
 ### D6: Identity endpoints derive from the configured remote URL origin
 
 <a id="d6"></a> 

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
-import { refreshSession } from './identity_client.js'
+import { InvalidGrantError, refreshSession } from './identity_client.js'
 
 /**
  * @import { Stats } from 'node:fs'
@@ -296,7 +296,7 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   }
 
   const creds = await readCredentials(stateDir)
-  const entry = creds[target]
+  let entry = creds[target]
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
   }
@@ -312,7 +312,26 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
     if (!identityBase) {
       return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
     }
-    const refreshed = await refreshSession({ identityBase, refreshToken: entry.refreshToken, fetchImpl })
+    let refreshed
+    try {
+      refreshed = await refreshSession({ identityBase, refreshToken: entry.refreshToken, fetchImpl })
+    } catch (err) {
+      // Concurrent-rotation tolerance: another `hyp` process sharing this 0600
+      // store (a second MCP client, or a verb call alongside a proxy) may have
+      // refreshed first, consuming our refresh row so this refresh comes back
+      // `invalid_grant`. Re-read once: if the stored refresh token changed, that
+      // process already minted a fresh session - adopt it (its JWT if still
+      // fresh, else refresh with the rotated token) rather than forcing a
+      // needless re-login. An unchanged token is a real revocation; re-throw.
+      if (!(err instanceof InvalidGrantError)) throw err
+      const latest = (await readCredentials(stateDir))[target]
+      if (!latest || latest.kind !== 'oidc' || latest.refreshToken === entry.refreshToken) throw err
+      if (isFresh(latest, now)) {
+        return { ok: true, token: latest.accessJwt, source: 'file', kind: 'oidc' }
+      }
+      entry = latest
+      refreshed = await refreshSession({ identityBase, refreshToken: latest.refreshToken, fetchImpl })
+    }
     /** @type {RemoteOidcRecord} */
     // `org` is fixed for the refresh token's life; keep the stored one when the
     // refresh response omits it (refreshSession returns '' in that case). A

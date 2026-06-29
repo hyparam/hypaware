@@ -236,6 +236,45 @@ test('resolveAccessJwt errors with login guidance when no record exists', async 
   assert.match(/** @type {any} */ (r).error, /no token for 'prod' - run 'hyp remote login prod'/)
 })
 
+test('resolveAccessJwt adopts a concurrent process\'s fresh session on invalid_grant', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  let calls = 0
+  // A second `hyp` process refreshed first, rotating the row out from under us,
+  // and stored its fresh session. Our refresh comes back invalid_grant; we must
+  // adopt the winner's JWT rather than force a re-login.
+  const fetchImpl = /** @type {any} */ (async () => {
+    calls++
+    await writeSession(dir, 'prod', { refreshToken: 'rt-winner', accessJwt: 'jwt-winner', expiresAt: FUTURE, org: 'acme' })
+    return { ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_grant' }) }
+  })
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  assert.equal(/** @type {any} */ (r).token, 'jwt-winner')
+  assert.equal(calls, 1) // the fresh adopted JWT means no second refresh
+})
+
+test('resolveAccessJwt refreshes with a rotated token when the adopted session is also stale', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  let calls = 0
+  const fetchImpl = /** @type {any} */ (async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+    calls++
+    const sent = JSON.parse(opts.body).refresh_token
+    if (sent === 'rt-old') {
+      // Winner rotated to rt-new but its JWT is also already stale.
+      await writeSession(dir, 'prod', { refreshToken: 'rt-new', accessJwt: 'jwt-mid', expiresAt: PAST, org: 'acme' })
+      return { ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_grant' }) }
+    }
+    // Retry with the rotated token succeeds.
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-final', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-final' }) }
+  })
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  assert.equal(/** @type {any} */ (r).token, 'jwt-final')
+  assert.equal(calls, 2)
+  const creds = await readCredentials(dir)
+  assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt-final')
+})
+
 test('resolveAccessJwt propagates a refresh failure (invalid_grant)', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'stale', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
