@@ -70,20 +70,58 @@ test('unionSources does not forward limit/offset to sub-sources', async () => {
   }
 })
 
-test('unionSources preserves where/columns hints for sub-sources', async () => {
+/**
+ * A `col = value` predicate as a squirreling ExprNode.
+ *
+ * @param {string} col
+ * @param {unknown} value
+ */
+function eqWhere(col, value) {
+  return { type: 'binary', op: '=', left: { type: 'identifier', name: col }, right: { type: 'literal', value } }
+}
+
+test('unionSources forwards where/columns to sub-sources that have the predicate columns', async () => {
   /** @type {Record<string, unknown>[]} */
   const seen = []
   const union = unionSources([
     /** @type {any} */ (fakeSource([{ id: 'a1' }], seen)),
     /** @type {any} */ (fakeSource([{ id: 'b1' }], seen)),
   ])
-  const where = /** @type {any} */ ({ column: 'id', op: '=', value: 'a1' })
+  const where = /** @type {any} */ (eqWhere('id', 'a1'))
   const scan = union.scan(/** @type {any} */ ({ where, columns: ['id'], limit: 1 }))
   for await (const _ of scan.rows()) { /* drain */ }
   for (const options of seen) {
     assert.equal(options.where, where, 'where hint forwarded')
     assert.deepEqual(options.columns, ['id'], 'columns hint forwarded')
   }
+})
+
+test('unionSources drops where for a partition that lacks a predicate column but keeps it for one that has it', async () => {
+  /** @type {Record<string, unknown>[]} */
+  const seen = []
+  // Heterogeneous schemas: the first partition has `repo`, the second does not.
+  const union = unionSources([
+    /** @type {any} */ (fakeSource([{ id: 'a1', repo: 'x' }], seen)),
+    /** @type {any} */ (fakeSource([{ id: 'b1' }], seen)),
+  ])
+  const where = /** @type {any} */ (eqWhere('repo', 'x'))
+  const scan = union.scan(/** @type {any} */ ({ where }))
+  assert.equal(scan.appliedWhere, false, 'engine re-applies the filter over the merged stream')
+  for await (const _ of scan.rows()) { /* drain */ }
+
+  assert.equal(seen[0].where, where, 'where pushed to the partition that has `repo`')
+  assert.equal(seen[1].where, undefined, 'where dropped for the partition missing `repo` (a parquet source would otherwise throw)')
+})
+
+test('unionSources does not push a non-enumerable where (subquery) to any sub-source', async () => {
+  /** @type {Record<string, unknown>[]} */
+  const seen = []
+  const union = unionSources([/** @type {any} */ (fakeSource([{ id: 'a1' }], seen))])
+  // A subquery predicate whose column set can't be enumerated locally.
+  const where = /** @type {any} */ ({ type: 'exists', subquery: {} })
+  const scan = union.scan(/** @type {any} */ ({ where }))
+  for await (const _ of scan.rows()) { /* drain */ }
+  assert.equal(seen[0].where, undefined, 'unenumerable predicate is left for the engine')
 })
 
 test('unionSources tolerates a scan with no options', async () => {
