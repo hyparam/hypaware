@@ -68,7 +68,7 @@ test('drives PKCE -> loopback -> exchange and returns the session', async (t) =>
 test('--no-browser prints the URL instead of opening it', async () => {
   const fetchImpl = /** @type {any} */ (async () => ({
     ok: true, status: 200,
-    text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: 'x', org: 'acme' }),
+    text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: '2026-06-29T12:00:00Z', org: 'acme' }),
   }))
   const { startReceiver } = scriptedReceiver()
   /** @type {string[]} */

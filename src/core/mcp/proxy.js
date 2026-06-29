@@ -5,7 +5,7 @@ import process from 'node:process'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
-import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
+import { describeRefreshError, sessionExpiredMessage } from '../remote/identity_client.js'
 import { isAuthStatus, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
@@ -52,7 +52,7 @@ export async function runMcpProxy({ target, ctx }) {
       return 2
     }
   } catch (err) {
-    ctx.stderr.write(`hyp mcp: ${proxyAuthMessage(err, target)}\n`)
+    ctx.stderr.write(`hyp mcp: ${describeRefreshError(err, target).message}\n`)
     return 2
   }
   const fetchImpl = /** @type {typeof fetch | undefined} */ (globalThis.fetch)
@@ -92,7 +92,7 @@ export async function runMcpProxy({ target, ctx }) {
       try {
         resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
       } catch (err) {
-        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, proxyAuthMessage(err, target))
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, describeRefreshError(err, target).message)
       }
       if (!resolved.ok) {
         return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, resolved.error)
@@ -120,7 +120,7 @@ export async function runMcpProxy({ target, ctx }) {
           op,
         })
       } catch (err) {
-        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, proxyAuthMessage(err, target))
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, describeRefreshError(err, target).message)
       }
       if (!out.ok) {
         // The forced refresh could not produce a token (e.g. no identity
@@ -138,7 +138,12 @@ export async function runMcpProxy({ target, ctx }) {
       if (sid) sessionId = sid
       if (isNotify) return null
       if (!res.ok) {
-        return jsonRpcError(id, INTERNAL_ERROR, `remote returned HTTP ${res.status}`)
+        // A 401/403 that survives the refresh + retry above (server-side clock
+        // skew, or a JWT revoked independently of the refresh row) is a dead
+        // credential: give the same re-login guidance the verb path does rather
+        // than a bare status the caller can't act on.
+        const detail = isAuthStatus(res.status) ? sessionExpiredMessage(target) : `remote returned HTTP ${res.status}`
+        return jsonRpcError(id, INTERNAL_ERROR, detail)
       }
       try {
         return await parseRpcResponse(res, message?.id)
@@ -161,20 +166,4 @@ export async function runMcpProxy({ target, ctx }) {
   })
   log.info('mcp.proxy_stop', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.proxy' })
   return 0
-}
-
-/**
- * Message for a refresh failure: a typed `invalid_grant` (the refresh row was
- * revoked or expired) becomes re-login guidance (LLP 0046 D5); anything else
- * surfaces as a generic error.
- *
- * @param {unknown} err
- * @param {string} target
- * @returns {string}
- */
-function proxyAuthMessage(err, target) {
-  if (err instanceof InvalidGrantError) {
-    return sessionExpiredMessage(target)
-  }
-  return err instanceof Error ? err.message : String(err)
 }

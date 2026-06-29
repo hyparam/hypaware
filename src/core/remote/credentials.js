@@ -114,10 +114,16 @@ export async function readCredentials(stateDir) {
  * `{}` when the file is absent; throws on a corrupt file, same as
  * {@link readCredentials}.
  *
+ * The read path (it builds a fresh normalized map and never mutates the parsed
+ * object) takes the cached value directly; only a `mutable` caller that edits
+ * the map in place before writing it back gets a defensive clone, so the
+ * per-message proxy resolve doesn't deep-clone the whole store on every hit.
+ *
  * @param {string} stateDir
+ * @param {{ mutable?: boolean }} [opts]
  * @returns {Promise<Record<string, unknown>>}
  */
-async function readRawCredentials(stateDir) {
+async function readRawCredentials(stateDir, { mutable = false } = {}) {
   const p = remoteCredentialsPath(stateDir)
   /** @type {Stats} */
   let stat
@@ -127,10 +133,9 @@ async function readRawCredentials(stateDir) {
     if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return {}
     throw err
   }
-  // Cache hit: same file, unchanged since the last parse. Return a clone so a
-  // mutating caller (the write path) can't corrupt the cached value.
+  // Cache hit: same file, unchanged since the last parse.
   if (rawCache && rawCache.path === p && rawCache.mtimeMs === stat.mtimeMs && rawCache.size === stat.size) {
-    return structuredClone(rawCache.value)
+    return mutable ? structuredClone(rawCache.value) : rawCache.value
   }
   let raw
   try {
@@ -151,7 +156,7 @@ async function readRawCredentials(stateDir) {
   }
   const value = /** @type {Record<string, unknown>} */ (parsed)
   rawCache = { path: p, mtimeMs: stat.mtimeMs, size: stat.size, value }
-  return structuredClone(value)
+  return mutable ? structuredClone(value) : value
 }
 
 /**
@@ -196,7 +201,7 @@ function normalizeRecord(entry) {
  */
 export async function writeToken(stateDir, target, token) {
   await fs.mkdir(stateDir, { recursive: true })
-  const current = await readRawCredentials(stateDir)
+  const current = await readRawCredentials(stateDir, { mutable: true })
   current[target] = { kind: 'static', token }
   await writeCredentials(stateDir, current)
 }
@@ -213,7 +218,7 @@ export async function writeToken(stateDir, target, token) {
  */
 export async function writeSession(stateDir, target, session) {
   await fs.mkdir(stateDir, { recursive: true })
-  const current = await readRawCredentials(stateDir)
+  const current = await readRawCredentials(stateDir, { mutable: true })
   current[target] = {
     kind: 'oidc',
     refreshToken: session.refreshToken,
@@ -235,7 +240,7 @@ export async function writeSession(stateDir, target, session) {
 export async function removeToken(stateDir, target) {
   // Operate on the raw file so a record we can't normalize is still removable,
   // and so removing one target never drops an unrelated sibling.
-  const current = await readRawCredentials(stateDir)
+  const current = await readRawCredentials(stateDir, { mutable: true })
   if (!Object.prototype.hasOwnProperty.call(current, target)) return false
   delete current[target]
   await writeCredentials(stateDir, current)
@@ -324,6 +329,10 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
       // fresh, else refresh with the rotated token) rather than forcing a
       // needless re-login. An unchanged token is a real revocation; re-throw.
       if (!(err instanceof InvalidGrantError)) throw err
+      // Drop the parse cache before re-reading: we are reacting to a probable
+      // concurrent write, and a same-size rewrite landing within one mtime tick
+      // would otherwise be hidden behind the cache, making us miss the rotation.
+      rawCache = null
       const latest = (await readCredentials(stateDir))[target]
       if (!latest || latest.kind !== 'oidc' || latest.refreshToken === entry.refreshToken) throw err
       if (isFresh(latest, now)) {

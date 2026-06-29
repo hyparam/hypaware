@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { exchangeCode, refreshSession, InvalidGrantError, sessionExpiredMessage } from '../../src/core/remote/identity_client.js'
+import { exchangeCode, refreshSession, describeRefreshError, InvalidGrantError, sessionExpiredMessage } from '../../src/core/remote/identity_client.js'
 
 /**
  * A fetch stub that records the last request and returns `reply`.
@@ -103,4 +103,26 @@ test('a response missing access_jwt is rejected', async () => {
     () => refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt', fetchImpl }),
     /missing 'access_jwt'/,
   )
+})
+
+test('a non-date expires_at is rejected at refresh time, not stored to loop forever', async () => {
+  const { fetchImpl } = stubFetch({ body: { access_jwt: 'jwt', expires_at: '1719600000', org: 'acme' } })
+  await assert.rejects(
+    () => refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt', fetchImpl }),
+    /'expires_at' is not a valid timestamp/,
+  )
+})
+
+test('describeRefreshError maps invalid_grant to session-expired re-login guidance', () => {
+  assert.deepEqual(describeRefreshError(new InvalidGrantError(), 'prod'), {
+    sessionExpired: true,
+    message: "remote session expired - re-run 'hyp remote login prod'",
+  })
+})
+
+test('describeRefreshError passes a non-invalid_grant error through as a generic message', () => {
+  assert.deepEqual(describeRefreshError(new Error('identity endpoint rejected the grant (HTTP 500)'), 'prod'), {
+    sessionExpired: false,
+    message: 'identity endpoint rejected the grant (HTTP 500)',
+  })
 })

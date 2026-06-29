@@ -101,12 +101,12 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       fail(new Error('loopback received a callback with a mismatched state'), 'state_mismatch')
       return
     }
-    if (error) {
+    if (params.has('error')) {
       // The redirect's `error` is attacker-influenceable (anyone can hit the
       // loopback port). Bound it to a safe token before it reaches the error
       // message, the log ERROR_KIND, and the terminal, so a crafted value can't
       // inject newlines into logs or terminal output.
-      const safeError = sanitizeErrorCode(error)
+      const safeError = sanitizeErrorCode(error ?? '')
       respond(res, 'Login failed. You can close this tab and return to the terminal.')
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
       return

@@ -144,6 +144,30 @@ test('proxy surfaces a failed forced refresh instead of a bare HTTP 401', async 
   assert.doesNotMatch(out.join(''), /remote returned HTTP 401/)
 })
 
+test('proxy gives re-login guidance, not a bare 401, when a clean refresh is still rejected', async (t) => {
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+
+  const hypHome = await tmpHome()
+  const stateDir = path.join(hypHome, 'hypaware')
+  await writeSession(stateDir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: FUTURE, org: 'acme' })
+
+  // The refresh succeeds (mints a new JWT), but the MCP side rejects every JWT
+  // (e.g. server-side clock skew or a revocation independent of the refresh row).
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url, /** @type {any} */ init) => {
+    if (url === TOKEN_URL) return reply({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme' })
+    const body = JSON.parse(init.body)
+    return reply({ jsonrpc: '2.0', id: body.id }, 401)
+  })
+
+  const { ctx, out } = makeCtx({ hypHome, lines: [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x' } }] })
+  const code = await runMcpProxy({ target: 'prod', ctx })
+
+  assert.equal(code, 0)
+  assert.match(out.join(''), /re-run 'hyp remote login prod'/)
+  assert.doesNotMatch(out.join(''), /remote returned HTTP 401/)
+})
+
 test('proxy surfaces re-login guidance when the refresh is rejected (invalid_grant)', async (t) => {
   const original = globalThis.fetch
   t.after(() => { globalThis.fetch = original })

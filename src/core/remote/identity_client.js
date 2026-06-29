@@ -43,6 +43,25 @@ export function sessionExpiredMessage(target) {
 }
 
 /**
+ * Classify a refresh failure so both attach paths report it the same way: a
+ * typed `invalid_grant` (the refresh row was revoked or expired) is a session
+ * expiry that maps to the re-login guidance; anything else surfaces its own
+ * message. The one home for this decision, shared by the stdio proxy and the
+ * verb attach path, so the two can never drift in what they tell the user.
+ *
+ * @param {unknown} err
+ * @param {string} target
+ * @returns {{ sessionExpired: boolean, message: string }}
+ * @ref LLP 0046#d5 [implements]: invalid_grant -> re-login guidance, one home for both attach paths
+ */
+export function describeRefreshError(err, target) {
+  if (err instanceof InvalidGrantError) {
+    return { sessionExpired: true, message: sessionExpiredMessage(target) }
+  }
+  return { sessionExpired: false, message: err instanceof Error ? err.message : String(err) }
+}
+
+/**
  * Exchange an authorization code for a session (the `authorization_code`
  * grant). Presents the held PKCE verifier.
  *
@@ -55,7 +74,7 @@ export async function exchangeCode({ identityBase, code, codeVerifier, fetchImpl
   return {
     refreshToken: str(json.refresh_token, 'refresh_token'),
     accessJwt: str(json.access_jwt, 'access_jwt'),
-    expiresAt: str(json.expires_at, 'expires_at'),
+    expiresAt: isoTimestamp(json.expires_at, 'expires_at'),
     org: str(json.org, 'org'),
   }
 }
@@ -72,7 +91,7 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
   const json = await postToken({ identityBase, body, fetchImpl, operation: 'remote.refresh' })
   return {
     accessJwt: str(json.access_jwt, 'access_jwt'),
-    expiresAt: str(json.expires_at, 'expires_at'),
+    expiresAt: isoTimestamp(json.expires_at, 'expires_at'),
     // The refresh grant only has to re-mint the access JWT; `org` is fixed for
     // the life of the refresh token. Treat it as optional here and let the
     // caller keep the org it already stored, so a server that omits it on
@@ -147,6 +166,23 @@ function str(v, field) {
     throw new Error(`identity response missing '${field}'`)
   }
   return v
+}
+
+/**
+ * A non-empty string that also parses as a date. The stdio proxy refreshes
+ * whenever the stored expiry is unparseable, so accepting a non-date
+ * `expires_at` (e.g. epoch-seconds-as-string) would make every forwarded
+ * message a fresh refresh that re-stores the same bad value and never
+ * self-corrects. Fail the refresh loudly at parse time instead.
+ *
+ * @param {unknown} v @param {string} field @returns {string}
+ */
+function isoTimestamp(v, field) {
+  const s = str(v, field)
+  if (Number.isNaN(Date.parse(s))) {
+    throw new Error(`identity response field '${field}' is not a valid timestamp`)
+  }
+  return s
 }
 
 /**

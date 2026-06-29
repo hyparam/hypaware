@@ -2,8 +2,8 @@
 
 import { readObservabilityEnv } from '../observability/env.js'
 import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt } from '../remote/credentials.js'
-import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
-import { createHttpMcpClient } from './client.js'
+import { describeRefreshError } from '../remote/identity_client.js'
+import { createHttpMcpClient, isAuthStatus } from './client.js'
 
 /**
  * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
@@ -105,10 +105,8 @@ async function callRemoteTool({ url, token, verb, params }) {
  * @returns {{ ok: false, error: string, exitCode: number }}
  */
 function mapRefreshError(err, target) {
-  if (err instanceof InvalidGrantError) {
-    return { ok: false, error: sessionExpiredMessage(target), exitCode: 2 }
-  }
-  return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
+  const { sessionExpired, message } = describeRefreshError(err, target)
+  return { ok: false, error: message, exitCode: sessionExpired ? 2 : 1 }
 }
 
 /**
@@ -120,7 +118,7 @@ function mapRefreshError(err, target) {
  */
 function isAuthError(err) {
   return !!err && typeof err === 'object' &&
-    (/** @type {any} */ (err).authError === true || /** @type {any} */ (err).status === 401 || /** @type {any} */ (err).status === 403)
+    (/** @type {any} */ (err).authError === true || isAuthStatus(/** @type {any} */ (err).status))
 }
 
 /**
