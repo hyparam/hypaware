@@ -10,8 +10,7 @@
  * to surface a `sources` reference on `CommandRunContext`.
  *
  * The runtime is `null` when the plugin has not yet been activated
- * in this process; tests reset it across smoke flows via
- * `clearGascityRuntime`.
+ * in this process.
  */
 
 /**
@@ -45,8 +44,4 @@ export function requireGascityRuntime() {
     throw new Error('@hypaware/gascity: command invoked before plugin activation')
   }
   return runtime
-}
-
-export function clearGascityRuntime() {
-  runtime = null
 }

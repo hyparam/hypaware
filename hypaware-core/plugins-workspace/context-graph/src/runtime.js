@@ -19,10 +19,6 @@ export function setGraphRuntime(value) {
   runtime = value
 }
 
-export function clearGraphRuntime() {
-  runtime = null
-}
-
 /**
  * Resolve the runtime or throw if the plugin has not been activated.
  * @returns {{ registry: ContractRegistry }}

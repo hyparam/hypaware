@@ -25,10 +25,6 @@ export function setAiGatewayRuntime(value) {
   runtime = value
 }
 
-export function clearAiGatewayRuntime() {
-  runtime = null
-}
-
 /**
  * Resolve the runtime or throw if the plugin has not been activated.
  * Used by the smoke harness and future commands to drive source.start
