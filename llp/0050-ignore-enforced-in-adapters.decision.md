@@ -1,7 +1,7 @@
 # LLP 0050: ignore is enforced in the client adapters, not the gateway
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Gateway, Plugins, Core
 **Author:** Phil / Claude
 **Date:** 2026-06-29

@@ -1,7 +1,7 @@
 # LLP 0049: hypignore usage policy
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Gateway, CLI
 **Author:** Phil / Claude
 **Date:** 2026-06-29
