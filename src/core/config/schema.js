@@ -6,7 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -616,7 +616,7 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       errors.push({ pointer: `${pointer}/maintenance`, message: 'query.cache.maintenance must be an object' })
     } else {
       const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
-      /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').QueryCacheMaintenanceConfig} */
+      /** @type {QueryCacheMaintenanceConfig} */
       const maint = {}
       if (m.enabled !== undefined) {
         if (typeof m.enabled !== 'boolean') {

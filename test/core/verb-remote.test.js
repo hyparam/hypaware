@@ -1,5 +1,9 @@
 // @ts-check
 
+/**
+ * @import { TestContext } from 'node:test'
+ */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -12,7 +16,7 @@ const cmd = verbToCommand(querySqlVerb)
  * Install a fake MCP-over-HTTP server as `globalThis.fetch` for the
  * duration of `t`. `toolResult` is what `tools/call` returns.
  *
- * @param {import('node:test').TestContext} t
+ * @param {TestContext} t
  * @param {{ token?: string, toolResult?: any }} [opts]
  */
 function stubServer(t, opts = {}) {

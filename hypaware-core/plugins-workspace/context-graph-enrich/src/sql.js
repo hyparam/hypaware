@@ -72,9 +72,9 @@ export function sqlQuote(v) {
 
 /**
  * Source-scan content filters shared by the T1 session scans
- * ({@link import('./propose.js').buildSessionAggregateQuery} /
- * {@link import('./propose.js').buildSessionPartsQuery}) and the T2 source deref
- * ({@link import('./curate.js')}'s `safeDeref`), so both skip the same
+ * ({@link buildSessionAggregateQuery} /
+ * {@link buildSessionPartsQuery}) and the T2 source deref
+ * (`curate.js`'s `safeDeref`), so both skip the same
  * low-signal rows. Returns SQL predicate fragments to AND into a WHERE clause;
  * an empty array means no content filter.
  *

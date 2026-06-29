@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
 
 /**
- * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration, VerbRenderResult } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -87,7 +87,7 @@ export async function runVerbCommand(verb, argv, ctx) {
     }
   }
 
-  /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').VerbRenderResult} */
+  /** @type {VerbRenderResult} */
   let rendered
   try {
     rendered = verb.render(result, ctrl.controls)

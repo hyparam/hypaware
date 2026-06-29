@@ -1158,7 +1158,7 @@ function pluginStateDir(ctx) {
  * corrupt; the underlying discovery layer logs its own diagnostics.
  *
  * @param {CommandRunContext} ctx
- * @returns {Promise<{ knownPlugins: Map<import('../../../collectivus-plugin-kernel-types.d.ts').PluginName, import('../config/types.d.ts').PluginMetadata>, knownDatasets: Set<string> }>}
+ * @returns {Promise<{ knownPlugins: Map<PluginName, PluginMetadata>, knownDatasets: Set<string> }>}
  */
 async function buildKnownPluginsForCtx(ctx) {
   /** @type {LoadedManifest[]} */

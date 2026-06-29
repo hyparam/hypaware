@@ -6,8 +6,9 @@ import readline from 'node:readline'
 import { reduce } from './keypress.js'
 import { render } from './render.js'
 
-/** @typedef {import('./keypress.js').State} State */
-/** @typedef {import('./keypress.js').Key} Key */
+/**
+ * @import { State, Key } from './keypress.js'
+ */
 
 const CURSOR_HIDE  = '\x1b[?25l'
 const CURSOR_SHOW  = '\x1b[?25h'
