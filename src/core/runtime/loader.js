@@ -42,7 +42,7 @@ import { createActivationContext, createKernelRuntime } from './activation.js'
  * @param {KernelRuntime} [args.runtime]          Override the kernel runtime (tests).
  * @param {string} [args.tmpRoot]                 Override the OS temp root (tests).
  * @returns {Promise<{ runtime: KernelRuntime, results: ActivationResult[] }>}
- * @ref LLP 0008#consequences [implements] — loads each plugin only through its single manifest entrypoint, never a deep import
+ * @ref LLP 0008#consequences [implements]: loads each plugin only through its single manifest entrypoint, never a deep import
  */
 export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpRoot }) {
   if (!Array.isArray(plugins)) throw new Error('activatePlugins: plugins must be an array')

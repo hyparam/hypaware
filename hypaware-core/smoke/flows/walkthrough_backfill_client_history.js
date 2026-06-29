@@ -14,7 +14,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
 
 /**
- * Phase 7 smoke — full onboarding walkthrough with the client-history
+ * Phase 7 smoke: full onboarding walkthrough with the client-history
  * backfill step.
  *
  * Boots `@hypaware/ai-gateway` + `@hypaware/claude` + `@hypaware/codex`
@@ -38,7 +38,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'walkthrough_backfill_client_history: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'walkthrough_backfill_client_history: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

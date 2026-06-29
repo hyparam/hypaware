@@ -44,11 +44,11 @@ const SKIPPED_DIR_NAMES = new Set([
  *
  * Pipeline (each external boundary wrapped in its own span):
  *
- *   1. `plugin.git.clone`     — `git clone --filter=blob:none --no-checkout`
- *   2. `plugin.git.checkout`  — `git checkout <ref>` (default branch HEAD when omitted)
- *   3. `plugin.git.resolve_ref` — `git rev-parse HEAD`
- *   4. `plugin.artifact.validate` — manifest, entrypoint, symlink-free
- *   5. `plugin.artifact.copy` — copy into install dir (atomic swap)
+ *   1. `plugin.git.clone`     - `git clone --filter=blob:none --no-checkout`
+ *   2. `plugin.git.checkout`  - `git checkout <ref>` (default branch HEAD when omitted)
+ *   3. `plugin.git.resolve_ref` - `git rev-parse HEAD`
+ *   4. `plugin.artifact.validate` - manifest, entrypoint, symlink-free
+ *   5. `plugin.artifact.copy` - copy into install dir (atomic swap)
  *
  * On any failure after the clone, temp directories are cleaned up and
  * any prior install is left untouched.

@@ -94,8 +94,8 @@ async function launchListener(ctx, state, liveState) {
     gatewayId: config.gatewayId,
     projectors: state.projectors,
     // Thread storage so the projector can lazily seed its seen-set from
-    // committed part_ids per conversation — without it a restart/reload
-    // rebuilds an empty set and replays re-emit duplicate-part_id rows.
+    // committed part_ids per conversation (without it a restart/reload
+    // rebuilds an empty set and replays re-emit duplicate-part_id rows).
     storage: ctx.storage,
     log: ctx.log,
   })
@@ -176,8 +176,8 @@ async function launchListener(ctx, state, liveState) {
  * sorted by the proxy at compile time.
  *
  * Presets without a `match()` and without a `path_prefix` are filtered
- * out — they can never route a request and would only inflate the
- * compiled table.
+ * out (they can never route a request and would only inflate the
+ * compiled table).
  *
  * @param {UpstreamConfig[]} configUpstreams
  * @param {GatewayState} state
@@ -206,7 +206,7 @@ function mergeUpstreams(configUpstreams, state) {
 
 /**
  * Read the names of configured upstreams from the activation config.
- * Defensive — if config has been mutated to a degenerate shape, returns
+ * Defensive: if config has been mutated to a degenerate shape, returns
  * an empty list so status() never throws.
  *
  * @param {PluginActivationContext} ctx

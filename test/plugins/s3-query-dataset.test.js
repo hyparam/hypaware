@@ -187,7 +187,7 @@ test('parquet discovery bounds the prefix to a directory, excluding sibling name
 })
 
 test('parquet read rejects when a listed object disappears before read (list→read race)', async () => {
-  // listObjects advertises a key, but getObject returns null — the
+  // listObjects advertises a key, but getObject returns null: the
   // real list→read race. The scan must reject, not silently drop rows.
   /** @type {BlobStore} */
   const racyBlobStore = /** @type {BlobStore} */ ({

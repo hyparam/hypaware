@@ -21,8 +21,8 @@ const DEFAULT_ZSTD_LEVEL = 3
 // Row-group clustering. hyparquet-writer keeps a column dictionary-encoded
 // only while a row group's DISTINCT values fit under its ~1 MiB dictionary-
 // page cap. Columns denormalized onto every row but constant per conversation
-// (e.g. `tools`, `system_text`) explode to PLAIN — re-storing every copy in
-// full — once a single row group spans the whole partition's distinct values.
+// (e.g. `tools`, `system_text`) explode to PLAIN: re-storing every copy in
+// full once a single row group spans the whole partition's distinct values.
 // Bounding each row group to a small number of distinct cluster keys (and a
 // max row count) keeps the dictionary alive. The dictionary decision depends
 // on the distinct-value COUNT, not row order, and the source rows already
@@ -118,7 +118,7 @@ function makeZstdCompressor(level) {
  * for writing the encoded bytes once this encoder hands them back.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0014#queryable-sinks [implements] — parquet encoder declares `queryable`; lights up only paired with a blob store
+ * @ref LLP 0014#queryable-sinks [implements]: parquet encoder declares `queryable`, lights up only paired with a blob store
  */
 export async function activate(ctx) {
   const settings = resolveEncodeSettings(ctx.config, ctx.log)
@@ -181,7 +181,7 @@ async function encodePartition(partition, ctx, settings) {
         const sourceRows = ctx.rows
 
         // Derive a stable schema from the declared column types (not from the
-        // data) so we can write row groups incrementally — never holding more
+        // data) so we can write row groups incrementally: never holding more
         // than one cluster group of rows (plus its columnar copy) in memory.
         // This is what stops `hyp sink force` on a large partition from OOMing
         // while materializing the whole partition at once.

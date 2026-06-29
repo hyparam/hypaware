@@ -19,7 +19,7 @@ export const CORE_VERBS = [querySqlVerb]
 /**
  * Register the intrinsic core verbs onto the kernel verb registry. Run
  * during `createKernelRuntime`, so the projected `query sql` command and
- * the `query_sql` MCP tool exist on every boot, with no plugin needed —
+ * the `query_sql` MCP tool exist on every boot, with no plugin needed:
  * the intrinsic SQL surface (LLP 0003).
  *
  * @param {VerbRegistry} verbs

@@ -14,12 +14,12 @@ const PLUGIN_NAME = '@hypaware/completion-anthropic'
  * Build the `hypaware.completion` capability value: an HTTP client for
  * the Anthropic Messages API (`POST /v1/messages`).
  *
- * There is deliberately no retry layer — callers (an enrichment tick, an
+ * There is deliberately no retry layer: callers (an enrichment tick, an
  * interactive command) run on their own cadence, so a failed request
  * surfaces immediately instead of stalling a tick. A `refusal` is NOT an
  * error: the Messages API returns it as a successful HTTP 200, so
  * `complete()`/`stream()` return it as `stopReason: 'refusal'` and the
- * caller decides — exactly as the capability contract requires.
+ * caller decides: exactly as the capability contract requires.
  *
  * @param {CreateAnthropicCompletionOptions} opts
  * @returns {CompletionCapability}
@@ -79,7 +79,7 @@ export function createAnthropicCompletion(opts) {
         { component: 'completion' }
       ).catch((/** @type {unknown} */ err) => {
         const errorKind = /** @type {HypError} */ (err)?.hypErrorKind ?? 'completion_failed'
-        // Prompt content and key material never reach logs — counts only.
+        // Prompt content and key material never reach logs: counts only.
         log.error('completion.complete_failed', {
           [Attr.ERROR_KIND]: errorKind,
           completion_model: model,
@@ -115,7 +115,7 @@ function assertMessages(req) {
 /**
  * Compose the request body + headers. The API key resolves from the
  * environment at call time, used only for `x-api-key`; it is never logged,
- * thrown, or stored. `params` is the provider passthrough — `betas` lifts
+ * thrown, or stored. `params` is the provider passthrough: `betas` lifts
  * to the `anthropic-beta` header, everything else merges into the body
  * (e.g. `thinking`, `tool_choice`, `output_config.effort`). Explicit
  * fields (messages/system/tools) always win over `params`.
@@ -250,7 +250,7 @@ function contentToText(content) {
 
 /**
  * Send the request, mapping transport/HTTP failures to `hypErrorKind`
- * errors. The response body is deliberately never read into an error —
+ * errors. The response body is deliberately never read into an error:
  * a provider may echo prompt content or credential material in its error
  * detail; status + endpoint + kind are enough to diagnose.
  *
@@ -262,9 +262,9 @@ async function sendRequest({ endpoint, headers, body, fetchImpl, config, signal 
 }
 
 /**
- * Generalized HTTP send (any method, optional body — the batch poll/results
+ * Generalized HTTP send (any method, optional body: the batch poll/results
  * GETs carry none), mapping transport/HTTP failures to `hypErrorKind` errors.
- * The response body is deliberately never read into an error — a provider may
+ * The response body is deliberately never read into an error: a provider may
  * echo prompt content or credential material in its error detail; status +
  * endpoint + kind are enough to diagnose.
  *
@@ -346,12 +346,12 @@ export function parseAnthropicMessageResponse(payload, ctx) {
 }
 
 /**
- * Submit a Message Batch — one Anthropic batch job over N `{custom_id, params}`
+ * Submit a Message Batch: one Anthropic batch job over N `{custom_id, params}`
  * requests, each `params` a Messages body built by {@link composeMessageBody}.
  * Returns the initial job status; the caller polls and collects. Any `betas`
  * across the requests are unioned onto the submit's `anthropic-beta` header.
  *
- * @ref LLP 0028#two-regimes [implements]
+ * @ref LLP 0028#two-regimes [implements]:
  *
  * @param {{ requests: CompletionBatchRequest[], config: AnthropicCompletionConfig, env: NodeJS.ProcessEnv, fetchImpl: FetchLike, batchEndpoint: string, log: PluginLogger, signal: AbortSignal | undefined }} args
  * @returns {Promise<CompletionBatchStatus>}
@@ -479,7 +479,7 @@ function parseBatchStatusFull(payload) {
  * Parse the JSONL results body into per-`custom_id` outcomes. A `succeeded`
  * entry's `message` is normalized via {@link parseAnthropicMessageResponse}
  * (so a `refusal` arrives as a successful result with `stopReason: 'refusal'`);
- * everything else surfaces only the safe error *category* — never the provider
+ * everything else surfaces only the safe error *category*: never the provider
  * error message, which can echo prompt content.
  *
  * @param {string} text

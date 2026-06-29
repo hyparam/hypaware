@@ -5,7 +5,7 @@ import test from 'node:test'
 
 import { redactRemoteUserinfo } from '../../hypaware-core/plugins-workspace/codex/src/git-remote.js'
 
-// @ref LLP 0032#remote-redaction — strip credentials from a remote at ingress.
+// @ref LLP 0032#remote-redaction: strip credentials from a remote at ingress.
 
 test('strips user:token userinfo from an https remote', () => {
   assert.equal(

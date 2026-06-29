@@ -11,12 +11,12 @@ import { executeQuerySql } from './sql.js'
 /**
  * The intrinsic `query_sql` verb. SQL/dataset query is **intrinsic** (LLP
  * 0003), so core contributes this verb for free on every host with a
- * registered dataset — it projects the `query sql` CLI command and the
+ * registered dataset; it projects the `query sql` CLI command and the
  * `query_sql` MCP tool from one declaration. Read-class: reachable by a
  * query-scoped credential.
  *
  * @type {VerbRegistration}
- * @ref LLP 0034#maps-onto-the-intrinsicplugin-boundary-llp-0003 [implements] — SQL surface is intrinsic → core's own verb, a tool on every host
+ * @ref LLP 0034#maps-onto-the-intrinsicplugin-boundary-llp-0003 [implements]: SQL surface is intrinsic → core's own verb, a tool on every host
  */
 export const querySqlVerb = {
   name: 'query sql',

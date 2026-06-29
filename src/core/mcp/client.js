@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * MCP **client** over Streamable HTTP — the consumer half of remote attach
+ * MCP **client** over Streamable HTTP: the consumer half of remote attach
  * (LLP 0033). `hyp` is an MCP client, so `hyp <verb> --remote <target>`
  * runs the verb's operation against the remote tool of the **same**
  * `inputSchema` instead of locally (LLP 0034 §consumer-side).
@@ -12,7 +12,7 @@
  * unit-tested through an injectable `fetchImpl`; integration-test it once
  * the server lands.
  *
- * @ref LLP 0034#pluggable-transport [implements] — the HTTP adapter the fleet server needs, reused on the client side
+ * @ref LLP 0034#pluggable-transport [implements]: the HTTP adapter the fleet server needs, reused on the client side
  */
 
 const PROTOCOL_VERSION = '2025-06-18'
@@ -67,10 +67,10 @@ export function createHttpMcpClient(opts) {
     }
     if (!res.ok) {
       if (res.status === 401 || res.status === 403) {
-        throw new Error(`remote rejected the credential (HTTP ${res.status}) — re-run 'hyp remote login'`)
+        throw new Error(`remote rejected the credential (HTTP ${res.status}) - re-run 'hyp remote login'`)
       }
       const text = await safeText(res)
-      throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` — ${text.slice(0, 200)}` : ''}`)
+      throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`)
     }
     const message = await parseRpcResponse(res, id)
     if (message?.error) {

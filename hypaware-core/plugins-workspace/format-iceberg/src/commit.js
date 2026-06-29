@@ -82,7 +82,7 @@ export async function commitBatch(input, priorState) {
 
   if (!priorState.exists) {
     try {
-      // @ref LLP 0022#partition-derivation — create with the writer-owned
+      // @ref LLP 0022#partition-derivation: create with the writer-owned
       // day-grain partitionSpec + conversation sort order. Both default to
       // unpartitioned/unsorted in icebird when `partitioning` is absent.
       await icebergCreateTable({
@@ -97,7 +97,7 @@ export async function commitBatch(input, priorState) {
       throw wrapCommitError(err, 'iceberg_commit_failed', `create table failed at '${input.tableUrl}'`)
     }
   } else if (priorState.metadata) {
-    // @ref LLP 0022#drift-rejection — an existing table whose partition spec no
+    // @ref LLP 0022#drift-rejection: an existing table whose partition spec no
     // longer matches the dataset's derived day grain is rejected; the export
     // cannot retroactively repartition object-store data files. [constrained-by]
     const existingSpec = currentPartitionSpec(priorState.metadata) ?? { 'spec-id': 0, fields: [] }
@@ -115,7 +115,7 @@ export async function commitBatch(input, priorState) {
       // Reverse drift: the dataset stopped deriving partitioning but the
       // table on disk is partitioned. The append itself would succeed (icebird
       // keeps routing rows through the existing spec) while the sink reports
-      // `unpartitioned` — reject rather than let layout and telemetry diverge.
+      // `unpartitioned`. Reject rather than let layout and telemetry diverge.
       const existingLabel = existingSpec.fields.map((f) => `${f.transform}(${f.name})`).join(',')
       throw newError(
         'iceberg_partition_spec_drift',
@@ -294,9 +294,9 @@ function toNumber(value) {
  *
  * The blob-io adapter raises `iceberg_metadata_read_failed` for two
  * structurally distinct conditions:
- *  - The object is genuinely missing — adapter sets `code = 'ENOENT'`.
+ *  - The object is genuinely missing: adapter sets `code = 'ENOENT'`.
  *  - The underlying read errored (timeout, throttle, 500, SDK failure)
- *    — adapter leaves `code` unset.
+ *    Adapter leaves `code` unset.
  *
  * Treating the kind alone as a miss conflates the two and lets a
  * flaky read drive the sink into `create` mode. Match only the

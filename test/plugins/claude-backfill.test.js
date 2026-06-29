@@ -225,7 +225,7 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
       transcript_path: filePath,
       cwd: '/work/repo-a',
       git_branch: 'feature/x',
-      // @ref LLP 0032#capture — the hook also captures repo identity; backfill
+      // @ref LLP 0032#capture: the hook also captures repo identity; backfill
       // must replay all three or re-imported Claude sessions drop out of the join.
       git_remote: 'git@github.com:acme/repo-a.git',
       head_sha: '0123456789abcdef0123456789abcdef01234567',
@@ -248,7 +248,7 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
     assert.equal(item.provenance?.native_id, 'sess-1')
 
     // Projection carries the bead-mandated conversation envelope.
-    // @ref LLP 0030#decision — the Claude session id is the session_id
+    // @ref LLP 0030#decision: the Claude session id is the session_id
     // partition key; conversation_id is null (no per-thread id).
     const exchange = value(item)
     assert.equal(exchange.provider, 'anthropic')
@@ -258,7 +258,7 @@ test('fixture transcript projects into canonical ai_gateway_messages rows', asyn
     assert.equal(exchange.client_name, 'claude')
     assert.equal(exchange.cwd, '/work/repo-a')
     assert.equal(exchange.git_branch, 'feature/x')
-    // @ref LLP 0032#capture — repo identity rides the same record as cwd; the
+    // @ref LLP 0032#capture: repo identity rides the same record as cwd; the
     // live projector stamps these too, so backfilled rows converge with live.
     assert.equal(exchange.git_remote, 'git@github.com:acme/repo-a.git')
     assert.equal(exchange.head_sha, '0123456789abcdef0123456789abcdef01234567')
@@ -365,7 +365,7 @@ test('assistant token usage is folded into attributes.usage like live capture', 
   }
 })
 
-test('usage lands once — on the last block of a split assistant API message', async () => {
+test('usage lands once - on the last block of a split assistant API message', async () => {
   const env = await stageEnv()
   try {
     // Claude Code writes one transcript line per content block; both lines of
@@ -451,7 +451,7 @@ test('assistant model is surfaced per message, switches mid-session, and drops <
         parentUuid: 'u-asst-2',
         type: 'assistant',
         // `<synthetic>` is a sentinel for locally-generated assistant lines
-        // that never hit a model — it must not land in the model column.
+        // that never hit a model: it must not land in the model column.
         message: { role: 'assistant', content: [{ type: 'text', text: '[interrupted]' }], model: '<synthetic>' },
         timestamp: '2026-05-20T10:00:07.000Z',
       },
@@ -569,7 +569,7 @@ test('native DAG identity is preserved verbatim', async () => {
   }
 })
 
-test('raw_frame is minimized — never a full transcript copy', async () => {
+test('raw_frame is minimized - never a full transcript copy', async () => {
   const env = await stageEnv()
   try {
     const secret = 'SENSITIVE-PROMPT-BODY-should-not-be-copied'
@@ -817,7 +817,7 @@ test('missing transcript root yields nothing without throwing', async () => {
 
 /**
  * A one-turn session whose transcript line carries a `cwd` (as Claude Code
- * stamps it) but for which no session-context record exists — the shape of a
+ * stamps it) but for which no session-context record exists: the shape of a
  * session recorded before the hook captured git identity.
  *
  * @param {string} sessionId
@@ -840,7 +840,7 @@ function rowsWithCwd(sessionId, cwd) {
 test('recovers git_remote/repo_root from the transcript cwd when the record predates git capture', async () => {
   const env = await stageEnv()
   try {
-    // No session-context record at all — the historical shape.
+    // No session-context record at all: the historical shape.
     await writeTranscript(env, '-Users-phil-workspace-repo-z', 'sess-z', rowsWithCwd('sess-z', '/Users/phil/workspace/repo-z'))
 
     /** @type {string[]} */
@@ -863,7 +863,7 @@ test('recovers git_remote/repo_root from the transcript cwd when the record pred
     assert.equal(exchange.cwd, '/Users/phil/workspace/repo-z')
     assert.equal(exchange.git_remote, 'git@github.com:acme/repo-z.git')
     assert.equal(exchange.repo_root, '/Users/phil/workspace/repo-z')
-    // head_sha is NEVER derived — current HEAD ≠ the session's HEAD.
+    // head_sha is NEVER derived: current HEAD ≠ the session's HEAD.
     assert.equal(exchange.head_sha, undefined)
     assert.deepEqual(derivedFor, ['/Users/phil/workspace/repo-z'])
 
@@ -949,7 +949,7 @@ test('recovers git_remote from the record cwd when the record predates git captu
   const env = await stageEnv()
   try {
     // The canonical pre-0032 shape (LLP 0032): a session-context record EXISTS
-    // — cwd and git_branch were captured — but predates git-remote capture, so
+    // (cwd and git_branch were captured) but predates git-remote capture, so
     // it carries no git_remote/head_sha/repo_root. The record's cwd differs
     // from the transcript line's cwd to prove derivation keys on `record.cwd`
     // (the `record?.cwd ?? transcriptCwd` precedence), not the transcript line.
@@ -991,7 +991,7 @@ test('recovers git_remote from the record cwd when the record predates git captu
     assert.equal(exchange.git_branch, 'feature/recover')
     assert.equal(exchange.git_remote, 'git@github.com:acme/repo-canon.git')
     assert.equal(exchange.repo_root, '/Users/phil/workspace/repo-canon')
-    // head_sha is NEVER derived — current HEAD ≠ the session's HEAD.
+    // head_sha is NEVER derived: current HEAD ≠ the session's HEAD.
     assert.equal(exchange.head_sha, undefined)
 
     // The recovered identity survives materialization into canonical rows.
@@ -1012,7 +1012,7 @@ test('record repo_root is preserved when only the remote is derived', async () =
     // A partial pre-0032 record: the hook captured an authoritative repo_root
     // (`git rev-parse --show-toplevel`) but no git_remote. Derivation must
     // recover the remote WITHOUT clobbering the record's repo_root, even when
-    // the probe — run later / in a shifted worktree — reports a different
+    // the probe (run later / in a shifted worktree) reports a different
     // toplevel. This guards the `&& !exchange.repo_root` clause: drop it and
     // the derived repo_root would overwrite the record's authoritative value.
     const filePath = await writeTranscript(env, 'repo-partial', 'sess-partial', rowsWithCwd('sess-partial', '/transcript/line/cwd'))

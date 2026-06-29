@@ -247,7 +247,7 @@ test('runCurateBatch resumes a pre-persisted backfill job (collects, does not re
     const r = await runCurateBatch(runtime, { intervalMs: 1 })
 
     assert.equal(r.batched, true)
-    assert.equal(batch._submitted.length, 0, 'resume collects the existing job — no second (re-billed) submit')
+    assert.equal(batch._submitted.length, 0, 'resume collects the existing job - no second (re-billed) submit')
     assert.equal(r.pending, 1, 'pending recomputed from the scoped pool, not a placeholder 0')
     assert.equal(r.processed, 1)
     assert.equal(tables.enrichment_committed.length, 1, 'the resumed job committed its result')

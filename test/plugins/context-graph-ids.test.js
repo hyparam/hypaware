@@ -14,7 +14,7 @@ test('nodeId pins known digests', () => {
   assert.equal(nodeId('App', 'claude'), '2e9bdd4283a3dfed19a24ddc')
   // Keys containing spaces must not collide with delimiter boundaries. This is
   // ALSO an out-of-repo File path: the LLP 0032 File re-key only bridges paths
-  // INSIDE a captured repo, so an absolute /tmp path keeps its key — this pin is
+  // INSIDE a captured repo, so an absolute /tmp path keeps its key, and this pin is
   // deliberately unchanged by the migration.
   assert.equal(nodeId('File', '/tmp/a b.txt'), 'f089fa67a6b72ea65ff004f9')
 })

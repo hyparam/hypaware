@@ -17,7 +17,7 @@ function makeLog() {
 }
 
 /**
- * Storage whose table yields `count` rows one at a time — a stand-in for
+ * Storage whose table yields `count` rows one at a time: a stand-in for
  * the streaming Iceberg scan. Never builds an array of all rows, so the
  * test mirrors the memory-bounded production path. `rowFactory` lets a
  * test shape the rows (wide payloads, byte-identical rows); the default
@@ -47,7 +47,7 @@ function makeStorage(tablePath, count, rowFactory) {
 
 /**
  * A query registry whose dataset resolves to `signal`. Pass `null` to
- * model a dataset with **no** `sourceSignal` — the failure mode bug #2
+ * model a dataset with **no** `sourceSignal`: the failure mode bug #2
  * fixed, where the sink falls back to the (unknown) dataset name.
  *
  * @param {string | null} signal
@@ -77,7 +77,7 @@ function makeFetch(responder) {
   /** @type {Array<{ url: string, batchId: string, lines: string[], rowCount: number }>} */
   const calls = []
   // Count of response bodies the sink cancelled (drained) before parking on
-  // backpressure — proves it releases the socket rather than leaking it.
+  // backpressure: proves it releases the socket rather than leaking it.
   let bodyCancels = 0
   /** @type {typeof fetch} */
   const fn = /** @type {any} */ (async (url, init) => {
@@ -222,7 +222,7 @@ test('a dataset with no sourceSignal fails the partition for retry (unknown sign
   assert.equal(result.partitionsExported, 0)
   assert.equal(result.retryPartitions?.length, 1)
   assert.match(String(result.error), /unknown signal/)
-  // it never reached the wire — the signal is rejected before streaming
+  // it never reached the wire: the signal is rejected before streaming
   assert.equal(calls.length, 0)
 })
 
@@ -233,7 +233,7 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 test('the byte budget splits wide rows even when the row count is tiny', async () => {
   // 10 rows of ~1 MiB each: MAX_CHUNK_ROWS (5000) never trips, so only
   // the byte budget governs. This is the bound that actually prevents
-  // the OOM/oversized-body for wide `content_text` — the row-count tests
+  // the OOM/oversized-body for wide `content_text`: the row-count tests
   // above never exercise it.
   const wide = 'x'.repeat(1 << 20)
   const { sink, calls } = buildSink({
@@ -357,7 +357,7 @@ test('repeated 429s walk the ladder before succeeding', async () => {
 
 test('backpressure beyond the inline budget fails the partition for retry', async () => {
   // Persistent 429 with Retry-After: 120. The inline budget is 5 min, so
-  // two waits (240s) fit and the third would cross it — the chunk throws
+  // two waits (240s) fit and the third would cross it: the chunk throws
   // and the partition is handed back for the next tick (cheap: the server
   // dedupes the delivered prefix).
   const { sink, calls, sleeps } = buildSink({

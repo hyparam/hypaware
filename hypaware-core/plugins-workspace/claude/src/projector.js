@@ -46,10 +46,10 @@ import {
  *
  * Behavior:
  *
- *  1. `match()` — true for any captured exchange whose path looks like
+ *  1. `match()`: true for any captured exchange whose path looks like
  *     `/v1/messages*` OR whose headers carry an Anthropic signature
  *     (`anthropic-version`, `x-api-key`, or `Authorization: Bearer sk-ant-*`).
- *  2. `project()` — parses the request + response (HTTP body for
+ *  2. `project()`: parses the request + response (HTTP body for
  *     non-streamed, SSE event stream for streamed) into the canonical
  *     Anthropic message list, resolves a session id from
  *     `metadata.user_id.session_id` / `x-claude-code-session-id`, reads
@@ -63,7 +63,7 @@ import {
  *     result (joined by `tool_use_id`), prompts stay whole. When a
  *     transcript line matches:
  *       - `message_id = provider_uuid = uuid`, native parent on
- *         `parent_uuid` — `previous_message_id` is never supplied;
+ *         `parent_uuid`: `previous_message_id` is never supplied;
  *         the gateway always fills it with the full prior-message
  *         chain so enriched and fallback rows share one shape.
  *     On a miss, messages are returned without `message_id` so the
@@ -100,7 +100,7 @@ export function createClaudeExchangeProjector(opts) {
       const requestPath = stringValue(input.path) ?? ''
       const reqBody = parseMaybeJson(input.request_body)
       if (!isPlainObject(reqBody)) {
-        // Surface the skip — adapter projectors that decline must
+        // Surface the skip: adapter projectors that decline must
         // still leave a breadcrumb so a missing row is debuggable.
         ctx.log.warn('plugin.claude.projector_skip', {
           reason: 'unparseable_request_body',
@@ -114,11 +114,11 @@ export function createClaudeExchangeProjector(opts) {
       // data, so we tag rather than drop: stamp `attributes.claude.aux_kind`
       // on every projected message below so conversation queries exclude
       // it (`aux_kind IS NULL`) without losing it. `claudeAuxKind` keys
-      // only on the dedicated security-monitor system prompt — the one aux
-      // kind reliably fingerprintable today — so a normal turn is never
+      // only on the dedicated security-monitor system prompt: the one aux
+      // kind reliably fingerprintable today: so a normal turn is never
       // mislabeled. The drop this replaced silently lost ~88% of rows in
       // an autonomous session.
-      // @ref LLP 0026#decision — tag-don't-drop; aux_kind rides the
+      // @ref LLP 0026#decision: tag-don't-drop; aux_kind rides the
       // attributes JSON (no schema change, per LLP 0027#decision pt 5).
       const auxKind = claudeAuxKind(reqBody)
 
@@ -161,7 +161,7 @@ export function createClaudeExchangeProjector(opts) {
         : []
       const transcriptIndex = indexTranscriptEntries(transcriptEntries)
       const identityFromTranscript = transcriptIndex.ordered.length > 0
-      // @ref LLP 0030#decision — a Claude session is a container of many
+      // @ref LLP 0030#decision: a Claude session is a container of many
       // threads (main loop, subagents, side chats), so the session id is
       // the `session_id` partition key, NOT `conversation_id`. Claude has
       // no per-thread conversation id, so conversation_id is null.
@@ -181,7 +181,7 @@ export function createClaudeExchangeProjector(opts) {
         responseBody,
         input.duration_ms
       )
-      // @ref LLP 0026#decision — decompose each wire message into the
+      // @ref LLP 0026#decision: decompose each wire message into the
       // transcript's native units (one per assistant block, one per
       // tool_result) so message_id is the transcript-line uuid and
       // live rows converge with backfill.
@@ -226,7 +226,7 @@ export function createClaudeExchangeProjector(opts) {
 
       // Tag every message of an aux exchange so queries can exclude it.
       // Keyed on THIS exchange's request body (see `auxKind` above), so
-      // only the aux exchange's rows carry `aux_kind` — real turns are
+      // only the aux exchange's rows carry `aux_kind`: real turns are
       // never mislabeled.
       if (auxKind) {
         for (const projected of projectedMessages) {
@@ -236,8 +236,8 @@ export function createClaudeExchangeProjector(opts) {
         }
       }
 
-      // @ref LLP 0027#decision — a message that came out fallback (no
-      // transcript line on disk yet — the finalize race) carries the
+      // @ref LLP 0027#decision: a message that came out fallback (no
+      // transcript line on disk yet: the finalize race) carries the
       // content match-key so flush-time settlement can re-match it by
       // pure lookup once the line lands, without reconstructing the
       // content array that per-part expansion discards.
@@ -254,7 +254,7 @@ export function createClaudeExchangeProjector(opts) {
       const projection = {
         provider: 'anthropic',
         session_id: sessionIdColumn,
-        // conversation_id is null for Claude — the session id is the
+        // conversation_id is null for Claude: the session id is the
         // session container, not a per-thread id. @ref LLP 0030#decision
         conversation_source: conversationSource,
         client_name: clientName,
@@ -268,7 +268,7 @@ export function createClaudeExchangeProjector(opts) {
       if (userId) projection.user_id = userId
       if (sessionContextRecord?.cwd) projection.cwd = sessionContextRecord.cwd
       if (sessionContextRecord?.git_branch) projection.git_branch = sessionContextRecord.git_branch
-      // @ref LLP 0032#capture — repo identity for the graph bridge, recovered
+      // @ref LLP 0032#capture: repo identity for the graph bridge, recovered
       // from the same hook-written session-context record as cwd/git_branch.
       if (sessionContextRecord?.git_remote) projection.git_remote = sessionContextRecord.git_remote
       if (sessionContextRecord?.head_sha) projection.head_sha = sessionContextRecord.head_sha
@@ -276,7 +276,7 @@ export function createClaudeExchangeProjector(opts) {
       if (exchangeAttrs) projection.attributes = exchangeAttrs
       if (input.ts_start) projection.conversation_started_at = input.ts_start
 
-      // @ref LLP 0026#decision — subagent exchanges identify themselves
+      // @ref LLP 0026#decision: subagent exchanges identify themselves
       // on the wire; sidechain provenance must not depend on winning the
       // transcript race, so it is stamped from the header (resolved
       // above, and used to scope transcript matching to this thread).
@@ -299,7 +299,7 @@ export function createClaudeExchangeProjector(opts) {
       }
 
       // Claude-side identity provenance. Per the phase 2 spec, only
-      // the missing-log case stamps an explicit marker — when the
+      // the missing-log case stamps an explicit marker: when the
       // transcript supplied uuids the projection's `message_id` /
       // `parent_uuid` already encode the native DAG and no
       // extra marker is needed. The gateway still stamps its own
@@ -314,7 +314,7 @@ export function createClaudeExchangeProjector(opts) {
       }
 
       // The projector preset is anchored on `/v1/messages` but we
-      // accept arbitrary paths via header signature — record both so
+      // accept arbitrary paths via header signature: record both so
       // the path heuristic is debuggable without re-running the smoke.
       if (requestPath && !isAnthropicPath(requestPath) && !hasAnthropicHeaderSignature(headers)) {
         // Defensive: should be unreachable because match() would have
@@ -334,7 +334,7 @@ export function createClaudeExchangeProjector(opts) {
  * Split one wire assistant message into per-block projected messages,
  * mirroring Claude Code's one-transcript-line-per-block representation.
  *
- * // @ref LLP 0026#decision — alignment: the lines of one API message
+ * // @ref LLP 0026#decision: alignment: the lines of one API message
  * // share `message.id` in block order, so when the counts agree each
  * // block takes its positional line (type-checked); otherwise each
  * // block falls back to its own content key. Cardinality is recorded
@@ -395,12 +395,12 @@ function projectAssistantMessage(args) {
 /**
  * Project one wire user message into the transcript's units.
  *
- * // @ref LLP 0026#decision — tool_results split one message per
+ * // @ref LLP 0026#decision: tool_results split one message per
  * // block (the transcript writes one line per result; `tool_use_id`
  * // is the join key). Prompt-style messages stay whole, matched with
  * // a wire-injected-reminder-stripped retry; on that match the
- * // projected content is the TRANSCRIPT's (else live `uuid#0` — a
- * // reminder — would collide with backfill `uuid#0` — the prompt),
+ * // projected content is the TRANSCRIPT's (else live `uuid#0`: a
+ * // reminder: would collide with backfill `uuid#0`: the prompt),
  * // and the injected blocks become a separate `wire_only` message.
  *
  * @param {{
@@ -442,7 +442,7 @@ function projectUserMessage(args) {
     const injectedRest = rest.filter(isInjectedReminderBlock)
     // Only harness-injected reminders are wire_only. Real content riding
     // alongside tool_results (queued user text, `[Request interrupted…]`
-    // markers, skill banners) is a genuine user message — project it
+    // markers, skill banners) is a genuine user message: project it
     // normally with transcript matching, not as fallback-only noise.
     if (realRest.length > 0) {
       /** @type {AiGatewayProjectedMessage} */
@@ -504,7 +504,7 @@ function wholeMessageProjection(role, message) {
 
 /**
  * Copy a transcript line's native identity and provenance onto a
- * projected message. No-op when there is no match — the gateway then
+ * projected message. No-op when there is no match: the gateway then
  * computes fallback hash identity for the message.
  *
  * @param {AiGatewayProjectedMessage} projected
@@ -512,7 +512,7 @@ function wholeMessageProjection(role, message) {
  */
 function applyTranscriptMatch(projected, match) {
   if (!match) return
-  // Native id only — `previous_message_id` is deliberately NOT supplied.
+  // Native id only: `previous_message_id` is deliberately NOT supplied.
   // The gateway fills the full prior-message chain for every row; a
   // [parentUuid] singleton here would make enriched rows shaped
   // differently from fallback rows. The native DAG parent lands in
@@ -550,7 +550,7 @@ function isInjectedReminderBlock(block) {
 
 /**
  * Register the Anthropic upstream preset on the gateway. Same routing
- * surface as `match()` on the projector — keeping them paired here
+ * surface as `match()` on the projector: keeping them paired here
  * avoids drift between routing and projection.
  *
  * @returns {AiGatewayUpstreamPreset}

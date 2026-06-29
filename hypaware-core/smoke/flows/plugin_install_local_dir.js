@@ -40,7 +40,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'plugin_install_local_dir: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'plugin_install_local_dir: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -57,8 +57,8 @@ export async function run({ harness, expect }) {
 
   // Drive the install through the CLI dispatcher so we exercise the
   // exact path `hyp plugin install ./hypaware-core/plugins-workspace/dummy-a`
-  // takes — argv parsing, dispatch span, plugin.install + plugin.update_check
-  // span emission, lock writes — in one shot.
+  // takes (argv parsing, dispatch span, plugin.install + plugin.update_check
+  // span emission, lock writes) in one shot.
   const installStdout = makeBuf()
   const installStderr = makeBuf()
   const installCode = await runRoot(
@@ -261,7 +261,7 @@ export async function run({ harness, expect }) {
  * Drop a minimal fixture plugin under `dir`. The shape mirrors what
  * Phase 8 plugins will commit to `hypaware-core/plugins-workspace/<name>/`:
  * one manifest and one entrypoint. The smoke does not activate the
- * plugin — installing it is enough to exercise the §Phase 7
+ * plugin, installing it is enough to exercise the §Phase 7
  * resolver/fetch/lock/update_check contract.
  *
  * @param {string} dir

@@ -47,7 +47,7 @@ import { checkForPluginUpdate } from './update_check.js'
  *   - `hyp_plugin` once the manifest is known
  *   - `hyp_source_kind` from the resolved source
  *   - `status` (`ok`/`failed`)
- *   - `error_kind` (set on failure) — `resolver_error`,
+ *   - `error_kind` (set on failure): `resolver_error`,
  *     `local_dir_missing`, `local_dir_invalid`, `manifest_invalid`,
  *     `manifest_name_mismatch`, `fetch_unsupported`, or
  *     `lock_write_error`.
@@ -210,7 +210,7 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts, confi
       }
 
       // The fetch already resolved the upstream ref, so the post-
-      // install probe would just confirm what we already know — and
+      // install probe would just confirm what we already know, and
       // would block on a slow or hung remote inside the same span.
       // Synthesize the "no update available" state directly.
       const updateState = await checkForPluginUpdate({
@@ -260,7 +260,7 @@ export async function installPlugin({ rawSource, stateDir, cwd, now, opts, confi
  *   - `status` (`ok`/`failed`), `error_kind` (on failure)
  *
  * If the user rejects the confirmation prompt the prior install is
- * left intact — the artifact swap inside `fetchGitSource` only fires
+ * left intact: the artifact swap inside `fetchGitSource` only fires
  * once the `beforeCommit` callback returns `proceed=true`.
  *
  * @param {object} args

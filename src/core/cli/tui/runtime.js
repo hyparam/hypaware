@@ -205,7 +205,7 @@ function visibleWidth(line) {
  * a logical line is wider than the terminal: the terminal soft-wraps it
  * onto multiple rows, so the cursor descended further than the number of
  * `\n` written. Undercounting here leaves stale rows on screen on every
- * redraw — the classic "the question keeps duplicating when I move the
+ * redraw: the classic "the question keeps duplicating when I move the
  * cursor" symptom.
  *
  * Frames always end with a trailing `\n`; the empty segment after it

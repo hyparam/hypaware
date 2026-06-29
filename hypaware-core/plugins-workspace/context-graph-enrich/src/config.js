@@ -22,14 +22,14 @@ export const SOURCE_DEFAULTS = Object.freeze({
   // the tuple (timestamp_column, tiebreak_column); `part_id` is the per-row id.
   tiebreak_column: 'part_id',
   anchor_type: 'Session',
-  // @ref LLP 0030#decision — the Session anchor keys on session_id (the
+  // @ref LLP 0030#decision: the Session anchor keys on session_id (the
   // session container, always present), matching the ai-gateway-graph
   // Session node; conversation_id is null for Claude.
   anchor_key_column: 'session_id',
-  // @ref LLP 0028#row-selection — the enrichment scans *signal*, not plumbing.
+  // @ref LLP 0028#row-selection: the enrichment scans *signal*, not plumbing.
   // `part_type` distinguishes content kinds (text / reasoning / tool_call /
   // tool_result …); `exclude_part_types` drops whole kinds before the model
-  // sees them. Default excludes `tool_result` — raw tool/file/command output is
+  // sees them. Default excludes `tool_result`, raw tool/file/command output is
   // ~60% of the corpus by volume but not durable knowledge worth extracting.
   part_type_column: 'part_type',
   exclude_part_types: ['tool_result'],
@@ -43,7 +43,7 @@ export const PROPOSE_DEFAULTS = Object.freeze({
   enabled: true,
   interval_minutes: 5,
   max_tick_ms: 60_000,
-  // @ref LLP 0028#two-regimes — the proposer is session-oriented, not
+  // @ref LLP 0028#two-regimes: the proposer is session-oriented, not
   // row-oriented: an ongoing tick extracts whole *settled* sessions (latest
   // part older than `settle_cutoff_minutes`), bounded by `max_sessions_per_tick`
   // so a synchronous tick can't run away. Backfill ignores both knobs.
@@ -65,7 +65,7 @@ export const CURATE_DEFAULTS = Object.freeze({
   t2_model: 'claude-opus-4-8',
   salience_threshold: 0.0,
   recall_top_k: 8,
-  // @ref LLP 0028#curate-clustering — the curate unit is a similarity/recall
+  // @ref LLP 0028#curate-clustering: the curate unit is a similarity/recall
   // cluster, not a session. A prospect whose top recall hit clears
   // `recall_cluster_floor` is grouped against that committed region; the
   // no-recall remainder is greedily clustered by embedding cosine
@@ -91,7 +91,7 @@ export function validateEnrichConfig(value) {
   const raw = /** @type {Record<string, unknown>} */ (value ?? {})
 
   // Dataset/column fields are interpolated as SQL identifiers in the
-  // propose/curate queries, so they must be strict identifiers — a typo
+  // propose/curate queries, so they must be strict identifiers: a typo
   // becomes a runtime SQL failure, and an unvalidated string would let
   // crafted config alter the generated query. (`anchor_type` and
   // `recall_index` are used as values / index names, not SQL identifiers.)
@@ -108,7 +108,7 @@ export function validateEnrichConfig(value) {
   // explicit `[]` disables the part-type filter (it is not undefined, so it
   // is honored rather than falling back to the default).
   //
-  // @ref LLP 0028#row-selection — the default `['tool_result']` only fits the
+  // @ref LLP 0028#row-selection: the default `['tool_result']` only fits the
   // default `ai_gateway_messages` schema, which has a `part_type` column. A
   // custom `source_dataset` may not, so it defaults to *no* part-type filter
   // (`[]`) rather than emitting `part_type NOT IN (…)` against a column the
@@ -245,7 +245,7 @@ function readString(raw, key, errors, prefix = '') {
 /**
  * Read an array of non-empty strings. Returns `undefined` when the key is
  * absent (caller falls back to the default), but an explicit empty array is
- * returned as-is — `[]` is a meaningful "filter nothing" value, distinct from
+ * returned as-is: `[]` is a meaningful "filter nothing" value, distinct from
  * "not configured".
  *
  * @param {Record<string, unknown>} raw

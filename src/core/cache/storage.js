@@ -56,7 +56,7 @@ export function resolveIcebergDir(tablePath) {
  * scans; the dispatcher hands the same instance to built-in commands.
  *
  * Every `appendRows` call is wrapped in a `cache.append` span carrying
- * `hyp_dataset`, `row_count`, and `bytes_written` — the contract the
+ * `hyp_dataset`, `row_count`, and `bytes_written` - the contract the
  * Phase 4 smoke (and the SQL assertion in the implementation plan)
  * exercise.
  *
@@ -66,7 +66,7 @@ export function resolveIcebergDir(tablePath) {
  *   getSettleHook?: (dataset: string) => ((rows: Record<string, unknown>[], ctx: { storage: ExtendedQueryStorageService }) => Promise<Record<string, unknown>[]>) | undefined,
  * }} args
  * @returns {ExtendedQueryStorageService}
- * @ref LLP 0013#write-path-and-query [implements] — kernel-owned cache write path; every source row lands here
+ * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
 export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
@@ -79,7 +79,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
-      // @ref LLP 0027#decision — flush-time settlement: the owning dataset
+      // @ref LLP 0027#decision: flush-time settlement: the owning dataset
       // may upgrade provisional (fallback) row identity and dedupe before
       // the batch is committed. Generic and optional; the hook itself
       // short-circuits cheaply when a batch has nothing to settle.
@@ -297,7 +297,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       return discoverCachePartitionsImpl(cacheRoot, scope)
     },
 
-    // @ref LLP 0027#open-questions [implements] — read-only spool surface so
+    // @ref LLP 0027#open-questions [implements]: read-only spool surface so
     // `hyp backfill` can dedupe against rows captured live but not yet flushed,
     // which the committed-partition scan cannot see. Inspection-only: never
     // rotates or advances flush progress, so it is safe alongside live capture.

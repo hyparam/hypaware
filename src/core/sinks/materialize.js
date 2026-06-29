@@ -43,13 +43,13 @@ import {
  *
  * Three sink shapes are supported:
  *
- * - **request**: `{ plugin }` — resolves that plugin's registered sink
+ * - **request**: `{ plugin }`, resolves that plugin's registered sink
  *   contribution.
  * - **blob**: `{ writer, destination }` where the writer provides
- *   `hypaware.encoder` — resolves encoder and destination blob-store
+ *   `hypaware.encoder`, resolves encoder and destination blob-store
  *   contributions.
  * - **table-format**: `{ writer, destination }` where the writer provides
- *   `hypaware.table-format` — resolves table-format provider, blob-store
+ *   `hypaware.table-format`, resolves table-format provider, blob-store
  *   from destination, inner encoder from `config.encoder` pin or default
  *   `@hypaware/format-parquet`.
  *
@@ -167,7 +167,7 @@ async function materializeRequest(runtime, instanceName, raw, opts) {
   if (contributions.length > 1) {
     throw materializeError(
       'sink_contribution_ambiguous',
-      `sink '${instanceName}': plugin '${pluginName}' registered ${contributions.length} sink contributions — cannot select unambiguously`
+      `sink '${instanceName}': plugin '${pluginName}' registered ${contributions.length} sink contributions - cannot select unambiguously`
     )
   }
 

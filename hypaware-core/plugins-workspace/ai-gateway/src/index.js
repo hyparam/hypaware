@@ -33,10 +33,10 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  * sets `state.listen`, which is what makes
  * `AiGatewayCapability.localEndpoint()` resolve. Until then the
  * capability is registered (adapters can record their contributions)
- * but `localEndpoint()` throws — the contract documented in api.js.
+ * but `localEndpoint()` throws: the contract documented in api.js.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — owns the gateway capability + ai_gateway_messages; no client specifics
+ * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: owns the gateway capability + ai_gateway_messages; no client specifics
  */
 export async function activate(ctx) {
   const state = createGatewayState()

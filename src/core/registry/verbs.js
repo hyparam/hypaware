@@ -17,7 +17,7 @@ import { verbToCommand } from '../cli/verb_command.js'
  *
  * @param {{ commandRegistry?: CommandRegistry }} [opts]
  * @returns {VerbRegistry}
- * @ref LLP 0034#tool-exposure-emergent [implements] — no central tool gate; the surface is exactly the verbs active plugins register
+ * @ref LLP 0034#tool-exposure-emergent [implements]: no central tool gate; the surface is exactly the verbs active plugins register
  */
 export function createVerbRegistry(opts = {}) {
   const commandRegistry = opts.commandRegistry

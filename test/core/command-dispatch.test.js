@@ -186,7 +186,7 @@ test('top-level help lists commands declared by config-active plugins', async ()
   assert.equal(stderr.text(), '')
   const out = stdout.text()
   // context-graph is in the default surface; vector-search is excluded
-  // from default but config-enabled here — both must appear, with the
+  // from default but config-enabled here: both must appear, with the
   // summary pulled from the manifest's `contributes.commands`.
   assert.match(out, /graph project\s+Project every registered source contract/)
   assert.match(out, /graph neighbors\s+Walk the activity graph/)
@@ -197,15 +197,15 @@ test('top-level help lists commands declared by config-active plugins', async ()
 
 test('top-level help lists a local plugin addition on a fleet-joined host', async () => {
   // Regression: help must resolve the effective config the same way
-  // `bootKernel` does — with the discovered plugin catalog. A joined host
+  // `bootKernel` does: with the discovered plugin catalog. A joined host
   // has a central layer; the merge validator, run WITHOUT the catalog,
   // treats every bundled plugin as unknown and drops the local `plugins[]`
-  // addition (`@hypaware/context-graph`) — so help would hide `graph`
+  // addition (`@hypaware/context-graph`), so help would hide `graph`
   // commands that actually dispatch.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-joined-'))
   const controlDir = path.join(hypHome, 'hypaware', 'config-control')
   await fs.mkdir(controlDir, { recursive: true })
-  // Central layer (authoritative, fleet-owned) — does NOT include the graph.
+  // Central layer (authoritative, fleet-owned): does NOT include the graph.
   await fs.writeFile(
     path.join(controlDir, 'seed.json'),
     JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/local-fs' }] })
@@ -350,7 +350,7 @@ test('top-level help lists the installed plugin that replaces an excluded bundle
   // colliding `gascity attach` summary) are what dispatch would run.
   assert.match(out, /gascity attach\s+attach \(installed winner\)/)
   assert.match(out, /gascity real\s+only the installed plugin declares this/)
-  // The replaced skeleton's commands never dispatch — they must not appear.
+  // The replaced skeleton's commands never dispatch: they must not appear.
   assert.equal(out.includes('gascity phantom'), false)
   assert.equal(out.includes('bundled skeleton'), false)
 })
@@ -358,7 +358,7 @@ test('top-level help lists the installed plugin that replaces an excluded bundle
 test('top-level help advertises no commands for an installed plugin that shadows a bundled first-party name', async () => {
   // Regression: an installed plugin shadowing a bundled first-party plugin
   // makes real boot reject before any command dispatches. Help must not
-  // advertise either side's commands — none of them will ever run.
+  // advertise either side's commands: none of them will ever run.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-shadow-'))
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
@@ -595,7 +595,7 @@ function fakeClientKernel() {
     ])
   )
 
-  // Fake an `hypaware.ai-gateway@2.0.0` surface — that's the range
+  // Fake an `hypaware.ai-gateway@2.0.0` surface: that's the range
   // the CLI dispatcher requires after the phase-1 capability bump,
   // and the test's `dispatch(['attach', ...])` call resolves against
   // it before it ever reaches the client hooks above.

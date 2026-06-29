@@ -23,7 +23,7 @@ function fingerprintToken(token) {
 /**
  * Eagerly refresh when the remaining lifetime falls inside this window
  * (24h). Matches the donor `collectivus/src/gateway/identity.js`
- * contract — see proto.md "Refresh window".
+ * contract: see proto.md "Refresh window".
  */
 export const REFRESH_WINDOW_SECONDS = 24 * 60 * 60
 
@@ -87,7 +87,7 @@ export class IdentityClient {
       // gateway_id, so re-bootstrap with the new token instead. In steady
       // state no bootstrap token is configured (the seed is retired after
       // first apply), so this never fires and the persisted JWT is reused.
-      // @ref LLP 0031#physical-layout [implements] re-join re-bootstraps a fresh gateway identity; clearing config slots alone leaves identity.json shadowing the new token
+      // @ref LLP 0031#physical-layout [implements]: re-join re-bootstraps a fresh gateway identity; clearing config slots alone leaves identity.json shadowing the new token
       if (this.bootstrapToken && mintChanged(persisted, this.centralUrl, this.bootstrapToken)) {
         await this.bootstrap()
         return 'bootstrapped'
@@ -98,7 +98,7 @@ export class IdentityClient {
       // file this server's data under the other server's gateway_id, a
       // cross-tenant leak. Refuse rather than silently mis-route; the
       // operator must re-run `hyp join` against the new server.
-      // @ref LLP 0031#physical-layout [implements] a re-point with no token cannot safely reuse the old identity, so loading is refused
+      // @ref LLP 0031#physical-layout [implements]: a re-point with no token cannot safely reuse the old identity, so loading is refused
       if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
         throw new Error(
           `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
@@ -213,7 +213,7 @@ export class IdentityClient {
    */
   async getCurrentJwt() {
     if (!this.identity) {
-      throw new Error('identity not acquired — call acquire() first')
+      throw new Error('identity not acquired - call acquire() first')
     }
     const remainingSec = this.identity.expires_at - Math.floor(this.now() / 1000)
     if (remainingSec <= REFRESH_WINDOW_SECONDS) {
@@ -303,7 +303,7 @@ function writePersistedFile(filePath, identity) {
   try {
     fs.chmodSync(filePath, 0o600)
   } catch {
-    // best effort — rename already replaced the file
+    // best effort: rename already replaced the file
   }
 }
 
@@ -332,7 +332,7 @@ function identityFromPayload(parsed, fallbackGatewayId) {
 
 /**
  * Decode the `sub` claim from a JWT without verifying the signature.
- * The gateway trusts the TLS connection for authenticity — it has no
+ * The gateway trusts the TLS connection for authenticity: it has no
  * way to verify the JWT (it doesn't share the issuer secret).
  *
  * @param {string} jwt
@@ -399,7 +399,7 @@ async function readErrorDetail(response) {
         if (error) return `${response.status} ${error}`
       }
     } catch {
-      // plain text body — fall through
+      // plain text body: fall through
     }
     return `${response.status} ${body.trim().slice(0, 200)}`
   }

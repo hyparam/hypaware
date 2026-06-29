@@ -34,7 +34,7 @@ const COLUMNS = [
 /**
  * Conversation-contiguous rows (the order `readRows` yields). Each
  * conversation repeats one wide `tools` blob; the blob differs per
- * conversation, so the column has `nConvs` distinct values total — enough
+ * conversation, so the column has `nConvs` distinct values total: enough
  * distinct ~20 KB blobs to exceed hyparquet-writer's 1 MiB dictionary cap
  * when they all land in one row group.
  *
@@ -118,7 +118,7 @@ test('with clustering, the wide column stays dictionary-encoded and the file shr
     `expected tools to be dictionary-encoded under clustering, got ${[...tools].join(',')}`
   )
 
-  // Same rows, same codec — the only difference is row-group clustering, which
+  // Same rows, same codec: the only difference is row-group clustering, which
   // keeps the repeated blob stored once per group instead of once per row.
   assert.ok(
     clustered.bytesWritten * 3 < plain.bytesWritten,
@@ -159,7 +159,7 @@ test('a fat row flushes the group before it is added, so no group overshoots the
   // one fits. The byte check must run *before* the row is added: otherwise the
   // group accumulates one row, fails the `groupBytes >= cap` test (it is still
   // under), then takes a second fat row to ~36 MB before flushing on the next
-  // iteration — overshooting the heap bound by a whole row. With the pre-add
+  // iteration, overshooting the heap bound by a whole row. With the pre-add
   // check, every fat row lands in its own row group.
   const encoder = await makeEncoder()
   const ROWS = 4
@@ -193,12 +193,12 @@ test('a fat row flushes the group before it is added, so no group overshoots the
 
 test('JSON object columns are interned so they dictionary-encode AND round-trip as objects', async () => {
   // The cache stores JSON columns as Iceberg `variant`, so the reader hands
-  // them back as parsed objects — a fresh object reference per row even when
+  // them back as parsed objects: a fresh object reference per row even when
   // the content repeats. The writer keys its dictionary by reference, so
   // without help it sees every row as distinct and bails to PLAIN (this is
   // what kept the real `tools` column at >1 GB even with clustering active).
   // Interning identical-content objects to one shared reference lets them
-  // dictionary-encode WITHOUT stringifying — so the JSON logical type still
+  // dictionary-encode WITHOUT stringifying, so the JSON logical type still
   // round-trips the original object to readers (no double-encoding).
   const encoder = await makeEncoder()
   const cols = [
@@ -209,7 +209,7 @@ test('JSON object columns are interned so they dictionary-encode AND round-trip 
   async function* rows() {
     for (let c = 0; c < 40; c++) {
       const conversation_id = `conv-${c}`
-      // Fresh object reference each row, identical content — mirrors the reader.
+      // Fresh object reference each row, identical content: mirrors the reader.
       for (let r = 0; r < 10; r++) yield { conversation_id, tools: content(conversation_id) }
     }
   }

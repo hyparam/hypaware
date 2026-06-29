@@ -2,8 +2,8 @@
 
 /**
  * Module-local runtime singleton for `@hypaware/context-graph`. Holds the
- * contract registry created at `activate()` so the `graph project` command —
- * which runs with a `CommandRunContext`, not the activation context — can read
+ * contract registry created at `activate()` so the `graph project` command,
+ * which runs with a `CommandRunContext`, not the activation context, can read
  * the contracts source plugins contributed through the capability without
  * rebuilding an activation context. Mirrors `@hypaware/ai-gateway`'s
  * `runtime.js` (saved-state-as-source-of-truth) convention.
@@ -25,7 +25,7 @@ export function setGraphRuntime(value) {
  */
 export function requireGraphRuntime() {
   if (!runtime) {
-    throw new Error('@hypaware/context-graph: not activated yet — runtime singleton is empty')
+    throw new Error('@hypaware/context-graph: not activated yet - runtime singleton is empty')
   }
   return runtime
 }

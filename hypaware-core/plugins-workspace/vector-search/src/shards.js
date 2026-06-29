@@ -11,7 +11,7 @@ import path from 'node:path'
 
 /**
  * Shard layout: one hypvector parquet file per cache partition, plus a
- * JSON sidecar carrying what the parquet KV metadata cannot — the
+ * JSON sidecar carrying what the parquet KV metadata cannot: the
  * embedder model and the source partition's row count at build time.
  * Files live under `<plugin stateDir>/indexes/<index>/`:
  *
@@ -35,14 +35,14 @@ function sortedEntries(partition) {
  * a human-readable label plus a short hash of the canonical partition
  * JSON. The sanitized label alone is lossy (`source=a/b` and
  * `source=a_b` both render `source=a_b`, and a value containing `,`
- * or `=` can mimic another partition's entry list), so the hash —
- * not the label — is what makes distinct partitions map to distinct
+ * or `=` can mimic another partition's entry list), so the hash (not the label)
+ * is what makes distinct partitions map to distinct
  * shard files. Keys are sorted so discovery order can never produce
  * two names for one partition; `all` covers partition-less datasets.
  *
  * @param {Record<string, string>} partition
  * @returns {string}
- * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — shard file names are label + partition hash so sanitization can never collide two partitions
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements]: shard file names are label + partition hash so sanitization can never collide two partitions
  */
 export function shardFileBase(partition) {
   const entries = sortedEntries(partition)
@@ -85,7 +85,7 @@ export function contentId(text) {
 
 /**
  * Read every shard sidecar under one index dir. Unreadable or
- * malformed sidecars are skipped — the shard will classify as
+ * malformed sidecars are skipped: the shard will classify as
  * `missing` and rebuild through the normal path.
  *
  * @param {string} indexesDir
@@ -115,7 +115,7 @@ export function readShardMetas(indexesDir, indexName) {
         if (parsed.row_count > 0 && !fs.existsSync(path.join(dir, `${fileBase}.parquet`))) continue
         metas.set(fileBase, /** @type {ShardMeta} */ (parsed))
       }
-    } catch { /* malformed sidecar — rebuild path handles it */ }
+    } catch { /* malformed sidecar: rebuild path handles it */ }
   }
   return metas
 }
@@ -155,11 +155,11 @@ function matchesDeclaration(meta, decl, partition) {
  *    (an index name reused over a different dataset/column must never
  *    pass row-count + model checks and serve the old vectors)
  *  - sidecar model differs from config model  → `stale_model`
- *    (stale, not an error — the refresh path re-embeds)
+ *    (stale, not an error: the refresh path re-embeds)
  *  - sidecar dimension differs from the expected dimension, when the
  *    caller knows one                          → `stale_dimension`
  *    (the embedder's configured `dimensions`, or the dimension the
- *    query embedded to — same model, different vector length)
+ *    query embedded to: same model, different vector length)
  *  - sidecar source_row_count differs from the partition's current
  *    rowCount                                  → `stale_rows`
  *    (compaction dedup can shrink rowCount without new content; the
@@ -171,7 +171,7 @@ function matchesDeclaration(meta, decl, partition) {
  *
  * @param {{ partitions: CachePartitionMeta[], metas: Map<string, ShardMeta>, decl: VectorIndexDeclaration, model: string, dimension?: number }} args
  * @returns {ShardState[]}
- * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — declaration, model, and dimension drift are all staleness; retention coupling dissolves into orphan sweep
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements]: declaration, model, and dimension drift are all staleness; retention coupling dissolves into orphan sweep
  */
 export function computeShardStates({ partitions, metas, decl, model, dimension }) {
   /** @type {ShardState[]} */
@@ -208,7 +208,7 @@ export function computeShardStates({ partitions, metas, decl, model, dimension }
 
 /**
  * Merge per-shard hit lists into one global top-K. Scores are cosine
- * over normalized vectors (higher = better) — fixed at shard write
+ * over normalized vectors (higher = better): fixed at shard write
  * time, so a plain descending sort is a correct merge.
  *
  * @template {RawShardHit} T
@@ -226,7 +226,7 @@ export function mergeTopK(hitLists, topK) {
 
 /**
  * Render a partition for display (`source=claude`, or `all`). Unlike
- * {@link shardFileBase} this is unsanitized and unhashed — display
+ * {@link shardFileBase} this is unsanitized and unhashed: display
  * strings don't need to be collision-free file names.
  *
  * @param {Record<string, string>} partition

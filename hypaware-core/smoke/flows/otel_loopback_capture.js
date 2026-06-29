@@ -11,7 +11,7 @@ import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
- * Phase 7 smoke — OTLP HTTP listener acceptance plus daemon
+ * Phase 7 smoke: OTLP HTTP listener acceptance plus daemon
  * self-telemetry capture into local storage, under the daemon boot
  * path.
  *
@@ -25,11 +25,11 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *
  *   - **Daemon self-telemetry loopback.** With `HYP_DEV_TELEMETRY=1`
  *     the kernel's JSONL exporter records every daemon-emitted span
- *     into `<state>/dev-telemetry/` — that's the "local storage" the
+ *     into `<state>/dev-telemetry/`: that's the "local storage" the
  *     bead asks for. The smoke asserts the expected spans landed:
  *     `source.start` (otlp), `sink.tick`, `daemon.shutdown`. No OTLP
  *     loopback into the cache is required (the kernel's exporters are
- *     JSONL-vs-OTLP mutually exclusive — see
+ *     JSONL-vs-OTLP mutually exclusive: see
  *     `src/core/observability/tracer.js`).
  *
  * @param {{ harness: any, expect: any }} args
@@ -38,7 +38,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'otel_loopback_capture: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'otel_loopback_capture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -68,7 +68,7 @@ export async function run({ harness, expect }) {
   })
 
   // Snapshot reports the bound otel host/port via the source's
-  // `status().details` — that's how external OTLP clients discover it.
+  // `status().details`: that's how external OTLP clients discover it.
   const otelDetails = /** @type {{ listen_host: string, listen_port: number }} */ (
     handle.snapshot().sources.find((s) => s.name === 'otlp')?.details
   )
@@ -154,7 +154,7 @@ export async function run({ harness, expect }) {
     (arr) => Array.isArray(arr) && arr.length >= 3 && arr.every((v) => v === harness.devRunId),
   )
 
-  // sentinel — ports got reaped on stop so a follow-up listener could
+  // sentinel: ports got reaped on stop so a follow-up listener could
   // re-bind cleanly if a downstream phase wants it.
   const probe = await canBind(otelDetails.listen_host, otelDetails.listen_port)
   expect.that(

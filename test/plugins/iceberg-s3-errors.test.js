@@ -167,6 +167,6 @@ test('writer onWrite observer that throws does not break the commit', async () =
   if (!resolver.writer) throw new Error('writer required')
   const writer = resolver.writer(`blob://${KEY}`, { ifNoneMatch: '*' })
   writer.appendBytes(new Uint8Array([1]))
-  // Must not throw — observer failures are best-effort.
+  // Must not throw: observer failures are best-effort.
   await writer.finish()
 })

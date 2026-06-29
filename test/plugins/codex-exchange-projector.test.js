@@ -173,7 +173,7 @@ test('OpenAI Responses body usage is normalized onto one assistant response item
 
   assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant', 'assistant'])
   // Response-level usage rides the LAST assistant output item (here the
-  // function_call), not the first — one carrier per response, same row Claude
+  // function_call), not the first. One carrier per response, same row Claude
   // uses. @ref LLP 0035#one-carrier
   assert.equal(projection.messages[1].attributes, undefined)
   assert.deepEqual(projection.messages[2].attributes, {
@@ -431,7 +431,7 @@ test('OpenAI Responses turn-1 response shape matches turn-2 input replay shape (
   }), context()))
 
   // Turn 1's assistant text + tool_use must match turn 2's replayed input items
-  // block-for-block — that's what makes content-hash dedupe collapse them.
+  // block-for-block. That's what makes content-hash dedupe collapse them.
   assert.deepEqual(turn1.messages[1].content, turn2.messages[1].content)
   assert.deepEqual(turn1.messages[2].content, turn2.messages[2].content)
 })
@@ -605,13 +605,13 @@ test('Codex turn metadata + headers project into first-class columns and codex.*
 
   // LLP 0032: repo identity promoted to first-class projection fields (still
   // mirrored in attributes.codex.* for provenance). head_sha carries the raw
-  // captured value — `abc123` here is abbreviated, so the graph's commitKey
+  // captured value. `abc123` here is abbreviated, so the graph's commitKey
   // guard mints no Commit node, but the column stays faithful to capture.
   assert.equal(projection.git_remote, 'git@github.com:acme/repo.git')
   assert.equal(projection.head_sha, 'abc123')
   // repo_root stays null: the workspace path is NOT a verified git toplevel
-  // (it may be a repo subdir), so Codex File keys must not bridge against it —
-  // they fall back to absolute. @ref LLP 0032#codex-repo-root
+  // (it may be a repo subdir), so Codex File keys must not bridge against it.
+  // They fall back to absolute. @ref LLP 0032#codex-repo-root
   assert.equal(projection.repo_root, undefined)
 
   assert.equal(projection.attributes.codex.thread_id, 'thread-x')

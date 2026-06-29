@@ -19,7 +19,7 @@ export const BLOB_STORE_KIND = 's3'
  * smoke and unit tests can supply a fake S3 client without spinning up
  * the AWS SDK. Production builds wire `defaultS3BlobStoreClientFactory`.
  *
- * Keys passed to put/get/delete are relative — the BlobStore prepends
+ * Keys passed to put/get/delete are relative: the BlobStore prepends
  * the configured `prefix` (slash-joined) before calling into S3. `prefix`
  * is normalized at construction so callers do not have to think about
  * trailing slashes.
@@ -67,7 +67,7 @@ export function createS3BlobStore({ bucket, prefix, client }) {
     // `bucket` and `prefix` are surfaced on the returned BlobStore so
     // consumers that care about S3-specific telemetry (e.g. the iceberg
     // commit span) can read them without reaching back into config.
-    // They are advisory — the BlobStore methods do not consult these
+    // They are advisory: the BlobStore methods do not consult these
     // properties, the original closure values are the source of truth.
     bucket,
     prefix: normalized,
@@ -289,7 +289,7 @@ export async function defaultS3BlobStoreClientFactory(opts) {
 /**
  * Build a sentinel `BlobStore` that fails every call with a clear
  * actionable error. The s3 plugin returns this when activation runs
- * without a plugin-level bucket — the capability still resolves (so
+ * without a plugin-level bucket: the capability still resolves (so
  * downstream consumers can discover the s3 provider exists) but using
  * it without configuration is a programming error, not a silent
  * fallback.

@@ -22,7 +22,7 @@ const PLUGIN_NAME = '@hypaware/vector-search'
  * Bring every configured index up to date, incrementally: only
  * missing/stale shards are rebuilt, orphaned shards are swept, and the
  * optional budget bounds wall-clock and embedding spend. Budgets are
- * soft — they gate *starting* a shard, not finishing it, so one
+ * soft: they gate *starting* a shard, not finishing it, so one
  * oversized partition overshoots a tick once instead of starving
  * forever.
  *
@@ -40,7 +40,7 @@ const PLUGIN_NAME = '@hypaware/vector-search'
  *   onShard?: (info: { index: string, fileBase: string, state: string, rowsEmbedded: number }) => void,
  * }} args
  * @returns {Promise<RefreshReport>}
- * @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements] — incremental per-partition shard builds under a tick budget; per-shard writes are durable
+ * @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements]: incremental per-partition shard builds under a tick budget; per-shard writes are durable
  */
 export async function refreshIndexes({ decls, embedder, storage, indexesDir, log, budget, dimension, onShard }) {
   /** @type {RefreshReport} */
@@ -66,7 +66,7 @@ export async function refreshIndexes({ decls, embedder, storage, indexesDir, log
       dimension: embedder.dimensions ?? dimension,
     })
 
-    // Orphans sweep even on an exhausted budget — deletion is cheap and
+    // Orphans sweep even on an exhausted budget: deletion is cheap and
     // never spends embedding tokens.
     for (const state of states) {
       if (state.state === 'orphan') {
@@ -160,7 +160,7 @@ async function withShardBuildLock(key, fn) {
  * id, embed, and write the hypvector file + sidecar atomically. Builds
  * of the same shard serialize in-process; temp names carry pid + a
  * UUID so concurrent processes (CLI search vs daemon tick) can never
- * write the same temp file, and the final rename stays atomic —
+ * write the same temp file, and the final rename stays atomic:
  * last-writer-wins on identical inputs.
  *
  * @param {{
@@ -173,7 +173,7 @@ async function withShardBuildLock(key, fn) {
  *   log: PluginLogger,
  * }} args
  * @returns {Promise<{ rowsEmbedded: number }>}
- * @ref LLP 0024#index-files-are-plugin-state [implements] — shards are derived artifacts under plugin state, rebuilt from the cache
+ * @ref LLP 0024#index-files-are-plugin-state [implements]: shards are derived artifacts under plugin state, rebuilt from the cache
  */
 async function buildShard({ decl, partition, state, embedder, storage, indexesDir, log }) {
   const { file } = shardPaths(indexesDir, decl.name, state.fileBase)

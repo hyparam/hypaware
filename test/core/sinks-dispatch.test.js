@@ -152,7 +152,7 @@ test('instantiate table-format sink wires blobStore + encoder + config into crea
 test('instantiate table-format sink intersects supports tags between provider and encoder', async () => {
   const registry = createSinkRegistry()
   const provider = makeTableFormatProvider({ supports: ['queryable'] })
-  // Encoder that does NOT advertise queryable — the resolved sink should
+  // Encoder that does NOT advertise queryable. The resolved sink should
   // drop the tag (the queryable-only-when-both-agree rule).
   const encoder = makeEncoder({ format: 'jsonl', extension: 'jsonl', supports: [] })
   const handle = await registry.instantiate({
@@ -279,7 +279,7 @@ test('validateConfig rejects table-format writer without blob-store destination'
 })
 
 test('validateConfig rejects writer providing neither encoder nor table-format', async () => {
-  // `@hypaware/ai-gateway` provides hypaware.ai-gateway — neither encoder
+  // `@hypaware/ai-gateway` provides hypaware.ai-gateway: neither encoder
   // nor table-format. Using it as a blob-sink writer must surface as
   // sink_writer_invalid, not the generic sink_pair_incompatible kind.
   const result = await validateConfig({

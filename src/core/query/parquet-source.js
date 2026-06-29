@@ -31,7 +31,7 @@ import { whereToParquetFilter } from './parquet-pushdown.js'
  *    filter was active, which can under-return rows when the filter is
  *    selective. Here, when a `WHERE` is present we read every row group
  *    (with the filter applied) and let the engine apply `LIMIT`/`OFFSET`
- *    over the filtered stream — correct, at the cost of not early-stopping.
+ *    over the filtered stream: correct, at the cost of not early-stopping.
  *
  * @param {AsyncBuffer} file
  * @param {FileMetaData} metadata
@@ -76,7 +76,7 @@ export function parquetDataSource(file, metadata) {
                 safeOffset = Math.min(rowCount, hints.offset - groupStart)
               }
               safeLimit = Math.min(rowCount - safeOffset, remainingLimit)
-              // Past the requested window — nothing further to read.
+              // Past the requested window: nothing further to read.
               if (safeLimit <= 0 && safeOffset < rowCount) break
             }
             // Whole row group skipped by OFFSET.

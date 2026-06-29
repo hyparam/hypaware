@@ -8,7 +8,7 @@ import path from 'node:path'
  */
 
 /**
- * Resolve the directory the daemon uses for runtime state files —
+ * Resolve the directory the daemon uses for runtime state files:
  * `<HYP_HOME>/hypaware/run`. The dispatcher passes `stateRoot`
  * (`<HYP_HOME>/hypaware`); this returns the `run` child.
  *
@@ -31,8 +31,8 @@ export function pidFilePath(stateRoot) {
 
 /**
  * Write a PID file atomically (write to `.tmp`, then rename). The
- * caller is the running daemon, so we crash hard on any I/O failure —
- * a daemon that cannot record its PID has nothing for `daemon stop`
+ * caller is the running daemon, so we crash hard on any I/O failure.
+ * A daemon that cannot record its PID has nothing for `daemon stop`
  * to target later.
  *
  * @param {string} stateRoot
@@ -51,8 +51,8 @@ export function writePidFile(stateRoot, entry) {
 
 /**
  * Read the current PID file, returning `null` when no daemon has
- * claimed this `HYP_HOME` (no file). Malformed files raise — the
- * caller's job is to surface "daemon state is corrupt" to the user
+ * claimed this `HYP_HOME` (no file). Malformed files raise errors.
+ * The caller's job is to surface "daemon state is corrupt" to the user
  * rather than silently swallowing it.
  *
  * @param {string} stateRoot
@@ -81,8 +81,8 @@ export function readPidFile(stateRoot) {
 }
 
 /**
- * Best-effort delete of the PID file. Silent when nothing is there —
- * shutdown should not throw if a parallel `daemon stop` already
+ * Best-effort delete of the PID file. Silent when nothing is there.
+ * Shutdown should not throw if a parallel `daemon stop` already
  * cleaned up.
  *
  * @param {string} stateRoot

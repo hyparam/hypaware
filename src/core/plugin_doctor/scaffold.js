@@ -122,7 +122,7 @@ function sourceActivate(slug) {
     `/**\n` +
     ` * Activate the ${slug} plugin.\n` +
     ` *\n` +
-    ` * Registers source '${slug}'. The source does not start here —\n` +
+    ` * Registers source '${slug}'. The source does not start here -\n` +
     ` * \`start()\` owns the lifecycle and reads config from \`ctx.config\`.\n` +
     ` *\n` +
     ` * @param {PluginActivationContext} ctx\n` +
@@ -228,7 +228,7 @@ function datasetActivate(slug) {
 function typesTemplate({ slug, kind }) {
   return (
     `// Shared interfaces for the ${slug} plugin. Define plugin-local\n` +
-    `// types here and import them with @import JSDoc — do not use\n` +
+    `// types here and import them with @import JSDoc - do not use\n` +
     `// @typedef or inline import('...') types (see CLAUDE.md).\n\n` +
     `export interface ${pascal(slug)}Config {\n` +
     `  // TODO: fields read from ctx.config for this ${kind}.\n` +
@@ -249,7 +249,7 @@ function readmeTemplate({ name, slug, kind }) {
     `# Validate the plugin (static checks + dry-run activate):\n` +
     `hyp plugin doctor .\n` +
     '```\n\n' +
-    `Edit \`src/index.js\` — the \`activate(ctx)\` function registers the\n` +
+    `Edit \`src/index.js\` - the \`activate(ctx)\` function registers the\n` +
     `${kind} '${slug}'. See \`docs/PLUGIN_AUTHORING.md\` in the HypAware repo\n` +
     `for the full authoring guide.\n`
   )

@@ -25,7 +25,7 @@ const MAX_SOURCE_CHARS = 8_000
  * {@link curateRequestForCluster} / {@link routeClusterDecisions} pieces but
  * submit through the Batch API instead (see batch.js).
  *
- * @ref LLP 0028#curate-clustering [implements]
+ * @ref LLP 0028#curate-clustering [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ deadlineMs?: number, signal?: AbortSignal }} [opts]
@@ -56,7 +56,7 @@ export async function runCurateTick(runtime, opts = {}) {
         calls++
         const routed = routeClusterDecisions(cluster, result, at)
         if (routed.noDecisions) {
-          // Refusal / no tool call — leave the cluster pending for retry.
+          // Refusal / no tool call: leave the cluster pending for retry.
           runtime.log.warn('enrich.curate_no_decisions', { cluster_size: cluster.length })
           continue
         }
@@ -93,12 +93,12 @@ export async function runCurateTick(runtime, opts = {}) {
  *
  * An optional `anchorKeys` allowlist scopes the queue to prospects anchored to
  * those sessions. This is the lever the bounded `hyp enrich backfill --since`
- * curate uses to keep the cold-backfill pool — and its per-prospect recall +
- * greedy O(n²) clustering ({@link buildCurateClusters}) — tractable, *without*
+ * curate uses to keep the cold-backfill pool, and its per-prospect recall +
+ * greedy O(n²) clustering ({@link buildCurateClusters}): tractable, *without*
  * mutating the append-only prospect table: out-of-window prospects stay pending
  * for a later, separately-scoped run rather than being deleted or skip-drained.
  *
- * @ref LLP 0028#curate-clustering [constrained-by]
+ * @ref LLP 0028#curate-clustering [constrained-by]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ anchorKeys?: Set<string> }} [opts]
@@ -240,7 +240,7 @@ export async function appendResolutions(runtime, rows) {
  * One recall pass over the pending prospects: returns the per-prospect hits
  * (reused for clustering and the prompt), the salience-ordered above-threshold
  * prospects (`ordered`, descending novelty), and the below-threshold ones
- * (`skipped`). Novelty is `1 - top-1 similarity` to committed knowledge — a
+ * (`skipped`). Novelty is `1 - top-1 similarity` to committed knowledge: a
  * cheap, no-LLM triage so the curator spends on the least-covered first; the
  * caller writes a terminal resolution for the skipped so they drain instead of
  * re-scoring every tick (@ref LLP 0028#salience-drain). Salience-skipping only
@@ -266,7 +266,7 @@ async function scoreAndRecall(runtime, pending) {
     try {
       hits = await getVector(runtime).search({ query: clusterText(p), topK: c.recall_top_k, ...(recallIndex ? { index: recallIndex } : {}) })
     } catch {
-      // recall unavailable — treat as fully novel / cold
+      // recall unavailable: treat as fully novel / cold
     }
     recallByProspect.set(pid, hits)
     const novelty = hits.length > 0 ? 1 - hits[0].score : 1
@@ -281,10 +281,10 @@ async function scoreAndRecall(runtime, pending) {
  * Group the selected prospects into curator-call clusters
  * ([§curate-clustering](LLP 0028)):
  *
- * - **Recall-region** — prospects whose top recall hit clears
+ * - **Recall-region**: prospects whose top recall hit clears
  *   `recall_cluster_floor` are bucketed by that committed node id (dominates the
  *   warm ongoing regime).
- * - **Embedding** — the no-recall remainder is greedily clustered by its own
+ * - **Embedding**: the no-recall remainder is greedily clustered by its own
  *   embeddings so near-duplicate proposals from different sessions land in one
  *   call (dominates the cold backfill regime). Best-effort: if no embedder is
  *   resolvable the remainder falls back to session grouping.
@@ -315,7 +315,7 @@ export async function clusterProspects(runtime, prospects, recallByProspect) {
 }
 
 /**
- * Bucket warm prospects by their top recalled committed node id — prospects
+ * Bucket warm prospects by their top recalled committed node id: prospects
  * that recall the same region of the graph are curated together against it.
  * Pure.
  *
@@ -462,7 +462,7 @@ function groupByAnchor(prospects) {
  */
 function clusterText(p) {
   const summary = strField(asObject(p.props).summary)
-  return `${strField(p.prospect_type)}: ${strField(p.label)}${summary ? ` — ${summary}` : ''}`.trim()
+  return `${strField(p.prospect_type)}: ${strField(p.label)}${summary ? ` - ${summary}` : ''}`.trim()
 }
 
 /**
@@ -490,7 +490,7 @@ function formatHits(hits) {
 
 /**
  * The cluster's **shared recalled knowledge**: the union of every cluster
- * prospect's recall hits, deduped by committed node id and ordered by score —
+ * prospect's recall hits, deduped by committed node id and ordered by score:
  * the content-based context the curator reasons against (cold clusters yield an
  * empty block).
  *
@@ -512,7 +512,7 @@ function formatSharedRecalled(cluster, recallByProspect) {
 
 /**
  * Targeted source excerpt behind a set of provenance row ids (the union across a
- * cluster's prospects — possibly spanning sessions). Bounded by
+ * cluster's prospects (possibly spanning sessions). Bounded by
  * {@link MAX_SOURCE_CHARS}.
  *
  * @param {EnrichRuntime} runtime
@@ -556,18 +556,18 @@ async function safeDeref(runtime, ids) {
  * source_keys under the canonical `(item_type, item_key)`, so the
  * content-addressed graph id collapses the node while the projector emits this
  * session's `produced` edge ([§committed-only-projection](LLP 0028)). A `reject`
- * — or a prospect the curator omitted (implicit reject) — commits nothing, so a
+ * or a prospect the curator omitted (implicit reject) commits nothing, so a
  * rejected prospect never reaches `enrichment_committed`, hence never the graph.
  *
  * A merge converges only under the *target's* canonical `(item_type, item_id)`,
  * so it needs BOTH `merge_into` (the key) and `item_type` (the type). If either
  * is missing, falling back to the prospect's own type/key would derive a
  * *different* content-addressed id and attach the `produced` edge to the wrong
- * node — silent provenance corruption. An under-specified merge is therefore
+ * node. Silent provenance corruption. An under-specified merge is therefore
  * returned **pending** (`resolution: null`, no commit): it stays in the queue for
  * a later, better-specified pass rather than mis-routing. Pure: no I/O.
  *
- * @ref LLP 0028#committed-only-projection [implements]
+ * @ref LLP 0028#committed-only-projection [implements]:
  *
  * @param {Record<string, unknown>} prospect
  * @param {{ type: string, label: string, summary: string, confidence: number | undefined }} view
@@ -587,7 +587,7 @@ export function routeDecision(prospect, view, decision, at) {
 
   const isMerge = decision.decision === 'merge'
   // A merge without its target key + type cannot be routed to the right
-  // content-addressed node — leave it pending rather than corrupt provenance.
+  // content-addressed node: leave it pending rather than corrupt provenance.
   if (isMerge && (!decision.merge_into || !decision.item_type)) {
     return { committed: null, rejected: false, merged: false, resolution: null }
   }

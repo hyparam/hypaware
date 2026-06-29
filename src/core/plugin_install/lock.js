@@ -18,7 +18,7 @@ export function emptyLock() {
 
 /**
  * Load `plugin-lock.json` from the state directory. A missing file is
- * not an error — callers get an empty lock back. A malformed file is
+ * not an error: callers get an empty lock back. A malformed file is
  * an error: we refuse to silently drop entries the user thinks are
  * installed.
  *

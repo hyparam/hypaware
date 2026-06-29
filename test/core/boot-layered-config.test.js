@@ -13,7 +13,7 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 // The merge wiring lives in boot.js; activate nothing (`{ activate: [] }`)
 // so these assertions stay about the two-layer resolution, not plugin
 // activation. boot.config is the effective merge regardless of profile.
-// @ref LLP 0031#two-layers-merged-at-boot [tests]
+// @ref LLP 0031#two-layers-merged-at-boot [tests]:
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-layered-'))
@@ -109,7 +109,7 @@ test('a local plugin that invalidates the merge (capability tie) is dropped; cen
     plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/format-parquet' }],
   }) + '\n')
 
-  // Local adds a second encoder (ties with central — capability_ambiguous,
+  // Local adds a second encoder (ties with central: capability_ambiguous,
   // dropped) plus a clean additive client (kept).
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,

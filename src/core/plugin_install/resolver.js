@@ -25,7 +25,7 @@ const THIRD_PARTY_UNSCOPED_PREFIX = 'hypaware-plugin-'
  *      development against `hypaware-core/plugins-workspace/<name>`.
  *   2. A token matching a known git prefix (`github:`, `git+https://`,
  *      `https://...git`, `ssh://`, etc.) is a `git` source. The
- *      resolver does not contact the network — it records the URL on
+ *      resolver does not contact the network: it records the URL on
  *      the spec and lets `fetch` perform the clone.
  *   3. A scoped name beginning with `@hypaware/` is a first-party
  *      plugin. It maps to `github:hyperparam/hypaware-<name>` per
@@ -37,13 +37,13 @@ const THIRD_PARTY_UNSCOPED_PREFIX = 'hypaware-plugin-'
  *      plugin, same registry lookup path.
  *
  * Everything else is rejected with a thrown `Error`. The resolver is
- * a pure function — no I/O — so the dispatcher can call it inside the
+ * a pure function (no I/O), so the dispatcher can call it inside the
  * `plugin.install` span without surprises.
  *
  * @param {string} rawSource
  * @param {{ cwd?: string, ref?: string, subdir?: string }} [opts]
  * @returns {PluginSourceSpec}
- * @ref LLP 0007#single-install-surface [implements] — one fixed resolution precedence across first-party and third-party name shapes
+ * @ref LLP 0007#single-install-surface [implements]: one fixed resolution precedence across first-party and third-party name shapes
  */
 export function resolveSource(rawSource, opts = {}) {
   if (typeof rawSource !== 'string' || rawSource.length === 0) {
@@ -129,8 +129,8 @@ export function resolveSource(rawSource, opts = {}) {
 
 /**
  * Heuristic for "this looks like a local filesystem path." The CLI
- * design treats `./foo`, `/abs/foo`, `../foo`, and `foo/bar` as local
- * — anything that isn't a bare identifier and lacks a git protocol
+ * design treats `./foo`, `/abs/foo`, `../foo`, and `foo/bar` as local:
+ * anything that isn't a bare identifier and lacks a git protocol
  * prefix. The resolver does not stat the path; absence is handled by
  * `fetch.js` so the developer gets a `local_dir_missing` error_kind
  * instead of a confusing "unknown command" message.

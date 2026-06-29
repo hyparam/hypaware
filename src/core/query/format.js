@@ -8,16 +8,16 @@
  * Bound a result set's context footprint before it is rendered to a
  * model or terminal. Two independent axes:
  *
- *   1. per-cell truncation — recursively clip every string value to
+ *   1. per-cell truncation: recursively clip every string value to
  *      `maxCell` code points, appending a greppable `…(+N)` marker so
  *      the elision is visible and its size known. Only strings shrink;
  *      numbers/booleans/null pass through unchanged, so `--format json`
  *      output stays valid and same-typed.
- *   2. row budget — drop trailing rows once the cumulative serialized
+ *   2. row budget: drop trailing rows once the cumulative serialized
  *      *row-data* size (compact JSON per row, i.e. the jsonl payload)
  *      exceeds `maxBytes`, so a wide or long result cannot flood the
- *      caller's context. This measures the underlying data — the
- *      dominant, format-independent context cost — not the final
+ *      caller's context. This measures the underlying data: the
+ *      dominant, format-independent context cost, not the final
  *      rendered output, which adds modest per-format overhead (JSON
  *      array syntax and indentation, table padding, markdown escaping).
  *      At least one row is always kept.
@@ -43,7 +43,7 @@ export function applyContextControls(result, controls) {
   }
 
   // Budget: truncate lazily, one source row at a time, and stop as soon as
-  // the budget is exceeded — so a broad query never pays to truncate rows
+  // the budget is exceeded, so a broad query never pays to truncate rows
   // that would be dropped anyway. Always emit at least one row.
   /** @type {Record<string, unknown>[]} */
   const kept = []
@@ -255,7 +255,7 @@ function mdEscape(value) {
 
 /**
  * Decide what a SQL query emits for a completed result, without doing any
- * IO — so the spill-vs-inline behavior is unit-testable. The caller (the
+ * IO. So the spill-vs-inline behavior is unit-testable. The caller (the
  * `query sql` verb's `render`, or `hyp mcp`) performs the actual writes.
  *
  * - Spill mode (`output` set): the full, un-capped result is rendered for
@@ -271,7 +271,7 @@ function mdEscape(value) {
 export function buildQuerySqlOutput(full, opts) {
   if (opts.output) {
     // Render the file content once and reuse it for both the file and the
-    // receipt's byte count — large dumps are exactly the `--output` case,
+    // receipt's byte count: large dumps are exactly the `--output` case,
     // so a second full serialization is wasted work and peak memory.
     const content = renderResult(full, opts.format)
     return {

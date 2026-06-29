@@ -16,7 +16,7 @@ import {
 
 // Re-running `hypaware` on a configured install fronts the first-run
 // picker with a friendly summary + menu instead of starting fresh.
-// @ref LLP 0011#returning-to-a-configured-install [tests]
+// @ref LLP 0011#returning-to-a-configured-install [tests]:
 
 /**
  * @import { HypAwareStatusReport } from '../../src/core/daemon/types.d.ts'

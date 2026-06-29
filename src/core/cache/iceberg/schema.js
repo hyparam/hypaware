@@ -11,8 +11,8 @@
  * needs to create a table.
  *
  * Field ids start at 1 and are assigned in declaration order. The
- * cache does not (yet) maintain id stability across schema evolution
- * — V1 tables are append-only and re-created on schema change.
+ * cache does not (yet) maintain id stability across schema evolution:
+ * V1 tables are append-only and re-created on schema change.
  *
  * @param {readonly ColumnSpec[]} columns
  * @returns {Schema}
@@ -35,7 +35,7 @@ export function icebergSchemaForColumns(columns) {
 /**
  * Reconcile a `ColumnSpec[]` with an existing Iceberg table schema so
  * subsequent appends keep field IDs stable. The result is the schema to
- * use for writes — same fields as `icebergSchemaForColumns` but with IDs
+ * use for writes: same fields as `icebergSchemaForColumns` but with IDs
  * re-bound to the existing table.
  *
  * Rules:

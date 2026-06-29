@@ -9,19 +9,19 @@ Use this skill to validate the `@ref` annotations in a codebase. References are 
 
 Invoke as:
 
-- `/ref-check` — scan the current working directory for all reference annotations and report problems
-- `/ref-check <path>` — scan a specific file or directory
-- `/ref-check --fix` — attempt to auto-repair broken references where possible (e.g., LLP moved to a new number but title still matches)
+- `/ref-check`: scan the current working directory for all reference annotations and report problems
+- `/ref-check <path>`: scan a specific file or directory
+- `/ref-check --fix`: attempt to auto-repair broken references where possible (e.g., LLP moved to a new number but title still matches)
 
 ## What a `@ref` annotation looks like
 
 Per LLP 0000, the reference syntax is:
 
 ```
-@ref LLP NNNN#anchor — gloss
-@ref LLP NNNN#anchor [relation] — gloss
-@ref LLP NNNN — gloss
-@ref path/to/doc.md#anchor — gloss
+@ref LLP NNNN#anchor: gloss
+@ref LLP NNNN#anchor [relation]: gloss
+@ref LLP NNNN: gloss
+@ref path/to/doc.md#anchor: gloss
 ```
 
 Where:
@@ -29,10 +29,10 @@ Where:
 - `NNNN` is a zero-padded four-digit LLP number (or just `NNNN` without padding, e.g. `LLP 42`)
 - `#anchor` is an optional section anchor within the document (maps to a heading in the target file)
 - `[relation]` is an optional relation type: `implements`, `constrained-by`, `tests`, `explains`, or a project-defined type
-- `— gloss` is a short human-readable summary (required per LLP 0000 for readability)
+- `: gloss` is a short human-readable summary (required per LLP 0000 for readability); the colon separates the structured prefix from the gloss
 - The whole thing appears in a language-appropriate comment (`//`, `#`, `/* */`, `--`, etc.)
 
-References are commonly attached to the construct below them — a function, a struct, a block, a variable declaration. Per LLP 0000's attachment semantics, the reference binds to the next named construct.
+References are commonly attached to the construct below them: a function, a struct, a block, a variable declaration. Per LLP 0000's attachment semantics, the reference binds to the next named construct.
 
 ## Ground rules
 
@@ -109,17 +109,17 @@ Group the output by severity:
 ```
 ref-check found 47 references in 23 files.
 
-BROKEN (3) — these must be fixed:
-  src/auth/tokens.rs:42   @ref LLP 0099 — nonexistent LLP
-  src/ui/modal.ts:15      @ref LLP 0074#focus-trap — no such section (did you mean "focus-trapping"?)
-  src/net/client.go:88    @ref docs/vendor/spec.md#tokens — file not found
+BROKEN (3), these must be fixed:
+  src/auth/tokens.rs:42   @ref LLP 0099   (nonexistent LLP)
+  src/ui/modal.ts:15      @ref LLP 0074#focus-trap   (no such section; did you mean "focus-trapping"?)
+  src/net/client.go:88    @ref docs/vendor/spec.md#tokens   (file not found)
 
-WARNING (2) — references point at deprecated LLPs:
-  src/legacy/sync.rs:12   @ref LLP 0009 — tombstoned (no replacement indicated)
-  src/db/migrate.rs:55    @ref LLP 0021 — superseded by LLP 0044
+WARNING (2), references point at deprecated LLPs:
+  src/legacy/sync.rs:12   @ref LLP 0009   (tombstoned, no replacement indicated)
+  src/db/migrate.rs:55    @ref LLP 0021   (superseded by LLP 0044)
 
-HINT (5) — consider updating:
-  src/ui/button.ts:33     @ref LLP 0007#layout — gloss "button click handler" does not obviously relate to section "layout"
+HINT (5), consider updating:
+  src/ui/button.ts:33     @ref LLP 0007#layout: gloss "button click handler" does not obviously relate to section "layout"
   ...
 
 Summary:
@@ -152,15 +152,15 @@ For scripting (this skill can be invoked from CI):
 ## Output formats
 
 - Plain text (default)
-- JSON (`--format=json`) — an array of finding objects for programmatic consumption
-- SARIF (`--format=sarif`) — for integration with CI systems that consume SARIF reports
+- JSON (`--format=json`): an array of finding objects for programmatic consumption
+- SARIF (`--format=sarif`): for integration with CI systems that consume SARIF reports
 
 ## Scope limits
 
 - Do not modify source files without explicit approval in `--fix` mode.
 - Do not modify LLP documents.
 - Do not follow references into unrelated repositories or external URLs.
-- Do not attempt to resolve references that use unknown relation types or unknown reference syntax — report them as hints instead.
+- Do not attempt to resolve references that use unknown relation types or unknown reference syntax; report them as hints instead.
 - Do not assume an LLP moved just because a title matches; always confirm with the user.
 
 ## Integration with other skills

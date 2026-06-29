@@ -21,12 +21,12 @@ const PASSTHROUGH_GIT_RE = /^(?:git\+|git:|ssh:|https?:\/\/|gitlab:|bitbucket:|f
  *
  * Other git-prefixed URLs (gitlab:, bitbucket:, generic git+/git:/ssh:)
  * are accepted as-is so plugin authors using non-GitHub hosts still get
- * a working install path — owner/repo/host telemetry just stays empty.
+ * a working install path, so owner/repo/host telemetry just stays empty.
  *
  * Returns the normalized HTTPS clone URL, parsed `ref` (URL fragment),
  * and GitHub owner/repo/host segments when discoverable. Throws when
  * the token starts with a recognized git prefix but otherwise fails to
- * parse — callers funnel the throw into the `resolver_error` span attr.
+ * parse: callers funnel the throw into the `resolver_error` span attr.
  *
  * @param {string} raw
  * @returns {GitSourceParts}
@@ -85,7 +85,7 @@ export function parseGitSource(raw) {
   }
 
   if (PASSTHROUGH_GIT_RE.test(trimmed)) {
-    // Non-GitHub clone URL — split a `#<ref>` fragment if present, then
+    // Non-GitHub clone URL: split a `#<ref>` fragment if present, then
     // strip any `user:pass@` userinfo from the resulting URL so the
     // persisted spec never carries credentials.
     const hashIdx = trimmed.lastIndexOf('#')

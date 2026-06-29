@@ -5,7 +5,7 @@ import readline from 'node:readline'
 import { PARSE_ERROR, jsonRpcError, parseMessage } from './jsonrpc.js'
 
 /**
- * Serve an MCP server over a newline-delimited JSON-RPC stdio stream — the
+ * Serve an MCP server over a newline-delimited JSON-RPC stdio stream: the
  * default, near-free transport (LLP 0034 §pluggable-transport). Reads one
  * JSON message per line from `stdin`, dispatches it to `server`, and writes
  * each response as a single line to `stdout`.
@@ -25,7 +25,7 @@ import { PARSE_ERROR, jsonRpcError, parseMessage } from './jsonrpc.js'
  *   onError?: (err: unknown) => void,
  * }} args
  * @returns {Promise<void>}
- * @ref LLP 0034#stdio-stdout-discipline [implements] — stdout carries only JSON-RPC; one line per message
+ * @ref LLP 0034#stdio-stdout-discipline [implements]: stdout carries only JSON-RPC; one line per message
  */
 export function serveStdio({ server, stdin, stdout, onError }) {
   return new Promise((resolve) => {

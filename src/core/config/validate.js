@@ -108,7 +108,7 @@ export function firstPartyPluginMetadata() {
  * cross-plugin validator so sink-pair and capability-ambiguity checks
  * work the same way they do for bundled plugins.
  *
- * First-party metadata always wins on collision — the boot path already
+ * First-party metadata always wins on collision: the boot path already
  * rejects installed plugins that shadow first-party names, but the
  * helper is defensive in case it is called outside the boot path (e.g.
  * `hyp config validate` from a host that has not booted).
@@ -129,7 +129,7 @@ export function mergeInstalledManifestsIntoKnown(installedManifests, base) {
 
 /**
  * Derive a `PluginMetadata` snapshot from a plugin manifest. Picks up
- * capability `provides` / `requires` only — schema-validated upstream
+ * capability `provides` / `requires` only, schema-validated upstream
  * by `validateManifest` so the casts here are safe.
  *
  * @param {PluginManifest} manifest
@@ -152,14 +152,14 @@ function pluginMetadataFromManifest(manifest) {
 /**
  * Run the cross-plugin checks and return the raw error list, without the
  * `config.validate` span or per-error logging. The synchronous, quiet
- * core that `validateConfig` wraps — used by the boot-time layer merge,
+ * core that `validateConfig` wraps, used by the boot-time layer merge,
  * which re-validates candidate merges many times and must stay silent and
  * cheap (no telemetry spam, no async).
  *
  * @param {HypAwareV2Config} config
  * @param {ValidateContext} [ctx]
  * @returns {ConfigValidationError[]}
- * @ref LLP 0010#validation [implements] — the same cross-plugin checks, sans span/logging
+ * @ref LLP 0010#validation [implements]: the same cross-plugin checks, sans span/logging
  */
 export function collectConfigErrors(config, ctx = {}) {
   const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
@@ -212,7 +212,7 @@ export function collectConfigErrors(config, ctx = {}) {
  * @param {HypAwareV2Config} config
  * @param {ValidateContext} [ctx]
  * @returns {Promise<ValidateResult>}
- * @ref LLP 0010#validation [implements] — core's cross-plugin checks run after all manifests are loaded
+ * @ref LLP 0010#validation [implements]: core's cross-plugin checks run after all manifests are loaded
  */
 export async function validateConfig(config, ctx = {}) {
   const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
@@ -340,7 +340,7 @@ function checkSinks(config, knownPlugins, errors) {
  * @param {BlobSinkConfigInstance} sink
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
- * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] — writer requires blob-store; rejects writer paired with an http-endpoint
+ * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements]: writer requires blob-store; rejects writer paired with an http-endpoint
  */
 function checkBlobSink(name, sink, knownPlugins, errors) {
   const pointer = `/sinks/${name}`
@@ -378,7 +378,7 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
       errorKind: 'sink_writer_invalid',
       message:
         `sink '${name}': writer '${sink.writer}' provides neither ${CAP_ENCODER} nor ${CAP_TABLE_FORMAT}` +
-        ` — blob sinks need an encoder or table-format writer`,
+        ` - blob sinks need an encoder or table-format writer`,
     })
     return
   }
@@ -400,7 +400,7 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
     if (!destProvidesBlob) {
       const destProvidesHttp = !!destMeta.provides?.[CAP_HTTP_ENDPOINT]
       const hint = destProvidesHttp
-        ? ` (provides ${CAP_HTTP_ENDPOINT} instead — only request sinks accept it)`
+        ? ` (provides ${CAP_HTTP_ENDPOINT} instead - only request sinks accept it)`
         : ''
       errors.push({
         pointer: `${pointer}/destination`,
@@ -428,7 +428,7 @@ function checkBlobSink(name, sink, knownPlugins, errors) {
   if (!destProvidesBlob) {
     const destProvidesHttp = !!destMeta.provides?.[CAP_HTTP_ENDPOINT]
     const hint = destProvidesHttp
-      ? ` (provides ${CAP_HTTP_ENDPOINT} instead — only request sinks accept it)`
+      ? ` (provides ${CAP_HTTP_ENDPOINT} instead - only request sinks accept it)`
       : ''
     errors.push({
       pointer: `${pointer}/destination`,
@@ -499,7 +499,7 @@ function checkRequestSink(name, sink, knownPlugins, errors) {
  * @param {unknown} schedule
  * @param {string} pointer
  * @param {ConfigValidationError[]} errors
- * @ref LLP 0014#config-two-shapes [implements] — schedule is a 5-field cron; friendly DSLs (@hourly) are rejected
+ * @ref LLP 0014#config-two-shapes [implements]: schedule is a 5-field cron; friendly DSLs (@hourly) are rejected
  */
 function checkSchedule(name, schedule, pointer, errors) {
   if (schedule === undefined) return
@@ -681,7 +681,7 @@ function clientDescriptorsWithFallback(clientDescriptors) {
  * it" lines.
  *
  * Client and upstream checks use the plugin catalog's client
- * descriptors rather than hardcoded plugin names — any plugin that
+ * descriptors rather than hardcoded plugin names, any plugin that
  * declares a `contributes.client` with `required_upstreams` gets the
  * same diagnostic coverage.
  *
@@ -712,7 +712,7 @@ export function diagnoseV1Config(config, ctx = {}) {
         kind: 'client_without_gateway',
         pointer: pluginPointer(config, pluginName),
         message:
-          `client plugin '${pluginName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not — ` +
+          `client plugin '${pluginName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not - ` +
           `attach commands will fail until the gateway is enabled.`,
         repair: [
           `hyp init --from-file <config.json>  # re-run picker to add the gateway`,
@@ -733,7 +733,7 @@ export function diagnoseV1Config(config, ctx = {}) {
           kind: `gateway_missing_${primaryUpstream}_upstream`,
           pointer: pluginPointer(config, AI_GATEWAY_PLUGIN),
           message:
-            `'${pluginName}' is enabled but the gateway has no ${upstreamList} upstream — ` +
+            `'${pluginName}' is enabled but the gateway has no ${upstreamList} upstream - ` +
             `${clientName} requests will have nowhere to forward.`,
           repair: [
             `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
@@ -759,7 +759,7 @@ export function diagnoseV1Config(config, ctx = {}) {
         pointer: `/sinks/${name}`,
         message:
           `sink '${name}' targets '${destination}' but no encoder plugin ` +
-          `(${[...encoderPlugins].join(' or ')}) is enabled — local export will produce no files.`,
+          `(${[...encoderPlugins].join(' or ')}) is enabled - local export will produce no files.`,
         repair: [
           `hyp init --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
         ],

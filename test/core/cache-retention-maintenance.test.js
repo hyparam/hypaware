@@ -537,7 +537,7 @@ test('retention cursor stays accurate after new data arrives between ticks', asy
     const result1 = await enforcer.tick()
     assert.equal(result1.sourceTableResults[0].rowsDeleted, 2)
 
-    // New data arrives — creates a new snapshot, triggering a re-scan
+    // New data arrives: creates a new snapshot, triggering a re-scan
     await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
       { id: 4, value: 'new-recent', timestamp: recentTimestamp },
     ])
@@ -674,7 +674,7 @@ test('maintenance reclaims a stale cursor-orphaned table dir with no .retired ma
     const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
     await fs.utimes(orphan, stale, stale)
 
-    // A second generation that is still fresh — must be treated as a
+    // A second generation that is still fresh: must be treated as a
     // possibly-in-flight compaction and left alone.
     const fresh = path.join(sourceDir, 'table-1800000000000')
     await fs.mkdir(path.join(fresh, 'data'), { recursive: true })

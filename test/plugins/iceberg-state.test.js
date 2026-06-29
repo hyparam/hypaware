@@ -143,7 +143,7 @@ test('markerSubsumedBySnapshot accepts a probe-state object and resolves equalit
   assert.equal(
     markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '200', metadata: null }),
     false,
-    'without metadata, only equality counts — ancestry cannot be proven'
+    'without metadata, only equality counts - ancestry cannot be proven'
   )
 })
 

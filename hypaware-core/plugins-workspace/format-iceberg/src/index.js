@@ -15,7 +15,7 @@ const PLUGIN_VERSION = '1.0.0'
  * `createSink` builds an Iceberg writer over the destination's
  * `BlobStore` and the inner `SinkEncoder` resolved by the kernel.
  *
- * The plugin contributes no `sinks[]` entry — table-format writers
+ * The plugin contributes no `sinks[]` entry: table-format writers
  * bypass the destination's sink contribution and become the sink
  * themselves (see `src/core/registry/sinks.js`
  * §`instantiateTableFormat`). The destination must still provide

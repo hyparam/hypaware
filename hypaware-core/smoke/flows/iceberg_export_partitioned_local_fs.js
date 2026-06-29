@@ -59,7 +59,7 @@ const ROWS = [
  *  - export succeeds (`status='exported'`, `bytesWritten > 0`).
  *  - the committed metadata carries a `day(message_created_at)` partition
  *    spec and a `conversation_id`-led sort order.
- *  - the 4 rows land in exactly 2 data files — one per day partition.
+ *  - the 4 rows land in exactly 2 data files: one per day partition.
  *  - each data file's rows read back ordered by `conversation_id` (the
  *    sort happened on write, not just in metadata).
  *  - the `iceberg.table.create` span carries `hyp_partition_spec` and
@@ -74,7 +74,7 @@ const ROWS = [
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
-    throw new Error('iceberg_export_partitioned_local_fs: tracer not installed — expected HYP_DEV_TELEMETRY=1')
+    throw new Error('iceberg_export_partitioned_local_fs: tracer not installed - expected HYP_DEV_TELEMETRY=1')
   }
 
   const cacheRoot = path.join(harness.stateDir, 'cache')
@@ -103,7 +103,7 @@ export async function run({ harness, expect }) {
     async () => {
       const { loaded, failed } = await loadManifests([parquetDir, localFsDir, icebergDir])
       if (failed.length > 0) {
-        throw new Error(`manifest failures — ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`)
+        throw new Error(`manifest failures - ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`)
       }
       const entries = loaded.map((l) => ({
         manifest: l.manifest,

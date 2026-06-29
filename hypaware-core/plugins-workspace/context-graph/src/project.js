@@ -28,7 +28,7 @@ import {
  *
  * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean }} args
  * @returns {Promise<{ nodes: number, edges: number, nodesWritten: number, edgesWritten: number }>}
- * @ref LLP 0023#contract-contribution [implements] — the engine runs every registered contract; adding a source is contributing one
+ * @ref LLP 0023#contract-contribution [implements]: the engine runs every registered contract; adding a source is contributing one
  */
 export async function projectGraph({ query, storage, contracts, config, dryRun = false }) {
   return withSpan(
@@ -104,7 +104,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
 }
 
 /**
- * Filter out rows whose id is already committed in the dataset — the
+ * Filter out rows whose id is already committed in the dataset: the
  * pre-write dedup that keeps re-projection idempotent at query time.
  * Duplicates that slip past it (concurrent projections, partial
  * failures) are merged later by `compactGraphTables` (maintenance.js).
@@ -116,7 +116,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
  * @param {ExtendedQueryStorageService} storage
  * @param {HypAwareV2Config | undefined} config
  * @returns {Promise<GraphRow[]>}
- * @ref LLP 0023#pre-write-dedup [implements] — only a missing dataset is benign; real failures abort instead of duplicating
+ * @ref LLP 0023#pre-write-dedup [implements]: only a missing dataset is benign; real failures abort instead of duplicating
  */
 async function dedupExisting(rows, idCol, dataset, query, storage, config) {
   if (rows.length === 0) return rows
@@ -171,14 +171,14 @@ const propsProvenance = new WeakMap()
  * Merge a duplicate row into the accumulated one: keep the earliest
  * `first_seen` and union props. On a props key conflict the value from
  * the earliest-seen row wins; equal (or unknown) times fall back to a
- * value comparison — so the result is independent of merge order, which
+ * value comparison so the result is independent of merge order, which
  * matters because the projection's source SELECTs have no stable
  * ordering. Shared with the dedup compaction in maintenance.js so
  * projection-time and compaction-time merges agree.
  *
  * @param {GraphRow} existing
  * @param {GraphRow} incoming
- * @ref LLP 0023#merge-policy [implements] — order-independent merge shared by projection and compaction
+ * @ref LLP 0023#merge-policy [implements]: order-independent merge shared by projection and compaction
  */
 export function mergeRow(existing, incoming) {
   const existingTime = firstSeenTime(existing.first_seen)
@@ -238,7 +238,7 @@ function stableJson(value) {
 
 /**
  * Epoch millis for a `first_seen` value. Projection-time rows carry ISO
- * strings; rows scanned back from Iceberg carry `Date` objects — both
+ * strings; rows scanned back from Iceberg carry `Date` objects: both
  * must compare the same way.
  *
  * @param {unknown} value

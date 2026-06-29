@@ -8,7 +8,7 @@ import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-worksp
 
 // Cross-source convergence guard (LLP 0032). A repo, commit, or file seen by
 // BOTH @hypaware/github and a recorded Claude/Codex session must land on ONE
-// graph node — the whole point of the bridge. Convergence is automatic given a
+// graph node: the whole point of the bridge. Convergence is automatic given a
 // shared natural key + a shared id recipe (LLP 0023 §content-addressed-ids), and
 // the GitHub plugin imports THIS repo's id recipe, so the only thing that can
 // break convergence is a key-normalization drift between this connector's
@@ -17,7 +17,7 @@ import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-worksp
 // asserting the HOST bridge mints the same ids from a session's captured
 // remote/sha/path proves the join fires. If a host key recipe drifts, these
 // fail; if the GitHub side drifts, its pins change and these must be updated in
-// lockstep — either way the break is deliberate and visible.
+// lockstep: either way the break is deliberate and visible.
 const GITHUB_PINS = {
   repo: 'e1505143b1ca95f6a92c3681', // nodeId('Repo', 'octocat/hello-world')
   commit: 'c40ec7e789b96f5b036504dd', // nodeId('Commit', '6dcb…db5e')
@@ -83,7 +83,7 @@ test('host Commit -in-> Repo edge converges with the GitHub edge', () => {
 test('worktrees of one repo converge on a single File node', () => {
   // Same file, two checkouts: the main repo and a linked worktree. Different
   // absolute paths and repo roots, but the remote and relpath are identical, so
-  // the bridge key — and therefore the node id — is the same. Absolute-path
+  // the bridge key (and therefore the node id) is the same. Absolute-path
   // keying (pre-0032) would have split this into two File nodes.
   const main = rule('node', 'File').toRow({
     tool_name: 'Edit',

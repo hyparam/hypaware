@@ -27,20 +27,20 @@ const CAPABILITY_VERSION = '1.0.0'
  * Activate `@hypaware/context-graph`.
  *
  * Registers:
- *  - capability `hypaware.context-graph@1.0.0` — source plugins (or a
+ *  - capability `hypaware.context-graph@1.0.0` - source plugins (or a
  *    connector like `@hypaware/ai-gateway-graph`) call `registerContract` to
  *    contribute a projection contract, and build its rows with the shared
  *    `kit` (id recipe + provenance). The engine runs every registered contract.
- *  - dataset `node` and dataset `edge` — derived graph tables, fronted by
+ *  - dataset `node` and dataset `edge` - derived graph tables, fronted by
  *    the kernel-managed Iceberg cache (populated by the projection command,
  *    not by a live source)
- *  - command `graph project` — runs the T0 deterministic projection over
+ *  - command `graph project` - runs the T0 deterministic projection over
  *    every registered source contract
- *  - command `graph compact` — merges duplicate node/edge rows and
+ *  - command `graph compact` - merges duplicate node/edge rows and
  *    rewrites affected partitions into sorted tables
- *  - command `graph neighbors` — walks the activity graph from a seed node out
+ *  - command `graph neighbors` - walks the activity graph from a seed node out
  *    to N hops, reading the published node/edge datasets ([LLP 0026])
- *  - skill `hypaware-graph` — teaches AI clients (Claude, Codex) how to project
+ *  - skill `hypaware-graph` - teaches AI clients (Claude, Codex) how to project
  *    and query the graph; installed by `hyp skills install` when this plugin is
  *    active
  *
@@ -48,7 +48,7 @@ const CAPABILITY_VERSION = '1.0.0'
  * snapshot/commit hook exists, and eventual freshness is acceptable).
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0023#on-demand-projection [implements] — command-only projection keeps the plugin out of the daemon loop
+ * @ref LLP 0023#on-demand-projection [implements]: command-only projection keeps the plugin out of the daemon loop
  */
 export async function activate(ctx) {
   // The contract registry source plugins contribute into, exposed via the

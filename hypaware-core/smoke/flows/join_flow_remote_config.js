@@ -17,7 +17,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
  * Join-flow smoke (LLP 0025): drives the full remote-config lifecycle
- * against a stub central server —
+ * against a stub central server:
  *
  *   join (seed write) → seed boot → identity bootstrap → config pull
  *   (200) → kernel apply → staged restart → relaunch on the served
@@ -29,7 +29,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * service manager would.
  *
  * Under layering (LLP 0031) the seed is the **central** layer, written
- * to config-control/ — never to the user's `hypaware-config.json`. This
+ * to config-control/, never to the user's `hypaware-config.json`. This
  * smoke seeds a pre-existing local config to prove `join` leaves it
  * intact (#111) and that its colliding entry drops at the boot-time
  * merge.
@@ -44,14 +44,14 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *    rows, `join.run` span.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0025#the-join-sequence [tests] — seed → bootstrap → pull → apply → restart → operational, end to end against a stub server
- * @ref LLP 0031#physical-layout [tests] — join writes the central seed (not the local layer); boot merges central ⊕ local
+ * @ref LLP 0025#the-join-sequence [tests]: seed → bootstrap → pull → apply → restart → operational, end to end against a stub server
+ * @ref LLP 0031#physical-layout [tests]: join writes the central seed (not the local layer); boot merges central ⊕ local
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'join_flow_remote_config: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'join_flow_remote_config: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -95,7 +95,7 @@ export async function run({ harness, expect }) {
 
     // A pre-existing local install (LLP 0031 / #111): `join` must not
     // touch this file. Its `@hypaware/central` entry collides with the
-    // central layer, so it is dropped at the boot-time merge — surfaced
+    // central layer, so it is dropped at the boot-time merge, surfaced
     // as a structured `config.local_entry_dropped` log asserted below.
     const localConfig = { version: 2, plugins: [{ name: '@hypaware/central' }] }
     await fs.writeFile(localConfigPath, JSON.stringify(localConfig, null, 2) + '\n')

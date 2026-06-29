@@ -10,8 +10,8 @@
  * projects a CLI command and an MCP tool from it
  * ([LLP 0034 §verbs](../../../llp/0034-mcp-host-intrinsic.decision.md#verbs)).
  * This module turns argv into typed params (CLI side) and emits the clean
- * JSON Schema the MCP tool advertises — so the flag set and the tool
- * schema can never drift, they are the same object.
+ * JSON Schema the MCP tool advertises, so the flag set and the tool
+ * schema can never drift (they are the same object).
  */
 
 /**
@@ -36,8 +36,8 @@ const REFRESH_MODES = new Set(['never', 'auto', 'always'])
  * Kernel-owned render/transport control flags, common to every verb and
  * stripped before the schema codec sees the rest. Keeping them out of the
  * per-verb `inputSchema` is deliberate: `--refresh` is a local-cache
- * control and `--remote` a transport selector — neither is an operation
- * param, so neither belongs in the MCP tool schema.
+ * control and `--remote` a transport selector (neither is an operation
+ * param), so neither belongs in the MCP tool schema.
  *
  * @param {string[]} argv
  * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }, rest: string[] } | { ok: false, error: string }}
@@ -200,7 +200,7 @@ export function argvToParams(inputSchema, argv) {
  * Validate + coerce an MCP `tools/call` arguments object against the same
  * schema. MCP delivers typed JSON, but a client may send a string for an
  * integer; we coerce defensively, apply defaults, and enforce
- * required/enum — the identical contract the CLI path enforces.
+ * required/enum: the identical contract the CLI path enforces.
  *
  * @param {VerbInputSchema} inputSchema
  * @param {Record<string, unknown>} args
@@ -240,7 +240,7 @@ export function validateToolArguments(inputSchema, args) {
 
 /**
  * Project the verb's `inputSchema` to the clean JSON Schema the MCP tool
- * advertises — the same properties, minus the CLI-only `positional` and
+ * advertises: the same properties, minus the CLI-only `positional` and
  * per-property `greedy` hints (those describe argv binding, not the wire
  * contract).
  *

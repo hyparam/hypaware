@@ -64,7 +64,7 @@ test('matchUpstream invokes match() and returns the first upstream whose match()
   assert.deepEqual(calls, ['anthropic:/v1/responses', 'codex:/v1/responses'])
 })
 
-test('matchUpstream short-circuits on the first match — lower-priority match() is not called', () => {
+test('matchUpstream short-circuits on the first match - lower-priority match() is not called', () => {
   let lowCalled = false
   const compiled = compileUpstreams([
     {

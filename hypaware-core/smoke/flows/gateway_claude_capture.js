@@ -12,7 +12,7 @@ import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
- * Phase 2 smoke — Claude exchange capture through the daemon.
+ * Phase 2 smoke: Claude exchange capture through the daemon.
  *
  * Boots `runDaemon` with `@hypaware/ai-gateway@2.0.0` AND
  * `@hypaware/claude@2.0.0` activated against an in-process echo
@@ -46,7 +46,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'gateway_claude_capture: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'gateway_claude_capture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -131,7 +131,7 @@ export async function run({ harness, expect }) {
   // ----- Compute the plugin state-file path that the Claude plugin
   // will use, then drive the hook command to populate it. This
   // mirrors how Claude Code itself would call the hook on
-  // SessionStart — only the entry path differs. The kernel resolves
+  // SessionStart: only the entry path differs. The kernel resolves
   // `ctx.paths.stateDir` to `<HYP_HOME>/hypaware/plugins/<name>` (see
   // `src/core/runtime/paths.js`), so we mirror that recipe here.
   const stateFile = path.join(

@@ -115,7 +115,7 @@ export function columnsFor(dataset) {
 /**
  * Build the `DatasetRegistration` for an enrichment dataset so its rows are
  * queryable by name (the contract's SQL and the curate queue both depend on
- * this). Generic over the three datasets — same discovery/data-source shape
+ * this). Generic over the three datasets: same discovery/data-source shape
  * the context-graph plugin uses for node/edge.
  *
  * @param {string} dataset
@@ -197,7 +197,7 @@ async function createDataSource(partitions, ctx, dataset) {
  * lets propose filter against already-persisted ids for cross-tick idempotency
  * (see propose.js `filterNewProspects`).
  *
- * @ref LLP 0028#idempotent-prospects [implements]
+ * @ref LLP 0028#idempotent-prospects [implements]:
  *
  * @param {{ extractor: string, extractorVersion: number, anchorKey: string, candidateKey: string }} parts
  * @returns {string}

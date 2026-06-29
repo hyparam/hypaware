@@ -2,8 +2,8 @@
 
 /**
  * Model I/O for the two tiers. Both use a forced tool so the model returns
- * schema-shaped structured output (a `tool_use` block) rather than prose —
- * the structured-extraction channel of `hypaware.completion`.
+ * schema-shaped structured output (a `tool_use` block) rather than prose.
+ * This uses the structured-extraction channel of `hypaware.completion`.
  *
  * @import { CompletionRequest, CompletionResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { CurateDecision } from './types.d.ts'
@@ -28,7 +28,7 @@ const EMIT_PROSPECTS_TOOL = {
             type: { type: 'string', enum: [...PROSPECT_TYPES] },
             label: { type: 'string', description: 'A short canonical name for the item (used as its key).' },
             summary: { type: 'string', description: 'One sentence stating the item.' },
-            confidence: { type: 'number', description: '0..1 — your confidence this is a real, useful item.' },
+            confidence: { type: 'number', description: '0..1 - your confidence this is a real, useful item.' },
             evidence: { type: 'string', description: 'A short quote from the text supporting it.' },
           },
           required: ['type', 'label'],
@@ -41,7 +41,7 @@ const EMIT_PROSPECTS_TOOL = {
 
 const T1_SYSTEM =
   'You extract candidate knowledge (decisions, concepts, facts, constraints, open questions) from a work session transcript. ' +
-  'OVER-PROPOSE: favor recall over precision — a later curation step prunes. Emit many small, specific candidates rather than few broad ones. ' +
+  'OVER-PROPOSE: favor recall over precision - a later curation step prunes. Emit many small, specific candidates rather than few broad ones. ' +
   'Each candidate gets a short canonical `label` (its key), a one-sentence `summary`, a `confidence` in 0..1, and a supporting `evidence` quote.'
 
 const CURATE_DECISIONS_TOOL = {
@@ -64,7 +64,7 @@ const CURATE_DECISIONS_TOOL = {
             item_key: { type: 'string', description: 'Final canonical key (for commit/deepen). Reuse an existing key to converge.' },
             label: { type: 'string', description: 'Final human-readable label.' },
             summary: { type: 'string', description: 'Final one-sentence statement of the item.' },
-            confidence: { type: 'number', description: '0..1 — final confidence after curation.' },
+            confidence: { type: 'number', description: '0..1 - final confidence after curation.' },
             merge_into: { type: 'string', description: 'Existing item key to merge into (for merge). Pair with item_type so the merged node matches.' },
             note: { type: 'string', description: 'Short rationale.' },
           },
@@ -80,9 +80,9 @@ const T2_SYSTEM =
   'You are a graph librarian curating proposed knowledge for a context graph. ' +
   'You are given a CLUSTER of related prospects (which may come from DIFFERENT work sessions), plus the shared recalled ' +
   'committed knowledge, per-prospect similar existing items, and the shared source excerpt. For EACH prospect choose exactly one action: ' +
-  '`commit` (real and new — give a final type, canonical key, label, summary, confidence), ' +
-  '`merge` (duplicates another prospect in this cluster or an existing committed item — give `merge_into` AND `item_type` so the node converges), ' +
-  '`deepen` (real but should be corrected/enriched — give the improved fields), or ' +
+  '`commit` (real and new - give a final type, canonical key, label, summary, confidence), ' +
+  '`merge` (duplicates another prospect in this cluster or an existing committed item - give `merge_into` AND `item_type` so the node converges), ' +
+  '`deepen` (real but should be corrected/enriched - give the improved fields), or ' +
   '`reject` (noise, trivial, or wrong). When two prospects in the cluster are the same concept, commit one and `merge` the others into its key, ' +
   'so cross-session duplicates collapse to one node. Prefer reusing existing keys so the same concept converges. ' +
   'Respond by calling the `curate_decisions` tool exactly once, with one entry per prospect referenced by its `index`.'
@@ -109,7 +109,7 @@ export function buildProposeRequest({ text, model, maxTokens, maxCandidates }) {
  * Build ONE curate request for a **similarity/recall cluster** of prospects
  * (possibly spanning sessions). The shared recalled committed knowledge and the
  * source excerpt are read once and shared across the cluster, so they aren't
- * re-sent per prospect — the cost win — and the curator can merge cross-session
+ * re-sent per prospect: the cost win. The curator can merge cross-session
  * duplicates in one call. The model returns one decision per prospect, keyed by
  * 1-based index. (`neighborhood` carries the content-based shared recalled
  * knowledge; the field name is kept for call-site stability.)
@@ -136,7 +136,7 @@ export function buildCurateBatchRequest({ prospects, neighborhood, source, model
   const user =
     `SHARED RECALLED KNOWLEDGE (committed items related to this cluster)\n${neighborhood || '(none)'}\n\n` +
     `SHARED SOURCE EXCERPT\n${source || '(unavailable)'}\n\n` +
-    `PROSPECTS — decide on each by index:\n${lines}\n`
+    `PROSPECTS - decide on each by index:\n${lines}\n`
   /** @type {CompletionRequest} */
   const req = {
     model,

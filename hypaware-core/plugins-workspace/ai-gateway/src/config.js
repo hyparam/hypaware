@@ -57,7 +57,7 @@ export function compileUpstreams(raw) {
 
 /**
  * Parse `host:port`. IPv6 literals may be wrapped in `[]`. Throws on a
- * malformed value — the gateway will surface that as an activation
+ * malformed value: the gateway will surface that as an activation
  * failure rather than silently bind to a wrong address.
  *
  * @param {string} listen

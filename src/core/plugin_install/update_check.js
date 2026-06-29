@@ -74,7 +74,7 @@ export async function checkForPluginUpdate({ entry, now, freshlyResolved }) {
     async (s) => {
       let state
       if (freshlyResolved) {
-        // The fetch path resolved the upstream ref a tick ago — re-
+        // The fetch path resolved the upstream ref a tick ago; re-
         // querying just risks blocking the install span on a slow
         // remote. Synthesize the state and mark the span so smokes can
         // see we deliberately skipped the network probe.
@@ -144,7 +144,7 @@ function isRateLimited(entry, now) {
  * Probe the upstream for a newer version. The Phase 7 implementation
  * intentionally only handles `local-dir` (no upstream). The other
  * kinds get a benign "no upstream wired yet" response with
- * `available=false` — when Phase 8 brings real fetch online, this
+ * `available=false` when Phase 8 brings real fetch online, this
  * function gets the actual git/npm probe without changing the span
  * contract.
  *
@@ -188,7 +188,7 @@ async function runGitProbe(entry, checkedAt) {
   // `--` separates options from the URL/ref positionals so a hostile
   // gitUrl or ref like `--upload-pack=<cmd>` cannot be parsed as a
   // git option (CVE-2018-17456 family). The resolver also rejects
-  // leading-dash inputs upstream — this is the spawn-boundary defense.
+  // leading-dash inputs upstream: this is the spawn-boundary defense.
   const probe = await execGit(['ls-remote', '--quiet', '--', gitUrl, ref])
   if (probe.code !== 0) {
     return {
@@ -222,7 +222,7 @@ async function runGitProbe(entry, checkedAt) {
  * matches, formatted `<sha>\t<refname>`. For annotated tags the
  * output contains both `refs/tags/<name>` (the tag object) and
  * `refs/tags/<name>^{}` (the peeled commit). Comparing the tag-object
- * SHA against `entry.resolved_ref` — which is always a commit SHA —
+ * SHA against `entry.resolved_ref`, which is always a commit SHA,
  * produces a spurious "update available" signal. The peeled line is
  * the authoritative match.
  *
@@ -248,7 +248,7 @@ export function pickLsRemoteSha(stdout, requestedRef) {
   }
   if (rows.length === 0) return undefined
 
-  // Prefer a peeled annotated tag (refs/tags/<x>^{}) — its SHA is the
+  // Prefer a peeled annotated tag (refs/tags/<x>^{}): its SHA is the
   // commit the tag points at, which is what we compared `resolved_ref`
   // against when we recorded it.
   const peeled = rows.find((r) => r.refname.endsWith('^{}'))

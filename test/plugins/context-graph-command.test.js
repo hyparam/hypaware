@@ -191,7 +191,7 @@ test('an ambiguous seed exits 1 and lists the candidates on stderr', async () =>
     const code = await runGraphNeighbors(['index.js'], ctx)
     assert.equal(code, 1)
     const stderr = errs.join('')
-    assert.match(stderr, /ambiguous seed "index.js" — 2 nodes match by label/)
+    assert.match(stderr, /ambiguous seed "index.js" - 2 nodes match by label/)
     // Both colliding Files are listed so the caller can pick the full key.
     assert.match(stderr, /\/repo\/index\.js/)
     assert.match(stderr, /\/other\/index\.js/)
@@ -216,7 +216,7 @@ test('--limit truncates and reports the true total on stdout (not stderr)', asyn
   await withGraph(async ({ ctx, out, errs }) => {
     const code = await runGraphNeighbors(['conv-1', '--direction', 'out', '--limit', '1'], ctx)
     assert.equal(code, 0)
-    assert.match(out.join(''), /1 of 4 neighbor\(s\) within 1 hop\(s\) — truncated; raise --limit/)
+    assert.match(out.join(''), /1 of 4 neighbor\(s\) within 1 hop\(s\) - truncated; raise --limit/)
     assert.equal(errs.join(''), '', 'truncation is a result, not an error')
   })
 })
@@ -273,7 +273,7 @@ test('TEXT renderer disambiguates two Files sharing a basename into distinct row
 
 test('TEXT renderer keeps deep same-suffix Files distinct when the path tail is truncated', () => {
   // Two checkouts of one tree: same long relative suffix, differing only in the
-  // root — so a fixed 47-char tail truncation drops the distinguishing prefix.
+  // root, so a fixed 47-char tail truncation drops the distinguishing prefix.
   // The rows must still differ (fall back to node_id), not regress to identical.
   const suffix = '/packages/server/src/components/common/widgets/Button/index.js'
   const result = {
@@ -317,7 +317,7 @@ test('TEXT renderer leaves a non-colliding label readable (no disambiguator)', (
   const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
   const toolRow = String(stdout).split('\n').find((l) => l.includes('Tool'))
   assert.ok(toolRow, 'tool row present')
-  assert.match(toolRow, /Bash\s*$/, 'unique label stays bare — no path/id appended')
+  assert.match(toolRow, /Bash\s*$/, 'unique label stays bare - no path/id appended')
 })
 
 test('--json output is unchanged by the collision: node.natural_key is the path, labels untouched', () => {

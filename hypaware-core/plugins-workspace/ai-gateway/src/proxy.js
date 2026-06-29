@@ -40,7 +40,7 @@ const HOP_BY_HOP_HEADERS = new Set([
  *
  * Routing is preset-driven: each compiled upstream is matched via
  * `match()` when supplied, otherwise via path-segment prefix. There
- * is no hardcoded Anthropic / OpenAI / Codex routing — adapter
+ * is no hardcoded Anthropic / OpenAI / Codex routing: adapter
  * plugins own provider matching by registering presets with their
  * own `match()`.
  *

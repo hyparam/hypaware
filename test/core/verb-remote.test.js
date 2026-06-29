@@ -94,7 +94,7 @@ test('a missing token errors with login guidance', async (t) => {
   const { ctx, err } = ctxWith({ HYP_HOME: '/tmp/none-missing' })
   const code = await cmd.run(['SELECT 1', '--remote', 'prod'], ctx)
   assert.equal(code, 2)
-  assert.match(err.join(''), /no token for 'prod' — run 'hyp remote login prod'/)
+  assert.match(err.join(''), /no token for 'prod' - run 'hyp remote login prod'/)
 })
 
 test('a remote isError result maps to a nonzero exit with the message', async (t) => {

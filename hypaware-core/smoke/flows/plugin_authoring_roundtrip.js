@@ -15,7 +15,7 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 
 /**
  * Plugin authoring loop smoke. Drives the exact CLI an author/agent
- * uses — `hyp plugin new` then `hyp plugin doctor` — through the
+ * uses (`hyp plugin new` then `hyp plugin doctor`) through the
  * dispatcher in a temp HYP_HOME, and proves the doctor's headline
  * check actually fires:
  *
@@ -33,7 +33,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'plugin_authoring_roundtrip: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'plugin_authoring_roundtrip: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -80,7 +80,7 @@ export async function run({ harness, expect }) {
     .then(() => true, () => false)
   expect.that('scaffold wrote a manifest', manifestExists, (v) => v === true)
 
-  // 2. Doctor the clean scaffold — should be green.
+  // 2. Doctor the clean scaffold: should be green.
   const okOut = makeBuf()
   const okCode = await runRoot(
     'smoke.driver',
@@ -109,7 +109,7 @@ export async function run({ harness, expect }) {
   )
 
   // 3. Scaffold a *separate* plugin, strip its register() call, and
-  //    doctor it — should fail with the headline diagnostic. A fresh
+  //    doctor it: should fail with the headline diagnostic. A fresh
   //    directory is required: ESM import() caches by URL, so re-importing
   //    the already-doctored `widget` would return its clean module.
   const brokenNewCode = await dispatch(

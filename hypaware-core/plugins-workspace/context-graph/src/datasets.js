@@ -21,11 +21,11 @@ export const EDGE_DATASET = 'edge'
 
 /**
  * `node` columns. Provenance is carried inline (source_dataset / source_keys /
- * projector / projector_version) — a v1 simplification of the separate
+ * projector / projector_version), a v1 simplification of the separate
  * provenance-table design.
  *
  * @type {ReadonlyArray<ColumnSpec>}
- * @ref LLP 0023#inline-provenance — first sighting's keys as exemplar; a join table waits for a consumer that needs full lineage
+ * @ref LLP 0023#inline-provenance: first sighting's keys as exemplar; a join table waits for a consumer that needs full lineage
  */
 export const NODE_COLUMNS = Object.freeze([
   { name: 'node_id',           type: 'STRING',    nullable: false },

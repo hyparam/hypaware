@@ -21,8 +21,8 @@ import { makeExpect } from './expect.js'
  * - Dynamically imports `hypaware-core/smoke/flows/<name>.js` and
  *   invokes its exported `run({ harness, expect })`.
  *
- * The harness intentionally does not auto-shutdown observability —
- * each flow flushes via `installObservability().shutdown()` once it
+ * The harness intentionally does not auto-shutdown observability.
+ * Each flow flushes via `installObservability().shutdown()` once it
  * has emitted everything it needs to assert against.
  *
  * @param {string} name

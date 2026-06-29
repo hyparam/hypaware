@@ -10,7 +10,7 @@
  *
  * The union reports `appliedWhere: false` and `appliedLimitOffset: false`,
  * so the SQL engine re-applies both over the merged stream. `limit`/`offset`
- * are stripped from the sub-scans — they are not distributive across a
+ * are stripped from the sub-scans. They are not distributive across a
  * concatenation; a sub-source that honors limit/offset pushdown (e.g. an
  * Iceberg partition) would otherwise drop its first `offset` rows per
  * partition and the engine would skip the offset again on the joined stream,
@@ -24,11 +24,11 @@
  * reading the column as null. When a partition can't satisfy the predicate we
  * drop `where` for it and let the engine filter the concatenated stream (it
  * already owns the filter via `appliedWhere: false`). `columns` is always
- * forwarded — projecting an absent column reads as null, never throws.
+ * forwarded: projecting an absent column reads as null, never throws.
  *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}
- * @ref LLP 0015#multi-partition-union [constrained-by] — the union must not forward limit/offset or offsets apply twice, nor push a filter a partition can't satisfy
+ * @ref LLP 0015#multi-partition-union [constrained-by]: the union must not forward limit/offset or offsets apply twice, nor push a filter a partition can't satisfy
  */
 export function unionSources(sources) {
   /** @type {Set<string>} */
@@ -90,7 +90,7 @@ function canPushWhere(source, predicateColumns) {
  * Collect the column names a `where` predicate references. Returns null when
  * the predicate contains a construct whose column set can't be safely
  * enumerated locally (a qualified identifier, subquery, or correlated
- * reference) — the caller then declines to push the predicate, which is always
+ * reference). The caller then declines to push the predicate, which is always
  * safe because the engine re-applies it.
  *
  * @param {ExprNode | undefined} where
@@ -148,7 +148,7 @@ function whereColumns(where) {
         walk(node.elseResult)
         return
       default:
-        // subquery / in / exists / not exists / anything new — bail.
+        // subquery / in / exists / not exists / anything new: bail.
         enumerable = false
     }
   }

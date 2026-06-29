@@ -15,16 +15,16 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 /**
- * Phase 7 smoke — Parquet export through the `@hypaware/local-fs` +
+ * Phase 7 smoke: Parquet export through the `@hypaware/local-fs` +
  * `@hypaware/format-parquet` pair under the daemon boot path, with a
  * CLI-driven forced tick and a failed-export → outbox path.
  *
  * Two sink instances are wired through the daemon's runtime:
  *
- *   - `good`     — base dir is a clean tmp dir; the tick lands a
+ *   - `good`: base dir is a clean tmp dir; the tick lands a
  *                  readable Parquet file under
  *                  `<dir>/logs/partition=all/partition=all.parquet`.
- *   - `broken`   — a regular file is pre-staged at
+ *   - `broken`: a regular file is pre-staged at
  *                  `<dir>/logs`, so `fs.mkdir(partitionDir,
  *                  recursive: true)` inside `local-fs.writeBlob` hits
  *                  ENOTDIR. The driver then routes the failed batch
@@ -33,7 +33,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
  * The forced tick is driven through `hyp sink force` so the CLI
  * surface is exercised, not just the in-process driver. Dispatch is
  * handed the daemon's runtime via `opts.kernel` because Phase 7 does
- * not yet wire config-driven sink instantiation — the smoke owns the
+ * not yet wire config-driven sink instantiation. The smoke owns the
  * `kernel.sinks.instantiate` calls until that lands.
  *
  * Bead `hy-bbyi` assertions:
@@ -55,7 +55,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'local_parquet_export: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'local_parquet_export: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -107,7 +107,7 @@ export async function run({ harness, expect }) {
     env: process.env,
     runId: harness.devRunId,
     // 60ms cadence so a few scheduled ticks fire during the smoke and
-    // the daemon's `sink.tick` span shows up in JSONL — the CLI force
+    // the daemon's `sink.tick` span shows up in JSONL: the CLI force
     // tick exercises the dispatcher path but does not emit `sink.tick`
     // itself.
     tickIntervalMs: 60,
@@ -294,9 +294,9 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.length >= 1,
   )
 
-  // The encoder.encode_parquet span is what produces the bytes — both
+  // The encoder.encode_parquet span is what produces the bytes: both
   // the good and the broken instances open it (the broken one fails
-  // after — its failure surfaces during writeBlob, not encoding).
+  // after. Its failure surfaces during writeBlob, not encoding).
   const encodeSpans = traces.filter((/** @type {any} */ t) => t.name === 'encoder.encode_parquet')
   expect.that(
     'traces: at least one encoder.encode_parquet span emitted',

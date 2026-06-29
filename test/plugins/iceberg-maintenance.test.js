@@ -248,7 +248,7 @@ test('compactExportTable cleans up partial output when staging fails mid-flight'
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-maint-'))
   const { tableUrl, resolver, lister, rows } = await createTwoFileTable(dir)
 
-  // Fail the manifest write — by then the consolidated data file(s)
+  // Fail the manifest write, by which point the consolidated data file(s)
   // already landed, so without tracked cleanup they would leak (icebird
   // only reports writtenFiles on a StagedUpdate that completed).
   /** @type {string[]} */

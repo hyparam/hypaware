@@ -4,7 +4,7 @@
 // Electron app that bundles hypaware and drives it in-process instead of
 // spawning the `hyp` binary). Every helper here boots the kernel through
 // the same `dispatch()` the CLI uses, captures stdout/stderr into buffers,
-// and returns a structured result — so callers get a typed object and real
+// and returns a structured result, so callers get a typed object and real
 // thrown errors instead of parsing JSON out of a child process's stdout.
 //
 // The long-running daemon is intentionally NOT exposed here: it must run as
@@ -198,7 +198,7 @@ export function detach(client = 'claude', opts = {}) {
  * Join a central hypaware server, writing the join seed under
  * `<HYP_HOME>/hypaware/config-control/`. With `noDaemon` (the default for
  * embedded hosts that own their own daemon) it performs no network call and
- * installs no launchd/systemd unit — the host's already-running daemon
+ * installs no launchd/systemd unit: the host's already-running daemon
  * picks up the seed and pulls its configuration.
  *
  * `token` may be omitted when the caller supplies it another way (e.g. a
@@ -206,18 +206,18 @@ export function detach(client = 'claude', opts = {}) {
  *
  * `dryRun` is intentionally not part of this surface: `hyp join` has no
  * dry-run path and always writes the seed. Passing `dryRun: true` throws
- * rather than silently writing — unlike {@link attach}/{@link detach},
+ * rather than silently writing, unlike {@link attach}/{@link detach},
  * which do honor it.
  *
  * @param {string} url
  * @param {string} [token]
  * @param {Omit<IntegrationOptions, 'dryRun'> & { noDaemon?: boolean }} [opts]
  * @returns {Promise<IntegrationCommandResult>}
- * @ref LLP 0025#seed-config-mode [implements] — embedded join writes only the central seed; the host's daemon pulls config
- * @ref LLP 0017#the-primary-daemon [constrained-by] — noDaemon defaults true: the daemon is a service unit, never hosted in-process
+ * @ref LLP 0025#seed-config-mode [implements]: embedded join writes only the central seed; the host's daemon pulls config
+ * @ref LLP 0017#the-primary-daemon [constrained-by]: noDaemon defaults true: the daemon is a service unit, never hosted in-process
  */
 export async function join(url, token, opts = {}) {
-  // `hyp join` always writes the central seed — there is no dry-run path.
+  // `hyp join` always writes the central seed, there is no dry-run path.
   // Refuse a dryRun request instead of writing anyway, so a preview caller
   // never mutates state. Forward-compatible: a real dry-run can land later.
   if (/** @type {IntegrationOptions} */ (opts).dryRun) {

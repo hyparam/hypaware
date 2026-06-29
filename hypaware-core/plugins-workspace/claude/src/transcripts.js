@@ -23,7 +23,7 @@ import readline from 'node:readline'
  *
  * The projector calls `loadTranscript()` per exchange. The reader is
  * best-effort: a missing directory, a missing file, or a truncated
- * line never throws — projection falls back to gateway-computed
+ * line never throws: projection falls back to gateway-computed
  * identity in that case.
  */
 
@@ -63,7 +63,7 @@ export async function loadTranscript(opts) {
   if (opts.transcriptPath) {
     await readTranscriptFile(opts.transcriptPath, entries)
     // Subagent transcripts live next to the session file in a directory
-    // named for the session, not inside it — without this walk every
+    // named for the session, not inside it: without this walk every
     // sidechain message misses transcript identity and lands as a
     // gateway-fallback row that later duplicates against the backfill.
     const sessionDir = path.join(
@@ -99,14 +99,14 @@ export function* walkTranscriptFiles(projectsDir) {
  * Read the subagent metadata sidecars Claude Code writes beside each
  * subagent transcript: `<sessionDir>/subagents/agent-<agentId>.meta.json`.
  * The sidecar's `toolUseId` is the parent-thread `Agent`/`Task` tool call
- * that spawned the subagent — provenance that lives in neither the
+ * that spawned the subagent: provenance that lives in neither the
  * subagent's own `.jsonl` (its first line has null parent/source uuids)
  * nor the wire exchange. Returns a map keyed by the agent id parsed from
  * each filename.
  *
  * Resolution mirrors `loadTranscript`: a `transcriptPath` scans just that
- * session's directory (cheap — the live path); otherwise `projectsDir`
- * is scanned recursively (the backfill path). Best-effort — a missing
+ * session's directory (cheap: the live path); otherwise `projectsDir`
+ * is scanned recursively (the backfill path). Best-effort: a missing
  * directory or an unparseable sidecar is skipped, never thrown.
  *
  * @param {{ transcriptPath?: string, projectsDir?: string }} opts
@@ -184,18 +184,18 @@ function byTimestampAsc(a, b) {
 /**
  * Index transcript entries for the projector's wire→line matching.
  *
- * // @ref LLP 0026#decision — one line per native DAG node: an API
+ * // @ref LLP 0026#decision: one line per native DAG node: an API
  * // message spans SEVERAL lines (one per assistant block), so the
  * // message-id index must keep the ordered list, not last-wins.
  *
- *  - `byUuid`        — native uuid → entry.
- *  - `byMessageId`   — API `message.id` → ordered entry list (block
+ *  - `byUuid`        : native uuid → entry.
+ *  - `byMessageId`   : API `message.id` → ordered entry list (block
  *                      order; assistant turns split one line per block
  *                      all sharing the API id).
- *  - `byToolUseId`   — `tool_use_id` of a user tool_result line →
+ *  - `byToolUseId`   : `tool_use_id` of a user tool_result line →
  *                      entry. Each tool_result is its own line, so
  *                      this is a unique join key.
- *  - `byContentKey`  — canonicalized role+content key → entry.
+ *  - `byContentKey`  : canonicalized role+content key → entry.
  *
  * @param {TranscriptEntry[]} entries
  */
@@ -228,11 +228,11 @@ export function indexTranscriptEntries(entries) {
  * loop AND every subagent, and content can repeat across them; without
  * this a subagent block could match a main-session (or other-agent)
  * entry and inherit the wrong uuid / `is_sidechain`. `byMessageId` and
- * `byToolUseId` need no scoping — those ids are globally unique.
+ * `byToolUseId` need no scoping: those ids are globally unique.
  * `agent_id` empty/undefined is the main loop; ids and content keys are
  * hex, so `:` is an unambiguous separator.
  *
- * // @ref LLP 0026#decision — match within a thread, not across the session.
+ * // @ref LLP 0026#decision: match within a thread, not across the session.
  *
  * @param {string | undefined} agentId
  * @param {string} contentKey
@@ -267,7 +267,7 @@ function entryToolUseId(entry) {
  * canonical role+content key, with an optional `message.id` shortcut
  * that only applies when the id maps to exactly one line (an API
  * message split across several lines is ambiguous at message
- * granularity — the splitter aligns those per block instead).
+ * granularity: the splitter aligns those per block instead).
  *
  * The content-key lookup is scoped to `candidate.agentId` (the
  * exchange's `x-claude-code-agent-id`, empty for the main loop) so a
@@ -290,9 +290,9 @@ export function findTranscriptMatch(index, candidate) {
  * its transcript line. Exported so the projector can stamp it on a
  * fallback row at projection time (when wire content is in hand) and
  * flush-time settlement can re-match by pure lookup once the transcript
- * line lands — without reconstructing the lost content array.
+ * line lands: without reconstructing the lost content array.
  *
- * // @ref LLP 0027#decision — match-key at projection enables flush-time settlement.
+ * // @ref LLP 0027#decision: match-key at projection enables flush-time settlement.
  *
  * @param {string} role
  * @param {unknown} content
@@ -311,7 +311,7 @@ export function matchKey(role, content) {
  * to the gateway (full prior-message chain) so enriched and fallback
  * rows stay one shape.
  *
- * // @ref LLP 0027#decision — one identity-copy core for projection and settlement.
+ * // @ref LLP 0027#decision: one identity-copy core for projection and settlement.
  *
  * @param {Record<string, unknown>} target
  * @param {TranscriptEntry} match
@@ -341,7 +341,7 @@ export function assignTranscriptIdentity(target, match) {
 }
 
 /**
- * The block type a single transcript line holds — used by the
+ * The block type a single transcript line holds: used by the
  * splitter's order-alignment sanity check. String content is a text
  * line; array content reports the first block's type (lines are
  * single-block in current transcripts).
@@ -528,12 +528,12 @@ function readKey(obj, key) {
 /**
  * The model id from an assistant transcript line's `message.model`.
  *
- * @ref LLP 0026#decision [implements] — native per-line granularity: each
+ * @ref LLP 0026#decision [implements]: native per-line granularity: each
  * assistant line carries its own model, so backfill surfaces it per message
  * rather than collapsing a session to one model. Only assistant lines record
  * `message.model`; user-prompt and tool_result lines have none. Claude Code
  * stamps `<synthetic>` on assistant lines it generates locally (interrupt
- * notices, injected errors) that never hit a model — that is a sentinel, not a
+ * notices, injected errors) that never hit a model: that is a sentinel, not a
  * model id, so it is dropped to undefined.
  * @param {unknown} message
  */

@@ -15,7 +15,7 @@ const CAPABILITY_VERSION = '1.0.0'
  * `hypaware.completion@1` capability backed by the Anthropic Messages API
  * (`POST /v1/messages`).
  *
- * Activation performs no network IO and reads no credentials — the API key
+ * Activation performs no network IO and reads no credentials: the API key
  * resolves from the environment per request. Enabling this plugin is the
  * explicit opt-in that allows captured content (prompts built from the
  * graph and source) to leave the machine; a localhost `base_url` (a
@@ -33,7 +33,7 @@ export async function activate(ctx) {
   const validated = validateAnthropicCompletionConfig(ctx.config)
   if (!validated.ok) {
     const detail = validated.errors.map((e) => `${e.pointer || '/'}: ${e.message}`).join('; ')
-    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config — ${detail}`))
+    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config - ${detail}`))
     err.hypErrorKind = 'completion_config_invalid'
     throw err
   }

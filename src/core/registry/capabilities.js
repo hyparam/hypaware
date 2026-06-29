@@ -13,7 +13,7 @@ import { matchesSemverRange } from '../semver.js'
  * contract: `cap.provide`, `cap.require_satisfied`, and
  * `cap.require_missing` logs, plus the `hyp_capabilities_provided`
  * UpDownCounter on each provide. Duplicate-provider arbitration is
- * intentionally not handled here — dep_graph inspects `list()` after
+ * intentionally not handled here; dep_graph inspects `list()` after
  * provides and emits the `cap_version_clash` rejection.
  *
  * @returns {CapabilityRegistryHandle}
@@ -48,7 +48,7 @@ export function createCapabilityRegistry() {
    * @param {string} name
    * @param {string} [range]
    * @returns {T}
-   * @ref LLP 0006#resolution-rules [implements] — the single sanctioned cross-plugin channel; missing capability fails early
+   * @ref LLP 0006#resolution-rules [implements]: the single sanctioned cross-plugin channel; missing capability fails early
    */
   function requireCapability(requester, name, range) {
     const matches = findMatches(registrations, name, range)
@@ -128,7 +128,7 @@ export function createCapabilityRegistry() {
  * @param {InternalRegistration[]} registrations
  * @param {string} name
  * @param {string} [range]
- * @ref LLP 0006#two-kinds-of-dependency [implements] — version range travels with the require, never baked into the capability name
+ * @ref LLP 0006#two-kinds-of-dependency [implements]: version range travels with the require, never baked into the capability name
  */
 function findMatches(registrations, name, range) {
   return registrations.filter((r) => r.name === name && matchesSemverRange(r.version, range))

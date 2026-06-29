@@ -56,7 +56,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'walkthrough_to_first_query: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'walkthrough_to_first_query: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -76,7 +76,7 @@ export async function run({ harness, expect }) {
     claude: path.join(pluginsRoot, 'claude'),
   }
 
-  // Plugins listen on ephemeral ports for the smoke — the preset's
+  // Plugins listen on ephemeral ports for the smoke. The preset's
   // written config carries the standard defaults (8787, 4318) but the
   // running test instances use port 0 so multiple smoke runs do not
   // collide. The golden assertion below checks the written config,
@@ -224,7 +224,7 @@ export async function run({ harness, expect }) {
     )
     const gatewayUrl = gatewayApi.localEndpoint()
 
-    // POST one OTLP log payload — `attributes.dev_run_id` is what the
+    // POST one OTLP log payload: `attributes.dev_run_id` is what the
     // SQL assertion below counts on.
     const otlpPayload = buildOtlpLogPayload(harness.devRunId)
     const otlpResponse = await fetch(

@@ -7,11 +7,11 @@ import { installObservability } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
- * Phase 6 smoke (renamed from `config_migrate_v1` in the plan — this
+ * Phase 6 smoke, renamed from `config_migrate_v1` in the original plan: this
  * fresh-start rig has no v1 install to migrate, so the smoke only
  * exercises schema + cross-plugin validation).
  *
- * Case 1 — happy path:
+ * Case 1: happy path:
  *  - Stages a tmp `~/.hyp/hypaware-config.json` with `version: 2`,
  *    two enabled plugins (`@hypaware/ai-gateway`, `@hypaware/claude`),
  *    and one blob sink (`@hypaware/format-parquet` +
@@ -21,20 +21,20 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *    `status=ok`, and that no log row carries `error_kind=...`
  *    in this run.
  *
- * Case 2 — incompatible sink pair:
+ * Case 2: incompatible sink pair:
  *  - Same config but the sink pairs `@hypaware/format-parquet` with
  *    `@hypaware/webhook` (a request destination, not a blob store).
  *  - Asserts the command exits non-zero and at least one log row
  *    carries `error_kind=sink_pair_incompatible`.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0010#validation [tests] — config load + cross-plugin validation, incl. incompatible sink pairing
+ * @ref LLP 0010#validation [tests]: tests config load and cross-plugin validation, including incompatible sink pairing
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'config_load_validate: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'config_load_validate: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -196,7 +196,7 @@ export async function run({ harness, expect }) {
       l.attributes?.error_kind !== undefined
   )
   // Filter only entries that *could* have come from the OK run by
-  // pointer prefix — case 2 emits errors via the same logger, so we
+  // pointer prefix, as case 2 emits errors via the same logger and we
   // partition by error_kind. The case 1 contract is "no error_kind on
   // any config log row in the OK run". Because both runs share the
   // same dev_run_id, the strict test is "the count of error_kind logs
@@ -208,7 +208,7 @@ export async function run({ harness, expect }) {
     (rows) => rows.length >= 1
   )
 
-  // The OK case must contribute zero error_kind logs — verify by
+  // The OK case must contribute zero error_kind logs. Verify by
   // checking that every error_kind log is one of the kinds case 2
   // produces (sink_pair_incompatible, plus optional follow-ups from
   // the validator).

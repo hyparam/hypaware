@@ -10,7 +10,7 @@ import process from 'node:process'
  * lives in a single `0600` file, written atomically, mirroring `central`'s
  * `identity.json` single-file precedent.
  *
- * Stakes are low by scoping — what lands here is the **query-scoped** token
+ * Stakes are low by scoping: what lands here is the **query-scoped** token
  * (read/compute tools only; cannot author configs or mint tokens), not the
  * all-powerful operator token (LLP 0033 §credential-stakes). AI clients that
  * install the endpoint directly hold their own token in their own MCP
@@ -125,7 +125,7 @@ export async function resolveToken({ target, env, stateDir }) {
   }
   return {
     ok: false,
-    error: `no token for '${target}' — run 'hyp remote login ${target}' (or set ${envName})`,
+    error: `no token for '${target}' - run 'hyp remote login ${target}' (or set ${envName})`,
   }
 }
 

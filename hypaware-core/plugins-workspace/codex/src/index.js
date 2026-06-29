@@ -23,12 +23,12 @@ const CHATGPT_UPSTREAM_NAME = 'chatgpt'
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
  * export so the kernel apply path can validate this plugin's `config` block
- * (the `backfill` policy) *before* the plugin is ever activated — e.g. a
+ * (the `backfill` policy) *before* the plugin is ever activated: e.g. a
  * central config that first introduces `@hypaware/codex`. It is the same
  * registration `activate()` hands `ctx.configRegistry.registerSection`;
  * importing this module never runs `activate()`, so discovery is safe.
  *
- * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the plugin owns + exposes its own `backfill` validator
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]: the plugin owns + exposes its own `backfill` validator
  * @type {{ section: string, validate: typeof validateCodexConfig }}
  */
 export const configSection = { section: CODEX_CONFIG_SECTION, validate: validateCodexConfig }
@@ -47,14 +47,14 @@ export const configSection = { section: CODEX_CONFIG_SECTION, validate: validate
  * `restored=true|false`.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream presets
+ * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: adapter requires the ai-gateway capability; registers client + upstream presets
  */
 export async function activate(ctx) {
-  // Validate the plugin's own `config` block — currently just the
+  // Validate the plugin's own `config` block: currently just the
   // optional `backfill` policy ({ on_join, window_days }) that drives
   // backfill-on-join. Registered so the kernel runs it via
   // `runPerPluginSectionValidators`; no top-level core schema change.
-  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — the source plugin owns and validates its `backfill` config
+  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]: the source plugin owns and validates its `backfill` config
   ctx.configRegistry.registerSection({
     plugin: PLUGIN_NAME,
     section: CODEX_CONFIG_SECTION,

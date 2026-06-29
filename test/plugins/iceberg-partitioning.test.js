@@ -89,7 +89,7 @@ test('derivePartitioning builds day(primaryTimestampColumn) + conversation sort 
 test('derivePartitioning day grain is independent of cachePartitioning (does not inherit conversation_id partitioning)', () => {
   const p = derivePartitioning(AI_GATEWAY_REG, AI_GATEWAY_COLUMNS)
   assert.ok(p)
-  // The partition axis must be the day grain only — NOT the cache's
+  // The partition axis must be the day grain only: NOT the cache's
   // conversation_id/cwd/date identity partitioning.
   assert.deepEqual(p.partitionSpec.fields.map((f) => f.name), ['message_created_at'])
 })

@@ -26,7 +26,7 @@ import {
  * - `select count(*) from edge` = 6 (via, used_model, 2× used, 2× touched)
  * - node_type breakdown matches the fixture
  * - re-running `graph project` leaves the counts unchanged (idempotent)
- * - a `graph.project` span carries the write counts — the internal signal
+ * - a `graph.project` span carries the write counts: the internal signal
  *   that the projection path (not just the CLI wrapper) actually ran
  *
  * @param {{ harness: any, expect: any }} args
@@ -69,7 +69,7 @@ export async function run({ harness, expect }) {
   )
 
   // Seed a small ai_gateway_messages fixture: two tool calls touching two
-  // files, plus a text part — all in one conversation, same app/model.
+  // files, plus a text part: all in one conversation, same app/model.
   const tablePath = aiGatewayTablePath(kernel.storage)
   await kernel.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], [
     fixtureRow({ message_id: 'm1', message_index: 0, role: 'assistant', part_type: 'tool_call', tool_name: 'Read', tool_call_id: 'tc1', tool_args: { file_path: '/repo/auth.py' } }),

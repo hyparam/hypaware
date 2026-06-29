@@ -14,7 +14,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
 
 /**
- * Phase 7 smoke — Codex rollout backfill → query → idempotent rerun.
+ * Phase 7 smoke: Codex rollout backfill → query → idempotent rerun.
  *
  * Boots `@hypaware/ai-gateway` + `@hypaware/codex` against a tmp
  * HYP_HOME with a staged modern Codex rollout under the fake HOME's
@@ -38,7 +38,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'backfill_codex_fixture: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'backfill_codex_fixture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

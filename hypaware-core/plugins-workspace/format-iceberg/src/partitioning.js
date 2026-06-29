@@ -11,7 +11,7 @@ import { icebergSchemaForColumns } from './schema.js'
  * @import { DatasetPartitioning } from './types.d.ts'
  */
 
-// @ref LLP 0022#partition-derivation — the export partitions by a writer-owned
+// @ref LLP 0022#partition-derivation: the export partitions by a writer-owned
 // day grain on the dataset's primaryTimestampColumn, derived independently of
 // the cache's `cachePartitioning` (which would impose an unbounded
 // per-conversation file count on an archive). [implements]
@@ -19,7 +19,7 @@ import { icebergSchemaForColumns } from './schema.js'
  * Derive the export table's layout for a dataset: a `day(primaryTimestampColumn)`
  * partition plus a within-partition sort on the dataset's lookup columns.
  * Returns `null` when the dataset declares no `primaryTimestampColumn` present
- * in its schema — that dataset exports unpartitioned (V1 behavior unchanged).
+ * in its schema: that dataset exports unpartitioned (V1 behavior unchanged).
  *
  * @param {DatasetRegistration | undefined} reg
  * @param {readonly ColumnSpec[]} columns
@@ -50,15 +50,15 @@ export function derivePartitioning(reg, columns) {
   }
 }
 
-// @ref LLP 0022#within-partition-sort — cluster each day partition by the
+// @ref LLP 0022#within-partition-sort: cluster each day partition by the
 // dataset's declared identity (lookup) columns so a conversation lookup prunes
 // row groups by min/max, without the file-count cost of partitioning on it.
-// This is the one place the export reads `cachePartitioning` — sort axis only.
+// This is the one place the export reads `cachePartitioning`: sort axis only.
 // [implements]
 /**
  * Build a sort order from the dataset's declared identity columns
  * (`cachePartitioning.iceberg.fields`, transform `identity`), in declared order.
- * Returns an empty (unsorted) order when none apply — icebird treats that as a
+ * Returns an empty (unsorted) order when none apply: icebird treats that as a
  * no-op, so an undeclared dataset is day-partitioned but unsorted.
  *
  * @param {DatasetRegistration} reg
