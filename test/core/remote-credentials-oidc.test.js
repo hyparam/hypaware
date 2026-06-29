@@ -131,6 +131,32 @@ test('resolveAccessJwt refreshes a stale oidc JWT and persists the new one', asy
   assert.equal(/** @type {any} */ (creds.prod).expiresAt, FUTURE)
 })
 
+test('resolveAccessJwt persists a rotated refresh token from the refresh response', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  // A one-time-use server rotates the refresh token on each refresh.
+  const fetchImpl = /** @type {any} */ (async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }),
+  }))
+  await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  const creds = await readCredentials(dir)
+  // The consumed token must be replaced; storing rt-old would 401 next refresh.
+  assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt-new')
+})
+
+test('resolveAccessJwt keeps the stored refresh token when the server does not rotate', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-stable', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  const fetchImpl = /** @type {any} */ (async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme' }),
+  }))
+  await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  const creds = await readCredentials(dir)
+  assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt-stable')
+})
+
 test('resolveAccessJwt keeps the stored org when a refresh response omits it', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })

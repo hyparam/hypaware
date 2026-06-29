@@ -49,14 +49,24 @@ test('refreshSession posts the refresh_token grant and maps the response', async
     refreshToken: 'rt-1',
     fetchImpl,
   })
-  assert.deepEqual(refreshed, { accessJwt: 'jwt-2', expiresAt: '2026-06-29T13:00:00Z', org: 'acme' })
+  // No rotated refresh_token in the response, so refreshToken comes back empty
+  // (the caller keeps the one it already stored).
+  assert.deepEqual(refreshed, { accessJwt: 'jwt-2', expiresAt: '2026-06-29T13:00:00Z', org: 'acme', refreshToken: '' })
   assert.deepEqual(JSON.parse(calls[0].init.body), { grant_type: 'refresh_token', refresh_token: 'rt-1' })
+})
+
+test('refreshSession returns a rotated refresh_token when the server issues one', async () => {
+  const { fetchImpl } = stubFetch({
+    body: { access_jwt: 'jwt-2', expires_at: '2026-06-29T13:00:00Z', org: 'acme', refresh_token: 'rt-2' },
+  })
+  const refreshed = await refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt-1', fetchImpl })
+  assert.equal(refreshed.refreshToken, 'rt-2')
 })
 
 test('refreshSession tolerates a response that omits org (returns org: "")', async () => {
   const { fetchImpl } = stubFetch({ body: { access_jwt: 'jwt-2', expires_at: '2026-06-29T13:00:00Z' } })
   const refreshed = await refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt-1', fetchImpl })
-  assert.deepEqual(refreshed, { accessJwt: 'jwt-2', expiresAt: '2026-06-29T13:00:00Z', org: '' })
+  assert.deepEqual(refreshed, { accessJwt: 'jwt-2', expiresAt: '2026-06-29T13:00:00Z', org: '', refreshToken: '' })
 })
 
 test('a 401 invalid_grant surfaces a typed InvalidGrantError', async () => {

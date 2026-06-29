@@ -24,6 +24,12 @@ export interface RefreshedAccess {
   /** ISO-8601 expiry of `accessJwt`. */
   expiresAt: string
   org: string
+  /**
+   * A rotated refresh token, when the server issues one-time-use refresh
+   * tokens. Empty when the server keeps the refresh token stable, in which
+   * case the caller retains the one it already stored.
+   */
+  refreshToken: string
 }
 
 /**

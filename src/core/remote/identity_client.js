@@ -65,6 +65,11 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
     // caller keep the org it already stored, so a server that omits it on
     // refresh does not turn every silent refresh into a hard error.
     org: typeof json.org === 'string' ? json.org : '',
+    // A rotated (one-time-use) refresh token, if the server issues one. Empty
+    // when the server keeps the refresh token stable; the caller then retains
+    // the token it already stored. Storing a stale token here would 401 on the
+    // next refresh and force a full re-login every session.
+    refreshToken: typeof json.refresh_token === 'string' ? json.refresh_token : '',
   }
 }
 
