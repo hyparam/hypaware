@@ -12,11 +12,9 @@
  * No I/O. No reads from `process.*`.
  */
 
-/** @typedef {import('./keypress.js').State} State */
-/** @typedef {import('./keypress.js').MultiselectState} MultiselectState */
-/** @typedef {import('./keypress.js').SelectState} SelectState */
-/** @typedef {import('./keypress.js').TextState} TextState */
-/** @typedef {import('./keypress.js').ConfirmState} ConfirmState */
+/**
+ * @import { State, MultiselectState, SelectState, TextState, ConfirmState } from './keypress.js'
+ */
 
 /**
  * @typedef {Object} RenderOpts

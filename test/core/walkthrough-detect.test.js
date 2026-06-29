@@ -1,5 +1,9 @@
 // @ts-check
 
+/**
+ * @import { WalkthroughQuestion, AsyncPickPrompt } from '../../src/core/cli/types.js'
+ */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -22,9 +26,9 @@ async function tmpEnv() {
 }
 
 test('picker pre-checks detected sources, labels them, and defaults export to local-parquet', async () => {
-  /** @type {import('../../src/core/cli/types.d.ts').WalkthroughQuestion[]} */
+  /** @type {WalkthroughQuestion[]} */
   const seen = []
-  /** @type {import('../../src/core/cli/types.d.ts').AsyncPickPrompt} */
+  /** @type {AsyncPickPrompt} */
   const prompt = async (question) => {
     seen.push(question)
     // Confirm whatever is pre-checked, mirroring a user pressing enter.
@@ -60,9 +64,9 @@ test('picker pre-checks detected sources, labels them, and defaults export to lo
 })
 
 test('nothing detected → no source pre-checked, export still defaults to local-parquet', async () => {
-  /** @type {import('../../src/core/cli/types.d.ts').WalkthroughQuestion[]} */
+  /** @type {WalkthroughQuestion[]} */
   const seen = []
-  /** @type {import('../../src/core/cli/types.d.ts').AsyncPickPrompt} */
+  /** @type {AsyncPickPrompt} */
   const prompt = async (question) => {
     seen.push(question)
     return question.options.filter((o) => o.checked).map((o) => o.value)

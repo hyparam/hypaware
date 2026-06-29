@@ -3,7 +3,7 @@
 import { verbToCommand } from '../cli/verb_command.js'
 
 /**
- * @import { CommandRegistry, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRegistry, VerbAuthClass, VerbExposure, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -59,7 +59,7 @@ export function createVerbRegistry(opts = {}) {
 /**
  * Effective exposure of a verb (default `'cli+mcp'`).
  * @param {VerbRegistration} verb
- * @returns {import('../../../collectivus-plugin-kernel-types.d.ts').VerbExposure}
+ * @returns {VerbExposure}
  */
 export function verbExposure(verb) {
   return verb.exposure ?? 'cli+mcp'
@@ -68,7 +68,7 @@ export function verbExposure(verb) {
 /**
  * Effective auth class of a verb (default `'read'`).
  * @param {VerbRegistration} verb
- * @returns {import('../../../collectivus-plugin-kernel-types.d.ts').VerbAuthClass}
+ * @returns {VerbAuthClass}
  */
 export function verbAuthClass(verb) {
   return verb.authClass ?? 'read'
