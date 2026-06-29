@@ -72,7 +72,18 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
 
   /** @type {Server} */
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    // A malformed request target (e.g. `GET //` or `http://[`) makes `new URL`
+    // throw; an uncaught throw in the request listener would crash the whole
+    // `hyp remote login` process. Treat it as a stray request: 400 and ignore,
+    // never settle the flow, so the real callback can still arrive.
+    let url
+    try {
+      url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    } catch {
+      res.writeHead(400, { 'content-type': 'text/plain' })
+      res.end('bad request')
+      return
+    }
     if (url.pathname !== CALLBACK_PATH) {
       res.writeHead(404, { 'content-type': 'text/plain' })
       res.end('not found')

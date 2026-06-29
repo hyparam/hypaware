@@ -2,8 +2,31 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import net from 'node:net'
 
 import { startLoopbackReceiver } from '../../src/core/remote/loopback.js'
+
+/**
+ * Send a raw request line the way `fetch` never would, so we can exercise a
+ * request target that makes `new URL` throw. Resolves with the response bytes.
+ *
+ * @param {string} redirectUri
+ * @param {string} target the raw request-target after the method
+ * @returns {Promise<string>}
+ */
+function rawRequest(redirectUri, target) {
+  const port = Number(new URL(redirectUri).port)
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1', () => {
+      sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`)
+    })
+    let buf = ''
+    sock.setEncoding('utf8')
+    sock.on('data', (chunk) => { buf += chunk })
+    sock.on('end', () => resolve(buf))
+    sock.on('error', reject)
+  })
+}
 
 /**
  * Drive the real bound port with a real HTTP request, the way the browser
@@ -62,6 +85,18 @@ test('close() before a code arrives rejects a pending waitForCode (no hang)', as
   const assertion = assert.rejects(() => recv.waitForCode(), /closed before a code arrived/)
   recv.close()
   await assertion
+})
+
+test('a malformed request target returns 400 without crashing or settling the flow', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  const waiting = recv.waitForCode()
+  // `GET //` makes `new URL('//', base)` throw; the handler must answer 400
+  // rather than letting the throw crash the process.
+  const resp = await rawRequest(recv.redirectUri, '//')
+  assert.match(resp, /^HTTP\/1\.1 400/)
+  // The flow is untouched: the real callback afterward still resolves.
+  await hitCallback(recv.redirectUri, { code: 'ok', state: 's1' })
+  assert.deepEqual(await waiting, { code: 'ok' })
 })
 
 test('a request to a path other than /callback does not consume the single shot', async () => {
