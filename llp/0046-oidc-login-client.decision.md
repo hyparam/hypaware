@@ -1,7 +1,7 @@
 # LLP 0046: Multi-tenant OIDC login on the client
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Onboarding, Query, MCP
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
