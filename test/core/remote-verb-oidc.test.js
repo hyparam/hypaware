@@ -122,6 +122,20 @@ test('a refresh that fails invalid_grant surfaces the re-login guidance', async 
   assert.match(err.join(''), /remote session expired - re-run 'hyp remote login prod'/)
 })
 
+test('a stale JWT whose pre-call refresh fails maps to re-login (not an unhandled throw)', async (t) => {
+  const hypHome = await tmpHome()
+  const stateDir = path.join(hypHome, 'hypaware')
+  // Stale stored JWT: the initial resolve refreshes before the call, and that
+  // refresh is the one that fails invalid_grant.
+  await writeSession(stateDir, 'prod', { refreshToken: 'stale', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  stubServers(t, { validJwt: 'jwt-never', refreshInvalid: true })
+
+  const { ctx, err } = ctxWith(hypHome)
+  const code = await cmd.run(['SELECT 1', '--remote', 'prod', '--format', 'json'], ctx)
+  assert.equal(code, 2)
+  assert.match(err.join(''), /remote session expired - re-run 'hyp remote login prod'/)
+})
+
 test('a static token that 401s is not retried (cannot refresh)', async (t) => {
   const hypHome = await tmpHome()
   const stateDir = path.join(hypHome, 'hypaware')

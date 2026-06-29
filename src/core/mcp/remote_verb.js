@@ -36,7 +36,15 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const identityBase = deriveIdentityBase(entry.url) ?? undefined
-  const resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+  /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
+  let resolved
+  try {
+    // The initial resolve can itself refresh (and fail) when the stored JWT is
+    // already stale; map an invalid_grant here too, not only on the 401 retry.
+    resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+  } catch (err) {
+    return mapRefreshError(err, target)
+  }
   if (!resolved.ok) {
     return { ok: false, error: resolved.error, exitCode: 2 }
   }
@@ -59,14 +67,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
     try {
       refreshed = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true })
     } catch (refreshErr) {
-      if (refreshErr instanceof InvalidGrantError) {
-        return {
-          ok: false,
-          error: `remote session expired - re-run 'hyp remote login ${target}'`,
-          exitCode: 2,
-        }
-      }
-      return { ok: false, error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr), exitCode: 1 }
+      return mapRefreshError(refreshErr, target)
     }
     if (!refreshed.ok) {
       return { ok: false, error: refreshed.error, exitCode: 2 }
@@ -97,6 +98,22 @@ async function callRemoteTool({ url, token, verb, params }) {
   }
   const structured = toolResult?.structuredContent ?? parseTextContent(toolResult)
   return { ok: true, result: structured, notices: serverCapNotices(structured) }
+}
+
+/**
+ * Map a refresh failure to a verb result: a typed `invalid_grant` (the refresh
+ * row was revoked or expired) becomes the re-login guidance (LLP 0046 D5); any
+ * other failure is a generic error.
+ *
+ * @param {unknown} err
+ * @param {string} target
+ * @returns {{ ok: false, error: string, exitCode: number }}
+ */
+function mapRefreshError(err, target) {
+  if (err instanceof InvalidGrantError) {
+    return { ok: false, error: `remote session expired - re-run 'hyp remote login ${target}'`, exitCode: 2 }
+  }
+  return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
 }
 
 /**
