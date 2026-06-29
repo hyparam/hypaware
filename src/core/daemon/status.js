@@ -17,10 +17,6 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
-  defaultLogDir,
-  platformIsSupported,
-} from './platform.js'
-import {
   isLaunchAgentInstalled,
   launchAgentStatus,
 } from './macos.js'
@@ -852,20 +848,3 @@ function repairForConfigError(kind) {
   }
 }
 
-/**
- * Expose the daemon log directory so command callers can render it
- * alongside the run state.
- *
- * @param {string} [homeDir]
- */
-export function statusLogDir(homeDir) {
-  return defaultLogDir(homeDir)
-}
-
-/**
- * Re-exported for symmetry with `statusLogDir`. The Phase 8 work uses
- * `platformIsSupported` to decide whether to skip installer probes
- * when running on Windows; surfacing the helper here keeps the import
- * surface of `core_commands.js` small.
- */
-export { platformIsSupported }
