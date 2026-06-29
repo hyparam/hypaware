@@ -4,8 +4,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
  * @import { BlobSinkConfigInstance, CapabilityName, ConfigRegistry, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance, ValidationError } from '../../../collectivus-plugin-kernel-types.js'
- * @import { LoadedManifest } from '../../../src/core/types.js'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
+ * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
  */
 
 /**

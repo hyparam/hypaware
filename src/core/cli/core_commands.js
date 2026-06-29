@@ -62,13 +62,12 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 
 /**
  * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.js'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { PluginMetadata } from '../../../src/core/config/types.js'
  * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../../../src/core/daemon/types.js'
  * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.js'
  * @import { ConfirmInstall } from '../../../src/core/plugin_install/types.js'
- * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from '../../../src/core/cli/types.js'
  */

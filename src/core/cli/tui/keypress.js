@@ -10,79 +10,8 @@
  */
 
 /**
- * @typedef {Object} Key
- * @property {string} [name]      Special name: 'up', 'down', 'space',
- *                                 'return', 'escape', 'backspace', or a
- *                                 single character ('a', '1', ...).
- * @property {string} [sequence]  Raw character(s): used for printable
- *                                 text input in `text` mode and the y/n
- *                                 chars in `confirm` mode.
- * @property {boolean} [ctrl]
- * @property {boolean} [shift]
- * @property {boolean} [meta]
+ * @import { Key, MultiselectState, SelectState, TextState, ConfirmState, State } from '../../../../src/core/cli/tui/types.js'
  */
-
-/**
- * @typedef {Object} MultiselectOption
- * @property {string|number} value
- * @property {string} label
- * @property {string} [summary]
- * @property {boolean} checked
- */
-
-/**
- * @typedef {Object} MultiselectState
- * @property {'multiselect'} kind
- * @property {string} title
- * @property {string} [hint]
- * @property {MultiselectOption[]} options
- * @property {number} cursor
- * @property {{ min?: number, max?: number }} [bounds]
- * @property {'active'|'resolved'|'cancelled'} status
- * @property {string} [error]
- */
-
-/**
- * @typedef {Object} SelectOption
- * @property {string|number} value
- * @property {string} label
- * @property {string} [summary]
- */
-
-/**
- * @typedef {Object} SelectState
- * @property {'select'} kind
- * @property {string} title
- * @property {string} [hint]
- * @property {SelectOption[]} options
- * @property {number} cursor
- * @property {'active'|'resolved'|'cancelled'} status
- */
-
-/**
- * @typedef {Object} TextState
- * @property {'text'} kind
- * @property {string} title
- * @property {string} [hint]
- * @property {string} [default]
- * @property {string} value
- * @property {boolean} mask
- * @property {((v: string) => string | null)} [validate]
- * @property {'active'|'resolved'|'cancelled'} status
- * @property {string} [error]
- */
-
-/**
- * @typedef {Object} ConfirmState
- * @property {'confirm'} kind
- * @property {string} title
- * @property {string} [hint]
- * @property {boolean} default
- * @property {boolean} [value]    Set when resolved.
- * @property {'active'|'resolved'|'cancelled'} status
- */
-
-/** @typedef {MultiselectState|SelectState|TextState|ConfirmState} State */
 
 /**
  * Apply a single key event to a state and return the next state. Pure:
