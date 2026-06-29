@@ -223,7 +223,7 @@ async function createDataSource(partitions, ctx, dataset) {
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}
  */
-function unionSources(sources) {
+export function unionSources(sources) {
   /** @type {Set<string>} */
   const allColumns = new Set()
   let totalRows = 0
@@ -235,12 +235,17 @@ function unionSources(sources) {
     columns: Array.from(allColumns),
     numRows: totalRows,
     scan(options) {
+      // The union reports appliedLimitOffset: false (the engine applies
+      // limit/offset to the concatenated stream), so the hints must not
+      // reach the sub-sources: an iceberg sub-source would push the offset
+      // down per partition and rows would be skipped twice.
+      const subOptions = options ? { ...options, limit: undefined, offset: undefined } : options
       return {
         appliedWhere: false,
         appliedLimitOffset: false,
         async *rows() {
           for (const source of sources) {
-            const scan = source.scan(options)
+            const scan = source.scan(subOptions)
             for await (const row of scan.rows()) {
               yield row
             }
