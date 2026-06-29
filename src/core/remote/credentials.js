@@ -7,6 +7,7 @@ import process from 'node:process'
 import { refreshSession } from './identity_client.js'
 
 /**
+ * @import { Stats } from 'node:fs'
  * @import { RemoteCredentialRecord, RemoteOidcRecord } from '../../../src/core/remote/types.js'
  */
 
@@ -118,7 +119,7 @@ export async function readCredentials(stateDir) {
  */
 async function readRawCredentials(stateDir) {
   const p = remoteCredentialsPath(stateDir)
-  /** @type {import('node:fs').Stats} */
+  /** @type {Stats} */
   let stat
   try {
     stat = await fs.stat(p)
