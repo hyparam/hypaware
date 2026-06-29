@@ -4,7 +4,8 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { resolveToken } from '../remote/credentials.js'
+import { deriveIdentityBase, resolveAccessJwt } from '../remote/credentials.js'
+import { InvalidGrantError } from '../remote/identity_client.js'
 import { parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
@@ -37,9 +38,18 @@ export async function runMcpProxy({ target, ctx }) {
     return 2
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const resolved = await resolveToken({ target, env: ctx.env, stateDir })
-  if (!resolved.ok) {
-    ctx.stderr.write(`hyp mcp: ${resolved.error}\n`)
+  const identityBase = deriveIdentityBase(entry.url) ?? undefined
+  // Fail fast (exit 2) if there is no usable credential at all. Resolve again
+  // per message below so an OIDC access JWT that expires mid-session refreshes,
+  // rather than the whole long-lived proxy holding one short-lived JWT.
+  try {
+    const probe = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+    if (!probe.ok) {
+      ctx.stderr.write(`hyp mcp: ${probe.error}\n`)
+      return 2
+    }
+  } catch (err) {
+    ctx.stderr.write(`hyp mcp: ${proxyAuthMessage(err, target)}\n`)
     return 2
   }
   const fetchImpl = /** @type {typeof fetch | undefined} */ (globalThis.fetch)
@@ -55,33 +65,72 @@ export async function runMcpProxy({ target, ctx }) {
   // Lifecycle line to stderr: stdout is the protocol channel.
   ctx.stderr.write(`hyp mcp: proxying stdio → ${entry.url} (target '${target}')\n`)
 
+  /** Forward one message to the remote with the given bearer token. */
+  const forward = (/** @type {any} */ message, /** @type {string} */ token) => {
+    /** @type {Record<string, string>} */
+    const headers = {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      authorization: `Bearer ${token}`,
+      ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+    }
+    return fetchImpl(entry.url, { method: 'POST', headers, body: JSON.stringify(message) })
+  }
+
   const server = {
     /** @param {any} message */
     async handleMessage(message) {
       const isNotify = message && typeof message === 'object' && message.id === undefined
-      /** @type {Record<string, string>} */
-      const headers = {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        authorization: `Bearer ${resolved.token}`,
-        ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+      const id = message?.id ?? null
+
+      // Resolve a fresh access JWT per message: an OIDC session silently
+      // refreshes a near-expiry JWT, env/static tokens pass through unchanged.
+      let resolved
+      try {
+        resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+      } catch (err) {
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, proxyAuthMessage(err, target))
       }
+      if (!resolved.ok) {
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, resolved.error)
+      }
+
       let res
       try {
-        res = await fetchImpl(entry.url, { method: 'POST', headers, body: JSON.stringify(message) })
+        res = await forward(message, resolved.token)
       } catch (err) {
-        return isNotify ? null : jsonRpcError(message?.id ?? null, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
       }
+
+      // A live 401/403 on an OIDC session means the cached JWT was revoked or
+      // expired early: force one refresh + retry before surfacing (LLP 0046 D5).
+      // An env/static token cannot refresh, so it falls through to the error.
+      if ((res.status === 401 || res.status === 403) && resolved.kind === 'oidc' && resolved.source === 'file') {
+        let refreshed
+        try {
+          refreshed = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true })
+        } catch (err) {
+          return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, proxyAuthMessage(err, target))
+        }
+        if (refreshed.ok) {
+          try {
+            res = await forward(message, refreshed.token)
+          } catch (err) {
+            return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+      }
+
       const sid = res.headers?.get?.('mcp-session-id')
       if (sid) sessionId = sid
       if (isNotify) return null
       if (!res.ok) {
-        return jsonRpcError(message?.id ?? null, INTERNAL_ERROR, `remote returned HTTP ${res.status}`)
+        return jsonRpcError(id, INTERNAL_ERROR, `remote returned HTTP ${res.status}`)
       }
       try {
         return await parseRpcResponse(res, message?.id)
       } catch (err) {
-        return jsonRpcError(message?.id ?? null, INTERNAL_ERROR, err instanceof Error ? err.message : String(err))
+        return jsonRpcError(id, INTERNAL_ERROR, err instanceof Error ? err.message : String(err))
       }
     },
   }
@@ -99,4 +148,20 @@ export async function runMcpProxy({ target, ctx }) {
   })
   log.info('mcp.proxy_stop', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.proxy' })
   return 0
+}
+
+/**
+ * Message for a refresh failure: a typed `invalid_grant` (the refresh row was
+ * revoked or expired) becomes re-login guidance (LLP 0046 D5); anything else
+ * surfaces as a generic error.
+ *
+ * @param {unknown} err
+ * @param {string} target
+ * @returns {string}
+ */
+function proxyAuthMessage(err, target) {
+  if (err instanceof InvalidGrantError) {
+    return `remote session expired - re-run 'hyp remote login ${target}'`
+  }
+  return err instanceof Error ? err.message : String(err)
 }

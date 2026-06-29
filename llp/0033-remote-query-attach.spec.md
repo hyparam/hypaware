@@ -104,7 +104,10 @@ a free invariant. The URL is non-secret and committable; the token is not config
   **session-aware** ([LLP 0046 D5](./0046-oidc-login-client.decision.md#d5)): it
   silently refreshes a near-expiry access JWT, and on a live `401`/`403` it
   refreshes once and retries before surfacing; a refresh that fails `invalid_grant`
-  surfaces the same re-login guidance, now meaning re-run the browser flow.
+  surfaces the same re-login guidance, now meaning re-run the browser flow. The
+  stdio proxy fallback ([LLP 0034 §proxy-fallback](./0034-mcp-host-intrinsic.decision.md#proxy-fallback))
+  shares this session-aware path, resolving a fresh JWT per forwarded message so a
+  long-lived proxy does not pin one short-lived access JWT.
 - AI clients that install the endpoint directly hold the token in **their own** MCP
   config — `hyp`'s store is only for the human-CLI client path.
 
