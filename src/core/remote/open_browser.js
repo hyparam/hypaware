@@ -44,7 +44,11 @@ export function openBrowser(url, opts = {}) {
  */
 function openerFor(platform) {
   if (platform === 'darwin') return { command: 'open', args: [] }
-  if (platform === 'win32') return { command: 'cmd', args: ['/c', 'start', ''] }
+  // win32: NOT `cmd /c start <url>`. cmd treats `&` as a command separator, so
+  // an unquoted authorize URL (always multi-param: redirect_uri, code_challenge,
+  // state, ...) is truncated at the first `&`, opening a PKCE-less URL. rundll32
+  // is spawned directly (no shell), so the URL reaches the handler verbatim.
+  if (platform === 'win32') return { command: 'rundll32', args: ['url.dll,FileProtocolHandler'] }
   // Treat every other Unix as freedesktop (xdg-open). A missing xdg-open
   // surfaces as an async spawn 'error' event (swallowed above); the caller's
   // loopback waits and the URL is printed, so login still completes manually.

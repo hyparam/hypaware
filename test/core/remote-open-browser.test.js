@@ -38,11 +38,13 @@ test('linux uses `xdg-open`', () => {
   assert.equal(calls[0].command, 'xdg-open')
 })
 
-test('win32 uses `cmd /c start`', () => {
+test('win32 uses rundll32 so `&` in the URL is not a cmd separator', () => {
   const { spawnImpl, calls } = stubSpawn()
-  openBrowser('https://x/auth', { platform: 'win32', spawnImpl })
-  assert.equal(calls[0].command, 'cmd')
-  assert.deepEqual(calls[0].args, ['/c', 'start', '', 'https://x/auth'])
+  // A real authorize URL has multiple `&`-joined params; cmd /c start would
+  // truncate it at the first `&`. rundll32 receives it as a single argv.
+  openBrowser('https://x/auth?a=1&b=2', { platform: 'win32', spawnImpl })
+  assert.equal(calls[0].command, 'rundll32')
+  assert.deepEqual(calls[0].args, ['url.dll,FileProtocolHandler', 'https://x/auth?a=1&b=2'])
 })
 
 test('a synchronous spawn throw returns false (caller prints the URL)', () => {
