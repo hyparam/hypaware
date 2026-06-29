@@ -6,8 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin, deriveIdentityBase } from '../../src/core/cli/remote_commands.js'
-import { readCredentials } from '../../src/core/remote/credentials.js'
+import { runRemoteLogin } from '../../src/core/cli/remote_commands.js'
+import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 
 async function tmpHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))

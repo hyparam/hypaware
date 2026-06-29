@@ -7,6 +7,7 @@ import process from 'node:process'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import {
+  deriveIdentityBase,
   readCredentials,
   remoteTokenEnvVar,
   removeToken,
@@ -235,23 +236,6 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
     const callbackError = /** @type {any} */ (err)?.callbackError
     ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
     return 1
-  }
-}
-
-/**
- * Derive the identity base `<origin>/v1/identity` from a target's MCP URL
- * (LLP 0046 D6): identity is mounted at the same origin, so no second URL is
- * configured. Returns `null` for an unparseable URL.
- *
- * @param {string} url
- * @returns {string | null}
- * @ref LLP 0046#d6 [implements]: identity endpoints derive from the configured remote URL origin
- */
-export function deriveIdentityBase(url) {
-  try {
-    return `${new URL(url).origin}/v1/identity`
-  } catch {
-    return null
   }
 }
 
