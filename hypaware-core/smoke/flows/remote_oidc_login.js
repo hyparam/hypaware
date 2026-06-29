@@ -15,6 +15,7 @@ import { verbToCommand } from '../../../src/core/cli/verb_command.js'
 
 /**
  * @import { AddressInfo } from 'node:net'
+ * @import { IncomingMessage } from 'node:http'
  */
 
 /**
@@ -69,7 +70,7 @@ export async function run({ harness, expect }) {
 
     // ----- smoke_step: attach_query -----
     const cmd = verbToCommand(querySqlVerb)
-    const first = runQuery(cmd, mcpUrl)
+    const first = runQuery(mcpUrl)
     let code = await cmd.run(['SELECT 1', '--remote', 'prod', '--format', 'json'], first.ctx)
     expect.that('attach: query exits 0 with the access JWT', code, (v) => v === 0)
     expect.that('attach: rows returned', first.out.join(''), (s) => s.includes('"n": 1') || s.includes('"n":1'))
@@ -78,7 +79,7 @@ export async function run({ harness, expect }) {
     // ----- smoke_step: silent_refresh -----
     // Force the stored access JWT to look expired; the next query must refresh.
     await forceExpiry(stateDir, 'prod')
-    const second = runQuery(cmd, mcpUrl)
+    const second = runQuery(mcpUrl)
     code = await cmd.run(['SELECT 1', '--remote', 'prod', '--format', 'json'], second.ctx)
     expect.that('refresh: query still exits 0 after silent refresh', code, (v) => v === 0)
     expect.that('refresh: exactly one refresh happened', server.state.refreshCalls, (v) => v === 1)
@@ -90,15 +91,17 @@ export async function run({ harness, expect }) {
     // surface the re-login guidance, not a generic error.
     server.state.refreshRevoked = true
     await forceExpiry(stateDir, 'prod')
-    const third = runQuery(cmd, mcpUrl)
+    const third = runQuery(mcpUrl)
     code = await cmd.run(['SELECT 1', '--remote', 'prod', '--format', 'json'], third.ctx)
     expect.that('revoked: query exits nonzero', code, (v) => v !== 0)
     expect.that('revoked: re-login guidance surfaced', third.err.join(''), (s) => /re-run 'hyp remote login prod'/.test(s))
   } finally {
+    // Force-close keep-alive sockets so close() does not wait on idle timeouts,
+    // then flush telemetry even if an assertion above threw.
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections()
     await new Promise((resolve) => server.close(() => resolve(undefined)))
+    await obs.shutdown()
   }
-
-  await obs.shutdown()
 
   // ----- telemetry: the remote-oidc path emitted its smoke_step markers -----
   const logs = await expect.logs()
@@ -113,10 +116,9 @@ export async function run({ harness, expect }) {
  * Build a ctx for the query verb against `mcpUrl`, with captured streams and a
  * configured `prod` target. The credential resolves from HYP_HOME's state dir.
  *
- * @param {{ run: (argv: string[], ctx: any) => Promise<number> }} _cmd
  * @param {string} mcpUrl
  */
-function runQuery(_cmd, mcpUrl) {
+function runQuery(mcpUrl) {
   /** @type {string[]} */ const out = []
   /** @type {string[]} */ const err = []
   const ctx = /** @type {any} */ ({
@@ -148,7 +150,7 @@ async function forceExpiry(stateDir, target) {
  * Start the combined identity + MCP stub server. Signs a fresh access JWT on
  * each grant; the MCP side accepts only the latest one.
  *
- * @returns {Promise<{ port: number, state: any, close: (cb: () => void) => void }>}
+ * @returns {Promise<{ port: number, state: any, close: (cb: () => void) => void, closeAllConnections: () => void }>}
  */
 function startStubServer() {
   const state = { jwtSeq: 0, validJwt: '', refreshToken: 'rt-smoke', refreshRevoked: false, refreshCalls: 0 }
@@ -220,13 +222,18 @@ function startStubServer() {
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const addr = /** @type {AddressInfo} */ (server.address())
-      resolve({ port: addr.port, state, close: (cb) => server.close(cb) })
+      resolve({
+        port: addr.port,
+        state,
+        close: (/** @type {() => void} */ cb) => server.close(cb),
+        closeAllConnections: () => server.closeAllConnections?.(),
+      })
     })
   })
 }
 
 /**
- * @param {import('node:http').IncomingMessage} req
+ * @param {IncomingMessage} req
  * @returns {Promise<any>}
  */
 function readBody(req) {
