@@ -173,6 +173,24 @@ test('an empty piped stdin (no token) points at --browser instead of just "empty
   assert.match(err.join(''), /re-run with --browser/)
 })
 
+test('--no-browser with a piped token stores it statically instead of discarding it', async () => {
+  const hypHome = await tmpHome()
+  const stdin = {
+    isTTY: false,
+    async *[Symbol.asyncIterator]() { yield Buffer.from('piped-tok\n') },
+  }
+  const { ctx, err } = await makeCtx({ hypHome, stdin })
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return {} })
+  const code = await runRemoteLogin(['prod', '--no-browser'], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(called, false) // the browser flow must NOT run; the token wins
+  assert.match(err.join(''), /--no-browser is ignored because a token was piped/)
+  const stateDir = path.join(hypHome, 'hypaware')
+  const creds = await readCredentials(stateDir)
+  assert.deepEqual(creds.prod, { kind: 'static', token: 'piped-tok' })
+})
+
 test('--browser overrides a piped stdin token and takes the browser flow', async () => {
   const hypHome = await tmpHome()
   const stdin = {

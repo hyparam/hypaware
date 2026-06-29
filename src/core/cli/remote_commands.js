@@ -132,6 +132,33 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
     }
     return runStaticLogin(name, tokenFile, stdin, ctx)
   }
+
+  // `--no-browser` with a piped token is contradictory: the flag is a browser
+  // mode modifier ("print the URL") but a piped token signals static intent.
+  // Peek stdin to tell a real token apart from an empty pipe: a non-empty value
+  // is stored statically (never silently discarded), while an empty pipe falls
+  // through to the browser flow (which is what `--no-browser` is for).
+  if (stdinPiped && noBrowser && !forceBrowser && !tokenFile) {
+    /** @type {string} */
+    let piped
+    try {
+      piped = (await readAllStdin(stdin)).trim()
+    } catch (err) {
+      ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+    if (piped) {
+      ctx.stderr.write('note: --no-browser is ignored because a token was piped on stdin (storing it statically)\n')
+      if (org) {
+        ctx.stderr.write('note: --org is ignored with a static token (it applies to the browser login flow)\n')
+      }
+      return persistStaticToken(name, piped, ctx)
+    }
+    // Empty pipe: this is the documented "print the URL" path. The browser flow
+    // below must not re-read the (now exhausted) stdin, so signal it explicitly.
+    return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
+  }
+
   return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
 }
 
@@ -191,6 +218,21 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
     return 2
   }
 
+  return persistStaticToken(name, token, ctx)
+}
+
+/**
+ * Store an already-read static token to the 0600 store and print the
+ * confirmation, with a nudge when the target isn't configured. Shared by the
+ * `--token-file`/piped static path and the `--no-browser`-with-a-piped-token
+ * peek.
+ *
+ * @param {string} name
+ * @param {string} token a non-empty, trimmed token
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function persistStaticToken(name, token, ctx) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   await writeToken(stateDir, name, token)
   ctx.stdout.write(`stored query-scoped token for '${name}' (mode 0600)\n`)
