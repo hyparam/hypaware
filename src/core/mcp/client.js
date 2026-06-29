@@ -67,7 +67,12 @@ export function createHttpMcpClient(opts) {
     }
     if (!res.ok) {
       if (res.status === 401 || res.status === 403) {
-        throw new Error(`remote rejected the credential (HTTP ${res.status}) - re-run 'hyp remote login'`)
+        // Tag the error so the attach path can recognize an auth rejection and
+        // attempt a single silent refresh + retry (LLP 0046 D5).
+        throw Object.assign(
+          new Error(`remote rejected the credential (HTTP ${res.status}) - re-run 'hyp remote login'`),
+          { authError: true, status: res.status },
+        )
       }
       const text = await safeText(res)
       throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`)

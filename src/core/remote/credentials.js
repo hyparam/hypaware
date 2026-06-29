@@ -34,6 +34,24 @@ const CREDENTIALS_BASENAME = 'remote-credentials.json'
 const REFRESH_SKEW_MS = 60 * 1000
 
 /**
+ * Derive the identity base `<origin>/v1/identity` from a target's MCP URL
+ * (LLP 0046 D6): identity is mounted at the same origin, so no second URL is
+ * configured. Returns `null` for an unparseable URL. Shared by the login
+ * command and the attach path.
+ *
+ * @param {string} url
+ * @returns {string | null}
+ * @ref LLP 0046#d6 [implements]: identity endpoints derive from the configured remote URL origin
+ */
+export function deriveIdentityBase(url) {
+  try {
+    return `${new URL(url).origin}/v1/identity`
+  } catch {
+    return null
+  }
+}
+
+/**
  * @param {string} stateDir
  * @returns {string}
  */
@@ -219,11 +237,12 @@ export async function resolveToken({ target, env, stateDir }) {
  *   identityBase?: string,
  *   now?: number,
  *   fetchImpl?: typeof fetch,
+ *   forceRefresh?: boolean,
  * }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>}
  * @ref LLP 0046#d5 [implements]: silent refresh on the attach path; env override still wins
  */
-export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl }) {
+export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
   const envName = remoteTokenEnvVar(target)
   const fromEnv = env[envName]
   if (typeof fromEnv === 'string' && fromEnv.length > 0) {
@@ -241,8 +260,9 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
       : { ok: false, error: noTokenError(target, envName) }
   }
 
-  // oidc: refresh if the cached JWT is missing, unparseable, or near expiry.
-  if (!isFresh(entry, now)) {
+  // oidc: refresh if forced (a live 401 retry), or the cached JWT is missing,
+  // unparseable, or near expiry.
+  if (forceRefresh || !isFresh(entry, now)) {
     if (!identityBase) {
       return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
     }
