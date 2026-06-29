@@ -4,8 +4,8 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { messagesEndpoint } from './config.js'
 
 /**
- * @import { CompletionBatchRequest, CompletionBatchResult, CompletionBatchStatus, CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AnthropicCompletionConfig, CreateAnthropicCompletionOptions, FetchLike } from './types.d.ts'
+ * @import { CompletionBatchRequest, CompletionBatchResult, CompletionBatchStatus, CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AnthropicCompletionConfig, CreateAnthropicCompletionOptions, FetchLike } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/completion-anthropic'

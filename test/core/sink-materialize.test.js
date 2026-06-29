@@ -30,7 +30,7 @@ import { materializeSinks } from '../../src/core/sinks/materialize.js'
  *   SinkEncoder,
  *   TableFormatProvider,
  * } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../../src/core/runtime/types.d.ts'
+ * @import { KernelRuntime } from '../../src/core/runtime/types.js'
  */
 
 function makeNoopLogger() {

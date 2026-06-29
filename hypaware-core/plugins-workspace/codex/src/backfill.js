@@ -6,8 +6,8 @@ import path from 'node:path'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CodexRolloutItem, CodexRolloutSession } from './types.d.ts'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
  */
 
 /**

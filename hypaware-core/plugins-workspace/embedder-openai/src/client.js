@@ -4,8 +4,8 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { embeddingsEndpoint } from './config.js'
 
 /**
- * @import { EmbedderCapability, EmbedResult, HypError } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CreateEmbedderOptions, EmbedderOpenAiConfig, FetchLike } from './types.d.ts'
+ * @import { EmbedderCapability, EmbedResult, HypError } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CreateEmbedderOptions, EmbedderOpenAiConfig, FetchLike } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/embedder-openai'

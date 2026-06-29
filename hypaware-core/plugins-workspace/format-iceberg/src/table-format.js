@@ -9,8 +9,8 @@ import { derivePartitioning } from './partitioning.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'
 
 /**
- * @import { BlobStore, ColumnSpec, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkEncoder, TableFormatCreateContext, TableFormatProvider } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExportRetentionConfig } from './types.d.ts'
+ * @import { BlobStore, ColumnSpec, ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkEncoder, TableFormatCreateContext, TableFormatProvider } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExportRetentionConfig } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/format-iceberg'

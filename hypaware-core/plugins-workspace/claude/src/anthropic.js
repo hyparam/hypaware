@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 
 /**
- * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

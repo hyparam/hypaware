@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

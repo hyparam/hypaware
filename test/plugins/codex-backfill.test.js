@@ -20,7 +20,7 @@ import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspa
  * `ai_gateway.projected_exchange` materializer, so the assertions cover the
  * exact path `hyp backfill codex` exercises in production.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.js'
  */
 
 // ---------------------------------------------------------------------------

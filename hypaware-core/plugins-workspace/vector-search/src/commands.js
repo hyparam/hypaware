@@ -7,8 +7,8 @@ import { partitionLabel } from './shards.js'
 import { collectIndexStatus } from './status.js'
 
 /**
- * @import { CommandRunContext, HypError } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { QueryFormat } from '../../../../src/core/query/types.d.ts'
+ * @import { CommandRunContext, HypError } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { QueryFormat } from '../../../../src/core/query/types.js'
  */
 
 // Mirrors the `hyp query sql` inline-output defaults so vector results

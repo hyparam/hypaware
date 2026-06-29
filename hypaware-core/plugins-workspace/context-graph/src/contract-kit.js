@@ -5,7 +5,7 @@ import { nodeId, edgeId } from './ids.js'
 export { nodeId, edgeId }
 
 /**
- * @import { NodeSpec, EdgeSpec } from './types.d.ts'
+ * @import { NodeSpec, EdgeSpec } from './types.js'
  */
 
 /**

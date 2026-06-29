@@ -9,7 +9,7 @@ import { encodePartition, clusterColumnsForDataset } from 'hypaware/core/sinks'
 import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/local-fs'

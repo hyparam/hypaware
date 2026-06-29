@@ -14,8 +14,8 @@ import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/icebe
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.d.ts'
+ * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  */
 
 /** @param {string} prefix */

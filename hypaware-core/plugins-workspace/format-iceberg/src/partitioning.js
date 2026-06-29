@@ -5,10 +5,10 @@ import { partitionSpecForDeclaration } from '../../../../src/core/iceberg/partit
 import { icebergSchemaForColumns } from './schema.js'
 
 /**
- * @import { ColumnSpec, DatasetRegistration } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration } from '../../../../src/core/iceberg/types.d.ts'
+ * @import { ColumnSpec, DatasetRegistration } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../../../src/core/iceberg/types.js'
  * @import { Schema, SortField, SortOrder } from 'icebird/src/types.js'
- * @import { DatasetPartitioning } from './types.d.ts'
+ * @import { DatasetPartitioning } from './types.js'
  */
 
 // @ref LLP 0022#partition-derivation: the export partitions by a writer-owned

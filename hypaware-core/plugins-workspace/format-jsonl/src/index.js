@@ -6,7 +6,7 @@ import zlib from 'node:zlib'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 /**
- * @import { PluginActivationContext, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationContext, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/format-jsonl'

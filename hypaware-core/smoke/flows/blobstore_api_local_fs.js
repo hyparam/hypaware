@@ -15,7 +15,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
- * @import { BlobStore } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

@@ -19,8 +19,8 @@ import {
 import { parseConfigShape } from '../../src/core/config/schema.js'
 
 /**
- * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigApplyDeps, PinnedInstallResult } from '../../src/core/config/types.d.ts'
+ * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigApplyDeps, PinnedInstallResult } from '../../src/core/config/types.js'
  */
 
 const SEED_CONFIG = {

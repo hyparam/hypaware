@@ -7,7 +7,7 @@
  */
 
 /**
- * @import { EnrichConfigError, EnrichConfigResult } from './types.d.ts'
+ * @import { EnrichConfigError, EnrichConfigResult } from './types.js'
  */
 
 export const SOURCE_DEFAULTS = Object.freeze({

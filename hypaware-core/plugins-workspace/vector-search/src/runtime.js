@@ -9,7 +9,7 @@
  */
 
 /**
- * @import { VectorSearchRuntime } from './types.d.ts'
+ * @import { VectorSearchRuntime } from './types.js'
  */
 
 /** @type {VectorSearchRuntime | null} */

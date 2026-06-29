@@ -11,8 +11,8 @@ import { createBackfillHandler, backfillHandler } from '../../src/core/config/ac
 import { createActionReconciler } from '../../src/core/config/action_reconciler.js'
 
 /**
- * @import { ActionContext, BackfillSpawnArgs, BackfillSpawnResult } from '../../src/core/config/types.d.ts'
- * @import { BackfillContribution } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActionContext, BackfillSpawnArgs, BackfillSpawnResult } from '../../src/core/config/types.js'
+ * @import { BackfillContribution } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /** A quiet logger so tests don't spam stderr. */

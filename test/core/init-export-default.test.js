@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 
 import { resolveInitExportChoice } from '../../src/core/cli/core_commands.js'
 
-/** @import { InitFlags } from '../../src/core/cli/types.d.ts' */
+/** @import { InitFlags } from '../../src/core/cli/types.js' */
 
 /**
  * Build a complete {@link InitFlags} with conservative defaults; tests

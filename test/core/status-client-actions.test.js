@@ -12,7 +12,7 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/cli/core_commands.js'
 
 /**
- * @import { ClientActionReport } from '../../src/core/daemon/types.d.ts'
+ * @import { ClientActionReport } from '../../src/core/daemon/types.js'
  */
 
 // T6: the client-action reconciler status surface (LLP 0036 / 0041). The

@@ -3,8 +3,8 @@
 import { createAiGatewayGraphContract } from './graph_contract.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ContextGraphCapability } from './types.d.ts'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ContextGraphCapability } from './types.js'
  */
 
 /**

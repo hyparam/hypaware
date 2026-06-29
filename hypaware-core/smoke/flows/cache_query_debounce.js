@@ -9,9 +9,9 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { installObservability } from '../../../src/core/observability/index.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../../../src/core/runtime/types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  */
 
 const DATASET = 'debounce_rows'

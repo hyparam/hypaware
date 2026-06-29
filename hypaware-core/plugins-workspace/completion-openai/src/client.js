@@ -4,8 +4,8 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { chatCompletionsEndpoint } from './config.js'
 
 /**
- * @import { CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CreateOpenAiCompletionOptions, FetchLike, OpenAiCompletionConfig } from './types.d.ts'
+ * @import { CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CreateOpenAiCompletionOptions, FetchLike, OpenAiCompletionConfig } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/completion-openai'

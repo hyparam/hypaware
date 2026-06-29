@@ -9,8 +9,8 @@ import { runSql } from './sql.js'
 import { readState } from './state.js'
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { EnrichRuntime } from './types.d.ts'
+ * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { EnrichRuntime } from './types.js'
  */
 
 /**

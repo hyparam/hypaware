@@ -6,8 +6,8 @@ import { estimatePendingWork, newVectorError, refreshIndexes } from './refresh.j
 import { computeShardStates, contentId, mergeTopK, readShardMetas, shardFileBase, shardPaths } from './shards.js'
 
 /**
- * @import { VectorSearchHit, VectorSearchOptions } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ShardState, VectorIndexDeclaration, VectorSearchRuntime } from './types.d.ts'
+ * @import { VectorSearchHit, VectorSearchOptions } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ShardState, VectorIndexDeclaration, VectorSearchRuntime } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/vector-search'

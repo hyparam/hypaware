@@ -5,8 +5,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * @import { CachePartitionMeta } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { RawShardHit, ShardMeta, ShardState, VectorIndexDeclaration } from './types.d.ts'
+ * @import { CachePartitionMeta } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { RawShardHit, ShardMeta, ShardState, VectorIndexDeclaration } from './types.js'
  */
 
 /**

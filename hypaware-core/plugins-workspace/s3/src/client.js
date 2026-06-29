@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CredentialSourceKind, S3ClientFactory, S3ClientHandle, S3ClientOptions } from './types.d.ts'
+ * @import { CredentialSourceKind, S3ClientFactory, S3ClientHandle, S3ClientOptions } from './types.js'
  * @import { S3ClientConfig } from '@aws-sdk/client-s3'
  */
 

@@ -3,8 +3,8 @@
 import { computeShardStates, readShardMetas } from './shards.js'
 
 /**
- * @import { VectorIndexStatus } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { VectorSearchRuntime } from './types.d.ts'
+ * @import { VectorIndexStatus } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { VectorSearchRuntime } from './types.js'
  */
 
 /**

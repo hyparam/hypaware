@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { ColumnSource } from 'hyparquet-writer'
  */
 

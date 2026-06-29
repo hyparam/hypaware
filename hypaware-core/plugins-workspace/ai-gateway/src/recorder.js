@@ -27,7 +27,7 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
 ])
 
 /**
- * @import { ExchangeInit, FinishedRow, RecorderOptions, ResponseStart } from './types.d.ts'
+ * @import { ExchangeInit, FinishedRow, RecorderOptions, ResponseStart } from './types.js'
  */
 
 /**

@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CodexLogReader } from './types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CodexLogReader } from './types.js'
  */
 
 /**

@@ -18,8 +18,8 @@ import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
  * @import { AddressInfo } from 'node:net'
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))

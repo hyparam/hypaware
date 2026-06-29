@@ -6,8 +6,8 @@ import { getVectorSearchRuntime } from './runtime.js'
 import { validateVectorSearchConfig } from './config.js'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { RefreshReport } from './types.d.ts'
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { RefreshReport } from './types.js'
  */
 
 /**

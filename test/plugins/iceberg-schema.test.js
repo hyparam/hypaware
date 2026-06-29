@@ -10,7 +10,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/schema.js'
 
 /**
- * @import { HypError } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { HypError } from '../../collectivus-plugin-kernel-types.js'
  * @import { Schema } from 'icebird/src/types.js'
  */
 

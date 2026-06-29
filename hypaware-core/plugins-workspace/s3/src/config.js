@@ -11,8 +11,8 @@
  */
 
 /**
- * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.d.ts'
+ * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.js'
  */
 
 const RECOGNIZED_STORAGE_CLASSES = new Set([

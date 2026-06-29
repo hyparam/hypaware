@@ -7,7 +7,7 @@ import { validateEnrichConfig } from '../../hypaware-core/plugins-workspace/cont
 import { inWindowSessions, parseBackfillArgv } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/commands.js'
 
 /**
- * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
+ * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.js'
  */
 
 /** @returns {EnrichConfig} */
