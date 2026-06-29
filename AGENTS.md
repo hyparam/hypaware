@@ -31,6 +31,42 @@ actually shipped in V1.
   surveys the corpus; `/llp-grill` stress-tests a plan against the LLP corpus
   before you write code.
 
+## Skills (`plugins-workspace`)
+
+Agent skills live under
+`hypaware-core/plugins-workspace/{claude,codex}/skills/<name>/SKILL.md`.
+
+- **Mirror claude and codex.** A skill offered to both clients must be
+  **byte-identical** across `claude/skills/` and `codex/skills/` — edit one,
+  copy to the other, verify with `diff`. Client-specific skills (e.g.
+  `hypaware-ignore` / `hypaware-unignore`, which are Claude-only) live only
+  under the client that needs them.
+- **One source of truth for the data format.** The **hypaware-query** skill
+  owns *all* knowledge of the `ai_gateway_messages` schema — column names, JSON
+  paths, the deduped token-spine SQL, Claude-vs-Codex column availability, and
+  what transcript backfill does and doesn't populate. Every other skill that
+  reads recorded data (the `hypaware-ai-*-report` skills) stays
+  **schema-agnostic**: describe the analysis conceptually and defer to
+  hypaware-query. Don't put column names, JSON paths, or SQL in a report skill —
+  a schema change should touch only hypaware-query.
+- **Reports are written for a human, not an LLM.** The `hypaware-ai-*-report`
+  one-pagers follow a fixed house style:
+  - open with `## Overview` (a bold, plain-English summary — never a bare
+    opening line);
+  - then a short **numbered list** — `## Recommended changes` (improvement) or
+    `## What we found` (adoption / spend / security) — with each item's single
+    most relevant **number inline**; no detached "key numbers" table;
+  - lead each recommendation **problem-first, then the fix**;
+  - **ban internal jargon** (no "package", "fan-out", "sidechain",
+    "single-gateway" / "fleet-wide", raw "bypassPermissions" — say what you
+    mean);
+  - group items that share a section link under one `### subsection` (don't
+    repeat the same link);
+  - keep tables and depth in the per-section files — progressive disclosure: a
+    short main file plus one file per section;
+  - tokens are reported as **volume, never dollars**, and every figure is a
+    floor.
+
 ## Code Style
 
 - JavaScript, no semicolons.

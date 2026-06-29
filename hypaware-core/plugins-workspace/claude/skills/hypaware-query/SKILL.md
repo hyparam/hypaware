@@ -67,18 +67,109 @@ Never read a smaller CLI row count as "fewer rows matched" — it is the display
 
 ## AI gateway message model
 
-Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages`. Each row is a normalized message content part owned by the HypAware AI gateway schema.
+Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages` (56 columns).
+This section is the **authoritative column + availability reference** — the report skills name
+columns but defer here for *which columns exist, how Claude and Codex differ, and what backfill
+does and doesn't populate*. When a number matters, confirm with a quick `count(col)` per
+`provider`; for the full list run `hyp query schema ai_gateway_messages --format markdown`.
 
-Key columns:
+Each row is one normalized message **content part**: a single provider message fans out into
+several rows (one per part), so most analysis dedups per `message_id` first.
 
-- `session_id`, `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable identity. `session_id` is the always-present session key (group/scope on it); `conversation_id` is a nullable thread within a session (a Codex thread; null for Claude).
-- `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields.
-- `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
-- `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
+**`source` is a partition, not a column.** `hyp query status` lists partitions as
+`ai_gateway_messages/source=claude` and `…/source=codex`, but there is **no `source` column** —
+`WHERE source='claude'` errors with "Column source not found". Filter by `provider` instead:
+`'anthropic'` = Claude, `'openai'` = Codex.
 
-**Token counts** live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`): `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`. Codex (`provider='openai'`) omits `cache_write_tokens` and adds `reasoning_tokens` + `total_tokens`. Extract with `CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens') AS BIGINT)`; usage repeats across a message's content parts, so dedup per `message_id` (e.g. `max(...)`) before summing.
+### Columns by group (the analytically useful ones)
 
-Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
+- **Identity / dedup:** `gateway_id` (NOT NULL — ≈ one machine/user; the unit most reports group
+  on. `user_id` is effectively always null — don't group on it), `session_id` (always present,
+  the session key), `conversation_id` (a thread — set for Codex, **null for Claude**),
+  `message_id`, `message_index`, `part_id`, `part_index`.
+- **Source context:** `repo_root`, `git_branch`, `git_remote`, `head_sha`, `cwd`, `model`,
+  `provider`, and `date` (a STRING partition, `YYYY-MM-DD` — put it in every `WHERE` to prune the
+  30s timeout).
+- **Subagent provenance:** `is_sidechain` is the **portable subagent boolean** (true on both
+  providers); the *id* column is provider-specific — `agent_id` for Claude, `parent_thread_id`
+  (+ `user_type='subagent'`) for Codex (see the table below).
+- **Content:** `role`, `part_type`, `content_text`, `tool_name`, `tool_call_id`, `tool_args`
+  (JSON, sometimes a bare string — see the dialect note), `status`, `is_error`. Message text lives
+  in `content_text` on `part_type='text'` rows; `system_text` is its own column but is **empty in
+  practice** (sample `content_text`, not `system_text`). Tool-result rows are `role='user'` for
+  Claude but `role='tool'` for Codex.
+- **Settings / diagnostics:** `permission_mode`, `entrypoint`, `client_name`, `client_version`,
+  `user_type`, `is_compact_summary`, `attributes` (JSON: `attributes.usage`, `attributes.gateway`,
+  request settings, propagated `dev_run_id`), `raw_frame` (JSON: the raw provider frame — Claude
+  only).
+
+### Tokens — the deduped token spine (`attributes.usage`, `role='assistant'`)
+
+Token counts live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`). Usage
+repeats across a message's content parts, so a plain `SUM` overcounts ~3× — **dedup per message
+with `max()` first**. This is the canonical **deduped token spine** every report reconciles to;
+build token figures off it rather than re-deriving the dedup:
+
+```sql
+WITH msg AS (
+  SELECT COALESCE(CAST(JSON_EXTRACT(raw_frame,'$.message_id') AS VARCHAR), message_id) mid,
+    max(CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens')       AS BIGINT)) inp,
+    max(CAST(JSON_EXTRACT(attributes,'$.usage.output_tokens')      AS BIGINT)) outp,
+    max(CAST(JSON_EXTRACT(attributes,'$.usage.cache_write_tokens') AS BIGINT)) cwrite,
+    max(CAST(JSON_EXTRACT(attributes,'$.usage.cache_read_tokens')  AS BIGINT)) cread
+  FROM ai_gateway_messages
+  WHERE date BETWEEN '<start>' AND '<end>'
+    AND role='assistant' AND JSON_EXTRACT(attributes,'$.usage') IS NOT NULL
+  GROUP BY mid)
+SELECT sum(inp) t_in, sum(outp) t_out, sum(cwrite) t_cw, sum(cread) t_cr FROM msg;
+-- slice by adding max(gateway_id)/max(model)/max(repo_root)/max(date) inside, GROUP BY outside.
+```
+
+Report the four types separately (cache-read is usually the bulk, output the scarce slice); the
+**cache-read ratio** is `cache_read/(cache_read+input)`. Token keys differ by provider:
+
+- **Claude (`anthropic`):** `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_write_tokens`.
+- **Codex (`openai`):** `input_tokens`, `output_tokens`, `cache_read_tokens`, `reasoning_tokens`,
+  `total_tokens` — **no `cache_write_tokens`**.
+
+`usage` is **partial even on assistant rows** (locally only ~43% of Claude and ~68% of Codex
+assistant rows carry a `usage` block). Always measure usage coverage rather than assuming every
+assistant row has tokens.
+
+### Capture origin & backfill (so you're not surprised)
+
+`attributes.gateway.source` marks how a row was captured. Local recordings are reconstructed from
+the on-disk Claude/Codex transcript and carry `source='backfill'`; rows captured live through the
+running gateway carry a different value (check the distinct values). **Backfill recovers
+structure, identity, git/repo context, and subagent provenance, but only *some* token usage
+survives** — which is why `attributes.usage` is partial above. A missing `usage` block means "this
+row was reconstructed without token counts", **not** "no activity here".
+
+### Claude vs Codex availability
+
+Same dataset, very different columns populated per provider — check before writing cross-provider
+SQL or attributing by a column one provider doesn't fill:
+
+| Signal | Claude (`anthropic`) | Codex (`openai`) |
+| --- | --- | --- |
+| `conversation_id` (thread) | null | always set |
+| `user_id` | null | null |
+| `repo_root` | set (~93%) | **none** — use `git_branch`/`head_sha` |
+| `git_branch` / `head_sha` | sparse (~10%) | dense (~96%) |
+| subagent flag | `is_sidechain=true` | `is_sidechain=true` |
+| subagent id | `agent_id` (`parent_thread_id` null) | `parent_thread_id` + `user_type='subagent'` (`agent_id` null) |
+| `permission_mode` | **sparse (~3%)** | dense (~99%) |
+| `request_id` / `provider_uuid` / `prompt_id` | set | none |
+| `raw_frame` | set | none |
+| `system_text` | empty | empty |
+| usage token keys | …/**`cache_write`** | …/**`reasoning`**/**`total`** (no `cache_write`) |
+
+Percentages are from the local dataset and will drift — the *which-columns-exist* pattern is the
+stable part; confirm a figure with `count(col)` per `provider` when it matters. Claude transcript
+enrichment is what fills `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`,
+`client_version`, `user_type`, `permission_mode`, and `hook_event` (when the local Claude Code
+JSONL transcript can be matched), so those are Claude-leaning.
 
 Run `hyp query schema ai_gateway_messages --format markdown` for the authoritative column reference.
 
