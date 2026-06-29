@@ -87,9 +87,10 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
 
 /**
  * POST a JSON body to `<identityBase>/token` and parse the JSON response. A
- * 401 whose body carries `error: "invalid_grant"` becomes an
- * {@link InvalidGrantError}; any other non-2xx becomes a generic error. The
- * refresh token, access JWT, code, and verifier are never logged.
+ * non-2xx whose body carries `error: "invalid_grant"` becomes an
+ * {@link InvalidGrantError} (regardless of the exact status: RFC 6749 uses 400,
+ * some servers 401); any other non-2xx becomes a generic error. The refresh
+ * token, access JWT, code, and verifier are never logged.
  *
  * @param {{ identityBase: string, body: Record<string, unknown>, fetchImpl?: typeof fetch, operation: string }} args
  * @returns {Promise<Record<string, any>>}
@@ -122,7 +123,11 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
       [Attr.STATUS]: 'failed',
       [Attr.ERROR_KIND]: errCode ?? `http_${res.status}`,
     })
-    if (res.status === 401 && errCode === 'invalid_grant') {
+    // Key the typed rejection on the OAuth error code, not the HTTP status:
+    // RFC 6749 §5.2 returns 400 for `invalid_grant`, but some deployments use
+    // 401. Either way a revoked/expired refresh row must reach the re-login
+    // guidance, so trust the body's `error` field over the status code.
+    if (errCode === 'invalid_grant') {
       throw new InvalidGrantError()
     }
     throw new Error(`identity endpoint rejected the grant (HTTP ${res.status}${errCode ? ` ${errCode}` : ''})`)
