@@ -55,8 +55,7 @@ export async function runRemoteHelp(argv, ctx) {
  * @ref LLP 0033#commands [implements]: `remote add` is a local-layer writer; URL in config, token never in config
  */
 export async function runRemoteAdd(argv, ctx) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const [name, url] = positional
+  const [name, url] = positionals(argv)
   if (!name || !url) {
     ctx.stderr.write('usage: hyp remote add <name> <url>\n')
     return 2
@@ -112,7 +111,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   // The target name is the first positional. Skip the VALUE slot of a
   // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
   // as the target 'acme'.
-  const name = firstPositional(argv, new Set(['--token-file', '--org']))
+  const name = positionals(argv, new Set(['--token-file', '--org']))[0]
   if (!name) {
     ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--no-browser]\n')
     return 2
@@ -137,23 +136,27 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
 }
 
 /**
- * Return the first positional argument (not a flag, not the value slot of a
- * value-taking flag).
+ * Return the positional arguments in order, skipping flags and the value slot
+ * of any value-taking flag (so e.g. `--org acme` is not read as a positional).
+ * The one parser every `remote` subcommand uses, so a value flag added to any
+ * of them never misreads its value as a positional.
  *
  * @param {string[]} argv
- * @param {Set<string>} valueFlags
- * @returns {string | undefined}
+ * @param {Set<string>} [valueFlags]
+ * @returns {string[]}
  */
-function firstPositional(argv, valueFlags) {
+function positionals(argv, valueFlags = new Set()) {
+  /** @type {string[]} */
+  const out = []
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a.startsWith('-')) {
       if (valueFlags.has(a)) i++ // consume its value
       continue
     }
-    return a
+    out.push(a)
   }
-  return undefined
+  return out
 }
 
 /**
@@ -180,6 +183,11 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
   }
   if (!token) {
     ctx.stderr.write('hyp remote login: empty token\n')
+    // Any non-TTY stdin (a wrapper, an IDE terminal, /dev/null) routes here
+    // even when no token was piped; point at the browser flow it bypassed.
+    if (!tokenFile) {
+      ctx.stderr.write('  (to sign in with a browser instead, re-run with --browser)\n')
+    }
     return 2
   }
 
@@ -309,8 +317,7 @@ export async function runRemoteList(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runRemoteRemove(argv, ctx) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const name = positional[0]
+  const name = positionals(argv)[0]
   if (!name) {
     ctx.stderr.write('usage: hyp remote remove <name>\n')
     return 2

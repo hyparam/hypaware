@@ -142,6 +142,20 @@ test('a piped stdin token still takes the static path', async () => {
   assert.deepEqual(creds.prod, { kind: 'static', token: 'piped-tok' })
 })
 
+test('an empty piped stdin (no token) points at --browser instead of just "empty token"', async () => {
+  const hypHome = await tmpHome()
+  // Non-TTY stdin that yields nothing, the way `< /dev/null` or some wrappers do.
+  const stdin = {
+    isTTY: false,
+    async *[Symbol.asyncIterator]() { /* no chunks */ },
+  }
+  const { ctx, err } = await makeCtx({ hypHome, stdin })
+  const code = await runRemoteLogin(['prod'], ctx, {})
+  assert.equal(code, 2)
+  assert.match(err.join(''), /empty token/)
+  assert.match(err.join(''), /re-run with --browser/)
+})
+
 test('--browser overrides a piped stdin token and takes the browser flow', async () => {
   const hypHome = await tmpHome()
   const stdin = {
