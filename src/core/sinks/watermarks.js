@@ -6,8 +6,8 @@ import path from 'node:path'
 import { datasetsRoot } from '../cache/paths.js'
 
 /**
- * @import { SinkContinuation } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SinkWatermarkKey, SinkWatermarkRecord, SinkWatermarkStore } from './types.d.ts'
+ * @import { SinkContinuation } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { SinkWatermarkKey, SinkWatermarkRecord, SinkWatermarkStore } from '../../../src/core/sinks/types.js'
  */
 
 /**

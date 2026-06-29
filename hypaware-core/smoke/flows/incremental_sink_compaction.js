@@ -20,7 +20,7 @@ import { maintainCache } from '../../../src/core/cache/maintenance.js'
 import { readCursorSync } from '../../../src/core/cache/partition.js'
 
 /**
- * @import { ActivePlugin, ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
  * @import { Dirent } from 'node:fs'
  */
 
