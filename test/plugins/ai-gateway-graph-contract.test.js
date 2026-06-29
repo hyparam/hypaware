@@ -14,7 +14,7 @@ import {
 // Build the contract the way the connector's activate() does: from the graph
 // plugin's generic kit (the bridge-key recipe is the connector's own, imported
 // inside the contract). The rules' row identity + provenance are therefore the
-// real end-to-end ones — these assertions double as the digest-stability guard.
+// real end-to-end ones, and these assertions double as the digest-stability guard.
 const KIT = { nodeId, edgeId, makeRowBuilders }
 const contract = createAiGatewayGraphContract(KIT)
 
@@ -41,7 +41,7 @@ test('contract carries its source/projector metadata', () => {
   assert.equal(contract.projectorVersion, PROJECTOR_VERSION)
 })
 
-// @ref LLP 0030#decision — the Session node keys on session_id (the
+// @ref LLP 0030#decision: the Session node keys on session_id (the
 // session container, always present); conversation_id is null for Claude.
 test('Session rule builds a node keyed on session_id with pruned props', () => {
   const r = rule('node', 'Session')
@@ -164,7 +164,7 @@ test('numeric natural keys are stringified', () => {
   assert.equal(row.node_id, nodeId('Session', '42'))
 })
 
-// @ref LLP 0026#decision — Claude harness aux exchanges are retained (tagged
+// @ref LLP 0026#decision: Claude harness aux exchanges are retained (tagged
 // attributes.claude.aux_kind) rather than dropped; the graph contract must
 // exclude them so security-monitor traffic mints no Session/App/Tool noise.
 test('every rule selects attributes so the shared aux filter has its input', () => {

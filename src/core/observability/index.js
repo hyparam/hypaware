@@ -8,7 +8,7 @@ import { installMeterProvider, resetKernelInstruments } from './meter.js'
 
 /**
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
- * @import { ObservabilityEnv, ObservabilityHandle } from './types.d.ts'
+ * @import { ObservabilityEnv, ObservabilityHandle } from '../../../src/core/observability/types.js'
  */
 
 /** @type {ReturnType<typeof buildHandle> | null} */
@@ -18,10 +18,10 @@ let installed = null
  * Install tracer, logger, and meter providers using a single shared
  * Resource derived from env. Returns a handle exposing each provider
  * and a `shutdown()` that flushes and closes exporters in reverse
- * order. Idempotent — a second call returns the existing handle.
+ * order. Idempotent: a second call returns the existing handle.
  *
  * @param {{ env?: ObservabilityEnv }} [opts]
- * @ref LLP 0021#otel-is-the-substrate [implements] — idempotent install over one shared Resource; safe-by-default tracer
+ * @ref LLP 0021#otel-is-the-substrate [implements]: idempotent install over one shared Resource; safe-by-default tracer
  */
 export function installObservability(opts = {}) {
   if (installed) return installed
@@ -44,7 +44,7 @@ export function installObservability(opts = {}) {
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter }) {
-  // @ref LLP 0021#shutdown-and-flush [implements] — close exporters reverse order; dev gets 5s budget + forceFlush
+  // @ref LLP 0021#shutdown-and-flush [implements]: close exporters reverse order; dev gets 5s budget + forceFlush
   async function shutdown() {
     const timeoutMs = env.devTelemetry ? 5_000 : 500
     for (const reader of meter.readers ?? []) {

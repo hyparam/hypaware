@@ -12,11 +12,11 @@ import { loadLock } from '../../src/core/plugin_install/install.js'
 import { getEntry, writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
- * @import { PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginName } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /**
- * Pin enforcement is the apply path's core security property — nothing
+ * Pin enforcement is the apply path's core security property: nothing
  * may substitute code after the config was authored (LLP 0025
  * install-on-config). The apply-engine tests mock these deps away, so
  * the real decisions are exercised here against real fixtures: a
@@ -81,7 +81,7 @@ test('bundled plugin: matching version pin is satisfied without an install; hash
   try {
     const deps = buildConfigApplyDeps({ stateRoot: fx.stateRoot, workspaceDir: fx.workspaceDir })
     // The artifact_hash refers to a git release artifact that
-    // legitimately differs from the npm-bundled tree — a garbage hash
+    // legitimately differs from the npm-bundled tree, so a garbage hash
     // must not fail a bundled pin (LLP 0025 bundled-first-party).
     const result = await deps.installPinnedPlugins([
       { name: '@hypaware/otel', version: '9.9.9', artifact_hash: 'f'.repeat(64) },
@@ -193,7 +193,7 @@ test('a fetched artifact failing its hash pin is an artifact_hash_mismatch and n
 
 test('a correct hash pin installs, and validation then sees the plugin it could not know before', async () => {
   // The install-before-validate ordering only works because a fresh
-  // catalog is discovered per call — this is the integration check for
+  // catalog is discovered per call: this is the integration check for
   // a served config naming a not-yet-installed plugin.
   const fx = await makeFixture()
   const git = await buildGitPluginFixture()

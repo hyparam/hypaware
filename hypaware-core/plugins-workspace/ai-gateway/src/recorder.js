@@ -27,12 +27,12 @@ const DEFAULT_REDACT_HEADERS = Object.freeze([
 ])
 
 /**
- * @import { ExchangeInit, FinishedRow, RecorderOptions, ResponseStart } from './types.d.ts'
+ * @import { ExchangeInit, FinishedRow, RecorderOptions, ResponseStart } from './types.js'
  */
 
 /**
  * Build a Recorder. The recorder owns the redact set so per-exchange
- * code doesn't have to recompute it; it does not own a sink — the
+ * code doesn't have to recompute it; it does not own a sink: the
  * source layer hands each finished row to `appendRows` directly so it
  * can compose a span around the write.
  *
@@ -158,7 +158,7 @@ export class Exchange {
   /**
    * Record dev_run_id (and any future request-scoped metadata that the
    * row will carry). Stored as a flat record because the schema's
-   * `metadata` column is a JSON variant — we stringify at finalize.
+   * `metadata` column is a JSON variant: we stringify at finalize.
    *
    * @returns {string | undefined}
    */
@@ -215,7 +215,7 @@ export class Exchange {
    *
    * The proxy is a pass-through, so when the upstream compressed the
    * stream (`content-encoding: gzip` et al.) these chunks are the
-   * compressed bytes — feeding them to the text parser yields zero
+   * compressed bytes: feeding them to the text parser yields zero
    * events and the whole response is silently lost. Compressed streams
    * are buffered raw here and decoded + parsed once, at `finalize()`.
    *
@@ -243,7 +243,7 @@ export class Exchange {
   }
 
   /**
-   * Record a final error. Overwriting is allowed — the most recent
+   * Record a final error. Overwriting is allowed: the most recent
    * error usually carries the most useful diagnostic.
    *
    * @param {unknown} err
@@ -265,7 +265,7 @@ export class Exchange {
 
   /**
    * Build the row to be handed to the exchange-projector dispatcher.
-   * Idempotent — once `finished` is true subsequent calls return the
+   * Idempotent: once `finished` is true subsequent calls return the
    * cached row.
    *
    * The JSON-shaped fields (`request_headers`, `response_headers`,
@@ -288,9 +288,9 @@ export class Exchange {
       : ''
 
     // Header-blind SSE detection. Some upstreams stream Server-Sent
-    // Events WITHOUT a `content-type: text/event-stream` header — e.g.
+    // Events WITHOUT a `content-type: text/event-stream` header (e.g.
     // ChatGPT's `/backend-api/codex/responses` sends no content-type at
-    // all — so `setResponseStart` couldn't flag it and the body was
+    // all), so `setResponseStart` couldn't flag it and the body was
     // buffered like a normal response. Sniff the decoded body: if it
     // opens like an event stream, treat it as SSE so the response is
     // parsed into events instead of stored as an opaque, unprojectable
@@ -299,7 +299,7 @@ export class Exchange {
       this.isSse = true
     }
 
-    // SSE whose bytes were buffered rather than parsed live — a
+    // SSE whose bytes were buffered rather than parsed live: a
     // compressed stream (see consumeStreamChunk) or a header-blind one
     // just detected above. Decode-and-parse the whole stream in one
     // pass. Event `t_ms` is stamped at finalize; per-chunk arrival times
@@ -401,9 +401,9 @@ function decodeBody(buf, encodingHeader) {
       else if (enc === 'br') current = brotliDecompressSync(current)
       else if (enc === 'deflate') current = inflateOrRaw(current)
       else if (enc === 'zstd' && zstdDecompress) current = zstdDecompress(current)
-      else return current.toString('utf8') // unknown codec — stop, keep what we have
+      else return current.toString('utf8') // unknown codec: stop, keep what we have
     } catch {
-      return buf.toString('utf8') // undecodable — fall back to the raw bytes
+      return buf.toString('utf8') // undecodable: fall back to the raw bytes
     }
   }
   return current.toString('utf8')

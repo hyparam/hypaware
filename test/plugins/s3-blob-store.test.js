@@ -11,7 +11,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/s3/src/blob-store.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -119,7 +119,7 @@ test('s3 BlobStore listObjects strips the prefix from emitted keys', async () =>
   assert.deepEqual(seen.sort(), ['a.bin', 'sub/b.bin'])
 
   // The fake captured the composed-with-prefix Prefix argument so the
-  // BlobStore-level prefix actually reached S3 — and it MUST carry a
+  // BlobStore-level prefix actually reached S3, and it MUST carry a
   // trailing slash so a sibling namespace like `hyp/exports2/...` does
   // not match as a string prefix.
   const listCall = client.calls.find((c) => c.command === 'listObjects')
@@ -136,13 +136,13 @@ test('s3 BlobStore listObjects does not leak into sibling-namespace keys (hyp/ex
   // cannot touch out-of-scope objects.
   const client = makeFakeS3Client()
   // Pre-populate the fake bucket directly to bypass composeKey's path
-  // safety check — we want sibling-namespace keys to exist in the
+  // safety check: we want sibling-namespace keys to exist in the
   // backing store so the test can confirm they are NOT surfaced.
   client.objects.set('hyp/exports/datasets/foo.parquet',
     { bytes: new Uint8Array([1]), lastModified: new Date(0) })
   client.objects.set('hyp/exports/datasets/sub/bar.parquet',
     { bytes: new Uint8Array([2]), lastModified: new Date(0) })
-  // Sibling namespace — must never be reported through this BlobStore.
+  // Sibling namespace: must never be reported through this BlobStore.
   client.objects.set('hyp/exports2/datasets/leak.parquet',
     { bytes: new Uint8Array([9]), lastModified: new Date(0) })
   client.objects.set('hyp/exports-other/leak2.parquet',
@@ -190,7 +190,7 @@ test('s3 BlobStore listObjects empty-prefix without a configured prefix lists th
   assert.deepEqual(seen.sort(), ['a.bin', 'nested/b.bin'])
   const listCall = client.calls.find((c) => c.command === 'listObjects')
   assert.ok(listCall)
-  // No Prefix passed to S3 — entire bucket is in scope by design.
+  // No Prefix passed to S3: entire bucket is in scope by design.
   assert.equal(listCall.input.Prefix, undefined)
 })
 

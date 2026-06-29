@@ -533,7 +533,7 @@ export interface RequestSinkConfigInstance {
   config?: SinkInstanceConfig
 }
 
-export interface SinkInstanceConfig extends JsonObject {
+export type SinkInstanceConfig = JsonObject & {
   /** Export cadence — standard 5-field cron expression (e.g. "0 * * * *"). */
   schedule?: string
   /**

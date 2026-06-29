@@ -5,8 +5,8 @@ import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { FlushChunk, ProgressState } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { FlushChunk, ProgressState } from '../../../src/core/cache/types.js'
  */
 
 export const BATCH_BYTE_LIMIT = 128 * 1024 * 1024
@@ -30,7 +30,7 @@ export const INGEST_SEQ_COLUMN = { name: '_hyp_ingest_seq', type: 'INT64', nulla
 /**
  * Read a rotated spool file as a stream, yielding batches of rows that
  * respect both a byte-size ceiling and a row-count ceiling. Partial
- * trailing lines are left in the buffer — the caller should treat them
+ * trailing lines are left in the buffer: the caller should treat them
  * as data for the next read cycle (in practice the spool writer always
  * ends lines with `\n`, so a partial line means the file was truncated
  * or is still being written).

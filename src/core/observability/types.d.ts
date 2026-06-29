@@ -1,6 +1,16 @@
-import type { installObservability } from './index.js'
-
-export type ObservabilityHandle = Awaited<ReturnType<typeof installObservability>>
+// The precise return of `installObservability` (with concrete provider
+// classes) is what consumers see via the generated `index.d.ts`. This named
+// handle is the self-contained shape of that return; it intentionally avoids
+// importing the JSDoc-only `index.js`/`runtime.js` modules so it resolves from
+// the published `.d.ts` without a paired declaration for those modules.
+export interface ObservabilityHandle {
+  env: ObservabilityEnv
+  resource: { attributes: Record<string, string | number | boolean> }
+  tracer: { provider: unknown }
+  logger: { provider: unknown }
+  meter: { provider: unknown; readers: object[] }
+  shutdown: () => Promise<void>
+}
 
 export interface ObservabilityEnv {
   devTelemetry: boolean

@@ -20,8 +20,8 @@ import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
 /**
- * @import { DatasetRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from './types.d.ts'
+ * @import { DatasetRegistration } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta, PartitionCursor, RetentionConfig, RetentionResult, RetentionSourceTableResult } from '../../../src/core/cache/types.js'
  * @import { Manifest, ManifestEntry, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 
@@ -31,7 +31,7 @@ const DEFAULT_TIMESTAMP_COLUMNS = ['timestamp', 'created_at', 'recorded_at', 'da
 
 /**
  * @param {{ cacheRoot: string, config: RetentionConfig | undefined, getDataset?: (dataset: string) => Pick<DatasetRegistration, 'primaryTimestampColumn' | 'fallbackTimestampColumns'> | undefined }} args
- * @ref LLP 0013#retention-is-the-central-tradeoff [implements] — per-dataset window; rows past it are deleted permanently
+ * @ref LLP 0013#retention-is-the-central-tradeoff [implements]: per-dataset window; rows past it are deleted permanently
  */
 export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
   const cfg = normalizeConfig(config)
@@ -424,7 +424,7 @@ async function scanFileForExpiredRows(filePath, cutoffMs, resolver, timestampCol
       }
     }
   } catch {
-    // unreadable file — skip rather than block retention
+    // unreadable file: skip rather than block retention
   }
   return positions
 }
@@ -508,7 +508,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
 /**
  * @param {RetentionConfig | undefined} config
  * @returns {Required<Pick<RetentionConfig, 'default_days'>> & { datasets: Record<string, number>, wait_for_sink_ack: boolean }}
- * @ref LLP 0013#open-question [explains] — wait_for_sink_ack is the parsed-but-unwired evict-on-ack vs evict-on-retention knob
+ * @ref LLP 0013#open-question [explains]: wait_for_sink_ack is the parsed-but-unwired evict-on-ack vs evict-on-retention knob
  */
 function normalizeConfig(config) {
   const default_days =

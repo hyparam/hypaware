@@ -4,12 +4,13 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
+import { unionSources, emptySource } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { GatewayState } from './types.d.ts'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { GatewayState } from './types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
 
@@ -25,7 +26,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
 export const AI_GATEWAY_PROJECTED_EXCHANGE_KIND = 'ai_gateway.projected_exchange'
 
 export const DATASET_NAME = 'ai_gateway_messages'
-// @ref LLP 0030#breaking — the partition key moved from conversation_id
+// @ref LLP 0030#breaking: the partition key moved from conversation_id
 // to session_id (schema v6). The label bump gives the recreated cache a
 // fresh partition path; discoverParts still lists the legacy v4 path so
 // any pending v4 spool still flushes.
@@ -141,7 +142,7 @@ export async function createDataSource(partitions, ctx) {
     if (source && (source.numRows ?? 0) > 0) sources.push(source)
   }
 
-  if (sources.length === 0) return emptySource()
+  if (sources.length === 0) return emptySource(SCHEMA_COLUMN_NAMES)
   if (sources.length === 1) return withSchemaColumns(sources[0])
   return withSchemaColumns(unionSources(sources))
 }
@@ -150,8 +151,8 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
 
 /**
  * Expose the dataset's DECLARED schema columns on a data source even when the
- * underlying parquet partitions physically lack some of them — the normal state
- * after an additive schema bump, when older partitions predate a new column
+ * underlying parquet partitions physically lack some of them (the normal state
+ * after an additive schema bump), when older partitions predate a new column
  * (e.g. `git_remote`/`head_sha`/`repo_root` in v7, LLP 0032). Squirreling's
  * `validateScan` rejects a SELECT that names a column absent from the source's
  * `columns`, so without this a contract or query that reads a freshly-added
@@ -159,7 +160,7 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * itself is unchanged: a row object that lacks the key simply reads as null,
  * which is the correct value for "this partition predates the column".
  *
- * @ref LLP 0032#capture [implements] — additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
+ * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
  * @param {AsyncDataSource} source
  * @returns {AsyncDataSource}
  */
@@ -188,54 +189,6 @@ function buildDiscoveryScope(scope) {
 }
 
 /**
- * Merge multiple AsyncDataSources into a single union source.
- *
- * @param {AsyncDataSource[]} sources
- * @returns {AsyncDataSource}
- */
-function unionSources(sources) {
-  /** @type {Set<string>} */
-  const allColumns = new Set()
-  let totalRows = 0
-  for (const s of sources) {
-    for (const col of s.columns) allColumns.add(col)
-    totalRows += s.numRows ?? 0
-  }
-  return {
-    columns: Array.from(allColumns),
-    numRows: totalRows,
-    scan(options) {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {
-          for (const source of sources) {
-            const scan = source.scan(options)
-            for await (const row of scan.rows()) {
-              yield row
-            }
-          }
-        },
-      }
-    },
-  }
-}
-
-function emptySource() {
-  return {
-    columns: AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name),
-    numRows: 0,
-    scan() {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {},
-      }
-    },
-  }
-}
-
-/**
  * The DatasetRegistration passed to `ctx.query.registerDataset` from
  * activate(). Takes the gateway state so `settleBatch` can dispatch to
  * registered settlement enrichers by `client_name`.
@@ -260,9 +213,9 @@ export function aiGatewayDatasetRegistration(state) {
         fallback: 'unknown',
       },
       iceberg: {
-        // @ref LLP 0030#breaking — the required identity partition field
+        // @ref LLP 0030#breaking: the required identity partition field
         // is session_id (always present), not conversation_id (now
-        // nullable). @ref LLP 0022#within-partition-sort — these identity
+        // nullable). @ref LLP 0022#within-partition-sort: these identity
         // fields, in declared order, also seed the export sort order, so
         // session_id leads the clustering and conversation_id rides along
         // as a secondary thread-lookup sort key.
@@ -286,7 +239,7 @@ export function aiGatewayDatasetRegistration(state) {
  * Build the flush-time settlement pass (LLP 0024). On each flush batch:
  *
  *  1. Short-circuit when the batch carries no fallback rows
- *     (`attributes.gateway.identity_source === 'gateway_fallback'`) — the
+ *     (`attributes.gateway.identity_source === 'gateway_fallback'`) - the
  *     common case, so the hot path does zero transcript or storage I/O.
  *  2. Group fallback rows by `client_name` and hand each group to the
  *     enricher registered for that client; the enricher upgrades the
@@ -317,7 +270,7 @@ function createSettleBatch(state) {
  * sweep the rows handed in are ALREADY committed, so a committed-scan
  * dedupe would match a non-upgraded fallback against its own committed
  * copy and wrongly drop it. The maintenance rewrite owns the de-twin
- * instead — it has both committed twins of the partition in hand and
+ * instead, it has both committed twins of the partition in hand and
  * collapses an upgraded fallback against the native twin within the
  * rewrite set. So this pass upgrades fallback rows to native identity and
  * returns them; it never drops a row.
@@ -373,7 +326,7 @@ async function upgradeFallbackRows(rows, state, ctx) {
         if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
       }
     } catch {
-      // An enricher failure must never drop rows — leave the group as
+      // An enricher failure must never drop rows: leave the group as
       // provisional fallback; a later flush or sweep can retry.
       continue
     }
@@ -388,7 +341,7 @@ async function upgradeFallbackRows(rows, state, ctx) {
  * pre-write dedupe (committed scan + per-call fold-in), so an upgraded
  * fallback row collapses onto the canonical committed uuid row.
  *
- * Scans ONLY committed partitions — deliberately NOT the spool. The rows
+ * Scans ONLY committed partitions (deliberately NOT the spool). The rows
  * passed here are the batch being flushed out of the spool, so seeding
  * the seen-set with spool `part_id`s would make every row match itself
  * and be dropped (see scanSpooledPartIds's hazard note). That spool scan
@@ -445,7 +398,7 @@ function stringValue(value) {
  * Backfill providers yield a whole conversation as a single
  * `AiGatewayProjectedExchange` payload; this converts it into canonical
  * `ai_gateway_messages` rows through `aiGatewayRowsFromProjectedExchange`
- * — the exact expansion the live gateway recorder uses — so backfilled
+ * (the exact expansion the live gateway recorder uses) so backfilled
  * and live-captured rows are byte-identical for the same projection.
  * Row expansion is pure with respect to `item.value`: it allocates a
  * fresh conversation state per call, so reruns and out-of-order items
@@ -454,7 +407,7 @@ function stringValue(value) {
  * On top of that pure expansion the materializer applies a narrow
  * PRE-WRITE dedupe: before a batch is handed back to the runner for
  * `appendRows`, any row whose `part_id` already exists in the dataset is
- * skipped. This is the PRIMARY rerun guarantee — rerunning a backfill
+ * skipped. This is the PRIMARY rerun guarantee: rerunning a backfill
  * re-materializes byte-identical rows, and without this guard each rerun
  * would re-append them and lean on cache-maintenance compaction to
  * collapse the duplicates later. Compaction's content-hash dedupe
@@ -499,12 +452,12 @@ export function aiGatewayBackfillMaterializer() {
  * items in the same run that resolve to the same `part_id` (transitional
  * fixtures, fallback-id collisions, a re-yielded conversation) also
  * dedupe against each other. A later run carries a fresh run id, so it
- * re-scans and observes the prior run's now-committed rows — which is
+ * re-scans and observes the prior run's now-committed rows, which is
  * what makes a clean rerun write zero new rows.
  *
  * The seen-set is seeded from two sources: the committed (flushed)
- * Iceberg partitions AND the rows still pending in the spool — captured
- * live but not yet flushed (issue #107). Without the spool scan, backfill
+ * Iceberg partitions AND the rows still pending in the spool (captured
+ * live but not yet flushed, issue #107). Without the spool scan, backfill
  * re-materializes its own copy of an unflushed live row and the spool
  * later flushes its copy, leaving two rows with the same `part_id`. The
  * spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
@@ -529,7 +482,7 @@ function createBackfillDedupe() {
         const seen = await scanExistingPartIds(storage)
         // Fold in part_ids pending in the spool so backfill does not
         // re-materialize a row that was captured live and is still waiting
-        // to flush. Opt-in to the backfill path only — see scanSpooledPartIds.
+        // to flush. Opt-in to the backfill path only (see scanSpooledPartIds).
         await scanSpooledPartIds(storage, seen)
         memo = { runId, seen }
       }
@@ -540,7 +493,7 @@ function createBackfillDedupe() {
       for (const row of rows) {
         const key = partIdKey(row)
         if (key === undefined) {
-          // No usable identity to dedupe on — never drop the row.
+          // No usable identity to dedupe on: never drop the row.
           fresh.push(row)
           continue
         }
@@ -568,8 +521,8 @@ function canScanExistingRows(storage) {
  * set of `part_id`s already present. Reads are projected to the three
  * identity columns so the scan stays cheap, and every failure mode
  * (unreadable partition, missing table) degrades to "not seen" rather
- * than aborting the backfill — a dedupe miss only risks a duplicate that
- * compaction will later collapse, whereas throwing would drop real rows.
+ * than aborting the backfill (a dedupe miss only risks a duplicate that
+ * compaction will later collapse, whereas throwing would drop real rows).
  *
  * @param {QueryStorageService} storage
  * @returns {Promise<Set<string>>}
@@ -605,21 +558,21 @@ async function scanExistingPartIds(storage) {
  * These are rows captured live but not yet flushed to a committed
  * partition, so `scanExistingPartIds` cannot see them. Folding them in
  * lets `hyp backfill` skip re-materializing a row whose live copy is
- * about to flush — the fix for issue #107.
+ * about to flush (the fix for issue #107).
  *
- * CRITICAL HAZARD — BACKFILL ONLY. This must never be wired into the
+ * CRITICAL HAZARD: BACKFILL ONLY. This must never be wired into the
  * flush-time settle path (`createSettleBatch` -> `dedupeByPartId`). At
  * flush, the rows being settled ARE the spool rows; if the settle
  * seen-set contained spool `part_id`s, every row would match itself and
- * be dropped — the flush would delete the data it is committing. So the
+ * be dropped (the flush would delete the data it is committing). So the
  * spool scan stays opt-in and is invoked only from `createBackfillDedupe`.
  *
  * Best-effort like the committed scan: a storage stub without the spool
- * read surface, or any read error, leaves `seen` untouched — a dedupe
+ * read surface, or any read error, leaves `seen` untouched (a dedupe
  * miss only risks a duplicate compaction can later collapse, whereas
- * throwing would abort the backfill.
+ * throwing would abort the backfill).
  *
- * @ref LLP 0027#open-questions [implements] — resolves the documented
+ * @ref LLP 0027#open-questions [implements]: resolves the documented
  *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
  *   rows in the materializer (not the settle path).
  *

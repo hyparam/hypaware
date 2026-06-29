@@ -191,7 +191,7 @@ test('an ambiguous seed exits 1 and lists the candidates on stderr', async () =>
     const code = await runGraphNeighbors(['index.js'], ctx)
     assert.equal(code, 1)
     const stderr = errs.join('')
-    assert.match(stderr, /ambiguous seed "index.js" — 2 nodes match by label/)
+    assert.match(stderr, /ambiguous seed "index.js" - 2 nodes match by label/)
     // Both colliding Files are listed so the caller can pick the full key.
     assert.match(stderr, /\/repo\/index\.js/)
     assert.match(stderr, /\/other\/index\.js/)
@@ -216,7 +216,7 @@ test('--limit truncates and reports the true total on stdout (not stderr)', asyn
   await withGraph(async ({ ctx, out, errs }) => {
     const code = await runGraphNeighbors(['conv-1', '--direction', 'out', '--limit', '1'], ctx)
     assert.equal(code, 0)
-    assert.match(out.join(''), /1 of 4 neighbor\(s\) within 1 hop\(s\) — truncated; raise --limit/)
+    assert.match(out.join(''), /1 of 4 neighbor\(s\) within 1 hop\(s\) - truncated; raise --limit/)
     assert.equal(errs.join(''), '', 'truncation is a result, not an error')
   })
 })
@@ -232,4 +232,103 @@ test('--json emits the structured result on stdout', async () => {
     assert.equal(parsed.truncated, false)
     assert.equal(errs.join(''), '')
   })
+})
+
+// --- Display: same-basename neighbors render as distinct rows (issue #123) ---
+
+/** @param {Partial<Record<string, unknown>>} o */
+function neighborOf(o) {
+  return { hop: 1, edge_type: 'touched', direction: 'out', from: 'n-sess', ...o }
+}
+
+// A session that touched two distinct Files sharing the `sink.js` basename, plus
+// a non-colliding Tool. The renderer is the unit-addressable surface here.
+const COLLIDING_RESULT = {
+  ok: /** @type {const} */ (true),
+  depth: 1,
+  direction: /** @type {const} */ ('out'),
+  seed: { node_id: 'n-sess', node_type: 'Session', natural_key: 'conv-1', label: null },
+  neighbors: [
+    neighborOf({ node: { node_id: 'n-f1', node_type: 'File', natural_key: '/repo/sink.js', label: 'sink.js' } }),
+    neighborOf({ node: { node_id: 'n-f2', node_type: 'File', natural_key: '/other/sink.js', label: 'sink.js' } }),
+    neighborOf({ edge_type: 'used', node: { node_id: 'n-tool', node_type: 'Tool', natural_key: 'Bash', label: 'Bash' } }),
+  ],
+  reachable: 3,
+  truncated: false,
+  totalNodes: 4,
+  totalEdges: 3,
+}
+
+test('TEXT renderer disambiguates two Files sharing a basename into distinct rows', () => {
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
+  const text = String(stdout)
+  // Both full paths must appear so the colliding rows are visibly distinct.
+  assert.match(text, /\/repo\/sink\.js/, 'first file disambiguated by its full path')
+  assert.match(text, /\/other\/sink\.js/, 'second file disambiguated by its full path')
+  // And the two File rows must not be byte-identical (the bug: both said "sink.js").
+  const fileRows = text.split('\n').filter((l) => l.includes('File'))
+  assert.equal(fileRows.length, 2)
+  assert.notEqual(fileRows[0], fileRows[1], 'same-basename Files render as distinct rows')
+})
+
+test('TEXT renderer keeps deep same-suffix Files distinct when the path tail is truncated', () => {
+  // Two checkouts of one tree: same long relative suffix, differing only in the
+  // root, so a fixed 47-char tail truncation drops the distinguishing prefix.
+  // The rows must still differ (fall back to node_id), not regress to identical.
+  const suffix = '/packages/server/src/components/common/widgets/Button/index.js'
+  const result = {
+    ...COLLIDING_RESULT,
+    neighbors: [
+      neighborOf({ node: { node_id: 'n-deep-1', node_type: 'File', natural_key: `/Users/alice/work${suffix}`, label: 'index.js' } }),
+      neighborOf({ node: { node_id: 'n-deep-2', node_type: 'File', natural_key: `/Users/bob/projects/acme-checkout-two${suffix}`, label: 'index.js' } }),
+    ],
+  }
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (result), /** @type {any} */ ({ json: false }))
+  const fileRows = String(stdout).split('\n').filter((l) => l.includes('File'))
+  assert.equal(fileRows.length, 2)
+  assert.notEqual(fileRows[0], fileRows[1], 'deep same-suffix Files must not render byte-identical')
+})
+
+test('TEXT renderer breaks the tie with the full node_id when shortId prefixes also collide', () => {
+  // The residual fallback must use the full content-addressed node_id, not a
+  // 12-char prefix. Two Files with an identical long path tail (so the path-tail
+  // disambiguator collides) whose node_ids share their leading 12 hex chars: a
+  // shortId(node_id) fallback would render byte-identical, the bug surviving one
+  // layer deeper. Only the full id guarantees the rows differ.
+  const suffix = '/packages/server/src/components/common/widgets/Button/index.js'
+  const result = {
+    ...COLLIDING_RESULT,
+    neighbors: [
+      neighborOf({ node: { node_id: 'a1b2c3d4e5f6111111111111', node_type: 'File', natural_key: `/Users/alice/work${suffix}`, label: 'index.js' } }),
+      neighborOf({ node: { node_id: 'a1b2c3d4e5f6222222222222', node_type: 'File', natural_key: `/Users/bob/projects/acme${suffix}`, label: 'index.js' } }),
+    ],
+  }
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (result), /** @type {any} */ ({ json: false }))
+  const text = String(stdout)
+  const fileRows = text.split('\n').filter((l) => l.includes('File'))
+  assert.equal(fileRows.length, 2)
+  assert.notEqual(fileRows[0], fileRows[1], 'shortId-prefix collision must still render distinct rows')
+  // The full id, not just its shared 12-char prefix, must reach the output.
+  assert.match(text, /a1b2c3d4e5f6111111111111/, 'first row carries the full node_id')
+  assert.match(text, /a1b2c3d4e5f6222222222222/, 'second row carries the full node_id')
+})
+
+test('TEXT renderer leaves a non-colliding label readable (no disambiguator)', () => {
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: false }))
+  const toolRow = String(stdout).split('\n').find((l) => l.includes('Tool'))
+  assert.ok(toolRow, 'tool row present')
+  assert.match(toolRow, /Bash\s*$/, 'unique label stays bare - no path/id appended')
+})
+
+test('--json output is unchanged by the collision: node.natural_key is the path, labels untouched', () => {
+  const { stdout } = graphNeighborsVerb.render(/** @type {any} */ (COLLIDING_RESULT), /** @type {any} */ ({ json: true }))
+  const parsed = JSON.parse(String(stdout))
+  const files = parsed.neighbors.filter((/** @type {any} */ n) => n.node.node_type === 'File')
+  assert.equal(files.length, 2)
+  // JSON disambiguates by natural_key already; labels are the bare basename, untouched.
+  assert.deepEqual(files.map((/** @type {any} */ n) => n.node.label).sort(), ['sink.js', 'sink.js'])
+  assert.deepEqual(
+    files.map((/** @type {any} */ n) => n.node.natural_key).sort(),
+    ['/other/sink.js', '/repo/sink.js'],
+  )
 })

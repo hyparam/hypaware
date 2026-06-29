@@ -20,9 +20,9 @@
   },
   "contributes": {
     "commands": [
-      { "name": "vector" },
-      { "name": "vector search" },
-      { "name": "vector status" }
+      { "name": "vector", "summary": "Vector similarity search (see subcommands: search, status)" },
+      { "name": "vector search", "summary": "Similarity search across configured vector indexes" },
+      { "name": "vector status", "summary": "Per-index vector shard coverage and staleness" }
     ],
     "sources": [{ "name": "vector-search-refresh" }],
     "config_sections": [{ "section": "vector-search" }]

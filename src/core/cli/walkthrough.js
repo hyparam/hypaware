@@ -25,10 +25,10 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
- * @import { DaemonInstallOptions } from '../daemon/types.d.ts'
- * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
+ * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 
 /**
@@ -49,7 +49,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   WalkthroughOptions,
  *   WalkthroughQuestion,
  *   WalkthroughResult,
- * } from './types.d.ts'
+ * } from '../../../src/core/cli/types.js'
  */
 
 const DEFAULT_RETENTION_DAYS = 30
@@ -115,7 +115,7 @@ export async function runWalkthrough(opts) {
     return picked
   }
 
-  stdout.write('Welcome to HypAware — the local logs+telemetry collector.\n')
+  stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n')
   stdout.write('\n')
 
   const sourcesPicked = await askCategory(
@@ -210,7 +210,7 @@ function buildSinkOptions(sinks) {
   const opts = [
     {
       value: '__none__',
-      label: 'Keep local only — query the cache for the retention window',
+      label: 'Keep local only - query the cache for the retention window',
     },
   ]
   for (const { contribution } of sinks.listContributions()) {
@@ -413,7 +413,7 @@ function legacyRetentionPromptFactory(opts) {
 
 /**
  * Build the interactive "overwrite existing config?" confirm. Defaults
- * to **no** — a bare Enter keeps the existing config — so a stray
+ * to **no** (a bare Enter keeps the existing config), so a stray
  * keystroke never destroys a working install. On yes the caller backs
  * the file up before replacing it.
  *
@@ -495,7 +495,7 @@ function tuiRetentionPromptFactory(opts) {
 
 /**
  * Route between the TUI and legacy prompts. Tests and CI keep getting
- * the legacy numbered list — only real TTYs without `HYP_NO_TUI=1` see
+ * the legacy numbered list, but only real TTYs without `HYP_NO_TUI=1` see
  * the new interactive multiselect.
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
@@ -518,8 +518,8 @@ function defaultRetentionPromptFactory(opts) {
 /**
  * Build the interactive backfill-consent prompt. Routes to the TUI
  * arrow-navigable yes/no select on a real TTY, else a legacy readline
- * yes/no. Both default to yes so a bare enter opts in — the bead's
- * "default backfill to enabled, but let the user choose no".
+ * yes/no. Both default to yes, so a bare enter opts in: the design
+ * is "default backfill to enabled, but let the user choose no".
  *
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncBackfillConsentPrompt}
@@ -542,8 +542,8 @@ function tuiBackfillConsentPromptFactory(opts) {
     const choice = await select({
       title: backfillConsentTitle(providers, retentionDays),
       options: [
-        { value: 'yes', label: 'Yes — import it now', summary: 'Reads local transcripts into the query cache.' },
-        { value: 'no', label: 'No — skip for now', summary: 'You can import later with hyp backfill.' },
+        { value: 'yes', label: 'Yes - import it now', summary: 'Reads local transcripts into the query cache.' },
+        { value: 'no', label: 'No - skip for now', summary: 'You can import later with hyp backfill.' },
       ],
       default: 'yes',
       clearOnResolve: true,
@@ -587,7 +587,7 @@ function backfillConsentTitle(providers, retentionDays) {
 /**
  * Phase 5 picker source contributions. These are the user-facing
  * inputs for the V1 npx first-run flow. Each value maps to a plugin
- * composition rule in `composePickerConfig` — they are NOT tied to
+ * composition rule in `composePickerConfig`. They are NOT tied to
  * the source registry (which carries lower-level source contributions
  * like `ai-gateway` and `otlp`).
  *
@@ -667,7 +667,7 @@ const PICKER_EXPORTS = [
  *
  * @param {RunPickerWalkthroughOptions} opts
  * @returns {Promise<PickerWalkthroughResult>}
- * @ref LLP 0011#interactive-walkthrough [implements] — canonical npx first-run; composes plugin-contributed what/where picks
+ * @ref LLP 0011#interactive-walkthrough [implements]: canonical npx first-run; composes plugin-contributed what/where picks
  */
 export async function runPickerWalkthrough(opts) {
   const { capabilities, stdout, env } = opts
@@ -676,9 +676,9 @@ export async function runPickerWalkthrough(opts) {
   // Autodetect installed client tools so the picker can pre-check them.
   // Interactive only: when `picks` are supplied (`--yes` / `--dry-run` /
   // presets) the selection is explicit and must stay deterministic, so
-  // detection is skipped entirely. Best-effort — a detector failure
+  // detection is skipped entirely. Best-effort: a detector failure
   // leaves the set empty rather than blocking onboarding.
-  // @ref LLP 0011#autodetect-vs-default [implements] — detection only seeds the initial checkbox; never forces a source on
+  // @ref LLP 0011#autodetect-vs-default [implements]: detection only seeds the initial checkbox; never forces a source on
   const interactive = !opts.picks
   /** @type {Set<PickerSource>} */
   let detected = new Set()
@@ -709,7 +709,7 @@ export async function runPickerWalkthrough(opts) {
   /** @type {PickerPicks} */
   let picks
   // Provenance of the export choice, for telemetry. Export is no longer
-  // asked interactively — local-parquet is the out-of-the-box default —
+  // asked interactively (local-parquet is the out-of-the-box default),
   // so the origin is `user` only when an explicit `--export` flag was
   // threaded in on the pre-baked path; otherwise the pick was defaulted.
   let exportOrigin = 'default'
@@ -720,7 +720,7 @@ export async function runPickerWalkthrough(opts) {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
     const retentionAsk = opts.retentionPrompt ?? defaultRetentionPromptFactory(opts)
 
-    stdout.write('Welcome to HypAware — the local logs+telemetry collector.\n\n')
+    stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
 
     try {
       const sourceRaw = await ask({
@@ -786,7 +786,7 @@ export async function runPickerWalkthrough(opts) {
   // half of #111). Interactive runs prompt for confirmation;
   // non-interactive runs require `--force`. Either path backs up the
   // existing file before replacing it.
-  // @ref LLP 0031#local-layer-writers [implements] — init overwrite safety on the walkthrough write path
+  // @ref LLP 0031#local-layer-writers [implements]: init overwrite safety on the walkthrough write path
   const overwriteConfirm = interactive
     ? (opts.confirmOverwrite ?? defaultOverwriteConfirmFactory({ stdin: opts.stdin, stdout }))
     : undefined
@@ -937,7 +937,7 @@ export async function runPickerWalkthrough(opts) {
  *   hypHome: string,
  * }} args
  * @returns {HypAwareV2Config}
- * @ref LLP 0011#no-architectural-names [implements] — user picks what/where; HypAware derives the explicit plugin set, no role labels
+ * @ref LLP 0011#no-architectural-names [implements]: user picks what/where; HypAware derives the explicit plugin set, no role labels
  */
 export function composePickerConfig(args) {
   const wantsAnthropic = args.sources.includes('claude') || args.sources.includes('raw-anthropic')
@@ -1258,8 +1258,8 @@ async function runPickerFinale(args) {
 
   // Backfill: import each picked client's local history after the config
   // write and before the daemon (re)start that resumes live capture.
-  // Runs independent of the daemon — `--no-daemon` still backfills, since
-  // it is a local file import — and is bounded by the retention window and
+  // Runs independent of the daemon (`--no-daemon` still backfills, since
+  // it is a local file import) and is bounded by the retention window and
   // the `backfillUntil` cutoff so it never double-counts live rows.
   await runFinaleBackfill({
     ...(args.backfill ? { backfill: args.backfill } : {}),
@@ -1303,7 +1303,7 @@ async function runPickerFinale(args) {
  *   - interactive (no pre-baked picks): prompt, defaulting to yes;
  *   - `--yes` / `--dry-run` (picks supplied): run automatically;
  *   - `--dry-run`: scan and report a plan but write nothing;
- *   - `--no-daemon`: still backfill — it is a local file import.
+ *   - `--no-daemon`: still backfill (it is a local file import).
  *
  * Each provider's outcome is pushed onto `summary.backfill` and a
  * one-line status is written to stdout. Wrapped in a `walkthrough.backfill`
@@ -1372,8 +1372,8 @@ async function runFinaleBackfill(args) {
         return
       }
       // Guard each provider so one failure neither aborts sibling
-      // providers nor the daemon (re)start that resumes live capture —
-      // matching the attach/restart resilience above.
+      // providers nor the daemon (re)start that resumes live capture.
+      // This matches the attach/restart resilience above.
       for (const provider of providers) {
         try {
           // Importing local history reads and writes potentially
@@ -1525,8 +1525,8 @@ async function overwriteAbortedResult({ opts, configPath, config, picks }) {
  * surfaces {@link WALKTHROUGH_CANCEL_EXIT_CODE} (130, matching SIGINT
  * convention) as the exit code. The returned object satisfies the
  * required shape of {@link PickerWalkthroughResult} but contains no
- * config — callers that key off `exitCode` already short-circuit on
- * non-zero values.
+ * config (callers that key off `exitCode` already short-circuit on
+ * non-zero values).
  *
  * @param {RunPickerWalkthroughOptions} opts
  * @returns {Promise<PickerWalkthroughResult>}

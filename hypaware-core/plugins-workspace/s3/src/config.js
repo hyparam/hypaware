@@ -6,13 +6,13 @@
  * The validator runs at config-load time. It returns a normalized config
  * object on success (trailing-slash-stripped prefix, defaulted booleans)
  * and a list of `s3_config_invalid` errors on failure. Sink-instance
- * config carries a `schedule` field too — the kernel-level validator
+ * config carries a `schedule` field too. The kernel-level validator
  * already enforces standard 5-field cron, so this module ignores it.
  */
 
 /**
- * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.d.ts'
+ * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.js'
  */
 
 const RECOGNIZED_STORAGE_CLASSES = new Set([

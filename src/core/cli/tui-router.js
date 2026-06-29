@@ -8,7 +8,7 @@ import process from 'node:process'
  *
  * The TUI path requires BOTH stdin and stdout to be TTYs because the
  * runtime needs raw-mode key events and rewindable terminal frames.
- * `HYP_NO_TUI=1` forces the legacy path even when both ends are TTYs —
+ * `HYP_NO_TUI=1` forces the legacy path even when both ends are TTYs:
  * a deliberate escape hatch for CI shells that report `isTTY=true` but
  * are wrapped by something that mangles ANSI sequences.
  *

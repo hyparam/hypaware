@@ -5,7 +5,7 @@
  *
  * In production the source opens an HTTP/SSE connection per city
  * (`<api_url>/v0/city/<name>/events/stream`) and consumes lifecycle
- * frames. The HTTP path is not exercised by the V1 smoke suite —
+ * frames. The HTTP path is not exercised by the V1 smoke suite:
  * `gascity_attach_writes_partition` boots an in-process fixture
  * supervisor and replaces the transport at the well-known global
  * key below.
@@ -18,12 +18,12 @@
 export const TRANSPORT_SYMBOL = Symbol.for('hypaware-gascity:transport')
 
 /**
- * @import { GascityCitySubscription, GascityFrame, GascityTransport } from './types.d.ts'
+ * @import { GascityCitySubscription, GascityFrame, GascityTransport } from './types.js'
  */
 
 /**
  * Look up the active transport from the `globalThis` registry. The
- * default (HTTP/SSE) path is deliberately not implemented in V1 —
+ * default (HTTP/SSE) path is deliberately not implemented in V1:
  * activation surfaces a no-op subscription if nothing is registered
  * so attach/detach still produce the spans the bead asks for.
  *

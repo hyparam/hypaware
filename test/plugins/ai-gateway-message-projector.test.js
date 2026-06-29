@@ -12,8 +12,8 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
  */
 
 const EXPECTED_COLUMNS = [
@@ -269,7 +269,7 @@ test('projector-supplied message_id and previous_message_id are preserved', asyn
 
 test('supplied message_id without history gets the immediate predecessor as previous_message_id', async () => {
   // Adapter projectors (Claude transcripts, Codex native ids) supply
-  // message_id but never previous_message_id — the gateway fills the
+  // message_id but never previous_message_id. The gateway fills the
   // immediate predecessor (0/1-element) so enriched rows match fallback
   // rows. Full ancestry is the transitive closure of these links.
   const projector = createAiGatewayMessageProjector({
@@ -405,7 +405,7 @@ test('previous_message_id chains are scoped per (conversation_id ?? session_id, 
 
   // Main-loop second message chains only on the main-loop first.
   assert.deepEqual(mainTwo.previous_message_id, [mainOne.message_id])
-  // Subagent's first message starts a FRESH chain — it must not include
+  // Subagent's first message starts a FRESH chain. It must not include
   // the main-loop ids.
   assert.deepEqual(agentOne.previous_message_id, [])
   // Subagent's second chains only on the subagent's first.
@@ -495,7 +495,7 @@ test('row output is stripped to the schema (no extra fields leak)', async () => 
 })
 
 test('a multi-block usage-bearing message stamps usage on only the last part', () => {
-  // @ref LLP 0035#one-carrier — Claude backfill emits multi-block carrier
+  // @ref LLP 0035#one-carrier: Claude backfill emits multi-block carrier
   // messages (e.g. reasoning + parallel tool_use under one messageId). Usage is
   // per-response, so it must ride exactly one row (the last block), not every
   // block, or a plain SUM(attributes.usage.*) over-counts within the message.
@@ -525,8 +525,8 @@ test('a multi-block usage-bearing message stamps usage on only the last part', (
   assert.equal(carrier.part_type, 'tool_call')
   const usage = isPlainObject(carrier.attributes) ? carrier.attributes.usage : undefined
   assert.deepEqual(usage, { input_tokens: 100, output_tokens: 42, cache_read_tokens: 9 })
-  // A plain SUM over the message's rows equals the single response's usage —
-  // no per-block over-count.
+  // A plain SUM over the message's rows equals the single response's usage.
+  // No per-block over-count.
   const summedOutput = rows.reduce((acc, r) => {
     const u = isPlainObject(r.attributes) ? r.attributes.usage : undefined
     return acc + (isPlainObject(u) && typeof u.output_tokens === 'number' ? u.output_tokens : 0)
@@ -565,7 +565,7 @@ test('two Codex threads sharing a session_id keep separate start time and tool l
   }, { gatewayId: 'gw', state })
 
   assert.equal(rowsT1[0].conversation_started_at, '2026-06-01T00:00:00.000Z')
-  // Thread-2 keeps its OWN start time — it does not inherit thread-1's.
+  // Thread-2 keeps its OWN start time. It does not inherit thread-1's.
   assert.equal(rowsT2[0].conversation_started_at, '2026-06-02T00:00:00.000Z')
   assert.equal(rowsT2[0].session_id, 'sess-shared')
   assert.equal(rowsT2[0].conversation_id, 'thread-2')
@@ -605,7 +605,7 @@ test('restart replay: seeds seen-set from committed part_ids so prior history re
   // then a fresh post-restart listener replaying the SAME history through
   // a stub storage that reports those rows as committed. With the seen-set
   // seeded from committed message_ids, the replay must emit zero rows.
-  // Seeding scopes on session_id — the partition key (LLP 0030).
+  // Seeding scopes on session_id: the partition key (LLP 0030).
   const project = () => ({
     provider: 'native',
     session_id: 'sess-restart',

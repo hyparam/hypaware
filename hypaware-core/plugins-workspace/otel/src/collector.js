@@ -11,8 +11,8 @@ import { flattenOtlpTraces } from './otlp/traces.js'
 import { flattenOtlpMetrics } from './otlp/metrics.js'
 
 /**
- * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { OtlpRequest } from './types.d.ts'
+ * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { OtlpRequest } from './types.js'
  */
 
 const FLATTENERS = {
@@ -156,7 +156,7 @@ function asObject(value) {
 /**
  * Stamp `listen_host` and `listen_port` onto the currently-active
  * `source.start` span. Called by `source.js` once the HTTP listener has
- * bound — the kernel opens the span for us, and we just enrich it.
+ * bound: the kernel opens the span for us, and we just enrich it.
  *
  * @param {string} host
  * @param {number} port

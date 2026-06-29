@@ -170,6 +170,7 @@ test('exportBatch partial failure: retryPartitions has only the failed partition
     async putObject() {
       call += 1
       if (call === 1) return {} // p1 succeeds
+      // Non-terminal error. Driver expects to retry just p2.
       throw Object.assign(new Error('slow down'), { name: 'SlowDown' })
     },
     destroy() {},
@@ -192,6 +193,9 @@ test('exportBatch partial failure: retryPartitions has only the failed partition
 })
 
 test('exportBatch forwards dataset cluster columns to the encoder', async (t) => {
+  // The s3 sink must derive cluster columns from the dataset's Iceberg
+  // partition fields and pass them to the encoder (same as local-fs), so the
+  // Parquet encoder keeps wide repeated columns dictionary-encoded.
   const stateDir = await tmpStateDir()
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
   const storage = makeStorage({

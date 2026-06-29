@@ -294,7 +294,7 @@ test('renderConfirmationSummary: update header shows diff arrows when version/re
 
 test('installPlugin (git): non-tty without confirm callback succeeds (legacy direct caller)', async () => {
   // The `confirm` callback is the trust gate. When it is not supplied
-  // the install proceeds — this preserves the legacy programmatic path
+  // the install proceeds, which preserves the legacy programmatic path
   // for callers that already know they want to commit.
   const { stateDir, sourceUrl, commitSha, cleanup } = await buildGitFixture()
   try {

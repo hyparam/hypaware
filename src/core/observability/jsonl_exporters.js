@@ -6,7 +6,7 @@ import path from 'node:path'
 import { hrTimeToIso } from './runtime.js'
 
 /**
- * @import { LogRecord, MetricRecord } from './types.d.ts'
+ * @import { LogRecord, MetricRecord } from '../../../src/core/observability/types.js'
  * @import { Span } from './runtime.js'
  */
 
@@ -20,7 +20,7 @@ const ExportResultCode = Object.freeze({
  * opened lazily on first write so a no-op shutdown doesn't create
  * empty artifacts.
  */
-// @ref LLP 0021#shutdown-and-flush [implements] — one file per signal per pid, opened lazily so no-op runs leave none
+// @ref LLP 0021#shutdown-and-flush [implements]: one file per signal per pid, opened lazily so no-op runs leave none
 class JsonlWriter {
   /**
    * @param {string} dir
@@ -246,7 +246,7 @@ export class JsonlLogRecordExporter {
  * record per data point, flattened so smoke assertions can query a
  * single named metric without unpacking the OTel resource metrics tree.
  */
-// @ref LLP 0021#the-attribute-contract [explains] — flatten to one record per line is why the vocabulary stays bounded
+// @ref LLP 0021#the-attribute-contract [explains]: flatten to one record per line is why the vocabulary stays bounded
 export class JsonlMetricExporter {
   /**
    * @param {object} opts

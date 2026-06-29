@@ -14,11 +14,11 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
 
 /**
- * Phase 7 smoke — Claude transcript backfill → query → idempotent rerun.
+ * Phase 7 smoke: Claude transcript backfill → query → idempotent rerun.
  *
  * Boots `@hypaware/ai-gateway` + `@hypaware/claude` against a tmp
  * HYP_HOME with a staged Claude transcript fixture under the fake HOME,
- * then drives `hyp backfill claude` directly (no daemon — backfill is a
+ * then drives `hyp backfill claude` directly (no daemon: backfill is a
  * local file import) and asserts the bead-6 contract end to end:
  *
  *  - **User-visible query result**: `ai_gateway_messages` holds the two
@@ -30,7 +30,7 @@ import { resolveDependencies } from '../../../src/core/dep_graph.js'
  *    span for `ai_gateway_messages`.
  *  - **Idempotency (phase 8)**: a second `hyp backfill claude` (a fresh
  *    run id, so the materializer re-scans committed partitions) writes
- *    ZERO new rows and the query still returns exactly two rows — the
+ *    ZERO new rows and the query still returns exactly two rows. The
  *    rerun did not duplicate.
  *
  * @param {{ harness: any, expect: any }} args
@@ -39,7 +39,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'backfill_claude_fixture: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'backfill_claude_fixture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

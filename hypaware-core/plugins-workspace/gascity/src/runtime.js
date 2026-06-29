@@ -10,14 +10,13 @@
  * to surface a `sources` reference on `CommandRunContext`.
  *
  * The runtime is `null` when the plugin has not yet been activated
- * in this process; tests reset it across smoke flows via
- * `clearGascityRuntime`.
+ * in this process.
  */
 
 /**
- * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
- * @import { GascityRuntime } from './types.d.ts'
+ * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
+ * @import { GascityRuntime } from './types.js'
  */
 
 /** @type {GascityRuntime | null} */
@@ -45,8 +44,4 @@ export function requireGascityRuntime() {
     throw new Error('@hypaware/gascity: command invoked before plugin activation')
   }
   return runtime
-}
-
-export function clearGascityRuntime() {
-  runtime = null
 }

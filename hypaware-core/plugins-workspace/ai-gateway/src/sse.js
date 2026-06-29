@@ -12,7 +12,7 @@
  */
 
 /**
- * @import { SseEvent } from './types.d.ts'
+ * @import { SseEvent } from './types.js'
  */
 
 export class SseParser {

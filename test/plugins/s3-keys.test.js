@@ -59,7 +59,7 @@ test('renderObjectKey strips path separators from dataset and filename so the ke
     partition: { dataset: '../escape', partition: {} },
     filename: '../../etc/passwd',
   })
-  // Exactly three separators (prefix / dataset / segment / filename) —
+  // Exactly three separators (prefix / dataset / segment / filename), so
   // the inputs cannot inject any more.
   assert.equal((key.match(/\//g) ?? []).length, 3)
   assert.equal(key.startsWith('acme/'), true)

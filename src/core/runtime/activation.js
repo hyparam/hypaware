@@ -17,9 +17,9 @@ import { createQueryStorageService } from '../cache/storage.js'
 import { isSafeContributionName } from './contribution_names.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry, VerbRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
- * @import { KernelRuntime } from './activation.d.ts'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -47,7 +47,7 @@ import { isSafeContributionName } from './contribution_names.js'
  *   configControl?: ConfigControlFacade,
  * }} [opts]
  * @returns {KernelRuntime}
- * @ref LLP 0003#intrinsic-not-plugin-provided [implements] — query + storage are wired in as intrinsic services, not plugin contributions
+ * @ref LLP 0003#intrinsic-not-plugin-provided [implements]: query + storage are wired in as intrinsic services, not plugin contributions
  */
 export function createKernelRuntime(opts = {}) {
   const cacheRoot = opts.cacheRoot ?? opts.storage?.cacheRoot ?? defaultCacheRoot()
@@ -106,7 +106,7 @@ function defaultCacheRoot() {
  * @param {JsonObject}       [args.config]
  * @param {NodeJS.ProcessEnv} [args.env]
  * @returns {PluginActivationContext}
- * @ref LLP 0004#the-activation-context [implements] — per-plugin ctx: config slice, registry facades, scoped logger, requireCapability
+ * @ref LLP 0004#the-activation-context [implements]: per-plugin ctx: config slice, registry facades, scoped logger, requireCapability
  */
 export function createActivationContext({ runtime, plugin, paths, config, env }) {
   const pluginName = plugin.name
@@ -135,7 +135,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     initPresets: runtime.initPresets,
     backfills: runtime.backfills,
     backfillMaterializers: runtime.backfillMaterializers,
-    // @ref LLP 0025#apply-engine-is-kernel-surface [implements] — plugins reach the apply engine only through this narrow facade; absent outside the daemon
+    // @ref LLP 0025#apply-engine-is-kernel-surface [implements]: plugins reach the apply engine only through this narrow facade; absent outside the daemon
     ...(runtime.configControl ? { configControl: runtime.configControl } : {}),
     /**
      * @template T
@@ -218,7 +218,7 @@ function createPermissionContext(pluginName, granted) {
  * @param {PluginName} pluginName
  * @param {ReturnType<typeof createCapabilityRegistry>} registry
  * @returns {CapabilityRegistry}
- * @ref LLP 0006#resolution-rules [constrained-by] — facade pins the activating plugin's identity; can't impersonate a provider
+ * @ref LLP 0006#resolution-rules [constrained-by]: facade pins the activating plugin's identity; can't impersonate a provider
  */
 function createCapabilitiesFacade(pluginName, registry) {
   return {
@@ -257,7 +257,7 @@ function createPhase2SkillRegistry() {
       if (!skill || typeof skill.name !== 'string' || skill.name.length === 0) {
         throw new TypeError('skills.register: name is required')
       }
-      // @ref LLP 0003#principle [constrained-by] — name is interpolated into
+      // @ref LLP 0003#principle [constrained-by]: name is interpolated into
       // `<skill_dir>/<name>`; reject traversal before it reaches the filesystem.
       if (!isSafeContributionName(skill.name)) {
         throw new TypeError(`skills.register '${skill.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
@@ -300,7 +300,7 @@ function createAgentRegistry() {
       if (!agent || typeof agent.name !== 'string' || agent.name.length === 0) {
         throw new TypeError('agents.register: name is required')
       }
-      // @ref LLP 0003#principle [constrained-by] — name is interpolated into
+      // @ref LLP 0003#principle [constrained-by]: name is interpolated into
       // `<agent_dir>/<name>.md`; reject traversal before it reaches the filesystem.
       if (!isSafeContributionName(agent.name)) {
         throw new TypeError(`agents.register '${agent.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
@@ -333,7 +333,7 @@ function createAgentRegistry() {
  *
  * Promoted from a Phase 2 placeholder in Phase 9 (hy-imw). The
  * registry is intentionally non-validating beyond the basic shape
- * checks — preset authors own their argv parsing and config writing
+ * checks. Preset authors own their argv parsing and config writing
  * in `run()`.
  *
  * @returns {InitPresetRegistry}

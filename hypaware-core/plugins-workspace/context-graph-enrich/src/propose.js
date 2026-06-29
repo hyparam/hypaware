@@ -9,8 +9,8 @@ import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 import { readState, updateState } from './state.js'
 
 /**
- * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.d.ts'
- * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.js'
+ * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const EXTRACTOR = 'enrich.t1'
@@ -20,18 +20,18 @@ const EXTRACTOR_VERSION = 1
  * Run one T1 propose tick over **whole sessions**. The two regimes differ only
  * in their session selector ([§two-regimes](LLP 0028)):
  *
- * - `ongoing` (default) — settled, not-yet-enriched sessions: latest part older
+ * - `ongoing` (default): settled, not-yet-enriched sessions. Latest part older
  *   than `settle_cutoff_minutes` AND past the session's watermark, capped at
  *   `max_sessions_per_tick`.
- * - `backfill` — every session, ignoring the settle cutoff and the watermark.
+ * - `backfill`: every session, ignoring the settle cutoff and the watermark.
  *
  * Each selected session's filtered parts are stitched in DAG order, `tool_result`
- * excluded, and passed to a **single** frontier-model call — closing the old
+ * excluded, and passed to a **single** frontier-model call, closing the old
  * 12k-char truncation defect. Prospects are deduped by a deterministic
  * {@link prospectId}, pre-write-filtered against the persisted set (idempotent
  * across ticks/regimes), appended, and the session's watermark is advanced.
  *
- * @ref LLP 0028#two-tiers-one-pipeline [implements]
+ * @ref LLP 0028#two-tiers-one-pipeline [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ regime?: 'ongoing' | 'backfill', sessionIds?: string[], deadlineMs?: number, nowMs?: number, signal?: AbortSignal }} [opts]
@@ -54,7 +54,7 @@ export async function runProposeTick(runtime, opts = {}) {
       // Per session: read its filtered parts, DAG-order them, extract in full.
       // Track which sessions advanced so the watermark only moves over the
       // sessions actually processed (an early deadline break must not skip the
-      // rest — they re-qualify next tick).
+      // rest: they re-qualify next tick).
       /** @type {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} */
       const perSession = []
       /** @type {Record<string, SessionMark>} */
@@ -68,8 +68,8 @@ export async function runProposeTick(runtime, opts = {}) {
         const mark = sessionMark(ordered, cfg)
         // Re-qualify against this read's own parts: the selector already compared
         // the exact tuple, but its aggregate and this parts query are separate
-        // reads — a part landing between them could make a just-selected session
-        // already-covered (TOCTOU). Backfill re-extracts unconditionally — its
+        // reads. A part landing between them could make a just-selected session
+        // already-covered (TOCTOU). Backfill re-extracts unconditionally: its
         // appends are idempotent ({@link filterNewProspects}).
         if (regime === 'ongoing') {
           const prev = marks[sid]
@@ -99,7 +99,7 @@ export async function runProposeTick(runtime, opts = {}) {
       }
 
       // Persist marks only AFTER the prospects are appended: a crash in between
-      // re-reads the same sessions next tick (safe — idempotent), whereas
+      // re-reads the same sessions next tick (safe: idempotent), whereas
       // marking first then crashing would lose a session's prospects forever.
       const advanced = Object.keys(newMarks)
       if (advanced.length > 0) {
@@ -128,24 +128,24 @@ export async function runProposeTick(runtime, opts = {}) {
 /**
  * Select the sessions a tick should extract. One aggregate query
  * ({@link buildSessionAggregateQuery}) returns the **precise latest part tuple**
- * `(last_ts, last_id)` per session — one row per session — and the regime filters
+ * `(last_ts, last_id)` per session. One row per session, and the regime filters
  * it in JS:
  *
- * - `backfill` — every session with extractable content.
- * - `ongoing` — only **settled** sessions (latest part older than
+ * - `backfill`: every session with extractable content.
+ * - `ongoing`: only **settled** sessions (latest part older than
  *   `settle_cutoff_minutes`) whose latest part is strictly past the stored
  *   watermark, oldest-settled first and capped at `max_sessions_per_tick`.
  *
  * The exclusion compares the **full `(ts, tiebreak)` tuple** against the mark
  * ({@link cmpMark}), not the timestamp alone: parts of one message share a
  * wall-clock millisecond, so a same-`ts` part that advanced the session past its
- * mark (higher tiebreak) must re-qualify — a timestamp-only check would silently
+ * mark (higher tiebreak) must re-qualify. A timestamp-only check would silently
  * drop its text. The tuple match is also why an already-enriched session
  * (`cmpMark == 0`) is excluded rather than re-selected every tick (no
  * cap-flooding). {@link runProposeTick} keeps a precise re-check as a TOCTOU
  * guard against rows landing between the two queries.
  *
- * @ref LLP 0028#two-regimes [implements]
+ * @ref LLP 0028#two-regimes [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ regime: 'ongoing' | 'backfill', nowMs: number, marks: Record<string, SessionMark> }} args
@@ -181,14 +181,14 @@ export async function selectSessions(runtime, { regime, nowMs, marks }) {
 
 /**
  * The per-session selector query: one row per session carrying the **precise
- * latest part tuple** `(last_ts, last_id)` — the timestamp *and* tiebreak of the
+ * latest part tuple** `(last_ts, last_id)`. The timestamp *and* tiebreak of the
  * session's latest kept part, so the selector can compare the full mark, not the
  * timestamp alone ({@link selectSessions}). A plain `MAX(ts)` aggregate can't do
  * this: the tiebreak that wins at the max timestamp is not the global `MAX`
  * tiebreak, so we rank parts with `ROW_NUMBER() OVER (… ORDER BY ts DESC,
  * tiebreak DESC)` and keep `rn = 1`. The shared {@link contentFilterClauses} are
  * applied in the inner scan so a session that is *only* plumbing never appears
- * and the tuple reflects the latest part the proposer would actually read —
+ * and the tuple reflects the latest part the proposer would actually read,
  * matching {@link sessionMark}, which is computed over the same filtered parts.
  *
  * @param {EnrichConfig} cfg
@@ -210,7 +210,7 @@ export function buildSessionAggregateQuery(cfg) {
 }
 
 /**
- * Read **all** filtered parts of one session — the full transcript, no row
+ * Read **all** filtered parts of one session. The full transcript, no row
  * budget and no truncation (that was the defect). The shared content filter
  * keeps the proposer on signal, and the anchor value is `sqlQuote`'d (the only
  * interpolated value; column names are validated identifiers). Ordering is done
@@ -230,13 +230,13 @@ export function buildSessionPartsQuery(cfg, sessionId) {
 /**
  * Order a session's parts into one coherent transcript. The gateway assigns
  * `message_created_at` in logical message order, so sorting by (timestamp,
- * row-unique tiebreak) reconstructs the conversation — the "DAG order" the
- * design calls for — without coupling to `ai_gateway_messages`-specific columns
+ * row-unique tiebreak) reconstructs the conversation. The "DAG order" the
+ * design calls for. Without coupling to `ai_gateway_messages`-specific columns
  * (`message_index` / `agent_id`), which a custom source may lack. Deterministic,
  * so re-runs over the same session yield the same transcript (hence the same
  * prospect ids).
  *
- * @ref LLP 0028#two-tiers-one-pipeline [implements]
+ * @ref LLP 0028#two-tiers-one-pipeline [implements]:
  *
  * @param {Record<string, unknown>[]} rows
  * @param {EnrichConfig} cfg
@@ -302,7 +302,7 @@ function t1MaxTokens(p) {
 
 /**
  * Dedup proposed candidates into prospect rows keyed by a deterministic
- * {@link prospectId} — the same (extractor, version, anchor, type+label)
+ * {@link prospectId}. The same (extractor, version, anchor, type+label)
  * collapses to one row, so re-proposing the same content never duplicates.
  *
  * @param {Array<{ anchorKey: string, keys: string[], candidates: ReturnType<typeof parseProspects> }>} perSession
@@ -350,7 +350,7 @@ export function collectProspectRows(perSession, cfg, createdAt) {
  * nothing new. Mirrors the graph projector's pre-write dedup (read the committed
  * id set, filter before append; only a missing dataset is benign there).
  *
- * @ref LLP 0028#idempotent-prospects [implements]
+ * @ref LLP 0028#idempotent-prospects [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {Record<string, unknown>[]} candidates

@@ -7,11 +7,12 @@ import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { createCodexBackfillProvider } from './backfill.js'
+import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { attach, defaultConfigPath, detach } from './settings.js'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/codex'
@@ -20,11 +21,25 @@ const UPSTREAM_NAME = 'openai'
 const CHATGPT_UPSTREAM_NAME = 'chatgpt'
 
 /**
+ * The plugin's `config_sections` validator, surfaced as a side-effect-free
+ * export so the kernel apply path can validate this plugin's `config` block
+ * (the `backfill` policy) *before* the plugin is ever activated: e.g. a
+ * central config that first introduces `@hypaware/codex`. It is the same
+ * registration `activate()` hands `ctx.configRegistry.registerSection`;
+ * importing this module never runs `activate()`, so discovery is safe.
+ *
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]: the plugin owns + exposes its own `backfill` validator
+ * @type {{ section: string, validate: typeof validateCodexConfig }}
+ */
+export const configSection = { section: CODEX_CONFIG_SECTION, validate: validateCodexConfig }
+
+/**
  * Activate the `@hypaware/codex` adapter plugin.
  *
  * Resolves the `hypaware.ai-gateway` capability, registers the
  * OpenAI-compatible upstream preset, wires Codex's config.toml
- * attach/detach, and contributes the `hypaware-query` skill for
+ * attach/detach, and contributes the `hypaware-query` skill plus
+ * the AI report skills (adoption/improvement/security/spend) for
  * Codex installs.
  *
  * Each attach/detach emits a `client.attach`/`client.detach` span
@@ -32,9 +47,20 @@ const CHATGPT_UPSTREAM_NAME = 'chatgpt'
  * `restored=true|false`.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements] — adapter requires the ai-gateway capability; registers client + upstream presets
+ * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: adapter requires the ai-gateway capability; registers client + upstream presets
  */
 export async function activate(ctx) {
+  // Validate the plugin's own `config` block: currently just the
+  // optional `backfill` policy ({ on_join, window_days }) that drives
+  // backfill-on-join. Registered so the kernel runs it via
+  // `runPerPluginSectionValidators`; no top-level core schema change.
+  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]: the source plugin owns and validates its `backfill` config
+  ctx.configRegistry.registerSection({
+    plugin: PLUGIN_NAME,
+    section: CODEX_CONFIG_SECTION,
+    validate: validateCodexConfig,
+  })
+
   /** @type {AiGatewayCapability} */
   const gateway = ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
@@ -211,12 +237,20 @@ export async function activate(ctx) {
   })
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
-  ctx.skills.register({
-    name: 'hypaware-query',
-    plugin: PLUGIN_NAME,
-    clients: ['codex'],
-    sourceDir: path.join(skillsRoot, 'hypaware-query'),
-  })
+  for (const skillName of [
+    'hypaware-query',
+    'hypaware-ai-adoption-report',
+    'hypaware-ai-improvement-report',
+    'hypaware-ai-security-report',
+    'hypaware-ai-spend-report',
+  ]) {
+    ctx.skills.register({
+      name: skillName,
+      plugin: PLUGIN_NAME,
+      clients: ['codex'],
+      sourceDir: path.join(skillsRoot, skillName),
+    })
+  }
 }
 
 /**

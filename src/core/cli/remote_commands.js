@@ -14,7 +14,7 @@ import {
 } from '../remote/credentials.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -42,12 +42,12 @@ export async function runRemoteHelp(argv, ctx) {
 }
 
 /**
- * `hyp remote add <name> <url>` — register (or update) a target in the
+ * `hyp remote add <name> <url>`: register (or update) a target in the
  * local config's `query.remotes`. The URL is non-secret and committable.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0033#commands [implements] — `remote add` is a local-layer writer; URL in config, token never in config
+ * @ref LLP 0033#commands [implements]: `remote add` is a local-layer writer; URL in config, token never in config
  */
 export async function runRemoteAdd(argv, ctx) {
   const positional = argv.filter((a) => !a.startsWith('-'))
@@ -77,13 +77,13 @@ export async function runRemoteAdd(argv, ctx) {
 }
 
 /**
- * `hyp remote login <name>` — store the query-scoped token for a target.
+ * `hyp remote login <name>`: store the query-scoped token for a target.
  * Token source: `--token-file <path>` or piped stdin (a TTY with neither is
  * an error, never a hang).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0033#credentials [implements] — token to the 0600 store, never config; one login per server
+ * @ref LLP 0033#credentials [implements]: token to the 0600 store, never config; one login per server
  */
 export async function runRemoteLogin(argv, ctx) {
   const positional = argv.filter((a) => !a.startsWith('-'))
@@ -125,17 +125,17 @@ export async function runRemoteLogin(argv, ctx) {
   await writeToken(stateDir, name, token)
   ctx.stdout.write(`stored query-scoped token for '${name}' (mode 0600)\n`)
 
-  // A friendly nudge if the target isn't configured — the token still
+  // A friendly nudge if the target isn't configured: the token still
   // stores (an env override may use it), but a typo here is common.
   const remotes = await readConfiguredRemotes(ctx)
   if (!remotes[name]) {
-    ctx.stderr.write(`note: '${name}' is not a configured target — add it with 'hyp remote add ${name} <url>'\n`)
+    ctx.stderr.write(`note: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>'\n`)
   }
   return 0
 }
 
 /**
- * `hyp remote list` — targets + token status (`stored` / `env` / `missing`),
+ * `hyp remote list`: targets + token status (`stored` / `env` / `missing`),
  * never the token itself.
  *
  * @param {string[]} argv
@@ -163,7 +163,7 @@ export async function runRemoteList(argv, ctx) {
     return 0
   }
   if (names.length === 0) {
-    ctx.stdout.write("no remote targets configured — add one with 'hyp remote add <name> <url>'\n")
+    ctx.stdout.write("no remote targets configured - add one with 'hyp remote add <name> <url>'\n")
     return 0
   }
   for (const name of names) {
@@ -173,7 +173,7 @@ export async function runRemoteList(argv, ctx) {
 }
 
 /**
- * `hyp remote remove <name>` — drop the target from config + its stored token.
+ * `hyp remote remove <name>`: drop the target from config + its stored token.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx

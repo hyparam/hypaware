@@ -13,7 +13,7 @@ import {
 } from './jsonrpc.js'
 
 /**
- * @import { QueryRegistry, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { QueryRegistry, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /** Protocol version advertised when the client sends none. */
@@ -23,7 +23,7 @@ const SERVER_NAME = 'hypaware'
 /**
  * Build the **one server assembly** (verbs → MCP tools, datasets → MCP
  * resources) the kernel exposes. The transport (stdio here; HTTP later) is
- * a thin adapter over this object — the tool list is emergent from the
+ * a thin adapter over this object: the tool list is emergent from the
  * verbs the active plugins registered, so a new capability is a new tool
  * with zero server change (LLP 0034 §pluggable-transport / §tool-exposure-emergent).
  *
@@ -42,7 +42,7 @@ const SERVER_NAME = 'hypaware'
  *   allowOperator?: boolean,
  *   serverVersion?: string,
  * }} opts
- * @ref LLP 0034#tool-auth-class [implements] — read/operator boundary lives on the tool; the credential scope gates it
+ * @ref LLP 0034#tool-auth-class [implements]: read/operator boundary lives on the tool; the credential scope gates it
  */
 export function createMcpServer(opts) {
   const { verbs, query, runTool } = opts
@@ -78,7 +78,7 @@ export function createMcpServer(opts) {
 
   /**
    * Handle one parsed JSON-RPC message. Returns the response object, or
-   * `null` for a notification (which gets no reply). Never throws — a
+   * `null` for a notification (which gets no reply). Never throws: a
    * tool that throws becomes an `isError` tool result, and an unknown
    * method a `-32601` error response, so the stream is never corrupted.
    *
@@ -142,7 +142,7 @@ export function createMcpServer(opts) {
       })
     } catch (err) {
       // A tool execution failure is a tool *result* (isError), not a
-      // protocol error — the client sees it as a failed call, not a dead
+      // protocol error: the client sees it as a failed call, not a dead
       // connection.
       const text = err instanceof Error ? err.message : String(err)
       return jsonRpcResult(id, { content: [{ type: 'text', text }], isError: true })

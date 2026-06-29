@@ -13,7 +13,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 
 /**
- * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -143,7 +143,7 @@ test('markerSubsumedBySnapshot accepts a probe-state object and resolves equalit
   assert.equal(
     markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '200', metadata: null }),
     false,
-    'without metadata, only equality counts — ancestry cannot be proven'
+    'without metadata, only equality counts - ancestry cannot be proven'
   )
 })
 

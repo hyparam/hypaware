@@ -5,10 +5,10 @@ import { createHash } from 'node:crypto'
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.d.ts'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from './identity_client.js'
- * @import { CentralSinkConfig } from './types.d.ts'
+ * @import { CentralSinkConfig } from './types.js'
  */
 
 const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
@@ -16,7 +16,7 @@ const KNOWN_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 // Ceiling on how long one chunk POST will pace itself against the
 // server's 429/503 backpressure before giving up inline. We retry the
 // SAME chunk (honoring Retry-After) so delivery is correct at any volume
-// — pausing whenever the server's byte-rate bucket empties — but bound
+// (pausing whenever the server's byte-rate bucket empties), but bound
 // the inline wait so one throttled partition can't wedge a sink tick.
 // On exceeding it we throw: the driver respools the partition and the
 // next tick resumes, which is cheap because the server dedupes the
@@ -270,7 +270,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       })
     } catch (err) {
       // Annotate so the partition-level failure log (exportBatch) can
-      // name the failing chunk and how many already landed — the new
+      // name the failing chunk and how many already landed: the new
       // chunk loop is otherwise invisible against the server ledger.
       if (err && typeof err === 'object') {
         const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err)
@@ -419,8 +419,8 @@ function serializeValue(value) {
  * idempotency key as `X-Hyp-Batch-Id`. Re-sends the *same* body + key on
  * two transient conditions, so every retry stays idempotent:
  *
- * - `401` — refresh the JWT once and retry (a second `401` escalates).
- * - `429`/`503` — server backpressure. Honor `Retry-After` (falling back
+ * - `401`: refresh the JWT once and retry (a second `401` escalates).
+ * - `429`/`503`: server backpressure. Honor `Retry-After` (falling back
  *   to the linear ladder when it is absent or garbage), sleep, and retry
  *   the same chunk. This is what makes delivery correct at any volume:
  *   the POST pauses whenever the server's byte-rate bucket empties rather
@@ -429,7 +429,7 @@ function serializeValue(value) {
  *   throw and let the driver respool (the server dedupes the delivered
  *   prefix, so the next tick resumes cheaply).
  *
- * Any other non-2xx throws — `4xx` poison and other `5xx` are the
+ * Any other non-2xx throws: `4xx` poison and other `5xx` are the
  * driver's to classify (outbox respool); narrowing poison-drop is a
  * separate follow-up (hypaware #118).
  *
@@ -481,11 +481,11 @@ async function postNdjson(args) {
       continue
     }
 
-    // @ref LLP 0014#forward-sink-backpressure [implements] — 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
+    // @ref LLP 0014#forward-sink-backpressure [implements]: 429/503 is backpressure, not failure: pace the same chunk in place, bounded inline, respool past budget.
     if (response.status === 429 || response.status === 503) {
       // Honor only a *positive* Retry-After. A legal `Retry-After: 0` or a
       // past HTTP-date parses to 0 (not undefined) and carries no useful
-      // pacing — taking it verbatim would retry with zero delay, never
+      // pacing: taking it verbatim would retry with zero delay, never
       // advance `waitedMs`, and spin this loop forever. `||` (not `??`)
       // falls a zero through to the ladder, so every wait progresses and
       // the inline budget can bound the retries.
@@ -509,7 +509,7 @@ async function postNdjson(args) {
       })
       // Release the throttle response before parking: undici keeps the
       // socket out of the pool until the body is read or cancelled, so a
-      // multi-minute pause — and every retry that piles up — would
+      // multi-minute pause (and every retry that piles up) would
       // otherwise pin it.
       await discardBody(response)
       await sleepFn(delayMs, abortSignal)
@@ -546,7 +546,7 @@ async function readErrorDetail(response) {
         if (error) return `${response.status} ${error}`
       }
     } catch {
-      // plain text — fall through
+      // plain text: fall through
     }
     return `${response.status} ${body.trim().slice(0, 200)}`
   }
@@ -554,8 +554,8 @@ async function readErrorDetail(response) {
 }
 
 /**
- * Discard a response body we will not read — a 429/503 we are about to
- * retry past — so undici returns the socket to the pool. Cancelling is
+ * Discard a response body we will not read (a 429/503 we are about to
+ * retry past), so undici returns the socket to the pool. Cancelling is
  * best-effort: a missing or already-settled body is a no-op.
  *
  * @param {Response} response

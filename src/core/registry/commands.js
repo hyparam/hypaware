@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CommandRegistration, CommandRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRegistration, CommandRegistry } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -25,7 +25,7 @@
  *   has: (name: string) => boolean,
  *   size: () => number,
  * }}
- * @ref LLP 0009#core-owns-dispatch [implements] — core routes argv to the owning command; plugins only register
+ * @ref LLP 0009#core-owns-dispatch [implements]: core routes argv to the owning command; plugins only register
  */
 export function createCommandRegistry() {
   /** @type {Map<string, CommandRegistration>} */

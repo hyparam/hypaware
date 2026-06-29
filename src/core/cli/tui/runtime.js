@@ -6,24 +6,16 @@ import readline from 'node:readline'
 import { reduce } from './keypress.js'
 import { render } from './render.js'
 
-/** @typedef {import('./keypress.js').State} State */
-/** @typedef {import('./keypress.js').Key} Key */
+/**
+ * @import { State, Key, RunOpts } from '../../../../src/core/cli/tui/types.js'
+ * @import { Key as ReadlineKey } from 'node:readline'
+ */
 
 const CURSOR_HIDE  = '\x1b[?25l'
 const CURSOR_SHOW  = '\x1b[?25h'
 const CLEAR_TO_END = '\x1b[J'
 
 let activeRun = false
-
-/**
- * @typedef {Object} RunOpts
- * @property {NodeJS.ReadableStream} stdin
- * @property {NodeJS.WritableStream} stdout
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]  Erase the prompt's frame from the
- *   terminal when it settles (resolve or cancel) so the next prompt
- *   redraws in its place instead of stacking below it.
- */
 
 /**
  * Drive the reducer loop against a TTY. Resolves with the terminal
@@ -44,14 +36,13 @@ export async function run(initialState, io) {
 
   const color = env.NO_COLOR ? false : true
   const clearOnResolve = io.clearOnResolve === true
-  /** @type {NodeJS.ReadStream} */
-  const stdin = /** @type {any} */ (io.stdin)
-  const stdout = io.stdout
+  const stdin = /** @type {NodeJS.ReadStream} */ (io.stdin)
+  const stdout = /** @type {NodeJS.WriteStream} */ (io.stdout)
 
   /** @type {State} */
   let state = initialState
   let previousLineCount = 0
-  /** @type {((s: any, k: any) => void) | null} */
+  /** @type {((s: string | undefined, k: ReadlineKey) => void) | null} */
   let onKeypress = null
   let cleanedUp = false
 
@@ -144,20 +135,21 @@ function ensureTty(stdin, stdout, env) {
   if (env.HYP_NO_TUI === '1') {
     throw new Error('TUI prompt requires a TTY; got non-TTY stdin/stdout')
   }
-  const inTty  = stdin  && /** @type {any} */ (stdin).isTTY  === true
-  const outTty = stdout && /** @type {any} */ (stdout).isTTY === true
+  const inTty  = stdin  && /** @type {NodeJS.ReadStream} */ (stdin).isTTY  === true
+  const outTty = stdout && /** @type {NodeJS.WriteStream} */ (stdout).isTTY === true
   if (!inTty || !outTty) {
     throw new Error('TUI prompt requires a TTY; got non-TTY stdin/stdout')
   }
 }
 
 /**
- * @param {unknown} str
- * @param {unknown} key
+ * @param {string | undefined} str
+ * @param {ReadlineKey | undefined} key
  * @returns {Key}
  */
 function normalizeKey(str, key) {
-  const k = /** @type {any} */ (key) ?? {}
+  /** @type {ReadlineKey} */
+  const k = key ?? {}
   /** @type {Key} */
   const out = {
     ctrl:  !!k.ctrl,
@@ -174,11 +166,11 @@ function normalizeKey(str, key) {
  * Resolve the terminal width in columns, defaulting to 80 when the
  * stream does not expose a usable `.columns` (non-TTY mocks, pipes).
  *
- * @param {NodeJS.WritableStream} stdout
+ * @param {NodeJS.WriteStream} stdout
  * @returns {number}
  */
 function terminalColumns(stdout) {
-  const cols = /** @type {any} */ (stdout).columns
+  const cols = stdout.columns
   return typeof cols === 'number' && cols > 0 ? cols : 80
 }
 
@@ -205,7 +197,7 @@ function visibleWidth(line) {
  * a logical line is wider than the terminal: the terminal soft-wraps it
  * onto multiple rows, so the cursor descended further than the number of
  * `\n` written. Undercounting here leaves stale rows on screen on every
- * redraw — the classic "the question keeps duplicating when I move the
+ * redraw: the classic "the question keeps duplicating when I move the
  * cursor" symptom.
  *
  * Frames always end with a trailing `\n`; the empty segment after it

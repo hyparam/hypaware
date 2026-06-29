@@ -3,11 +3,11 @@
 /**
  * Minimal JSON-RPC 2.0 framing for the hand-rolled MCP host. The kernel
  * never `npm install`s (LLP 0008), and the protocol surface MCP needs is
- * small — `initialize` / `tools/list` / `tools/call` / `resources/*` — so
+ * small (`initialize` / `tools/list` / `tools/call` / `resources/*`), so
  * the implementation call here is to hand-roll JSON-RPC rather than add an
  * SDK dependency (LLP 0034 dependency note).
  *
- * @ref LLP 0034#stdio-stdout-discipline [constrained-by] — JSON-RPC is the stdout channel; helpers here produce only protocol objects
+ * @ref LLP 0034#stdio-stdout-discipline [constrained-by]: JSON-RPC is the stdout channel; helpers here produce only protocol objects
  */
 
 export const PARSE_ERROR = -32700

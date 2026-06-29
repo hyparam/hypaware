@@ -12,9 +12,9 @@
     "sources": [{ "name": "gascity" }],
     "datasets": [{ "name": "gascity_messages" }],
     "commands": [
-      { "name": "gascity attach" },
-      { "name": "gascity detach" },
-      { "name": "gascity list" }
+      { "name": "gascity attach", "summary": "Subscribe to a gascity supervisor" },
+      { "name": "gascity detach", "summary": "Unsubscribe from a gascity supervisor" },
+      { "name": "gascity list", "summary": "List attached gascity supervisors" }
     ],
     "config_sections": [{ "section": "gascity" }],
     "init_presets": [{ "name": "gascity" }],

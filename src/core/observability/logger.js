@@ -7,7 +7,7 @@ import { logs, LoggerProvider, SeverityNumber } from './runtime.js'
 import { OtlpLogExporter } from './otlp_exporters.js'
 
 /**
- * @import { ObservabilityEnv } from './types.d.ts'
+ * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000

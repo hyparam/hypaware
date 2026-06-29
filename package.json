@@ -7,14 +7,15 @@
     "hypaware": "./bin/hypaware.js",
     "hyp": "./bin/hypaware.js"
   },
+  "types": "./src/core/index.d.ts",
   "exports": {
-    ".": "./src/core/index.js",
-    "./core": "./src/core/index.js",
-    "./core/observability": "./src/core/observability/index.js",
-    "./core/sinks": "./src/core/sinks/index.js",
-    "./core/query": "./src/core/query/index.js",
-    "./integration": "./src/core/cli/integration.js",
-    "./tui": "./src/core/cli/tui/index.js"
+    ".": { "types": "./src/core/index.d.ts", "import": "./src/core/index.js" },
+    "./core": { "types": "./src/core/index.d.ts", "import": "./src/core/index.js" },
+    "./core/observability": { "types": "./types/core/observability/index.d.ts", "import": "./src/core/observability/index.js" },
+    "./core/sinks": { "types": "./types/core/sinks/index.d.ts", "import": "./src/core/sinks/index.js" },
+    "./core/query": { "types": "./types/core/query/index.d.ts", "import": "./src/core/query/index.js" },
+    "./integration": { "types": "./src/core/cli/integration.d.ts", "import": "./src/core/cli/integration.js" },
+    "./tui": { "types": "./types/core/cli/tui/index.d.ts", "import": "./src/core/cli/tui/index.js" }
   },
   "imports": {
     "#core/observability": "./src/core/observability/index.js"
@@ -23,6 +24,7 @@
     "bin/",
     "src/",
     "hypaware-core/",
+    "types/",
     "collectivus-plugin-kernel-types.d.ts"
   ],
   "engines": {
@@ -32,6 +34,8 @@
     "lint": "node scripts/check-syntax.js",
     "test": "node scripts/run-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:types": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build:types",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {

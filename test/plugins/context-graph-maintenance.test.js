@@ -143,7 +143,7 @@ test('compactGraphTables refuses to touch a partition whose cursor is corrupt', 
   const report = await compactGraphTables({ storage: /** @type {any} */ ({ cacheRoot }) })
   const nodeReport = report.datasets.find((d) => d.dataset === 'node')
 
-  // Partition b was never scanned, so the duplicate is invisible — but
+  // Partition b was never scanned, so the duplicate is invisible. But
   // crucially nothing was rewritten or retired from the stale 'table'
   // dir a synthesized epoch-0 cursor would have pointed at.
   assert.deepEqual(nodeReport?.partitionsSkipped, [{ path: partB, reason: 'unreadable-cursor' }])

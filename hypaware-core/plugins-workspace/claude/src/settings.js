@@ -18,7 +18,7 @@ import path from 'node:path'
  */
 
 /**
- * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.d.ts'
+ * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.js'
  * @import { FileHandle } from 'node:fs/promises'
  */
 

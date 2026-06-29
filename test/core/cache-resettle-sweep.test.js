@@ -15,15 +15,15 @@ import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/trans
 
 /**
  * Re-settle sweep (LLP 0027 "Re-settle sweep"): the finalize-vs-transcript
- * race can commit a fallback-hash row ALONE — its transcript line not yet
- * on disk — and the uuid twin lands in a SEPARATE later flush. Flush-time
+ * race can commit a fallback-hash row ALONE, with its transcript line not yet
+ * on disk, and the uuid twin lands in a SEPARATE later flush. Flush-time
  * settlement only collapses twins that co-batch, so this split pair is a
  * permanent duplicate the flush path can never revisit. The maintenance
  * sweep re-runs the dataset's own settleBatch over the committed fallback
  * row during compaction, upgrades it to native identity, and dedupes it
- * against the committed uuid twin — collapsing the pair after the fact.
+ * against the committed uuid twin, collapsing the pair after the fact.
  *
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -77,7 +77,7 @@ test('re-settle sweep collapses a split fallback/uuid twin pair after the fact',
     await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
     await storage.flushTable(tablePath, { force: true })
 
-    // Pre-condition: flush-time settle could NOT fix the split — both the
+    // Pre-condition: flush-time settle could NOT fix the split, since both the
     // fallback and the uuid twin are committed.
     const before = await readPartIds(storage, tablePath)
     assert.deepEqual(before.sort(), ['fallbackhash16ab#0', 'u-assist#0'].sort(),
@@ -99,7 +99,7 @@ test('re-settle sweep collapses a split fallback/uuid twin pair after the fact',
     assert.deepEqual(after, ['u-assist#0'],
       'the pair collapses to the single native uuid row')
 
-    // No fallback marker survives — the surviving row is fully native.
+    // No fallback marker survives. The surviving row is fully native.
     const rows = await readRows(storage, tablePath)
     assert.equal(rows.length, 1)
     assert.equal(rows[0].message_id, 'u-assist')
@@ -131,7 +131,7 @@ test('re-settle sweep upgrades a lone fallback row even when its twin never arri
 
     const after = await readPartIds(storage, tablePath)
     assert.deepEqual(after, ['u-assist#0'],
-      'the lone fallback is upgraded to native identity (kept, not dropped — no twin to collapse onto)')
+      'the lone fallback is upgraded to native identity (kept, not dropped - no twin to collapse onto)')
   } finally {
     await env.cleanup()
   }
@@ -202,7 +202,7 @@ test('a fallback marker auto-triggers compaction without force; a no-marker part
   }
 })
 
-test('an unmatchable fallback does not force a rewrite every tick — only on new data', async () => {
+test('an unmatchable fallback does not force a rewrite every tick - only on new data', async () => {
   // Regression for the forced-rewrite loop: a fallback whose transcript never
   // lands stays a candidate forever. Without the re-settle baseline it would
   // force a full rewrite on every maintenance tick. The baseline makes the

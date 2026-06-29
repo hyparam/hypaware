@@ -18,7 +18,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -43,23 +43,23 @@ const ROW_COUNT = 50
  *   - the encoder emitted an `encoder.encode_parquet` span carrying
  *     `row_count=50`, `bytes_written>0`, and `compression='SNAPPY'`
  *
- * The smoke is a real plugin integration — the dataset rows are written
+ * The smoke is a real plugin integration: the dataset rows are written
  * into the kernel's Iceberg cache, then exported through the production
  * sink driver, encoder, and destination paths.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0014#queryable-sinks [tests] — parquet-on-local-fs export through the production writer/destination path
+ * @ref LLP 0014#queryable-sinks [tests]: parquet-on-local-fs export through the production writer/destination path
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'blob_sink_parquet_local_fs: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'blob_sink_parquet_local_fs: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
   if (!obs.meter.provider) {
     throw new Error(
-      'blob_sink_parquet_local_fs: meter provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'blob_sink_parquet_local_fs: meter provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -96,7 +96,7 @@ export async function run({ harness, expect }) {
       const { loaded, failed } = await loadManifests([parquetDir, localFsDir, fixtureDir])
       if (failed.length > 0) {
         throw new Error(
-          `blob_sink_parquet_local_fs: manifest failures — ${failed
+          `blob_sink_parquet_local_fs: manifest failures - ${failed
             .map((f) => `${f.manifestPath}: ${f.message}`)
             .join('; ')}`
         )
@@ -364,7 +364,7 @@ function fixturePluginSource() {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const DATASET = '${DATASET}'

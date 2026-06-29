@@ -3,13 +3,13 @@
 import { Buffer } from 'node:buffer'
 
 import { parquetMetadataAsync } from 'hyparquet'
-import { parquetDataSource } from 'hypaware/core/query'
+import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/query'
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
  * @import { AsyncDataSource } from 'squirreling/src/types.js'
- * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { S3QuerySourceConfig } from './types.d.ts'
+ * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { S3QuerySourceConfig } from './types.js'
  */
 
 /**
@@ -96,7 +96,7 @@ async function createDataSource(source, blobStore, partitions) {
 
 /**
  * Read an Iceberg table from S3 by adapting the BlobStore into the
- * `Resolver`/`Lister` pair icebird speaks — the same path the local
+ * `Resolver`/`Lister` pair icebird speaks, the same path the local
  * cache uses, only the bytes come from S3. The `@hypaware/format-iceberg`
  * adapter and `icebird` are imported lazily so parquet-only deployments
  * never load them.
@@ -107,7 +107,7 @@ async function createDataSource(source, blobStore, partitions) {
  */
 async function createIcebergDataSource(source, blobStore) {
   // Guard against a missing/empty table the way the local cache does
-  // (`tableExists` before load) — without it, loading catalog metadata
+  // (`tableExists` before load). Without it, loading catalog metadata
   // for a table that was never written can throw instead of reading as
   // an empty result.
   if (!(await icebergTableHasMetadata(blobStore, source.prefix))) {
@@ -139,7 +139,7 @@ async function icebergTableHasMetadata(blobStore, prefix) {
 
 /**
  * Materialize an S3 object into an in-memory `AsyncBuffer`. This reads
- * the whole object — fine for the modest parquet files HypAware writes;
+ * the whole object (fine for the modest parquet files HypAware writes);
  * range-based reads can be layered on later by extending `getObject`.
  *
  * @param {BlobStore} blobStore
@@ -159,59 +159,6 @@ async function s3AsyncBuffer(blobStore, key) {
       const out = new ArrayBuffer(sliced.byteLength)
       new Uint8Array(out).set(sliced)
       return out
-    },
-  }
-}
-
-/**
- * Combine several parquet sources into one logical table. The union does
- * NOT push WHERE/LIMIT/OFFSET through to the children — LIMIT/OFFSET are
- * not distributive across a concatenation — so it reports both flags
- * false and lets the SQL engine apply them over the merged stream.
- *
- * @param {AsyncDataSource[]} sources
- * @returns {AsyncDataSource}
- */
-function unionSources(sources) {
-  /** @type {Set<string>} */
-  const allColumns = new Set()
-  let total = 0
-  for (const s of sources) {
-    for (const col of s.columns) allColumns.add(col)
-    total += s.numRows ?? 0
-  }
-  return {
-    columns: Array.from(allColumns),
-    numRows: total,
-    scan(options) {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {
-          for (const s of sources) {
-            const scan = s.scan({ signal: options.signal })
-            for await (const row of scan.rows()) yield row
-          }
-        },
-      }
-    },
-  }
-}
-
-/**
- * @param {string[]} names
- * @returns {AsyncDataSource}
- */
-function emptySource(names) {
-  return {
-    columns: names,
-    numRows: 0,
-    scan() {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {},
-      }
     },
   }
 }

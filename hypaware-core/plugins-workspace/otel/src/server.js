@@ -4,7 +4,7 @@ import http from 'node:http'
 import zlib from 'node:zlib'
 
 /**
- * @import { OtlpReceiveHandler, OtlpRequest, OtlpSignal } from './types.d.ts'
+ * @import { OtlpReceiveHandler, OtlpRequest, OtlpSignal } from './types.js'
  */
 
 const JSON_CT = { 'Content-Type': 'application/json' }
@@ -28,7 +28,7 @@ const EMPTY_PARTIAL_SUCCESS = {
  * `start`) is responsible for wrapping that path in an `otel.receive`
  * span and translating exception types to `error_kind` attributes.
  *
- * Only OTLP/JSON is accepted in this pass — the OTLP/protobuf decoder
+ * Only OTLP/JSON is accepted in this pass: the OTLP/protobuf decoder
  * chain from the donor (`collectivus/src/protobuf.js`,
  * `collectivus/src/otlp/*`) is left out of V1 and can be added later
  * without changing the request handler shape.

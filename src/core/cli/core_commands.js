@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import process from 'node:process'
+import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
@@ -11,6 +12,9 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
 import { centralSeedPath, resetCentralLayerToSeed } from '../config/apply.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
+import { select } from './tui/index.js'
+import { isPromptCancelledError } from './tui/runtime.js'
+import { shouldUseTui } from './tui-router.js'
 import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
@@ -57,20 +61,20 @@ import { renderReport } from '../plugin_doctor/render.js'
 import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 
 /**
- * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
- * @import { ExtendedQueryStorageService } from '../cache/types.d.ts'
- * @import { PluginMetadata } from '../config/types.d.ts'
- * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../daemon/types.d.ts'
- * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.d.ts'
- * @import { ConfirmInstall } from '../plugin_install/types.d.ts'
- * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../registry/types.d.ts'
- * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from './types.d.ts'
+ * @import { AiGatewayCapability, CommandRegistration, CommandRunContext, HypAwareV2Config, PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { PluginMetadata } from '../../../src/core/config/types.js'
+ * @import { DaemonInstallOptions, HypAwareStatusReport, ServiceState } from '../../../src/core/daemon/types.js'
+ * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.js'
+ * @import { ConfirmInstall } from '../../../src/core/plugin_install/types.js'
+ * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
+ * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
+ * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from '../../../src/core/cli/types.js'
  */
 
 /**
  * Register the V1 core command set onto the supplied registry. These
- * commands are NOT plugin contributions — they ship with the kernel
+ * commands are NOT plugin contributions: they ship with the kernel
  * (per Phase 3 plan §Built-In Commands and the V1 Parity Table).
  *
  * Phase 3 implementations are deliberately thin: each command emits the
@@ -86,7 +90,7 @@ export function registerCoreCommands(registry) {
     registry.register(cmd)
   }
   // Project the intrinsic core verbs (query_sql) as CLI commands here too,
-  // so `hyp --help` — rendered before the kernel boots — lists `query sql`.
+  // so `hyp --help` (rendered before the kernel boots) lists `query sql`.
   // The kernel verb registry re-projects them idempotently during boot and
   // owns the MCP tool surface (LLP 0034 §verbs).
   for (const verb of CORE_VERBS) {
@@ -395,9 +399,9 @@ function buildCoreCommands() {
 /**
  * `hyp status [--json]`
  *
- * Renders the V1 install state — config path, daemon install/run
+ * Renders the V1 install state (config path, daemon install/run
  * state, active plugins, source/sink/client status, cache + retention
- * window, recent error count — and any diagnostics + repair
+ * window, recent error count) and any diagnostics + repair
  * suggestions surfaced by the Phase 8 collector.
  *
  * Span: `status.render`. Attributes match the bead contract
@@ -413,10 +417,8 @@ function buildCoreCommands() {
 async function runStatus(argv, ctx) {
   const json = argv.includes('--json')
 
-  /** @type {ExtendedSourceRegistry} */
-  const sources = /** @type {any} */ (ctx.sources)
-  /** @type {ExtendedSinkRegistry} */
-  const sinks = /** @type {any} */ (ctx.sinks)
+  const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
+  const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
 
   const runtimeClientNames = listClientNames(ctx.capabilities)
 
@@ -515,7 +517,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       exists: report.configExists,
       valid: report.configValid,
     },
-    // V1 stable shape — array of `{name}` so consumers can pin keys
+    // V1 stable shape: array of `{name}` so consumers can pin keys
     // without needing to know the version. The collector currently
     // does not track per-plugin version (Phase 2 set version on each
     // entry but it was always 'unknown'); keeping the field reserved
@@ -614,6 +616,21 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
         bad_etag: report.remoteConfig.badEtag,
       }
       : null,
+    // Client-action reconciler state (LLP 0036 / 0041). Null until a
+    // backfill-on-join target is configured or a pass has run; a `failed`
+    // entry is informational and never affects `overall`.
+    client_actions: report.clientActions
+      ? report.clientActions.actions.map((a) => ({
+        kind: a.kind,
+        request_key: a.requestKey,
+        state: a.state,
+        ...(a.rows !== undefined ? { rows: a.rows } : {}),
+        ...(a.at ? { at: a.at } : {}),
+        ...(a.reason ? { reason: a.reason } : {}),
+        ...(a.lastAttempt ? { last_attempt: a.lastAttempt } : {}),
+        ...(a.attempts !== undefined ? { attempts: a.attempts } : {}),
+      }))
+      : null,
     diagnostics: report.diagnostics.map((d) => ({
       severity: d.severity,
       kind: d.kind,
@@ -650,7 +667,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 
   stdout.write('  active plugins:\n')
   if (report.activePlugins.length === 0) {
-    stdout.write('    (none — no config or no plugins selected)\n')
+    stdout.write('    (none - no config or no plugins selected)\n')
   } else {
     for (const name of report.activePlugins) {
       stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}\n`)
@@ -668,7 +685,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 
   stdout.write('  sinks:\n')
   if (report.sinks.length === 0) {
-    stdout.write('    (none — keeping captured data local only)\n')
+    stdout.write('    (none - keeping captured data local only)\n')
   } else {
     for (const s of report.sinks) {
       stdout.write(`    - ${s.instance}  (${s.plugin}, ${s.kind})${provenanceTag(report.layered, isCentralSink(report.layered, s.instance))}\n`)
@@ -707,8 +724,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
 
   // Local entries the central layer overrides (LLP 0031): dropped at
-  // merge, listed here with their reason. Loud, but not an outage signal
-  // — the gateway runs fine on the central config.
+  // merge, listed here with their reason. Loud, but not an outage signal.
+  // The gateway runs fine on the central config.
   if (report.layered && (report.layered.drops.length > 0 || report.layered.centralQueryIgnored)) {
     stdout.write('  local config (not applied):\n')
     for (const d of report.layered.drops) {
@@ -723,7 +740,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   }
 
   // Remote-config section appears only once the gateway has state to
-  // show — a never-joined install keeps the V1 status surface.
+  // show. A never-joined install keeps the V1 status surface.
   const rc = report.remoteConfig
   if (rc && (rc.runningEtag || rc.probation || rc.lastRollback || rc.badEtag)) {
     stdout.write('  remote config:\n')
@@ -736,6 +753,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
     if (rc.badEtag) {
       stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+    }
+  }
+
+  // Client-action reconciler section (LLP 0036 / 0041). Appears only once a
+  // backfill-on-join target is configured or a pass has run; a `failed`
+  // line is loud but informational. It never degrades `overall`.
+  if (report.clientActions && report.clientActions.actions.length > 0) {
+    stdout.write('  client actions:\n')
+    for (const a of report.clientActions.actions) {
+      let detail = ''
+      if (a.state === 'done') {
+        const bits = []
+        if (a.rows !== undefined) bits.push(`${a.rows} rows`)
+        if (a.at) bits.push(`at ${a.at}`)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      } else if (a.state === 'failed') {
+        const bits = []
+        if (a.reason) bits.push(a.reason)
+        if (a.lastAttempt) bits.push(`last attempt ${a.lastAttempt}`)
+        if (a.attempts !== undefined) bits.push(`${a.attempts} attempt${a.attempts === 1 ? '' : 's'}`)
+        if (bits.length > 0) detail = `  (${bits.join(', ')})`
+      }
+      stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
     }
   }
 
@@ -756,13 +796,13 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
  * that never joined (no central layer → the V1 surface is unchanged);
  * otherwise `[central · locked]` for entries the central layer owns and
  * `[local]` for the user's additive entries. Used for plugin, source,
- * sink, and client lines — sources and clients inherit their owning
+ * sink, and client lines. Sources and clients inherit their owning
  * plugin's layer.
  *
  * @param {HypAwareStatusReport['layered']} layered
  * @param {boolean} isCentral
  * @returns {string}
- * @ref LLP 0031#status-provenance [implements] — every active plugin/source/sink/client line tagged central·locked or local
+ * @ref LLP 0031#status-provenance [implements]: every active plugin/source/sink/client line tagged central·locked or local
  */
 function provenanceTag(layered, isCentral) {
   if (!layered) return ''
@@ -883,7 +923,7 @@ async function runQuerySchema(argv, ctx) {
       const schema = schemaForDataset(ctx.query, dataset)
       if (!schema) {
         ctx.stdout.write(`dataset: ${dataset}\n`)
-        ctx.stdout.write('  (no dataset registered — install a plugin that contributes it)\n')
+        ctx.stdout.write('  (no dataset registered - install a plugin that contributes it)\n')
         return 0
       }
       ctx.stdout.write(renderSchema(dataset, schema))
@@ -999,7 +1039,7 @@ async function runQueryMaintain(argv, ctx) {
     compactOnly,
     expireOnly,
     config: maintenanceConfig,
-    // @ref LLP 0027#re-settle-sweep — `hyp query maintain` re-settles
+    // @ref LLP 0027#re-settle-sweep: `hyp query maintain` re-settles
     // committed fallback rows too, so a manual sweep also closes the race.
     storage: ctx.storage,
     getSettleHook: (dataset) => ctx.query.getDataset(dataset)?.resettleBatch,
@@ -1110,17 +1150,17 @@ function pluginStateDir(ctx) {
  * `buildPluginCatalog`, so config validation runs against the actual
  * declared capabilities rather than a hardcoded table.
  *
- * Discovery failures are absorbed silently — `hyp config validate`
+ * Discovery failures are absorbed silently: `hyp config validate`
  * keeps working when the lock is missing or any installed manifest is
  * corrupt; the underlying discovery layer logs its own diagnostics.
  *
  * @param {CommandRunContext} ctx
- * @returns {Promise<{ knownPlugins: Map<import('../../../collectivus-plugin-kernel-types.d.ts').PluginName, import('../config/types.d.ts').PluginMetadata>, knownDatasets: Set<string> }>}
+ * @returns {Promise<{ knownPlugins: Map<PluginName, PluginMetadata>, knownDatasets: Set<string> }>}
  */
 async function buildKnownPluginsForCtx(ctx) {
-  /** @type {import('../manifest.js').LoadedManifest[]} */
+  /** @type {LoadedManifest[]} */
   let bundledLoaded = []
-  /** @type {import('../manifest.js').LoadedManifest[]} */
+  /** @type {LoadedManifest[]} */
   let installedLoaded = []
   try {
     const bundled = await discoverBundledPlugins()
@@ -1210,7 +1250,7 @@ function buildPluginInstallConfirm({ yes, ctx, headerKind }) {
     for (const w of warnings) stderr.write(`${w}\n`)
     stderr.write(summary)
     // Prompt on stderr so stdout stays parseable. We require both
-    // stderr and stdin to be a TTY before asking — piping either
+    // stderr and stdin to be a TTY before asking: piping either
     // direction means "no human watching, prompt is useless."
     const tty = isTty(stderr) && isTty(process.stdin)
     const ask = tty
@@ -1228,7 +1268,7 @@ function buildPluginInstallConfirm({ yes, ctx, headerKind }) {
  * Parse `hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]`.
  * Flags accept both `--flag value` and `--flag=value` forms. The
  * function does NOT verify mutual exclusion of `--ref` with a URL
- * fragment — that lives in the resolver so the same rule applies to
+ * fragment. That lives in the resolver so the same rule applies to
  * programmatic callers.
  *
  * @param {string[]} argv
@@ -1256,7 +1296,7 @@ function parsePluginInstallArgs(argv) {
       if (value === undefined || value.startsWith('--')) {
         return { ok: false, code: 2, message: `flag ${arg} requires a value` }
       }
-      // Block `-X` style values too — `applyGitSourceFlags` enforces
+      // Block `-X` style values too: `applyGitSourceFlags` enforces
       // the same rule but rejecting at the CLI layer gives a friendlier
       // error before the install span opens.
       if (value.startsWith('-')) {
@@ -1781,7 +1821,7 @@ async function runDaemonHelp(argv, ctx) {
 }
 
 /**
- * `hyp daemon run --foreground [--config <path>]` — boot the kernel as a daemon and
+ * `hyp daemon run --foreground [--config <path>]`: boot the kernel as a daemon and
  * tend it in the current process until SIGTERM/SIGINT. Phase 3
  * intentionally only supports `--foreground`; the detached run path
  * lands with the Phase 4 launchd/systemd installers, so a no-flag
@@ -1863,7 +1903,7 @@ async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write('    (none)\n')
   } else {
     for (const source of status.sources) {
-      ctx.stdout.write(`    - ${source.name} (${source.plugin}): ${source.state}${source.error ? ' — ' + source.error : ''}\n`)
+      ctx.stdout.write(`    - ${source.name} (${source.plugin}): ${source.state}${source.error ? ' - ' + source.error : ''}\n`)
     }
   }
   ctx.stdout.write('  sinks:\n')
@@ -1898,7 +1938,7 @@ async function runDaemonStop(_argv, ctx) {
 }
 
 /**
- * `hyp daemon restart` — restart the installed service if present,
+ * `hyp daemon restart`: restart the installed service if present,
  * otherwise fall back to a stop + operator-relaunch hint for the
  * foreground path.
  *
@@ -1929,7 +1969,7 @@ async function runDaemonRestart(_argv, ctx) {
 }
 
 /**
- * `hyp daemon install` — install the persistent platform service.
+ * `hyp daemon install`: install the persistent platform service.
  * Supports `--dry-run [--json]` to render the planned plist / unit
  * file without touching disk.
  *
@@ -1996,7 +2036,7 @@ async function runDaemonInstall(argv, ctx) {
 }
 
 /**
- * `hyp daemon uninstall` — remove the persistent service while
+ * `hyp daemon uninstall`: remove the persistent service while
  * leaving config, recordings, and logs in place.
  *
  * @param {string[]} argv
@@ -2025,7 +2065,7 @@ async function runDaemonUninstall(argv, ctx) {
 }
 
 /**
- * `hyp daemon start` — start (kickstart) the installed service.
+ * `hyp daemon start`: start (kickstart) the installed service.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -2134,11 +2174,11 @@ function parseDaemonRunArgs(argv) {
 /* ---------- mcp ---------- */
 
 /**
- * `hyp mcp` — serve this host's verbs as an MCP server. The tool surface is
+ * `hyp mcp`: serve this host's verbs as an MCP server. The tool surface is
  * assembled dynamically from the verbs the active plugins registered (LLP
  * 0034): a bare host offers `query_sql`; add `@hypaware/context-graph` and
- * `graph_neighbors` appears. Local stdio is local-user trust — same as
- * running `hyp query` at the terminal — so no auth and operator tools are
+ * `graph_neighbors` appears. Local stdio is local-user trust (same as
+ * running `hyp query` at the terminal), so no auth and operator tools are
  * exposed.
  *
  * stdout is the JSON-RPC channel; the lifecycle line and all logs go to
@@ -2147,7 +2187,7 @@ function parseDaemonRunArgs(argv) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
- * @ref LLP 0034#kernel-wide-not-server-only [implements] — a local gateway exposes its own active plugins' tools to a local AI client
+ * @ref LLP 0034#kernel-wide-not-server-only [implements]: a local gateway exposes its own active plugins' tools to a local AI client
  */
 async function runMcp(argv, ctx) {
   const parsed = parseMcpArgv(argv)
@@ -2185,7 +2225,7 @@ async function runMcp(argv, ctx) {
     transport: 'stdio',
     tool_count: tools.length,
   })
-  // Lifecycle line to stderr — stdout is reserved for the protocol.
+  // Lifecycle line to stderr (stdout is reserved for the protocol).
   ctx.stderr.write(`hyp mcp: serving ${tools.length} tool(s) over stdio${tools.length ? ` (${tools.map((t) => t.name).join(', ')})` : ''}\n`)
 
   const stdin = /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin)
@@ -2260,7 +2300,7 @@ async function runVersion(_argv, ctx) {
 /* ---------- smoke ---------- */
 
 /**
- * `hyp smoke <flow>` — internal developer command.
+ * `hyp smoke <flow>`: internal developer command.
  *
  * The smoke harness owns a fresh tmp `HYP_HOME` and installs its own
  * observability against that tmpdir. Installing observability in the
@@ -2302,7 +2342,7 @@ async function runSmoke(argv, ctx) {
 /* ---------- sink ---------- */
 
 /**
- * `hyp sink` group landing — no default behavior, just usage.
+ * `hyp sink` group landing: no default behavior, just usage.
  *
  * @param {string[]} _argv
  * @param {CommandRunContext} ctx
@@ -2320,11 +2360,11 @@ async function runSinkHelp(_argv, ctx) {
  *
  * Drives one tick of the sink driver immediately, bypassing each
  * sink's cron schedule. The optional `instance` argument restricts
- * the tick to a single sink — useful when an operator just wants to
+ * the tick to a single sink (useful when an operator just wants to
  * flush one configured destination without waking the others.
  *
  * The driver writes the same `sink.export_batch` span and outbox
- * artifacts it does on a scheduled tick — the only difference is the
+ * artifacts it does on a scheduled tick. The only difference is the
  * trigger.
  *
  * @param {string[]} argv
@@ -2335,9 +2375,9 @@ async function runSinkForce(argv, ctx) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const { createSinkDriver } = await import('../sinks/driver.js')
   const driver = createSinkDriver({
-    sinkRegistry: /** @type {any} */ (ctx.sinks),
+    sinkRegistry: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
     queryRegistry: ctx.query,
-    storage: ctx.storage,
+    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
     stateRoot: obsEnv.stateDir,
     config: ctx.config,
   })
@@ -2366,10 +2406,10 @@ async function runSinkForce(argv, ctx) {
  * `hyp sink maintain [instance] [--compact] [--dry-run]`
  *
  * Runs export maintenance on table-format (Iceberg) sink instances:
- * snapshot expiration on exported tables, and — only with `--compact` —
+ * snapshot expiration on exported tables, and (only with `--compact`)
  * a data-file rewrite via icebird's `icebergRewrite`.
  *
- * @ref LLP 0022#compaction — rewrites are out-of-band only: this manual
+ * @ref LLP 0022#compaction: rewrites are out-of-band only: this manual
  * CLI invocation is the one place they may run. The daemon loop and the
  * sink tick never compact.
  *
@@ -2396,13 +2436,14 @@ async function runSinkMaintain(argv, ctx) {
     return 2
   }
 
-  const { maintainExportTables } = await import(
-    '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
-  )
+  // Indirect the specifier so the declaration build (rootDir=src) does not
+  // pull this hypaware-core runtime module under src's emit root (TS6059).
+  // The module is loaded lazily and only when `sink maintain` runs.
+  const maintenanceModule = '../../../hypaware-core/plugins-workspace/format-iceberg/src/maintenance.js'
+  const { maintainExportTables } = await import(maintenanceModule)
 
-  const allHandles = /** @type {any} */ (ctx.sinks).listHandles?.() ?? []
+  const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
   const tableFormatHandles = allHandles.filter(
-    /** @param {any} h */
     (h) => h.kind === 'table-format' && h.tableFormat === 'iceberg' && h.blobStore
   )
 
@@ -2493,7 +2534,7 @@ function describeCompactionSkip(d) {
     case 'no-table':
       return 'compaction_skipped (no table metadata)'
     case 'conflict':
-      return 'compaction_conflict (concurrent commit won the race; staged files cleaned up — re-run to retry from fresh metadata)'
+      return 'compaction_conflict (concurrent commit won the race; staged files cleaned up - re-run to retry from fresh metadata)'
     case 'error':
       return `compaction_failed (${d.compactionError ?? 'unknown error'})`
     default:
@@ -2534,7 +2575,7 @@ function buildPickerBackfillRunner(ctx) {
 /**
  * `hyp init [preset]`
  *
- * Without arguments runs the interactive walkthrough (TTY only — when
+ * Without arguments runs the interactive walkthrough (TTY only; when
  * stdout is not a TTY the command prints the available presets and
  * exits non-zero so scripts get a deterministic failure instead of
  * blocking on stdin).
@@ -2546,6 +2587,232 @@ function buildPickerBackfillRunner(ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
+/**
+ * No-arg / `hyp init` entry gate for an already-configured install.
+ *
+ * Re-running `hypaware` on a working install used to jump straight into
+ * the first-run picker as if starting fresh. Instead, when a valid config
+ * is present, print a short friendly summary of what's set up and offer a
+ * small menu: reconfigure, see full status, or quit (the default; a bare
+ * enter changes nothing).
+ *
+ * @ref LLP 0011#returning-to-a-configured-install [implements]: the picker
+ *   stays the first-run path; this gate only fronts it once a config exists.
+ *
+ * Returns:
+ *  - `'first-run'`: no valid config; caller runs the walkthrough as before
+ *  - `'reconfigure'`: user chose to re-run the picker
+ *  - `'done'`: user quit or viewed status; caller should exit 0
+ *
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<'first-run' | 'reconfigure' | 'done'>}
+ */
+async function runConfiguredEntry(ctx) {
+  const report = await collectHypAwareStatus({
+    env: ctx.env,
+    runtime: {
+      sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
+      sinks: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
+      capabilities: ctx.capabilities,
+      query: ctx.query,
+      storage: ctx.storage,
+    },
+  })
+
+  // No config, or one that won't validate → treat as first run and let
+  // the walkthrough own the experience (it can repair a missing file).
+  if (!report.configExists || !report.configValid) return 'first-run'
+
+  // A centrally-managed (fleet-joined) config is locked locally, so
+  // reconfiguring here would be a no-op: drop that option and say so.
+  const locked = !!(report.layered && report.layered.hasCentral)
+  renderConfigSummary({ report, locked, stdout: ctx.stdout })
+
+  const options = buildConfiguredMenuOptions(locked)
+  const choice = await promptConfiguredAction(ctx, options)
+  if (choice === 'reconfigure') return 'reconfigure'
+  if (choice === 'status') {
+    ctx.stdout.write('\n')
+    await runStatus([], ctx)
+  }
+  return 'done'
+}
+
+/**
+ * Build the action menu for the configured-install entry. `Quit` is
+ * always present and is the default; `Reconfigure` is omitted when the
+ * config is centrally managed (locked), since a local re-run is a no-op.
+ *
+ * @param {boolean} locked
+ * @returns {{ value: string, label: string, summary?: string }[]}
+ */
+export function buildConfiguredMenuOptions(locked) {
+  /** @type {{ value: string, label: string, summary?: string }[]} */
+  const options = []
+  if (!locked) {
+    options.push({
+      value: 'reconfigure',
+      label: 'Reconfigure',
+      summary: 'Re-run the setup picker and rewrite the config.',
+    })
+  }
+  options.push({ value: 'status', label: 'See full status', summary: 'Print the detailed status report.' })
+  options.push({ value: 'quit', label: 'Quit', summary: 'Leave the current setup untouched.' })
+  return options
+}
+
+/**
+ * Single-select action menu for the configured-install entry. Uses the
+ * arrow-navigable TUI on a real TTY (matching the picker's look) and a
+ * numbered readline fallback otherwise. A cancel (Ctrl-C / EOF) or an
+ * unparseable choice resolves to `'quit'`, so nothing is changed.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {{ value: string, label: string, summary?: string }[]} options
+ * @returns {Promise<string>}
+ */
+async function promptConfiguredAction(ctx, options) {
+  if (shouldUseTui({ stdin: ctx.stdin, stdout: ctx.stdout, env: ctx.env })) {
+    try {
+      const choice = await select({
+        title: 'What would you like to do?',
+        options,
+        default: 'quit',
+        clearOnResolve: true,
+        stdin: ctx.stdin ?? process.stdin,
+        stdout: /** @type {any} */ (ctx.stdout),
+        env: ctx.env,
+      })
+      return String(choice)
+    } catch (err) {
+      if (isPromptCancelledError(err)) return 'quit'
+      throw err
+    }
+  }
+  return legacyConfiguredActionPrompt(ctx, options)
+}
+
+/**
+ * Numbered readline menu used when the TUI is unavailable (HYP_NO_TUI=1
+ * or a non-TTY stdin). Mirrors the legacy walkthrough prompts: an empty
+ * answer takes the default (Quit), an out-of-range answer also quits.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {{ value: string, label: string, summary?: string }[]} options
+ * @returns {Promise<string>}
+ */
+export async function legacyConfiguredActionPrompt(ctx, options) {
+  const input = /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin)
+  const output = /** @type {NodeJS.WritableStream} */ (/** @type {any} */ (ctx.stdout))
+  const defaultIdx = Math.max(0, options.findIndex((o) => o.value === 'quit'))
+  const rl = readline.createInterface({ input, output, terminal: false })
+  try {
+    output.write('What would you like to do?\n')
+    options.forEach((opt, i) => output.write(`  ${i + 1}) ${opt.label}\n`))
+    const answer = await rl.question(`Choose [1-${options.length}, default ${defaultIdx + 1}]: `)
+    const trimmed = answer.trim()
+    if (trimmed === '') return options[defaultIdx]?.value ?? 'quit'
+    const n = Number.parseInt(trimmed, 10)
+    if (Number.isInteger(n) && n >= 1 && n <= options.length) return options[n - 1].value
+    return 'quit'
+  } finally {
+    rl.close()
+  }
+}
+
+const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
+  claude: 'Claude',
+  codex: 'Codex',
+})
+
+const FRIENDLY_SINK_LABELS = /** @type {Record<string, string>} */ ({
+  '@hypaware/format-parquet': 'local Parquet files',
+  '@hypaware/format-jsonl': 'local JSONL files',
+  '@hypaware/local-fs': 'local files',
+  '@hypaware/central': 'central fleet sink',
+})
+
+/**
+ * Compact, friendly one-screen summary of an existing install. The full
+ * diagnostic surface stays in `hyp status`; this is just enough to
+ * recognise the setup before deciding whether to reconfigure.
+ *
+ * @param {{ report: HypAwareStatusReport, locked: boolean, stdout: CommandRunContext['stdout'] }} args
+ */
+export function renderConfigSummary({ report, locked, stdout }) {
+  stdout.write(locked ? 'HypAware is set up (managed by your fleet).\n\n' : 'HypAware is set up.\n\n')
+  stdout.write(`  Collecting:  ${summariseCollecting(report)}\n`)
+  stdout.write(`  Saving to:   ${summariseSinks(report)}\n`)
+  stdout.write(`  Daemon:      ${summariseDaemon(report.daemon)}\n`)
+  stdout.write(
+    `  Cache:       ${formatBytesShort(report.cache.totalBytes)} · ${report.retention.days}-day retention\n`
+  )
+  if (locked) stdout.write('\n  Settings are locked here and managed centrally.\n')
+  stdout.write('\n')
+}
+
+/**
+ * What's being collected, in human terms: configured AI clients first
+ * (Claude, Codex), falling back to raw source names (OTEL, proxies).
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {string}
+ */
+function summariseCollecting(report) {
+  const clients = report.clients
+    .filter((c) => c.configured)
+    .map((c) => FRIENDLY_CLIENT_LABELS[c.name] ?? c.name.charAt(0).toUpperCase() + c.name.slice(1))
+  if (clients.length > 0) return clients.join(', ')
+  const sources = report.sources.map((s) => s.name)
+  if (sources.length > 0) return sources.join(', ')
+  return 'nothing yet'
+}
+
+/**
+ * Where captured data lands. Dedupes friendly per-plugin labels; when no
+ * sink is configured the local query cache is the only durable store.
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {string}
+ */
+function summariseSinks(report) {
+  if (report.sinks.length === 0) return 'local query cache only'
+  /** @type {string[]} */
+  const labels = []
+  for (const s of report.sinks) {
+    const label = FRIENDLY_SINK_LABELS[s.plugin] ?? s.instance
+    if (!labels.includes(label)) labels.push(label)
+  }
+  return labels.join(' + ')
+}
+
+/**
+ * One-word daemon state for the summary; `hyp status` carries the detail.
+ *
+ * @param {HypAwareStatusReport['daemon']} daemon
+ * @returns {string}
+ */
+function summariseDaemon(daemon) {
+  if (daemon.running) return 'running'
+  if (daemon.installed) return 'installed, not running'
+  return 'not installed'
+}
+
+/**
+ * Short human byte count for the cache line (e.g. `65 MB`). Rounds to
+ * whole MB/KB so the summary stays glanceable.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytesShort(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${Math.round(bytes)} B`
+}
+
 async function runInit(argv, ctx) {
   if (argv.length > 0 && !argv[0].startsWith('-')) {
     const presetName = argv[0]
@@ -2554,11 +2821,11 @@ async function runInit(argv, ctx) {
       const available = ctx.initPresets.list()
       ctx.stderr.write(`hyp init: unknown preset '${presetName}'\n`)
       if (available.length === 0) {
-        ctx.stderr.write('  no presets registered — install a plugin that contributes one\n')
+        ctx.stderr.write('  no presets registered - install a plugin that contributes one\n')
       } else {
         ctx.stderr.write('  available:\n')
         for (const p of available) {
-          ctx.stderr.write(`    ${p.name}  (${p.plugin})  — ${p.summary}\n`)
+          ctx.stderr.write(`    ${p.name}  (${p.plugin})  - ${p.summary}\n`)
         }
       }
       return 1
@@ -2580,6 +2847,13 @@ async function runInit(argv, ctx) {
 
   if (argv.length === 0) {
     if (isTty(ctx.stdout)) {
+      // Already configured? Show a short friendly summary + menu rather
+      // than dropping straight into the first-run picker as if starting
+      // fresh. A bare enter quits, so re-running `hypaware` on a working
+      // install never reconfigures by accident. First-run (no/invalid
+      // config) returns 'first-run' and falls through unchanged.
+      const entry = await runConfiguredEntry(ctx)
+      if (entry === 'done') return 0
       const result = await runPickerWalkthrough({
         capabilities: ctx.capabilities,
         sources: /** @type {any} */ (ctx.sources),
@@ -2594,14 +2868,14 @@ async function runInit(argv, ctx) {
       return result.exitCode
     }
     const available = ctx.initPresets.list()
-    ctx.stderr.write('hyp init: stdin is not a TTY — pass a preset name or non-interactive flags.\n')
+    ctx.stderr.write('hyp init: stdin is not a TTY - pass a preset name or non-interactive flags.\n')
     ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] [--force] ...\n')
     if (available.length === 0) {
       ctx.stderr.write('  no presets registered\n')
     } else {
       ctx.stderr.write('  presets:\n')
       for (const p of available) {
-        ctx.stderr.write(`    ${p.name}  (${p.plugin})  — ${p.summary}\n`)
+        ctx.stderr.write(`    ${p.name}  (${p.plugin})  - ${p.summary}\n`)
       }
     }
     return 2
@@ -2613,11 +2887,11 @@ async function runInit(argv, ctx) {
     const available = ctx.initPresets.list()
     ctx.stderr.write(`hyp init: unknown preset '${presetName}'\n`)
     if (available.length === 0) {
-      ctx.stderr.write('  no presets registered — install a plugin that contributes one\n')
+      ctx.stderr.write('  no presets registered - install a plugin that contributes one\n')
     } else {
       ctx.stderr.write('  available:\n')
       for (const p of available) {
-        ctx.stderr.write(`    ${p.name}  (${p.plugin})  — ${p.summary}\n`)
+        ctx.stderr.write(`    ${p.name}  (${p.plugin})  - ${p.summary}\n`)
       }
     }
     return 1
@@ -2739,7 +3013,7 @@ function parseInitFlags(argv) {
  *
  * @param {InitFlags} flags
  * @returns {{ exportChoice: PickerExport, origin: PickerExportOrigin }}
- * @ref LLP 0011#autodetect-vs-default [implements] — export defaults to local Parquet, a fixed pick not derived from system state
+ * @ref LLP 0011#autodetect-vs-default [implements]: export defaults to local Parquet, a fixed pick not derived from system state
  */
 export function resolveInitExportChoice(flags) {
   if (flags.exportChoice) {
@@ -2756,7 +3030,7 @@ export function resolveInitExportChoice(flags) {
  * @param {InitFlags} flags
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
- * @ref LLP 0011#non-interactive-entry [implements] — flags / preset / --from-file path that bypasses the interactive TUI
+ * @ref LLP 0011#non-interactive-entry [implements]: flags / preset / --from-file path that bypasses the interactive TUI
  */
 async function runPickerInit(flags, ctx) {
   // --from-file short-circuits the picker entirely. The supplied
@@ -2769,13 +3043,13 @@ async function runPickerInit(flags, ctx) {
 
   // Default sources when `--yes` is the only signal: capture Claude +
   // OTEL. (Export defaults separately, below.)
-  // @ref LLP 0002#v1-acceptance-criteria-summary [implements] — --yes default install captures Claude + OTEL
+  // @ref LLP 0002#v1-acceptance-criteria-summary [implements]: --yes default install captures Claude + OTEL
   const sources = flags.sources.slice()
   if (sources.length === 0) {
     if (flags.yes) {
       sources.push('claude', 'otel')
     } else {
-      ctx.stderr.write('hyp init: no sources selected — pass --source <kind> or --yes\n')
+      ctx.stderr.write('hyp init: no sources selected - pass --source <kind> or --yes\n')
       return 2
     }
   }
@@ -2792,7 +3066,7 @@ async function runPickerInit(flags, ctx) {
 
   const result = await runPickerWalkthrough({
     capabilities: ctx.capabilities,
-    sources: /** @type {any} */ (ctx.sources),
+    sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
     skills: /** @type {any} */ (ctx.skills),
     agents: /** @type {any} */ (ctx.agents),
     stdout: ctx.stdout,
@@ -2816,7 +3090,7 @@ async function runPickerInit(flags, ctx) {
 }
 
 /**
- * `hyp init --from-file <path>` — read a v2 config from disk, validate
+ * `hyp init --from-file <path>`: read a v2 config from disk, validate
  * it, and write it to the canonical location. Still emits the
  * walkthrough spans so the smoke pipeline observes a consistent
  * lifecycle.
@@ -2923,7 +3197,7 @@ async function runInitFromFile(flags, ctx) {
 }
 
 /**
- * `hyp join <url> [token]` — join a centrally-managed fleet. Pure
+ * `hyp join <url> [token]`: join a centrally-managed fleet. Pure
  * sugar over two existing steps: write the seed config (an ordinary v2
  * config containing exactly the central plugin) and run the
  * non-interactive daemon install. Doing those two steps by hand is
@@ -2931,12 +3205,12 @@ async function runInitFromFile(flags, ctx) {
  *
  * Because a policy token is a multi-use fleet-wide credential, the
  * token can (and for MDM scripts, should) arrive via `--token-file`
- * or stdin instead of argv — a bare argv token lands in shell history
+ * or stdin instead of argv. A bare argv token lands in shell history
  * and process listings. The seed config is written mode 0600.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0025#seed-config-mode [implements] — join = write-seed-config + daemon install; a wrapper, not a second code path
+ * @ref LLP 0025#seed-config-mode [implements]: join = write-seed-config + daemon install; a wrapper, not a second code path
  */
 async function runJoin(argv, ctx) {
   const parsed = parseJoinArgs(argv)
@@ -2974,7 +3248,7 @@ async function runJoin(argv, ctx) {
   }
   if (token === undefined) {
     if (isTty(ctx.stdin)) {
-      ctx.stderr.write('hyp join: no token given — pass it as an argument, via --token-file, or on stdin\n')
+      ctx.stderr.write('hyp join: no token given - pass it as an argument, via --token-file, or on stdin\n')
       return 2
     }
     token = (await readAllStdin(ctx.stdin)).trim()
@@ -3012,11 +3286,11 @@ async function runJoin(argv, ctx) {
   }
 
   // The seed is the initial *central* layer. It is written to a
-  // dedicated central-seed file under `config-control/` — never to
+  // dedicated central-seed file under `config-control/`, never to
   // `hypaware-config.json`, which is the user-owned local layer. This is
   // the #111 fix: `join` augments a working install instead of
   // destroying it.
-  // @ref LLP 0031#physical-layout [implements] — join writes only the central seed, never the local layer
+  // @ref LLP 0031#physical-layout [implements]: join writes only the central seed, never the local layer
   const obsEnv = readObservabilityEnv(ctx.env)
   const seedPath = centralSeedPath(obsEnv.stateDir)
 
@@ -3041,11 +3315,11 @@ async function runJoin(argv, ctx) {
       // A re-enrollment (identity broke, operator re-runs `join`) writes a
       // fresh bootstrap token into the seed, but a prior enrollment may
       // have left a stale active config slot that boot resolution prefers
-      // over the seed — silently shadowing the new token, so identity
+      // over the seed, silently shadowing the new token, so identity
       // bootstrap keeps failing with no explanation (#139). Reset to
       // seed-config mode so the freshly written token is honored; on a
       // first join (no slot) this is a no-op.
-      // @ref LLP 0031#physical-layout [implements] — join supersedes a stale active slot so the fresh seed wins
+      // @ref LLP 0031#physical-layout [implements]: join supersedes a stale active slot so the fresh seed wins
       const reset = resetCentralLayerToSeed(obsEnv.stateDir)
       span.setAttribute('superseded_active_slot', reset.supersededActiveSlot)
       if (reset.supersededActiveSlot) {
@@ -3064,7 +3338,7 @@ async function runJoin(argv, ctx) {
         span.setAttribute('error_kind', 'daemon_install_failed')
         return code
       }
-      ctx.stdout.write('✓ Joined — the daemon will pull its configuration from the server\n')
+      ctx.stdout.write('✓ Joined - the daemon will pull its configuration from the server\n')
       return 0
     },
     { component: 'join' }
@@ -3235,7 +3509,7 @@ async function runClientLifecycle(action, argv, ctx) {
       if (action === 'attach') {
         // In dry-run mode the gateway source may not be started yet,
         // so `localEndpoint()` could throw. Fall back to a placeholder
-        // endpoint — adapters are expected to short-circuit before
+        // endpoint (adapters are expected to short-circuit before
         // touching it.
         let endpoint
         if (parsed.dryRun) {

@@ -20,8 +20,8 @@ import {
 import { appendRowsToTable, readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.d.ts'
+ * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  * @import { Schema, PartitionSpec } from 'icebird/src/types.js'
  */
 

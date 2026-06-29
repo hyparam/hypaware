@@ -31,7 +31,7 @@ function e(src_id, dst_id, edge_type) {
   return { src_id, dst_id, edge_type }
 }
 
-// A small Session-rooted activity graph. f2 is isolated (no edges) — it exists
+// A small Session-rooted activity graph. f2 is isolated (no edges). It exists
 // only to collide on the `index.js` basename for the ambiguity test.
 const NODES = [
   n('s1', 'Session', 'conv-1', null),
@@ -196,7 +196,7 @@ test('queryNeighbors folds pre-compaction duplicate rows so a natural-key seed s
     registry.registerDataset(graphDatasetRegistration('edge'))
 
     // The same Session/Tool/edge committed twice in different source=
-    // partitions — what a concurrent projection lands before `hyp graph
+    // partitions: what a concurrent projection lands before `hyp graph
     // compact` runs. Without the identity fold, the duplicate node rows make
     // the natural-key seed read as "ambiguous" and the doubled edge inflates
     // the walk.

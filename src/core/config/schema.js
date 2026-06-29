@@ -6,7 +6,7 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -16,7 +16,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
  *   LoadConfigResult,
  *   LoadConfigSuccess,
  *   LocalConfigWriteGuard,
- * } from './types.d.ts'
+ * } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -40,7 +40,7 @@ export function defaultConfigPath(hypHome) {
 
 /**
  * Guard a write to the user-owned **local** config layer
- * (`hypaware-config.json`) so `init` cannot silently clobber it — the
+ * (`hypaware-config.json`) so `init` cannot silently clobber it: the
  * remaining, non-destructive half of #111 (`join` no longer writes here;
  * `init` still can). Behaviour:
  *
@@ -60,7 +60,7 @@ export function defaultConfigPath(hypHome) {
  *   now?: () => number,
  * }} args
  * @returns {Promise<LocalConfigWriteGuard>}
- * @ref LLP 0031#local-layer-writers [implements] — init overwrite safety: refuse / --force / backup (non-interactive), prompt (interactive)
+ * @ref LLP 0031#local-layer-writers [implements]: init overwrite safety: refuse / --force / backup (non-interactive), prompt (interactive)
  */
 export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwrite, now }) {
   let exists = true
@@ -80,7 +80,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
     return {
       proceed: false,
       message:
-        `refusing to overwrite existing config at ${targetPath} — ` +
+        `refusing to overwrite existing config at ${targetPath} - ` +
         `pass --force to replace it (a timestamped .bak copy is written first)`,
     }
   }
@@ -189,7 +189,7 @@ export async function loadConfigFile(configPath) {
  *
  * @param {unknown} value
  * @returns {{ ok: true, config: HypAwareV2Config } | { ok: false, errors: ValidationError[] }}
- * @ref LLP 0010#no-mode-field [implements] — v2 shape: version must be 2, explicit plugins[], no mode/role label
+ * @ref LLP 0010#no-mode-field [implements]: v2 shape: version must be 2, explicit plugins[], no mode/role label
  */
 export function parseConfigShape(value) {
   /** @type {ValidationError[]} */
@@ -304,7 +304,7 @@ const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'di
  *   list: () => ConfigSectionRegistration[],
  *   getDefaults: (plugin: PluginName) => JsonObject|undefined,
  * }}
- * @ref LLP 0010#validation [implements] — each plugin validates its own config section through this registry
+ * @ref LLP 0010#validation [implements]: each plugin validates its own config section through this registry
  */
 export function createConfigRegistry() {
   /** @type {Map<PluginName, ConfigSectionRegistration>} */
@@ -342,7 +342,7 @@ export function createConfigRegistry() {
     const reg = sections.get(pluginName)
     if (!reg) {
       // No registered section means the kernel has nothing plugin-specific
-      // to enforce — return ok so cross-plugin validation can proceed.
+      // to enforce: return ok so cross-plugin validation can proceed.
       return { ok: true }
     }
     const result = reg.validate(config, { pluginName, pointer: `/plugins/<${pluginName}>/config` })
@@ -419,7 +419,7 @@ function parsePluginEntry(entry, pointer, errors) {
  * @param {string} pointer
  * @param {ValidationError[]} errors
  * @returns {SinkConfigInstance|undefined}
- * @ref LLP 0014#config-two-shapes [implements] — blob sink = writer+destination; request sink = one-piece plugin; never both
+ * @ref LLP 0014#config-two-shapes [implements]: blob sink = writer+destination; request sink = one-piece plugin; never both
  */
 function parseSinkEntry(entry, pointer, errors) {
   if (!isPlainObject(entry)) {
@@ -506,7 +506,7 @@ function parseQueryConfig(obj, pointer, errors) {
     }
   }
 
-  // remotes{} — named MCP targets for `--remote`. The URL is non-secret and
+  // remotes{}: named MCP targets for `--remote`. The URL is non-secret and
   // committable; the token is never config (secrets-never-in-config).
   if (obj.remotes !== undefined) {
     if (!isPlainObject(obj.remotes)) {
@@ -616,7 +616,7 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       errors.push({ pointer: `${pointer}/maintenance`, message: 'query.cache.maintenance must be an object' })
     } else {
       const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
-      /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').QueryCacheMaintenanceConfig} */
+      /** @type {QueryCacheMaintenanceConfig} */
       const maint = {}
       if (m.enabled !== undefined) {
         if (typeof m.enabled !== 'boolean') {

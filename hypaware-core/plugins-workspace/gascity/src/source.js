@@ -4,8 +4,8 @@ import { gascityTablePath, GASCITY_SCHEMA_COLUMNS } from './dataset.js'
 import { getActiveTransport } from './transport.js'
 
 /**
- * @import { PluginActivationContext, PluginLogger, QueryStorageService, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CityConfig, GascityCitySubscription, GascityFrame } from './types.d.ts'
+ * @import { PluginActivationContext, PluginLogger, QueryStorageService, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CityConfig, GascityCitySubscription, GascityFrame } from './types.js'
  */
 
 /**

@@ -34,7 +34,11 @@
     "skills": [
       { "name": "hypaware-query", "clients": ["claude"] },
       { "name": "hypaware-ignore", "clients": ["claude"] },
-      { "name": "hypaware-unignore", "clients": ["claude"] }
+      { "name": "hypaware-unignore", "clients": ["claude"] },
+      { "name": "hypaware-ai-adoption-report", "clients": ["claude"] },
+      { "name": "hypaware-ai-improvement-report", "clients": ["claude"] },
+      { "name": "hypaware-ai-security-report", "clients": ["claude"] },
+      { "name": "hypaware-ai-spend-report", "clients": ["claude"] }
     ],
     "agents": [
       { "name": "hypaware-analyst", "clients": ["claude"] }
@@ -43,6 +47,12 @@
       {
         "name": "claude-and-otel-local",
         "summary": "Capture Claude Code + OTLP locally, export to Parquet under HYP_HOME/exports"
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "claude",
+        "summary": "Claude adapter config, including the optional backfill-on-join policy { on_join, window_days }."
       }
     ]
   }

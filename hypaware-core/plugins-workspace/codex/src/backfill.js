@@ -6,8 +6,8 @@ import path from 'node:path'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CodexRolloutItem, CodexRolloutSession } from './types.d.ts'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
  */
 
 /**
@@ -25,10 +25,10 @@ import { redactRemoteUserinfo } from './git-remote.js'
  * Discovery stack (V1):
  *   - `<codexHome>/sessions/**`     PRIMARY. Session/event JSONL (modern)
  *                                   and legacy single-doc `{session,items}`.
- *   - `<codexHome>/history.*`       diagnostic only — command/input history,
+ *   - `<codexHome>/history.*`       diagnostic only: command/input history,
  *                                   not enough for canonical rows. Detected,
  *                                   never parsed here.
- *   - `<codexHome>/log/**`          diagnostic only — version/breadcrumbs.
+ *   - `<codexHome>/log/**`          diagnostic only: version/breadcrumbs.
  *   - ChatGPT/Codex app + browser   detected, NEVER parsed in V1; flagged
  *     storage                       via an `unsupported_location` event.
  *   - HypAware's gateway cache      excluded (lives under HYP_HOME, not
@@ -36,7 +36,7 @@ import { redactRemoteUserinfo } from './git-remote.js'
  *
  * Parsing is best-effort and version-defensive: a malformed line, a
  * truncated trailing record, or an unreadable file degrades to whatever
- * parsed cleanly rather than aborting the run. Reruns are deterministic —
+ * parsed cleanly rather than aborting the run. Reruns are deterministic:
  * ids, parents, and timestamps come straight from the immutable rollout
  * and the materializer is pure.
  */
@@ -45,7 +45,7 @@ const DEFAULT_CLIENT_NAME = 'codex'
 const DEFAULT_PLUGIN_NAME = '@hypaware/codex'
 
 // The Codex client speaks the OpenAI wire format, so backfilled rows carry
-// provider 'openai' and conversation_source 'codex' — matching the live
+// provider 'openai' and conversation_source 'codex': matching the live
 // @hypaware/codex exchange projector's chatgpt/api output split.
 const PROVIDER = 'openai'
 const CONVERSATION_SOURCE = 'codex'
@@ -217,7 +217,7 @@ async function* runCodexBackfill(args) {
 }
 
 /**
- * Flag — but never parse — Codex/ChatGPT app and browser storage. Each
+ * Flag, but never parse, Codex/ChatGPT app and browser storage. Each
  * existing location emits both a structured log and an `unsupported_location`
  * `BackfillEvent` (the kernel's named lifecycle signal) so the runner and a
  * human can see what history was left on the table.
@@ -327,7 +327,7 @@ function isRolloutFileName(name) {
  * Parse one rollout file into zero or more sessions. The legacy format is a
  * single pretty-printed JSON object; the modern format is line-delimited
  * records. Each file holds one session, so the array carries at most one
- * entry — the array shape just keeps the run loop uniform.
+ * entry: the array shape just keeps the run loop uniform.
  *
  * @param {string} filePath
  * @returns {Promise<CodexRolloutSession[]>}
@@ -369,7 +369,7 @@ function parseLegacyDoc(text, filePath) {
 }
 
 /**
- * Modern rollout: line-delimited `{ timestamp, type, payload }` records —
+ * Modern rollout: line-delimited `{ timestamp, type, payload }` records:
  * one `session_meta`, zero+ `turn_context`, and the conversation's
  * `response_item`s. A `token_count` `event_msg` carries the turn's token
  * usage and is captured as a synthetic turn-boundary marker (no message);
@@ -410,7 +410,7 @@ function parseJsonlRollout(text, filePath) {
     } else if (type === 'response_item' && payload) {
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
-      // The one event_msg we keep: token_count. It is NOT a message — it is a
+      // The one event_msg we keep: token_count. It is NOT a message: it is a
       // turn-boundary marker carrying that turn's normalized usage. Its slot in
       // the items stream is preserved (so the projector can attribute it to the
       // preceding assistant message), but it never projects a row of its own.
@@ -513,7 +513,7 @@ function projectedExchangeFromSession(args) {
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
     provider: PROVIDER,
-    // @ref LLP 0030#decision — the rollout id is the thread; the rollout
+    // @ref LLP 0030#decision: the rollout id is the thread; the rollout
     // carries no distinct session id, so session_id (the non-null
     // partition key) and conversation_id (the thread) are both the
     // rollout id here.
@@ -527,7 +527,7 @@ function projectedExchangeFromSession(args) {
   if (session.startedAtMs !== undefined) exchange.conversation_started_at = new Date(session.startedAtMs).toISOString()
   if (session.cwd) exchange.cwd = session.cwd
   if (session.gitBranch) exchange.git_branch = session.gitBranch
-  // @ref LLP 0032#capture — repo identity for the graph bridge (Repo/Commit),
+  // @ref LLP 0032#capture: repo identity for the graph bridge (Repo/Commit),
   // from the rollout's session_meta `git` block (commitKey rejects an
   // abbreviated sha). repo_root is intentionally NOT set from `cwd`: the rollout
   // records no verified git toplevel, and the cwd may be a repo subdir, which
@@ -711,7 +711,7 @@ function reasoningItemToProjected(payload) {
 /**
  * Pull a turn's normalized token usage from a `token_count` event_msg
  * payload. Reads the per-turn delta (`info.last_token_usage`), NOT the
- * cumulative session running total (`info.total_token_usage`) — stamping the
+ * cumulative session running total (`info.total_token_usage`): stamping the
  * cumulative would multiply-count when usage is summed across a conversation.
  * Returns `undefined` for any other event_msg or a usage-less payload.
  *
@@ -737,7 +737,7 @@ function codexUsageAttributes(rawUsage) {
   /** @type {JsonObject} */
   const usage = {}
 
-  // @ref LLP 0035#net-input — Codex `input_tokens` is gross (it includes
+  // @ref LLP 0035#net-input: Codex `input_tokens` is gross (it includes
   // `cached_input_tokens`); HypAware stores input_tokens NET of cache so it
   // never double-counts against cache_read_tokens and matches the Claude /
   // live-Codex convention. total_tokens stays raw, so net + cache_read +
@@ -758,7 +758,7 @@ function codexUsageAttributes(rawUsage) {
 
 /**
  * Stamp a turn's usage onto the LAST assistant message at or after
- * `startIndex` that carries text or a tool_use — the same target the live
+ * `startIndex` that carries text or a tool_use: the same target the live
  * projector picks (its terminal output item), so live and backfilled rows fold
  * usage onto the one logical message and dedupe cleanly, and the row carrying
  * usage is the response's last assistant row for both Codex and Claude.

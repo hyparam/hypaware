@@ -10,7 +10,7 @@ const DATASETS_SEGMENT = 'datasets'
  *   <cacheRoot>/datasets/<dataset>/<partition...>/
  *
  * Plugins that materialize rows ask `ctx.storage` for `tablePath`s
- * and never assemble paths themselves — but the storage and retention
+ * and never assemble paths themselves; but the storage and retention
  * layers need a stable on-disk convention so they can attribute spans
  * back to the originating dataset.
  *
@@ -22,7 +22,7 @@ export function datasetsRoot(cacheRoot) {
 
 /**
  * Build the absolute `tablePath` for a dataset partition. The
- * directory is **not** created here — `appendRows` and Iceberg's
+ * directory is **not** created here: `appendRows` and Iceberg's
  * writer handle creation on first commit.
  *
  * @param {string} cacheRoot

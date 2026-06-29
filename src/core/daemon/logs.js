@@ -5,7 +5,7 @@ import path from 'node:path'
 
 /**
  * Resolve the directory the daemon writes its dispatch / lifecycle
- * log to — `<HYP_HOME>/hypaware/logs`. OTel logs continue to land in
+ * log to: `<HYP_HOME>/hypaware/logs`. OTel logs continue to land in
  * `dev-telemetry/` (when `HYP_DEV_TELEMETRY=1`) or be exported over
  * OTLP; this file is the line-oriented sidecar a human inspects with
  * `tail -f` after `daemon run`.
@@ -17,7 +17,7 @@ export function daemonLogDir(stateRoot) {
 }
 
 /**
- * @import { DaemonLogger } from './types.d.ts'
+ * @import { DaemonLogger } from '../../../src/core/daemon/types.js'
  */
 
 /**
@@ -54,7 +54,7 @@ export function openDaemonLog({ stateRoot, runId, mode }) {
     try {
       stream.write(JSON.stringify(record) + '\n')
     } catch {
-      // best-effort — daemon must not crash because the log device is
+      // best-effort. Daemon must not crash because the log device is
       // full or detached.
     }
   }
@@ -65,7 +65,20 @@ export function openDaemonLog({ stateRoot, runId, mode }) {
     warn: (event, fields) => emit('warn', event, fields),
     error: (event, fields) => emit('error', event, fields),
     close() {
-      try { stream.end() } catch { /* see emit() */ }
+      // Resolve only once the stream has flushed every buffered line to
+      // disk. The daemon awaits this before resolving `done` / exiting, so a
+      // boot health event or shutdown line written moments earlier is never
+      // lost to a half-flushed buffer. Under load, `stream.end()` alone
+      // returns before the writes land, which intermittently dropped the
+      // `daemon.degraded` line the #138 regression reads back.
+      return new Promise((resolve) => {
+        try {
+          stream.once('error', () => resolve())
+          stream.end(() => resolve())
+        } catch {
+          resolve()
+        }
+      })
     },
   }
 }

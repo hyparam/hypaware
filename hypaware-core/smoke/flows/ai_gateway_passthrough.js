@@ -18,7 +18,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
- * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -31,7 +31,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *  - Capability `hypaware.ai-gateway` registered at `2.0.0`.
  *  - The echo upstream saw the request verbatim (gateway is a
  *    pass-through).
- *  - No rows are written into `ai_gateway_messages` — phase 1
+ *  - No rows are written into `ai_gateway_messages`: phase 1
  *    intentionally ships no built-in projector, so without an adapter
  *    plugin the gateway records nothing into the dataset.
  *  - Pass-through telemetry STILL fires: the `aigw.exchange` log
@@ -50,7 +50,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'ai_gateway_passthrough: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'ai_gateway_passthrough: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -71,7 +71,7 @@ export async function run({ harness, expect }) {
 
   // Config slice handed to the plugin's activate(). Listen on
   // 127.0.0.1:0 so the test grabs an ephemeral port; route every path
-  // ('/') to the echo upstream. No exchange projector is registered —
+  // ('/') to the echo upstream. No exchange projector is registered.
   // the gateway 2.0 contract is that with no projector the dataset
   // gets zero rows but pass-through telemetry still flows.
   const aiGatewayConfig = {
@@ -118,7 +118,7 @@ export async function run({ harness, expect }) {
   await kernel.sources.start('ai-gateway', runtime.ctx)
   runtime.started = true
 
-  // Read the bound endpoint off the capability facade — exactly the
+  // Read the bound endpoint off the capability facade, exactly the
   // path an adapter plugin would use to discover the gateway.
   const registered = kernel.capabilities.list().find((c) => c.name === 'hypaware.ai-gateway')
   expect.that(
@@ -182,7 +182,7 @@ export async function run({ harness, expect }) {
 
   // Query the dataset through the dispatcher. With no projector
   // registered the gateway must have written ZERO rows for this
-  // dev_run_id — the zero-projector contract.
+  // dev_run_id: the zero-projector contract.
   const sqlStdout = makeBuf()
   const sqlStderr = makeBuf()
   const sqlCode = await dispatch(
@@ -232,7 +232,7 @@ export async function run({ harness, expect }) {
   await obs.shutdown()
   await echo.close()
 
-  // Telemetry assertions — pass-through telemetry MUST fire even
+  // Telemetry assertions: pass-through telemetry MUST fire even
   // without a projector.
   const traces = await expect.traces()
   const logs = await expect.logs()
@@ -313,7 +313,7 @@ export async function run({ harness, expect }) {
       m.attributes?.hyp_plugin === '@hypaware/ai-gateway'
   )
   expect.that(
-    'metrics: hyp_rows_written for ai_gateway_messages is absent — projector wrote zero rows',
+    'metrics: hyp_rows_written for ai_gateway_messages is absent - projector wrote zero rows',
     rowsWritten,
     (v) => v === undefined
   )

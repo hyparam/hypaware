@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { classifyAwsError, describeS3ErrorKind } from '../../hypaware-core/plugins-workspace/s3/src/errors.js'
 
 /**
- * @import { S3ErrorKind } from '../../hypaware-core/plugins-workspace/s3/src/types.d.ts'
+ * @import { S3ErrorKind } from '../../hypaware-core/plugins-workspace/s3/src/types.js'
  */
 
 test('classifyAwsError maps CredentialsProviderError to s3_credentials_missing', () => {

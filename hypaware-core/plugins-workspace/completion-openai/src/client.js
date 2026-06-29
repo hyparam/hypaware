@@ -4,8 +4,8 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { chatCompletionsEndpoint } from './config.js'
 
 /**
- * @import { CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CreateOpenAiCompletionOptions, FetchLike, OpenAiCompletionConfig } from './types.d.ts'
+ * @import { CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CreateOpenAiCompletionOptions, FetchLike, OpenAiCompletionConfig } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/completion-openai'
@@ -14,7 +14,7 @@ const PLUGIN_NAME = '@hypaware/completion-openai'
  * Build the `hypaware.completion` capability value: an HTTP client for
  * the OpenAI-compatible Chat Completions API (`POST /v1/chat/completions`).
  *
- * There is deliberately no retry layer — callers run on their own
+ * There is deliberately no retry layer: callers run on their own
  * cadence, so a failed request surfaces immediately. The API key resolves
  * from the environment at call time and is sent only as a Bearer header;
  * an unset key sends no Authorization header so localhost servers (Ollama,

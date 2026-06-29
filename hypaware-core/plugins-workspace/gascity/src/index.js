@@ -10,8 +10,8 @@ import { gascityInitPreset } from './init.js'
 import { setGascityRuntime } from './runtime.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  */
 
 /**
@@ -24,7 +24,7 @@ import { setGascityRuntime } from './runtime.js'
  *  - init preset `gascity`
  *  - skill `hypaware-gascity`
  *
- * Activation does NOT start the source — `gascity attach` is the
+ * Activation does NOT start the source: `gascity attach` is the
  * lifecycle trigger, mirroring the donor's "configure first, attach
  * on demand" UX. The source starts on the first attach and reloads
  * on every subsequent attach/detach.

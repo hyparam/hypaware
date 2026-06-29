@@ -16,7 +16,7 @@ import { readStatusFile } from '../../../src/core/daemon/status.js'
  * graceful shutdown and verifies the status file + telemetry.
  *
  * The smoke opts out of OS signal handlers (`installSignalHandlers:
- * false`) and uses `handle.stop()` to simulate SIGTERM — the actual
+ * false`) and uses `handle.stop()` to simulate SIGTERM. The actual
  * shutdown path is identical, but we avoid trampling the harness
  * process's own SIGTERM handling. Tick interval is set to 0 so the
  * scheduled sink loop never fires (Phase 5 owns sink-driven assertions).
@@ -29,13 +29,13 @@ import { readStatusFile } from '../../../src/core/daemon/status.js'
  *    children for every started source.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0017#the-primary-daemon [tests] — boots the daemon, drives start/stop, asserts the lifecycle spans
+ * @ref LLP 0017#the-primary-daemon [tests]: boots the daemon, drives start/stop, asserts the lifecycle spans
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'daemon_foreground_start_stop: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'daemon_foreground_start_stop: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -191,7 +191,7 @@ export async function run({ harness, expect }) {
 
   // `kernel.boot` opens its own root span (each boot is a logical
   // unit of work that survives the calling context), so we don't
-  // assert parent-of-daemon.run here — we only assert that the
+  // assert parent-of-daemon.run here. We only assert that the
   // daemon boot path emitted one with `mode=daemon`.
   const kernelBootSpans = traces.filter((/** @type {any} */ t) => t.name === 'kernel.boot')
   expect.that(
@@ -203,8 +203,8 @@ export async function run({ harness, expect }) {
   // `source.start` either lands inside `daemon.run` (for sources the
   // daemon starts explicitly, like ai-gateway) or inside the
   // plugin's `activate` span (for sources that auto-start, like otel).
-  // We check that at least one source.start came up under daemon.run
-  // — that's the new code path Phase 3 actually adds.
+  // We check that at least one source.start came up under daemon.run.
+  // That's the new code path Phase 3 actually adds.
   const daemonRunIds = new Set(
     daemonRunSpans.map((/** @type {any} */ s) => s.spanId)
   )

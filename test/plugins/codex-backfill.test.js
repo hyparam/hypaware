@@ -20,7 +20,7 @@ import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspa
  * `ai_gateway.projected_exchange` materializer, so the assertions cover the
  * exact path `hyp backfill codex` exercises in production.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.js'
  */
 
 // ---------------------------------------------------------------------------
@@ -284,7 +284,7 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
       assert.equal(row.client_name, 'codex')
       assert.equal(row.cwd, '/work/repo')
       // First-class repo-identity columns survive materialization (LLP 0032).
-      // repo_root is null for Codex (no verified toplevel — §codex-repo-root).
+      // repo_root is null for Codex (no verified toplevel: see §codex-repo-root).
       assert.equal(row.git_remote, 'https://github.com/acme/repo.git')
       assert.equal(row.head_sha, 'abc123def')
       assert.equal(row.repo_root, undefined)
@@ -325,11 +325,11 @@ test('token_count event folds per-turn usage (net of cache) onto the turn assist
     // turn's token_count event_msg. The per-turn delta is `last_token_usage`;
     // `total_token_usage` is the session's cumulative running total. They are
     // set to DIFFERENT (and deliberately larger) values here so a regression
-    // that read the cumulative total — the multiply-count trap — would fail the
+    // that read the cumulative total (the multiply-count trap) would fail the
     // net-input assertion below instead of passing by coincidence.
     // @ref LLP 0035#per-turn
     const lastUsage = {
-      input_tokens: 13761, // gross — includes the 9600 cached
+      input_tokens: 13761, // gross (includes the 9600 cached)
       cached_input_tokens: 9600,
       output_tokens: 484,
       reasoning_output_tokens: 189,
@@ -371,7 +371,7 @@ test('token_count event folds per-turn usage (net of cache) onto the turn assist
     assert.equal(exchange.messages.length, 5)
 
     // Usage lands on the LAST text/tool_use assistant message of the turn (the
-    // function_call here), one carrier per response — same row Claude uses.
+    // function_call here), one carrier per response (same row Claude uses).
     // Derived from `last_token_usage` (NOT the cumulative `total_token_usage`):
     // NET of cache 13761 − 9600 = 4161; 4161 + 9600 + 484 == 14245 total. Were
     // the cumulative read instead, input would be 90000 − 50000 = 40000 here.
@@ -446,7 +446,7 @@ test('multi-turn token_count: each turn stamps its own per-turn delta on its own
         { timestamp: '2026-06-24T00:00:08.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'turn two' }] } },
         { timestamp: '2026-06-24T00:00:09.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'final answer' }] } },
         { type: 'event_msg', timestamp: '2026-06-24T00:00:10.000Z', payload: { type: 'token_count', info: { total_token_usage: turn2Total, last_token_usage: turn2Delta } } },
-        // Turn 3: reasoning ONLY — no text/tool_use assistant in range, so its
+        // Turn 3: reasoning ONLY (no text/tool_use assistant in range), so its
         // usage is DROPPED rather than mis-attributed to an earlier turn's row.
         { timestamp: '2026-06-24T00:00:11.000Z', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking 3' }] } },
         { type: 'event_msg', timestamp: '2026-06-24T00:00:12.000Z', payload: { type: 'token_count', info: { total_token_usage: turn3Total, last_token_usage: turn3Delta } } },
@@ -473,7 +473,7 @@ test('multi-turn token_count: each turn stamps its own per-turn delta on its own
       usage: { input_tokens: 4161, cache_read_tokens: 9600, output_tokens: 484, reasoning_tokens: 189, total_tokens: 14245 },
     })
 
-    // Turn 2's usage rides its own text reply — its own delta, NOT turn 1's and
+    // Turn 2's usage rides its own text reply: its own delta, NOT turn 1's and
     // NOT the cumulative total (which would give input 8161, output 684).
     const turn2Carrier = findMsg((m) => m.role === 'assistant' && m.content[0].type === 'text' && m.content[0].text === 'final answer')
     assert.deepEqual(turn2Carrier.attributes, {
@@ -491,7 +491,7 @@ test('multi-turn token_count: each turn stamps its own per-turn delta on its own
 
     // No row anywhere carries turn 3's delta (it was dropped, not mis-stamped).
     const stamped = exchange.messages.filter((/** @type {any} */ m) => m.attributes?.usage)
-    assert.equal(stamped.length, 2, 'exactly two carrier rows — turns 1 and 2')
+    assert.equal(stamped.length, 2, 'exactly two carrier rows - turns 1 and 2')
     for (const m of stamped) {
       assert.notEqual(/** @type {any} */ (m.attributes).usage.total_tokens, 7600, 'turn 3 usage never stamped')
     }

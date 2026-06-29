@@ -13,9 +13,9 @@ import {
 import { shardFileBase, shardPaths } from '../../hypaware-core/plugins-workspace/vector-search/src/shards.js'
 
 /**
- * @import { CachePartitionMeta, EmbedderCapability } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.d.ts'
- * @import { ShardMeta, VectorIndexDeclaration } from '../../hypaware-core/plugins-workspace/vector-search/src/types.d.ts'
+ * @import { CachePartitionMeta, EmbedderCapability } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
+ * @import { ShardMeta, VectorIndexDeclaration } from '../../hypaware-core/plugins-workspace/vector-search/src/types.js'
  */
 
 /** @type {VectorIndexDeclaration} */

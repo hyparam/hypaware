@@ -3,7 +3,7 @@
 import { Attr, getLogger } from '../observability/index.js'
 
 /**
- * @import { BackfillContribution, BackfillMaterializerContribution, BackfillMaterializerRegistry, BackfillRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BackfillContribution, BackfillMaterializerContribution, BackfillMaterializerRegistry, BackfillRegistry } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -11,7 +11,7 @@ import { Attr, getLogger } from '../observability/index.js'
  * `register(contribution)` during activation; `hyp backfill list`,
  * `hyp backfill plan`, and `hyp backfill <provider...>` enumerate
  * providers through `list()` / `get()`. The registry is intentionally
- * narrow — the runner owns lifecycle and telemetry; the contribution's
+ * narrow. The runner owns lifecycle and telemetry; the contribution's
  * `plan()` / `run()` own native discovery.
  *
  * @returns {BackfillRegistry}

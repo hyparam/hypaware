@@ -8,8 +8,8 @@ import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/
 import { cacheTablePath, datasetsRoot } from './paths.js'
 
 /**
- * @import { ColumnSpec, QueryScope } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration, CachePartitionMeta, PartitionCursor } from './types.d.ts'
+ * @import { ColumnSpec, QueryScope } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration, CachePartitionMeta, PartitionCursor } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  */
 

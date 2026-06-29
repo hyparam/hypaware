@@ -7,7 +7,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 /**
- * @import { CommandResult, CommandRunner, DurableBinResult } from './types.d.ts'
+ * @import { CommandResult, CommandRunner, DurableBinResult } from '../../../src/core/cli/types.js'
  */
 
 const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))

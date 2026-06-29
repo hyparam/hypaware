@@ -1,5 +1,9 @@
 // @ts-check
 
+/**
+ * @import { TestContext } from 'node:test'
+ */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -12,7 +16,7 @@ const cmd = verbToCommand(querySqlVerb)
  * Install a fake MCP-over-HTTP server as `globalThis.fetch` for the
  * duration of `t`. `toolResult` is what `tools/call` returns.
  *
- * @param {import('node:test').TestContext} t
+ * @param {TestContext} t
  * @param {{ token?: string, toolResult?: any }} [opts]
  */
 function stubServer(t, opts = {}) {
@@ -94,7 +98,7 @@ test('a missing token errors with login guidance', async (t) => {
   const { ctx, err } = ctxWith({ HYP_HOME: '/tmp/none-missing' })
   const code = await cmd.run(['SELECT 1', '--remote', 'prod'], ctx)
   assert.equal(code, 2)
-  assert.match(err.join(''), /no token for 'prod' — run 'hyp remote login prod'/)
+  assert.match(err.join(''), /no token for 'prod' - run 'hyp remote login prod'/)
 })
 
 test('a remote isError result maps to a nonzero exit with the message', async (t) => {

@@ -11,7 +11,7 @@ import { buildS3QueryDataset } from '../../hypaware-core/plugins-workspace/s3/sr
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */
@@ -187,7 +187,7 @@ test('parquet discovery bounds the prefix to a directory, excluding sibling name
 })
 
 test('parquet read rejects when a listed object disappears before read (list→read race)', async () => {
-  // listObjects advertises a key, but getObject returns null — the
+  // listObjects advertises a key, but getObject returns null: the
   // real list→read race. The scan must reject, not silently drop rows.
   /** @type {BlobStore} */
   const racyBlobStore = /** @type {BlobStore} */ ({

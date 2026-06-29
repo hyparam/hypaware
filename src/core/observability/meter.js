@@ -6,7 +6,7 @@ import { MeterProvider, metrics } from './runtime.js'
 import { OtlpMetricExporter } from './otlp_exporters.js'
 
 /**
- * @import { ObservabilityEnv } from './types.d.ts'
+ * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
@@ -21,7 +21,7 @@ const OTLP_EXPORT_TIMEOUT_MS = 1_000
  * @param {ObservabilityEnv} args.env
  * @param {{ attributes: Record<string, string|number|boolean> }} args.resource
  * @returns {{ provider: MeterProvider|null, exporters: object[], readers: object[] }}
- * @ref LLP 0021#exporter-selection [implements] — mirrors tracer's JSONL/OTLP choice; 250ms dev push for fast smokes
+ * @ref LLP 0021#exporter-selection [implements]: mirrors tracer's JSONL/OTLP choice; 250ms dev push for fast smokes
  */
 export function installMeterProvider({ env, resource }) {
   /** @type {object[]} */
@@ -56,7 +56,7 @@ export function installMeterProvider({ env, resource }) {
  * for things the kernel itself emits.
  *
  * @param {{ createCounter(name: string, opts?: object): object, createUpDownCounter(name: string, opts?: object): object, createGauge(name: string, opts?: object): object, createHistogram(name: string, opts?: object): object }} meter
- * @ref LLP 0021#summary — kernel pre-declares its own instruments; plugins declare theirs
+ * @ref LLP 0021#summary: kernel pre-declares its own instruments; plugins declare theirs
  */
 function buildKernelInstruments(meter) {
   return {
@@ -137,7 +137,7 @@ export function getKernelInstruments() {
 }
 
 /**
- * Reset the cached instruments (test affordance — kernel boot resets
+ * Reset the cached instruments (test affordance: kernel boot resets
  * state when reinitializing the observability layer).
  */
 export function resetKernelInstruments() {

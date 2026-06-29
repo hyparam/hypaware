@@ -39,7 +39,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'claude_attach_detach: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'claude_attach_detach: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -49,7 +49,7 @@ export async function run({ harness, expect }) {
 
   // Seed an existing settings file with a non-managed env var so the
   // golden compare can verify the detach really restored the pre-attach
-  // state — not just deleted everything HypAware added.
+  // state: not just deleted everything HypAware added.
   const originalSettings = {
     env: { ANTHROPIC_API_KEY: 'sk-original-key' },
     permissions: { allow: ['Bash(ls *)'] },
@@ -152,7 +152,7 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && v.includes('Claude Code attached') && v.includes(settingsPath)
     )
 
-    // Read patched settings — golden compare against an expected shape.
+    // Read patched settings: golden compare against an expected shape.
     const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
     expect.that(
       'settings: pre-existing env.ANTHROPIC_API_KEY was preserved',

@@ -8,7 +8,7 @@
  */
 
 /**
- * @import { CompletionConfigError, CompletionConfigResult } from './types.d.ts'
+ * @import { CompletionConfigError, CompletionConfigResult } from './types.js'
  */
 
 export const DEFAULT_BASE_URL = 'https://api.anthropic.com'
@@ -16,12 +16,12 @@ export const DEFAULT_MODEL = 'claude-opus-4-8'
 export const DEFAULT_API_KEY_ENV = 'ANTHROPIC_API_KEY'
 export const DEFAULT_ANTHROPIC_VERSION = '2023-06-01'
 export const DEFAULT_MAX_TOKENS = 4096
-// Generation can run far longer than embedding — default well above the
+// Generation can run far longer than embedding: default well above the
 // embedder's 30s so a slow frontier model isn't cut off mid-response.
 export const DEFAULT_TIMEOUT_MS = 120_000
 
 /**
- * Validate the plugin's config slice. Every field is optional — the
+ * Validate the plugin's config slice. Every field is optional: the
  * zero-config default targets Anthropic with `ANTHROPIC_API_KEY` and Opus.
  *
  * @param {unknown} value

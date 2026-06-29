@@ -3,11 +3,12 @@ import type {
   CapabilityRegistry,
   QueryRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
-import type { ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
-import type { ExtendedSourceRegistry } from '../registry/sources.js'
-import type { ExtendedSinkRegistry } from '../registry/sinks.js'
-import type { KernelRuntime } from '../runtime/activation.js'
-import type { BootKernelResult } from '../runtime/boot.js'
+import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
+import type {
+  ExtendedSinkRegistry,
+  ExtendedSourceRegistry,
+} from '../registry/types.d.ts'
+import type { KernelRuntime } from '../runtime/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -88,6 +89,50 @@ export interface StatusDiagnostic {
   pointer?: string
 }
 
+/**
+ * Display state of one reconciler client-action, derived for `hyp status`
+ * from the persisted marker store (LLP 0036 / 0041) plus the effective
+ * config — `hyp status` never runs a pass. A `failed` entry is
+ * informational: it never flips `overall` to `degraded` (the gateway runs
+ * fine on a valid config, LLP 0041 §failure-is-surfaced-not-fatal).
+ *
+ * - `done` — run-once effect completed (carries `rows` + `at`).
+ * - `failed` — last attempt failed; retried next pass (carries `reason`,
+ *   `lastAttempt`, `attempts`).
+ * - `pending` — desired on this joined host but no marker yet.
+ * - `n/a` — suppressed (`on_join: false`) or inert (host never joined).
+ */
+export type ClientActionState = 'done' | 'failed' | 'pending' | 'n/a'
+
+/** One reconciler action's state for the status surface. */
+export interface ClientActionReport {
+  /** Handler kind / marker namespace, e.g. `backfill`. */
+  kind: string
+  /** Request key — the owning plugin name for backfill (LLP 0041). */
+  requestKey: string
+  state: ClientActionState
+  /** Rows imported (on `done`). */
+  rows?: number
+  /** ISO time the action reached `done`. */
+  at?: string
+  /** Failure reason (on `failed`). */
+  reason?: string
+  /** ISO time of the most recent attempt (on `failed`). */
+  lastAttempt?: string
+  /** Attempts so far (on `failed`). */
+  attempts?: number
+}
+
+/**
+ * Client-action reconciler state (LLP 0036 / 0041) read from the marker
+ * file for `hyp status`. The report field is null when nothing applies (no
+ * markers and no backfill-configured plugins), so the V1 status surface is
+ * unchanged on an ordinary host.
+ */
+export interface ClientActionsReport {
+  actions: ClientActionReport[]
+}
+
 /** Per-client attach state probed off the user's home directory. */
 export interface ClientAttachReport {
   /** `claude` or `codex`. */
@@ -166,6 +211,15 @@ export interface HypAwareStatusReport {
    * never applied a remote config reports all-null fields.
    */
   remoteConfig: ConfigControlStatus | null
+  /**
+   * Client-action reconciler state (LLP 0036 / 0041): per-provider
+   * backfill-on-join (and future reconciled actions), read from the marker
+   * file via `readClientActionStatus` — `hyp status` never runs a pass.
+   * Null when nothing applies, so the V1 status surface is unchanged. A
+   * `failed` entry is informational and is deliberately excluded from
+   * `overall === 'degraded'`.
+   */
+  clientActions: ClientActionsReport | null
 }
 
 export interface CollectStatusOptions {
@@ -184,10 +238,10 @@ export interface CollectStatusOptions {
   homeDir?: string
   /** Absolute path to the daemon binary the installer recorded. */
   binPath?: string
-  isLaunchAgentInstalled?: (opts: any) => boolean
-  launchAgentStatus?: (opts: any) => Promise<{ loaded: boolean; pid?: number }>
-  isSystemdUnitInstalled?: (opts: any) => boolean
-  systemdUnitStatus?: (opts: any) => Promise<{ loaded: boolean; pid?: number }>
+  isLaunchAgentInstalled?: (opts: { label?: string; plistDir?: string; homeDir?: string }) => boolean
+  launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  isSystemdUnitInstalled?: (opts: { label?: string; unitDir?: string; homeDir?: string }) => boolean
+  systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
 }
 
 export interface SystemctlResult {
@@ -397,6 +451,13 @@ export interface RunDaemonOptions {
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
   tmpRoot?: string
+  /**
+   * Injected client-action reconciler (LLP 0041). Defaults to one built with
+   * the v1 `[backfillHandler]`; tests pass a fake to drive the boot
+   * already-confirmed pass and the confirmation-edge wiring without a real
+   * `hyp backfill` subprocess.
+   */
+  actionReconciler?: ActionReconciler
 }
 
 export interface DaemonLogger {
@@ -405,7 +466,8 @@ export interface DaemonLogger {
   info(event: string, fields?: Record<string, unknown>): void
   warn(event: string, fields?: Record<string, unknown>): void
   error(event: string, fields?: Record<string, unknown>): void
-  close(): void
+  /** Flush all buffered lines and close the file; resolves when durable. */
+  close(): Promise<void>
 }
 
 export interface PidFileEntry {

@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { appendSessionContext } from './session_context.js'
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const execFileAsync = promisify(execFile)
@@ -55,7 +55,7 @@ export async function runClaudeSessionContextHook(argv, ctx) {
   if (!sessionId || !cwd) return 0
   const transcriptPath = str(event.transcript_path)
   const gitBranch = await currentGitBranch(cwd)
-  // @ref LLP 0032#capture — the hook already runs git in the live cwd for the
+  // @ref LLP 0032#capture: the hook already runs git in the live cwd for the
   // branch; the remote/HEAD/root for the graph bridge come from the same place.
   const repo = await gitRepoFacts(cwd)
 
@@ -74,7 +74,7 @@ export async function runClaudeSessionContextHook(argv, ctx) {
   try {
     await appendSessionContext(stateFile, /** @type {any} */ (record))
   } catch {
-    /* hook MUST never throw back into Claude — exit 0 even on write failure */
+    /* hook MUST never throw back into Claude: exit 0 even on write failure */
   }
   return 0
 }
@@ -164,7 +164,7 @@ async function currentGitBranch(cwd) {
 
 /**
  * Best-effort repo identity for the GitHub↔LLM graph bridge (LLP 0032):
- * the `origin` remote URL, the FULL HEAD sha (never the short form — an
+ * the `origin` remote URL, the FULL HEAD sha (never the short form: an
  * abbreviated sha can't converge with the GitHub side's full-sha node), and
  * the repo root that relativizes touched-file paths. Each lookup is
  * independent and degrades to `undefined`; like `currentGitBranch`, the hook
@@ -190,17 +190,17 @@ async function gitRepoFacts(cwd) {
 
 /**
  * Strip credential userinfo (`user[:token]@`) from a git remote URL so a token
- * embedded in an HTTPS remote — e.g. `https://x-access-token:<token>@github.com/owner/repo.git`,
- * which `gh` and CI checkouts write into `remote.origin.url` — never lands in
+ * embedded in an HTTPS remote: e.g. `https://x-access-token:<token>@github.com/owner/repo.git`,
+ * which `gh` and CI checkouts write into `remote.origin.url`: never lands in
  * the session-context sidecar or the `git_remote` row column. Convergence only
  * needs the normalized `owner/repo`, so the raw secret has no downstream use.
  *
  * Only the `scheme://[user[:token]@]host/…` URL form carries a secret; the
  * scp-like SSH form (`git@github.com:owner/repo.git`) authenticates by key, so
  * its `git@` user is left intact. Duplicated (deliberately) in `@hypaware/codex`
- * `git-remote.js` — the plugins are decoupled; a test on each path pins it.
+ * `git-remote.js`: the plugins are decoupled; a test on each path pins it.
  *
- * @ref LLP 0032#remote-redaction — owner/repo is all convergence needs; the raw remote can carry a secret
+ * @ref LLP 0032#remote-redaction: owner/repo is all convergence needs; the raw remote can carry a secret
  * @param {string | undefined} remote
  * @returns {string | undefined}
  */

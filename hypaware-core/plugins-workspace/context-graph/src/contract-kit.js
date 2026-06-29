@@ -5,7 +5,7 @@ import { nodeId, edgeId } from './ids.js'
 export { nodeId, edgeId }
 
 /**
- * @import { NodeSpec, EdgeSpec } from './types.d.ts'
+ * @import { NodeSpec, EdgeSpec } from './types.js'
  */
 
 /**
@@ -13,7 +13,7 @@ export { nodeId, edgeId }
  *
  * The id recipe (`ids.js`) and the provenance column shape live here, in the
  * graph plugin. A contract author receives `buildNode`/`buildEdge` through the
- * `hypaware.context-graph` capability and never reimplements either — so no
+ * `hypaware.context-graph` capability and never reimplements either, so no
  * source can fork the id recipe (which would orphan every committed row, see
  * `ids.js`) or drift the provenance columns. The source supplies only the
  * per-row semantics (`type`, natural `key`, `props`, `sourceKeys`); the kit
@@ -21,7 +21,7 @@ export { nodeId, edgeId }
  *
  * @param {{ sourceDataset: string, projector: string, projectorVersion: number }} meta
  * @returns {{ buildNode: (spec: NodeSpec) => Record<string, unknown>, buildEdge: (spec: EdgeSpec) => Record<string, unknown> }}
- * @ref LLP 0023#contract-contribution [implements] — central id+provenance kit; sources own only their rules
+ * @ref LLP 0023#contract-contribution [implements]: central id+provenance kit; sources own only their rules
  */
 export function makeRowBuilders({ sourceDataset, projector, projectorVersion }) {
   /**

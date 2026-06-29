@@ -3,6 +3,7 @@
 import { Attr, getLogger } from '../observability/index.js'
 import { parseConfigShape } from './schema.js'
 import { validateConfig } from './validate.js'
+import { discoverConfigSectionValidators } from './discover_section_validators.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -10,8 +11,9 @@ import { installPlugin, loadLock } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
 
 /**
- * @import { PluginConfigInstance, PluginName, ValidationError } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigApplyDeps, PinnedInstallResult } from './types.d.ts'
+ * @import { ConfigRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { ConfigApplyDeps, PinnedInstallResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -22,11 +24,18 @@ import { getEntry } from '../plugin_install/lock.js'
  * bundled manifest set) and attached via
  * `configControl.attachApplyDeps()`.
  *
- * @param {{ stateRoot: string, workspaceDir?: string }} opts
+ * The live `configRegistry` (the kernel registry the active plugins
+ * registered their `config_sections` validators into during boot) is
+ * threaded through so apply-time validation actually dispatches to those
+ * per-plugin validators. Omitting it makes them dead: a served config with
+ * a malformed plugin `config` block (e.g. claude/codex `backfill`) would be
+ * accepted instead of rejected (LLP 0037).
+ *
+ * @param {{ stateRoot: string, workspaceDir?: string, configRegistry?: ConfigRegistry }} opts
  * @returns {ConfigApplyDeps}
  */
 export function buildConfigApplyDeps(opts) {
-  const { stateRoot, workspaceDir } = opts
+  const { stateRoot, workspaceDir, configRegistry } = opts
   const log = getLogger('config-control')
 
   /**
@@ -53,9 +62,25 @@ export function buildConfigApplyDeps(opts) {
       [...bundled.loaded, ...bundled.excluded],
       installed.loaded
     )
+
+    // Per-plugin `config_sections` validation (LLP 0037). The live registry
+    // only carries validators for *already-active* plugins, so a central
+    // config that first introduces a backfill-capable plugin (e.g.
+    // `@hypaware/claude`) would otherwise skip its `config.backfill`
+    // validation. Discover the section validators for any introduced plugin
+    // from disk (side-effect-free, never runs `activate()`) and route each
+    // plugin to the right source: live for active, discovered for introduced.
+    const allManifests = [...bundled.loaded, ...bundled.excluded, ...installed.loaded]
+    const sectionRegistry = await buildSectionRegistry({
+      document: shape.config,
+      live: configRegistry,
+      allManifests,
+    })
+
     const result = await validateConfig(shape.config, {
       knownPlugins: catalog.pluginMetadata,
       knownDatasets: catalog.knownDatasets,
+      ...(sectionRegistry ? { configRegistry: sectionRegistry } : {}),
     })
     return { ok: result.ok, errors: /** @type {ValidationError[]} */ (result.errors) }
   }
@@ -69,7 +94,7 @@ export function buildConfigApplyDeps(opts) {
    *
    * @param {PluginConfigInstance[]} entries
    * @returns {Promise<PinnedInstallResult>}
-   * @ref LLP 0025#install-on-config-hash-pinned [implements] — existing LLP 0007 install path; hash mismatch is an apply failure
+   * @ref LLP 0025#install-on-config-hash-pinned [implements]: existing LLP 0007 install path; hash mismatch is an apply failure
    */
   async function installPinnedPlugins(entries) {
     const { bundled, installed } = await discover()
@@ -86,7 +111,7 @@ export function buildConfigApplyDeps(opts) {
 
       const bundledVersion = bundledVersions.get(entry.name)
       if (bundledVersion !== undefined) {
-        // @ref LLP 0025#bundled-first-party-plugins [implements] — version checked strictly, artifact hash not checked for bundled plugins
+        // @ref LLP 0025#bundled-first-party-plugins [implements]: version checked strictly, artifact hash not checked for bundled plugins
         if (entry.version !== undefined && entry.version !== bundledVersion) {
           return {
             ok: false,
@@ -109,7 +134,7 @@ export function buildConfigApplyDeps(opts) {
         stateDir: stateRoot,
         ...(entry.version !== undefined ? { opts: { ref: `v${entry.version}` } } : {}),
         // The hash pin is verified against the staged artifact before
-        // the install commits — nothing may substitute code after the
+        // the install commits: nothing may substitute code after the
         // config was authored.
         confirm: async (staged) => {
           if (entry.artifact_hash !== undefined && staged.contentHash !== entry.artifact_hash) {
@@ -141,4 +166,62 @@ export function buildConfigApplyDeps(opts) {
   }
 
   return { validateDocument, installPinnedPlugins }
+}
+
+/**
+ * Build the `ConfigRegistry` the document's per-plugin section validation
+ * should run against. Active plugins are served by the live registry (the
+ * validators actually registered at activation); plugins the document
+ * *introduces* are served by validators discovered from disk so their
+ * `config` block is validated before they ever activate (LLP 0037). Returns
+ * `undefined` when there is nothing to validate against (no live registry and
+ * no introduced plugin), preserving the prior "cross-plugin checks only"
+ * degradation for non-daemon callers with a document that introduces nothing.
+ *
+ * @param {{
+ *   document: HypAwareV2Config,
+ *   live: ConfigRegistry | undefined,
+ *   allManifests: LoadedManifest[],
+ * }} args
+ * @returns {Promise<ConfigRegistry | undefined>}
+ */
+async function buildSectionRegistry({ document, live, allManifests }) {
+  // Plugin names the live registry already validates. `list()` is on the
+  // concrete registry; the type narrows it to `ConfigRegistry`, so reach it
+  // through a local cast.
+  const liveList = /** @type {{ list?: () => Array<{ plugin: string }> }} */ (live ?? {})
+  const liveSections = new Set((liveList.list?.() ?? []).map((s) => s.plugin))
+
+  const introduced = (document.plugins ?? [])
+    .filter((p) => p && p.enabled !== false && !liveSections.has(p.name))
+    .map((p) => p.name)
+
+  let discovered
+  if (introduced.length > 0) {
+    const want = new Set(introduced)
+    discovered = await discoverConfigSectionValidators({
+      manifests: allManifests.filter((m) => want.has(/** @type {PluginName} */ (m.manifest.name))),
+    })
+  }
+
+  if (!live && !discovered) return undefined
+  if (!discovered) return live
+  if (!live) return discovered
+
+  /** @type {ConfigRegistry} */
+  const composite = {
+    // This is a read-only validation view; nothing registers through it.
+    registerSection() {},
+    /**
+     * @param {PluginName} name
+     * @param {unknown} config
+     * @returns {ValidationResult}
+     */
+    validatePluginConfig(name, config) {
+      return liveSections.has(name)
+        ? live.validatePluginConfig(name, config)
+        : discovered.validatePluginConfig(name, config)
+    },
+  }
+  return composite
 }

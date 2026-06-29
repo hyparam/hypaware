@@ -5,7 +5,7 @@ import { resolveToken } from '../remote/credentials.js'
 import { createHttpMcpClient } from './client.js'
 
 /**
- * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -16,11 +16,11 @@ import { createHttpMcpClient } from './client.js'
  *
  * Surfaces the **server-side cap** (data volume) as a distinct notice line;
  * the client display budget (context volume) is added separately by the
- * renderer — the two truncations of LLP 0033 §two-truncations.
+ * renderer: the two truncations of LLP 0033 §two-truncations.
  *
  * @param {{ verb: VerbRegistration, params: Record<string, unknown>, target: string, ctx: CommandRunContext }} args
  * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
- * @ref LLP 0033#two-truncations [implements] — server cap surfaced here as its own line; client cannot lift it
+ * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
 export async function runRemoteVerb({ verb, params, target, ctx }) {
   const remotes = ctx.config?.query?.remotes ?? {}
@@ -28,7 +28,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
   if (!entry) {
     return {
       ok: false,
-      error: `unknown remote target '${target}' — add it with 'hyp remote add ${target} <url>'`,
+      error: `unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'`,
       exitCode: 2,
     }
   }
@@ -70,7 +70,7 @@ function serverCapNotices(structured) {
   const capPart = cap !== undefined ? ` (server cap rows:${cap})` : ''
   const shownPart = shown !== undefined ? `showing first ${shown} rows` : 'result truncated'
   return [
-    `remote: ${shownPart}${capPart} — narrow the query, or read the Iceberg archive directly for bulk`,
+    `remote: ${shownPart}${capPart} - narrow the query, or read the Iceberg archive directly for bulk`,
   ]
 }
 

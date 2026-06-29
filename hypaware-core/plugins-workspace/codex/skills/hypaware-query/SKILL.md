@@ -5,7 +5,7 @@ description: Inspect local HypAware recordings with the hyp query CLI. Use when 
 
 # HypAware Query
 
-Use `hyp query` to inspect local HypAware recordings. It reads local JSONL recordings and an explicit local query cache; it does not query the central server.
+Use `hyp query` to inspect local HypAware recordings. By default it reads local JSONL recordings and an explicit local query cache, not the central server. To run the same query against a remote HypAware host (a fleet server) over its MCP endpoint, add `--remote <target>` — see [Remote queries](#remote-queries-other-hypaware-hosts).
 
 ## Workflow
 
@@ -33,6 +33,33 @@ hyp collect remove <name>
 
 These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain; `hyp collect`: list, remove). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
 
+## Remote queries (other HypAware hosts)
+
+By default `hyp query` is local-only. To run a verb against a remote HypAware host (a fleet server) over its MCP endpoint (`/v1/mcp`), add `--remote <target>`: `hyp` acts as an MCP client, runs the same SQL against the remote `query_sql` tool, and renders the result with the same formatter. Only read-class tools are reachable remotely (`query_sql`, `graph_neighbors`); the credential is **query-scoped** (read/compute only — it cannot author configs or mint tokens), distinct from the server's operator/admin token, which never leaves the server.
+
+- **Discover configured targets:** `hyp remote list` (`--json` for machine output). Each row shows the target URL and a `token:` status — `env` (a `HYP_REMOTE_TOKEN_<NAME>` var is set), `stored` (saved by `hyp remote login`), or `missing`. This reflects local config + credentials only; it is **not** a liveness check. The real connectivity/auth test is running a `--remote` query: rows back means reachable + authorized; a 401/timeout tells you which half failed.
+- **Set up a target (two steps):** `hyp remote add <name> <full-url>` registers the URL — pass the full endpoint including the path (e.g. `https://host:8740/v1/mcp`); it is used verbatim, never auto-suffixed. Then supply the query-scoped token one of two ways: `hyp remote login <name>` (token via `--token-file <path>` or piped stdin — never a CLI argument, never an interactive prompt), or a per-target env var `HYP_REMOTE_TOKEN_<NAME>` (name uppercased, non-alphanumeric runs → `_`; e.g. `prod` → `HYP_REMOTE_TOKEN_PROD`). The env var is checked first and wins.
+- **Query it:** `hyp query sql "<sql>" --remote <name> --format json`.
+- **Truncation is doubled on remote — read both stderr lines.** A server-side data cap (`remote: showing first N rows (server cap …)`) clips before rows leave the server and you **cannot** lift it; the usual local display budget (`notice:` / `--output`) clips again on your side. Never `2>/dev/null` a remote query.
+- **`--remote` together with `--refresh` is a hard error** — refresh is a local-cache operation, meaningless against a server that owns its own freshness.
+- A remote target may be reachable only over a private network (e.g. a tailnet / `100.x` address); a timeout often means you are off that network, not that the server is down.
+
+### Two ways a HypAware host's MCP may be attached
+
+A HypAware host exposes its read-class verbs (`query_sql`, `graph_neighbors`) as an **MCP tool**, and that MCP can be attached by **two independent routes** — be aware of both:
+
+- **Via `hyp --remote`** — the CLI path above: `hyp` acts as the MCP client (`hyp query sql … --remote <name>`) and renders locally. Discover these by running `hyp remote list`.
+- **Via a direct client connection** — the host's `/v1/mcp` endpoint is registered in this client's MCP config (e.g. an `[mcp_servers]` entry in `~/.codex/config.toml`, set up out of band), surfacing the `query_sql` / `graph_neighbors` **tools** directly as hypaware MCP tools already available to you — no `hyp` in the data path.
+
+The routes are independent, so the **same server may be attached both ways at once** — an attached hypaware MCP tool and a `hyp remote list` target can point at the identical `/v1/mcp` URL. Expect that overlap; don't treat them as two different servers.
+
+Both routes run the identical `query_sql` operation, so **the data is the same** — but the surfaces are **not byte-identical**:
+
+- **MCP tool:** returns the **full structured result** (every matching row, as JSON) with **no ~32 KB display budget**; a large result can overflow the client's own output limit and spill to a file.
+- **`hyp --remote` CLI:** applies the ~32 KB display budget and prints `notice: showing N of M rows …` on stderr; lift it with `--max-bytes 0` or `--output <file>` to recover the tool's full set.
+
+Never read a smaller CLI row count as "fewer rows matched" — it is the display budget, not the result set.
+
 ## SQL dialect notes
 
 - `json_extract_scalar()` does not exist. `JSON_EXTRACT` does, but it errors on rows where a JSON-typed column (notably `tool_args`) holds a plain string instead of a JSON object ("first argument must be JSON string or object, got string").
@@ -48,6 +75,8 @@ Key columns:
 - `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields.
 - `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
 - `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
+
+**Token counts** live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`): `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`. Codex (`provider='openai'`) omits `cache_write_tokens` and adds `reasoning_tokens` + `total_tokens`. Extract with `CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens') AS BIGINT)`; usage repeats across a message's content parts, so dedup per `message_id` (e.g. `max(...)`) before summing.
 
 Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
 

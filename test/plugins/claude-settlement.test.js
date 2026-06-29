@@ -128,7 +128,7 @@ test('settleBatch dispatches to the enricher and dedupes the upgraded row agains
 
 // --- helpers ---------------------------------------------------------
 
-// @ref LLP 0030#decision — the settlement enricher groups fallback rows by
+// @ref LLP 0030#decision: the settlement enricher groups fallback rows by
 // session_id (Claude conversation_id is null), so the row fixtures carry the
 // session in session_id, not conversation_id.
 /** @param {Partial<Record<string, unknown>> & { match_key: string }} f */

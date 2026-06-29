@@ -2,10 +2,10 @@ import type {
   ExportResult,
   HypAwareV2Config,
   QueryRegistry,
-  QueryStorageService,
   SinkContinuation,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
-import type { ExtendedSinkRegistry } from '../registry/types.d.ts'
+import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
+import type { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types.d.ts'
 
 /**
  * A single-use, self-tracking incremental row stream for a blob destination,
@@ -68,7 +68,7 @@ export interface SinkWatermarkStore {
 export interface DriverOptions {
   sinkRegistry: ExtendedSinkRegistry
   queryRegistry: QueryRegistry
-  storage: QueryStorageService
+  storage: ExtendedQueryStorageService
   /** Kernel state root (e.g. `<HYP_HOME>/hypaware`). */
   stateRoot: string
   config?: HypAwareV2Config
@@ -92,4 +92,15 @@ export interface TickReport {
     bytesWritten: number
     error?: string
   }>
+}
+
+export interface MaterializeResult {
+  handles: ExtendedSinkHandle[]
+  errors: MaterializeError[]
+}
+
+export interface MaterializeError {
+  instance: string
+  errorKind: string
+  message: string
 }

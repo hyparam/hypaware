@@ -18,15 +18,18 @@ import {
 } from '../observability/index.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
-import { bootKernel } from '../runtime/boot.js'
+import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
+import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { BootProfile } from '../runtime/types.d.ts'
- * @import { DispatchOptions } from './dispatch.d.ts'
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BootProfile } from '../../../src/core/runtime/types.js'
+ * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
@@ -58,13 +61,13 @@ function sinkWarningHint(err) {
  *
  * Lifecycle:
  *
- * 1. `installObservability()` (idempotent — shares state with smoke
+ * 1. `installObservability()` (idempotent: shares state with smoke
  *    harnesses and prior dispatch calls within the same process).
  * 2. Assemble a `CommandRegistry`. Core commands register directly;
  *    plugin-contributed commands land during `bootKernel` below.
  * 3. Render help and exit when argv is empty on a non-TTY stdout or
  *    begins with a help flag (no kernel boot required).
- * 4. Otherwise call `bootKernel({ ... })` — the single shared boot
+ * 4. Otherwise call `bootKernel({ ... })`: the single shared boot
  *    path that loads the config, discovers bundled plugin manifests,
  *    resolves dependencies, and activates the selected plugins
  *    *before* command dispatch. Active plugins land on
@@ -103,8 +106,18 @@ export async function dispatch(argv, opts = {}) {
   const obsEnv = readObservabilityEnv(env)
   const cacheRoot = path.join(obsEnv.stateDir, 'cache')
 
+  // Inputs the help path uses to list plugin commands without booting.
+  // `obsEnv.stateDir` is `<HYP_HOME>/hypaware`: the same `stateRoot`
+  // boot derives; so manifest discovery and config resolution see the
+  // exact plugin set and effective config dispatch would activate.
+  const helpDiscovery = {
+    workspaceDir: opts.workspaceDir,
+    stateRoot: obsEnv.stateDir,
+    configPath: resolveConfigPath({ env, hypHome: obsEnv.hypHome }),
+  }
+
   if (argv.length === 0 && !isInteractiveStream(stdout)) {
-    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0 })
+    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0, discovery: helpDiscovery })
   }
   if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
     const require = createRequire(import.meta.url)
@@ -113,7 +126,7 @@ export async function dispatch(argv, opts = {}) {
     return 0
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
-    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length })
+    return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length, discovery: helpDiscovery })
   }
 
   // Boot the kernel so plugin-contributed commands, sources, sinks,
@@ -173,6 +186,26 @@ export async function dispatch(argv, opts = {}) {
 
   const matched = registry.match(argv)
   if (!matched) {
+    // No command owns this argv. Before failing, see whether the leading
+    // tokens name a *group*: a prefix shared by registered subcommands
+    // (e.g. `graph`, with `graph neighbors`/`graph project` registered)
+    // and synthesize group help for it. A group that registers an explicit
+    // bare command (`query`, `remote`, …) never reaches here: it matched
+    // above and renders its own help, so the explicit registration wins.
+    const group = resolveGroupHelp(registry, argv)
+    if (group) {
+      if (group.unknownSub !== undefined) {
+        stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
+        stderr.write(`  expected one of: ${group.subcommands.join(', ')}\n`)
+      } else {
+        stdout.write(`usage: hyp ${group.prefix} <subcommand> [args...]\n`)
+        stdout.write(`  subcommands: ${group.subcommands.join(', ')}\n`)
+      }
+      if (ownsKernel) {
+        await stopBootStartedSources(kernel)
+      }
+      return group.unknownSub !== undefined ? 2 : 0
+    }
     stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
     stderr.write(`run 'hyp --help' for the list of available commands\n`)
     if (ownsKernel) {
@@ -292,6 +325,57 @@ async function runCommandByName(name, rest, ctx) {
   })
 }
 
+/**
+ * Resolve group-level help for an argv that matched no command.
+ *
+ * A "group" is a command-name prefix shared by registered subcommands but
+ * with no command of its own; e.g. `graph`, when `graph neighbors` and
+ * `graph project` are registered but `graph` is not. Walk the leading
+ * non-flag tokens from longest to shortest and return the longest prefix
+ * that has registered children, so `hyp graph`, `hyp graph --help`, and
+ * `hyp graph bogus` all resolve to the `graph` group.
+ *
+ * Runs only on the dispatch miss path (`registry.match` returned
+ * undefined), so it costs nothing on the hot path: a single pass over the
+ * registry right before the process renders help and exits. Hidden
+ * commands are excluded so they stay out of synthesized help exactly as
+ * they stay out of top-level help.
+ *
+ * @param {ReturnType<typeof createCommandRegistry>} registry
+ * @param {string[]} argv
+ * @returns {{ prefix: string, subcommands: string[], unknownSub: string | undefined } | undefined}
+ * @ref LLP 0009#core-owns-dispatch: core renders group help; plugins only register the leaf subcommands
+ */
+function resolveGroupHelp(registry, argv) {
+  /** @type {string[]} */
+  const lead = []
+  for (const token of argv) {
+    if (typeof token !== 'string' || token.startsWith('-')) break
+    lead.push(token)
+  }
+  if (lead.length === 0) return undefined
+  const names = registry
+    .list()
+    .filter((c) => !c.hidden)
+    .map((c) => c.name)
+  for (let depth = lead.length; depth >= 1; depth -= 1) {
+    const prefix = lead.slice(0, depth).join(' ')
+    const childPrefix = `${prefix} `
+    const direct = new Set()
+    for (const name of names) {
+      if (name.startsWith(childPrefix)) direct.add(name.slice(childPrefix.length).split(' ')[0])
+    }
+    if (direct.size > 0) {
+      return {
+        prefix,
+        subcommands: [...direct].sort(),
+        unknownSub: depth < lead.length ? lead[depth] : undefined,
+      }
+    }
+  }
+  return undefined
+}
+
 /** @param {unknown} stream */
 function isInteractiveStream(stream) {
   return !!stream && typeof stream === 'object' && /** @type {{ isTTY?: boolean }} */ (stream).isTTY === true
@@ -351,10 +435,11 @@ async function stopBootStartedSources(kernel) {
  *   registry: ReturnType<typeof createCommandRegistry>,
  *   devRunId: string | undefined,
  *   argvCount: number,
+ *   discovery?: { workspaceDir?: string, stateRoot: string, configPath: string },
  * }} args
  * @returns {Promise<number>}
  */
-async function runHelp({ stdout, registry, devRunId, argvCount }) {
+async function runHelp({ stdout, registry, devRunId, argvCount, discovery }) {
   const attrs = buildAttrs({
     [Attr.COMPONENT]: 'cmd-dispatch',
     [Attr.OPERATION]: 'command.run',
@@ -375,11 +460,13 @@ async function runHelp({ stdout, registry, devRunId, argvCount }) {
         const start = performance.now()
         let exitCode = 0
         try {
+          const pluginCommands = discovery ? await collectPluginHelpCommands(discovery) : []
           getLogger('cli').info('cli.help_rendered', {
             [Attr.COMPONENT]: 'cmd-dispatch',
             command_count: registry.size(),
+            plugin_command_count: pluginCommands.length,
           })
-          renderHelp({ stdout, registry })
+          renderHelp({ stdout, registry, pluginCommands })
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error))
           span.recordException(err)
@@ -412,21 +499,116 @@ async function runHelp({ stdout, registry, devRunId, argvCount }) {
 
 /**
  * Render the help text. Lists visible commands (sorted) with their
- * summary; hidden commands are dropped.
+ * summary; hidden commands are dropped. Plugin-contributed commands
+ * (gathered from manifests by {@link collectPluginHelpCommands}) are
+ * merged in alongside core commands; a core command always wins a name
+ * collision so its registered summary is authoritative.
  *
- * @param {{ stdout: { write(chunk: string): unknown }, registry: ReturnType<typeof createCommandRegistry> }} args
+ * @param {{
+ *   stdout: { write(chunk: string): unknown },
+ *   registry: ReturnType<typeof createCommandRegistry>,
+ *   pluginCommands?: { name: string, summary: string }[],
+ * }} args
  */
-function renderHelp({ stdout, registry }) {
-  const visible = registry.list().filter((c) => !c.hidden)
-  stdout.write('hyp — HypAware kernel CLI\n')
+function renderHelp({ stdout, registry, pluginCommands = [] }) {
+  const core = registry
+    .list()
+    .filter((c) => !c.hidden)
+    .map((c) => ({ name: c.name, summary: c.summary }))
+  const coreNames = new Set(core.map((c) => c.name))
+  const merged = [...core, ...pluginCommands.filter((c) => !coreNames.has(c.name))].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  )
+
+  stdout.write('hyp - HypAware kernel CLI\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
   stdout.write('Commands:\n')
-  const nameWidth = Math.max(...visible.map((c) => c.name.length), 8)
-  for (const cmd of visible) {
+  const nameWidth = Math.max(...merged.map((c) => c.name.length), 8)
+  for (const cmd of merged) {
     stdout.write(`  ${cmd.name.padEnd(nameWidth)}  ${cmd.summary}\n`)
   }
   stdout.write('\n')
   stdout.write(`Run 'hyp <command> --help' for command-specific help.\n`)
+}
+
+/**
+ * Collect the listable plugin commands for top-level help, WITHOUT
+ * activating any plugin.
+ *
+ * Help renders before `bootKernel`, so it cannot read the activated
+ * command registry; doing so would cost a full boot: importing every
+ * plugin entrypoint and binding the gateway/OTLP listeners some plugins
+ * open during activation (the same reason `decideBootProfile` uses an
+ * empty activation set for `daemon`/`status`/`version`). Instead help
+ * reads the two cheap inputs boot uses for *discovery*: plugin
+ * manifests (plain JSON) and the effective config, and lists the
+ * commands each config-active plugin *declares* in its manifest
+ * `contributes.commands`. That scope matches dispatch's `config` boot
+ * profile, so every command shown here is one that will actually
+ * dispatch.
+ *
+ * Best-effort: any failure (missing workspace, unreadable config or
+ * lock file) degrades to "no plugin commands" rather than failing
+ * `--help`.
+ *
+ * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
+ * @returns {Promise<{ name: string, summary: string }[]>}
+ * @ref LLP 0005#declarative [implements]: manifest lists commands before any plugin code is loaded
+ */
+async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }) {
+  try {
+    const [bundled, installed] = await Promise.all([
+      discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {}),
+      discoverInstalledPlugins({ stateDir: stateRoot }),
+    ])
+    // Resolve the effective config the SAME way `bootKernel` does: with
+    // the discovered plugin catalog. Without it the merge validator treats
+    // every bundled plugin as unknown and drops local `plugins[]` additions
+    // (e.g. `@hypaware/context-graph`) from a fleet-joined host's effective
+    // config, so help would hide commands that actually dispatch.
+    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
+    const merged = await resolveLayeredConfigFromDisk({
+      stateRoot,
+      configPath,
+      knownPlugins: catalog.pluginMetadata,
+      knownDatasets: catalog.knownDatasets,
+    })
+
+    // Reuse boot's plugin SELECTION (the same pure computation `bootKernel`
+    // runs) so help lists only the manifests dispatch would actually
+    // activate. Dispatch boots ordinary commands with the `config` profile,
+    // so select with it too. This replicates the two boot selection rules a
+    // hand-rolled pool would miss: an installed plugin that *shadows* a
+    // bundled first-party name (boot rejects; nothing dispatches) and an
+    // installed plugin that *replaces* a same-named excluded bundled
+    // skeleton (its commands win, the skeleton's don't).
+    const { shadowing, selectedManifests } = selectBootPlugins({
+      discovered: bundled,
+      installed,
+      config: merged.effective,
+      bootProfile: 'config',
+    })
+    // A shadow collision makes real boot throw before any command
+    // dispatches; advertise no plugin commands rather than ones boot rejects.
+    if (shadowing.length > 0) return []
+
+    /** @type {Map<string, { name: string, summary: string }>} */
+    const out = new Map()
+    for (const entry of selectedManifests) {
+      for (const cmd of entry.manifest.contributes?.commands ?? []) {
+        if (!cmd || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
+        out.set(cmd.name, {
+          name: cmd.name,
+          summary: typeof cmd.summary === 'string' ? cmd.summary : '',
+        })
+      }
+    }
+    return [...out.values()]
+  } catch {
+    // Help must never fail because plugin discovery did. Fall back to
+    // core commands only.
+    return []
+  }
 }

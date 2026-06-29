@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 
 import { executeQuerySql } from '../../src/core/query/sql.js'
 
-/** Minimal registry/storage stubs — parse failures fire before either is used. */
+/** Minimal registry/storage stubs: parse failures fire before either is used. */
 const registry = { getDataset: () => null, listDatasets: () => [] }
 const storage = { cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) }
 

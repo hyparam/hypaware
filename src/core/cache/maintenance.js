@@ -19,7 +19,7 @@ import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 
 /**
- * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.js'
  * @import {
  *   CachePartitionMeta,
  *   CacheStatusPartition,
@@ -32,9 +32,9 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTab
  *   PartitionCursor,
  *   AppendOptions,
  *   SettleContext,
- * } from './types.d.ts'
- * @import { QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * } from '../../../src/core/cache/types.js'
+ * @import { QueryStorageService } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
  */
@@ -195,14 +195,14 @@ async function maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpire
   }
 
   if (!opts.expireOnly) {
-    // @ref LLP 0027#re-settle-sweep — a partition holding a committed
+    // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
     // when the file-count heuristics say compaction isn't due. Gate that
     // force on NEW data having flushed since the last sweep (the live
     // data-file count moved off the recorded baseline): an unmatchable
-    // fallback — one whose transcript line never lands (harness aux,
-    // wire-only reminders) — would otherwise force a full rewrite every
+    // fallback: one whose transcript line never lands (harness aux,
+    // wire-only reminders) - would otherwise force a full rewrite every
     // tick forever. The cheap baseline check also lets us skip the
     // attributes scan entirely when nothing new has flushed.
     const hasResettle = settle
@@ -255,7 +255,7 @@ async function maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snaps
   }
 
   if (!opts.expireOnly) {
-    // @ref LLP 0027#re-settle-sweep — same backstop on the legacy layout,
+    // @ref LLP 0027#re-settle-sweep: same backstop on the legacy layout,
     // with the same new-data gate so an unmatchable fallback does not force
     // a rewrite every tick.
     const hasResettle = settle
@@ -460,13 +460,13 @@ function estimateRowBytes(row) {
 /**
  * Compact a source-table partition by rewriting into a fresh table
  * directory. Iceberg metadata stores absolute `file://` URLs, so we
- * cannot rename directories after writing — we write to a new dir
+ * cannot rename directories after writing: we write to a new dir
  * name and update the cursor to point to it.
  *
  * Rows are flushed to a data file whenever the batch reaches either
  * `COMPACT_BATCH_SIZE` rows or `cfg.compact_batch_bytes` estimated
  * bytes, whichever comes first. The byte cap keeps peak heap bounded
- * regardless of per-row payload size — without it, a fat denormalized
+ * regardless of per-row payload size: without it, a fat denormalized
  * column (e.g. tool definitions repeated on every row) pushes a
  * 10k-row batch into the gigabytes and OOMs the daemon mid-compaction.
  *
@@ -521,7 +521,7 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
   // Buffer committed fallback rows so the re-settle sweep can upgrade them
   // after the full partition has been seen (a fallback row may stream
   // before its native twin). Non-fallback rows emit immediately to keep
-  // peak heap bounded — settlement is rare and only touches the buffer.
+  // peak heap bounded: settlement is rare and only touches the buffer.
   /** @type {Record<string, unknown>[]} */
   const fallbackBuffer = []
   const emittedPartIds = settle ? new Set() : null
@@ -551,8 +551,8 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
         nullable: true,
       }))
     }
-    // @ref LLP 0027#re-settle-sweep — hold provisional fallback rows back;
-    // emit only after the sweep upgrades and de-twins them at end-of-scan.
+    // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
+    // Emit only after the sweep upgrades and de-twins them at end-of-scan.
     if (settle && isGatewayFallbackRow(row)) {
       fallbackBuffer.push(row)
       continue
@@ -695,7 +695,7 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
         nullable: true,
       }))
     }
-    // @ref LLP 0027#re-settle-sweep — same backstop on the legacy layout.
+    // @ref LLP 0027#re-settle-sweep: same backstop on the legacy layout.
     if (settle && isGatewayFallbackRow(row)) {
       fallbackBuffer.push(row)
       continue
@@ -745,8 +745,8 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
  *
  * Flush-time settlement (LLP 0027 "Decision") only collapses a
  * fallback/uuid twin pair when both rows land in the same flush batch. A
- * fallback row that flushed alone — its transcript line not yet on disk,
- * its uuid twin still in a later flush — commits unsettled, and the flush
+ * fallback row that flushed alone: its transcript line not yet on disk,
+ * its uuid twin still in a later flush: commits unsettled, and the flush
  * path can never revisit it. The twins share the Iceberg partition key
  * (`conversation_id`/`cwd`/`date`), so they always live in the SAME
  * partition; a single-partition compaction rewrite is therefore enough to
@@ -757,10 +757,10 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
 /**
  * Resolve the per-partition settle context. Returns null unless the
  * caller threaded both a storage handle and a settle hook for this
- * dataset — so every existing maintenance path (CLI, tests) stays a pure
+ * dataset, so every existing maintenance path (CLI, tests) stays a pure
  * compaction with no behavioural change.
  *
- * @ref LLP 0027#re-settle-sweep — compaction-time settle became acceptable
+ * @ref LLP 0027#re-settle-sweep: compaction-time settle became acceptable
  * once the registry/storage handle is threaded in (LLP 0027 option B's
  * blocker).
  * @param {MaintenanceOptions} opts
@@ -784,13 +784,13 @@ function resolveSettleContext(opts, dataset) {
  *     it can match to its native transcript identity (re-stamping
  *     `message_id`/`part_id`, clearing the fallback marker), leaving the
  *     rest as provisional fallbacks. The hook NEVER drops a row, so an
- *     enricher miss or failure degrades safely — the row survives
+ *     enricher miss or failure degrades safely: the row survives
  *     unchanged for a later sweep.
  *
  *  2. **De-twin within the rewrite set.** A fallback that upgraded onto a
  *     `part_id` already emitted from this same partition (its native twin,
  *     which streamed as a normal non-fallback row) is the duplicate the
- *     race left behind — drop it; the native twin wins. The twins share
+ *     race left behind: drop it. The native twin wins. The twins share
  *     the partition key (`conversation_id`/`cwd`/`date`), so the twin is
  *     guaranteed to be in this rewrite set: no committed-partition scan is
  *     needed, and a row whose identity did NOT change can never collide
@@ -803,7 +803,7 @@ function resolveSettleContext(opts, dataset) {
  * collides is dropped, and a second pass is a no-op because the survivor
  * is no longer a fallback.
  *
- * @ref LLP 0027#re-settle-sweep — reuse the flush enricher; de-twin within the partition rewrite.
+ * @ref LLP 0027#re-settle-sweep: reuse the flush enricher. De-twin within the partition rewrite.
  * @param {Record<string, unknown>[]} fallbackRows
  * @param {SettleContext} settle
  * @param {Set<unknown>} emittedPartIds  part_ids already emitted from this partition rewrite
@@ -863,12 +863,12 @@ function rowPartId(row) {
 /**
  * Does the table hold at least one committed gateway fallback row? Used
  * to force a compaction rewrite even when the file-count heuristics say
- * compaction isn't due — otherwise a split twin pair in a small,
+ * compaction isn't due: otherwise a split twin pair in a small,
  * never-compacted partition would never get re-settled. Scans only the
  * `attributes` column and short-circuits on the first hit, so the cost is
  * bounded and paid only for settle-eligible datasets.
  *
- * @ref LLP 0027#re-settle-sweep — gate the sweep on a cheap fallback scan.
+ * @ref LLP 0027#re-settle-sweep: gate the sweep on a cheap fallback scan.
  * @param {string} tableDir
  * @returns {Promise<boolean>}
  */
@@ -888,7 +888,7 @@ async function hasResettleCandidate(tableDir) {
  * A committed row is a re-settle candidate when it carries the gateway's
  * provisional-identity marker. This is the documented contract
  * (`attributes.gateway.identity_source === 'gateway_fallback'`, LLP 0027
- * "Decision") — a dataset-agnostic predicate, so the marker is the only
+ * "Decision") - a dataset-agnostic predicate, so the marker is the only
  * coupling between core compaction and the gateway plugin. Tolerates the
  * `attributes` column whether stored as an object or a JSON string.
  *
@@ -949,7 +949,7 @@ async function cleanRetiredEpochs(cacheRoot) {
  *
  * Two cases are removed:
  *  1. A generation that carries a `.retired` marker older than the grace
- *     period — the normal "compaction succeeded, the previous generation
+ *     period: the normal "compaction succeeded, the previous generation
  *     can go" path.
  *  2. A generation that is NOT the live one named by the partition cursor
  *     and is older than {@link ORPHAN_GRACE_MS}, even without a `.retired`
@@ -995,7 +995,7 @@ async function walkForRetired(dir) {
           removed = true
         }
       } catch {
-        // no .retired marker or parse error — fall through to orphan check
+        // no .retired marker or parse error: fall through to orphan check
       }
 
       // Orphan sweep: a generation the cursor does not reference and that
@@ -1007,7 +1007,7 @@ async function walkForRetired(dir) {
             fs.rmSync(full, { recursive: true, force: true })
           }
         } catch {
-          // stat/remove race — skip, a later tick will retry
+          // stat/remove race: skip, a later tick will retry
         }
       }
     } else {

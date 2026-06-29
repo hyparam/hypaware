@@ -6,8 +6,8 @@ import { getVectorSearchRuntime } from './runtime.js'
 import { validateVectorSearchConfig } from './config.js'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { RefreshReport } from './types.d.ts'
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { RefreshReport } from './types.js'
  */
 
 /**
@@ -16,8 +16,8 @@ import { validateVectorSearchConfig } from './config.js'
  * interval, a wall-clock budget per tick, an in-flight guard so a slow
  * tick never stacks, and an unref'd handle so the timer cannot keep the
  * process alive. Registered as a source contribution because the daemon
- * starts every registered source — that is the kernel's "give a plugin
- * a periodic foothold" seam.
+ * starts every registered source (that is, the kernel's "give a plugin
+ * a periodic foothold") seam.
  *
  * Per-tick embedding spend is additionally bounded by
  * `refresh.max_rows_per_tick`; bounded per-partition shard writes match
@@ -26,7 +26,7 @@ import { validateVectorSearchConfig } from './config.js'
  *
  * @param {PluginActivationContext} _ctx
  * @returns {Promise<StartedSource>}
- * @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements] — daemon timer with interval + per-tick wall-clock and row budgets
+ * @ref LLP 0024#freshness-rides-the-cache-maintenance-pattern [implements]: daemon timer with interval + per-tick wall-clock and row budgets
  */
 export async function startVectorRefreshSource(_ctx) {
   const runtime = getVectorSearchRuntime()

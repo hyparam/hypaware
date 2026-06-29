@@ -3,14 +3,14 @@
 import { computeShardStates, readShardMetas } from './shards.js'
 
 /**
- * @import { VectorIndexStatus } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { VectorSearchRuntime } from './types.d.ts'
+ * @import { VectorIndexStatus } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { VectorSearchRuntime } from './types.js'
  */
 
 /**
  * Per-index, per-partition shard coverage: state, model, dimension,
  * row counts, build time. Works without the optional hypvector
- * dependency — everything here reads sidecar metas and the cache
+ * dependency. Everything here reads sidecar metas and the cache
  * partition listing only.
  *
  * @param {VectorSearchRuntime} runtime

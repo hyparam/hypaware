@@ -1,35 +1,9 @@
 // @ts-check
 
 /**
- * @import { CapabilityName, PluginAttachProbeManifest, PluginContributionManifest, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from './manifest.js'
- * @import { PluginMetadata } from './config/types.d.ts'
- */
-
-/**
- * @typedef {object} PluginCatalogEntry
- * @property {PluginName} name
- * @property {string} version
- * @property {PluginMetadata} metadata
- * @property {PluginContributionManifest | undefined} contributes
- */
-
-/**
- * @typedef {object} ClientDescriptor
- * @property {PluginName} plugin
- * @property {string} name
- * @property {string} skillDir
- * @property {string} [agentDir]
- * @property {PluginAttachProbeManifest} [attachProbe]
- * @property {string[]} [requiredUpstreams]
- */
-
-/**
- * @typedef {object} PluginCatalog
- * @property {Map<PluginName, PluginCatalogEntry>} plugins
- * @property {Map<PluginName, PluginMetadata>} pluginMetadata
- * @property {Set<string>} knownDatasets
- * @property {Map<string, ClientDescriptor>} clientDescriptors
+ * @import { CapabilityName, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ClientDescriptor, LoadedManifest, PluginCatalog, PluginCatalogEntry } from '../../src/core/types.js'
+ * @import { PluginMetadata } from '../../src/core/config/types.js'
  */
 
 /**

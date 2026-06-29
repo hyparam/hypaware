@@ -24,7 +24,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'command_dispatch: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'command_dispatch: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -44,7 +44,7 @@ export async function run({ harness, expect }) {
   const listCode = await dispatch(['plugin', 'list', '--json'], { stdout, stderr })
   expect.that('dispatch: plugin list --json exited 0', listCode, (v) => v === 0)
 
-  // Help path — verifies `cli.help_rendered` log + command_count.
+  // Help path: verifies `cli.help_rendered` log + command_count.
   const helpCode = await dispatch(['--help'], { stdout, stderr })
   expect.that('dispatch: --help exited 0', helpCode, (v) => v === 0)
 

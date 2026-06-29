@@ -16,8 +16,8 @@ import {
 import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SinkWatermarkStore } from '../../../../src/core/sinks/types.d.ts'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/local-fs'
@@ -28,7 +28,7 @@ const PLUGIN_VERSION = '1.0.0'
  * capability as a full `BlobStore` (put/get/list/delete) AND contributes
  * a `local-fs` sink that writes encoded partition bytes under
  * `<config.dir>/<dataset>/<partition>/`. The sink contribution is
- * untouched by the BlobStore migration — existing
+ * untouched by the BlobStore migration: existing
  * encoder-writer + local-fs sinks keep working unchanged.
  *
  * BlobStore base directory resolution:
@@ -43,7 +43,7 @@ const PLUGIN_VERSION = '1.0.0'
  * encoder via the kernel's `sink.encode_partition` helper.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] — provides hypaware.blob-store; never knows its bytes' format
+ * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements]: provides hypaware.blob-store, never knows its bytes' format
  */
 export async function activate(ctx) {
   const baseDir = resolveExportsBaseDir({ pluginConfig: ctx.config, env: ctx.env })

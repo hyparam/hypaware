@@ -6,15 +6,15 @@
  * source listener share, and a `started` flag the smoke / future
  * commands can consult before driving a source start vs. reload.
  *
- * The shape mirrors `@hypaware/gascity`'s runtime — same lifecycle hook
+ * The shape mirrors `@hypaware/gascity`'s runtime: same lifecycle hook
  * pattern, same "saved-ctx-as-source-of-truth" convention so reloads
  * read the latest config from `runtime.ctx.config`.
  */
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { GatewayState } from './api.js'
- * @import { AiGatewayRuntime } from './types.d.ts'
+ * @import { AiGatewayRuntime } from './types.js'
  */
 
 /** @type {AiGatewayRuntime | null} */
@@ -23,10 +23,6 @@ let runtime = null
 /** @param {AiGatewayRuntime} value */
 export function setAiGatewayRuntime(value) {
   runtime = value
-}
-
-export function clearAiGatewayRuntime() {
-  runtime = null
 }
 
 /**
@@ -38,7 +34,7 @@ export function clearAiGatewayRuntime() {
  */
 export function requireAiGatewayRuntime() {
   if (!runtime) {
-    throw new Error('@hypaware/ai-gateway: not activated yet — runtime singleton is empty')
+    throw new Error('@hypaware/ai-gateway: not activated yet - runtime singleton is empty')
   }
   return runtime
 }

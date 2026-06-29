@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { HypvectorLoadResult } from './types.d.ts'
+ * @import { HypvectorLoadResult } from './types.js'
  */
 
 /** @type {HypvectorLoadResult | null} */
@@ -15,7 +15,7 @@ let cached = null
  * missing dependency instead.
  *
  * @returns {Promise<HypvectorLoadResult>}
- * @ref LLP 0024#packaging [implements] — root optionalDependency, graceful degradation when absent
+ * @ref LLP 0024#packaging [implements]: root optionalDependency, graceful degradation when absent
  */
 export async function loadHypvector() {
   if (cached) return cached
@@ -31,7 +31,7 @@ export async function loadHypvector() {
     cached = {
       ok: false,
       message:
-        "optional dependency 'hypvector' is not installed — reinstall hypaware without --omit=optional to enable vector search",
+        "optional dependency 'hypvector' is not installed - reinstall hypaware without --omit=optional to enable vector search",
     }
   }
   return cached

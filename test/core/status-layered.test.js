@@ -13,7 +13,7 @@ import { renderStatusJson, renderStatusText } from '../../src/core/cli/core_comm
 
 // `hyp status` on a centrally-managed host must restore inspectability of
 // the merged config: per-entry provenance + the dropped-local section.
-// @ref LLP 0031#status-provenance [tests]
+// @ref LLP 0031#status-provenance [tests]:
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-layered-'))
@@ -85,7 +85,7 @@ test('a joined host surfaces provenance and the dropped-local section', async ()
 // rendering that turns it into the user-visible provenance tags, the
 // dropped-local section (collision *and* invalid-merge), and the JSON
 // `config_layers` block. Rendering off a collected report avoids booting
-// the kernel. @ref LLP 0031#status-provenance [tests]
+// the kernel. @ref LLP 0031#status-provenance [tests]:
 
 function makeBuf() {
   let value = ''

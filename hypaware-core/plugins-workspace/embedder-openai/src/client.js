@@ -4,8 +4,8 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { embeddingsEndpoint } from './config.js'
 
 /**
- * @import { EmbedderCapability, EmbedResult, HypError } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CreateEmbedderOptions, EmbedderOpenAiConfig, FetchLike } from './types.d.ts'
+ * @import { EmbedderCapability, EmbedResult, HypError } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CreateEmbedderOptions, EmbedderOpenAiConfig, FetchLike } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/embedder-openai'
@@ -16,7 +16,7 @@ const PLUGIN_NAME = '@hypaware/embedder-openai'
  *
  * Batches larger than `max_batch` are chunked into sequential requests;
  * the returned vectors are always aligned with the input order. There
- * is deliberately no retry layer — callers (the vector-search refresh
+ * is deliberately no retry layer: callers (the vector-search refresh
  * tick, an interactive search) already re-run on their own cadence, so
  * a failed request surfaces immediately instead of stalling a tick.
  *
@@ -96,7 +96,7 @@ export function createOpenAiEmbedder(opts) {
         { component: 'embedder' }
       ).catch((/** @type {unknown} */ err) => {
         const errorKind = /** @type {HypError} */ (err)?.hypErrorKind ?? 'embedder_failed'
-        // Text content and key material never reach logs — counts only.
+        // Text content and key material never reach logs: counts only.
         log.error('embedder.embed_failed', {
           [Attr.ERROR_KIND]: errorKind,
           embed_model: config.model,
@@ -112,7 +112,7 @@ export function createOpenAiEmbedder(opts) {
 /**
  * One `POST /v1/embeddings` request. The API key resolves from the
  * environment at call time and is used only for the Authorization
- * header — it is never logged, never thrown in a message, and never
+ * header: it is never logged, never thrown in a message, and never
  * stored on the embedder. When the configured env var is unset the
  * request goes out without an Authorization header so localhost
  * servers (Ollama, LM Studio) work with zero credential config; a 401
@@ -127,7 +127,7 @@ export function createOpenAiEmbedder(opts) {
  *   signal: AbortSignal | undefined,
  * }} args
  * @returns {Promise<{ vectors: Float32Array[], usage?: { prompt_tokens?: number, total_tokens?: number } }>}
- * @ref LLP 0024#embedder-speaks-openai-compatible-base_url-configurable [implements] — config names the env var; the key resolves at call time and never reaches logs
+ * @ref LLP 0024#embedder-speaks-openai-compatible-base_url-configurable [implements]: config names the env var; the key resolves at call time and never reaches logs
  */
 async function requestEmbeddings({ batch, config, env, endpoint, fetchImpl, signal }) {
   const apiKey = env[config.api_key_env]
