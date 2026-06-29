@@ -25,6 +25,12 @@ export function openBrowser(url, opts = {}) {
       detached: true,
       stdio: 'ignore',
     })
+    // A missing opener (e.g. no `xdg-open`) is delivered ASYNCHRONOUSLY as an
+    // 'error' event, not a synchronous throw. Without a listener that becomes
+    // an uncaught exception that crashes the process. Swallow it: the printed
+    // URL and the loopback timeout are the real backstops (D8). The boolean
+    // return is therefore best-effort, not a guarantee the browser opened.
+    if (child && typeof child.on === 'function') child.on('error', () => {})
     if (child && typeof child.unref === 'function') child.unref()
     return true
   } catch {
@@ -40,6 +46,7 @@ function openerFor(platform) {
   if (platform === 'darwin') return { command: 'open', args: [] }
   if (platform === 'win32') return { command: 'cmd', args: ['/c', 'start', ''] }
   // Treat every other Unix as freedesktop (xdg-open). A missing xdg-open
-  // surfaces as a spawn error and falls back to printing the URL.
+  // surfaces as an async spawn 'error' event (swallowed above); the caller's
+  // loopback waits and the URL is printed, so login still completes manually.
   return { command: 'xdg-open', args: [] }
 }
