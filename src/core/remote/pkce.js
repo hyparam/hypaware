@@ -21,17 +21,8 @@ import crypto from 'node:crypto'
  * @ref LLP 0046#d3 [implements]: client owns the downstream PKCE leg; verifier + S256 challenge, in-memory for one flow
  */
 export function createPkcePair() {
-  const verifier = base64url(crypto.randomBytes(32))
-  const challenge = base64url(crypto.createHash('sha256').update(verifier).digest())
+  // `base64url` is unpadded base64url (RFC 7636 §A) natively, no replace chain.
+  const verifier = crypto.randomBytes(32).toString('base64url')
+  const challenge = crypto.createHash('sha256').update(verifier).digest().toString('base64url')
   return { verifier, challenge }
-}
-
-/**
- * Base64url with no padding (RFC 7636 §A).
- *
- * @param {Buffer} buf
- * @returns {string}
- */
-function base64url(buf) {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
