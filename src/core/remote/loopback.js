@@ -102,8 +102,13 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       return
     }
     if (error) {
+      // The redirect's `error` is attacker-influenceable (anyone can hit the
+      // loopback port). Bound it to a safe token before it reaches the error
+      // message, the log ERROR_KIND, and the terminal, so a crafted value can't
+      // inject newlines into logs or terminal output.
+      const safeError = sanitizeErrorCode(error)
       respond(res, 'Login failed. You can close this tab and return to the terminal.')
-      fail(Object.assign(new Error(`login failed: ${error}`), { callbackError: error }), error)
+      fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
       return
     }
     if (!code) {
@@ -177,6 +182,20 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       })
     })
   })
+}
+
+/**
+ * Reduce an OAuth `error` redirect param to a bounded, log-safe token. RFC 6749
+ * error codes are `%x20-21 / %x23-5B / %x5D-7E`; we keep that printable range,
+ * drop control chars (newlines especially), and cap the length so a hostile
+ * callback can't inject lines into logs or the terminal.
+ *
+ * @param {string} error
+ * @returns {string}
+ */
+function sanitizeErrorCode(error) {
+  const cleaned = error.replace(/[^\x20-\x7E]/g, '').replace(/["\\]/g, '').trim().slice(0, 80)
+  return cleaned || 'unknown_error'
 }
 
 /** @param {ServerResponse} res @param {string} message */
