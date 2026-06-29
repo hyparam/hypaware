@@ -30,6 +30,18 @@ export class InvalidGrantError extends Error {
 }
 
 /**
+ * The user-facing re-login guidance for an expired or revoked OIDC session
+ * (LLP 0046 D5). Lives with {@link InvalidGrantError} so the wording has one
+ * home, shared by the stdio proxy and the one-shot verb attach path.
+ *
+ * @param {string} target
+ * @returns {string}
+ */
+export function sessionExpiredMessage(target) {
+  return `remote session expired - re-run 'hyp remote login ${target}'`
+}
+
+/**
  * Exchange an authorization code for a session (the `authorization_code`
  * grant). Presents the held PKCE verifier.
  *

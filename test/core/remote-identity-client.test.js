@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { exchangeCode, refreshSession, InvalidGrantError } from '../../src/core/remote/identity_client.js'
+import { exchangeCode, refreshSession, InvalidGrantError, sessionExpiredMessage } from '../../src/core/remote/identity_client.js'
 
 /**
  * A fetch stub that records the last request and returns `reply`.
@@ -24,6 +24,10 @@ function stubFetch(reply) {
   })
   return { fetchImpl, calls }
 }
+
+test('sessionExpiredMessage names the target for re-login', () => {
+  assert.equal(sessionExpiredMessage('prod'), "remote session expired - re-run 'hyp remote login prod'")
+})
 
 test('exchangeCode posts the authorization_code grant and maps the response', async () => {
   const { fetchImpl, calls } = stubFetch({

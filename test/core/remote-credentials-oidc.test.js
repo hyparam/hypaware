@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
+  isRefreshable,
   readCredentials,
   remoteCredentialsPath,
   removeToken,
@@ -22,6 +23,12 @@ async function tmpState() {
 
 const FUTURE = '2999-01-01T00:00:00Z'
 const PAST = '2000-01-01T00:00:00Z'
+
+test('isRefreshable is true only for an oidc record read from the file', () => {
+  assert.equal(isRefreshable({ kind: 'oidc', source: 'file' }), true)
+  assert.equal(isRefreshable({ kind: 'oidc', source: 'env' }), false) // env override never refreshes
+  assert.equal(isRefreshable({ kind: 'static', source: 'file' }), false)
+})
 
 test('an oidc session round-trips with kind: oidc', async () => {
   const dir = await tmpState()

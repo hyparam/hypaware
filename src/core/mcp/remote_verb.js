@@ -1,8 +1,8 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
-import { deriveIdentityBase, resolveAccessJwt } from '../remote/credentials.js'
-import { InvalidGrantError } from '../remote/identity_client.js'
+import { deriveIdentityBase, isRefreshable, resolveAccessJwt } from '../remote/credentials.js'
+import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
 import { createHttpMcpClient } from './client.js'
 
 /**
@@ -58,7 +58,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
     // A live 401/403 on an OIDC session means the cached JWT is stale or was
     // revoked early. Refresh once and retry before surfacing (LLP 0046 D5). An
     // env override or a static token cannot be refreshed, so it surfaces as-is.
-    const refreshable = resolved.kind === 'oidc' && resolved.source === 'file'
+    const refreshable = isRefreshable(resolved)
     if (!refreshable || !isAuthError(err)) {
       return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
     }
@@ -111,7 +111,7 @@ async function callRemoteTool({ url, token, verb, params }) {
  */
 function mapRefreshError(err, target) {
   if (err instanceof InvalidGrantError) {
-    return { ok: false, error: `remote session expired - re-run 'hyp remote login ${target}'`, exitCode: 2 }
+    return { ok: false, error: sessionExpiredMessage(target), exitCode: 2 }
   }
   return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
 }

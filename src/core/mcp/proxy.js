@@ -4,8 +4,8 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { deriveIdentityBase, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
-import { InvalidGrantError } from '../remote/identity_client.js'
+import { deriveIdentityBase, isRefreshable, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
+import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
 import { parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
@@ -108,7 +108,7 @@ export async function runMcpProxy({ target, ctx }) {
       // A live 401/403 on an OIDC session means the cached JWT was revoked or
       // expired early: force one refresh + retry before surfacing (LLP 0046 D5).
       // An env/static token cannot refresh, so it falls through to the error.
-      if ((res.status === 401 || res.status === 403) && resolved.kind === 'oidc' && resolved.source === 'file') {
+      if ((res.status === 401 || res.status === 403) && isRefreshable(resolved)) {
         let refreshed
         try {
           refreshed = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true })
@@ -170,7 +170,7 @@ export async function runMcpProxy({ target, ctx }) {
  */
 function proxyAuthMessage(err, target) {
   if (err instanceof InvalidGrantError) {
-    return `remote session expired - re-run 'hyp remote login ${target}'`
+    return sessionExpiredMessage(target)
   }
   return err instanceof Error ? err.message : String(err)
 }

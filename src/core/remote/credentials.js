@@ -305,6 +305,19 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
 }
 
 /**
+ * Whether a resolved credential can be silently refreshed: an `oidc` record
+ * read from the file. A per-target env override and a `static` token cannot be
+ * refreshed. The attach paths call this instead of each re-deriving the
+ * kind+source rule, so "what is refreshable" has one owner (LLP 0046 D5).
+ *
+ * @param {{ source?: 'env' | 'file', kind?: 'static' | 'oidc' }} resolved a successful resolveAccessJwt result
+ * @returns {boolean}
+ */
+export function isRefreshable(resolved) {
+  return resolved.kind === 'oidc' && resolved.source === 'file'
+}
+
+/**
  * Whether an `oidc` record's cached JWT is still safely usable: present and
  * more than the skew window from its parseable expiry.
  *
