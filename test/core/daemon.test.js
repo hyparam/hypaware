@@ -20,7 +20,7 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
- * @import { ClientDescriptor } from '../../src/core/plugin_catalog.js'
+ * @import { ClientDescriptor } from '../../src/core/types.js'
  * @import { DaemonStatus } from '../../src/core/daemon/types.js'
  */
 

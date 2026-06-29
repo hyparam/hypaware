@@ -7,7 +7,7 @@ import { reduce } from './keypress.js'
 import { render } from './render.js'
 
 /**
- * @import { State, Key } from './keypress.js'
+ * @import { State, Key, RunOpts } from '../../../../src/core/cli/tui/types.js'
  */
 
 const CURSOR_HIDE  = '\x1b[?25l'
@@ -15,16 +15,6 @@ const CURSOR_SHOW  = '\x1b[?25h'
 const CLEAR_TO_END = '\x1b[J'
 
 let activeRun = false
-
-/**
- * @typedef {Object} RunOpts
- * @property {NodeJS.ReadableStream} stdin
- * @property {NodeJS.WritableStream} stdout
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]  Erase the prompt's frame from the
- *   terminal when it settles (resolve or cancel) so the next prompt
- *   redraws in its place instead of stacking below it.
- */
 
 /**
  * Drive the reducer loop against a TTY. Resolves with the terminal

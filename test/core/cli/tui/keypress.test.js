@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { reduce } from '../../../../src/core/cli/tui/keypress.js'
 
 /**
- * @import { MultiselectState, SelectState, TextState, ConfirmState } from '../../../../src/core/cli/tui/keypress.js'
+ * @import { MultiselectState, SelectState, TextState, ConfirmState } from '../../../../src/core/cli/tui/types.js'
  */
 
 /** @returns {MultiselectState} */

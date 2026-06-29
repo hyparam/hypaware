@@ -35,8 +35,7 @@ import {
  * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../../../src/core/config/types.js'
  * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
- * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
- * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  */
 
 /**

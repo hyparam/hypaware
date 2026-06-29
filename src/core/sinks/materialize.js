@@ -21,19 +21,7 @@ import {
  * } from '../../../collectivus-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
- */
-
-/**
- * @typedef {object} MaterializeResult
- * @property {ExtendedSinkHandle[]} handles
- * @property {MaterializeError[]} errors
- */
-
-/**
- * @typedef {object} MaterializeError
- * @property {string} instance
- * @property {string} errorKind
- * @property {string} message
+ * @import { MaterializeError, MaterializeResult } from '../../../src/core/sinks/types.js'
  */
 
 /**

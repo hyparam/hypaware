@@ -26,7 +26,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */

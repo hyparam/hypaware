@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { State, MultiselectState, SelectState, TextState, ConfirmState } from './keypress.js'
+ * @import { State, MultiselectState, SelectState, TextState, ConfirmState, MultiSelectOption, MultiSelectSpec, SelectSpecOption, SelectSpec, TextSpec, ConfirmSpec } from '../../../../src/core/cli/tui/types.js'
  */
 
 import process from 'node:process'
@@ -9,26 +9,6 @@ import process from 'node:process'
 import { run, PromptCancelledError } from './runtime.js'
 
 export { PromptCancelledError }
-
-/**
- * @typedef {Object} MultiSelectOption
- * @property {string|number} value
- * @property {string} label
- * @property {string} [summary]
- * @property {boolean} [checked]
- */
-
-/**
- * @typedef {Object} MultiSelectSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {MultiSelectOption[]} options
- * @property {{ min?: number, max?: number }} [bounds]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render an interactive multi-select prompt with checkbox toggling and
@@ -58,25 +38,6 @@ export async function multiselect(spec) {
   const final = /** @type {MultiselectState} */ (await run(initial, io))
   return final.options.filter((o) => o.checked).map((o) => o.value)
 }
-
-/**
- * @typedef {Object} SelectSpecOption
- * @property {string|number} value
- * @property {string} label
- * @property {string} [summary]
- */
-
-/**
- * @typedef {Object} SelectSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {SelectSpecOption[]} options
- * @property {string|number} [default]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render a single-select prompt and resolve to the selected `value`.
@@ -110,19 +71,6 @@ export async function select(spec) {
 }
 
 /**
- * @typedef {Object} TextSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {string} [default]
- * @property {((v: string) => string | null)} [validate]
- * @property {boolean} [mask]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
-
-/**
  * Render a single-line text prompt and resolve to the string the user
  * confirmed. When `default` is set and the user presses enter with an
  * empty buffer, the default is returned.
@@ -146,17 +94,6 @@ export async function text(spec) {
   const final = /** @type {TextState} */ (await run(initial, io))
   return final.value
 }
-
-/**
- * @typedef {Object} ConfirmSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {boolean} [default]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render a yes/no confirmation prompt and resolve to a boolean.

@@ -13,12 +13,7 @@
  */
 
 /**
- * @import { State, MultiselectState, SelectState, TextState, ConfirmState } from './keypress.js'
- */
-
-/**
- * @typedef {Object} RenderOpts
- * @property {boolean} color
+ * @import { State, MultiselectState, SelectState, TextState, ConfirmState, RenderOpts } from '../../../../src/core/cli/tui/types.js'
  */
 
 const ANSI = {
