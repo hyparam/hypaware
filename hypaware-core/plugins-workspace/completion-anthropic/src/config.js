@@ -8,7 +8,7 @@
  */
 
 /**
- * @import { CompletionConfigError, CompletionConfigResult } from './types.d.ts'
+ * @import { CompletionConfigError, CompletionConfigResult } from './types.js'
  */
 
 export const DEFAULT_BASE_URL = 'https://api.anthropic.com'

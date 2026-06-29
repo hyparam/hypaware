@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { S3ErrorKind } from './types.d.ts'
+ * @import { S3ErrorKind } from './types.js'
  */
 
 /**

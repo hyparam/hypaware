@@ -19,7 +19,7 @@ import {
 // @ref LLP 0011#returning-to-a-configured-install [tests]:
 
 /**
- * @import { HypAwareStatusReport } from '../../src/core/daemon/types.d.ts'
+ * @import { HypAwareStatusReport } from '../../src/core/daemon/types.js'
  */
 
 function makeBuf() {

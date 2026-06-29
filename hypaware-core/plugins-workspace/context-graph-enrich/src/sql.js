@@ -3,7 +3,7 @@
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 
 /**
- * @import { EnrichConfig, EnrichRuntime } from './types.d.ts'
+ * @import { EnrichConfig, EnrichRuntime } from './types.js'
  */
 
 /**

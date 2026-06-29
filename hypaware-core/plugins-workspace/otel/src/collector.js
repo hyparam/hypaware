@@ -11,8 +11,8 @@ import { flattenOtlpTraces } from './otlp/traces.js'
 import { flattenOtlpMetrics } from './otlp/metrics.js'
 
 /**
- * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { OtlpRequest } from './types.d.ts'
+ * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { OtlpRequest } from './types.js'
  */
 
 const FLATTENERS = {

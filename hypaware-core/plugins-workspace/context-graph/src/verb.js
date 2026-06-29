@@ -4,9 +4,9 @@ import { queryNeighbors } from './query.js'
 import { PLUGIN_NAME } from './datasets.js'
 
 /**
- * @import { VerbRegistration, VerbRenderControls, VerbRenderResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { Direction, TraversalOk, TraversalErr } from './types.d.ts'
+ * @import { VerbRegistration, VerbRenderControls, VerbRenderResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { Direction, TraversalOk, TraversalErr } from './types.js'
  */
 
 /** A graph this large strained the basic in-memory loader; nudge to the index path. */

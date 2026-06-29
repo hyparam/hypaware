@@ -8,7 +8,7 @@
  * rebuilding an activation context. Mirrors `@hypaware/ai-gateway`'s
  * `runtime.js` (saved-state-as-source-of-truth) convention.
  *
- * @import { ContractRegistry } from './types.d.ts'
+ * @import { ContractRegistry } from './types.js'
  */
 
 /** @type {{ registry: ContractRegistry } | null} */

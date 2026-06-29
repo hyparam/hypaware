@@ -18,7 +18,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
- * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

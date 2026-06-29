@@ -4,8 +4,8 @@ import { otelDatasetRegistration, PLUGIN_NAME } from './datasets.js'
 import { startOtelSource } from './source.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  */
 
 /**

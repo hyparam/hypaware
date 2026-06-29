@@ -12,8 +12,8 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
  */
 
 const EXPECTED_COLUMNS = [

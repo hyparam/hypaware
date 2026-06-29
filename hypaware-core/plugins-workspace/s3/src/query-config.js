@@ -14,8 +14,8 @@
 import { normalizePrefix } from './config.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { S3QuerySourceConfig, S3QuerySourceValidationError, S3QuerySourcesValidationResult } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { S3QuerySourceConfig, S3QuerySourceValidationError, S3QuerySourcesValidationResult } from './types.js'
  */
 
 const VALID_FORMATS = new Set(['parquet', 'iceberg'])

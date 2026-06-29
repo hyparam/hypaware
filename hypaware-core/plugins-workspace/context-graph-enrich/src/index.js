@@ -9,9 +9,9 @@ import { startProposeSource } from './propose.js'
 import { setEnrichRuntime } from './runtime.js'
 
 /**
- * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { ContextGraphCapabilityLike } from './types.d.ts'
+ * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { ContextGraphCapabilityLike } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/context-graph-enrich'

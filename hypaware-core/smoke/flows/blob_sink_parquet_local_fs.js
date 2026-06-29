@@ -18,7 +18,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -357,7 +357,7 @@ function fixturePluginSource() {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const DATASET = '${DATASET}'

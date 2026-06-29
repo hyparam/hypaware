@@ -21,7 +21,7 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
  * @import { ClientDescriptor } from '../../src/core/plugin_catalog.js'
- * @import { DaemonStatus } from '../../src/core/daemon/types.d.ts'
+ * @import { DaemonStatus } from '../../src/core/daemon/types.js'
  */
 
 test('writeStatusFile writes an atomic readable status snapshot', async () => {

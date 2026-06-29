@@ -5,7 +5,7 @@ import path from 'node:path'
 import { keys } from './graph-keys.js'
 
 /**
- * @import { ContractRule, GraphKit, GraphKeys } from './types.d.ts'
+ * @import { ContractRule, GraphKit, GraphKeys } from './types.js'
  */
 
 /** This connector's plugin name, stamped on the contract for provenance/dedup keys. */

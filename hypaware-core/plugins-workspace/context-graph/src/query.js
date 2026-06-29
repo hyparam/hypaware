@@ -5,9 +5,9 @@ import { executeQuerySql } from '../../../../src/core/query/sql.js'
 import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
 
 /**
- * @import { HypAwareV2Config, QueryRegistry } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { GraphNode, GraphEdge, Direction, Neighbor, TraversalOk, TraversalErr } from './types.d.ts'
+ * @import { HypAwareV2Config, QueryRegistry } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { GraphNode, GraphEdge, Direction, Neighbor, TraversalOk, TraversalErr } from './types.js'
  */
 
 /**

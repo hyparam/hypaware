@@ -17,7 +17,7 @@ import { projectGraph } from '../../hypaware-core/plugins-workspace/context-grap
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 
 /**
- * @import { Contract } from '../../hypaware-core/plugins-workspace/context-graph/src/types.d.ts'
+ * @import { Contract } from '../../hypaware-core/plugins-workspace/context-graph/src/types.js'
  */
 
 // End-to-end: a contributed contract, run by the engine, over a real seeded

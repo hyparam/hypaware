@@ -14,9 +14,9 @@
  */
 
 /**
- * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
- * @import { GascityRuntime } from './types.d.ts'
+ * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
+ * @import { GascityRuntime } from './types.js'
  */
 
 /** @type {GascityRuntime | null} */

@@ -9,8 +9,8 @@ import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 import { readState, updateState } from './state.js'
 
 /**
- * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.d.ts'
- * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.js'
+ * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const EXTRACTOR = 'enrich.t1'

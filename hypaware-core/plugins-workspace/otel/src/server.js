@@ -4,7 +4,7 @@ import http from 'node:http'
 import zlib from 'node:zlib'
 
 /**
- * @import { OtlpReceiveHandler, OtlpRequest, OtlpSignal } from './types.d.ts'
+ * @import { OtlpReceiveHandler, OtlpRequest, OtlpSignal } from './types.js'
  */
 
 const JSON_CT = { 'Content-Type': 'application/json' }

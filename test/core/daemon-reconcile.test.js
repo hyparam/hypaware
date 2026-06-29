@@ -11,7 +11,7 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 
 /**
- * @import { ActionReconciler, ReconcileInput } from '../../src/core/config/types.d.ts'
+ * @import { ActionReconciler, ReconcileInput } from '../../src/core/config/types.js'
  */
 
 /** Resolve on the next macrotask so a `void`-launched async pass can run. */

@@ -24,8 +24,8 @@ import {
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { ActivePlugin, BlobStore, JsonObject, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/types.d.ts'
+ * @import { ActivePlugin, BlobStore, JsonObject, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -284,7 +284,7 @@ function fixturePluginSource() {
 import { discoverCachePartitions } from ${JSON.stringify(partitionModuleUrl)}
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const DATASET = '${DATASET}'

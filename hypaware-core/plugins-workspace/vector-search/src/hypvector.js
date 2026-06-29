@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { HypvectorLoadResult } from './types.d.ts'
+ * @import { HypvectorLoadResult } from './types.js'
  */
 
 /** @type {HypvectorLoadResult | null} */

@@ -20,7 +20,7 @@ import {
 import { readState, writeState } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/state.js'
 
 /**
- * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
+ * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.js'
  */
 
 /** @returns {EnrichConfig} */

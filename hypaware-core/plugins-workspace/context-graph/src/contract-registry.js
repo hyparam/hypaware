@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * @import { Contract } from './types.d.ts'
- * @import { PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { Contract } from './types.js'
+ * @import { PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 /**

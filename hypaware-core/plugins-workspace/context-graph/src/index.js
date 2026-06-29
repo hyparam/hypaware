@@ -16,8 +16,8 @@ import {
 import { setGraphRuntime } from './runtime.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ContextGraphCapability } from './types.d.ts'
+ * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ContextGraphCapability } from './types.js'
  */
 
 /** The capability version source plugins / connectors require to contribute a contract. */

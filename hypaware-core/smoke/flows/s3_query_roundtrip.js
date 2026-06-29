@@ -21,8 +21,8 @@ import { executeQuerySql } from '../../../src/core/query/sql.js'
 import { rowsToColumnSources } from '../../plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/types.d.ts'
+ * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))

@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto'
  *
  * @ref LLP 0028#per-session-watermark [implements]:
  *
- * @import { CurateJob, EnrichStateFile, SessionMark } from './types.d.ts'
+ * @import { CurateJob, EnrichStateFile, SessionMark } from './types.js'
  */
 
 const STATE_FILE = 'enrich-state.json'

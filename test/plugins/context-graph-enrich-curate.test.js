@@ -15,7 +15,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/curate.js'
 
 /**
- * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
+ * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.js'
  */
 
 const AT = '2026-06-15T00:00:00.000Z'

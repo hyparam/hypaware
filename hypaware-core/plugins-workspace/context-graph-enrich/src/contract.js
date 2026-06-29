@@ -3,7 +3,7 @@
 import { COMMITTED_DATASET, PLUGIN_NAME } from './datasets.js'
 
 /**
- * @import { ContractLike, GraphKit } from './types.d.ts'
+ * @import { ContractLike, GraphKit } from './types.js'
  */
 
 export const PROJECTOR = 'enrich.t2'

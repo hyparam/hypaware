@@ -8,8 +8,8 @@ import { getCompletion, getEmbedder, getVector } from './runtime.js'
 import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 
 /**
- * @import { CurateDecision, EnrichRuntime } from './types.d.ts'
- * @import { CompletionRequest, CompletionResult, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CurateDecision, EnrichRuntime } from './types.js'
+ * @import { CompletionRequest, CompletionResult, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const CURATOR = 'enrich.t2'

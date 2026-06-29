@@ -11,9 +11,9 @@ import { loadHypvector } from './hypvector.js'
 import { computeShardStates, contentId, readShardMetas, REBUILD_STATES, shardPaths } from './shards.js'
 
 /**
- * @import { CachePartitionMeta, EmbedderCapability, HypError, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { RefreshBudget, RefreshReport, ShardMeta, ShardState, VectorIndexDeclaration } from './types.d.ts'
+ * @import { CachePartitionMeta, EmbedderCapability, HypError, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { RefreshBudget, RefreshReport, ShardMeta, ShardState, VectorIndexDeclaration } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/vector-search'

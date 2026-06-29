@@ -10,8 +10,8 @@ import {
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 
 /**
- * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SessionContextRecord, TranscriptEntry } from './types.d.ts'
+ * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  */
 
 /**

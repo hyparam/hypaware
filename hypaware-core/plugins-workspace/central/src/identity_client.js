@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.d.ts'
+ * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.js'
  */
 
 /**

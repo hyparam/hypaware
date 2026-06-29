@@ -18,7 +18,7 @@
 export const TRANSPORT_SYMBOL = Symbol.for('hypaware-gascity:transport')
 
 /**
- * @import { GascityCitySubscription, GascityFrame, GascityTransport } from './types.d.ts'
+ * @import { GascityCitySubscription, GascityFrame, GascityTransport } from './types.js'
  */
 
 /**

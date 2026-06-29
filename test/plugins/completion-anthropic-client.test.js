@@ -7,7 +7,7 @@ import { createAnthropicCompletion, parseAnthropicMessageResponse } from '../../
 import { validateAnthropicCompletionConfig } from '../../hypaware-core/plugins-workspace/completion-anthropic/src/config.js'
 
 /**
- * @import { AnthropicCompletionConfig, FetchLike } from '../../hypaware-core/plugins-workspace/completion-anthropic/src/types.d.ts'
+ * @import { AnthropicCompletionConfig, FetchLike } from '../../hypaware-core/plugins-workspace/completion-anthropic/src/types.js'
  */
 
 const SECRET = 'sk-ant-test-secret-value'

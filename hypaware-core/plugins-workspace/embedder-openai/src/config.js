@@ -8,7 +8,7 @@
  */
 
 /**
- * @import { EmbedderConfigError, EmbedderConfigResult } from './types.d.ts'
+ * @import { EmbedderConfigError, EmbedderConfigResult } from './types.js'
  */
 
 // @ref LLP 0024#embedder-speaks-openai-compatible-base_url-configurable [implements]: defaults cover OpenAI; base_url override covers proxies and localhost servers

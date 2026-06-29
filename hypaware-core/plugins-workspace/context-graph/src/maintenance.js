@@ -21,10 +21,10 @@ import { EDGE_COLUMNS, EDGE_DATASET, NODE_COLUMNS, NODE_DATASET } from './datase
 import { firstSeenTime, mergeRow } from './project.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AppendOptions, ExtendedQueryStorageService, PartitionCursor } from '../../../../src/core/cache/types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AppendOptions, ExtendedQueryStorageService, PartitionCursor } from '../../../../src/core/cache/types.js'
  * @import { PartitionSpec } from 'icebird/src/types.js'
- * @import { GraphRow, SkippedPartition } from './types.d.ts'
+ * @import { GraphRow, SkippedPartition } from './types.js'
  */
 
 /** Rows per append batch while rewriting; graph rows are skinny. */

@@ -9,7 +9,7 @@ import path from 'node:path'
 import { runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
 import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
-/** @import { BackfillFinaleResult } from '../../src/core/cli/types.d.ts' */
+/** @import { BackfillFinaleResult } from '../../src/core/cli/types.js' */
 
 /**
  * Fake picker backfill runner. Records every `run` call and returns a

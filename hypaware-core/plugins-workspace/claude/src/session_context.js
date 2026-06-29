@@ -21,7 +21,7 @@ export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
  */
 
 /**
- * @import { SessionContextRecord } from './types.d.ts'
+ * @import { SessionContextRecord } from './types.js'
  */
 
 /**

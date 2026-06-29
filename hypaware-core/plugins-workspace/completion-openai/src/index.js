@@ -4,7 +4,7 @@ import { createOpenAiCompletion } from './client.js'
 import { validateOpenAiCompletionConfig } from './config.js'
 
 /**
- * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/completion-openai'

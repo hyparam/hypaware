@@ -28,7 +28,7 @@ import readline from 'node:readline'
  */
 
 /**
- * @import { TranscriptEntry } from './types.d.ts'
+ * @import { TranscriptEntry } from './types.js'
  */
 
 /**

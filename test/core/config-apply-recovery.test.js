@@ -24,8 +24,8 @@ import {
 } from '../../src/core/config/apply.js'
 
 /**
- * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigApplyDeps } from '../../src/core/config/types.d.ts'
+ * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigApplyDeps } from '../../src/core/config/types.js'
  */
 
 const SEED_CONFIG = {

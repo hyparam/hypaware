@@ -6,7 +6,7 @@
  */
 
 /**
- * @import { VectorConfigError, VectorConfigResult, VectorIndexDeclaration } from './types.d.ts'
+ * @import { VectorConfigError, VectorConfigResult, VectorIndexDeclaration } from './types.js'
  */
 
 // Deliberately longer than cache maintenance's 60-minute default: index
