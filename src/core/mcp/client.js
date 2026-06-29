@@ -62,18 +62,14 @@ export function createHttpMcpClient(opts) {
 
     if (notify) {
       // A notification gets `202 Accepted` with no body.
-      if (!res.ok && res.status !== 202) throw new Error(`MCP ${method} failed: HTTP ${res.status}`)
+      if (!res.ok && res.status !== 202) {
+        if (isAuthStatus(res.status)) throw authRejectionError(res.status)
+        throw new Error(`MCP ${method} failed: HTTP ${res.status}`)
+      }
       return undefined
     }
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        // Tag the error so the attach path can recognize an auth rejection and
-        // attempt a single silent refresh + retry (LLP 0046 D5).
-        throw Object.assign(
-          new Error(`remote rejected the credential (HTTP ${res.status}) - re-run 'hyp remote login'`),
-          { authError: true, status: res.status },
-        )
-      }
+      if (isAuthStatus(res.status)) throw authRejectionError(res.status)
       const text = await safeText(res)
       throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`)
     }
@@ -106,6 +102,29 @@ export function createHttpMcpClient(opts) {
       return rpc('tools/list', {})
     },
   }
+}
+
+/**
+ * @param {number} status
+ * @returns {boolean}
+ */
+function isAuthStatus(status) {
+  return status === 401 || status === 403
+}
+
+/**
+ * Tag the error so the attach path can recognize an auth rejection and attempt
+ * a single silent refresh + retry.
+ *
+ * @param {number} status
+ * @returns {Error}
+ * @ref LLP 0046#d5 [implements]: live MCP 401/403 failures are tagged so attach can refresh once
+ */
+function authRejectionError(status) {
+  return Object.assign(
+    new Error(`remote rejected the credential (HTTP ${status}) - re-run 'hyp remote login'`),
+    { authError: true, status },
+  )
 }
 
 /**

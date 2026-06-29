@@ -25,7 +25,7 @@ const PAST = '2000-01-01T00:00:00Z'
  * `validJwt`; anything else gets a 401, simulating a stale/revoked access JWT.
  *
  * @param {TestContext} t
- * @param {{ validJwt: string, refreshTo?: string, refreshInvalid?: boolean }} opts
+ * @param {{ validJwt: string, refreshTo?: string, refreshInvalid?: boolean, notificationAuthStatus?: 401 | 403 }} opts
  */
 function stubServers(t, opts) {
   const original = globalThis.fetch
@@ -51,7 +51,10 @@ function stubServers(t, opts) {
     // MCP JSON-RPC.
     const req = JSON.parse(init.body)
     if (req.method === 'initialize') return reply({ jsonrpc: '2.0', id: req.id, result: { protocolVersion: '2025-06-18' } })
-    if (req.method === 'notifications/initialized') return { ok: true, status: 202, headers: { get: () => null }, text: async () => '' }
+    if (req.method === 'notifications/initialized') {
+      if (opts.notificationAuthStatus && init.headers.authorization !== `Bearer ${state.validJwt}`) return reply({}, opts.notificationAuthStatus)
+      return { ok: true, status: 202, headers: { get: () => null }, text: async () => '' }
+    }
     if (req.method === 'tools/call') {
       if (init.headers.authorization !== `Bearer ${state.validJwt}`) return reply({}, 401)
       return reply({ jsonrpc: '2.0', id: req.id, result: { structuredContent: { columns: ['n'], rows: [{ n: 7 }] }, isError: false } })
@@ -108,6 +111,25 @@ test('a 401 mid-flight triggers exactly one refresh + retry', async (t) => {
   assert.equal(code, 0)
   assert.deepEqual(JSON.parse(out.join('')), [{ n: 7 }])
   assert.equal(state.refreshCalls, 1)
+})
+
+test('a notification 401 or 403 during handshake triggers exactly one refresh + retry', async (t) => {
+  for (const status of /** @type {const} */ ([401, 403])) {
+    await t.test(`HTTP ${status}`, async (t) => {
+      const hypHome = await tmpHome()
+      const stateDir = path.join(hypHome, 'hypaware')
+      // Fresh-looking stored JWT, but the server accepts initialize and rejects
+      // the initialized notification before tools/call can run.
+      await writeSession(stateDir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-revoked', expiresAt: FUTURE, org: 'acme' })
+      const state = stubServers(t, { validJwt: 'jwt-fresh', refreshTo: 'jwt-fresh', notificationAuthStatus: status })
+
+      const { ctx, out } = ctxWith(hypHome)
+      const code = await cmd.run(['SELECT 1', '--remote', 'prod', '--format', 'json'], ctx)
+      assert.equal(code, 0)
+      assert.deepEqual(JSON.parse(out.join('')), [{ n: 7 }])
+      assert.equal(state.refreshCalls, 1)
+    })
+  }
 })
 
 test('a refresh that fails invalid_grant surfaces the re-login guidance', async (t) => {
