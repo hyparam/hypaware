@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
+import { unionSources, emptySource } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 
 /**
@@ -141,7 +142,7 @@ export async function createDataSource(partitions, ctx) {
     if (source && (source.numRows ?? 0) > 0) sources.push(source)
   }
 
-  if (sources.length === 0) return emptySource()
+  if (sources.length === 0) return emptySource(SCHEMA_COLUMN_NAMES)
   if (sources.length === 1) return withSchemaColumns(sources[0])
   return withSchemaColumns(unionSources(sources))
 }
@@ -184,54 +185,6 @@ function buildDiscoveryScope(scope) {
     ...(scope?.dates ? { dates: scope.dates } : {}),
     ...(scope?.from ? { from: scope.from } : {}),
     ...(scope?.to ? { to: scope.to } : {}),
-  }
-}
-
-/**
- * Merge multiple AsyncDataSources into a single union source.
- *
- * @param {AsyncDataSource[]} sources
- * @returns {AsyncDataSource}
- */
-function unionSources(sources) {
-  /** @type {Set<string>} */
-  const allColumns = new Set()
-  let totalRows = 0
-  for (const s of sources) {
-    for (const col of s.columns) allColumns.add(col)
-    totalRows += s.numRows ?? 0
-  }
-  return {
-    columns: Array.from(allColumns),
-    numRows: totalRows,
-    scan(options) {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {
-          for (const source of sources) {
-            const scan = source.scan(options)
-            for await (const row of scan.rows()) {
-              yield row
-            }
-          }
-        },
-      }
-    },
-  }
-}
-
-function emptySource() {
-  return {
-    columns: AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name),
-    numRows: 0,
-    scan() {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {},
-      }
-    },
   }
 }
 

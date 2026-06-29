@@ -198,6 +198,7 @@ swap is "duplicate persists", never data loss.
 `node` and `edge` register as kernel datasets ([LLP 0015](./0015-query-and-datasets.spec.md))
 backed directly by the cache's committed partitions — there is no live source;
 `refreshPartition` is a no-op. Queries over multiple committed partitions go
-through a union data source that concatenates per-partition scans; the union
-reports `appliedLimitOffset: false` and therefore must not forward
-limit/offset hints to its sub-sources, or offsets would be applied twice.
+through the shared `unionSources` helper
+([multi-partition union](./0015-query-and-datasets.spec.md#multi-partition-union)),
+which concatenates per-partition scans and strips limit/offset so offsets are
+never applied twice.
