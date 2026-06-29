@@ -107,10 +107,14 @@ export function createHttpMcpClient(opts) {
 }
 
 /**
+ * Whether an HTTP status is an auth rejection (401/403) eligible for a one-shot
+ * refresh + retry. The single home for "which statuses mean auth", shared with
+ * the stdio proxy's per-message forward.
+ *
  * @param {number} status
  * @returns {boolean}
  */
-function isAuthStatus(status) {
+export function isAuthStatus(status) {
   return status === 401 || status === 403
 }
 

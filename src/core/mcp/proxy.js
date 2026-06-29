@@ -6,7 +6,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
-import { parseRpcResponse } from './client.js'
+import { isAuthStatus, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
 
@@ -107,7 +107,7 @@ export async function runMcpProxy({ target, ctx }) {
       const op = async (token) => {
         try {
           const res = await forward(message, token)
-          return { authFailed: res.status === 401 || res.status === 403, value: { res } }
+          return { authFailed: isAuthStatus(res.status), value: { res } }
         } catch (err) {
           return { authFailed: false, value: { err } }
         }
