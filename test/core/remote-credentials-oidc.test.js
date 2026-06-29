@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -23,6 +24,27 @@ async function tmpState() {
 
 const FUTURE = '2999-01-01T00:00:00Z'
 const PAST = '2000-01-01T00:00:00Z'
+
+test('a second read with no change skips re-reading the file (parse cache)', async (t) => {
+  const dir = await tmpState()
+  await writeToken(dir, 'prod', 'sk-1') // creates the file and busts the cache
+  const spy = t.mock.method(fsp, 'readFile')
+  const isCredFile = (/** @type {any} */ c) => String(c.arguments[0]).endsWith('remote-credentials.json')
+
+  await readCredentials(dir) // miss: reads + parses once
+  await readCredentials(dir) // hit: served from cache, no read
+  assert.equal(spy.mock.calls.filter(isCredFile).length, 1)
+})
+
+test('a write is visible to the very next read (cache is busted on write)', async (t) => {
+  const dir = await tmpState()
+  await writeToken(dir, 'prod', 'sk-1')
+  assert.deepEqual((await readCredentials(dir)).prod, { kind: 'static', token: 'sk-1' })
+  // Overwrite through the module; the next read must see the new value, not the
+  // cached one.
+  await writeToken(dir, 'prod', 'sk-2')
+  assert.deepEqual((await readCredentials(dir)).prod, { kind: 'static', token: 'sk-2' })
+})
 
 test('isRefreshable is true only for an oidc record read from the file', () => {
   assert.equal(isRefreshable({ kind: 'oidc', source: 'file' }), true)

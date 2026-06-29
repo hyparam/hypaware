@@ -34,6 +34,17 @@ const CREDENTIALS_BASENAME = 'remote-credentials.json'
 const REFRESH_SKEW_MS = 60 * 1000
 
 /**
+ * Single-entry parse cache for the credential file. The stdio proxy resolves a
+ * token per forwarded message, so without this every message re-read and
+ * re-parsed the 0600 file. Keyed by path + mtime + size and busted on every
+ * write through this module, so a fresh-JWT message skips disk and parse while
+ * any real change (our own write, or an external edit) is still picked up.
+ *
+ * @type {{ path: string, mtimeMs: number, size: number, value: Record<string, unknown> } | null}
+ */
+let rawCache = null
+
+/**
  * Derive the identity base `<origin>/v1/identity` from a target's MCP URL
  * (LLP 0046 D6): identity is mounted at the same origin, so no second URL is
  * configured. Returns `null` for an unparseable URL. Shared by the login
@@ -106,9 +117,23 @@ export async function readCredentials(stateDir) {
  * @returns {Promise<Record<string, unknown>>}
  */
 async function readRawCredentials(stateDir) {
+  const p = remoteCredentialsPath(stateDir)
+  /** @type {import('node:fs').Stats} */
+  let stat
+  try {
+    stat = await fs.stat(p)
+  } catch (err) {
+    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return {}
+    throw err
+  }
+  // Cache hit: same file, unchanged since the last parse. Return a clone so a
+  // mutating caller (the write path) can't corrupt the cached value.
+  if (rawCache && rawCache.path === p && rawCache.mtimeMs === stat.mtimeMs && rawCache.size === stat.size) {
+    return structuredClone(rawCache.value)
+  }
   let raw
   try {
-    raw = await fs.readFile(remoteCredentialsPath(stateDir), 'utf8')
+    raw = await fs.readFile(p, 'utf8')
   } catch (err) {
     if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return {}
     throw err
@@ -118,12 +143,14 @@ async function readRawCredentials(stateDir) {
   try {
     parsed = JSON.parse(raw)
   } catch {
-    throw new Error(`remote credentials file is not valid JSON: ${remoteCredentialsPath(stateDir)}`)
+    throw new Error(`remote credentials file is not valid JSON: ${p}`)
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`remote credentials file must be a JSON object: ${remoteCredentialsPath(stateDir)}`)
+    throw new Error(`remote credentials file must be a JSON object: ${p}`)
   }
-  return /** @type {Record<string, unknown>} */ (parsed)
+  const value = /** @type {Record<string, unknown>} */ (parsed)
+  rawCache = { path: p, mtimeMs: stat.mtimeMs, size: stat.size, value }
+  return structuredClone(value)
 }
 
 /**
@@ -366,4 +393,7 @@ async function writeCredentials(stateDir, map) {
   await fs.rename(tmpPath, finalPath)
   // Re-assert the mode in case the file pre-existed with looser perms.
   await fs.chmod(finalPath, 0o600).catch(() => {})
+  // Invalidate the read cache: our own write must be visible to the next read
+  // regardless of mtime resolution.
+  rawCache = null
 }
