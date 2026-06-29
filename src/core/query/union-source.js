@@ -46,8 +46,8 @@ export function unionSources(sources) {
       // AsyncDataSource contract types it as required.
       const base = options ? { ...options, limit: undefined, offset: undefined } : options
       // Columns the predicate touches, computed once; null when `where` is
-      // present but references a construct we can't enumerate (a subquery),
-      // in which case it is never safe to push down.
+      // present but references a construct we can't safely push down (a
+      // qualified identifier, subquery, or other non-local construct).
       const predicateColumns = base && base.where ? whereColumns(base.where) : undefined
       return {
         appliedWhere: false,
@@ -88,9 +88,10 @@ function canPushWhere(source, predicateColumns) {
 
 /**
  * Collect the column names a `where` predicate references. Returns null when
- * the predicate contains a construct whose column set can't be enumerated
- * locally (a subquery or correlated reference) — the caller then declines to
- * push the predicate, which is always safe because the engine re-applies it.
+ * the predicate contains a construct whose column set can't be safely
+ * enumerated locally (a qualified identifier, subquery, or correlated
+ * reference) — the caller then declines to push the predicate, which is always
+ * safe because the engine re-applies it.
  *
  * @param {ExprNode | undefined} where
  * @returns {Set<string> | null}
@@ -105,6 +106,10 @@ function whereColumns(where) {
     if (!node || !enumerable) return
     switch (node.type) {
       case 'identifier':
+        if (node.prefix) {
+          enumerable = false
+          return
+        }
         names.add(node.name)
         return
       case 'literal':
