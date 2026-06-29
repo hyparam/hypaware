@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
 **Related:** LLP 0009, LLP 0011, LLP 0033, LLP 0046
-**Decided-by:** LLP 0046 — multi-tenant OIDC login on the client
+**Decided-by:** LLP 0046: multi-tenant OIDC login on the client
 
 > [LLP 0046](./0046-oidc-login-client.decision.md) grilled and decided the client-local
 > shape of chunk 2: a browser mode on `hyp remote login`, an ephemeral loopback

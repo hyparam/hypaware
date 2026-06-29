@@ -121,9 +121,9 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY
-  // Static path: an explicit token file, or a piped token unless --browser
-  // forces the interactive flow.
-  const useStatic = !!tokenFile || (stdinPiped && !forceBrowser)
+  // Static path: an explicit token file, or a piped token unless a browser
+  // mode flag forces the authorization-code flow.
+  const useStatic = !!tokenFile || (stdinPiped && !forceBrowser && !noBrowser)
 
   if (useStatic) {
     // --org only applies to the browser flow; say so rather than silently drop it.
@@ -183,8 +183,8 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
   }
   if (!token) {
     ctx.stderr.write('hyp remote login: empty token\n')
-    // Any non-TTY stdin (a wrapper, an IDE terminal, /dev/null) routes here
-    // even when no token was piped; point at the browser flow it bypassed.
+    // Non-TTY stdin without a browser-mode flag routes here even when no
+    // token was piped; point at the browser flow it bypassed.
     if (!tokenFile) {
       ctx.stderr.write('  (to sign in with a browser instead, re-run with --browser)\n')
     }

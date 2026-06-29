@@ -6,7 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
 **Related:** LLP 0033, LLP 0046, LLP 0047
-**Generated-by:** LLP 0047 — multi-tenant OIDC login on the client, implementation design
+**Generated-by:** LLP 0047: multi-tenant OIDC login on the client, implementation design
 
 > [LLP 0047](./0047-oidc-login-client.design.md) named the modules and the wire
 > contract. This plan turns them into a task graph of independently-mergeable PRs, with

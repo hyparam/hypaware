@@ -76,6 +76,23 @@ test('--no-browser passes noBrowser through to the flow', async () => {
   assert.equal(seen.noBrowser, true)
 })
 
+test('--no-browser still uses browser mode when stdin is non-TTY', async () => {
+  const hypHome = await tmpHome()
+  const stdin = {
+    isTTY: false,
+    async *[Symbol.asyncIterator]() { /* no chunks */ },
+  }
+  const { ctx } = await makeCtx({ hypHome, stdin })
+  /** @type {any} */ let seen
+  const login = /** @type {any} */ (async (/** @type {any} */ args) => {
+    seen = args
+    return { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }
+  })
+  const code = await runRemoteLogin(['prod', '--no-browser'], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(seen.noBrowser, true)
+})
+
 test('a callback error maps to a clear org-selection message', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })
