@@ -285,6 +285,13 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
   } catch (err) {
     const callbackError = /** @type {any} */ (err)?.callbackError
     ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
+    // A server-surfaced callback error (org selection, membership) is already
+    // actionable. A local failure - most importantly a timeout, which is what a
+    // headless box hits when the opener silently fails - is not, so point at the
+    // headless escape hatches rather than leaving the user stuck (LLP 0046 D8).
+    if (!callbackError) {
+      ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
+    }
     return 1
   }
 }

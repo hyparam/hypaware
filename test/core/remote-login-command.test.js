@@ -104,6 +104,30 @@ test('a callback error maps to a clear org-selection message', async () => {
   assert.match(err.join(''), /re-run with --org <name>/)
 })
 
+test('a browser login timeout points at the headless escape hatches', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  // A local failure with no server callbackError (e.g. the loopback timeout a
+  // headless box hits when the opener silently fails).
+  const login = /** @type {any} */ (async () => {
+    throw new Error('timed out waiting for the browser login to complete')
+  })
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 1)
+  assert.match(err.join(''), /timed out/)
+  assert.match(err.join(''), /--token-file <path> or pipe it on stdin/)
+})
+
+test('a server callback error does not append the headless hint (it is already actionable)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => {
+    throw Object.assign(new Error('x'), { callbackError: 'org_selection_required' })
+  })
+  await runRemoteLogin(['prod'], ctx, { login })
+  assert.doesNotMatch(err.join(''), /--token-file <path> or pipe it on stdin/)
+})
+
 test('no_membership maps to its own message', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })
