@@ -138,7 +138,9 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   // Peek stdin to tell a real token apart from an empty pipe: a non-empty value
   // is stored statically (never silently discarded), while an empty pipe falls
   // through to the browser flow (which is what `--no-browser` is for).
-  if (stdinPiped && noBrowser && !forceBrowser && !tokenFile) {
+  // `!useStatic` already guarantees no `--token-file` here (it forces the static
+  // path), so this only needs the browser-mode + piped-stdin conditions.
+  if (stdinPiped && noBrowser && !forceBrowser) {
     /** @type {string} */
     let piped
     try {
