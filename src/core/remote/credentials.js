@@ -84,6 +84,28 @@ export function remoteTokenEnvVar(target) {
  * @ref LLP 0033#credentials [constrained-by]: single 0600 per-target store, secrets never in config
  */
 export async function readCredentials(stateDir) {
+  const parsed = await readRawCredentials(stateDir)
+  /** @type {Record<string, RemoteCredentialRecord>} */
+  const out = {}
+  for (const [target, entry] of Object.entries(parsed)) {
+    const record = normalizeRecord(entry)
+    if (record) out[target] = record
+  }
+  return out
+}
+
+/**
+ * Read the credential file as its raw per-target object, **without** dropping
+ * records that don't normalize. The write path uses this so an unrelated login
+ * or remove rewrites the store without deleting a sibling record it could not
+ * interpret (a hand-edited entry, or one written by a newer version). Returns
+ * `{}` when the file is absent; throws on a corrupt file, same as
+ * {@link readCredentials}.
+ *
+ * @param {string} stateDir
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function readRawCredentials(stateDir) {
   let raw
   try {
     raw = await fs.readFile(remoteCredentialsPath(stateDir), 'utf8')
@@ -101,13 +123,7 @@ export async function readCredentials(stateDir) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`remote credentials file must be a JSON object: ${remoteCredentialsPath(stateDir)}`)
   }
-  /** @type {Record<string, RemoteCredentialRecord>} */
-  const out = {}
-  for (const [target, entry] of Object.entries(/** @type {Record<string, unknown>} */ (parsed))) {
-    const record = normalizeRecord(entry)
-    if (record) out[target] = record
-  }
-  return out
+  return /** @type {Record<string, unknown>} */ (parsed)
 }
 
 /**
@@ -152,7 +168,7 @@ function normalizeRecord(entry) {
  */
 export async function writeToken(stateDir, target, token) {
   await fs.mkdir(stateDir, { recursive: true })
-  const current = await readCredentials(stateDir)
+  const current = await readRawCredentials(stateDir)
   current[target] = { kind: 'static', token }
   await writeCredentials(stateDir, current)
 }
@@ -169,7 +185,7 @@ export async function writeToken(stateDir, target, token) {
  */
 export async function writeSession(stateDir, target, session) {
   await fs.mkdir(stateDir, { recursive: true })
-  const current = await readCredentials(stateDir)
+  const current = await readRawCredentials(stateDir)
   current[target] = {
     kind: 'oidc',
     refreshToken: session.refreshToken,
@@ -189,7 +205,9 @@ export async function writeSession(stateDir, target, session) {
  * @returns {Promise<boolean>}
  */
 export async function removeToken(stateDir, target) {
-  const current = await readCredentials(stateDir)
+  // Operate on the raw file so a record we can't normalize is still removable,
+  // and so removing one target never drops an unrelated sibling.
+  const current = await readRawCredentials(stateDir)
   if (!Object.prototype.hasOwnProperty.call(current, target)) return false
   delete current[target]
   await writeCredentials(stateDir, current)
@@ -323,7 +341,7 @@ function noTokenError(target, envName) {
 
 /**
  * @param {string} stateDir
- * @param {Record<string, RemoteCredentialRecord>} map
+ * @param {Record<string, unknown>} map
  * @returns {Promise<void>}
  */
 async function writeCredentials(stateDir, map) {

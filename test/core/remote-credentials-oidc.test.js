@@ -85,6 +85,34 @@ test('writeToken now stamps kind: static', async () => {
   assert.deepEqual(creds.prod, { kind: 'static', token: 'sk-1' })
 })
 
+test('writing one target preserves a sibling record that does not normalize', async () => {
+  const dir = await tmpState()
+  // A valid sibling we understand, plus a record from a hypothetical newer
+  // version that normalizeRecord would drop on read.
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({
+    future: { kind: 'webauthn', handle: 'abc' },
+  }))
+  await writeToken(dir, 'prod', 'sk-1')
+  // The future record must still be on disk after an unrelated login.
+  const raw = JSON.parse(await fs.readFile(remoteCredentialsPath(dir), 'utf8'))
+  assert.deepEqual(raw.future, { kind: 'webauthn', handle: 'abc' })
+  assert.deepEqual(raw.prod, { kind: 'static', token: 'sk-1' })
+})
+
+test('removeToken drops a record that does not normalize and keeps the rest', async () => {
+  const dir = await tmpState()
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({
+    ghost: { kind: 'webauthn', handle: 'abc' },
+    keep: { kind: 'static', token: 'sk-keep' },
+  }))
+  // removeToken must find and remove the un-normalizable record...
+  assert.equal(await removeToken(dir, 'ghost'), true)
+  const raw = JSON.parse(await fs.readFile(remoteCredentialsPath(dir), 'utf8'))
+  assert.equal(raw.ghost, undefined)
+  // ...without disturbing the sibling.
+  assert.deepEqual(raw.keep, { kind: 'static', token: 'sk-keep' })
+})
+
 test('removeToken clears an oidc record too', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: FUTURE, org: 'acme' })
