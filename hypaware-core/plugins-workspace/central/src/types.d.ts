@@ -21,6 +21,19 @@ export interface PersistedIdentity {
   jwt: string
   expires_at: number
   gateway_id: string
+  /**
+   * Central base URL that minted this identity. Set since the
+   * re-enrollment guard landed; absent on identities written by older
+   * builds (treated as a mint mismatch when a bootstrap token is set).
+   */
+  central_url?: string
+  /**
+   * SHA-256 fingerprint of the bootstrap token that minted this
+   * identity (never the raw token). Lets `acquire()` detect a re-join
+   * that swapped the token and re-bootstrap instead of reusing a stale
+   * gateway identity against a new tenant/server.
+   */
+  bootstrap_token_fp?: string
 }
 
 /** Request body for `POST /v1/identity/bootstrap`. */
