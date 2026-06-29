@@ -85,6 +85,37 @@ test('proxy refreshes an oidc session on a live 401 and retries (no longer dies 
   assert.equal(/** @type {any} */ (creds.prod).accessJwt, validJwt)
 })
 
+test('a stale JWT at startup refreshes once (lazily on the first message), not twice', async (t) => {
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+
+  const hypHome = await tmpHome()
+  const stateDir = path.join(hypHome, 'hypaware')
+  // Already-expired cached JWT: a probe that refreshed would do it once, then
+  // the first message again. The probe is a presence check now, so exactly one
+  // refresh happens.
+  await writeSession(stateDir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: '2000-01-01T00:00:00Z', org: 'acme' })
+
+  let refreshCalls = 0
+  const validJwt = 'jwt-new'
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url, /** @type {any} */ init) => {
+    if (url === TOKEN_URL) {
+      refreshCalls += 1
+      return reply({ access_jwt: validJwt, expires_at: FUTURE, org: 'acme' })
+    }
+    const body = JSON.parse(init.body)
+    if (init.headers.authorization !== `Bearer ${validJwt}`) return reply({ jsonrpc: '2.0', id: body.id }, 401)
+    return reply({ jsonrpc: '2.0', id: body.id, result: { ok: true } })
+  })
+
+  const { ctx, out } = makeCtx({ hypHome, lines: [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x' } }] })
+  const code = await runMcpProxy({ target: 'prod', ctx })
+
+  assert.equal(code, 0)
+  assert.equal(refreshCalls, 1)
+  assert.match(out.join(''), /"ok":\s*true/)
+})
+
 test('proxy surfaces re-login guidance when the refresh is rejected (invalid_grant)', async (t) => {
   const original = globalThis.fetch
   t.after(() => { globalThis.fetch = original })

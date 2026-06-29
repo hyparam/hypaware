@@ -4,7 +4,7 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { deriveIdentityBase, resolveAccessJwt } from '../remote/credentials.js'
+import { deriveIdentityBase, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { InvalidGrantError } from '../remote/identity_client.js'
 import { parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
@@ -39,11 +39,14 @@ export async function runMcpProxy({ target, ctx }) {
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const identityBase = deriveIdentityBase(entry.url) ?? undefined
-  // Fail fast (exit 2) if there is no usable credential at all. Resolve again
-  // per message below so an OIDC access JWT that expires mid-session refreshes,
-  // rather than the whole long-lived proxy holding one short-lived JWT.
+  // Fail fast (exit 2) if there is no usable credential at all. This is a
+  // presence check only - resolveToken never refreshes - so a near-expiry OIDC
+  // JWT does not trigger a network refresh here that the first handleMessage
+  // would immediately repeat, and a transient refresh blip can't abort a proxy
+  // that would otherwise start. The per-message resolveAccessJwt below does the
+  // session-aware refresh.
   try {
-    const probe = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+    const probe = await resolveToken({ target, env: ctx.env, stateDir })
     if (!probe.ok) {
       ctx.stderr.write(`hyp mcp: ${probe.error}\n`)
       return 2
