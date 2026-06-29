@@ -1,7 +1,7 @@
 # LLP 0047: Multi-tenant OIDC login on the client, implementation design
 
 **Type:** design
-**Status:** Draft
+**Status:** Accepted
 **Systems:** CLI, Onboarding, Query, MCP, Config
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
