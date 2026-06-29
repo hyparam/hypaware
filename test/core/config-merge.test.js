@@ -89,7 +89,7 @@ test('query is local-only: the local block wins, a central query block is ignore
 // ---- resolveLayeredConfig: the validation-driven drop pass (LLP 0031
 // §central-layer-is-sacrosanct). A fake validator keeps these unit-level:
 // "two encoders enabled together is a capability tie".
-// @ref LLP 0031#central-layer-is-sacrosanct [tests]
+// @ref LLP 0031#central-layer-is-sacrosanct [tests]:
 
 /** @param {any} cfg */
 function fakeValidate(cfg) {

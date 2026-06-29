@@ -13,7 +13,7 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 // The merge wiring lives in boot.js; activate nothing (`{ activate: [] }`)
 // so these assertions stay about the two-layer resolution, not plugin
 // activation. boot.config is the effective merge regardless of profile.
-// @ref LLP 0031#two-layers-merged-at-boot [tests]
+// @ref LLP 0031#two-layers-merged-at-boot [tests]:
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-layered-'))

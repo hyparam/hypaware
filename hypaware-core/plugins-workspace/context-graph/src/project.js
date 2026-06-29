@@ -28,7 +28,7 @@ import {
  *
  * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean }} args
  * @returns {Promise<{ nodes: number, edges: number, nodesWritten: number, edgesWritten: number }>}
- * @ref LLP 0023#contract-contribution [implements] - the engine runs every registered contract; adding a source is contributing one
+ * @ref LLP 0023#contract-contribution [implements]: the engine runs every registered contract; adding a source is contributing one
  */
 export async function projectGraph({ query, storage, contracts, config, dryRun = false }) {
   return withSpan(
@@ -116,7 +116,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
  * @param {ExtendedQueryStorageService} storage
  * @param {HypAwareV2Config | undefined} config
  * @returns {Promise<GraphRow[]>}
- * @ref LLP 0023#pre-write-dedup [implements] - only a missing dataset is benign; real failures abort instead of duplicating
+ * @ref LLP 0023#pre-write-dedup [implements]: only a missing dataset is benign; real failures abort instead of duplicating
  */
 async function dedupExisting(rows, idCol, dataset, query, storage, config) {
   if (rows.length === 0) return rows
@@ -178,7 +178,7 @@ const propsProvenance = new WeakMap()
  *
  * @param {GraphRow} existing
  * @param {GraphRow} incoming
- * @ref LLP 0023#merge-policy [implements] - order-independent merge shared by projection and compaction
+ * @ref LLP 0023#merge-policy [implements]: order-independent merge shared by projection and compaction
  */
 export function mergeRow(existing, incoming) {
   const existingTime = firstSeenTime(existing.first_seen)

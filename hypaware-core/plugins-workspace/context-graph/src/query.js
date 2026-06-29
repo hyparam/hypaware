@@ -21,7 +21,7 @@ import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
  * @param {string} token
  * @param {string | undefined} type
  * @returns {{ ok: true, node: GraphNode } | TraversalErr}
- * @ref LLP 0026#seed-resolution [implements] - node_id → natural_key → label, ambiguity lists candidates
+ * @ref LLP 0026#seed-resolution [implements]: node_id → natural_key → label, ambiguity lists candidates
  */
 export function resolveSeed(nodes, token, type) {
   const ofType = (n) => !type || n.node_type === type
@@ -56,7 +56,7 @@ export function resolveSeed(nodes, token, type) {
  *
  * @param {{ nodes: GraphNode[], edges: GraphEdge[], seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string }} args
  * @returns {TraversalOk | TraversalErr}
- * @ref LLP 0026#thin-in-memory-traversal [implements] - whole-graph-in-RAM BFS is the deliberate basic tier; persisted index is the deferred fast path
+ * @ref LLP 0026#thin-in-memory-traversal [implements]: whole-graph-in-RAM BFS is the deliberate basic tier; persisted index is the deferred fast path
  */
 export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direction = 'both', limit = Infinity, type }) {
   const resolved = resolveSeed(nodes, seed, type)
@@ -122,7 +122,7 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
  *
  * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config, seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string }} args
  * @returns {Promise<TraversalOk | TraversalErr>}
- * @ref LLP 0026#query-reads-the-published-surface [implements] - reads node/edge via the registry, not project.js state
+ * @ref LLP 0026#query-reads-the-published-surface [implements]: reads node/edge via the registry, not project.js state
  */
 export async function queryNeighbors({ query, storage, config, seed, depth, edgeTypes, direction, limit, type }) {
   const edgeRows = await loadRows(query, storage, config, `SELECT src_id, dst_id, edge_type FROM ${EDGE_DATASET}`)

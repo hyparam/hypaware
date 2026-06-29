@@ -31,7 +31,7 @@ import { readState, updateState } from './state.js'
  * Either driver falls back to the synchronous {@link runCurateTick} when the
  * completion provider exposes no `batch` surface.
  *
- * @ref LLP 0028#two-regimes [implements]
+ * @ref LLP 0028#two-regimes [implements]:
  *
  * @import { EnrichRuntime } from './types.d.ts'
  * @import { CompletionBatch, CompletionBatchStatus, CompletionRequest, SourceStatus, StartedSource, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -69,7 +69,7 @@ export async function runCurateBatch(runtime, opts = {}) {
   // (re-billed) batch. A daemon-owned job belongs to the ongoing regime's
   // submit-and-collect; this one shared slot can't hold two jobs, so overwriting
   // it would orphan the daemon's already-billed batch. Refuse instead of clobber.
-  // @ref LLP 0028#two-regimes [constrained-by] - shared curate_job slot ownership
+  // @ref LLP 0028#two-regimes [constrained-by]: shared curate_job slot ownership
   const inflight = readState(runtime.stateDir).curate_job
   if (inflight) {
     if (inflight.source !== 'backfill') {

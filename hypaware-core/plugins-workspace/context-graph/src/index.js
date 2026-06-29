@@ -48,7 +48,7 @@ const CAPABILITY_VERSION = '1.0.0'
  * snapshot/commit hook exists, and eventual freshness is acceptable).
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0023#on-demand-projection [implements] - command-only projection keeps the plugin out of the daemon loop
+ * @ref LLP 0023#on-demand-projection [implements]: command-only projection keeps the plugin out of the daemon loop
  */
 export async function activate(ctx) {
   // The contract registry source plugins contribute into, exposed via the

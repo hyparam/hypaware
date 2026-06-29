@@ -12,7 +12,7 @@
  * unit-tested through an injectable `fetchImpl`; integration-test it once
  * the server lands.
  *
- * @ref LLP 0034#pluggable-transport [implements] the HTTP adapter the fleet server needs, reused on the client side
+ * @ref LLP 0034#pluggable-transport [implements]: the HTTP adapter the fleet server needs, reused on the client side
  */
 
 const PROTOCOL_VERSION = '2025-06-18'

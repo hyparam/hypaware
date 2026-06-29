@@ -146,7 +146,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
     if (existingSpec) {
       validatePartitionSpecStability(declaration, existingSpec, effectiveSchema)
     }
-    // @ref LLP 0029#in-place-evolution [implements] - the single switch point.
+    // @ref LLP 0029#in-place-evolution [implements]: the single switch point.
     // effectiveSchema is the merged write schema; if it adds nullable columns
     // or widens an existing column required->nullable that the table's current
     // schema doesn't reflect yet, evolve the table in place (add-schema +
@@ -196,7 +196,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
  * required fields without defaults) as a second guard behind
  * `mergeFieldIdsFromTable`.
  *
- * @ref LLP 0029#reachable-path [implements] - fileCatalogCommit is the reachable
+ * @ref LLP 0029#reachable-path [implements]: fileCatalogCommit is the reachable
  *   icebird primitive; icebergTransaction's tx has no schema method (icebird#25).
  * @param {object} options
  * @param {Catalog} options.catalog

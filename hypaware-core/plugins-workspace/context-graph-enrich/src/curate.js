@@ -25,7 +25,7 @@ const MAX_SOURCE_CHARS = 8_000
  * {@link curateRequestForCluster} / {@link routeClusterDecisions} pieces but
  * submit through the Batch API instead (see batch.js).
  *
- * @ref LLP 0028#curate-clustering [implements]
+ * @ref LLP 0028#curate-clustering [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ deadlineMs?: number, signal?: AbortSignal }} [opts]
@@ -98,7 +98,7 @@ export async function runCurateTick(runtime, opts = {}) {
  * mutating the append-only prospect table: out-of-window prospects stay pending
  * for a later, separately-scoped run rather than being deleted or skip-drained.
  *
- * @ref LLP 0028#curate-clustering [constrained-by]
+ * @ref LLP 0028#curate-clustering [constrained-by]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ anchorKeys?: Set<string> }} [opts]
@@ -567,7 +567,7 @@ async function safeDeref(runtime, ids) {
  * returned **pending** (`resolution: null`, no commit): it stays in the queue for
  * a later, better-specified pass rather than mis-routing. Pure: no I/O.
  *
- * @ref LLP 0028#committed-only-projection [implements]
+ * @ref LLP 0028#committed-only-projection [implements]:
  *
  * @param {Record<string, unknown>} prospect
  * @param {{ type: string, label: string, summary: string, confidence: number | undefined }} view

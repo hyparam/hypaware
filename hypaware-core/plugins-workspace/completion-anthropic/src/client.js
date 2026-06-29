@@ -351,7 +351,7 @@ export function parseAnthropicMessageResponse(payload, ctx) {
  * Returns the initial job status; the caller polls and collects. Any `betas`
  * across the requests are unioned onto the submit's `anthropic-beta` header.
  *
- * @ref LLP 0028#two-regimes [implements]
+ * @ref LLP 0028#two-regimes [implements]:
  *
  * @param {{ requests: CompletionBatchRequest[], config: AnthropicCompletionConfig, env: NodeJS.ProcessEnv, fetchImpl: FetchLike, batchEndpoint: string, log: PluginLogger, signal: AbortSignal | undefined }} args
  * @returns {Promise<CompletionBatchStatus>}

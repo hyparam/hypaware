@@ -195,7 +195,7 @@ async function maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpire
   }
 
   if (!opts.expireOnly) {
-    // @ref LLP 0027#re-settle-sweep - a partition holding a committed
+    // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
     // never collapsed; force a rewrite so the sweep can re-settle it even
     // when the file-count heuristics say compaction isn't due. Gate that
@@ -255,7 +255,7 @@ async function maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snaps
   }
 
   if (!opts.expireOnly) {
-    // @ref LLP 0027#re-settle-sweep - same backstop on the legacy layout,
+    // @ref LLP 0027#re-settle-sweep: same backstop on the legacy layout,
     // with the same new-data gate so an unmatchable fallback does not force
     // a rewrite every tick.
     const hasResettle = settle
@@ -551,7 +551,7 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
         nullable: true,
       }))
     }
-    // @ref LLP 0027#re-settle-sweep - hold provisional fallback rows back.
+    // @ref LLP 0027#re-settle-sweep: hold provisional fallback rows back.
     // Emit only after the sweep upgrades and de-twins them at end-of-scan.
     if (settle && isGatewayFallbackRow(row)) {
       fallbackBuffer.push(row)
@@ -695,7 +695,7 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
         nullable: true,
       }))
     }
-    // @ref LLP 0027#re-settle-sweep - same backstop on the legacy layout.
+    // @ref LLP 0027#re-settle-sweep: same backstop on the legacy layout.
     if (settle && isGatewayFallbackRow(row)) {
       fallbackBuffer.push(row)
       continue
@@ -760,7 +760,7 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
  * dataset, so every existing maintenance path (CLI, tests) stays a pure
  * compaction with no behavioural change.
  *
- * @ref LLP 0027#re-settle-sweep - compaction-time settle became acceptable
+ * @ref LLP 0027#re-settle-sweep: compaction-time settle became acceptable
  * once the registry/storage handle is threaded in (LLP 0027 option B's
  * blocker).
  * @param {MaintenanceOptions} opts
@@ -803,7 +803,7 @@ function resolveSettleContext(opts, dataset) {
  * collides is dropped, and a second pass is a no-op because the survivor
  * is no longer a fallback.
  *
- * @ref LLP 0027#re-settle-sweep - reuse the flush enricher. De-twin within the partition rewrite.
+ * @ref LLP 0027#re-settle-sweep: reuse the flush enricher. De-twin within the partition rewrite.
  * @param {Record<string, unknown>[]} fallbackRows
  * @param {SettleContext} settle
  * @param {Set<unknown>} emittedPartIds  part_ids already emitted from this partition rewrite
@@ -868,7 +868,7 @@ function rowPartId(row) {
  * `attributes` column and short-circuits on the first hit, so the cost is
  * bounded and paid only for settle-eligible datasets.
  *
- * @ref LLP 0027#re-settle-sweep - gate the sweep on a cheap fallback scan.
+ * @ref LLP 0027#re-settle-sweep: gate the sweep on a cheap fallback scan.
  * @param {string} tableDir
  * @returns {Promise<boolean>}
  */

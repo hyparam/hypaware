@@ -135,7 +135,7 @@ export function createBackfillHandler(opts = {}) {
         // daemon's hypHome upstream in the reconcile input): NOT
         // `process.env`, which can name a different HYP_HOME on the
         // direct-`runDaemon`/hermetic-smoke path and import into the wrong
-        // cache. @ref LLP 0041#run-once-flow-backfill-handler [constrained-by]
+        // cache. @ref LLP 0041#run-once-flow-backfill-handler [constrained-by]:
         result = await spawn({ args, env: ctx.env })
       } catch (err) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }

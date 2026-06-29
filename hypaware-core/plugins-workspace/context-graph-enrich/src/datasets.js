@@ -197,7 +197,7 @@ async function createDataSource(partitions, ctx, dataset) {
  * lets propose filter against already-persisted ids for cross-tick idempotency
  * (see propose.js `filterNewProspects`).
  *
- * @ref LLP 0028#idempotent-prospects [implements]
+ * @ref LLP 0028#idempotent-prospects [implements]:
  *
  * @param {{ extractor: string, extractorVersion: number, anchorKey: string, candidateKey: string }} parts
  * @returns {string}

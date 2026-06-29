@@ -48,7 +48,7 @@ const PLUGIN_VERSION = '1.0.0'
  * specifically so it cannot be set from JSON config files.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] one blob-store for parquet or iceberg bytes, format stays separable
+ * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements]: one blob-store for parquet or iceberg bytes, format stays separable
  */
 export async function activate(ctx) {
   const blobStore = await resolveBlobStore(ctx)

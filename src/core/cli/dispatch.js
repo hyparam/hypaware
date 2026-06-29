@@ -344,7 +344,7 @@ async function runCommandByName(name, rest, ctx) {
  * @param {ReturnType<typeof createCommandRegistry>} registry
  * @param {string[]} argv
  * @returns {{ prefix: string, subcommands: string[], unknownSub: string | undefined } | undefined}
- * @ref LLP 0009#core-owns-dispatch core renders group help; plugins only register the leaf subcommands
+ * @ref LLP 0009#core-owns-dispatch: core renders group help; plugins only register the leaf subcommands
  */
 function resolveGroupHelp(registry, argv) {
   /** @type {string[]} */
@@ -555,7 +555,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
  * @returns {Promise<{ name: string, summary: string }[]>}
- * @ref LLP 0005#declarative [implements] manifest lists commands before any plugin code is loaded
+ * @ref LLP 0005#declarative [implements]: manifest lists commands before any plugin code is loaded
  */
 async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }) {
   try {

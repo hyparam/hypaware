@@ -21,7 +21,7 @@ export { nodeId, edgeId }
  *
  * @param {{ sourceDataset: string, projector: string, projectorVersion: number }} meta
  * @returns {{ buildNode: (spec: NodeSpec) => Record<string, unknown>, buildEdge: (spec: EdgeSpec) => Record<string, unknown> }}
- * @ref LLP 0023#contract-contribution [implements] - central id+provenance kit; sources own only their rules
+ * @ref LLP 0023#contract-contribution [implements]: central id+provenance kit; sources own only their rules
  */
 export function makeRowBuilders({ sourceDataset, projector, projectorVersion }) {
   /**

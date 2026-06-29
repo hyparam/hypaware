@@ -27,7 +27,7 @@ import { serveStdio } from './stdio.js'
  *
  * @param {{ target: string, ctx: CommandRunContext }} args
  * @returns {Promise<number>}
- * @ref LLP 0034#proxy-fallback [implements] stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
+ * @ref LLP 0034#proxy-fallback [implements]: stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
  */
 export async function runMcpProxy({ target, ctx }) {
   const remotes = ctx.config?.query?.remotes ?? {}

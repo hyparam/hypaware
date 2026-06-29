@@ -28,7 +28,7 @@
  *
  * @param {AsyncDataSource[]} sources
  * @returns {AsyncDataSource}
- * @ref LLP 0015#multi-partition-union [constrained-by] - the union must not forward limit/offset or offsets apply twice, nor push a filter a partition can't satisfy
+ * @ref LLP 0015#multi-partition-union [constrained-by]: the union must not forward limit/offset or offsets apply twice, nor push a filter a partition can't satisfy
  */
 export function unionSources(sources) {
   /** @type {Set<string>} */

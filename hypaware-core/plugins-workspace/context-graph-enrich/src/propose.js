@@ -31,7 +31,7 @@ const EXTRACTOR_VERSION = 1
  * {@link prospectId}, pre-write-filtered against the persisted set (idempotent
  * across ticks/regimes), appended, and the session's watermark is advanced.
  *
- * @ref LLP 0028#two-tiers-one-pipeline [implements]
+ * @ref LLP 0028#two-tiers-one-pipeline [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ regime?: 'ongoing' | 'backfill', sessionIds?: string[], deadlineMs?: number, nowMs?: number, signal?: AbortSignal }} [opts]
@@ -145,7 +145,7 @@ export async function runProposeTick(runtime, opts = {}) {
  * cap-flooding). {@link runProposeTick} keeps a precise re-check as a TOCTOU
  * guard against rows landing between the two queries.
  *
- * @ref LLP 0028#two-regimes [implements]
+ * @ref LLP 0028#two-regimes [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {{ regime: 'ongoing' | 'backfill', nowMs: number, marks: Record<string, SessionMark> }} args
@@ -236,7 +236,7 @@ export function buildSessionPartsQuery(cfg, sessionId) {
  * so re-runs over the same session yield the same transcript (hence the same
  * prospect ids).
  *
- * @ref LLP 0028#two-tiers-one-pipeline [implements]
+ * @ref LLP 0028#two-tiers-one-pipeline [implements]:
  *
  * @param {Record<string, unknown>[]} rows
  * @param {EnrichConfig} cfg
@@ -350,7 +350,7 @@ export function collectProspectRows(perSession, cfg, createdAt) {
  * nothing new. Mirrors the graph projector's pre-write dedup (read the committed
  * id set, filter before append; only a missing dataset is benign there).
  *
- * @ref LLP 0028#idempotent-prospects [implements]
+ * @ref LLP 0028#idempotent-prospects [implements]:
  *
  * @param {EnrichRuntime} runtime
  * @param {Record<string, unknown>[]} candidates

@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
  * resumed session re-qualifies when its latest part moves past its mark. Curate
  * has no mark: its queue is "prospects with no resolution", computed by query.
  *
- * @ref LLP 0028#per-session-watermark [implements]
+ * @ref LLP 0028#per-session-watermark [implements]:
  *
  * @import { CurateJob, EnrichStateFile, SessionMark } from './types.d.ts'
  */
@@ -124,7 +124,7 @@ export function writeState(stateDir, state) {
  * next tick double-submit. Every mutation of the sidecar therefore goes through
  * here, merging into the latest on-disk state.
  *
- * @ref LLP 0028#two-regimes [constrained-by]
+ * @ref LLP 0028#two-regimes [constrained-by]:
  *
  * @param {string} stateDir
  * @param {(current: EnrichStateFile) => EnrichStateFile} mutate

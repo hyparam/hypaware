@@ -87,7 +87,7 @@ export class IdentityClient {
       // gateway_id, so re-bootstrap with the new token instead. In steady
       // state no bootstrap token is configured (the seed is retired after
       // first apply), so this never fires and the persisted JWT is reused.
-      // @ref LLP 0031#physical-layout [implements] re-join re-bootstraps a fresh gateway identity; clearing config slots alone leaves identity.json shadowing the new token
+      // @ref LLP 0031#physical-layout [implements]: re-join re-bootstraps a fresh gateway identity; clearing config slots alone leaves identity.json shadowing the new token
       if (this.bootstrapToken && mintChanged(persisted, this.centralUrl, this.bootstrapToken)) {
         await this.bootstrap()
         return 'bootstrapped'
@@ -98,7 +98,7 @@ export class IdentityClient {
       // file this server's data under the other server's gateway_id, a
       // cross-tenant leak. Refuse rather than silently mis-route; the
       // operator must re-run `hyp join` against the new server.
-      // @ref LLP 0031#physical-layout [implements] a re-point with no token cannot safely reuse the old identity, so loading is refused
+      // @ref LLP 0031#physical-layout [implements]: a re-point with no token cannot safely reuse the old identity, so loading is refused
       if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
         throw new Error(
           `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`

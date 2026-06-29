@@ -19,7 +19,7 @@ import { renderStatusJson, renderStatusText } from '../../src/core/cli/core_comm
 // collector reads the marker file (it never runs a pass) and derives a
 // per-provider done/failed/pending/n-a section; a failed action is loud but
 // never flips `overall` to `degraded`.
-// @ref LLP 0041#failure-is-surfaced-not-fatal [tests]
+// @ref LLP 0041#failure-is-surfaced-not-fatal [tests]:
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-actions-'))

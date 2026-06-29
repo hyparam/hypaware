@@ -42,7 +42,7 @@ const SERVER_NAME = 'hypaware'
  *   allowOperator?: boolean,
  *   serverVersion?: string,
  * }} opts
- * @ref LLP 0034#tool-auth-class [implements] read/operator boundary lives on the tool; the credential scope gates it
+ * @ref LLP 0034#tool-auth-class [implements]: read/operator boundary lives on the tool; the credential scope gates it
  */
 export function createMcpServer(opts) {
   const { verbs, query, runTool } = opts

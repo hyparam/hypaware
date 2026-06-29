@@ -138,7 +138,7 @@ export async function discoverExportDatasets(blobStore, prefix) {
  * 0.8.10 preserves v3 row lineage across the rewrite, which matters
  * because export tables are created with `formatVersion: 3`).
  *
- * @ref LLP 0022#compaction - this is the *out-of-band* rewrite the spec
+ * @ref LLP 0022#compaction: this is the *out-of-band* rewrite the spec
  * reserves: it must only run from an explicit, manual invocation
  * (`hyp sink maintain --compact`), never from the daemon loop or the
  * sink tick, because a full read-rewrite in the daemon process is the

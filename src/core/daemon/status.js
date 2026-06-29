@@ -117,7 +117,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // The user-facing config path is the local layer; the central layer is
   // resolved read-only from config-control/ (active slot or join seed).
   // Reading it never fires a config poll. What's "running" is the merge.
-  // @ref LLP 0031#status-provenance [implements]. Restore inspectability: provenance tags + dropped-local section over the merged config
+  // @ref LLP 0031#status-provenance [implements]: Restore inspectability: provenance tags + dropped-local section over the merged config
   const configPath = env.HYP_CONFIG
     ? path.resolve(env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
@@ -151,7 +151,7 @@ export async function collectHypAwareStatus(opts = {}) {
     catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
   } catch { /* catalog build failure is non-fatal */ }
 
-  // @ref LLP 0031#central-layer-is-sacrosanct [implements]. Same merge + validation pruning as boot, so status shows exactly what runs
+  // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
     central: centralConfig,
     local: localConfig,
@@ -480,7 +480,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // failed backfill is surfaced here (its own section, below) but is
   // deliberately NOT a degrading diagnostic. The gateway runs fine on a
   // valid config (LLP 0041 §failure-is-surfaced-not-fatal).
-  // @ref LLP 0041#failure-is-surfaced-not-fatal [implements]. Surface client-action failure as its own line, never an outage signal
+  // @ref LLP 0041#failure-is-surfaced-not-fatal [implements]: Surface client-action failure as its own line, never an outage signal
   /** @type {ClientActionsReport | null} */
   let clientActions = null
   try {
@@ -564,7 +564,7 @@ export async function collectHypAwareStatus(opts = {}) {
  *
  * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean, backfillPlugins?: Set<string> }} args
  * @returns {ClientActionsReport | null}
- * @ref LLP 0041#idempotency-and-completion-state [implements]. Per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
+ * @ref LLP 0041#idempotency-and-completion-state [implements]: Per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
  */
 function buildClientActionsReport({ status, config, hasCentral, backfillPlugins }) {
   /** @type {ClientActionReport[]} */

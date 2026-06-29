@@ -159,7 +159,7 @@ function pluginMetadataFromManifest(manifest) {
  * @param {HypAwareV2Config} config
  * @param {ValidateContext} [ctx]
  * @returns {ConfigValidationError[]}
- * @ref LLP 0010#validation [implements] - the same cross-plugin checks, sans span/logging
+ * @ref LLP 0010#validation [implements]: the same cross-plugin checks, sans span/logging
  */
 export function collectConfigErrors(config, ctx = {}) {
   const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
@@ -212,7 +212,7 @@ export function collectConfigErrors(config, ctx = {}) {
  * @param {HypAwareV2Config} config
  * @param {ValidateContext} [ctx]
  * @returns {Promise<ValidateResult>}
- * @ref LLP 0010#validation [implements] - core's cross-plugin checks run after all manifests are loaded
+ * @ref LLP 0010#validation [implements]: core's cross-plugin checks run after all manifests are loaded
  */
 export async function validateConfig(config, ctx = {}) {
   const knownPlugins = ctx.knownPlugins ?? firstPartyPluginMetadata()
@@ -340,7 +340,7 @@ function checkSinks(config, knownPlugins, errors) {
  * @param {BlobSinkConfigInstance} sink
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
- * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] - writer requires blob-store; rejects writer paired with an http-endpoint
+ * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements]: writer requires blob-store; rejects writer paired with an http-endpoint
  */
 function checkBlobSink(name, sink, knownPlugins, errors) {
   const pointer = `/sinks/${name}`
@@ -499,7 +499,7 @@ function checkRequestSink(name, sink, knownPlugins, errors) {
  * @param {unknown} schedule
  * @param {string} pointer
  * @param {ConfigValidationError[]} errors
- * @ref LLP 0014#config-two-shapes [implements] - schedule is a 5-field cron; friendly DSLs (@hourly) are rejected
+ * @ref LLP 0014#config-two-shapes [implements]: schedule is a 5-field cron; friendly DSLs (@hourly) are rejected
  */
 function checkSchedule(name, schedule, pointer, errors) {
   if (schedule === undefined) return

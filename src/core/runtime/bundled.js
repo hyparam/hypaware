@@ -60,7 +60,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * model calls, so it too activates only via explicit config.
  *
  * @type {ReadonlySet<PluginName>}
- * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by] - the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
+ * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  */
 export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/central',

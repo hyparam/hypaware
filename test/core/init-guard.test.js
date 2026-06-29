@@ -10,7 +10,7 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
 
 // `init` writes the user-owned local layer; the overwrite guard is the
-// non-destructive half of #111. @ref LLP 0031#local-layer-writers [tests]
+// non-destructive half of #111. @ref LLP 0031#local-layer-writers [tests]:
 
 function makeBuf() {
   let value = ''

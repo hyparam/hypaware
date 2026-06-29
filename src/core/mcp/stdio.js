@@ -25,7 +25,7 @@ import { PARSE_ERROR, jsonRpcError, parseMessage } from './jsonrpc.js'
  *   onError?: (err: unknown) => void,
  * }} args
  * @returns {Promise<void>}
- * @ref LLP 0034#stdio-stdout-discipline [implements] stdout carries only JSON-RPC; one line per message
+ * @ref LLP 0034#stdio-stdout-discipline [implements]: stdout carries only JSON-RPC; one line per message
  */
 export function serveStdio({ server, stdin, stdout, onError }) {
   return new Promise((resolve) => {

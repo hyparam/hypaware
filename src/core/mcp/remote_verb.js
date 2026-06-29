@@ -20,7 +20,7 @@ import { createHttpMcpClient } from './client.js'
  *
  * @param {{ verb: VerbRegistration, params: Record<string, unknown>, target: string, ctx: CommandRunContext }} args
  * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
- * @ref LLP 0033#two-truncations [implements] server cap surfaced here as its own line; client cannot lift it
+ * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
 export async function runRemoteVerb({ verb, params, target, ctx }) {
   const remotes = ctx.config?.query?.remotes ?? {}

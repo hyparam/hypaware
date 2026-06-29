@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
  *
  * @param {string} value
  * @returns {string}
- * @ref LLP 0023#content-addressed-ids [implements] - changing the recipe orphans every committed graph row
+ * @ref LLP 0023#content-addressed-ids [implements]: changing the recipe orphans every committed graph row
  */
 function sha(value) {
   return createHash('sha256').update(value).digest('hex').slice(0, 24)

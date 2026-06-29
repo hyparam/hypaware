@@ -111,7 +111,7 @@ export function createAiGatewayGraphContract(kit) {
     // captured repo (so it converges with @hypaware/github AND across worktrees
     // of one repo); it falls back to the absolute path otherwise (file outside
     // the repo, non-github remote, or a session with no captured repo).
-    // @ref LLP 0032#file-migration [implements]
+    // @ref LLP 0032#file-migration [implements]:
     {
       kind: 'node',
       type: 'File',
