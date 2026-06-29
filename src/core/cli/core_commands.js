@@ -2380,7 +2380,7 @@ async function runSinkForce(argv, ctx) {
   const driver = createSinkDriver({
     sinkRegistry: /** @type {any} */ (ctx.sinks),
     queryRegistry: ctx.query,
-    storage: ctx.storage,
+    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
     stateRoot: obsEnv.stateDir,
     config: ctx.config,
   })

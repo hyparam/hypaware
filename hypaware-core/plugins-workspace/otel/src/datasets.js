@@ -2,9 +2,12 @@
 
 import path from 'node:path'
 
+import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
+
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+ * @import { AsyncDataSource } from 'squirreling'
  */
 
 export const PARTITION_LABEL = 'all'
@@ -144,34 +147,113 @@ export function otelDatasetRegistration(dataset) {
 }
 
 /**
+ * The kernel cache write path partitions rows that carry no
+ * `cachePartitioning` declaration under `source=<client>` (here always
+ * `source=unknown`, since OTLP rows have no client identity), *not*
+ * under the `PARTITION_LABEL` directory the collector spools to. So a
+ * lone hardcoded `<dataset>/all` partition never surfaces committed data.
+ * Discovery has to scan the on-disk `source=` partitions the same way
+ * every other cache-backed dataset does (cf. ai-gateway). The
+ * `PARTITION_LABEL` spool path is still listed so any pending rows there
+ * get flushed during query settlement before `createDataSource` reads.
+ *
  * @param {DatasetDiscoveryContext} ctx
  * @param {'logs' | 'traces' | 'metrics'} dataset
- * @returns {QueryPartition[]}
+ * @returns {Promise<QueryPartition[]>}
  */
-function discoverParts(ctx, dataset) {
+async function discoverParts(ctx, dataset) {
   const cacheDir = ctx.cacheDir ?? ''
   if (!cacheDir) return []
-  const tablePath = path.join(cacheDir, 'datasets', dataset, PARTITION_LABEL)
-  return [{
-    dataset,
-    partition: { partition: PARTITION_LABEL },
-    tablePath,
-  }]
+
+  /** @type {QueryPartition[]} */
+  const partitions = []
+  /** @type {Set<string>} */
+  const seen = new Set()
+
+  const spoolPath = path.join(cacheDir, 'datasets', dataset, PARTITION_LABEL)
+  partitions.push({ dataset, partition: { partition: PARTITION_LABEL }, tablePath: spoolPath })
+  seen.add(spoolPath)
+
+  const discovered = await discoverCachePartitions(cacheDir, { datasets: [dataset] })
+  for (const p of discovered) {
+    if (seen.has(p.path)) continue
+    seen.add(p.path)
+    partitions.push({ dataset, partition: p.partition, tablePath: p.path })
+  }
+
+  return partitions
 }
 
 /**
+ * Union every discovered partition's source. Re-discovers from the live
+ * cache root so rows flushed out of the spool during settlement (after
+ * the initial `discoverParts`) are picked up.
+ *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
  * @param {'logs' | 'traces' | 'metrics'} dataset
  */
 async function createDataSource(partitions, ctx, dataset) {
-  const partition = partitions[0]
-  if (!partition || !partition.tablePath) return emptySource(dataset)
-  const storage = /** @type {ExtendedQueryStorageService} */ (
-    ctx.storage
-  )
-  const source = await storage.dataSourceForTable(partition.tablePath)
-  return source ?? emptySource(dataset)
+  const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+
+  const fresh = await discoverCachePartitions(storage.cacheRoot, { datasets: [dataset] })
+
+  /** @type {Set<string>} */
+  const tablePaths = new Set()
+  for (const p of partitions) {
+    if (p.tablePath) tablePaths.add(p.tablePath)
+  }
+  for (const p of fresh) tablePaths.add(p.path)
+
+  /** @type {AsyncDataSource[]} */
+  const sources = []
+  for (const tablePath of tablePaths) {
+    const source = await storage.dataSourceForTable(tablePath)
+    if (source && (source.numRows ?? 0) > 0) sources.push(source)
+  }
+
+  if (sources.length === 0) return emptySource(dataset)
+  if (sources.length === 1) return sources[0]
+  return unionSources(sources)
+}
+
+/**
+ * Merge multiple AsyncDataSources into one union source.
+ *
+ * @param {AsyncDataSource[]} sources
+ * @returns {AsyncDataSource}
+ */
+export function unionSources(sources) {
+  /** @type {Set<string>} */
+  const allColumns = new Set()
+  let totalRows = 0
+  for (const s of sources) {
+    for (const col of s.columns) allColumns.add(col)
+    totalRows += s.numRows ?? 0
+  }
+  return {
+    columns: Array.from(allColumns),
+    numRows: totalRows,
+    scan(options) {
+      // The union reports appliedLimitOffset: false (the engine applies
+      // limit/offset to the concatenated stream), so the hints must not
+      // reach the sub-sources: an iceberg sub-source would push the offset
+      // down per partition and rows would be skipped twice.
+      const subOptions = options ? { ...options, limit: undefined, offset: undefined } : options
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const source of sources) {
+            const scan = source.scan(subOptions)
+            for await (const row of scan.rows()) {
+              yield row
+            }
+          }
+        },
+      }
+    },
+  }
 }
 
 /**

@@ -1,11 +1,24 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
 /**
  * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.d.ts'
  */
+
+/**
+ * Fingerprint a bootstrap token for the persisted identity's
+ * re-enrollment guard. A hash, never the raw token, so the persisted
+ * file (and any log of it) cannot leak the credential.
+ *
+ * @param {string} token
+ * @returns {string}
+ */
+function fingerprintToken(token) {
+  return createHash('sha256').update(token).digest('hex')
+}
 
 /**
  * Eagerly refresh when the remaining lifetime falls inside this window
@@ -66,6 +79,31 @@ export class IdentityClient {
   async acquire() {
     const persisted = readPersistedFile(this.persistedPath)
     if (persisted) {
+      // Re-enrollment guard: when a bootstrap token is configured (a
+      // fresh `hyp join` wrote one into the seed) and it (or the central
+      // URL) differs from what minted the persisted identity, the host is
+      // being re-pointed at a different tenant/server. Reusing the old
+      // gateway JWT would file the new tenant's data under the old
+      // gateway_id, so re-bootstrap with the new token instead. In steady
+      // state no bootstrap token is configured (the seed is retired after
+      // first apply), so this never fires and the persisted JWT is reused.
+      // @ref LLP 0031#physical-layout [implements] re-join re-bootstraps a fresh gateway identity; clearing config slots alone leaves identity.json shadowing the new token
+      if (this.bootstrapToken && mintChanged(persisted, this.centralUrl, this.bootstrapToken)) {
+        await this.bootstrap()
+        return 'bootstrapped'
+      }
+      // No bootstrap token to re-mint with, but the persisted identity was
+      // minted by a different central URL: the host has been re-pointed at
+      // another server without re-joining. Reusing the old gateway JWT would
+      // file this server's data under the other server's gateway_id, a
+      // cross-tenant leak. Refuse rather than silently mis-route; the
+      // operator must re-run `hyp join` against the new server.
+      // @ref LLP 0031#physical-layout [implements] a re-point with no token cannot safely reuse the old identity, so loading is refused
+      if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
+        throw new Error(
+          `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
+        )
+      }
       this.identity = persisted
       const remainingSec = persisted.expires_at - Math.floor(this.now() / 1000)
       if (remainingSec <= REFRESH_WINDOW_SECONDS) {
@@ -112,6 +150,10 @@ export class IdentityClient {
 
     const parsed = await readJsonResponse(response, 'bootstrap')
     const identity = identityFromPayload(parsed)
+    // Stamp what minted this identity so a later re-join with a different
+    // token/URL is detected (see acquire()).
+    identity.central_url = this.centralUrl
+    identity.bootstrap_token_fp = fingerprintToken(token)
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -154,6 +196,11 @@ export class IdentityClient {
     }
     const parsed = await readJsonResponse(response, 'refresh')
     const identity = identityFromPayload(parsed, this.identity.gateway_id)
+    // Preserve the mint provenance across refresh; the bootstrap token is
+    // typically absent in steady state, so re-derive it from the prior
+    // persisted identity rather than recomputing.
+    identity.central_url = this.identity.central_url
+    identity.bootstrap_token_fp = this.identity.bootstrap_token_fp
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -202,7 +249,8 @@ function readPersistedFile(filePath) {
   if (!isPlainObject(parsed)) {
     throw new Error(`persisted identity ${filePath} must be an object`)
   }
-  const { jwt, expires_at, gateway_id } = /** @type {Record<string, unknown>} */ (parsed)
+  const { jwt, expires_at, gateway_id, central_url, bootstrap_token_fp } =
+    /** @type {Record<string, unknown>} */ (parsed)
   if (typeof jwt !== 'string' || jwt.length === 0) {
     throw new Error(`persisted identity ${filePath}: missing or invalid jwt`)
   }
@@ -212,7 +260,30 @@ function readPersistedFile(filePath) {
   if (typeof gateway_id !== 'string' || gateway_id.length === 0) {
     throw new Error(`persisted identity ${filePath}: missing or invalid gateway_id`)
   }
-  return { jwt, expires_at, gateway_id }
+  /** @type {PersistedIdentity} */
+  const identity = { jwt, expires_at, gateway_id }
+  if (typeof central_url === 'string') identity.central_url = central_url
+  if (typeof bootstrap_token_fp === 'string') identity.bootstrap_token_fp = bootstrap_token_fp
+  return identity
+}
+
+/**
+ * Whether a persisted identity was minted by a different bootstrap token
+ * or central URL than the ones now configured (i.e. a re-enrollment).
+ * An identity written by an older build (no stamp) cannot be proven to
+ * match, so it counts as changed whenever a bootstrap token is set; that
+ * forces one safe re-bootstrap rather than reusing a possibly-stale JWT.
+ *
+ * @param {PersistedIdentity} persisted
+ * @param {string} centralUrl
+ * @param {string} bootstrapToken
+ * @returns {boolean}
+ */
+function mintChanged(persisted, centralUrl, bootstrapToken) {
+  if (persisted.central_url !== undefined && persisted.central_url !== centralUrl) {
+    return true
+  }
+  return persisted.bootstrap_token_fp !== fingerprintToken(bootstrapToken)
 }
 
 /**

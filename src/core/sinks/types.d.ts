@@ -2,14 +2,14 @@ import type {
   ExportResult,
   HypAwareV2Config,
   QueryRegistry,
-  QueryStorageService,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
 import type { ExtendedSinkRegistry } from '../registry/types.d.ts'
 
 export interface DriverOptions {
   sinkRegistry: ExtendedSinkRegistry
   queryRegistry: QueryRegistry
-  storage: QueryStorageService
+  storage: ExtendedQueryStorageService
   /** Kernel state root (e.g. `<HYP_HOME>/hypaware`). */
   stateRoot: string
   config?: HypAwareV2Config

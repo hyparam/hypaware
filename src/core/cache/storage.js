@@ -175,6 +175,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       return icebergTableExists(dir) || spool.hasPendingSync(tablePath)
     },
 
+    hasPendingSync(tablePath) {
+      return spool.hasPendingSync(tablePath)
+    },
+
     tableUrl(tablePath) {
       return icebergTableUrl(resolveIcebergDir(tablePath))
     },

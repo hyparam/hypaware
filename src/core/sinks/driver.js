@@ -142,17 +142,55 @@ export function createSinkDriver(opts) {
     const datasets = queryRegistry.listDatasets()
     /** @type {QueryPartition[]} */
     const all = []
+    /** @type {Set<string>} */
+    const seen = new Set()
+    // Keep a partition if it is exportable now: either it has no backing
+    // table path, or a table/pending-spool exists at it. Dedup by path so
+    // the pre- and post-flush discovery passes don't double-list one.
+    const keep = (/** @type {QueryPartition} */ part) => {
+      if (!part.tablePath) { all.push(part); return }
+      if (seen.has(part.tablePath) || !storage.tableExists(part.tablePath)) return
+      seen.add(part.tablePath)
+      all.push(part)
+    }
     for (const dataset of datasets) {
       try {
-        const parts = await dataset.discoverPartitions({
+        const discover = () => dataset.discoverPartitions({
           config: config ?? { version: 2 },
           scope: { limit: 1000 },
           cacheDir: storage.cacheRoot,
         })
+        const parts = await discover()
+        // Keep everything exportable right now, including spool-pending
+        // partitions a sink reads directly.
+        for (const part of parts ?? []) keep(part)
+        // Then flush any pending spool and re-discover. A dataset with no
+        // `cachePartitioning` declaration spools under one label (e.g.
+        // `<dataset>/all`) but commits under `source=<client>` on flush,
+        // so its rows would otherwise stay invisible to discovery, and a
+        // low-traffic source that never trips the spool's size threshold
+        // would never be exported at all. Flushing surfaces the committed
+        // `source=` partitions; `keep` adds the ones not already listed.
+        let flushedAny = false
         for (const part of parts ?? []) {
-          if (!part.tablePath || storage.tableExists(part.tablePath)) {
-            all.push(part)
+          if (part.tablePath && storage.hasPendingSync(part.tablePath)) {
+            // Isolate per partition: a flush failure on one partition must
+            // not strand its siblings' pending rows for this tick.
+            try {
+              await storage.flushTable(part.tablePath, { reason: 'sink_discover' })
+              flushedAny = true
+            } catch (err) {
+              log.warn('sink.flush_partition_failed', {
+                [Attr.SINK_INSTANCE]: handle.instanceName,
+                [Attr.DATASET]: dataset.name,
+                tablePath: part.tablePath,
+                message: err instanceof Error ? err.message : String(err),
+              })
+            }
           }
+        }
+        if (flushedAny) {
+          for (const part of (await discover()) ?? []) keep(part)
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

@@ -224,6 +224,8 @@ export type ExtendedQueryStorageService = QueryStorageService & {
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>
+  /** Whether `tablePath` has rows spooled but not yet flushed to Iceberg. */
+  hasPendingSync(tablePath: string): boolean
   appendRowsToPartition(
     dataset: string,
     partitionSegments: string[],
