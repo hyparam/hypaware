@@ -22,7 +22,7 @@ import { prepareAttach as codexPrepareAttach } from '../../hypaware-core/plugins
  * loaded** at reverse time, proving it never depends on `ctx.clients`.
  */
 
-/** @import { ClientDescriptor } from '../../src/core/plugin_catalog.js' */
+/** @import { ClientDescriptor } from '../../src/core/types.js' */
 
 /** @type {ClientDescriptor} */
 const CLAUDE_DESCRIPTOR = {

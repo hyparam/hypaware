@@ -17,7 +17,7 @@ import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.j
  * the reconciler's generic gap loop is covered by `action-reconciler.test.js`.
  *
  * @import { ActionContext, ActionHandler } from '../../src/core/config/types.d.ts'
- * @import { ClientDescriptor } from '../../src/core/plugin_catalog.js'
+ * @import { ClientDescriptor } from '../../src/core/types.js'
  */
 
 /**

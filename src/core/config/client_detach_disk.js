@@ -9,7 +9,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 
 /**
  * @import { FileHandle } from 'node:fs/promises'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DetachFromDiskResult } from './types.d.ts'
  */
 

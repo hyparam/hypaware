@@ -13,7 +13,7 @@ import type {
   JsonObject,
   AiGatewayCapability,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
-import type { ClientDescriptor } from '../plugin_catalog.js'
+import type { ClientDescriptor } from '../../../src/core/types.d.ts'
 
 /**
  * Outcome of the `init` overwrite guard (LLP 0031). `proceed` is true
