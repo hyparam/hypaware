@@ -10,8 +10,10 @@ import {
   readCredentials,
   remoteTokenEnvVar,
   removeToken,
+  writeSession,
   writeToken,
 } from '../remote/credentials.js'
+import { loginWithBrowser } from '../remote/oidc_login.js'
 
 /**
  * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
@@ -34,6 +36,8 @@ export async function runRemoteHelp(argv, ctx) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write('usage: hyp remote <subcommand> [args...]\n')
     ctx.stdout.write('  subcommands: add, login, list, remove\n')
+    ctx.stdout.write('  login: browser sign-in by default; --token-file/stdin for a static token,\n')
+    ctx.stdout.write('         --org <name> to select an org, --no-browser to print the URL\n')
     return 0
   }
   ctx.stderr.write(`hyp remote: unknown subcommand '${argv[0]}'\n`)
@@ -77,41 +81,98 @@ export async function runRemoteAdd(argv, ctx) {
 }
 
 /**
- * `hyp remote login <name>`: store the query-scoped token for a target.
- * Token source: `--token-file <path>` or piped stdin (a TTY with neither is
- * an error, never a hang).
+ * `hyp remote login <name>`: populate the target's query-scoped credential.
+ *
+ * Two modes, one store (LLP 0046 D1). A **static** token still comes from
+ * `--token-file <path>` or piped stdin, unchanged (the headless escape hatch,
+ * D8). Otherwise an interactive **browser** authorization-code flow runs
+ * against the target's identity endpoint and stores an OIDC session. `--org`
+ * selects an org; `--browser` forces the flow even with stdin piped;
+ * `--no-browser` prints the URL instead of opening it.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0033#credentials [implements]: token to the 0600 store, never config; one login per server
+ * @param {{ login?: typeof loginWithBrowser }} [deps] test seam for the browser flow
+ * @ref LLP 0046#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
-export async function runRemoteLogin(argv, ctx) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const name = positional[0]
-  if (!name) {
-    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>]\n')
-    return 2
-  }
+export async function runRemoteLogin(argv, ctx, deps = {}) {
   const tokenFileIdx = argv.indexOf('--token-file')
   const tokenFile = tokenFileIdx >= 0 ? argv[tokenFileIdx + 1] : undefined
   if (tokenFileIdx >= 0 && (!tokenFile || tokenFile.startsWith('-'))) {
     ctx.stderr.write('hyp remote login: --token-file expects a path\n')
     return 2
   }
+  const orgIdx = argv.indexOf('--org')
+  const org = orgIdx >= 0 ? argv[orgIdx + 1] : undefined
+  if (orgIdx >= 0 && (!org || org.startsWith('-'))) {
+    ctx.stderr.write('hyp remote login: --org expects an org name\n')
+    return 2
+  }
+  // The target name is the first positional. Skip the VALUE slot of a
+  // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
+  // as the target 'acme'.
+  const name = firstPositional(argv, new Set(['--token-file', '--org']))
+  if (!name) {
+    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--no-browser]\n')
+    return 2
+  }
+  const forceBrowser = argv.includes('--browser')
+  const noBrowser = argv.includes('--no-browser')
 
+  const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
+  const stdinPiped = !!stdin && !stdin.isTTY
+  // Static path: an explicit token file, or a piped token unless --browser
+  // forces the interactive flow.
+  const useStatic = !!tokenFile || (stdinPiped && !forceBrowser)
+
+  if (useStatic) {
+    // --org only applies to the browser flow; say so rather than silently drop it.
+    if (org) {
+      ctx.stderr.write('note: --org is ignored with a static token (it applies to the browser login flow)\n')
+    }
+    return runStaticLogin(name, tokenFile, stdin, ctx)
+  }
+  return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
+}
+
+/**
+ * Return the first positional argument (not a flag, not the value slot of a
+ * value-taking flag).
+ *
+ * @param {string[]} argv
+ * @param {Set<string>} valueFlags
+ * @returns {string | undefined}
+ */
+function firstPositional(argv, valueFlags) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a.startsWith('-')) {
+      if (valueFlags.has(a)) i++ // consume its value
+      continue
+    }
+    return a
+  }
+  return undefined
+}
+
+/**
+ * The static-token path (LLP 0033, unchanged behavior): read a token from
+ * `--token-file` or piped stdin and store it as a `kind: 'static'` record.
+ *
+ * @param {string} name
+ * @param {string | undefined} tokenFile
+ * @param {any} stdin
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0046#d8 [implements]: static token stays the documented headless fallback
+ */
+async function runStaticLogin(name, tokenFile, stdin, ctx) {
   /** @type {string} */
   let token
   try {
-    if (tokenFile) {
-      token = (await fs.readFile(tokenFile, 'utf8')).trim()
-    } else {
-      const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
-      if (stdin && stdin.isTTY) {
-        ctx.stderr.write("hyp remote login: provide the token via --token-file <path> or pipe it on stdin\n")
-        return 2
-      }
-      token = (await readAllStdin(stdin)).trim()
-    }
+    token = tokenFile
+      ? (await fs.readFile(tokenFile, 'utf8')).trim()
+      : (await readAllStdin(stdin)).trim()
   } catch (err) {
     ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
@@ -132,6 +193,91 @@ export async function runRemoteLogin(argv, ctx) {
     ctx.stderr.write(`note: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>'\n`)
   }
   return 0
+}
+
+/**
+ * The browser authorization-code path (LLP 0046 D1/D6/D7). Derives the
+ * identity base from the configured target URL's origin, runs the loopback
+ * flow, and stores the resulting OIDC session.
+ *
+ * @param {string} name
+ * @param {{ org?: string, noBrowser: boolean }} opts
+ * @param {CommandRunContext} ctx
+ * @param {typeof loginWithBrowser} login
+ * @returns {Promise<number>}
+ */
+async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
+  const remotes = await readConfiguredRemotes(ctx)
+  const entry = remotes[name]
+  if (!entry) {
+    ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it first with 'hyp remote add ${name} <url>'\n`)
+    ctx.stderr.write("  (or pass a static token with --token-file <path>)\n")
+    return 2
+  }
+  const identityBase = deriveIdentityBase(entry.url)
+  if (!identityBase) {
+    ctx.stderr.write(`hyp remote login: target '${name}' has an invalid url (${entry.url})\n`)
+    return 2
+  }
+
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  try {
+    const session = await login({
+      identityBase,
+      org,
+      noBrowser,
+      print: (line) => ctx.stderr.write(`${line}\n`),
+    })
+    await writeSession(stateDir, name, session)
+    ctx.stdout.write(`logged in to '${name}' as org '${session.org}' (session stored, mode 0600)\n`)
+    return 0
+  } catch (err) {
+    const callbackError = /** @type {any} */ (err)?.callbackError
+    ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
+    return 1
+  }
+}
+
+/**
+ * Derive the identity base `<origin>/v1/identity` from a target's MCP URL
+ * (LLP 0046 D6): identity is mounted at the same origin, so no second URL is
+ * configured. Returns `null` for an unparseable URL.
+ *
+ * @param {string} url
+ * @returns {string | null}
+ * @ref LLP 0046#d6 [implements]: identity endpoints derive from the configured remote URL origin
+ */
+export function deriveIdentityBase(url) {
+  try {
+    return `${new URL(url).origin}/v1/identity`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Translate a server-surfaced callback `error` (D7) into a clear message. The
+ * client never sees the user's org list, so `org_selection_required` instructs
+ * a re-run with `--org` rather than enumerating.
+ *
+ * @param {string | undefined} callbackError
+ * @param {unknown} err
+ * @returns {string}
+ * @ref LLP 0046#d7 [implements]: org selector errors explained; never enumerate the user's orgs
+ */
+function explainLoginError(callbackError, err) {
+  switch (callbackError) {
+    case 'access_denied':
+      return 'login was denied at the provider'
+    case 'no_membership':
+      return 'this account is not a member of any org on this server - ask an admin to invite you'
+    case 'org_selection_required':
+      return 'this account has more than one org - re-run with --org <name> to choose one'
+    case 'org_not_permitted':
+      return 'the selected org is not permitted for this account - check the --org name'
+    default:
+      return err instanceof Error ? err.message : String(err)
+  }
 }
 
 /**
