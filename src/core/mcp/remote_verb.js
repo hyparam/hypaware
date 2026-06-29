@@ -1,7 +1,7 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
-import { deriveIdentityBase, isRefreshable, resolveAccessJwt } from '../remote/credentials.js'
+import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt } from '../remote/credentials.js'
 import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
 import { createHttpMcpClient } from './client.js'
 
@@ -49,34 +49,29 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
     return { ok: false, error: resolved.error, exitCode: 2 }
   }
 
-  /** Run one full attach attempt with a given bearer token. */
-  const attempt = (/** @type {string} */ token) => callRemoteTool({ url: entry.url, token, verb, params })
+  // One full attach attempt, folded into the shape attachWithRefresh wants: a
+  // thrown 401/403 (stale or revoked OIDC JWT) is reported as `authFailed` so
+  // the shared policy can force one refresh and retry; any other throw is a
+  // terminal non-auth error folded into the returned verb-result.
+  const op = async (/** @type {string} */ token) => {
+    try {
+      return { authFailed: false, value: await callRemoteTool({ url: entry.url, token, verb, params }) }
+    } catch (err) {
+      /** @type {{ ok: false, error: string, exitCode: number }} */
+      const value = { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
+      return { authFailed: isAuthError(err), value }
+    }
+  }
 
   try {
-    return await attempt(resolved.token)
-  } catch (err) {
-    // A live 401/403 on an OIDC session means the cached JWT is stale or was
-    // revoked early. Refresh once and retry before surfacing (LLP 0046 D5). An
-    // env override or a static token cannot be refreshed, so it surfaces as-is.
-    const refreshable = isRefreshable(resolved)
-    if (!refreshable || !isAuthError(err)) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
-    }
-    /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
-    let refreshed
-    try {
-      refreshed = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true })
-    } catch (refreshErr) {
-      return mapRefreshError(refreshErr, target)
-    }
-    if (!refreshed.ok) {
-      return { ok: false, error: refreshed.error, exitCode: 2 }
-    }
-    try {
-      return await attempt(refreshed.token)
-    } catch (retryErr) {
-      return { ok: false, error: retryErr instanceof Error ? retryErr.message : String(retryErr), exitCode: 1 }
-    }
+    const out = await attachWithRefresh({
+      resolved,
+      refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+      op,
+    })
+    return out.ok ? out.value : { ok: false, error: out.error, exitCode: 2 }
+  } catch (refreshErr) {
+    return mapRefreshError(refreshErr, target)
   }
 }
 

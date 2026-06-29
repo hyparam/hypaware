@@ -4,7 +4,7 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { deriveIdentityBase, isRefreshable, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
+import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { InvalidGrantError, sessionExpiredMessage } from '../remote/identity_client.js'
 import { parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
@@ -98,37 +98,41 @@ export async function runMcpProxy({ target, ctx }) {
         return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, resolved.error)
       }
 
-      let res
+      // Forward via the shared attach policy: a live 401/403 on a refreshable
+      // OIDC session forces one refresh + retry before surfacing (LLP 0046 D5);
+      // an env/static token cannot refresh, so its 401 falls through. `op` folds
+      // both the fetch outcome and a fetch failure into `value`, so the retry
+      // decision stays in attachWithRefresh and never throws here.
+      /** @type {(token: string) => Promise<{ authFailed: boolean, value: { res: Awaited<ReturnType<typeof forward>> } | { err: unknown } }>} */
+      const op = async (token) => {
+        try {
+          const res = await forward(message, token)
+          return { authFailed: res.status === 401 || res.status === 403, value: { res } }
+        } catch (err) {
+          return { authFailed: false, value: { err } }
+        }
+      }
+      let out
       try {
-        res = await forward(message, resolved.token)
+        out = await attachWithRefresh({
+          resolved,
+          refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+          op,
+        })
       } catch (err) {
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, proxyAuthMessage(err, target))
+      }
+      if (!out.ok) {
+        // The forced refresh could not produce a token (e.g. no identity
+        // endpoint). Surface that reason rather than letting the stale 401
+        // fall through to a generic "remote returned HTTP 401" with no guidance.
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, out.error)
+      }
+      if ('err' in out.value) {
+        const err = out.value.err
         return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
       }
-
-      // A live 401/403 on an OIDC session means the cached JWT was revoked or
-      // expired early: force one refresh + retry before surfacing (LLP 0046 D5).
-      // An env/static token cannot refresh, so it falls through to the error.
-      if ((res.status === 401 || res.status === 403) && isRefreshable(resolved)) {
-        let refreshed
-        try {
-          refreshed = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true })
-        } catch (err) {
-          return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, proxyAuthMessage(err, target))
-        }
-        if (refreshed.ok) {
-          try {
-            res = await forward(message, refreshed.token)
-          } catch (err) {
-            return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        } else {
-          // The forced refresh could not produce a token (e.g. no identity
-          // endpoint). Surface that reason rather than letting the stale 401
-          // fall through to a generic "remote returned HTTP 401" with no
-          // guidance, mirroring the one-shot verb path.
-          return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, refreshed.error)
-        }
-      }
+      const res = out.value.res
 
       const sid = res.headers?.get?.('mcp-session-id')
       if (sid) sessionId = sid

@@ -346,6 +346,40 @@ export function isRefreshable(resolved) {
 }
 
 /**
+ * The one-shot refresh + retry policy both attach paths share (LLP 0046 D5):
+ * run `op(token)` with the already-resolved token; if `op` reports an auth
+ * failure on a refreshable (oidc/file) credential, force one refresh and run
+ * `op` once more. Env overrides and static tokens cannot refresh, so their auth
+ * failure is returned as-is. The two callers differ only in how `op` detects an
+ * auth failure (a thrown 401 for the verb path, an HTTP 401 response for the
+ * stdio proxy) and how they format the outcome; the retry decision lives here.
+ *
+ * `op` returns `{ authFailed, value }` and never throws for an auth failure (it
+ * folds it into `value`), so the final attempt's `value` is returned verbatim
+ * even when it too failed auth. A `refresh()` that throws (e.g. a typed
+ * `invalid_grant`) propagates to the caller, which maps it to re-login guidance.
+ *
+ * @template T
+ * @param {{
+ *   resolved: { ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' },
+ *   refresh: () => Promise<{ ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>,
+ *   op: (token: string) => Promise<{ authFailed: boolean, value: T }>,
+ * }} args
+ * @returns {Promise<{ ok: true, value: T } | { ok: false, error: string }>}
+ * @ref LLP 0046#d5 [implements]: the 401 -> force refresh -> retry-once policy, one home for both attach paths
+ */
+export async function attachWithRefresh({ resolved, refresh, op }) {
+  const first = await op(resolved.token)
+  if (!first.authFailed || !isRefreshable(resolved)) {
+    return { ok: true, value: first.value }
+  }
+  const refreshed = await refresh()
+  if (!refreshed.ok) return { ok: false, error: refreshed.error }
+  const second = await op(refreshed.token)
+  return { ok: true, value: second.value }
+}
+
+/**
  * Whether an `oidc` record's cached JWT is still safely usable: present and
  * more than the skew window from its parseable expiry.
  *
