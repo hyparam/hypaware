@@ -4,20 +4,34 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
+import { refreshSession } from './identity_client.js'
+
+/**
+ * @import { RemoteCredentialRecord, RemoteOidcRecord } from '../../../src/core/remote/types.js'
+ */
+
 /**
  * Query-scoped credential store for the human-CLI `--remote` path (LLP 0033
  * §credentials). The token is **never** config (secrets-never-in-config): it
  * lives in a single `0600` file, written atomically, mirroring `central`'s
  * `identity.json` single-file precedent.
  *
+ * Each per-target record is discriminated by `kind` (LLP 0046 D4): a
+ * `static` record is the LLP 0033 `{ token }`; an `oidc` record carries the
+ * refresh token + cached access JWT of a browser-login session. Migration is
+ * read-implicit: a legacy record with a `token` and no `kind` reads as
+ * `static`, so existing files keep working without a rewrite. One file, one
+ * resolve path, one remove path.
+ *
  * Stakes are low by scoping: what lands here is the **query-scoped** token
  * (read/compute tools only; cannot author configs or mint tokens), not the
- * all-powerful operator token (LLP 0033 §credential-stakes). AI clients that
- * install the endpoint directly hold their own token in their own MCP
- * config; this store is only for `hyp`'s client path.
+ * all-powerful operator token (LLP 0033 §credential-stakes).
  */
 
 const CREDENTIALS_BASENAME = 'remote-credentials.json'
+
+/** Refresh an `oidc` access JWT once it is within this window of expiry. */
+const REFRESH_SKEW_MS = 60 * 1000
 
 /**
  * @param {string} stateDir
@@ -40,11 +54,16 @@ export function remoteTokenEnvVar(target) {
 }
 
 /**
- * Read the credential map. Returns `{}` when the file is absent; throws on a
- * corrupt file so a silent empty map can't mask a broken store.
+ * Read the credential map, normalizing each record to a discriminated
+ * {@link RemoteCredentialRecord}. Returns `{}` when the file is absent; throws
+ * on a corrupt file so a silent empty map can't mask a broken store. A legacy
+ * `token`-only record is read as `kind: 'static'` (read-implicit migration,
+ * LLP 0046 D4).
  *
  * @param {string} stateDir
- * @returns {Promise<Record<string, { token: string }>>}
+ * @returns {Promise<Record<string, RemoteCredentialRecord>>}
+ * @ref LLP 0046#d4 [implements]: discriminated kind record; legacy token-only reads as static
+ * @ref LLP 0033#credentials [constrained-by]: single 0600 per-target store, secrets never in config
  */
 export async function readCredentials(stateDir) {
   let raw
@@ -64,18 +83,45 @@ export async function readCredentials(stateDir) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`remote credentials file must be a JSON object: ${remoteCredentialsPath(stateDir)}`)
   }
-  /** @type {Record<string, { token: string }>} */
+  /** @type {Record<string, RemoteCredentialRecord>} */
   const out = {}
   for (const [target, entry] of Object.entries(/** @type {Record<string, unknown>} */ (parsed))) {
-    if (entry && typeof entry === 'object' && typeof (/** @type {any} */ (entry).token) === 'string') {
-      out[target] = { token: /** @type {any} */ (entry).token }
-    }
+    const record = normalizeRecord(entry)
+    if (record) out[target] = record
   }
   return out
 }
 
 /**
- * Store (or replace) the token for a target. Atomic tmp+rename, mode `0600`.
+ * Normalize a stored entry into a discriminated record, or `null` if it is
+ * neither a usable static nor oidc record.
+ *
+ * @param {unknown} entry
+ * @returns {RemoteCredentialRecord | null}
+ */
+function normalizeRecord(entry) {
+  if (!entry || typeof entry !== 'object') return null
+  const e = /** @type {Record<string, any>} */ (entry)
+  if (e.kind === 'oidc' || (e.kind === undefined && typeof e.refreshToken === 'string')) {
+    if (typeof e.refreshToken !== 'string' || typeof e.accessJwt !== 'string') return null
+    return {
+      kind: 'oidc',
+      refreshToken: e.refreshToken,
+      accessJwt: e.accessJwt,
+      expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
+      org: typeof e.org === 'string' ? e.org : '',
+    }
+  }
+  // Legacy / static: a bare token with no (or static) kind.
+  if (typeof e.token === 'string') {
+    return { kind: 'static', token: e.token }
+  }
+  return null
+}
+
+/**
+ * Store (or replace) a static query-scoped token for a target, stamped
+ * `kind: 'static'`. Atomic tmp+rename, mode `0600`.
  *
  * @param {string} stateDir
  * @param {string} target
@@ -85,12 +131,36 @@ export async function readCredentials(stateDir) {
 export async function writeToken(stateDir, target, token) {
   await fs.mkdir(stateDir, { recursive: true })
   const current = await readCredentials(stateDir)
-  current[target] = { token }
+  current[target] = { kind: 'static', token }
   await writeCredentials(stateDir, current)
 }
 
 /**
- * Remove a target's stored token. Returns whether one was present.
+ * Store (or replace) an OIDC session for a target, stamped `kind: 'oidc'`.
+ * Same atomic 0600 path as {@link writeToken} (LLP 0046 D4).
+ *
+ * @param {string} stateDir
+ * @param {string} target
+ * @param {{ refreshToken: string, accessJwt: string, expiresAt: string, org: string }} session
+ * @returns {Promise<void>}
+ * @ref LLP 0046#d4 [implements]: oidc session written through the same atomic 0600 store as static tokens
+ */
+export async function writeSession(stateDir, target, session) {
+  await fs.mkdir(stateDir, { recursive: true })
+  const current = await readCredentials(stateDir)
+  current[target] = {
+    kind: 'oidc',
+    refreshToken: session.refreshToken,
+    accessJwt: session.accessJwt,
+    expiresAt: session.expiresAt,
+    org: session.org,
+  }
+  await writeCredentials(stateDir, current)
+}
+
+/**
+ * Remove a target's stored record (either kind). Returns whether one was
+ * present.
  *
  * @param {string} stateDir
  * @param {string} target
@@ -105,9 +175,12 @@ export async function removeToken(stateDir, target) {
 }
 
 /**
- * Resolve a target's token at query time. Order: per-target env var
- * (CI/ephemeral) → stored file → error. An env override never falls through
- * to the file, so an ephemeral token always wins (LLP 0033 §credentials).
+ * Resolve a target's bearer token at query time, **without** session-aware
+ * refresh. Order: per-target env var (CI/ephemeral) → stored file → error. An
+ * env override never falls through to the file (LLP 0033 §credentials). For an
+ * `oidc` record this returns the cached access JWT as-is; the attach path uses
+ * {@link resolveAccessJwt} for refresh. Kept for the stdio proxy and other
+ * non-refreshing callers.
  *
  * @param {{ target: string, env: NodeJS.ProcessEnv, stateDir: string }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file' } | { ok: false, error: string }>}
@@ -120,18 +193,102 @@ export async function resolveToken({ target, env, stateDir }) {
   }
   const creds = await readCredentials(stateDir)
   const entry = creds[target]
-  if (entry && entry.token.length > 0) {
-    return { ok: true, token: entry.token, source: 'file' }
+  const token = entry ? bearerOf(entry) : ''
+  if (token.length > 0) {
+    return { ok: true, token, source: 'file' }
   }
-  return {
-    ok: false,
-    error: `no token for '${target}' - run 'hyp remote login ${target}' (or set ${envName})`,
+  return { ok: false, error: noTokenError(target, envName) }
+}
+
+/**
+ * Session-aware resolver for the query attach path (LLP 0046 D5). The
+ * per-target env override still wins. A `static` record returns its token. An
+ * `oidc` record returns a fresh access JWT, calling `refreshSession` and
+ * persisting the new JWT/expiry when the stored one is within a skew window of
+ * expiry; a non-stale JWT is returned untouched. A refresh failure (including
+ * a typed `invalid_grant`) propagates to the caller.
+ *
+ * @param {{
+ *   target: string,
+ *   env: NodeJS.ProcessEnv,
+ *   stateDir: string,
+ *   identityBase?: string,
+ *   now?: number,
+ *   fetchImpl?: typeof fetch,
+ * }} args
+ * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>}
+ * @ref LLP 0046#d5 [implements]: silent refresh on the attach path; env override still wins
+ */
+export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl }) {
+  const envName = remoteTokenEnvVar(target)
+  const fromEnv = env[envName]
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+    return { ok: true, token: fromEnv, source: 'env', kind: 'static' }
   }
+
+  const creds = await readCredentials(stateDir)
+  const entry = creds[target]
+  if (!entry) {
+    return { ok: false, error: noTokenError(target, envName) }
+  }
+  if (entry.kind === 'static') {
+    return entry.token.length > 0
+      ? { ok: true, token: entry.token, source: 'file', kind: 'static' }
+      : { ok: false, error: noTokenError(target, envName) }
+  }
+
+  // oidc: refresh if the cached JWT is missing, unparseable, or near expiry.
+  if (!isFresh(entry, now)) {
+    if (!identityBase) {
+      return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
+    }
+    const refreshed = await refreshSession({ identityBase, refreshToken: entry.refreshToken, fetchImpl })
+    /** @type {RemoteOidcRecord} */
+    const next = { ...entry, accessJwt: refreshed.accessJwt, expiresAt: refreshed.expiresAt, org: refreshed.org }
+    await writeSession(stateDir, target, next)
+    return { ok: true, token: refreshed.accessJwt, source: 'file', kind: 'oidc' }
+  }
+  return { ok: true, token: entry.accessJwt, source: 'file', kind: 'oidc' }
+}
+
+/**
+ * Whether an `oidc` record's cached JWT is still safely usable: present and
+ * more than the skew window from its parseable expiry.
+ *
+ * @param {RemoteOidcRecord} record
+ * @param {number} now
+ * @returns {boolean}
+ */
+function isFresh(record, now) {
+  if (!record.accessJwt) return false
+  const expiry = Date.parse(record.expiresAt)
+  if (Number.isNaN(expiry)) return false
+  return expiry - now > REFRESH_SKEW_MS
+}
+
+/**
+ * The bearer token a record presents as-is (no refresh): the static token, or
+ * the oidc cached access JWT.
+ *
+ * @param {RemoteCredentialRecord} record
+ * @returns {string}
+ */
+function bearerOf(record) {
+  return record.kind === 'oidc' ? record.accessJwt : record.token
+}
+
+/**
+ * @param {string} target
+ * @param {string} envName
+ * @returns {string}
+ */
+function noTokenError(target, envName) {
+  return `no token for '${target}' - run 'hyp remote login ${target}' (or set ${envName})`
 }
 
 /**
  * @param {string} stateDir
- * @param {Record<string, { token: string }>} map
+ * @param {Record<string, RemoteCredentialRecord>} map
  * @returns {Promise<void>}
  */
 async function writeCredentials(stateDir, map) {

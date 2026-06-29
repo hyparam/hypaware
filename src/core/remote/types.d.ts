@@ -25,3 +25,32 @@ export interface RefreshedAccess {
   expiresAt: string
   org: string
 }
+
+/**
+ * A legacy / static credential record: a bare query-scoped token (LLP 0033).
+ * On read, a record with a `token` and no `kind` is normalized to this.
+ */
+export interface RemoteStaticRecord {
+  kind: 'static'
+  token: string
+}
+
+/**
+ * An OIDC session record (LLP 0046 D4): the revocable refresh token plus the
+ * cached short-lived access JWT, its expiry, and the resolved org.
+ */
+export interface RemoteOidcRecord {
+  kind: 'oidc'
+  refreshToken: string
+  accessJwt: string
+  /** ISO-8601 expiry of `accessJwt`. */
+  expiresAt: string
+  org: string
+}
+
+/**
+ * One per-target record in `remote-credentials.json`, discriminated by
+ * `kind`. Both kinds live in the same file, share one resolve path, and are
+ * dropped by the same `removeToken`.
+ */
+export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord
