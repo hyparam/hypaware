@@ -60,7 +60,11 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
   return {
     accessJwt: str(json.access_jwt, 'access_jwt'),
     expiresAt: str(json.expires_at, 'expires_at'),
-    org: str(json.org, 'org'),
+    // The refresh grant only has to re-mint the access JWT; `org` is fixed for
+    // the life of the refresh token. Treat it as optional here and let the
+    // caller keep the org it already stored, so a server that omits it on
+    // refresh does not turn every silent refresh into a hard error.
+    org: typeof json.org === 'string' ? json.org : '',
   }
 }
 
@@ -122,8 +126,14 @@ function str(v, field) {
   return v
 }
 
-/** @param {string} base @returns {string} */
-function trimSlash(base) {
+/**
+ * Strip trailing slashes from an identity base so `${base}/token` never
+ * double-slashes. Shared with the login orchestrator's start-URL builder.
+ *
+ * @param {string} base
+ * @returns {string}
+ */
+export function trimSlash(base) {
   return base.replace(/\/+$/, '')
 }
 

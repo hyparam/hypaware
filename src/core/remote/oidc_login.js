@@ -3,7 +3,7 @@
 import crypto from 'node:crypto'
 
 import { Attr, getLogger } from '../observability/index.js'
-import { exchangeCode } from './identity_client.js'
+import { exchangeCode, trimSlash } from './identity_client.js'
 import { startLoopbackReceiver } from './loopback.js'
 import { openBrowser as defaultOpenBrowser } from './open_browser.js'
 import { createPkcePair } from './pkce.js'
@@ -98,7 +98,7 @@ export async function loginWithBrowser({
  * @returns {string}
  */
 export function buildStartUrl({ identityBase, redirectUri, challenge, state, org }) {
-  const url = new URL(`${identityBase.replace(/\/+$/, '')}/login/start`)
+  const url = new URL(`${trimSlash(identityBase)}/login/start`)
   url.searchParams.set('redirect_uri', redirectUri)
   url.searchParams.set('code_challenge', challenge)
   url.searchParams.set('code_challenge_method', 'S256')

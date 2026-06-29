@@ -131,6 +131,21 @@ test('resolveAccessJwt refreshes a stale oidc JWT and persists the new one', asy
   assert.equal(/** @type {any} */ (creds.prod).expiresAt, FUTURE)
 })
 
+test('resolveAccessJwt keeps the stored org when a refresh response omits it', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  // A refresh grant that re-mints only the access JWT (no org field) must not
+  // wipe the stored org or fail; org is fixed for the refresh token's life.
+  const fetchImpl = /** @type {any} */ (async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE }),
+  }))
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  assert.equal(/** @type {any} */ (r).token, 'jwt-new')
+  const creds = await readCredentials(dir)
+  assert.equal(/** @type {any} */ (creds.prod).org, 'acme')
+})
+
 test('resolveAccessJwt errors with login guidance when no record exists', async () => {
   const dir = await tmpState()
   const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir })

@@ -200,9 +200,9 @@ export async function removeToken(stateDir, target) {
  * Resolve a target's bearer token at query time, **without** session-aware
  * refresh. Order: per-target env var (CI/ephemeral) → stored file → error. An
  * env override never falls through to the file (LLP 0033 §credentials). For an
- * `oidc` record this returns the cached access JWT as-is; the attach path uses
- * {@link resolveAccessJwt} for refresh. Kept for the stdio proxy and other
- * non-refreshing callers.
+ * `oidc` record this returns the cached access JWT as-is. Both the query attach
+ * path and the stdio proxy now use {@link resolveAccessJwt} for session-aware
+ * refresh; this lower-level reader is kept for any non-refreshing caller.
  *
  * @param {{ target: string, env: NodeJS.ProcessEnv, stateDir: string }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file' } | { ok: false, error: string }>}
@@ -268,7 +268,9 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
     }
     const refreshed = await refreshSession({ identityBase, refreshToken: entry.refreshToken, fetchImpl })
     /** @type {RemoteOidcRecord} */
-    const next = { ...entry, accessJwt: refreshed.accessJwt, expiresAt: refreshed.expiresAt, org: refreshed.org }
+    // `org` is fixed for the refresh token's life; keep the stored one when the
+    // refresh response omits it (refreshSession returns '' in that case).
+    const next = { ...entry, accessJwt: refreshed.accessJwt, expiresAt: refreshed.expiresAt, org: refreshed.org || entry.org }
     await writeSession(stateDir, target, next)
     return { ok: true, token: refreshed.accessJwt, source: 'file', kind: 'oidc' }
   }
