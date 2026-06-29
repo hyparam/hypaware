@@ -36,6 +36,7 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
   // One-flow result channel: the request handler (or the timeout) settles it
   // exactly once; waitForCode() adopts these resolvers.
   let settled = false
+  let started = false
   /** @type {(value: { code: string }) => void} */
   let resolveCode = () => {}
   /** @type {(err: Error) => void} */
@@ -108,12 +109,20 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
 
   return new Promise((resolveStart, rejectStart) => {
     server.on('error', (err) => {
+      const e = err instanceof Error ? err : new Error(String(err))
+      // A post-listen error must settle a pending waitForCode() (and close the
+      // server), not just no-op against the already-resolved start promise.
+      if (started) {
+        fail(e, 'server_error')
+        return
+      }
       if (settled) return
       settled = true
-      rejectStart(err instanceof Error ? err : new Error(String(err)))
+      rejectStart(e)
     })
 
     server.listen(0, '127.0.0.1', () => {
+      started = true
       const addr = server.address()
       const port = addr && typeof addr === 'object' ? addr.port : 0
       const redirectUri = `http://127.0.0.1:${port}/callback`
@@ -143,9 +152,14 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
           })
         },
         close() {
+          // Closing before a code arrives must reject an in-flight (or future)
+          // waitForCode(), or the caller's promise hangs forever.
           if (!settled) {
             settled = true
             clearTimeout(timer)
+            const err = new Error('loopback receiver closed before a code arrived')
+            pending = { error: err }
+            rejectCode(err)
           }
           server.close(() => {})
         },

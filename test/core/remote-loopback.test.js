@@ -56,3 +56,22 @@ test('a timeout rejects', async () => {
   const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 50 })
   await assert.rejects(() => recv.waitForCode(), /timed out/)
 })
+
+test('close() before a code arrives rejects a pending waitForCode (no hang)', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  const assertion = assert.rejects(() => recv.waitForCode(), /closed before a code arrived/)
+  recv.close()
+  await assertion
+})
+
+test('a request to a path other than /callback does not consume the single shot', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  const waiting = recv.waitForCode()
+  // A favicon-style probe to another path 404s without settling the flow.
+  const probe = await fetch(new URL('/favicon.ico', recv.redirectUri))
+  await probe.text()
+  assert.equal(probe.status, 404)
+  // The real callback still works afterward.
+  await hitCallback(recv.redirectUri, { code: 'ok', state: 's1' })
+  assert.deepEqual(await waiting, { code: 'ok' })
+})
