@@ -96,12 +96,6 @@ export async function runRemoteAdd(argv, ctx) {
  * @ref LLP 0046#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const name = positional[0]
-  if (!name) {
-    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--no-browser]\n')
-    return 2
-  }
   const tokenFileIdx = argv.indexOf('--token-file')
   const tokenFile = tokenFileIdx >= 0 ? argv[tokenFileIdx + 1] : undefined
   if (tokenFileIdx >= 0 && (!tokenFile || tokenFile.startsWith('-'))) {
@@ -114,6 +108,14 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
     ctx.stderr.write('hyp remote login: --org expects an org name\n')
     return 2
   }
+  // The target name is the first positional. Skip the VALUE slot of a
+  // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
+  // as the target 'acme'.
+  const name = firstPositional(argv, new Set(['--token-file', '--org']))
+  if (!name) {
+    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--no-browser]\n')
+    return 2
+  }
   const forceBrowser = argv.includes('--browser')
   const noBrowser = argv.includes('--no-browser')
 
@@ -124,9 +126,33 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   const useStatic = !!tokenFile || (stdinPiped && !forceBrowser)
 
   if (useStatic) {
+    // --org only applies to the browser flow; say so rather than silently drop it.
+    if (org) {
+      ctx.stderr.write('note: --org is ignored with a static token (it applies to the browser login flow)\n')
+    }
     return runStaticLogin(name, tokenFile, stdin, ctx)
   }
   return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
+}
+
+/**
+ * Return the first positional argument (not a flag, not the value slot of a
+ * value-taking flag).
+ *
+ * @param {string[]} argv
+ * @param {Set<string>} valueFlags
+ * @returns {string | undefined}
+ */
+function firstPositional(argv, valueFlags) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a.startsWith('-')) {
+      if (valueFlags.has(a)) i++ // consume its value
+      continue
+    }
+    return a
+  }
+  return undefined
 }
 
 /**
