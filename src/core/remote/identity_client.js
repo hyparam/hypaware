@@ -1,5 +1,6 @@
 // @ts-check
 
+import { safeText } from '../http_text.js'
 import { Attr, getLogger } from '../observability/index.js'
 
 /**
@@ -159,11 +160,3 @@ export function trimSlash(base) {
   return base.replace(/\/+$/, '')
 }
 
-/** @param {any} res @returns {Promise<string>} */
-async function safeText(res) {
-  try {
-    return await res.text()
-  } catch {
-    return ''
-  }
-}

@@ -1,5 +1,7 @@
 // @ts-check
 
+import { safeText } from '../http_text.js'
+
 /**
  * MCP **client** over Streamable HTTP: the consumer half of remote attach
  * (LLP 0033). `hyp` is an MCP client, so `hyp <verb> --remote <target>`
@@ -184,11 +186,3 @@ function pickById(messages, id) {
   return messages.find((m) => m && typeof m === 'object' && m.id === id)
 }
 
-/** @param {any} res */
-async function safeText(res) {
-  try {
-    return await res.text()
-  } catch {
-    return ''
-  }
-}
