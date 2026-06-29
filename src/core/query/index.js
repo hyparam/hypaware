@@ -7,3 +7,4 @@
 export { executeQuerySql } from './sql.js'
 export { parquetDataSource } from './parquet-source.js'
 export { whereToParquetFilter } from './parquet-pushdown.js'
+export { unionSources, emptySource } from './union-source.js'

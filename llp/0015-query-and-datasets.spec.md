@@ -42,6 +42,33 @@ query helpers.
 `hypaware schema gascity_messages` works because the gascity source registered
 its schema — not because core knows what gascity is.
 
+## Multi-partition union
+
+A dataset whose `createDataSource` spans several committed partitions returns a
+single union `AsyncDataSource` that concatenates the per-partition scans. Core
+ships the canonical pair — `unionSources` and `emptySource` — from
+`hypaware/core/query`; every plugin imports them rather than re-implementing the
+concatenation (otel, ai-gateway, s3, context-graph, context-graph-enrich).
+
+The union reports `appliedWhere: false` and `appliedLimitOffset: false`, so the
+SQL engine re-applies both over the merged stream. **`limit`/`offset` are
+stripped** from the sub-scans — they are not distributive across a
+concatenation. A sub-source that honors limit/offset pushdown (an Iceberg
+partition) would otherwise drop its first `offset` rows per partition, and the
+engine would skip the offset again on the joined stream, silently losing rows
+from paginated multi-partition queries. Five drifted copies of this helper, two
+of which had un-stripped the hints, produced exactly that pagination bug before
+the helper was centralized.
+
+`where` is forwarded to a sub-source as a pushdown optimization **only when that
+partition advertises every column the predicate references**. A heterogeneous
+union (partitions with additive schema drift) can otherwise push a filter on a
+column a given partition physically lacks, and a parquet-backed source throws
+`parquet filter columns not found` rather than reading it as null; when a
+partition can't satisfy the predicate the union drops `where` for it and lets
+the engine filter. `columns` is always forwarded — projecting an absent column
+reads as null, never throws.
+
 ## Collect: the ad-hoc on-ramp
 
 `hypaware collect` registers an external JSONL file (or glob) the user already

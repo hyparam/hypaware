@@ -3,7 +3,7 @@
 import { Buffer } from 'node:buffer'
 
 import { parquetMetadataAsync } from 'hyparquet'
-import { parquetDataSource } from 'hypaware/core/query'
+import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/query'
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
@@ -159,59 +159,6 @@ async function s3AsyncBuffer(blobStore, key) {
       const out = new ArrayBuffer(sliced.byteLength)
       new Uint8Array(out).set(sliced)
       return out
-    },
-  }
-}
-
-/**
- * Combine several parquet sources into one logical table. The union does
- * NOT push WHERE/LIMIT/OFFSET through to the children — LIMIT/OFFSET are
- * not distributive across a concatenation — so it reports both flags
- * false and lets the SQL engine apply them over the merged stream.
- *
- * @param {AsyncDataSource[]} sources
- * @returns {AsyncDataSource}
- */
-function unionSources(sources) {
-  /** @type {Set<string>} */
-  const allColumns = new Set()
-  let total = 0
-  for (const s of sources) {
-    for (const col of s.columns) allColumns.add(col)
-    total += s.numRows ?? 0
-  }
-  return {
-    columns: Array.from(allColumns),
-    numRows: total,
-    scan(options) {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {
-          for (const s of sources) {
-            const scan = s.scan({ signal: options.signal })
-            for await (const row of scan.rows()) yield row
-          }
-        },
-      }
-    },
-  }
-}
-
-/**
- * @param {string[]} names
- * @returns {AsyncDataSource}
- */
-function emptySource(names) {
-  return {
-    columns: names,
-    numRows: 0,
-    scan() {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {},
-      }
     },
   }
 }

@@ -3,6 +3,7 @@
 import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
+import { unionSources, emptySource } from 'hypaware/core/query'
 
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.d.ts'
@@ -145,65 +146,7 @@ async function createDataSource(partitions, ctx, dataset) {
     if (source && (source.numRows ?? 0) > 0) sources.push(source)
   }
 
-  if (sources.length === 0) return emptySource(dataset)
+  if (sources.length === 0) return emptySource(COLUMNS[dataset].map((c) => c.name))
   if (sources.length === 1) return sources[0]
   return unionSources(sources)
-}
-
-/**
- * Concatenate sub-sources into one AsyncDataSource. Exported for tests.
- *
- * @param {AsyncDataSource[]} sources
- * @returns {AsyncDataSource}
- * @ref LLP 0023#derived-datasets [constrained-by] — the union must not forward limit/offset or offsets apply twice
- */
-export function unionSources(sources) {
-  /** @type {Set<string>} */
-  const allColumns = new Set()
-  let totalRows = 0
-  for (const s of sources) {
-    for (const col of s.columns) allColumns.add(col)
-    totalRows += s.numRows ?? 0
-  }
-  return {
-    columns: Array.from(allColumns),
-    numRows: totalRows,
-    scan(options) {
-      // The union reports appliedLimitOffset: false (the engine applies
-      // limit/offset to the concatenated stream), so the hints must not
-      // reach the sub-sources — an iceberg sub-source would push the
-      // offset down per partition and rows would be skipped twice.
-      const subOptions = options ? { ...options, limit: undefined, offset: undefined } : options
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {
-          for (const source of sources) {
-            const scan = source.scan(subOptions)
-            for await (const row of scan.rows()) {
-              yield row
-            }
-          }
-        },
-      }
-    },
-  }
-}
-
-/**
- * @param {'node' | 'edge'} dataset
- * @returns {AsyncDataSource}
- */
-function emptySource(dataset) {
-  return {
-    columns: COLUMNS[dataset].map((c) => c.name),
-    numRows: 0,
-    scan() {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {},
-      }
-    },
-  }
 }
