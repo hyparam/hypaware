@@ -11,6 +11,7 @@ import {
   remoteCredentialsPath,
   removeToken,
   resolveAccessJwt,
+  resolveToken,
   writeSession,
   writeToken,
 } from '../../src/core/remote/credentials.js'
@@ -29,6 +30,44 @@ test('an oidc session round-trips with kind: oidc', async () => {
   assert.deepEqual(creds.prod, { kind: 'oidc', refreshToken: 'rt', accessJwt: 'jwt', expiresAt: FUTURE, org: 'acme' })
   const st = await fs.stat(remoteCredentialsPath(dir))
   assert.equal(st.mode & 0o777, 0o600)
+})
+
+test('a record with a refreshToken but no accessJwt still yields its usable static token', async () => {
+  const dir = await tmpState()
+  // A corrupt/hand-edited record: an incomplete oidc shape that also carries a
+  // working static token. The token must not be silently dropped.
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { refreshToken: 'rt', token: 'still-good' } }))
+  const creds = await readCredentials(dir)
+  assert.deepEqual(creds.prod, { kind: 'static', token: 'still-good' })
+})
+
+test('a malformed oidc record (no accessJwt, no token) is dropped on read', async () => {
+  const dir = await tmpState()
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { kind: 'oidc', refreshToken: 'rt' } }))
+  assert.deepEqual(await readCredentials(dir), {})
+})
+
+test('resolveToken returns an oidc record cached access JWT as-is', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-cached', expiresAt: FUTURE, org: 'acme' })
+  const r = await resolveToken({ target: 'prod', env: {}, stateDir: dir })
+  assert.deepEqual(r, { ok: true, token: 'jwt-cached', source: 'file' })
+})
+
+test('resolveAccessJwt refreshes a JWT inside the skew window (not yet past)', async () => {
+  const dir = await tmpState()
+  // Expiry 30s in the future, inside the 60s skew window: must refresh.
+  const now = Date.parse('2026-06-29T12:00:00Z')
+  const soon = new Date(now + 30 * 1000).toISOString()
+  await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-soon', expiresAt: soon, org: 'acme' })
+  let refreshed = false
+  const fetchImpl = /** @type {any} */ (async () => {
+    refreshed = true
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme' }) }
+  })
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', now, fetchImpl })
+  assert.equal(refreshed, true)
+  assert.equal(/** @type {any} */ (r).token, 'jwt-new')
 })
 
 test('a legacy token-only record reads as kind: static', async () => {

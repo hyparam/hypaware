@@ -102,15 +102,19 @@ export async function readCredentials(stateDir) {
 function normalizeRecord(entry) {
   if (!entry || typeof entry !== 'object') return null
   const e = /** @type {Record<string, any>} */ (entry)
+  // A complete oidc record (explicit kind, or an inferable refresh+access pair).
   if (e.kind === 'oidc' || (e.kind === undefined && typeof e.refreshToken === 'string')) {
-    if (typeof e.refreshToken !== 'string' || typeof e.accessJwt !== 'string') return null
-    return {
-      kind: 'oidc',
-      refreshToken: e.refreshToken,
-      accessJwt: e.accessJwt,
-      expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
-      org: typeof e.org === 'string' ? e.org : '',
+    if (typeof e.refreshToken === 'string' && typeof e.accessJwt === 'string') {
+      return {
+        kind: 'oidc',
+        refreshToken: e.refreshToken,
+        accessJwt: e.accessJwt,
+        expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
+        org: typeof e.org === 'string' ? e.org : '',
+      }
     }
+    // Incomplete oidc shape: fall through so a usable static `token` on the
+    // same (corrupt/hand-edited) record is not silently dropped.
   }
   // Legacy / static: a bare token with no (or static) kind.
   if (typeof e.token === 'string') {
