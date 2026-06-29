@@ -174,8 +174,19 @@ export function createSinkDriver(opts) {
         let flushedAny = false
         for (const part of parts ?? []) {
           if (part.tablePath && storage.hasPendingSync(part.tablePath)) {
-            await storage.flushTable(part.tablePath, { reason: 'sink_discover' })
-            flushedAny = true
+            // Isolate per partition: a flush failure on one partition must
+            // not strand its siblings' pending rows for this tick.
+            try {
+              await storage.flushTable(part.tablePath, { reason: 'sink_discover' })
+              flushedAny = true
+            } catch (err) {
+              log.warn('sink.flush_partition_failed', {
+                [Attr.SINK_INSTANCE]: handle.instanceName,
+                [Attr.DATASET]: dataset.name,
+                tablePath: part.tablePath,
+                message: err instanceof Error ? err.message : String(err),
+              })
+            }
           }
         }
         if (flushedAny) {

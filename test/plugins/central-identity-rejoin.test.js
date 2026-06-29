@@ -133,6 +133,41 @@ test('re-join pointed at a different central URL re-bootstraps', async () => {
   assert.equal(after.central_url, 'https://central-b.example')
 })
 
+test('re-pointed at a different central URL with no token refuses to load the old identity', async () => {
+  const persistedPath = tmpIdentityPath()
+  const first = makeFetch()
+  await new IdentityClient({
+    centralUrl: 'https://central-a.example', bootstrapToken: 'token-a', persistedPath, fetchFn: first.fetchFn, now,
+  }).acquire()
+
+  // Config hand-edited to a new server, no token (seed already retired).
+  const second = makeFetch()
+  await assert.rejects(
+    new IdentityClient({
+      centralUrl: 'https://central-b.example', persistedPath, fetchFn: second.fetchFn, now,
+    }).acquire(),
+    /central URL mismatch/
+  )
+  // Never reused the old gateway identity against the new server.
+  assert.equal(second.calls.bootstrap, 0)
+  assert.equal(second.calls.refresh, 0)
+})
+
+test('reboot at the same URL with no token still loads (no false mismatch)', async () => {
+  const persistedPath = tmpIdentityPath()
+  const first = makeFetch()
+  await new IdentityClient({
+    centralUrl: 'https://central-a.example', bootstrapToken: 'token-a', persistedPath, fetchFn: first.fetchFn, now,
+  }).acquire()
+
+  const second = makeFetch()
+  const source = await new IdentityClient({
+    centralUrl: 'https://central-a.example', persistedPath, fetchFn: second.fetchFn, now,
+  }).acquire()
+  assert.equal(source, 'loaded')
+  assert.equal(second.calls.bootstrap, 0)
+})
+
 test('an identity from an older build (no mint stamp) re-bootstraps when a token is set', async () => {
   const persistedPath = tmpIdentityPath()
   fs.mkdirSync(path.dirname(persistedPath), { recursive: true })

@@ -202,7 +202,11 @@ Consequences:
   re-pointed at a different tenant would silently keep shipping under its old
   `gateway_id`, filing the new tenant's data under the old one. The fingerprint
   is a hash of the token, never the token itself, so `identity.json` never
-  carries the raw credential.
+  carries the raw credential. When the host is re-pointed at a different central
+  URL with no bootstrap token available to re-mint (a hand-edited config rather
+  than a `hyp join`), `acquire()` cannot safely produce a fresh identity, so it
+  refuses to load the mismatched one and tells the operator to re-run `hyp join`
+  against the new server, rather than reuse the old `gateway_id` cross-tenant.
 - **No field migration.** Joined-under-the-old-model hosts (where
   `hypaware-config.json` is a symlink to a slot) do not exist in the field; at
   most a trivial defensive boot-time fixup, not a migration path. Non-joined

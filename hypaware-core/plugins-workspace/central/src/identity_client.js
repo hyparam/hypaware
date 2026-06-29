@@ -92,6 +92,18 @@ export class IdentityClient {
         await this.bootstrap()
         return 'bootstrapped'
       }
+      // No bootstrap token to re-mint with, but the persisted identity was
+      // minted by a different central URL: the host has been re-pointed at
+      // another server without re-joining. Reusing the old gateway JWT would
+      // file this server's data under the other server's gateway_id, a
+      // cross-tenant leak. Refuse rather than silently mis-route; the
+      // operator must re-run `hyp join` against the new server.
+      // @ref LLP 0031#physical-layout [implements] a re-point with no token cannot safely reuse the old identity, so loading is refused
+      if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
+        throw new Error(
+          `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
+        )
+      }
       this.identity = persisted
       const remainingSec = persisted.expires_at - Math.floor(this.now() / 1000)
       if (remainingSec <= REFRESH_WINDOW_SECONDS) {
