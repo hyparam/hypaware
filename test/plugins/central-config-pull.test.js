@@ -199,7 +199,7 @@ test('the steady timer keeps polling on the configured cadence', async () => {
     { status: 304 }, { status: 304 }, { status: 304 }, { status: 304 },
   ])
   // Sub-second cadence is rejected by config validation but accepted
-  // by the loop itself — that's what makes this test fast.
+  // by the loop itself. That's what makes this test fast.
   const { loop } = makeLoop({ configControl: control, fetchFn, pollIntervalSeconds: 0.02 })
   loop.start()
   await new Promise((resolve) => setTimeout(resolve, 120))
@@ -239,7 +239,7 @@ test('an oversized Content-Length is rejected without reading the body', async (
   /** @type {typeof fetch} */
   const fetchFn = async () => {
     // A stream that never produces and never closes: only the
-    // Content-Length pre-reject can finish this poll promptly — the
+    // Content-Length pre-reject can finish this poll promptly. The
     // streaming counter would wait on it until the deadline.
     const stream = new ReadableStream({ pull() {} })
     const response = new Response(stream, { status: 200, headers: { etag: 'rev-huge' } })
@@ -252,7 +252,7 @@ test('an oversized Content-Length is rejected without reading the body', async (
   assert.deepEqual(control.staged, [])
   const row = log.rows.find((r) => r.fields.error_kind === 'config_document_too_large')
   assert.ok(row, 'expected the Content-Length pre-reject to fire')
-  // body_bytes reports the declared length — the streaming path could
+  // body_bytes reports the declared length. The streaming path could
   // never have observed this number from an empty stream.
   assert.equal(row?.fields.body_bytes, MAX_CONFIG_DOCUMENT_BYTES + 1)
 })

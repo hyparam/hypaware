@@ -4,7 +4,7 @@ import { createOtlpServer, listenAndResolve } from './server.js'
 import { makeReceiveHandler, stampBoundAddress } from './collector.js'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const DEFAULT_HOST = '127.0.0.1'
@@ -61,8 +61,8 @@ export async function startOtelSource(ctx) {
 
 /**
  * Read `listen_host` / `listen_port` out of the activation config slice.
- * Falls back to defaults when the keys are missing or wrongly typed —
- * mistyped values log a warning so the operator notices on first boot.
+ * Falls back to defaults when the keys are missing or wrongly typed.
+ * Mistyped values log a warning so the operator notices on first boot.
  *
  * @param {PluginActivationContext} ctx
  */

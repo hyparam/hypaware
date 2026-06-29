@@ -18,22 +18,10 @@ import {
  *   SinkEncoder,
  *   PluginActivationContext,
  *   TableFormatProvider,
- * } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../runtime/activation.d.ts'
- * @import { ExtendedSinkHandle } from '../registry/types.d.ts'
- */
-
-/**
- * @typedef {object} MaterializeResult
- * @property {ExtendedSinkHandle[]} handles
- * @property {MaterializeError[]} errors
- */
-
-/**
- * @typedef {object} MaterializeError
- * @property {string} instance
- * @property {string} errorKind
- * @property {string} message
+ * } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
+ * @import { MaterializeError, MaterializeResult } from '../../../src/core/sinks/types.js'
  */
 
 /**
@@ -43,13 +31,13 @@ import {
  *
  * Three sink shapes are supported:
  *
- * - **request**: `{ plugin }` — resolves that plugin's registered sink
+ * - **request**: `{ plugin }`, resolves that plugin's registered sink
  *   contribution.
  * - **blob**: `{ writer, destination }` where the writer provides
- *   `hypaware.encoder` — resolves encoder and destination blob-store
+ *   `hypaware.encoder`, resolves encoder and destination blob-store
  *   contributions.
  * - **table-format**: `{ writer, destination }` where the writer provides
- *   `hypaware.table-format` — resolves table-format provider, blob-store
+ *   `hypaware.table-format`, resolves table-format provider, blob-store
  *   from destination, inner encoder from `config.encoder` pin or default
  *   `@hypaware/format-parquet`.
  *
@@ -167,7 +155,7 @@ async function materializeRequest(runtime, instanceName, raw, opts) {
   if (contributions.length > 1) {
     throw materializeError(
       'sink_contribution_ambiguous',
-      `sink '${instanceName}': plugin '${pluginName}' registered ${contributions.length} sink contributions — cannot select unambiguously`
+      `sink '${instanceName}': plugin '${pluginName}' registered ${contributions.length} sink contributions - cannot select unambiguously`
     )
   }
 

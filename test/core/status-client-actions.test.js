@@ -12,14 +12,14 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/cli/core_commands.js'
 
 /**
- * @import { ClientActionReport } from '../../src/core/daemon/types.d.ts'
+ * @import { ClientActionReport } from '../../src/core/daemon/types.js'
  */
 
-// T6 — the client-action reconciler status surface (LLP 0036 / 0041). The
+// T6: the client-action reconciler status surface (LLP 0036 / 0041). The
 // collector reads the marker file (it never runs a pass) and derives a
 // per-provider done/failed/pending/n-a section; a failed action is loud but
 // never flips `overall` to `degraded`.
-// @ref LLP 0041#failure-is-surfaced-not-fatal [tests]
+// @ref LLP 0041#failure-is-surfaced-not-fatal [tests]:
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-actions-'))
@@ -63,7 +63,7 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
   const stateRoot = path.join(hypHome, 'hypaware')
 
   // Joined host: central enables the gateway plus two backfill-declaring
-  // plugins — claude (on_join true → pending until a pass runs) and codex
+  // plugins: claude (on_join true → pending until a pass runs) and codex
   // (on_join false → suppressed → n/a).
   const seedPath = centralSeedPath(stateRoot)
   await fs.mkdir(path.dirname(seedPath), { recursive: true })
@@ -120,7 +120,7 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
 test('a malformed on_join block renders n/a (not pending) on a joined host', async () => {
   // Regression (round-2): a *present but malformed* `on_join` (the JSON typo
   // `on_join: "false"`) is an opt-out, exactly as `backfillHandler.desired()`
-  // reads it — so the reconciler never writes a marker and the honest state is
+  // reads it: so the reconciler never writes a marker and the honest state is
   // `n/a`. Status used to read `on_join !== false` inline, so the string
   // "false" (!== the boolean false) showed `pending` forever. Both consumers
   // now share `readBackfillPolicy`, so they agree.
@@ -174,7 +174,7 @@ test('a default-on backfill target (enabled client, no explicit block) shows pen
   const m = byKey(report.clientActions.actions)
   assert.equal(m.get('@hypaware/claude')?.state, 'pending')
   assert.equal(m.get('@hypaware/claude')?.kind, 'backfill')
-  // ai-gateway is enabled but is not a backfill provider — it must not appear.
+  // ai-gateway is enabled but is not a backfill provider: it must not appear.
   assert.equal(m.has('@hypaware/ai-gateway'), false)
 })
 
@@ -194,7 +194,7 @@ test('a default-on client on a NON-joined host keeps the V1 surface (no spurious
 test('a failed backfill does not flip overall to degraded', async () => {
   const hypHome = await makeHome()
 
-  // Minimal, otherwise-healthy config (gateway only — no client advisories)
+  // Minimal, otherwise-healthy config (gateway only: no client advisories)
   // so the only notable state is the failed action marker.
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({
     version: 2,

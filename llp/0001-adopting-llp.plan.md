@@ -57,7 +57,7 @@ Note: the `grill-with-docs` / `improve-codebase-architecture` skills assume a
 - **Anchors:** heading slugs (`#token-strategy`) as default — they survive
   restructuring, which matters because these are living docs. Numbered anchors
   only for settled Spec docs.
-- **`@ref` syntax:** `// @ref LLP NNNN#anchor — gloss` (≤80-char gloss).
+- **`@ref` syntax:** `// @ref LLP NNNN#anchor: gloss` (≤80-char gloss).
   Relation types (`[implements]`, `[constrained-by]`, `[tests]`, `[explains]`)
   used where they sharpen agent retrieval, not mechanically.
 - **Living-doc rule:** update in place; `Superseded` or `tombstones/` +
@@ -150,7 +150,7 @@ the agent workflow until then.
 
 A new `## Design docs (LLP)` section telling agents: LLPs live in `llp/`; read
 the ones tagged with the `Systems` you're touching before changing code; add
-`@ref LLP NNNN#anchor — gloss` when implementing a non-obvious documented
+`@ref LLP NNNN#anchor: gloss` when implementing a non-obvious documented
 decision; update the LLP (not just the code) when the design changes; never
 leave a stale `@ref`.
 

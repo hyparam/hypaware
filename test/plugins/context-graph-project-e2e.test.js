@@ -17,7 +17,7 @@ import { projectGraph } from '../../hypaware-core/plugins-workspace/context-grap
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 
 /**
- * @import { Contract } from '../../hypaware-core/plugins-workspace/context-graph/src/types.d.ts'
+ * @import { Contract } from '../../hypaware-core/plugins-workspace/context-graph/src/types.js'
  */
 
 // End-to-end: a contributed contract, run by the engine, over a real seeded
@@ -25,7 +25,7 @@ import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-worksp
 // Task 3 (the connector's contract), and Task 1 (the kit) together, and is the
 // automated regression that the relocation changed nothing observable.
 
-// @ref LLP 0030#decision — the ai-gateway contract keys the Session on
+// @ref LLP 0030#decision: the ai-gateway contract keys the Session on
 // session_id now (conversation_id is null for Claude). The fixture carries
 // both columns: session_id for the contract under test, conversation_id for
 // the version-bump regression's bespoke session-only contract below.
@@ -126,7 +126,7 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
   // The gateway now retains harness aux exchanges (tagged
   // attributes.claude.aux_kind) instead of dropping them (LLP 0026). They
   // must not mint graph nodes/edges. Seed the same two real rows plus one
-  // aux row whose keys are all distinct — counts must stay 5/4.
+  // aux row whose keys are all distinct. Counts must stay 5/4.
   await withSeededGateway(async ({ registry, storage }) => {
     const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
     const r = await projectGraph({ query: registry, storage, contracts: [contract] })
@@ -180,14 +180,14 @@ function sessionContract(version) {
   }
 }
 
-test('bumping projectorVersion does not re-project — committed rows keep their original version', async () => {
+test('bumping projectorVersion does not re-project: committed rows keep their original version', async () => {
   await withSeededGateway(async ({ registry, storage }) => {
     const v1 = await projectGraph({ query: registry, storage, contracts: [sessionContract(1)] })
     assert.equal(v1.nodesWritten, 1, 'one Session node committed at v1')
 
     // Same source, same content-addressed ids, projectorVersion bumped to 2.
     const v2 = await projectGraph({ query: registry, storage, contracts: [sessionContract(2)] })
-    assert.equal(v2.nodesWritten, 0, 'a version bump alone rewrites nothing — pre-write dedup skips the committed id')
+    assert.equal(v2.nodesWritten, 0, 'a version bump alone rewrites nothing - pre-write dedup skips the committed id')
 
     // Exactly one Session row survives, still stamped v1: bumping the version
     // did not re-derive it. (Asserting on the single Session row rather than by

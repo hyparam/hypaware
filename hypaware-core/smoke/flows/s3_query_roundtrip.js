@@ -21,8 +21,8 @@ import { executeQuerySql } from '../../../src/core/query/sql.js'
 import { rowsToColumnSources } from '../../plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -78,7 +78,7 @@ const QUERY_SOURCES = [
 export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
-    throw new Error('s3_query_roundtrip: tracer provider not installed — expected HYP_DEV_TELEMETRY=1')
+    throw new Error('s3_query_roundtrip: tracer provider not installed - expected HYP_DEV_TELEMETRY=1')
   }
 
   const cacheRoot = path.join(harness.stateDir, 'cache')
@@ -163,7 +163,7 @@ export async function run({ harness, expect }) {
       const { loaded, failed } = await loadManifests([parquetDir, s3Dir, icebergDir, fixtureDir])
       if (failed.length > 0) {
         throw new Error(
-          `s3_query_roundtrip: manifest failures — ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`
+          `s3_query_roundtrip: manifest failures - ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`
         )
       }
       /** @type {PluginActivationEntry[]} */

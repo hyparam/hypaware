@@ -16,13 +16,14 @@ actually shipped in V1.
   with its `Systems` value (e.g. `Sources`, `Sinks`, `Plugins`, `Config`).
 - **Annotate non-obvious decisions.** When you implement or change code that
   realizes a documented, non-obvious design decision, add an annotation:
-  `// @ref LLP NNNN#anchor — short gloss` (optional relation:
-  `[implements]`, `[constrained-by]`, `[tests]`). Attach it directly above the
-  construct — a blank line breaks attachment. Don't annotate mechanically; a
+  `// @ref LLP NNNN#anchor: short gloss` (with an optional relation before the
+  colon: `[implements]`, `[constrained-by]`, `[tests]`, e.g.
+  `// @ref LLP NNNN#anchor [implements]: short gloss`). Attach it directly above
+  the construct; a blank line breaks attachment. Don't annotate mechanically; a
   ref must tell you something the code and filename don't.
 - **Keep refs honest.** When you touch annotated code, check the referenced
   section still applies; update or remove the `@ref` if not.
-- **Living docs.** Update the LLP when the design changes — land the doc edit in
+- **Living docs.** Update the LLP when the design changes: land the doc edit in
   the same commit as the code. Mark retired docs `Superseded` or move them to
   `llp/tombstones/` with `Status: Tombstoned`; don't leave stale guidance.
 - **Tooling lives in-repo** under `.claude/skills/` (so every clone has it):
@@ -34,11 +35,26 @@ actually shipped in V1.
 ## Code Style
 
 - JavaScript, no semicolons.
+- No em dashes (the U+2014 character) anywhere: code, comments, JSDoc, strings,
+  or docs. In prose, use the punctuation the sentence wants (a comma, colon,
+  parentheses, or a sentence split); in runtime strings, prefer `-`.
 - Types are defined in JSDoc comments, not TypeScript.
 - Never use inline `import('...')` types. Declare type imports at the top of
   the file with `@import` JSDoc comments, then reference the bare names.
 - Do not use `@typedef` in JSDoc. Define shared types as `interface`s in
   `.d.ts` files and import them via `@import`.
+- **Type-import specifiers are repo-root-anchored `.js` paths.** Inside `src/`,
+  write `@import { Foo } from '../../src/core/types.js'` (route up to the repo
+  root, then back down through `src/...`, with a `.js` extension), not
+  `from './types.d.ts'`. The published declaration build (`npm run build:types`,
+  `tsconfig.build.json`, `rootDir: src` to `outDir: types`) emits `.d.ts` into a
+  parallel `types/` tree; a root-anchored specifier resolves identically from
+  both `src/<P>/x.js` and the generated `types/<P>/x.d.ts`, so consumers of the
+  published package get real types instead of `any`. A bare `./types.d.ts`
+  resolves in `src` but dangles in `types/`. Imports of the root kernel contract
+  (`collectivus-plugin-kernel-types.js`) and `hypaware-core/...` already reach
+  the root, so they only need the `.js` extension. This is the icebird-style
+  no-copy convention.
 
 ## Development Checks
 

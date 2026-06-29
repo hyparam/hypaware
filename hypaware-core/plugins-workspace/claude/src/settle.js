@@ -10,8 +10,8 @@ import {
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 
 /**
- * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SessionContextRecord, TranscriptEntry } from './types.d.ts'
+ * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  */
 
 /**
@@ -19,14 +19,14 @@ import { pickLatestMatching, readSessionContext } from './session_context.js'
  *
  * The live projector writes a Claude message under a fallback hash id
  * when its transcript line hasn't landed on disk yet (the
- * finalize-vs-transcript race). At flush — minutes later, the line now
- * present — this upgrades those rows to native uuid identity so they
+ * finalize-vs-transcript race). At flush (minutes later, the line now
+ * present), this upgrades those rows to native uuid identity so they
  * collapse onto the uuid copy a later replay already wrote.
  *
  * Each fallback row carries `attributes.claude.match_key` (stamped at
  * projection from the wire content), so settlement is a pure transcript
- * lookup — no need to reconstruct the content array that per-part
- * expansion discards. Rows that still don't match (no transcript line —
+ * lookup (no need to reconstruct the content array that per-part
+ * expansion discards). Rows that still don't match (no transcript line:
  * harness aux traffic, wire-only reminders) are returned unchanged.
  *
  * @param {{ homeDir: string, stateFile: string, projectsDir?: string, clientName?: string }} opts
@@ -49,7 +49,7 @@ export function createClaudeSettlementEnricher(opts) {
       if (!Array.isArray(rows) || rows.length === 0) return rows
 
       // Group fallback rows by session so each session's transcript is
-      // loaded and indexed once. @ref LLP 0030#decision — the session id
+      // loaded and indexed once. @ref LLP 0030#decision: the session id
       // lives in `session_id` now; Claude `conversation_id` is null, so
       // grouping on it would load nothing and never enrich.
       /** @type {Map<string, number[]>} */

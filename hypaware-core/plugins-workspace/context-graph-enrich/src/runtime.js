@@ -8,8 +8,8 @@
  */
 
 /**
- * @import { CompletionCapability, EmbedderCapability, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { EnrichRuntime } from './types.d.ts'
+ * @import { CompletionCapability, EmbedderCapability, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { EnrichRuntime } from './types.js'
  */
 
 /** @type {EnrichRuntime | null} */
@@ -23,7 +23,7 @@ export function setEnrichRuntime(value) {
 /** @returns {EnrichRuntime} */
 export function requireEnrichRuntime() {
   if (!runtime) {
-    throw new Error('@hypaware/context-graph-enrich: not activated yet — runtime singleton is empty')
+    throw new Error('@hypaware/context-graph-enrich: not activated yet - runtime singleton is empty')
   }
   return runtime
 }
@@ -58,7 +58,7 @@ export function getVector(rt) {
 /**
  * Lazily resolve + cache the embedder capability. Used only by the T2
  * cold-remainder clustering ([§curate-clustering](LLP 0028)): prospects that
- * recall nothing are clustered by their own embeddings. Resolved best-effort —
+ * recall nothing are clustered by their own embeddings. Resolved best-effort:
  * an embedder provider is already present transitively (vector-search requires
  * one), but if it isn't, the caller falls back to session grouping rather than
  * failing the tick. Throws (caught by the caller) when no provider is installed.

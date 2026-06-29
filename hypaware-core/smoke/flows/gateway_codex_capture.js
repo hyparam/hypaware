@@ -11,15 +11,15 @@ import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
 /**
- * Phase 7 smoke — OpenAI `/v1` passthrough plus the Codex-specific
+ * Phase 7 smoke: OpenAI `/v1` passthrough plus the Codex-specific
  * ChatGPT `/backend-api/codex/responses` capture under the daemon boot path.
  *
  * Boots `runDaemon` with `@hypaware/ai-gateway` activated and
  * OpenAI plus ChatGPT Codex upstreams. Two requests run through it:
  *
- *   - `POST /v1/chat/completions` — the legacy OpenAI Chat path, a
+ *   - `POST /v1/chat/completions`: the legacy OpenAI Chat path, a
  *     proxy of every non-streaming inference call.
- *   - `POST /backend-api/codex/responses` — the ChatGPT endpoint Codex
+ *   - `POST /backend-api/codex/responses`: the ChatGPT endpoint Codex
  *     Desktop uses; the response is an SSE stream so the recorder also
  *     exercises the `is_sse=true` / `stream_event_count>0` columns and
  *     Codex metadata projection.
@@ -41,7 +41,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'gateway_codex_capture: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'gateway_codex_capture: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -63,7 +63,7 @@ export async function run({ harness, expect }) {
             // local entries appear first in the merged routing table
             // (lower seq), so with identical priority + prefix length
             // they outrank the plugin presets at routing time. The
-            // plugin presets remain in the table — they just never win
+            // plugin presets remain in the table. They just never win
             // routing for this smoke's traffic.
             { name: 'local-openai', base_url: openai.url, path_prefix: '/v1', provider: 'openai' },
             { name: 'local-chatgpt', base_url: openai.url, path_prefix: '/backend-api/codex', provider: 'chatgpt' },
@@ -353,9 +353,8 @@ export async function run({ harness, expect }) {
  * Spin up an upstream that mimics the two OpenAI endpoints the smoke
  * exercises:
  *
- *   - `POST /chat/completions` — non-streaming JSON response.
- *   - `POST /responses` and `/backend-api/codex/responses`
- *                              — SSE stream with three events ending in
+ *   - `POST /chat/completions`: non-streaming JSON response.
+ *   - `POST /responses` and `/backend-api/codex/responses`: SSE stream with three events ending in
  *                                `response.completed`.
  *
  * The fake upstream accepts both the OpenAI `/v1` paths and the

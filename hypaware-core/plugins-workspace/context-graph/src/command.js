@@ -5,12 +5,12 @@ import { projectGraph } from './project.js'
 import { requireGraphRuntime } from './runtime.js'
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
+ * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  */
 
 /**
- * `hyp graph project` — run the T0 projection over every registered source
+ * `hyp graph project` - run the T0 projection over every registered source
  * contract (optionally filtered to one source with `--source <dataset>`).
  *
  * @param {string[]} argv
@@ -34,7 +34,7 @@ export async function runGraphProject(argv, ctx) {
       ctx.stdout.write(
         source
           ? `graph project: no contract registered for source '${source}'\n`
-          : 'graph project: no contracts registered — install a source connector (e.g. @hypaware/ai-gateway-graph)\n'
+          : 'graph project: no contracts registered - install a source connector (e.g. @hypaware/ai-gateway-graph)\n'
       )
       return 0
     }
@@ -50,7 +50,7 @@ export async function runGraphProject(argv, ctx) {
       ctx.stdout.write(`graph project (dry-run): ${r.nodes} node(s), ${r.edges} edge(s) would be projected\n`)
     } else {
       ctx.stdout.write(
-        `graph project: ${r.nodes} node(s), ${r.edges} edge(s) — wrote ${r.nodesWritten} new node(s), ${r.edgesWritten} new edge(s)\n`
+        `graph project: ${r.nodes} node(s), ${r.edges} edge(s) - wrote ${r.nodesWritten} new node(s), ${r.edgesWritten} new edge(s)\n`
       )
     }
     return 0
@@ -64,7 +64,7 @@ export async function runGraphProject(argv, ctx) {
  * Parse `graph project` argv: flags only, no positional. `--source` takes a
  * value (the source dataset to filter to, `--source <ds>` or `--source=<ds>`);
  * `--dry-run` is boolean. A missing, empty, or flag-shaped `--source` value is
- * a usage error — so a malformed targeted
+ * a usage error, so a malformed targeted
  * command can't silently fall back to projecting *all* contracts, a broader
  * write than was asked for. Unknown flags and stray positionals are rejected
  * for the same reason.
@@ -103,7 +103,7 @@ function parseProjectArgv(argv) {
 }
 
 /**
- * `hyp graph compact` — merge duplicate node/edge rows and rewrite
+ * `hyp graph compact` - merge duplicate node/edge rows and rewrite
  * affected partitions into sorted replacement tables.
  *
  * @param {string[]} argv
@@ -120,11 +120,11 @@ export async function runGraphCompact(argv, ctx) {
     for (const d of r.datasets) {
       if (dryRun) {
         ctx.stdout.write(
-          `graph compact (dry-run): ${d.dataset} — ${d.duplicateIds} duplicate id(s) across ${d.partitionsRewritten} partition(s) would be merged\n`
+          `graph compact (dry-run): ${d.dataset} - ${d.duplicateIds} duplicate id(s) across ${d.partitionsRewritten} partition(s) would be merged\n`
         )
       } else {
         ctx.stdout.write(
-          `graph compact: ${d.dataset} — merged ${d.rowsMerged} duplicate row(s) (${d.duplicateIds} id(s)), rewrote ${d.partitionsRewritten} partition(s)\n`
+          `graph compact: ${d.dataset} - merged ${d.rowsMerged} duplicate row(s) (${d.duplicateIds} id(s)), rewrote ${d.partitionsRewritten} partition(s)\n`
         )
       }
       for (const skip of d.partitionsSkipped) {
@@ -132,8 +132,8 @@ export async function runGraphCompact(argv, ctx) {
       }
     }
     // A concurrent-write skip is a benign retry-later; an unreadable
-    // cursor needs operator attention — exit nonzero so it can't pass
-    // silently in scripts.
+    // cursor needs operator attention, so exit nonzero to prevent it from
+    // passing silently in scripts.
     const unreadable = r.datasets.some((d) => d.partitionsSkipped.some((s) => s.reason === 'unreadable-cursor'))
     return unreadable ? 1 : 0
   } catch (err) {

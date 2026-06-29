@@ -11,8 +11,8 @@ import { deriveRepoFromCwd } from './git_repo.js'
 import { anthropicMessageAttributes } from './anthropic.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { SessionContextRecord, TranscriptEntry } from './types.d.ts'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  */
 
 /**
@@ -32,7 +32,7 @@ import { anthropicMessageAttributes } from './anthropic.js'
  * recomputes ids when the projector supplies them):
  *   - `uuid`       -> `message_id` / `provider_uuid`
  *   - `parentUuid` -> `parent_uuid`
- * `previous_message_id` is NOT supplied here — the gateway expansion
+ * `previous_message_id` is NOT supplied here; the gateway expansion
  * always fills it with the full prior-message-id chain, the same
  * shape live capture rows get.
  * Reruns are deterministic: ids, parents, and timestamps come straight
@@ -74,7 +74,7 @@ export function createClaudeBackfillProvider(opts) {
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
   const projectsDir = opts.projectsDir ?? defaultClaudeProjectsDir(opts.homeDir)
   const stateFile = opts.stateFile
-  // @ref LLP 0032#capture — pre-0032 Claude sessions carry no captured remote;
+  // @ref LLP 0032#capture: pre-0032 Claude sessions carry no captured remote;
   // recover it by running git in the session's cwd at backfill time. Injectable
   // so tests stub the git lookup and stay hermetic.
   const deriveRepo = opts.deriveRepo ?? deriveRepoFromCwd
@@ -300,7 +300,7 @@ async function projectedExchangeFromEntries(args) {
   let transcriptCwd
   // Usage is a response-level (per API message) figure that Claude Code
   // duplicates onto every block line of an assistant turn. Record the last
-  // block line per API message id so usage is stamped on only that one block —
+  // block line per API message id so usage is stamped on only that one block:
   // matching the live projector, so each response contributes usage to exactly
   // one row and live/backfill dedupe onto the same row. @ref LLP 0035#one-carrier
   /** @type {Map<string, number>} */
@@ -330,7 +330,7 @@ async function projectedExchangeFromEntries(args) {
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
     provider: 'anthropic',
-    // @ref LLP 0030#decision — the Claude session id is the session_id
+    // @ref LLP 0030#decision: the Claude session id is the session_id
     // partition key; conversation_id is null (no per-thread id). Matches
     // live capture so backfilled and live rows still converge.
     session_id: sessionId,
@@ -351,7 +351,7 @@ async function projectedExchangeFromEntries(args) {
   const cwd = record?.cwd ?? transcriptCwd
   if (cwd) exchange.cwd = cwd
   if (record?.git_branch) exchange.git_branch = record.git_branch
-  // @ref LLP 0032#capture — repo identity rides the same hook-written
+  // @ref LLP 0032#capture: repo identity rides the same hook-written
   // session-context record as cwd/git_branch; the live projector stamps these
   // too (projector.js), so backfilled and live Claude rows converge identically.
   // Unlike Codex, the Claude hook captures `git rev-parse --show-toplevel`, so
@@ -359,10 +359,10 @@ async function projectedExchangeFromEntries(args) {
   if (record?.git_remote) exchange.git_remote = record.git_remote
   if (record?.head_sha) exchange.head_sha = record.head_sha
   if (record?.repo_root) exchange.repo_root = record.repo_root
-  // @ref LLP 0032#capture — sessions recorded before the hook captured git
+  // @ref LLP 0032#capture: sessions recorded before the hook captured git
   // identity have a record with no remote; recover it by running git in the
   // recovered cwd. Only when the record didn't already supply a remote, and
-  // never head_sha — current HEAD ≠ the session's HEAD (git_repo.js).
+  // never head_sha: current HEAD ≠ the session's HEAD (git_repo.js).
   if (cwd && !exchange.git_remote) {
     const derived = await deriveRepo(cwd)
     if (derived.git_remote) exchange.git_remote = derived.git_remote
@@ -376,7 +376,7 @@ async function projectedExchangeFromEntries(args) {
  * mirroring the live Claude projector's native-DAG identity mapping.
  * Differs from live capture in two ways: `role` / `content` come
  * straight from the transcript frame, and `raw_frame` carries only a
- * minimized native-identity stub — never the full transcript line.
+ * minimized native-identity stub: never the full transcript line.
  *
  * @param {TranscriptEntry} entry
  * @param {Map<string, { tool_use_id: string }>} agentMeta
@@ -394,7 +394,7 @@ function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
     content: /** @type {any} */ (entry.content),
   }
   if (entry.provider_uuid) {
-    // Native id only — like the live projector, `previous_message_id`
+    // Native id only: like the live projector, `previous_message_id`
     // is left to the gateway expansion, which fills the full
     // prior-message chain; the native DAG parent rides `parent_uuid`.
     message.message_id = entry.provider_uuid
@@ -446,7 +446,7 @@ function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
  * Minimized native frame: enough to trace a row back to its Claude
  * transcript line (native uuids, type/subtype, timestamp) without
  * copying the full transcript or any prompt / response content. Per the
- * bead contract: store a minimized, redacted native frame — never the
+ * bead contract: store a minimized, redacted native frame, never the
  * raw line.
  *
  * @param {TranscriptEntry} entry

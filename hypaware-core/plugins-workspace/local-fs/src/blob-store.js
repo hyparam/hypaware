@@ -7,7 +7,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 
 /**
- * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 export const BLOB_STORE_KIND = 'local-fs'
@@ -110,7 +110,7 @@ export function createLocalFsBlobStore({ baseDir }) {
       await fs.mkdir(dir, { recursive: true })
       const bytes = await materializeBody(input.body)
       if (input.ifNoneMatch === '*') {
-        // Conditional create — use O_EXCL so a concurrent writer cannot
+        // Conditional create: use O_EXCL so a concurrent writer cannot
         // race past us. node:fs/promises maps O_EXCL via `flag: 'wx'`.
         try {
           const handle = await fs.open(dest, 'wx')

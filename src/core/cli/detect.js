@@ -7,15 +7,15 @@ import path from 'node:path'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 
 /**
- * @import { PickerSource } from './types.d.ts'
+ * @import { PickerSource } from '../../../src/core/cli/types.js'
  */
 
 /**
  * The client sources the first-run picker can autodetect, paired with
  * the `settings_file` their plugin manifest declares for the attach
  * probe. Detection stats the *directory* that holds this file (the
- * client's config home) — the "tool is installed on this system"
- * signal — not the file itself, so HypAware writing the settings file
+ * client's config home): the "tool is installed on this system"
+ * signal, not the file itself, so HypAware writing the settings file
  * on attach never makes a source detect itself.
  *
  * This list is intentionally hardcoded rather than read from
@@ -25,7 +25,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
  * is itself hardcoded. If the picker is ever made plugin-driven, move
  * detection to iterate the client descriptors and read each
  * `attach_probe.settings_file` (see `probeClientAttachFromDescriptor`
- * in daemon/status.js) in that same change — not before.
+ * in daemon/status.js) in that same change, not before.
  *
  * @type {{ source: PickerSource, client: string, settingsFile: string }[]}
  */

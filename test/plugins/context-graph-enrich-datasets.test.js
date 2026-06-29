@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { columnsFor, COMMITTED_DATASET, PROSPECTS_DATASET, prospectId, unionSources } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/datasets.js'
+import { columnsFor, COMMITTED_DATASET, PROSPECTS_DATASET, prospectId } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/datasets.js'
 
 test('prospectId is deterministic for the same inputs', () => {
   const a = prospectId({ extractor: 'enrich.t1', extractorVersion: 1, anchorKey: 'conv-1', candidateKey: 'Decision Use Redis' })
@@ -25,35 +25,6 @@ test('columnsFor returns the schema for known datasets and throws otherwise', ()
   assert.throws(() => columnsFor('nope'))
 })
 
-test('unionSources concatenates rows, unions columns, sums numRows, and strips limit/offset from sub-scans', async () => {
-  /** @type {any[]} */
-  const captured = []
-  /** @param {string[]} columns @param {Record<string, unknown>[]} rows */
-  const src = (columns, rows) => /** @type {any} */ ({
-    columns,
-    numRows: rows.length,
-    /** @param {Record<string, unknown>} [options] */
-    scan(options) {
-      captured.push(options)
-      return { appliedWhere: false, appliedLimitOffset: false, async *rows() { for (const r of rows) yield r } }
-    },
-  })
-
-  const u = unionSources([src(['a', 'b'], [{ a: 1 }]), src(['b', 'c'], [{ c: 2 }, { c: 3 }])])
-  assert.deepEqual([...u.columns].sort(), ['a', 'b', 'c'], 'columns are the union')
-  assert.equal(u.numRows, 3, 'numRows is the sum')
-
-  const scan = u.scan(/** @type {any} */ ({ limit: 5, offset: 2, where: 'x' }))
-  assert.equal(scan.appliedLimitOffset, false, 'the engine must apply limit/offset once over the concatenated stream')
-  /** @type {any[]} */
-  const out = []
-  for await (const r of scan.rows()) out.push(r)
-  assert.deepEqual(out, [{ a: 1 }, { c: 2 }, { c: 3 }], 'rows are concatenated in source order')
-
-  assert.equal(captured.length, 2)
-  for (const o of captured) {
-    assert.equal(o.limit, undefined, 'limit is stripped so it is not applied twice')
-    assert.equal(o.offset, undefined, 'offset is stripped so it is not applied twice')
-    assert.equal(o.where, 'x', 'other scan options still pass through')
-  }
-})
+// The union data source the enrich datasets build over multiple committed
+// partitions is the shared core helper; its limit/offset/where behavior is
+// covered by test/core/union-source.test.js.

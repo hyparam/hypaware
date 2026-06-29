@@ -20,8 +20,8 @@ import { centralSeedPath } from '../../src/core/config/apply.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
- * @import { ClientDescriptor } from '../../src/core/plugin_catalog.js'
- * @import { DaemonStatus } from '../../src/core/daemon/types.d.ts'
+ * @import { ClientDescriptor } from '../../src/core/types.js'
+ * @import { DaemonStatus } from '../../src/core/daemon/types.js'
  */
 
 test('writeStatusFile writes an atomic readable status snapshot', async () => {
@@ -175,7 +175,7 @@ test('renderDaemonInstall renders a deterministic LaunchAgent dry-run payload', 
 })
 
 test('installers default to relaunch-on-exit (staged restart requirement, LLP 0017)', () => {
-  // Defaults — no keepAlive/restart override. The service manager MUST
+  // Defaults: no keepAlive/restart override. The service manager MUST
   // relaunch the daemon after a staged config-apply exit.
   const launchd = renderDaemonInstall({
     platform: 'darwin',
@@ -262,7 +262,7 @@ test('runDaemon reload refreshes plugin config before source.reload', async () =
   }
 })
 
-test('runDaemon reload re-merges the central layer (does not re-read local alone) — #111 regression', async () => {
+test('runDaemon reload re-merges the central layer (does not re-read local alone) - #111 regression', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-reload-central-'))
   let handle
   try {
@@ -284,7 +284,7 @@ test('runDaemon reload re-merges the central layer (does not re-read local alone
     })
 
     // The fixture's config lives ONLY in the central layer (the join
-    // seed). The local layer exists and loads, but never names it — so a
+    // seed). The local layer exists and loads, but never names it: so a
     // reload that re-read the local layer alone would lose the central
     // config and write `reloaded: undefined`.
     const seedPath = centralSeedPath(stateRoot)
@@ -315,7 +315,7 @@ test('runDaemon reload re-merges the central layer (does not re-read local alone
 
     await handle.reload()
 
-    // After SIGHUP the merge still carries the central layer's config —
+    // After SIGHUP the merge still carries the central layer's config:
     // not `undefined` from a local-only re-read.
     assert.deepEqual(JSON.parse(await fs.readFile(statePath, 'utf8')), {
       started: 'central',
@@ -385,7 +385,7 @@ test('runDaemon health event derives from aggregate state and excludes failed so
       .filter(Boolean)
       .map((line) => JSON.parse(line))
 
-    // (a) The boot health event reflects degraded — NOT daemon.healthy.
+    // (a) The boot health event reflects degraded: NOT daemon.healthy.
     assert.equal(
       events.some((e) => e.event === 'daemon.healthy'),
       false,

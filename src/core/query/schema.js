@@ -1,13 +1,13 @@
 // @ts-check
 
 /**
- * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
  * Resolve the schema for a dataset by name. The kernel does not hard
- * code dataset names — the registry holds whatever the active plugin
- * set contributed — so `query schema <name>` simply asks the registry.
+ * code dataset names; the registry holds whatever the active plugin
+ * set contributed; so `query schema <name>` simply asks the registry.
  *
  * Returns `undefined` if the dataset is not registered; callers
  * surface that as a user-facing error.

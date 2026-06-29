@@ -8,10 +8,10 @@
  */
 
 /**
- * @import { EmbedderConfigError, EmbedderConfigResult } from './types.d.ts'
+ * @import { EmbedderConfigError, EmbedderConfigResult } from './types.js'
  */
 
-// @ref LLP 0024#embedder-speaks-openai-compatible-base_url-configurable [implements] — defaults cover OpenAI; base_url override covers proxies and localhost servers
+// @ref LLP 0024#embedder-speaks-openai-compatible-base_url-configurable [implements]: defaults cover OpenAI; base_url override covers proxies and localhost servers
 export const DEFAULT_BASE_URL = 'https://api.openai.com'
 export const DEFAULT_MODEL = 'text-embedding-3-small'
 export const DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'
@@ -19,7 +19,7 @@ export const DEFAULT_MAX_BATCH = 128
 export const DEFAULT_TIMEOUT_MS = 30_000
 
 /**
- * Validate the plugin's config slice. Every field is optional — the
+ * Validate the plugin's config slice. Every field is optional: the
  * zero-config default targets OpenAI with `OPENAI_API_KEY`.
  *
  * @param {unknown} value

@@ -3,12 +3,12 @@
 import { createHash } from 'node:crypto'
 
 /**
- * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
  * Anthropic Messages HTTP + SSE parsing. Ported from the gateway
- * core's pre-2.0 `message_projector.js` — the same logic, scoped to
+ * core's pre-2.0 `message_projector.js`: the same logic, scoped to
  * the Anthropic shape (no OpenAI/Codex branches). The projector in
  * `projector.js` calls these to turn a captured `/v1/messages`
  * exchange into the `(messages, model, system_text, tools, …)` shape
@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
  * Build the list of canonical Anthropic messages for one captured
  * exchange. The request body's `messages` array is the chat history
  * the client already had; the response (either the JSON assistant
- * body, or — for streamed responses — the reconstructed assistant
+ * body, or: for streamed responses: the reconstructed assistant
  * message from the SSE event stream) is appended as the final entry.
  *
  * @param {Record<string, unknown>} reqBody
@@ -177,7 +177,7 @@ export function hasAnthropicHeaderSignature(headers) {
 /**
  * Pull the Claude Code session id off either the request body's
  * `metadata.user_id` (Anthropic stuffs it there as a JSON-encoded
- * blob) or the `x-claude-code-session-id` header — same priority as
+ * blob) or the `x-claude-code-session-id` header: same priority as
  * the donor `resolveSessionId`.
  *
  * @param {Record<string, unknown> | undefined} reqBody
@@ -191,8 +191,8 @@ export function resolveClaudeSessionId(reqBody, headers) {
 
 /**
  * Resolve the non-null `session_id` (partition key) for an Anthropic
- * exchange. Claude has no per-thread conversation id — a session is a
- * container of many threads — so this value is `session_id`, not
+ * exchange. Claude has no per-thread conversation id: a session is a
+ * container of many threads: so this value is `session_id`, not
  * `conversation_id` (which is null for Claude). @ref LLP 0030#decision
  *
  * Resolution: the session id wins; otherwise hash the first message's
@@ -412,14 +412,14 @@ function isAnthropicAssistant(value) {
 
 /**
  * System-prompt fingerprints for Claude Code's harness-internal "aux"
- * API calls — requests the CLI makes on its own behalf (not the user's
+ * API calls: requests the CLI makes on its own behalf (not the user's
  * conversation) that nonetheless flow through the gateway under the
  * session's headers. Each entry maps a stable system-prompt substring to
  * the aux kind it identifies.
  *
  * The autonomous-mode security monitor fires on every action and, with
  * its embedded session digest, dwarfs the real conversation in row
- * volume — and it has a dedicated system prompt, so it is the one aux
+ * volume: and it has a dedicated system prompt, so it is the one aux
  * kind reliably fingerprintable today. Other aux calls (recap, title
  * generation) reuse the full Claude Code system prompt and only differ in
  * injected user text, so they have no stable fingerprint and are

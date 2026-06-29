@@ -37,7 +37,7 @@ function defaultLabelFor(platform) {
  *   DaemonInstallOptions,
  *   DaemonUninstallOptions,
  *   DaemonServiceOptions,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 export class DaemonInstallError extends Error {
@@ -247,55 +247,6 @@ export async function startServiceDaemon(options) {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         log.error('daemon.start_failed', {
-          hyp_platform: platform,
-          service_label: label,
-          message,
-          exit_status: 'failed',
-        })
-        throw err
-      }
-    },
-    { component: 'daemon' },
-  )
-}
-
-/**
- * Stop the installed service.
- *
- * @param {DaemonServiceOptions} options
- * @returns {Promise<void>}
- */
-export async function stopServiceDaemon(options) {
-  const platform = options.platform ?? process.platform
-  if (!platformIsSupported(platform)) {
-    throw new DaemonInstallError(`unsupported platform: ${platform}`)
-  }
-  const log = getLogger('daemon')
-  const label = options.label ?? defaultLabelFor(platform)
-  await withSpan(
-    'daemon.stop',
-    {
-      [Attr.COMPONENT]: 'daemon',
-      [Attr.OPERATION]: 'daemon.stop',
-      hyp_platform: platform,
-      service_label: label,
-      status: 'ok',
-    },
-    async function() {
-      try {
-        if (platform === 'darwin') {
-          await macos.stopLaunchAgent(options)
-        } else {
-          await linux.stopSystemdUnit(options)
-        }
-        log.info('daemon.stop', {
-          hyp_platform: platform,
-          service_label: label,
-          exit_status: 'ok',
-        })
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        log.error('daemon.stop_failed', {
           hyp_platform: platform,
           service_label: label,
           message,

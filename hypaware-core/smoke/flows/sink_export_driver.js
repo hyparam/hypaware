@@ -15,18 +15,18 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
  * Phase 5 smoke. Stands up:
  *
- *   - `@hypaware/test-encoder` — provides `hypaware.encoder@1` with a
+ *   - `@hypaware/test-encoder`: provides `hypaware.encoder@1` with a
  *     trivial CSV-ish encoder.
- *   - `@hypaware/test-fs` — provides `hypaware.blob-store@1` and
+ *   - `@hypaware/test-fs`: provides `hypaware.blob-store@1` and
  *     registers a sink contribution `local-fs` that writes encoded
  *     partition bytes to `<config.dir>/<filename>`.
- *   - `@hypaware/test-fixture` — registers the `dummy_rows` dataset and
+ *   - `@hypaware/test-fixture`: registers the `dummy_rows` dataset and
  *     materializes 50 rows into the cache so the driver has something to
  *     hand to the sink.
  *
@@ -46,12 +46,12 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'sink_export_driver: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'sink_export_driver: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
   if (!obs.meter.provider) {
     throw new Error(
-      'sink_export_driver: meter provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'sink_export_driver: meter provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -146,7 +146,7 @@ export async function run({ harness, expect }) {
   })
 
   // Fire the tick at a minute boundary so `"* * * * *"` matches in
-  // every field — the cron evaluator otherwise needs no help here.
+  // every field (the cron evaluator otherwise needs no help here).
   const report = await driver.tick({ now: new Date('2026-02-15T10:00:00Z') })
 
   expect.that(
@@ -328,8 +328,8 @@ const encoder = {
   async encodePartition(partition, ctx) {
     const datasetTag = partition.dataset || 'unknown'
     const partitionTag = Object.entries(partition.partition || {}).map(([k, v]) => k + '=' + v).join(',') || 'all'
-    // Trivial fixed payload — the smoke is testing the driver, not the
-    // encoder's row fidelity. 50 lines so bytes_written > 0 unambiguously.
+    // Trivial fixed payload (the smoke is testing the driver, not the
+    // encoder's row fidelity). 50 lines so bytes_written > 0 unambiguously.
     const lines = []
     for (let i = 0; i < 50; i++) {
       lines.push(datasetTag + ',' + partitionTag + ',' + i + ',v' + i)
@@ -413,7 +413,7 @@ export async function activate(ctx) {
                 await fs.writeFile(out, blob.bytes)
                 bytesWritten += blob.bytes.byteLength
               } else {
-                // Streaming case — assemble into a single write for the
+                // Streaming case: assemble into a single write for the
                 // smoke; production blob stores would pipe instead.
                 const chunks = []
                 for await (const chunk of blob.bytes) {
@@ -477,7 +477,7 @@ function fixturePluginSource() {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const DATASET = 'dummy_rows'

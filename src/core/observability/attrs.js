@@ -55,7 +55,7 @@ function normalizeValue(value) {
  *
  * @param {Record<string, unknown>} [input]
  * @returns {Record<string, string|number|boolean>}
- * @ref LLP 0021#the-attribute-contract [implements] — snake_case keys, fixed status set, bounded cardinality
+ * @ref LLP 0021#the-attribute-contract [implements]: snake_case keys, fixed status set, bounded cardinality
  */
 export function buildAttrs(input) {
   if (!input || typeof input !== 'object') return {}
@@ -80,7 +80,7 @@ export function buildAttrs(input) {
  * Convenience helpers for the most common attribute keys defined in
  * the self-instrumentation contract.
  */
-// @ref LLP 0021#the-attribute-contract — canonical snake_case key vocabulary
+// @ref LLP 0021#the-attribute-contract: canonical snake_case key vocabulary
 export const Attr = Object.freeze({
   COMPONENT: 'hyp_component',
   PLUGIN: 'hyp_plugin',

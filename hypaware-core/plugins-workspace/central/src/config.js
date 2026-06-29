@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CentralSinkConfig } from './types.d.ts'
+ * @import { CentralSinkConfig } from './types.js'
  */
 
 const MIN_POLL_INTERVAL = 5

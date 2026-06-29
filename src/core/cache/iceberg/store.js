@@ -32,14 +32,14 @@ import {
 } from '../../iceberg/partition-spec.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AppendOptions, CachePartitioningDeclaration } from '../types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AppendOptions, CachePartitioningDeclaration } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */
 
 /**
- * Reusable cache for the local IO pair. Constructed once per process —
+ * Reusable cache for the local IO pair. Constructed once per process,
  * the resolver/lister are pure functions over the filesystem so there's
  * no per-table state to worry about.
  *
@@ -54,7 +54,7 @@ function getLocalIO() {
 
 /**
  * Tests reset the IO cache so `installObservability` resets are
- * matched by a fresh resolver — keeps smoke-flow isolation honest.
+ * matched by a fresh resolver - keeps smoke-flow isolation honest.
  */
 export function resetLocalIO() {
   cachedIO = null
@@ -110,7 +110,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   // Coerce/validate rows up front, before any metadata commit (table create
   // or schema evolution). A row-level rejection (null in a required column, a
   // bad numeric coercion) must abort BEFORE we durably advance the table's
-  // schema — otherwise evolveSchemaInPlace lands the new column and the append
+  // schema: otherwise evolveSchemaInPlace lands the new column and the append
   // then throws, leaving the table's schema ahead of its data.
   const records = rows.length > 0 ? rowsToIcebergRecords(columns, rows) : []
 
@@ -146,12 +146,12 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
     if (existingSpec) {
       validatePartitionSpecStability(declaration, existingSpec, effectiveSchema)
     }
-    // @ref LLP 0029#in-place-evolution [implements] — the single switch point.
+    // @ref LLP 0029#in-place-evolution [implements]: the single switch point.
     // effectiveSchema is the merged write schema; if it adds nullable columns
-    // or widens an existing column required→nullable that the table's current
+    // or widens an existing column required->nullable that the table's current
     // schema doesn't reflect yet, evolve the table in place (add-schema +
     // set-current-schema) so the append below lands under the new schema and
-    // the columns become queryable — no recreate, old rows read null.
+    // the columns become queryable: no recreate, old rows read null.
     if (existingSchema) {
       await evolveSchemaInPlace({
         catalog, tableUrl: url, resolver, lister, existingSchema, effectiveSchema,
@@ -176,8 +176,8 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
  * nullable columns the table doesn't have yet. Additive-only: by the time we
  * reach here, `mergeFieldIdsFromTable` has already rejected every breaking
  * change, so any delta between `existingSchema` and `effectiveSchema` is one or
- * more new nullable fields (or a widened required→nullable). No-op when the two
- * schemas carry the same field ids — the common case — so a steady-state append
+ * more new nullable fields (or a widened required->nullable). No-op when the two
+ * schemas carry the same field ids: the common case, so a steady-state append
  * pays only a cheap id-set comparison, no extra commit.
  *
  * Mechanism: stage `add-schema` (with the merged schema) + `set-current-schema`
@@ -185,7 +185,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
  * commit. The subsequent `icebergAppend` reloads metadata, sees the new
  * current schema, and writes the new columns; pre-existing data files simply
  * lack the new field ids and icebird reads them back as `null`. This is the
- * single place the merged schema actually reaches storage — historically it
+ * single place the merged schema actually reaches storage: historically it
  * was computed and discarded, so the new column never appeared without a full
  * cache recreate (issue #102).
  *
@@ -196,7 +196,7 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
  * required fields without defaults) as a second guard behind
  * `mergeFieldIdsFromTable`.
  *
- * @ref LLP 0029#reachable-path [implements] — fileCatalogCommit is the reachable
+ * @ref LLP 0029#reachable-path [implements]: fileCatalogCommit is the reachable
  *   icebird primitive; icebergTransaction's tx has no schema method (icebird#25).
  * @param {object} options
  * @param {Catalog} options.catalog
@@ -238,9 +238,9 @@ async function evolveSchemaInPlace({ catalog, tableUrl, resolver, lister, existi
  * kinds of additive delta, and both must trigger evolution:
  *
  *  - a new field id `prior` lacks (a new nullable column), and
- *  - a shared field id whose `required` flag WIDENED (required → nullable):
+ *  - a shared field id whose `required` flag WIDENED (required -> nullable):
  *    the merge keeps the same id when only nullability flips, so an id-set
- *    check alone misses it — the table would stay marked `required` and a
+ *    check alone misses it: the table would stay marked `required` and a
  *    later append writing `null` would be rejected (issue #102 / LLP 0029
  *    lists widening as additive).
  *
@@ -304,7 +304,7 @@ export async function* scanRowsFromTable(tablePath, columns) {
 /**
  * Build a squirreling-compatible `AsyncDataSource` over the latest
  * snapshot of the table. Returns `null` if the table does not exist
- * yet or has no committed snapshot — the query layer treats that as
+ * yet or has no committed snapshot: the query layer treats that as
  * an empty table.
  *
  * @param {string} tablePath

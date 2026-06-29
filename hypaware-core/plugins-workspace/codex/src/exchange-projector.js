@@ -5,8 +5,8 @@ import { createHash } from 'node:crypto'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CodexLogReader } from './types.d.ts'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CodexLogReader } from './types.js'
  */
 
 /**
@@ -14,9 +14,9 @@ import { redactRemoteUserinfo } from './git-remote.js'
  * single projector subsumes three transport flavors that all flow
  * through the Codex client:
  *
- *  - OpenAI Chat (`/v1/chat/completions`) — non-streaming JSON.
- *  - OpenAI Responses (`/v1/responses`) — JSON or SSE.
- *  - ChatGPT Codex (`/backend-api/codex/*`) — SSE, with Codex-specific
+ *  - OpenAI Chat (`/v1/chat/completions`): non-streaming JSON.
+ *  - OpenAI Responses (`/v1/responses`): JSON or SSE.
+ *  - ChatGPT Codex (`/backend-api/codex/*`): SSE, with Codex-specific
  *    turn metadata, workspace, and identity headers.
  *
  * The match function is intentionally permissive across these paths
@@ -70,7 +70,7 @@ export function createCodexExchangeProjector(opts = {}) {
       const augmented = augmentFromLogReaders(logReaders, input)
 
       const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
-      // @ref LLP 0030#decision — session_id is the partition key (always
+      // @ref LLP 0030#decision: session_id is the partition key (always
       // non-null): Codex's `metadata.session_id`, falling back to the
       // thread (conversation_id) when no session id was captured. Keep
       // conversation_id = the thread; both can be set for Codex.
@@ -96,8 +96,8 @@ export function createCodexExchangeProjector(opts = {}) {
         conversation_source: resolveConversationSource(provider),
         cwd: recordedContext.cwd,
         git_branch: recordedContext.git_branch,
-        // @ref LLP 0032#capture — repo identity for the graph bridge (Repo/Commit).
-        // repo_root is intentionally omitted for Codex (left null) — see
+        // @ref LLP 0032#capture: repo identity for the graph bridge (Repo/Commit).
+        // repo_root is intentionally omitted for Codex (left null). See
         // resolveCodexContext. @ref LLP 0032#codex-repo-root
         git_remote: codexContext?.git_remote,
         head_sha: codexContext?.head_sha,
@@ -344,7 +344,7 @@ function openAiContentBlocks(content) {
 
 /**
  * Fan out response `output[]` items so each becomes its own assistant
- * message — same per-item shape `responsesInputMessages` produces for
+ * message: same per-item shape `responsesInputMessages` produces for
  * replayed input items, so turn-1 response rows hash equal to turn-2
  * input rows in the kernel's content-hash dedupe.
  *
@@ -502,7 +502,7 @@ function readOpenAiUsageFromResponsesStream(streamEvents) {
  * Normalize OpenAI Chat Completions and Responses usage into the
  * `attributes.usage` shape already used by Claude rows. The provider's
  * usage object is response-scoped, so callers stamp it onto exactly one
- * response assistant message — the LAST one — rather than every fanned-out
+ * response assistant message (the LAST one) rather than every fanned-out
  * output item. @ref LLP 0035#one-carrier
  *
  * @param {Record<string, unknown> | undefined} rawUsage
@@ -513,7 +513,7 @@ function openAiUsageAttributes(rawUsage) {
   /** @type {JsonObject} */
   const usage = {}
 
-  // @ref LLP 0035#net-input — OpenAI/Codex report input_tokens INCLUSIVE of
+  // @ref LLP 0035#net-input: OpenAI/Codex report input_tokens INCLUSIVE of
   // cached prompt reads; HypAware stores input_tokens NET of cache so it never
   // double-counts against cache_read_tokens and matches the Claude convention
   // (input + cache_read [+ cache_write] = total prompt). total_tokens stays the
@@ -553,14 +553,14 @@ function openAiUsageAttributes(rawUsage) {
 
 /**
  * Stamp response-level usage onto the LAST assistant message of the response
- * that carries text or a tool_use (the terminal output item — a tool_use on
+ * that carries text or a tool_use (the terminal output item, a tool_use on
  * tool-calling turns, else the final text). One carrier per response keeps a
  * SUM over rows honest, and "last text/tool_use assistant" is the SAME
  * predicate the backfill path applies (`backfill.js#stampUsageOnTurn` →
  * `hasTextOrToolUse`), so live and backfilled rows fold usage onto the same
  * logical row and dedupe to one. Sharing the predicate means the rule no longer
  * rests on the implicit invariant that a live Responses reply never ends in a
- * reasoning-only assistant message — today it never does (reasoning isn't
+ * reasoning-only assistant message. Today it never does (reasoning isn't
  * projected as an assistant message live), and if that ever changed the usage
  * would be dropped rather than mis-attributed, exactly as backfill does.
  * @ref LLP 0035#one-carrier
@@ -693,11 +693,11 @@ function resolveCodexContext(input, provider, path, reqBody) {
     client_version: client.version,
     entrypoint: originator,
     sandbox,
-    // @ref LLP 0032#capture — repo identity for the graph bridge, already in the
+    // @ref LLP 0032#capture: repo identity for the graph bridge, already in the
     // turn metadata (also kept in attributes.codex.* for provenance). Only
     // git_remote/head_sha are first-class: they feed Repo/Commit convergence and
     // need no repo root. repo_root is deliberately NOT derived from the workspace
-    // path — Codex exposes no verified git toplevel, and the workspace may be a
+    // path. Codex exposes no verified git toplevel, and the workspace may be a
     // repo *subdir*, which would mis-relativize (or collide) File keys. Codex
     // File nodes therefore keep absolute keys in V1. @ref LLP 0032#codex-repo-root
     git_remote: git_origin_url,
@@ -920,7 +920,7 @@ function extractSystemText(system) {
 
 /**
  * Apply registered log readers and merge any returned attributes.
- * Today no readers are shipped — this is a no-op stub kept behind
+ * Today no readers are shipped. This is a no-op stub kept behind
  * the `HYPAWARE_CODEX_SQLITE_READS` env flag so a future bead can
  * register the Codex SQLite-turn reader without churning the
  * projector interface.
@@ -999,7 +999,7 @@ function normalizeToolInput(value) {
 
 /**
  * Codex tool output can arrive as a string, a `{ output | content | text }`
- * wrapper, or a structured payload — fall back to JSON.stringify so the
+ * wrapper, or a structured payload. Fall back to JSON.stringify so the
  * row keeps a faithful trace.
  *
  * @param {unknown} output

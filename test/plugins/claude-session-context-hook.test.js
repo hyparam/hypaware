@@ -21,7 +21,7 @@ import { redactRemoteUserinfo, runClaudeSessionContextHook } from '../../hypawar
 import { appendSessionContext, defaultSessionContextFile, pickLatestMatching, readSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 
 /**
- * Roundtrip test for the phase-2 session-context channel — the path
+ * Roundtrip test for the phase-2 session-context channel: the path
  * that used to be `POST /_hypaware/session-context` on the gateway
  * and now lives entirely on disk:
  *
@@ -83,7 +83,7 @@ test('hook → state file → projector roundtrip writes cwd onto the row', asyn
     // Stage 3: the projector dispatches an Anthropic exchange and
     // returns rows carrying the state-file cwd. No transcript on disk
     // for this session, so identity falls back to the gateway hash
-    // path — that's expected and exactly what the smoke for missing
+    // path. That's expected and exactly what the smoke for missing
     // transcripts asserts as well.
     const projector = createClaudeExchangeProjector({
       homeDir: env.homeDir,
@@ -109,7 +109,7 @@ test('hook → state file → projector roundtrip writes cwd onto the row', asyn
   }
 })
 
-// @ref LLP 0032#capture — the Claude hook captures repo identity (remote, full
+// @ref LLP 0032#capture: the Claude hook captures repo identity (remote, full
 // HEAD sha, repo root) for the graph bridge, and the projector stamps it on
 // every row, the same way it already does cwd/git_branch.
 test('hook captures repo identity for a real git repo and the projector stamps it', async () => {
@@ -228,7 +228,7 @@ test('redactRemoteUserinfo strips only the credential-bearing URL form', () => {
     redactRemoteUserinfo('https://x-access-token:ghp_SECRET@github.com/acme/repo.git'),
     'https://github.com/acme/repo.git',
   )
-  // scp-like SSH authenticates by key — its git@ user is meaningful, kept intact.
+  // scp-like SSH authenticates by key. Its git@ user is meaningful, kept intact.
   assert.equal(redactRemoteUserinfo('git@github.com:acme/repo.git'), 'git@github.com:acme/repo.git')
   assert.equal(redactRemoteUserinfo('https://github.com/acme/repo.git'), 'https://github.com/acme/repo.git')
   assert.equal(redactRemoteUserinfo(undefined), undefined)

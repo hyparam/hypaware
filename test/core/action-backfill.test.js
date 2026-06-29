@@ -11,8 +11,8 @@ import { createBackfillHandler, backfillHandler } from '../../src/core/config/ac
 import { createActionReconciler } from '../../src/core/config/action_reconciler.js'
 
 /**
- * @import { ActionContext, BackfillSpawnArgs, BackfillSpawnResult } from '../../src/core/config/types.d.ts'
- * @import { BackfillContribution } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActionContext, BackfillSpawnArgs, BackfillSpawnResult } from '../../src/core/config/types.js'
+ * @import { BackfillContribution } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /** A quiet logger so tests don't spam stderr. */
@@ -124,8 +124,8 @@ test('desired() does not fail open on a non-boolean on_join (treats it as opt-ou
     makeCtx({ plugins: [{ name: '@hypaware/claude', enabled: true, config: { backfill: { on_join: 'false' } } }] })
   )
   assert.deepEqual(stringFalse, [], 'on_join:"false" (string) must not run backfill')
-  // A truthy non-boolean is equally malformed and equally suppressed —
-  // only a real boolean true (or an absent flag) runs the import.
+  // A truthy non-boolean is equally malformed and equally suppressed.
+  // Only a real boolean true (or an absent flag) runs the import.
   const numberOne = handler.desired(
     makeCtx({ plugins: [{ name: '@hypaware/claude', enabled: true, config: { backfill: { on_join: 1 } } }] })
   )
@@ -300,7 +300,7 @@ test('driven through the reconciler: a failed perform writes a failed marker, th
     assert.equal(marker.backfill['@hypaware/claude'].status, 'done')
     assert.equal(marker.backfill['@hypaware/claude'].rows, 42)
 
-    // Run-once: a done marker short-circuits — no third spawn.
+    // Run-once: a done marker short-circuits. No third spawn.
     const p3 = await reconciler.reconcile(input)
     assert.equal(p3.results[0].outcome, 'skipped')
     assert.equal(calls.length, 2, 'no spawn after the done marker lands')

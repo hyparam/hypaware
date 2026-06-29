@@ -75,7 +75,7 @@ test('input result is not mutated', () => {
 })
 
 test('truncation is lazy: rows past the budget are never touched', () => {
-  // A row whose field throws on access — clipping or serializing it would
+  // A row whose field throws on access: clipping or serializing it would
   // throw. It sits past the cutoff (row 0 fills the budget, row 1 triggers
   // the break), so a lazy implementation must never reach row 2.
   const r0 = { a: 'small' }

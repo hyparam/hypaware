@@ -10,7 +10,7 @@ import {
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
- * @import { AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.js'
  */
 
 const materializer = aiGatewayBackfillMaterializer()
@@ -82,7 +82,7 @@ test('materializer parity with live projector: native message ids', async () => 
   /** @type {AiGatewayProjectedExchange} */
   const projection = {
     provider: 'anthropic',
-    // @ref LLP 0030#decision — Claude carries session_id (conversation_id null).
+    // @ref LLP 0030#decision: Claude carries session_id (conversation_id null).
     session_id: 'conv-native',
     conversation_source: 'claude',
     client_name: 'claude',
@@ -253,7 +253,7 @@ test('backfill dedupe: a clean rerun writes zero new rows', async () => {
   // Simulate the runner writing + flushing the first run's rows.
   storage.commit(first)
   // A second run carries a fresh run id, so it re-scans and observes the
-  // now-committed part_ids — every row is a duplicate and is skipped.
+  // now-committed part_ids: every row is a duplicate and is skipped.
   const second = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-2'))
   assert.deepEqual(second, [])
 })
@@ -285,7 +285,7 @@ test('backfill dedupe: matches legacy committed rows that predate part_id via me
 
 test('backfill dedupe: a re-yielded item within the same run is skipped without re-committing', async () => {
   const m = aiGatewayBackfillMaterializer()
-  const storage = dedupeStorage() // stays empty — nothing is committed between calls
+  const storage = dedupeStorage() // stays empty. Nothing is committed between calls
   const first = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
   assert.equal(first.length, 2)
   // Same run id → the in-run memo already holds these part_ids, so a
@@ -309,7 +309,7 @@ test('backfill dedupe: an unreadable partition degrades to no dedupe rather than
   storage.failReads()
   const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
   // The scan throws, the seen-set stays empty, so every row passes through
-  // — a dedupe miss is recoverable (compaction), dropping rows is not.
+  // A dedupe miss is recoverable (compaction), dropping rows is not.
   assert.equal(rows.length, 2)
 })
 
@@ -349,7 +349,7 @@ test('backfill dedupe: spool dedupe also matches legacy rows via message_id + pa
 
 test('backfill dedupe: committed and spooled part_ids are unioned into one seen-set', async () => {
   const m = aiGatewayBackfillMaterializer()
-  // m1 already committed, m2 still in the spool — together they cover the
+  // m1 already committed, m2 still in the spool. Together they cover the
   // whole conversation, so a backfill of the same conversation is a no-op.
   const storage = dedupeStorage([{ part_id: 'm1#0' }])
   storage.spool([{ part_id: 'm2#0' }])
@@ -360,7 +360,7 @@ test('backfill dedupe: committed and spooled part_ids are unioned into one seen-
 test('backfill dedupe: an unreadable spool degrades to committed-only dedupe', async () => {
   const m = aiGatewayBackfillMaterializer()
   // m1 committed; the spool read throws. The committed scan still folds in
-  // m1, and m2 (never seen) passes through — the spool failure is absorbed.
+  // m1, and m2 (never seen) passes through. The spool failure is absorbed.
   const storage = dedupeStorage([{ part_id: 'm1#0' }])
   storage.failSpoolReads()
   const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
@@ -373,7 +373,7 @@ test('backfill dedupe: a storage stub without readSpooledRows still dedupes agai
   // Storage exposes the committed read surface but no spool surface; the
   // spool scan is feature-detected away and committed dedupe is unaffected.
   const storage = dedupeStorage([{ part_id: 'm1#0' }])
-  // @ts-expect-error — intentionally drop the spool surface for this case
+  // @ts-expect-error: intentionally drop the spool surface for this case
   delete storage.readSpooledRows
   const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-1'))
   assert.equal(rows.length, 1)

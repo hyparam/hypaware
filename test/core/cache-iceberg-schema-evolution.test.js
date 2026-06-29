@@ -1,7 +1,7 @@
 // @ts-check
 
 // Proves issue #102: additive (nullable) column changes evolve the cache table
-// schema IN PLACE — the new column is queryable after a plain append, with no
+// schema IN PLACE: the new column is queryable after a plain append, with no
 // recreate and no backfill. Old rows read the new column as `null`; new rows
 // populate it. Breaking changes still reject. See LLP 0029.
 
@@ -21,8 +21,8 @@ import { loadLatestFileCatalogMetadata } from 'icebird'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.d.ts'
+ * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  */
 
 /** @type {CachePartitioningDeclaration} */
@@ -93,7 +93,7 @@ async function tableSchemaCount(dir) {
   return metadata.schemas.length
 }
 
-test('additive nullable column evolves the cache schema in place — new column queryable, no recreate', async () => {
+test('additive nullable column evolves the cache schema in place - new column queryable, no recreate', async () => {
   const dir = await makeTmpDir('additive')
   try {
     // 1. Write a row under the V1 schema.
@@ -104,7 +104,7 @@ test('additive nullable column evolves the cache schema in place — new column 
     assert.equal(await tableHasColumn(dir, 'agent_id'), false, 'agent_id absent before evolution')
 
     // 2. Append a row under the V2 schema (new nullable `agent_id`) into the
-    //    SAME table dir — no recreate, no separate backfill step.
+    //    SAME table dir: no recreate, no separate backfill step.
     await appendRowsToTable(dir, V2_COLUMNS, [
       { conversation_id: 'c2', client_name: 'claude', date: '2026-06-16', message: 'new', agent_id: 'agent-7' },
     ], { declaration: DECLARATION })
@@ -126,7 +126,7 @@ test('additive nullable column evolves the cache schema in place — new column 
   }
 })
 
-test('backfill works against the evolved schema — repeated V2 appends keep the new column populated', async () => {
+test('backfill works against the evolved schema - repeated V2 appends keep the new column populated', async () => {
   const dir = await makeTmpDir('backfill')
   try {
     await appendRowsToTable(dir, V1_COLUMNS, [
@@ -155,7 +155,7 @@ test('backfill works against the evolved schema — repeated V2 appends keep the
   }
 })
 
-test('schema evolution is a no-op when columns are unchanged — only one schema persists', async () => {
+test('schema evolution is a no-op when columns are unchanged - only one schema persists', async () => {
   const dir = await makeTmpDir('noop')
   try {
     await appendRowsToTable(dir, V1_COLUMNS, [
@@ -182,7 +182,7 @@ test('breaking changes still reject after the table exists (no in-place evolutio
       { conversation_id: 'c1', client_name: 'claude', date: '2026-06-16', message: 'm1' },
     ], { declaration: DECLARATION })
 
-    // New REQUIRED column — Iceberg can't back-fill it; must reject.
+    // New REQUIRED column: Iceberg can't back-fill it, must reject.
     /** @type {ColumnSpec[]} */
     const requiredAddition = [...V1_COLUMNS, { name: 'must_have', type: 'STRING', nullable: false }]
     await assert.rejects(
@@ -192,7 +192,7 @@ test('breaking changes still reject after the table exists (no in-place evolutio
       /new column "must_have" must be nullable/
     )
 
-    // Type change on an existing column — must reject.
+    // Type change on an existing column: must reject.
     /** @type {ColumnSpec[]} */
     const typeChanged = V1_COLUMNS.map(c =>
       c.name === 'message' ? { ...c, type: /** @type {const} */ ('INT64') } : c
@@ -222,7 +222,7 @@ const V2_NOTE_WIDENED = [
   { name: 'note', type: 'STRING', nullable: true },
 ]
 
-test('required→nullable widening evolves the table in place — a later null append lands', async () => {
+test('required→nullable widening evolves the table in place - a later null append lands', async () => {
   // LLP 0029 lists a column that widened required→nullable as additive. The
   // merge keeps the column's field id, so the old id-set "needs evolution"
   // check missed it: the table stayed marked required and a null write was a
@@ -237,7 +237,7 @@ test('required→nullable widening evolves the table in place — a later null a
     const before = await tableField(dir, 'note')
     assert.equal(before?.required, true, 'note starts required')
 
-    // Append the widened schema with a NULL note — only valid if the table
+    // Append the widened schema with a NULL note: only valid if the table
     // schema actually evolved to mark note nullable.
     await appendRowsToTable(dir, V2_NOTE_WIDENED, [
       { conversation_id: 'c2', date: '2026-06-16', note: null },
@@ -259,7 +259,7 @@ test('required→nullable widening evolves the table in place — a later null a
 test('a rejected append does not advance the table schema (coerce before any commit)', async () => {
   // The new nullable column AND a row that violates an existing required
   // column arrive in the same batch. Coercion runs before evolveSchemaInPlace,
-  // so the schema commit never happens — the table is unchanged, not left with
+  // so the schema commit never happens: the table is unchanged, not left with
   // schema ahead of data.
   const dir = await makeTmpDir('atomic')
   try {

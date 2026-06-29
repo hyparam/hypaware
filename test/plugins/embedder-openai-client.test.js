@@ -7,7 +7,7 @@ import { createOpenAiEmbedder, parseEmbeddingsPayload } from '../../hypaware-cor
 import { validateEmbedderConfig } from '../../hypaware-core/plugins-workspace/embedder-openai/src/config.js'
 
 /**
- * @import { EmbedderOpenAiConfig, FetchLike } from '../../hypaware-core/plugins-workspace/embedder-openai/src/types.d.ts'
+ * @import { EmbedderOpenAiConfig, FetchLike } from '../../hypaware-core/plugins-workspace/embedder-openai/src/types.js'
  */
 
 const SECRET = 'sk-test-secret-value'

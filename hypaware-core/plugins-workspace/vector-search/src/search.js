@@ -6,8 +6,8 @@ import { estimatePendingWork, newVectorError, refreshIndexes } from './refresh.j
 import { computeShardStates, contentId, mergeTopK, readShardMetas, shardFileBase, shardPaths } from './shards.js'
 
 /**
- * @import { VectorSearchHit, VectorSearchOptions } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ShardState, VectorIndexDeclaration, VectorSearchRuntime } from './types.d.ts'
+ * @import { VectorSearchHit, VectorSearchOptions } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ShardState, VectorIndexDeclaration, VectorSearchRuntime } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/vector-search'
@@ -17,7 +17,7 @@ const DEFAULT_TOP_K = 10
  * Embed the query, fan out across every shard of the matching indexes,
  * and merge the global top-K. The query embeds *before* any refresh:
  * its dimension is the staleness signal that catches dimension drift
- * (same model, different vector length — a changed embedder
+ * (same model, different vector length: a changed embedder
  * `dimensions` config, or a different server behind the same model
  * name) so auto-refresh re-embeds instead of hard-failing on shards it
  * just declared fresh.
@@ -29,12 +29,12 @@ const DEFAULT_TOP_K = 10
  *    interactive caller sees where embedding spend goes.
  *  - `never`: search existing shards as-is. A shard built with a
  *    different model or dimension than the live embedder is a hard
- *    error here — cross-model scores are meaningless and must not
+ *    error here: cross-model scores are meaningless and must not
  *    silently degrade.
  *
  * @param {{ runtime: VectorSearchRuntime, opts: VectorSearchOptions, onProgress?: (line: string) => void }} args
  * @returns {Promise<VectorSearchHit[]>}
- * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements] — partition discovery via the registry-backed cache, fan-out, top-K merge; model/dimension mismatch is never a silent degraded search
+ * @ref LLP 0024#indexes-are-declared-in-config-sharded-per-partition [implements]: partition discovery via the registry-backed cache, fan-out, top-K merge; model/dimension mismatch is never a silent degraded search
  */
 export async function searchVectorIndexes({ runtime, opts, onProgress }) {
   const decls = selectIndexes(runtime.config.indexes, opts)
@@ -42,7 +42,7 @@ export async function searchVectorIndexes({ runtime, opts, onProgress }) {
     throw newVectorError(
       'vector_no_indexes',
       runtime.config.indexes.length === 0
-        ? 'no vector indexes configured — add indexes[] to the vector-search plugin config'
+        ? 'no vector indexes configured - add indexes[] to the vector-search plugin config'
         : `no configured vector index matches${opts.index ? ` index '${opts.index}'` : ''}${opts.dataset ? ` dataset '${opts.dataset}'` : ''}`
     )
   }
@@ -101,7 +101,7 @@ export async function searchVectorIndexes({ runtime, opts, onProgress }) {
               'vector_dimension_mismatch',
               refresh === 'never'
                 ? `shard ${decl.name}/${state.fileBase} has dimension ${state.meta.dimension} but the query embedded to ${queryEmbed.dimension}; rerun without --no-refresh to re-embed`
-                : `shard ${decl.name}/${state.fileBase} was just rebuilt at dimension ${state.meta.dimension} but the query embedded to ${queryEmbed.dimension} — the embedder is returning inconsistent dimensions for model '${runtime.embedder.model}'`
+                : `shard ${decl.name}/${state.fileBase} was just rebuilt at dimension ${state.meta.dimension} but the query embedded to ${queryEmbed.dimension} - the embedder is returning inconsistent dimensions for model '${runtime.embedder.model}'`
             )
           }
           searchable.push({ decl, state })
@@ -157,7 +157,7 @@ function selectIndexes(indexes, opts) {
 /**
  * Search-time refresh: report the pending work upfront (so the caller
  * sees the embedding spend before it happens), then rebuild with no row
- * budget — an interactive search wants a complete answer. `dimension`
+ * budget: an interactive search wants a complete answer. `dimension`
  * is the length the query embedded to, so dimension drift classifies
  * stale here even when the embedder has no configured `dimensions`.
  *
@@ -193,7 +193,7 @@ async function refreshForSearch({ runtime, decls, dimension, onProgress }) {
 /**
  * Resolve hit texts back out of the cache. One pass per partition that
  * actually holds hits, stopping early once every id in that partition
- * is resolved — never a scan over partitions without hits.
+ * is resolved. Never a scan over partitions without hits.
  *
  * @param {{ runtime: VectorSearchRuntime, decls: VectorIndexDeclaration[], hits: VectorSearchHit[] }} args
  */

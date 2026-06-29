@@ -13,7 +13,7 @@ import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-works
  * End-to-end identity tests for the Claude exchange projector. Each
  * test wires the Claude projector through the gateway core's
  * dispatcher (with no other projector registered) so the assertions
- * cover the same path that runs in production — including the
+ * cover the same path that runs in production: including the
  * gateway's fallback hash identity stamp.
  */
 
@@ -71,7 +71,7 @@ test('native DAG identity: uuid from JSONL transcript becomes message_id and pro
     assert.equal(assistantRows[0].parent_uuid, 'u-user-1')
 
     // Gateway must NOT stamp identity_source when the projector
-    // supplied message_id — the assertion guards the projector against
+    // supplied message_id. The assertion guards the projector against
     // a regression that drops `message_id` and silently falls back.
     for (const row of rows) {
       const claude = readAttrPath(row, ['attributes', 'claude'])
@@ -303,8 +303,8 @@ test('subagent transcript under <sessionId>/subagents supplies sidechain identit
 test('transcript_path from session context also loads sibling subagent files', async () => {
   const env = await stageClaudeEnv()
   try {
-    // Non-standard location only reachable through transcript_path —
-    // the projects-dir scan can never find it, so a uuid match proves
+    // Non-standard location only reachable through transcript_path.
+    // The projects-dir scan can never find it, so a uuid match proves
     // the sibling <sessionId>/ directory walk ran.
     const altDir = path.join(env.homeDir, 'alt-transcripts')
     const transcriptPath = path.join(altDir, 'sess-hook.jsonl')
@@ -525,8 +525,8 @@ test('multi-block assistant turn splits into per-line uuid messages (LLP 0023)',
       },
     })
 
-    // One row per transcript line: user, assistant text, assistant tool_use —
-    // each its own message with a single part.
+    // One row per transcript line: user, assistant text, assistant tool_use.
+    // Each its own message with a single part.
     assert.equal(rows.length, 3)
     const textRow = rows.find((r) => r.message_id === 'u-s-text')
     const toolRow = rows.find((r) => r.message_id === 'u-s-tool')
@@ -538,7 +538,7 @@ test('multi-block assistant turn splits into per-line uuid messages (LLP 0023)',
     assert.equal(toolRow.tool_name, 'Bash')
     // The native chain rides parent_uuid; previous_message_id is
     // gateway-owned (immediate predecessor) for enriched and fallback
-    // rows alike — here the text block that precedes this tool block.
+    // rows alike. Here the text block that precedes this tool block.
     assert.equal(toolRow.parent_uuid, 'u-s-text')
     assert.ok(Array.isArray(toolRow.previous_message_id))
     assert.ok(/** @type {string[]} */ (toolRow.previous_message_id).includes('u-s-text'))
@@ -776,7 +776,7 @@ test('missing transcript → gateway fallback identity + claude.identity_source 
       assert.equal(row.provider_uuid, undefined, 'no transcript means no provider_uuid')
     }
     // The gateway stamps its own fallback marker AND the Claude
-    // projector stamps its own — both must be present so the row is
+    // projector stamps its own. Both must be present so the row is
     // unambiguous to operators querying by either marker.
     for (const row of rows) {
       const claude = readAttrPath(row, ['attributes', 'claude'])

@@ -25,7 +25,7 @@ import {
  *
  * Subprocesses inherit the harness's `HYP_HOME` so their telemetry
  * lands in the same tmpdir we shut down here. We only assert against
- * exit codes and the pack manifest — the dispatched subprocess's
+ * exit codes and the pack manifest: the dispatched subprocess's
  * spans are exercised by their own smokes.
  *
  * @param {{ harness: any, expect: any }} args
@@ -34,7 +34,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'package_bin_boot: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'package_bin_boot: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -65,7 +65,7 @@ export async function run({ harness, expect }) {
       expect.that(
         'hypaware --help prints the usage header',
         helpResult.stdout,
-        (v) => typeof v === 'string' && v.includes('hyp — HypAware kernel CLI')
+        (v) => typeof v === 'string' && v.includes('hyp - HypAware kernel CLI')
       )
 
       const smokeResult = spawnSync(

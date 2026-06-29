@@ -24,8 +24,8 @@ import {
 } from '../../src/core/config/apply.js'
 
 /**
- * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfigApplyDeps } from '../../src/core/config/types.d.ts'
+ * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigApplyDeps } from '../../src/core/config/types.js'
  */
 
 const SEED_CONFIG = {
@@ -50,7 +50,7 @@ const REMOTE_CONFIG = {
   },
 }
 
-/** A state root with **no** join seed — so a first apply has nowhere to
+/** A state root with **no** join seed, so a first apply has nowhere to
  * roll back to (`previous_slot` is null), exactly the single-usable-slot
  * case behind #141. */
 async function makeSeedlessFixture() {
@@ -99,7 +99,7 @@ function writeState(stateRoot, state) {
 test('an expired first apply with no distinct previous slot does not mark the active etag bad', async () => {
   // Seedless first apply: commit() lands on slot 'b' with previous_slot=null
   // (the single usable slot). When probation expires there is nowhere to
-  // roll back to — the engine must NOT record the still-active etag as
+  // roll back to: the engine must NOT record the still-active etag as
   // bad_etag (that is the #141 wedge).
   const { stateRoot } = await makeSeedlessFixture()
   const { control } = makeControl({ stateRoot })

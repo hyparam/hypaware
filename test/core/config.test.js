@@ -17,7 +17,7 @@ import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
 
 /**
- * @import { BlobSinkConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobSinkConfigInstance } from '../../collectivus-plugin-kernel-types.js'
  */
 
 test('defaultConfigPath resolves the v2 config basename under HYP_HOME', () => {

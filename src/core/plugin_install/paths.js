@@ -17,11 +17,6 @@ import path from 'node:path'
 const PLUGIN_LOCK_BASENAME = 'plugin-lock.json'
 const PLUGIN_INSTALL_SUBDIR = 'plugins'
 
-/** @param {string} stateDir */
-export function pluginInstallRoot(stateDir) {
-  return path.join(stateDir, PLUGIN_INSTALL_SUBDIR)
-}
-
 /**
  * @param {string} stateDir
  * @param {string} name plugin name (may include `@scope/`)

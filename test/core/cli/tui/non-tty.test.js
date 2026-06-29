@@ -25,7 +25,7 @@ function makeFakeTty() {
   const stdout = new PassThrough()
   Object.defineProperty(stdin, 'isTTY', { value: true })
   Object.defineProperty(stdout, 'isTTY', { value: true })
-  // @ts-expect-error — PassThrough does not declare setRawMode.
+  // @ts-expect-error: PassThrough does not declare setRawMode.
   stdin.setRawMode = () => {}
   return { stdin, stdout }
 }

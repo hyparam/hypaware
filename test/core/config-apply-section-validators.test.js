@@ -19,7 +19,7 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
  * claude/codex `backfill` policy) would be accepted instead of rolled back.
  *
  * These tests boot the real kernel so the claude validator registers exactly
- * the way the daemon registers it — no hand-rolled registry.
+ * the way the daemon registers it: no hand-rolled registry.
  */
 
 /** @param {string} hypHome */
@@ -58,7 +58,7 @@ test('apply validation rejects a malformed plugin backfill block via the live se
   const fx = await bootWithClaude()
   try {
     // The claude plugin must have registered its `config_sections` validator
-    // during activation — that is the registry the apply path now consults.
+    // during activation: that is the registry the apply path now consults.
     // (`list()` is on the concrete registry; the runtime types it as the
     // narrower ConfigRegistry, so reach it through a local cast.)
     const registry = /** @type {{ list(): Array<{ plugin: string }> }} */ (
@@ -110,7 +110,7 @@ test('apply validates a backfill block for a plugin the document INTRODUCES but 
   // *already-active* plugins. A central config that first introduces a
   // backfill-capable plugin (the realistic join/fleet path) would skip its
   // `config.backfill` validation. The apply path now discovers the introduced
-  // plugin's section validator from disk (side-effect-free — never activates
+  // plugin's section validator from disk (side-effect-free, never activates
   // it), so the malformed block is rejected, not silently accepted.
   //
   // Boot WITHOUT claude/codex so neither section is in the live registry.
@@ -166,7 +166,7 @@ test('apply validates a backfill block for a plugin the document INTRODUCES but 
 test('introduced-plugin discovery rejects a malformed block even without the live registry', async () => {
   // Even with NO live registry passed (a non-daemon caller), the apply path
   // discovers the introduced plugin's validator from disk and rejects the bad
-  // block. (Before round-2 this exact shape silently accepted it — the
+  // block. (Before round-2 this exact shape silently accepted it: the
   // per-plugin validator was dead without the live registry.)
   const fx = await bootWith(['@hypaware/ai-gateway'])
   try {

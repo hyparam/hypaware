@@ -24,8 +24,8 @@ import {
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { ActivePlugin, BlobStore, JsonObject, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ * @import { ActivePlugin, BlobStore, JsonObject, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -101,7 +101,7 @@ export async function run({ harness, expect }) {
       const { loaded, failed } = await loadManifests([parquetDir, s3Dir, icebergDir, fixtureDir])
       if (failed.length > 0) {
         throw new Error(
-          `iceberg_export_s3_roundtrip: manifest failures — ${failed
+          `iceberg_export_s3_roundtrip: manifest failures - ${failed
             .map((f) => `${f.manifestPath}: ${f.message}`)
             .join('; ')}`
         )
@@ -189,7 +189,7 @@ export async function run({ harness, expect }) {
     })
 
     // Settle the spool so the fixture's rows are committed to their
-    // routed `source=...` partition table before discovery — appendRows
+    // routed `source=...` partition table before discovery. appendRows
     // only schedules a background flush at the size threshold.
     await kernel.storage.flushAll({ force: true })
 
@@ -284,7 +284,7 @@ function fixturePluginSource() {
 import { discoverCachePartitions } from ${JSON.stringify(partitionModuleUrl)}
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const DATASET = '${DATASET}'

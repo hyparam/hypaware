@@ -8,8 +8,8 @@ import { isValidRange, isValidSemver, matchesSemverRange } from '../semver.js'
 import { dryRunActivate } from './dry_run.js'
 
 /**
- * @import { PluginManifest } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { DoctorReport, DryRunResult, PluginDiagnostic, RegisteredSnapshot } from './types.d.ts'
+ * @import { PluginManifest } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { DoctorReport, DryRunResult, PluginDiagnostic, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
 const GUIDE = 'docs/PLUGIN_AUTHORING.md'
@@ -44,7 +44,7 @@ const CONTRIBUTIONS = [
  * @param {string} rootDir Absolute path to the plugin directory.
  * @param {{ knownCapabilities?: Map<string, string[]> }} [opts]
  *   `knownCapabilities` maps each capability name any bundled/installed
- *   plugin provides to the versions it provides — used to resolve
+ *   plugin provides to the versions it provides. This is used to resolve
  *   `requires.capabilities` against their declared semver ranges, and to
  *   pre-seed the dry run. Defaults to empty (every required capability is
  *   then flagged), so callers should pass the catalog map.
@@ -151,7 +151,7 @@ async function checkStatic(manifest, rootDir, out) {
 
 /**
  * Categories validated for *shape* only: each entry must be an object
- * with a non-empty name field. A superset of CONTRIBUTIONS — it also
+ * with a non-empty name field. A superset of CONTRIBUTIONS. It also
  * covers `config_sections` (keyed on `section`), which is excluded from
  * the declared-vs-registered diff but still must be well-formed, as the
  * authoring guide promises.
@@ -319,11 +319,11 @@ function checkProvidedCapabilities(manifest, registered, out) {
 }
 
 /**
- * `requires.capabilities` is a name → semver-range contract, so a
+ * `requires.capabilities` is a name -> semver-range contract, so a
  * provider satisfies it only when one of its provided versions falls in
  * the required range. A name with no provider at all, and a name whose
- * providers all fall outside the range, are both `capability_unresolved`
- * — runtime resolution would reject either.
+ * providers all fall outside the range, are both `capability_unresolved`.
+ * Runtime resolution would reject either.
  *
  * @param {PluginManifest} manifest
  * @param {Map<string, string[]>} knownCapabilities

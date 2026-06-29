@@ -6,9 +6,9 @@ import { fileURLToPath } from 'node:url'
 import { loadManifests } from '../manifest.js'
 
 /**
- * @import { PluginName } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { FailedManifest, LoadedManifest } from '../manifest.js'
- * @import { DiscoverBundledResult } from './types.d.ts'
+ * @import { PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { FailedManifest, LoadedManifest } from '../../../src/core/types.js'
+ * @import { DiscoverBundledResult } from '../../../src/core/runtime/types.js'
  */
 
 /**
@@ -16,7 +16,7 @@ import { loadManifests } from '../manifest.js'
  * activated by the default boot profiles (`all-bundled`,
  * `all-available`). Excluded plugins (`@hypaware/central`,
  * `@hypaware/gascity`) are still discoverable through the plugin
- * catalog — their manifest contributions (datasets, client
+ * catalog: their manifest contributions (datasets, client
  * descriptors, capability metadata) are visible to config validation
  * and the walkthrough. They are activatable via explicit config or
  * init presets; the allowlist only governs default activation.
@@ -43,16 +43,16 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * bucket) so the plugin catalog can derive datasets, client
  * descriptors, and capability metadata for config validation.
  * Activation requires explicit config (`{ name: '@hypaware/gascity' }`)
- * or an init preset — the picker and default boot profiles skip them.
+ * or an init preset: the picker and default boot profiles skip them.
  *
  * The embedder/vector-search pair is excluded because enabling an
  * API-backed embedder is the explicit opt-in that lets captured text
- * leave the machine — it must be a deliberate `plugins[]` decision,
+ * leave the machine: it must be a deliberate `plugins[]` decision,
  * never a default. `@hypaware/vector-search` follows it: its manifest
  * requires `hypaware.embedder`, which no default-activated plugin
  * provides.
  *
- * The completion providers follow the same rule — enabling a model
+ * The completion providers follow the same rule: enabling a model
  * backend lets captured content (prompts built from the graph + source)
  * leave the machine, so it is an explicit `plugins[]` choice. And
  * `@hypaware/context-graph-enrich` requires the completion + vector-search
@@ -60,7 +60,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * model calls, so it too activates only via explicit config.
  *
  * @type {ReadonlySet<PluginName>}
- * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by] — the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
+ * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  */
 export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/central',
@@ -90,14 +90,14 @@ export function defaultBundledWorkspaceDir() {
 /**
  * Walk `workspaceDir` and split discovered plugin manifests into:
  *
- *  - `loaded`    — manifests whose `name` is in the V1 allowlist.
- *  - `excluded`  — manifests whose `name` is in the V1 exclude set
+ *  - `loaded` - manifests whose `name` is in the V1 allowlist.
+ *  - `excluded` - manifests whose `name` is in the V1 exclude set
  *                  (`@hypaware/central`, `@hypaware/gascity`). These
  *                  are excluded from default activation but their
  *                  manifests feed the plugin catalog so datasets,
  *                  client descriptors, and capability metadata remain
  *                  visible to config validation and the walkthrough.
- *  - `unknownDirs` — directories that hold a parseable manifest under
+ *  - `unknownDirs` - directories that hold a parseable manifest under
  *                    a name the kernel doesn't recognise as bundled.
  *
  * Missing workspace directories return an empty result rather than

@@ -27,7 +27,7 @@ function makeFakeTty() {
   const stdout = new PassThrough()
   Object.defineProperty(stdin, 'isTTY', { value: true })
   Object.defineProperty(stdout, 'isTTY', { value: true })
-  // @ts-expect-error — PassThrough does not declare setRawMode but the runtime probes for it.
+  // @ts-expect-error: PassThrough does not declare setRawMode but the runtime probes for it.
   stdin.setRawMode = () => {}
   /** @type {string[]} */
   const writes = []
@@ -87,7 +87,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     await feed(io.stdin, ['\x1b[B', '\x1b[B', ' ', '\r'])
 
     // No export prompt: the picker always defaults to local-parquet now.
-    // Retention prompt — empty buffer + enter accepts the 30-day default.
+    // Retention prompt: empty buffer + enter accepts the 30-day default.
     await settle()
     await feed(io.stdin, ['\r'])
 
@@ -174,13 +174,13 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   // Mark BOTH ends as TTYs so the only signal that flips the router is
   // the HYP_NO_TUI escape. This proves the env override wins over the
   // TTY probe. Answers: source '3' (raw-anthropic), then retention
-  // default — the export question is no longer asked.
+  // default: the export question is no longer asked.
   Object.defineProperty(input, 'isTTY', { value: true })
   const stdout = answerDrivenOutput(input, ['3\n', '\n'], true)
   const stderr = makeBuf()
 
-  // HYP_NO_TUI flows through opts.env — the same channel real callers
-  // use — so this test also exercises the env-threading contract.
+  // HYP_NO_TUI flows through opts.env: the same channel real callers
+  // use. So this test also exercises the env-threading contract.
   const result = await runPickerWalkthrough({
     capabilities: /** @type {any} */ ({}),
     stdout,

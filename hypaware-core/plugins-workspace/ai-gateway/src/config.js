@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AiGatewayConfig, UpstreamConfig } from './types.d.ts'
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayConfig, UpstreamConfig } from './types.js'
  */
 
 const DEFAULT_LISTEN = '127.0.0.1:0'
@@ -57,7 +57,7 @@ export function compileUpstreams(raw) {
 
 /**
  * Parse `host:port`. IPv6 literals may be wrapped in `[]`. Throws on a
- * malformed value — the gateway will surface that as an activation
+ * malformed value: the gateway will surface that as an activation
  * failure rather than silently bind to a wrong address.
  *
  * @param {string} listen

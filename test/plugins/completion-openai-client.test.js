@@ -7,7 +7,7 @@ import { createOpenAiCompletion, parseOpenAiChatResponse } from '../../hypaware-
 import { validateOpenAiCompletionConfig } from '../../hypaware-core/plugins-workspace/completion-openai/src/config.js'
 
 /**
- * @import { FetchLike, OpenAiCompletionConfig } from '../../hypaware-core/plugins-workspace/completion-openai/src/types.d.ts'
+ * @import { FetchLike, OpenAiCompletionConfig } from '../../hypaware-core/plugins-workspace/completion-openai/src/types.js'
  */
 
 const SECRET = 'sk-openai-test-secret'

@@ -390,7 +390,7 @@ test('run is the escape hatch for multi-client attach (every client surfaces)', 
     .map((line) => JSON.parse(line).client)
     .sort()
   assert.deepEqual(clients, ['claude', 'codex'])
-  // run().json keeps only the final line — exactly why attach()/detach()
+  // run().json keeps only the final line: exactly why attach()/detach()
   // reject 'all' rather than route the fan-out through that single result.
   assert.equal(/** @type {{ client: string }} */ (result.json).client, 'codex')
 })

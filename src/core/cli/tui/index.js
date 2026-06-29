@@ -1,32 +1,14 @@
 // @ts-check
 
+/**
+ * @import { State, MultiselectState, SelectState, TextState, ConfirmState, MultiSelectOption, MultiSelectSpec, SelectSpecOption, SelectSpec, TextSpec, ConfirmSpec } from '../../../../src/core/cli/tui/types.js'
+ */
+
 import process from 'node:process'
 
 import { run, PromptCancelledError } from './runtime.js'
 
-/** @typedef {import('./keypress.js').State} State */
-
 export { PromptCancelledError }
-
-/**
- * @typedef {Object} MultiSelectOption
- * @property {string|number} value
- * @property {string} label
- * @property {string} [summary]
- * @property {boolean} [checked]
- */
-
-/**
- * @typedef {Object} MultiSelectSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {MultiSelectOption[]} options
- * @property {{ min?: number, max?: number }} [bounds]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render an interactive multi-select prompt with checkbox toggling and
@@ -37,7 +19,7 @@ export { PromptCancelledError }
  * @returns {Promise<Array<string|number>>}
  */
 export async function multiselect(spec) {
-  /** @type {import('./keypress.js').MultiselectState} */
+  /** @type {MultiselectState} */
   const initial = {
     kind: 'multiselect',
     title: spec.title,
@@ -53,28 +35,9 @@ export async function multiselect(spec) {
     ...(spec.bounds !== undefined ? { bounds: spec.bounds } : {}),
   }
   const io = resolveIo(spec)
-  const final = /** @type {import('./keypress.js').MultiselectState} */ (await run(initial, io))
+  const final = /** @type {MultiselectState} */ (await run(initial, io))
   return final.options.filter((o) => o.checked).map((o) => o.value)
 }
-
-/**
- * @typedef {Object} SelectSpecOption
- * @property {string|number} value
- * @property {string} label
- * @property {string} [summary]
- */
-
-/**
- * @typedef {Object} SelectSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {SelectSpecOption[]} options
- * @property {string|number} [default]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render a single-select prompt and resolve to the selected `value`.
@@ -89,7 +52,7 @@ export async function select(spec) {
   const defaultIdx = spec.default !== undefined
     ? Math.max(0, spec.options.findIndex((o) => o.value === spec.default))
     : 0
-  /** @type {import('./keypress.js').SelectState} */
+  /** @type {SelectState} */
   const initial = {
     kind: 'select',
     title: spec.title,
@@ -103,22 +66,9 @@ export async function select(spec) {
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
   }
   const io = resolveIo(spec)
-  const final = /** @type {import('./keypress.js').SelectState} */ (await run(initial, io))
+  const final = /** @type {SelectState} */ (await run(initial, io))
   return final.options[final.cursor].value
 }
-
-/**
- * @typedef {Object} TextSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {string} [default]
- * @property {((v: string) => string | null)} [validate]
- * @property {boolean} [mask]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render a single-line text prompt and resolve to the string the user
@@ -129,7 +79,7 @@ export async function select(spec) {
  * @returns {Promise<string>}
  */
 export async function text(spec) {
-  /** @type {import('./keypress.js').TextState} */
+  /** @type {TextState} */
   const initial = {
     kind: 'text',
     title: spec.title,
@@ -141,20 +91,9 @@ export async function text(spec) {
     ...(spec.validate !== undefined ? { validate: spec.validate } : {}),
   }
   const io = resolveIo(spec)
-  const final = /** @type {import('./keypress.js').TextState} */ (await run(initial, io))
+  const final = /** @type {TextState} */ (await run(initial, io))
   return final.value
 }
-
-/**
- * @typedef {Object} ConfirmSpec
- * @property {string} title
- * @property {string} [hint]
- * @property {boolean} [default]
- * @property {NodeJS.ReadableStream} [stdin]
- * @property {NodeJS.WritableStream} [stdout]
- * @property {NodeJS.ProcessEnv} [env]
- * @property {boolean} [clearOnResolve]
- */
 
 /**
  * Render a yes/no confirmation prompt and resolve to a boolean.
@@ -163,7 +102,7 @@ export async function text(spec) {
  * @returns {Promise<boolean>}
  */
 export async function confirm(spec) {
-  /** @type {import('./keypress.js').ConfirmState} */
+  /** @type {ConfirmState} */
   const initial = {
     kind: 'confirm',
     title: spec.title,
@@ -172,7 +111,7 @@ export async function confirm(spec) {
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
   }
   const io = resolveIo(spec)
-  const final = /** @type {import('./keypress.js').ConfirmState} */ (await run(initial, io))
+  const final = /** @type {ConfirmState} */ (await run(initial, io))
   return final.value === true
 }
 

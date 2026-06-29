@@ -5,22 +5,15 @@
  * that should be written to stdout to display the current frame.
  *
  * The returned string ends with a trailing newline. Lines are joined
- * with `\n` (no `\r\n` — runtime uses raw mode where `\n` advances a
+ * with `\n` (no `\r\n`; runtime uses raw mode where `\n` advances a
  * row without resetting the column, and the runtime emits an explicit
  * `\r` before redrawing).
  *
  * No I/O. No reads from `process.*`.
  */
 
-/** @typedef {import('./keypress.js').State} State */
-/** @typedef {import('./keypress.js').MultiselectState} MultiselectState */
-/** @typedef {import('./keypress.js').SelectState} SelectState */
-/** @typedef {import('./keypress.js').TextState} TextState */
-/** @typedef {import('./keypress.js').ConfirmState} ConfirmState */
-
 /**
- * @typedef {Object} RenderOpts
- * @property {boolean} color
+ * @import { State, MultiselectState, SelectState, TextState, ConfirmState, RenderOpts } from '../../../../src/core/cli/tui/types.js'
  */
 
 const ANSI = {

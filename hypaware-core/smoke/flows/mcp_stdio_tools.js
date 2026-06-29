@@ -26,7 +26,7 @@ import {
  * - `tools/list` advertises the intrinsic `query_sql` tool;
  * - `tools/call query_sql` over the seeded cache returns the right rows;
  * - `resources/list` exposes the `ai_gateway_messages` dataset schema;
- * - **stdout is protocol-clean** — every line parses as JSON-RPC, proving
+ * - **stdout is protocol-clean**: every line parses as JSON-RPC, proving
  *   the host never leaked human text onto the protocol channel
  *   (LLP 0034 §stdio-stdout-discipline);
  * - a `mcp.serve_start` log records the lifecycle (log-driven-development).

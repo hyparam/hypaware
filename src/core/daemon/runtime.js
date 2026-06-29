@@ -30,11 +30,11 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
- * @import { AiGatewayCapability, JsonObject } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { KernelRuntime } from '../runtime/activation.js'
- * @import { BootKernelResult } from '../runtime/types.d.ts'
- * @import { ClientDescriptor } from '../plugin_catalog.js'
- * @import { ActionHandler } from '../config/types.d.ts'
+ * @import { AiGatewayCapability, JsonObject } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
+ * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
+ * @import { ActionHandler } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -45,7 +45,7 @@ import { statusFilePath, writeStatusFile } from './status.js'
  *   SinkSnapshot,
  *   DaemonHandle,
  *   RunDaemonOptions,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000
@@ -66,20 +66,20 @@ export const DEFAULT_ACTION_HANDLERS = [attachHandler, backfillHandler]
 
 /**
  * Exit code a foreground daemon uses to request its own relaunch after
- * a staged config apply or rollback (EX_TEMPFAIL — "try again"). The
+ * a staged config apply or rollback (EX_TEMPFAIL, "try again"). The
  * service managers relaunch on any exit (`KeepAlive` /
  * `Restart=always`); foreground invokers (smoke harness, dev shells)
  * loop on this specific code.
- * @ref LLP 0017#staged-restart-for-config-replacement [implements] — a foreground daemon cannot relaunch itself; the invoker loops on this code
+ * @ref LLP 0017#staged-restart-for-config-replacement [implements]: a foreground daemon cannot relaunch itself; the invoker loops on this code
  */
 export const DAEMON_RESTART_EXIT_CODE = 75
 
 /**
  * Boot the kernel, start every configured source, and run sink ticks
  * on a fixed cadence. Returns a `DaemonHandle` the caller can use to
- * `stop()` the daemon or read the latest `snapshot()` — both used by
+ * `stop()` the daemon or read the latest `snapshot()` (both used by
  * the smoke flow to drive a deterministic start/stop without sending
- * real OS signals into the test process.
+ * real OS signals into the test process).
  *
  * Lifecycle (all under a single `daemon.run` root span):
  *
@@ -92,7 +92,7 @@ export const DAEMON_RESTART_EXIT_CODE = 75
  *     using the per-plugin activation context captured on the runtime.
  *  4. Once every configured source returns a `StartedSource`, status
  *     flips to `healthy`. Failures degrade the state to `degraded`
- *     but do not abort the daemon — operators get a partial system.
+ *     but do not abort the daemon. Operators get a partial system.
  *  5. A 60s (or `tickIntervalMs`) loop drives the sink driver. Each
  *     tick is a `sink.tick` child span; the bundled sink driver opens
  *     its own `sink.export_batch` spans inside.
@@ -110,7 +110,7 @@ export const DAEMON_RESTART_EXIT_CODE = 75
  *
  * @param {RunDaemonOptions} [opts]
  * @returns {Promise<DaemonHandle>}
- * @ref LLP 0017#the-primary-daemon [implements] — boots kernel, starts sources, runs the sink tick loop, reloads on SIGHUP
+ * @ref LLP 0017#the-primary-daemon [implements]: boots kernel, starts sources, runs the sink tick loop, reloads on SIGHUP
  */
 export async function runDaemon(opts = {}) {
   const env = opts.env ?? process.env
@@ -155,7 +155,7 @@ export async function runDaemon(opts = {}) {
   // Forward reference to the client-action reconcile scheduler. It can only
   // be built after `boot` resolves (it needs the effective config + the
   // kernel backfill registry), but the confirmation-edge hook below is wired
-  // into `configControl` before boot — so the hook calls through this ref and
+  // into `configControl` before boot, so the hook calls through this ref and
   // an edge that fires before the scheduler exists is recovered by the
   // after-activation already-confirmed pass (mirrors `pendingRestart`).
   /** @type {((reason: string) => void) | null} */
@@ -180,7 +180,7 @@ export async function runDaemon(opts = {}) {
   // any plugin activates: a kernel-killing-but-valid config that
   // crashloops under the service manager may never live long enough
   // for an in-process timer to fire. The central-layer slots, pointer,
-  // and join seed all live under `<stateRoot>/config-control/` — the
+  // and join seed all live under `<stateRoot>/config-control/`: the
   // engine derives every path from `stateRoot` and never touches the
   // user-owned local layer (`hypaware-config.json`).
   // An apply can land while the daemon is still wiring up (the pull
@@ -202,9 +202,9 @@ export async function runDaemon(opts = {}) {
     // schedule one reconcile pass. The pull loop's immediate pull can race
     // the tail of runDaemon, so an edge before the scheduler is wired is
     // dropped here and recovered by the after-activation already-confirmed
-    // pass (probation is cleared by then) — same race handling as
+    // pass (probation is cleared by then), same race handling as
     // `pendingRestart`.
-    // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — the daemon wires onConfirmed to schedule a reconcile pass per confirmation edge; apply.js stays ignorant of the reconciler
+    // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements]: the daemon wires onConfirmed to schedule a reconcile pass per confirmation edge; apply.js stays ignorant of the reconciler
     onConfirmed: () => {
       if (scheduleReconcile) scheduleReconcile('confirm-edge')
     },
@@ -299,7 +299,7 @@ export async function runDaemon(opts = {}) {
   // registered (e.g. claude/codex `backfill` blocks). Without it the
   // per-plugin validators are dead in production: a served config with a
   // malformed `backfill` block would be accepted instead of rolled back.
-  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] — apply-time validation dispatches to the source plugin's own config-section validator
+  // @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]: apply-time validation dispatches to the source plugin's own config-section validator
   configControl.attachApplyDeps(
     buildConfigApplyDeps({ stateRoot, configRegistry: boot.runtime.configRegistry })
   )
@@ -351,7 +351,7 @@ export async function runDaemon(opts = {}) {
 
   /**
    * Run one reconcile pass against the effective config + backfill registry.
-   * Never throws — a failed handler is surfaced as a `failed` marker by the
+   * Never throws. A failed handler is surfaced as a `failed` marker by the
    * reconciler, and any unexpected error is logged here, so the single-flight
    * scheduler's rerun loop is never aborted by a pass.
    * @param {string} reason
@@ -377,7 +377,7 @@ export async function runDaemon(opts = {}) {
           // hypHome this daemon actually booted against, so a spawned
           // `hyp backfill` imports into the same cache rather than whatever
           // process.env.HYP_HOME happened to be (LLP 0041 §Run-once flow).
-          // @ref LLP 0041#run-once-flow-backfill-handler [implements] — the child runs against the daemon's resolved HYP_HOME, not process.env
+          // @ref LLP 0041#run-once-flow-backfill-handler [implements]: the child runs against the daemon's resolved HYP_HOME, not process.env
           env: { ...env, HYP_HOME: hypHome },
           // The client-action seam (LLP 0045 §Part 1) the attach handler reads.
           // Undefined on a non-gateway boot — the handler stays inert.
@@ -407,10 +407,10 @@ export async function runDaemon(opts = {}) {
   // After-activation already-confirmed pass: if a central layer is present
   // and the running config already cleared probation on a prior boot (no
   // active probation marker now), run one pass to recover anything missed
-  // while a previous probation was outstanding. A fresh join — probation
-  // still active — instead waits for the `confirmPoll` edge above. A
+  // while a previous probation was outstanding. A fresh join (probation
+  // still active) instead waits for the `confirmPoll` edge above. A
   // non-joined host has no central layer, so the reconciler stays a no-op.
-  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — after-activation already-confirmed pass, gated on a present central layer and no active probation
+  // @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements]: after-activation already-confirmed pass, gated on a present central layer and no active probation
   const bootControlStatus = await configControl.status()
   if (boot.centralConfigPath != null && !bootControlStatus.probation) {
     reconcileScheduler.schedule('boot-already-confirmed')
@@ -445,10 +445,10 @@ export async function runDaemon(opts = {}) {
   persist()
   // Derive the boot health event from the SAME aggregate written to
   // status.json: a degraded boot (any source failed to start) must not log
-  // `daemon.healthy` — monitoring keyed off that event would read a false
-  // positive — and a health event never lists a source that failed to
+  // `daemon.healthy`. Monitoring keyed off that event would read a false
+  // positive, and a health event never lists a source that failed to
   // start; it reports only the sources that actually came up.
-  // @ref LLP 0017#the-primary-daemon [implements] — the boot health event reports the same state as `hyp daemon status`
+  // @ref LLP 0017#the-primary-daemon [implements]: the boot health event reports the same state as `hyp daemon status`
   const startedSourceNames = sourceSnapshots
     .filter((s) => s.state !== 'failed')
     .map((s) => s.name)
@@ -534,7 +534,7 @@ export async function runDaemon(opts = {}) {
             cacheRoot: boot.runtime.storage.cacheRoot,
             budgetMs: mCfg.max_tick_ms,
             config: mCfg,
-            // @ref LLP 0027#re-settle-sweep — thread the dataset's
+            // @ref LLP 0027#re-settle-sweep: thread the dataset's
             // re-settle hook (same enricher the flush path uses) so
             // compaction can re-settle committed fallback rows split from
             // their uuid twin.
@@ -575,7 +575,7 @@ export async function runDaemon(opts = {}) {
       await maintenanceInFlight
     }
     // Let any in-flight reconcile pass finish so the daemon never exits
-    // mid-import — abandoning a pass would orphan the spawned `hyp backfill`
+    // mid-import. Abandoning a pass would orphan the spawned `hyp backfill`
     // child and interrupt the marker write.
     await reconcileScheduler.settle()
     persist({ state: 'stopping' })
@@ -621,7 +621,7 @@ export async function runDaemon(opts = {}) {
     if (installSignals) {
       removeSignalHandlers()
     }
-    // @ref LLP 0017#staged-restart-for-config-replacement [implements] — the daemon exits and the service manager (or looping invoker) relaunches it
+    // @ref LLP 0017#staged-restart-for-config-replacement [implements]: the daemon exits and the service manager (or looping invoker) relaunches it
     resolveDone?.(reason === 'restart' ? DAEMON_RESTART_EXIT_CODE : 0)
     return done
   }
@@ -644,12 +644,12 @@ export async function runDaemon(opts = {}) {
         // central config on a joined host and re-open the #111 footgun this
         // design closes. The central layer is read-only here; only an
         // *apply* (which triggers a restart, not a reload) rewrites it.
-        // @ref LLP 0031#two-layers-merged-at-boot [implements] — reload re-runs the two-layer resolution; reload never sees the local layer alone
+        // @ref LLP 0031#two-layers-merged-at-boot [implements]: reload re-runs the two-layer resolution; reload never sees the local layer alone
         const resolved = await resolveLayeredConfigForDaemon({
           stateRoot,
           configPath: boot.configPath ?? null,
         })
-        // A broken/missing local layer is loud but not fatal — keep running
+        // A broken/missing local layer is loud but not fatal. Keep running
         // on the already-merged config rather than reload from a degraded
         // view (the central layer always carries the host).
         if (boot.configPath && resolved.localLoaded && !resolved.localLoaded.ok) {
@@ -734,22 +734,22 @@ export async function runDaemon(opts = {}) {
 /**
  * Single-flight scheduler for client-action reconcile passes.
  *
- * Each confirmation edge — and the after-activation already-confirmed check —
+ * Each confirmation edge (and the after-activation already-confirmed check)
  * calls `schedule()`, which runs `run()` as its own async task **off the
  * caller's stack**: `schedule()` returns synchronously, so a reconcile pass
  * (which may spawn a multi-minute `hyp backfill` import) never delays the
  * sink tick loop or the apply engine's confirm poll. Only one pass runs at a
  * time; an edge that arrives while a pass is in flight sets a "re-run when
  * done" flag, coalescing any number of edges during a pass into exactly one
- * more pass. Coalescing is lossless because the reconciler is level-triggered
- * — the next pass reads the latest config + markers and converges the gap.
+ * more pass. Coalescing is lossless because the reconciler is level-triggered,
+ * so the next pass reads the latest config + markers and converges the gap.
  *
  * `settle()` resolves when no pass is in flight; the shutdown path awaits it
  * so the daemon never exits mid-pass.
  *
  * @param {{ run: (reason: string) => Promise<void>, log?: { error(message: string, attributes?: Record<string, unknown>): void } }} args
  * @returns {{ schedule: (reason: string) => void, settle: () => Promise<void> }}
- * @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements] — single-flight guard: one pass at a time, an edge during a pass re-runs once when done, and the pass is its own async task off the tick loop
+ * @ref LLP 0041#when-the-reconciler-runs-lifecycle-integration [implements]: single-flight guard: one pass at a time, an edge during a pass re-runs once when done, and the pass is its own async task off the tick loop
  */
 export function createReconcilePassScheduler({ run, log }) {
   let running = false
@@ -892,8 +892,8 @@ function describeSourceStartError(err, source) {
 
 /**
  * Start every registered source that has not auto-started during
- * `activate()`. Returns one snapshot per source — including the
- * already-started ones so the status file lists everything the
+ * `activate()`. Returns one snapshot per source (including the
+ * already-started ones) so the status file lists everything the
  * operator expects to see.
  *
  * @param {{ runtime: KernelRuntime, log: ReturnType<typeof getLogger>, fileLog: ReturnType<typeof openDaemonLog>, sourcePluginByName: Map<string,string> }} args
@@ -1002,8 +1002,8 @@ async function stopAllSources({ runtime, fileLog }) {
 }
 
 /**
- * Best-effort source `.status()` invocation — failures should not
- * abort the daemon's snapshot capture.
+ * Best-effort source `.status()` invocation (failures should not
+ * abort the daemon's snapshot capture).
  *
  * @param {KernelRuntime} runtime
  * @param {string} name

@@ -6,8 +6,8 @@ import path from 'node:path'
 import { Attr, getLogger, withSpan } from './observability/index.js'
 
 /**
- * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../collectivus-plugin-kernel-types.d.ts'
- * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from './manifest.d.ts'
+ * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../collectivus-plugin-kernel-types.js'
+ * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from '../../src/core/types.js'
  */
 
 const MANIFEST_BASENAME = 'hypaware.plugin.json'
@@ -105,7 +105,7 @@ export async function loadManifests(rootDirs) {
  *
  * @param {unknown} value
  * @returns {{ ok: true, manifest: PluginManifest } | { ok: false, errorKind: ManifestErrorKind, message: string }}
- * @ref LLP 0005#declarative [implements] — one manifest shape declares requires/provides/contributes; category is emergent, not a variant
+ * @ref LLP 0005#declarative [implements]: one manifest shape declares requires/provides/contributes; category is emergent, not a variant
  */
 export function validateManifest(value) {
   if (!isPlainObject(value)) {

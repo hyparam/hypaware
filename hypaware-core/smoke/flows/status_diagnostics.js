@@ -15,7 +15,7 @@ import { resolveDependencies } from '../../../src/core/dep_graph.js'
 
 /**
  * Phase 8 status diagnostics smoke. Drives `hyp status` against two
- * configs — one healthy, one broken — and validates that:
+ * configs, one healthy and one broken, and validates that:
  *
  * 1. Healthy config reports `overall=healthy`, no error diagnostics,
  *    and the printed status lists the expected sources/sinks/clients
@@ -35,7 +35,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'status_diagnostics: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'status_diagnostics: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -66,7 +66,7 @@ export async function run({ harness, expect }) {
   }
   const otelConfig = { listen_host: '127.0.0.1', listen_port: 0 }
 
-  // Avoid mutating the real HOME under tests — every probe in the
+  // Avoid mutating the real HOME under tests: every probe in the
   // status collector walks $HOME for client settings files. Swap in a
   // tmp HOME so the smoke never picks up the developer's attach state.
   const fakeHome = path.join(harness.tmpDir, 'home')
@@ -224,7 +224,7 @@ export async function run({ harness, expect }) {
       )
     )
 
-    // V1 contract — no `central` or `gascity` references in JSON.
+    // V1 contract: no `central` or `gascity` references in JSON.
     const okJsonText = JSON.stringify(okJson)
     expect.that(
       'healthy json: contains no @hypaware/central reference',
@@ -249,7 +249,7 @@ export async function run({ harness, expect }) {
     await writeJson(badConfigPath, {
       version: 2,
       plugins: [
-        // Claude enabled but ai-gateway intentionally omitted — the
+        // Claude enabled but ai-gateway intentionally omitted: the
         // status collector should surface client_without_gateway plus
         // the gateway_missing_anthropic_upstream warning.
         { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },

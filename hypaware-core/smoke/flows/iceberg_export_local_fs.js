@@ -27,7 +27,7 @@ import {
 } from '../../plugins-workspace/format-iceberg/src/maintenance.js'
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -63,12 +63,12 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'iceberg_export_local_fs: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'iceberg_export_local_fs: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
   if (!obs.meter.provider) {
     throw new Error(
-      'iceberg_export_local_fs: meter provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'iceberg_export_local_fs: meter provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 
@@ -107,7 +107,7 @@ export async function run({ harness, expect }) {
       const { loaded, failed } = await loadManifests([parquetDir, localFsDir, icebergDir, fixtureDir])
       if (failed.length > 0) {
         throw new Error(
-          `iceberg_export_local_fs: manifest failures — ${failed
+          `iceberg_export_local_fs: manifest failures - ${failed
             .map((f) => `${f.manifestPath}: ${f.message}`)
             .join('; ')}`
         )
@@ -189,13 +189,13 @@ export async function run({ harness, expect }) {
   )
 
   // Settle the spool so the fixture's rows are committed to their
-  // routed `source=...` partition table before discovery — appendRows
+  // routed `source=...` partition table before discovery. appendRows
   // only schedules a background flush at the size threshold.
   await kernel.storage.flushAll({ force: true })
 
   // Discover the dataset partition the fixture registered and
   // simulate one sink tick by calling `exportBatch` directly. (The
-  // sink driver auto-tick path is still being wired up — flows in
+  // sink driver auto-tick path is still being wired up. Flows in
   // this repo all hand-tick for now.)
   const dataset = kernel.query.getDataset(DATASET)
   if (!dataset) throw new Error(`fixture dataset ${DATASET} did not register`)
@@ -240,7 +240,7 @@ export async function run({ harness, expect }) {
   )
 
   // The state marker proves the writer recorded idempotency state for
-  // the batch — a future tick would short-circuit instead of
+  // the batch. A future tick would short-circuit instead of
   // re-staging.
   const markerPath = path.join(
     destinationDir,
@@ -266,7 +266,7 @@ export async function run({ harness, expect }) {
   )
   expect.that('export2: status=exported', exportResult2.status, (v) => v === 'exported')
 
-  // Maintenance, default mode: snapshot expiration only — compaction is
+  // Maintenance, default mode: snapshot expiration only. Compaction is
   // out-of-band (LLP 0022) and must not run without the explicit opt-in.
   const maintainReport = await maintainExportTables({
     blobStore,
@@ -318,7 +318,7 @@ export async function run({ harness, expect }) {
   )
 
   // After maintenance the table holds exactly the rows both batches
-  // committed — batch-1 and batch-2 each appended the same ROW_COUNT
+  // committed. Batch-1 and batch-2 each appended the same ROW_COUNT
   // fixture rows, so every id 0..ROW_COUNT-1 must appear exactly twice.
   // An exact check here is the smoke-tier guard against the rewrite's
   // central risk (LLP 0022): a compaction that silently drops rows.
@@ -461,7 +461,7 @@ function fixturePluginSource() {
 import { discoverCachePartitions } from ${JSON.stringify(partitionModuleUrl)}
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 const DATASET = '${DATASET}'

@@ -17,7 +17,7 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  * installed third-party plugin from a local bare git repo and one
  * config file activating it. The fixture plugin contributes a single
  * command (`hyp installed-greet`) so the smoke can prove the boot
- * loaded the installed manifest into the merged pool — not just that
+ * loaded the installed manifest into the merged pool, not just that
  * `plugin list` saw the lock entry.
  *
  * Acceptance points from the bead:
@@ -38,7 +38,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'plugin_boot_installed: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'plugin_boot_installed: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

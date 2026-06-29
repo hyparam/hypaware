@@ -10,7 +10,7 @@ import path from 'node:path'
  * client directory. This module centralizes the two guards that keep
  * those writes contained.
  *
- * @ref LLP 0003#principle — names cross the core/plugin trust boundary,
+ * @ref LLP 0003#principle: names cross the core/plugin trust boundary,
  *   so core validates them rather than trusting plugins.
  */
 

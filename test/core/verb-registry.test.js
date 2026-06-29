@@ -49,7 +49,7 @@ test('projection is idempotent when a command of that name already exists', () =
   const commands = createCommandRegistry()
   commands.register({ name: 'demo verb', summary: 's', usage: 'u', run: async () => 0 })
   const verbs = createVerbRegistry({ commandRegistry: commands })
-  // Must not throw on the duplicate command name — the verb still registers.
+  // Must not throw on the duplicate command name: the verb still registers.
   assert.doesNotThrow(() => verbs.register(makeVerb()))
   assert.ok(verbs.getByTool('demo_verb'))
 })

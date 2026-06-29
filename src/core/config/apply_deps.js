@@ -11,9 +11,9 @@ import { installPlugin, loadLock } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
 
 /**
- * @import { ConfigRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { LoadedManifest } from '../manifest.js'
- * @import { ConfigApplyDeps, PinnedInstallResult } from './types.d.ts'
+ * @import { ConfigRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { ConfigApplyDeps, PinnedInstallResult } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -27,7 +27,7 @@ import { getEntry } from '../plugin_install/lock.js'
  * The live `configRegistry` (the kernel registry the active plugins
  * registered their `config_sections` validators into during boot) is
  * threaded through so apply-time validation actually dispatches to those
- * per-plugin validators. Omitting it makes them dead — a served config with
+ * per-plugin validators. Omitting it makes them dead: a served config with
  * a malformed plugin `config` block (e.g. claude/codex `backfill`) would be
  * accepted instead of rejected (LLP 0037).
  *
@@ -68,7 +68,7 @@ export function buildConfigApplyDeps(opts) {
     // config that first introduces a backfill-capable plugin (e.g.
     // `@hypaware/claude`) would otherwise skip its `config.backfill`
     // validation. Discover the section validators for any introduced plugin
-    // from disk (side-effect-free — never runs `activate()`) and route each
+    // from disk (side-effect-free, never runs `activate()`) and route each
     // plugin to the right source: live for active, discovered for introduced.
     const allManifests = [...bundled.loaded, ...bundled.excluded, ...installed.loaded]
     const sectionRegistry = await buildSectionRegistry({
@@ -94,7 +94,7 @@ export function buildConfigApplyDeps(opts) {
    *
    * @param {PluginConfigInstance[]} entries
    * @returns {Promise<PinnedInstallResult>}
-   * @ref LLP 0025#install-on-config-hash-pinned [implements] — existing LLP 0007 install path; hash mismatch is an apply failure
+   * @ref LLP 0025#install-on-config-hash-pinned [implements]: existing LLP 0007 install path; hash mismatch is an apply failure
    */
   async function installPinnedPlugins(entries) {
     const { bundled, installed } = await discover()
@@ -111,7 +111,7 @@ export function buildConfigApplyDeps(opts) {
 
       const bundledVersion = bundledVersions.get(entry.name)
       if (bundledVersion !== undefined) {
-        // @ref LLP 0025#bundled-first-party-plugins [implements] — version checked strictly, artifact hash not checked for bundled plugins
+        // @ref LLP 0025#bundled-first-party-plugins [implements]: version checked strictly, artifact hash not checked for bundled plugins
         if (entry.version !== undefined && entry.version !== bundledVersion) {
           return {
             ok: false,
@@ -134,7 +134,7 @@ export function buildConfigApplyDeps(opts) {
         stateDir: stateRoot,
         ...(entry.version !== undefined ? { opts: { ref: `v${entry.version}` } } : {}),
         // The hash pin is verified against the staged artifact before
-        // the install commits — nothing may substitute code after the
+        // the install commits: nothing may substitute code after the
         // config was authored.
         confirm: async (staged) => {
           if (entry.artifact_hash !== undefined && staged.contentHash !== entry.artifact_hash) {

@@ -20,7 +20,7 @@ import {
 import { readState, writeState } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/state.js'
 
 /**
- * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
+ * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.js'
  */
 
 /** @returns {EnrichConfig} */
@@ -34,7 +34,7 @@ function cfg(overrides = {}) {
  * Source row in the default `ai_gateway_messages` shape (part-level). `ts` is
  * epoch millis here (the engine surfaces TIMESTAMP as a Date, which the propose
  * helpers coerce to millis); part_id is the row-unique tiebreak; session_id is
- * the anchor (@ref LLP 0030#decision — the Session anchor moved off
+ * the anchor (@ref LLP 0030#decision: the Session anchor moved off
  * conversation_id, which is null for Claude).
  * @param {{ ts: number, part: string, sid: string, msg?: string, text?: string }} r
  */
@@ -50,7 +50,7 @@ test('buildSessionAggregateQuery ranks the precise latest (ts, tiebreak) per ses
   assert.match(sql, /SELECT session_id, last_ts, last_id FROM \(/)
   assert.match(sql, /message_created_at AS last_ts/)
   assert.match(sql, /part_id AS last_id/)
-  // ROW_NUMBER over (ts DESC, tiebreak DESC) — a plain MAX(ts) can't pick the
+  // ROW_NUMBER over (ts DESC, tiebreak DESC): a plain MAX(ts) can't pick the
   // winning tiebreak among same-ts parts.
   assert.match(sql, /ROW_NUMBER\(\) OVER \(PARTITION BY session_id ORDER BY message_created_at DESC, part_id DESC\) AS rn/)
   assert.match(sql, /FROM ai_gateway_messages WHERE/)
@@ -74,7 +74,7 @@ test('buildSessionPartsQuery selects all transcript columns for one session, wit
   assert.match(sql, /WHERE session_id = 'sess-1' AND/)
   assert.match(sql, /content_text IS NOT NULL AND content_text <> ''/)
   assert.match(sql, /part_type NOT IN \('tool_result'\)/)
-  assert.doesNotMatch(sql, /LIMIT/) // full session — the whole point
+  assert.doesNotMatch(sql, /LIMIT/) // full session. The whole point
 })
 
 test("buildSessionPartsQuery escapes a single quote in the session id (no injection surface)", () => {
@@ -109,7 +109,7 @@ test('orderSessionParts sorts by (timestamp, tiebreak) and coerces Date/ISO time
 test('buildTranscript stitches ordered text and dedups provenance ids, skipping empties', () => {
   const ordered = [
     srow({ ts: 1, part: 'p1', sid: 'A', msg: 'm1', text: 'one' }),
-    srow({ ts: 2, part: 'p2', sid: 'A', msg: 'm1', text: '' }),     // empty — skipped
+    srow({ ts: 2, part: 'p2', sid: 'A', msg: 'm1', text: '' }),     // empty. Skipped
     srow({ ts: 3, part: 'p3', sid: 'A', msg: 'm2', text: 'two' }),
   ]
   const { text, keys } = buildTranscript(ordered, cfg())
@@ -129,7 +129,7 @@ test('sessionMark returns the latest ordered part tuple', () => {
 
 /**
  * A runtime whose `execSql` returns a fixed aggregate result (one row per
- * session: { session_id, last_ts, last_id }) — the shape
+ * session: { session_id, last_ts, last_id }): the shape
  * buildSessionAggregateQuery yields (the precise latest part tuple). Lets us
  * drive selectSessions without a SQL engine.
  * @param {{ cfg: EnrichConfig, aggregate: Array<{ session_id: string, last_ts: number, last_id?: string }> }} args
@@ -146,7 +146,7 @@ const HOUR = 60 * 60_000
 
 test('selectSessions ongoing keeps only settled, past-watermark sessions, oldest first, capped', () => {
   const aggregate = [
-    { session_id: 'fresh', last_ts: NOW - 5 * 60_000, last_id: 'p1' }, // 5m old — not settled
+    { session_id: 'fresh', last_ts: NOW - 5 * 60_000, last_id: 'p1' }, // 5m old. Not settled
     { session_id: 'old1', last_ts: NOW - 3 * HOUR, last_id: 'p1' },    // settled
     { session_id: 'old2', last_ts: NOW - 2 * HOUR, last_id: 'p1' },    // settled
     { session_id: 'done', last_ts: NOW - 4 * HOUR, last_id: 'p1' },    // settled but already enriched-through
@@ -160,10 +160,10 @@ test('selectSessions ongoing keeps only settled, past-watermark sessions, oldest
 })
 
 test('selectSessions ongoing reselects a same-timestamp session whose latest part advanced past the mark (tiebreak)', async () => {
-  // Mark {ts, id:'p1'}; the session's latest part is now {ts, id:'p2'} — same
+  // Mark {ts, id:'p1'}; the session's latest part is now {ts, id:'p2'}. Same
   // wall-clock millisecond, higher tiebreak (parts of one message share a ts).
   // The exact (ts, id) compare must reselect it; a timestamp-only check would
-  // silently drop the new part's text — the defect Codex #1 flagged.
+  // silently drop the new part's text. The defect Codex #1 flagged.
   const settledTs = NOW - 3 * HOUR
   const aggregate = [{ session_id: 'S', last_ts: settledTs, last_id: 'p2' }]
   const runtime = selectorRuntime({ cfg: cfg(), aggregate })
@@ -230,7 +230,7 @@ test('collectProspectRows keeps the same label under different sessions as disti
 
 /**
  * Minimal SQL stand-in: resolves the first `FROM <table>`, then honors a single
- * `<col> = '<val>'` equality (the per-session parts query) — enough for the tick
+ * `<col> = '<val>'` equality (the per-session parts query): enough for the tick
  * to read one session's parts and the idempotency filter to read prospects.
  *
  * @param {string} query
@@ -255,8 +255,8 @@ function fakeQuery(query, tables) {
  * `appendRows` mutates `tables`, so the cross-tick idempotency filter sees prior
  * writes.
  *
- * `onComplete` (optional) runs inside `complete()` — i.e. during the tick's
- * await window — to simulate a concurrent source mutating the sidecar mid-tick.
+ * `onComplete` (optional) runs inside `complete()`: i.e. during the tick's
+ * await window: to simulate a concurrent source mutating the sidecar mid-tick.
  *
  * @param {{ cfg: EnrichConfig, stateDir: string, source: Record<string, unknown>[], prospects?: Record<string, unknown>[], candidates: Array<Record<string, unknown>>, onComplete?: () => void | Promise<void> }} args
  */
@@ -323,7 +323,7 @@ test('runProposeTick extracts a whole session in one call, appends prospects, an
   }
 })
 
-test('runProposeTick is idempotent across ticks — re-extracting the same session appends no duplicate', async () => {
+test('runProposeTick is idempotent across ticks: re-extracting the same session appends no duplicate', async () => {
   const stateDir = tmpStateDir()
   try {
     const source = [srow({ ts: 1000, part: 'p1', sid: 'A', msg: 'm1', text: 'use redis' })]

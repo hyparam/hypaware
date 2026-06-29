@@ -38,6 +38,22 @@ ctx.commands.register({
 The binary is `hypaware`, with `hyp` as an alias
 ([LLP 0002](./0002-v1-scope.decision.md#packaging-and-cli-identity)).
 
+### Top-level help lists plugin commands without booting
+
+`hyp --help` renders *before* `bootKernel`, so the activated registry holds
+only core commands at that point — booting just to populate it would import
+every plugin entrypoint and bind the gateway/OTLP listeners some plugins open
+during activation. Instead, top-level help reads the same cheap inputs boot uses
+for *discovery* — plugin manifests (plain JSON) and the effective config — and
+lists the commands each **config-active** plugin *declares* in its manifest
+`contributes.commands` ([LLP 0005](./0005-plugin-manifest.spec.md#declarative):
+"list datasets/commands before any plugin code is loaded"). The listing is
+scoped to the plugins the `config` boot profile would activate, so every command
+shown is one that will actually dispatch; a hidden/internal command stays out of
+help by being omitted from the manifest (it is still registered imperatively in
+`activate`). Discovery is best-effort: if it fails, help degrades to core
+commands rather than failing.
+
 ## No cross-plugin option injection
 
 Plugins may **not** inject options into commands they do not own. This keeps

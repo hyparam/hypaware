@@ -3,7 +3,7 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -14,13 +14,13 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  *   InstantiateArgs,
  *   ExtendedSinkHandle,
  *   ExtendedSinkRegistry,
- * } from './types.d.ts'
+ * } from '../../../src/core/registry/types.js'
  */
 
 /**
  * Build the kernel-side SinkRegistry. The contract surface
  * (`register`/`get`/`list`) matches `collectivus-plugin-kernel-types.d.ts
- * §Sinks` and is what plugins see through `ctx.sinks` — plugins call
+ * §Sinks` and is what plugins see through `ctx.sinks`: plugins call
  * `register(contribution)` to declare a sink type (matching their
  * manifest `contributes.sinks[]` entry). Instance creation (per
  * `HypAwareV2Config.sinks.<name>`) is driven by the kernel through
@@ -30,7 +30,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
  * `hyp_sinks_registered` counter.
  *
  * @returns {ExtendedSinkRegistry}
- * @ref LLP 0014#sinks-are-export-targets-not-the-write-path — instances driven from config; sources never reach here
+ * @ref LLP 0014#sinks-are-export-targets-not-the-write-path: instances driven from config; sources never reach here
  */
 export function createSinkRegistry() {
   /** @type {Map<string, { plugin: string, contribution: SinkContribution }>} */
@@ -115,7 +115,7 @@ export function createSinkRegistry() {
    *
    * @param {InstantiateArgs} args
    * @returns {Promise<ExtendedSinkHandle>}
-   * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements] — blob / table-format / request shapes keep writer + destination decoupled
+   * @ref LLP 0014#bytes-flow-down-semantics-flow-up [implements]: blob / table-format / request shapes keep writer + destination decoupled
    */
   async function instantiate(args) {
     const { instanceName, config } = args
@@ -348,7 +348,7 @@ function contributionKey(plugin, name) {
  * @param {TableFormatProvider} provider
  * @param {SinkEncoder} encoder
  * @returns {SinkSupportTag[]}
- * @ref LLP 0014#queryable-sinks [implements] — table-format queryable only when provider and encoder both claim it
+ * @ref LLP 0014#queryable-sinks [implements]: table-format queryable only when provider and encoder both claim it
  */
 function resolveTableFormatSupports(provider, encoder) {
   /** @type {Set<SinkSupportTag>} */
@@ -372,7 +372,7 @@ function resolveTableFormatSupports(provider, encoder) {
  * @param {SinkContribution} contribution
  * @param {SinkEncoder | undefined} encoder
  * @returns {SinkSupportTag[]}
- * @ref LLP 0014#queryable-sinks [implements] — queryable is a property of the writer+destination pair, not either alone
+ * @ref LLP 0014#queryable-sinks [implements]: queryable is a property of the writer+destination pair, not either alone
  */
 function resolveSupports(contribution, encoder) {
   /** @type {Set<SinkSupportTag>} */

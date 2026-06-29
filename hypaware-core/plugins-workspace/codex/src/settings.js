@@ -2,13 +2,13 @@
 
 import { defaultConfigPath, readConfig, writeAtomic } from './config-file.js'
 import { CodexSettingsError } from './errors.js'
-import { isManagedAttached, prepareAttach, prepareDetach } from './toml-config.js'
+import { prepareAttach, prepareDetach } from './toml-config.js'
 
 export { defaultConfigPath } from './config-file.js'
 export { CodexSettingsError } from './errors.js'
 
 /**
- * @import { CodexAttachOptions, CodexAttachResult, CodexDetachOptions, CodexDetachResult } from './types.d.ts'
+ * @import { CodexAttachOptions, CodexAttachResult, CodexDetachOptions, CodexDetachResult } from './types.js'
  */
 
 /**
@@ -65,19 +65,6 @@ export async function detach(opts = {}) {
   if (prepared.restoredValue !== undefined) result.restoredValue = prepared.restoredValue
   if (prepared.warning !== undefined) result.warning = prepared.warning
   return result
-}
-
-/**
- * Return true when config.toml exists and carries the
- * hypaware-managed Codex model provider block.
- *
- * @param {{ configPath?: string }} [opts]
- */
-export async function isAttached(opts = {}) {
-  const { configPath = defaultConfigPath() } = opts
-  const { content, existed } = await readConfig(configPath)
-  if (!existed) return false
-  return isManagedAttached(content)
 }
 
 /** @param {unknown} port */

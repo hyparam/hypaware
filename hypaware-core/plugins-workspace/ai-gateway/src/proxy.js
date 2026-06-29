@@ -6,8 +6,8 @@ import https from 'node:https'
 import { parseListen } from './config.js'
 
 /**
- * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CompiledUpstream, ProxyOptions, StartedProxy, UpstreamConfig } from './types.d.ts'
+ * @import { AiGatewayRouteInput } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CompiledUpstream, ProxyOptions, StartedProxy, UpstreamConfig } from './types.js'
  * @import { Exchange } from './recorder.js'
  * @import { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
  */
@@ -40,7 +40,7 @@ const HOP_BY_HOP_HEADERS = new Set([
  *
  * Routing is preset-driven: each compiled upstream is matched via
  * `match()` when supplied, otherwise via path-segment prefix. There
- * is no hardcoded Anthropic / OpenAI / Codex routing — adapter
+ * is no hardcoded Anthropic / OpenAI / Codex routing: adapter
  * plugins own provider matching by registering presets with their
  * own `match()`.
  *

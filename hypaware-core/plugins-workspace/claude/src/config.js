@@ -13,7 +13,7 @@
  * straight into `ctx.configRegistry.registerSection` and is callable from
  * tests without spinning up observability.
  *
- * @import { ValidationError, ValidationResult } from '../../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ValidationError, ValidationResult } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 /** Manifest `config_sections[].section` name this validator backs. */
@@ -25,7 +25,7 @@ export const CLAUDE_CONFIG_SECTION = 'claude'
  * are ignored so the validator stays additive over the existing config
  * surface.
  *
- * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements] —
+ * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]:
  *   backfill policy ({ on_join, window_days }) lives in and is validated
  *   by the source plugin's own config section; the kernel reconciler adds
  *   no top-level schema.
@@ -52,7 +52,7 @@ export function validateClaudeConfig(value) {
  * backfill-capable source plugin: `on_join` (whether to import on join,
  * boolean) and `window_days` (how far back, positive integer). Both are
  * optional; unknown keys are rejected so a typo (`window_day`) surfaces
- * instead of being silently ignored. Pure — the caller chooses where the
+ * instead of being silently ignored. Pure: the caller chooses where the
  * returned pointers mount.
  *
  * @param {unknown} value

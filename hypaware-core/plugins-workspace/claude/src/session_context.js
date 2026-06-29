@@ -21,7 +21,7 @@ export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
  */
 
 /**
- * @import { SessionContextRecord } from './types.d.ts'
+ * @import { SessionContextRecord } from './types.js'
  */
 
 /**
@@ -35,8 +35,8 @@ export function defaultSessionContextFile(stateDir) {
  * Append one record to the state file, creating parent directories as
  * needed. Atomic line write (single `appendFile`); concurrent hook
  * invocations interleave at line granularity, which is fine because
- * the reader picks newest-by-line — interleaving across lines just
- * means another writer will land its record on the next line.
+ * the reader picks newest-by-line (interleaving across lines just
+ * means another writer will land its record on the next line).
  *
  * @param {string} filePath
  * @param {SessionContextRecord} record
@@ -78,7 +78,7 @@ export async function readSessionContext(filePath, opts = {}) {
       if (record) out.push(record)
     }
   } catch {
-    /* truncated / rotated — return what we have */
+    /* truncated / rotated: return what we have */
   }
   return out
 }
@@ -122,7 +122,7 @@ function recordFrom(value) {
     transcript_path: stringValue(value.transcript_path),
     cwd: stringValue(value.cwd),
     git_branch: stringValue(value.git_branch),
-    // @ref LLP 0032#capture — repo identity for the graph bridge.
+    // @ref LLP 0032#capture: repo identity for the graph bridge.
     git_remote: stringValue(value.git_remote),
     head_sha: stringValue(value.head_sha),
     repo_root: stringValue(value.repo_root),

@@ -14,8 +14,8 @@
 import { normalizePrefix } from './config.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { S3QuerySourceConfig, S3QuerySourceValidationError, S3QuerySourcesValidationResult } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { S3QuerySourceConfig, S3QuerySourceValidationError, S3QuerySourcesValidationResult } from './types.js'
  */
 
 const VALID_FORMATS = new Set(['parquet', 'iceberg'])
@@ -107,7 +107,7 @@ function parseEntry(entry, pointer, errors) {
   const endpointUrl = readString(raw, 'endpoint_url', pointer, errors)
   if (endpointUrl !== undefined && !isHttpUrl(endpointUrl)) {
     // Validate connection fields here so a bad read target surfaces at
-    // boot, not at query time — mirrors the sink config validator.
+    // boot, not at query time: mirrors the sink config validator.
     errors.push({
       pointer: `${pointer}/endpoint_url`,
       message: `endpoint_url must be a valid http(s) URL (got '${endpointUrl}')`,

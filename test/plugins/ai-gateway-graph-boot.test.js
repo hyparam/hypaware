@@ -17,7 +17,7 @@ import { requireGraphRuntime } from '../../hypaware-core/plugins-workspace/conte
 // *plugin* dependency on @hypaware/context-graph (not just the capability dep) so
 // the resolver activates the provider first. Capability deps are interchangeable
 // and do not pin activation order, so a capability-only connector would race ahead
-// of the provider and `requireCapability` would throw here — which the stubbed
+// of the provider and `requireCapability` would throw here, which the stubbed
 // activate unit test cannot catch.
 test('the gateway+graph+connector chain activates in order and the connector registers its contract', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-boot-'))

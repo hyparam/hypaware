@@ -18,10 +18,6 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
-  defaultLogDir,
-  platformIsSupported,
-} from './platform.js'
-import {
   isLaunchAgentInstalled,
   launchAgentStatus,
 } from './macos.js'
@@ -36,12 +32,11 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../config/types.d.ts'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from './types.d.ts'
+ * @import { HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../../../src/core/config/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
- * @import { PluginCatalog, ClientDescriptor } from '../plugin_catalog.js'
- * @import { LoadedManifest } from '../manifest.js'
+ * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  */
 
 /**
@@ -58,7 +53,7 @@ export function statusFilePath(stateRoot) {
 /**
  * Write a status file atomically (write to `.tmp`, then rename). The
  * smoke harness asserts against this file directly so it must always
- * be either absent or fully formed — partial writes would race the
+ * be either absent or fully formed. Partial writes would race the
  * SIGTERM assertion.
  *
  * @param {string} stateRoot
@@ -74,7 +69,7 @@ export function writeStatusFile(stateRoot, status) {
 
 /**
  * Read the status file. Returns `null` when no daemon has run for
- * this `HYP_HOME` yet — `hyp daemon status` surfaces that as
+ * this `HYP_HOME` yet. `hyp daemon status` surfaces that as
  * "daemon: not started" rather than an error.
  *
  * @param {string} stateRoot
@@ -120,9 +115,9 @@ export async function collectHypAwareStatus(opts = {}) {
 
   // ----- config (LLP 0031: central ⊕ local) -----
   // The user-facing config path is the local layer; the central layer is
-  // resolved read-only from config-control/ (active slot or join seed) —
-  // reading it never fires a config poll. What's "running" is the merge.
-  // @ref LLP 0031#status-provenance [implements] — restore inspectability: provenance tags + dropped-local section over the merged config
+  // resolved read-only from config-control/ (active slot or join seed).
+  // Reading it never fires a config poll. What's "running" is the merge.
+  // @ref LLP 0031#status-provenance [implements]: Restore inspectability: provenance tags + dropped-local section over the merged config
   const configPath = env.HYP_CONFIG
     ? path.resolve(env.HYP_CONFIG)
     : defaultConfigPath(hypHome)
@@ -136,7 +131,7 @@ export async function collectHypAwareStatus(opts = {}) {
 
   // Build the plugin catalog before the merge so the layer resolution
   // validates local additions against the same plugin set the daemon
-  // runs — a local plugin that invalidates the merge (capability tie,
+  // runs. A local plugin that invalidates the merge (capability tie,
   // unknown plugin) is dropped here, not surfaced as a config error.
   /** @type {PluginCatalog | undefined} */
   let catalog
@@ -156,7 +151,7 @@ export async function collectHypAwareStatus(opts = {}) {
     catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
   } catch { /* catalog build failure is non-fatal */ }
 
-  // @ref LLP 0031#central-layer-is-sacrosanct [implements] — same merge + validation pruning as boot, so status shows exactly what runs
+  // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
     central: centralConfig,
     local: localConfig,
@@ -184,7 +179,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // outage. `configExists` tracks whether *anything* is configured.
   const configExists = config !== null
 
-  // Validate the *effective* (merged + pruned) config — that is what runs.
+  // Validate the *effective* (merged + pruned) config: that is what runs.
   // After pruning, any error left is the central layer's own (apply-time's
   // concern); a local entry that lost the merge shows in `layered.drops`,
   // not here, so it never degrades `overall`.
@@ -217,7 +212,7 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'config_missing',
-        message: `no config found — neither a central layer nor ${configPath}`,
+        message: `no config found - neither a central layer nor ${configPath}`,
         repair: ['hyp init', 'hyp init --from-file <config.json>', 'hyp join <url> <token>'],
       })
     } else {
@@ -230,12 +225,12 @@ export async function collectHypAwareStatus(opts = {}) {
     }
   } else {
     // A broken local file with the central layer still carrying the host
-    // is loud but not an outage — the central layer always boots.
+    // is loud but not an outage. The central layer always boots.
     if (!localLoaded.ok && localLoaded.errorKind !== 'config_missing') {
       diagnostics.push({
         severity: 'warning',
         kind: 'config_local_unreadable',
-        message: `local config layer is unreadable (${localLoaded.message}) — running on the central layer only`,
+        message: `local config layer is unreadable (${localLoaded.message}) - running on the central layer only`,
         repair: ['hyp init --from-file <config.json> --force'],
       })
     }
@@ -315,7 +310,7 @@ export async function collectHypAwareStatus(opts = {}) {
   }
 
   // Fall back to the PID + status files when the installer probe
-  // didn't already report a live process — covers foreground
+  // didn't already report a live process. This covers foreground
   // `hyp daemon run` sessions.
   if (!daemon.running) {
     try {
@@ -385,7 +380,7 @@ export async function collectHypAwareStatus(opts = {}) {
   const runtimeSources = opts.runtime?.sources?.list?.() ?? []
   if (runtimeSources.length > 0) {
     for (const contribution of runtimeSources) {
-      const started = opts.runtime?.sources.started?.(contribution.name)
+      const started = opts.runtime?.sources?.started?.(contribution.name)
       sources.push({
         name: contribution.name,
         plugin: contribution.plugin,
@@ -399,7 +394,7 @@ export async function collectHypAwareStatus(opts = {}) {
   }
 
   // Sinks are derived from the loaded config (so the count reflects
-  // "how many sinks does the user have configured?" — the same number
+  // "how many sinks does the user have configured?", the same number
   // a fresh kernel boot or a running daemon would surface). When
   // matching runtime handles exist on the kernel, layer in the live
   // instance metadata (plugin / kind) so the report does not lose
@@ -454,7 +449,7 @@ export async function collectHypAwareStatus(opts = {}) {
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_missing',
-        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker — run 'hyp attach --client ${clientName}'`,
+        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker - run 'hyp attach --client ${clientName}'`,
         repair: [`hyp attach --client ${clientName}`],
       })
     }
@@ -483,9 +478,9 @@ export async function collectHypAwareStatus(opts = {}) {
   // ----- client-action reconciler state (LLP 0036 / 0041) -----
   // Read-only marker view; `hyp status` never runs a reconcile pass. A
   // failed backfill is surfaced here (its own section, below) but is
-  // deliberately NOT a degrading diagnostic — the gateway runs fine on a
+  // deliberately NOT a degrading diagnostic. The gateway runs fine on a
   // valid config (LLP 0041 §failure-is-surfaced-not-fatal).
-  // @ref LLP 0041#failure-is-surfaced-not-fatal [implements] — surface client-action failure as its own line, never an outage signal
+  // @ref LLP 0041#failure-is-surfaced-not-fatal [implements]: Surface client-action failure as its own line, never an outage signal
   /** @type {ClientActionsReport | null} */
   let clientActions = null
   try {
@@ -511,11 +506,11 @@ export async function collectHypAwareStatus(opts = {}) {
   }
 
   // Anything that the operator would have to fix to call the install
-  // "set up" should degrade overall — config errors, v1 inconsistencies,
+  // "set up" should degrade overall: config errors, v1 inconsistencies,
   // and the "no config at all yet" case. `client_attach_missing` /
   // `recent_errors` stay informational so a perfectly-configured-but-
   // not-yet-attached install can still report healthy. A failed
-  // client-action (e.g. backfill-on-join) is likewise excluded — it has
+  // client-action (e.g. backfill-on-join) is likewise excluded. It has
   // its own status line but never flips `overall` (LLP 0041
   // §failure-is-surfaced-not-fatal); note it is not even a diagnostic, so
   // it cannot reach this computation.
@@ -549,7 +544,7 @@ export async function collectHypAwareStatus(opts = {}) {
 /**
  * Build the client-action reconciler section for `hyp status` from the
  * persisted marker store and the effective config. Pure: it reads markers
- * and config and never runs a reconcile pass (LLP 0041 — the status surface
+ * and config and never runs a reconcile pass (LLP 0041, the status surface
  * "reads the marker file, it never runs a pass"). Returns null when nothing
  * applies so the V1 status surface is unchanged on an ordinary host.
  *
@@ -571,7 +566,7 @@ export async function collectHypAwareStatus(opts = {}) {
  *
  * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean, clientDescriptors?: Map<string, ClientDescriptor> }} args
  * @returns {ClientActionsReport | null}
- * @ref LLP 0041#idempotency-and-completion-state [implements] — per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
+ * @ref LLP 0041#idempotency-and-completion-state [implements]: Per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
  */
 function buildClientActionsReport({ status, config, hasCentral, clientDescriptors }) {
   /** @type {ClientActionReport[]} */
@@ -589,12 +584,12 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   // backfill-on-join (LLP 0037 — policy rides the owning plugin). Keyed by
   // owning-plugin name (the backfill handler's request key, LLP 0041). Two cases:
   //   1. An explicit `config.backfill` block (any host).
-  //   2. *Default-on*: a known backfill provider with no explicit block — on
+  //   2. *Default-on*: a known backfill provider with no explicit block. On
   //      a joined host `backfillHandler.desired()` still emits for it, so it
   //      is a real (pending) target. Status mirrors that here; without this
   //      the default-on case was invisible. It is gated on `hasCentral` so a
   //      non-joined host (where the reconciler never runs) keeps its
-  //      V1-unchanged surface — a bare `claude`/`codex` install shows nothing.
+  //      V1-unchanged surface. A bare `claude`/`codex` install shows nothing.
   /** @type {Map<string, { onJoin: boolean }>} */
   const declared = new Map()
   for (const entry of config?.plugins ?? []) {
@@ -878,7 +873,7 @@ async function countRecentErrors(telemetryDir) {
 /**
  * Map config-validate `error_kind` values to the repair commands
  * status surfaces alongside them. Returning an empty array is
- * acceptable — the renderer just shows the diagnostic without a
+ * acceptable. The renderer just shows the diagnostic without a
  * "try this" line.
  *
  * @param {ConfigValidationError['errorKind']} kind
@@ -901,20 +896,3 @@ function repairForConfigError(kind) {
   }
 }
 
-/**
- * Expose the daemon log directory so command callers can render it
- * alongside the run state.
- *
- * @param {string} [homeDir]
- */
-export function statusLogDir(homeDir) {
-  return defaultLogDir(homeDir)
-}
-
-/**
- * Re-exported for symmetry with `statusLogDir`. The Phase 8 work uses
- * `platformIsSupported` to decide whether to skip installer probes
- * when running on Windows; surfacing the helper here keeps the import
- * surface of `core_commands.js` small.
- */
-export { platformIsSupported }

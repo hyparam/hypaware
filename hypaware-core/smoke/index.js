@@ -18,7 +18,7 @@ try {
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err)
   process.stderr.write(`smoke ${flowName}: FAIL\n${message}\n`)
-  // @ts-ignore — `expect` errors attach a `detail` line
+  // @ts-ignore: `expect` errors attach a `detail` line
   if (err && err.detail) process.stderr.write(`  ${err.detail}\n`)
   process.exit(1)
 }

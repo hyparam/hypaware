@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewaySettlementEnricher, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { GatewayState, RegisteredProjector } from './types.d.ts'
+ * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewaySettlementEnricher, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { GatewayState, RegisteredProjector } from './types.js'
  */
 
 /**

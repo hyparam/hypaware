@@ -21,10 +21,10 @@ import { EDGE_COLUMNS, EDGE_DATASET, NODE_COLUMNS, NODE_DATASET } from './datase
 import { firstSeenTime, mergeRow } from './project.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { AppendOptions, ExtendedQueryStorageService, PartitionCursor } from '../../../../src/core/cache/types.d.ts'
+ * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AppendOptions, ExtendedQueryStorageService, PartitionCursor } from '../../../../src/core/cache/types.js'
  * @import { PartitionSpec } from 'icebird/src/types.js'
- * @import { GraphRow, SkippedPartition } from './types.d.ts'
+ * @import { GraphRow, SkippedPartition } from './types.js'
  */
 
 /** Rows per append batch while rewriting; graph rows are skinny. */
@@ -53,7 +53,7 @@ const GRAPH_DATASETS = [NODE_DATASET, EDGE_DATASET]
  * (same content-addressed id) across all committed partitions, and
  * rewrite affected partitions into sorted replacement tables.
  *
- * Duplicates are rare — projection dedups pre-write — but concurrent
+ * Duplicates are rare (projection dedups pre-write), but concurrent
  * projections or partial failures can land the same id twice, possibly
  * in different `source=` partitions. Each duplicate group folds into a
  * single row (earliest `first_seen`, unioned props, via the same
@@ -65,7 +65,7 @@ const GRAPH_DATASETS = [NODE_DATASET, EDGE_DATASET]
  *
  * @param {{ storage: ExtendedQueryStorageService, dryRun?: boolean }} args
  * @returns {Promise<{ datasets: { dataset: string, duplicateIds: number, rowsMerged: number, partitionsRewritten: number, partitionsSkipped: SkippedPartition[] }[] }>}
- * @ref LLP 0023#graph-compaction [implements] — graph semantics only; file-count/snapshot compaction stays with the kernel
+ * @ref LLP 0023#graph-compaction [implements]: graph semantics only; file-count/snapshot compaction stays with the kernel
  */
 export async function compactGraphTables({ storage, dryRun = false }) {
   return withSpan(
@@ -109,7 +109,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   // read here is positive (tryReadCursorSync) and remembered per partition:
   // the eventual generation swap is conditional on the cursor still
   // matching it, and a partition whose cursor cannot be positively read is
-  // never rewritten — a corrupt cursor.json must not be mistaken for the
+  // never rewritten. A corrupt cursor.json must not be mistaken for the
   // epoch-0 default when the old generation is about to be retired.
   /** @type {Map<string, { count: number, parts: Set<string> }>} */
   const occurrences = new Map()
@@ -195,7 +195,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
     mergedByPart.set(home, rows)
   }
 
-  // Pass 2b: rewrite each affected partition — duplicate rows dropped,
+  // Pass 2b: rewrite each affected partition (duplicate rows dropped):
   // this partition's merged rows appended, sorted replacement table.
   //
   // Home partitions (the ones that receive merged rows) go first, and a
@@ -264,14 +264,14 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
  * The swap is conditional: writers (`appendRowsToSourceTable`) keep
  * appending to the old generation while it is being scanned, so before
  * repointing, the cursor is re-read and compared against the one the
- * compaction scan started from. Any change — a bumped rowCount from a
+ * compaction scan started from. Any change (a bumped rowCount from a
  * concurrent append, a different tableDir from another compactor, or a
- * cursor that can no longer be positively read — aborts the swap: the
+ * cursor that can no longer be positively read) aborts the swap: the
  * staged replacement table is removed and the partition is reported
  * skipped, because retiring the old generation at that point would lose
  * the rows appended during the rewrite window. (A small write window
  * between the re-read and the cursor write remains; closing it needs a
- * partition-level lock, which graph compaction doesn't take — reruns are
+ * partition-level lock, which graph compaction doesn't take. Reruns are
  * cheap and duplicates are benign.)
  *
  * @param {{
@@ -284,7 +284,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
  *   sortOrder: readonly { column: string, direction?: 'asc' | 'desc' }[]
  * }} args
  * @returns {Promise<{ status: 'rewritten', dropped: number } | { status: 'skipped', reason: 'unreadable-cursor' | 'concurrent-write' }>}
- * @ref LLP 0023#graph-compaction [constrained-by] — conditional swap: on any cursor change, skip and report; never retire
+ * @ref LLP 0023#graph-compaction [constrained-by]: conditional swap: on any cursor change, skip and report; never retire
  */
 export async function rewritePartition({ partitionDir, idCol, dropIds, extraRows, expectedCursor, fallbackColumns, sortOrder }) {
   const oldTableDirName = expectedCursor.tableDir ?? 'table'
@@ -395,7 +395,7 @@ async function removeStagedTable(tableDir) {
 
 /**
  * Deterministic duplicate ordering: earliest `first_seen` first (the
- * canonical row), then partition path, then the kernel row id — so the
+ * canonical row), then partition path, then the kernel row id: so the
  * fold result does not depend on scan order.
  *
  * @param {{ row: GraphRow, part: string }} a

@@ -10,9 +10,9 @@ import { startVectorRefreshSource } from './source.js'
 import { collectIndexStatus } from './status.js'
 
 /**
- * @import { EmbedderCapability, HypError, PluginActivationContext, ValidationResult, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
- * @import { VectorSearchRuntime } from './types.d.ts'
+ * @import { EmbedderCapability, HypError, PluginActivationContext, ValidationResult, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { VectorSearchRuntime } from './types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/vector-search'
@@ -32,7 +32,7 @@ const CAPABILITY_VERSION = '1.0.0'
  * `plugins[]` decision.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0024#plugin-not-kernel [implements] — vector search ships as a bundled plugin; query stays the SQL/dataset surface
+ * @ref LLP 0024#plugin-not-kernel [implements]: vector search ships as a bundled plugin; query stays the SQL/dataset surface
  */
 export async function activate(ctx) {
   ctx.configRegistry.registerSection({
@@ -44,12 +44,12 @@ export async function activate(ctx) {
   const validated = validateVectorSearchConfig(ctx.config)
   if (!validated.ok) {
     const detail = validated.errors.map((e) => `${e.pointer || '/'}: ${e.message}`).join('; ')
-    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config — ${detail}`))
+    const err = /** @type {HypError} */ (new Error(`${PLUGIN_NAME}: invalid config - ${detail}`))
     err.hypErrorKind = 'vector_config_invalid'
     throw err
   }
 
-  // @ref LLP 0024#embedding-is-a-separate-capability [constrained-by] — embedding always resolves through the capability registry, never a baked-in provider
+  // @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: embedding always resolves through the capability registry, never a baked-in provider
   const embedder = /** @type {EmbedderCapability} */ (ctx.requireCapability('hypaware.embedder', '^1.0.0'))
 
   /** @type {VectorSearchRuntime} */

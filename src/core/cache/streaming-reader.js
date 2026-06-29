@@ -5,8 +5,8 @@ import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { FlushChunk, ProgressState } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { FlushChunk, ProgressState } from '../../../src/core/cache/types.js'
  */
 
 export const BATCH_BYTE_LIMIT = 128 * 1024 * 1024
@@ -15,14 +15,14 @@ export const BATCH_ROW_LIMIT = 100_000
 /**
  * Read a rotated spool file as a stream, yielding batches of rows that
  * respect both a byte-size ceiling and a row-count ceiling. Partial
- * trailing lines are left in the buffer — the caller should treat them
+ * trailing lines are left in the buffer: the caller should treat them
  * as data for the next read cycle (in practice the spool writer always
  * ends lines with `\n`, so a partial line means the file was truncated
  * or is still being written).
  *
  * Each emitted row is decorated with:
- * - `_hyp_cache_row_id`  — SHA-256 of the serialized row (stable dedup key)
- * - `_hyp_cache_batch_id` — caller-supplied batch identifier
+ * - `_hyp_cache_row_id`: SHA-256 of the serialized row (stable dedup key)
+ * - `_hyp_cache_batch_id`: caller-supplied batch identifier
  *
  * Resume support: if `startOffset` > 0 the reader seeks past already-
  * flushed bytes and continues from there. After each yielded batch the

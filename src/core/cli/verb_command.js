@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
 
 /**
- * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration, VerbRenderResult } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -17,7 +17,7 @@ import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
  *
  * @param {VerbRegistration} verb
  * @returns {CommandRegistration}
- * @ref LLP 0034#verbs [implements] — one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
+ * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
 export function verbToCommand(verb) {
   return {
@@ -58,7 +58,7 @@ export async function runVerbCommand(verb, argv, ctx) {
   if (ctrl.controls.remote) {
     // `--refresh` is a local-cache control; the server owns its freshness,
     // so combining it with `--remote` is a hard error, not a silent ignore.
-    // @ref LLP 0033#flag-compat [implements] — --remote with --refresh is rejected; other render flags stay valid
+    // @ref LLP 0033#flag-compat [implements]: --remote with --refresh is rejected; other render flags stay valid
     if (ctrl.controls.refreshExplicit) {
       ctx.stderr.write(
         `hyp ${verb.name}: --refresh is a local cache control and cannot be combined with --remote (the server owns its freshness)\n`
@@ -75,7 +75,7 @@ export async function runVerbCommand(verb, argv, ctx) {
     }
     // Server-side cap (data volume) surfaced as its own stderr line, distinct
     // from the client display budget the renderer adds below.
-    // @ref LLP 0033#two-truncations [implements] — server cap and client display budget are two separate stderr lines
+    // @ref LLP 0033#two-truncations [implements]: server cap and client display budget are two separate stderr lines
     for (const line of remote.notices) ctx.stderr.write(line + '\n')
     result = remote.result
   } else {
@@ -87,7 +87,7 @@ export async function runVerbCommand(verb, argv, ctx) {
     }
   }
 
-  /** @type {import('../../../collectivus-plugin-kernel-types.d.ts').VerbRenderResult} */
+  /** @type {VerbRenderResult} */
   let rendered
   try {
     rendered = verb.render(result, ctrl.controls)

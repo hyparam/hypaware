@@ -22,9 +22,9 @@ import { pluginLockPath } from '../../../src/core/plugin_install/paths.js'
  *   HYP_SMOKE_REAL_GITHUB=1 npm run smoke -- plugin_install_github_url
  *
  * Defaults:
- *   HYP_SMOKE_GITHUB_URL  — git URL of a tiny public plugin fixture
- *   HYP_SMOKE_GITHUB_REF  — pinned tag (or commit SHA) to install
- *   HYP_SMOKE_GITHUB_NAME — manifest name the install should report
+ *   HYP_SMOKE_GITHUB_URL: git URL of a tiny public plugin fixture
+ *   HYP_SMOKE_GITHUB_REF: pinned tag (or commit SHA) to install
+ *   HYP_SMOKE_GITHUB_NAME: manifest name the install should report
  *
  * The smoke skips silently with a clear marker line when the env var
  * is not set so CI runs of `npm run smoke` do not hit the network.
@@ -48,7 +48,7 @@ export async function run({ harness, expect }) {
   const obs = installObservability()
   if (!obs.tracer.provider) {
     throw new Error(
-      'plugin_install_github_url: tracer provider not installed — expected HYP_DEV_TELEMETRY=1'
+      'plugin_install_github_url: tracer provider not installed - expected HYP_DEV_TELEMETRY=1'
     )
   }
 

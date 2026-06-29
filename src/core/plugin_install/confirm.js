@@ -3,13 +3,13 @@
 import readline from 'node:readline/promises'
 
 /**
- * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from './types.d.ts'
+ * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from '../../../src/core/plugin_install/types.js'
  */
 
 /**
  * Optional warning lines printed to stderr ahead of the prompt. Soft
- * warnings only — they never block install on their own. The strings
+ * warnings only: they never block install on their own. The strings
  * are short so they grep cleanly in smoke logs.
  *
  * @param {StagedArtifact} staged
@@ -29,7 +29,7 @@ export function buildWarnings(staged) {
   if (refIsBranch) {
     const refText = staged.source.ref ? `'${staged.source.ref}'` : '<default branch>'
     warnings.push(
-      `WARNING: ref ${refText} is an unpinned branch — pin a tag or commit SHA for reproducible installs`
+      `WARNING: ref ${refText} is an unpinned branch - pin a tag or commit SHA for reproducible installs`
     )
   }
   return warnings
@@ -50,7 +50,7 @@ function isBroadPermission(p) {
  * A ref counts as an unpinned branch when it is missing entirely (the
  * fetch picks the remote default branch) or when it does not look like
  * a tag (`v1.2.3`, semver-like) or a commit SHA. We do not call out to
- * `git ls-remote` here — the smoke fixture is local and the warning
+ * `git ls-remote` here: the smoke fixture is local and the warning
  * is intentionally heuristic.
  *
  * @param {PluginSourceSpec} source

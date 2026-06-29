@@ -13,8 +13,8 @@ import { readRowsFromTable } from './iceberg/store.js'
 import { datasetsRoot } from './paths.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CachePartitionMeta } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta } from '../../../src/core/cache/types.js'
  */
 
 /**
@@ -76,9 +76,9 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
 
 /**
  * A partition needs migration unless it is already in the source-table
- * layout (`source=<x>` partition key).  Everything else — direct Iceberg
+ * layout (`source=<x>` partition key). Everything else - direct Iceberg
  * tables without cursors, bare table names (`proxy_messages_v4`, `all`),
- * and the old `client=<x>/date=<y>` epoch layout — is legacy.
+ * and the old `client=<x>/date=<y>` epoch layout - is legacy.
  *
  * @param {CachePartitionMeta} partition
  * @returns {boolean}

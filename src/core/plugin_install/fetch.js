@@ -9,7 +9,7 @@ import { fetchGitSource } from './git_fetch.js'
 import { pluginInstallDir } from './paths.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -19,7 +19,7 @@ import { pluginInstallDir } from './paths.js'
  *   FetchResult,
  *   FetchErrorKind,
  *   BeforeCommitCallback,
- * } from './types.d.ts'
+ * } from '../../../src/core/plugin_install/types.js'
  */
 
 const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])
@@ -41,7 +41,7 @@ const SKIPPED_DIR_NAMES = new Set(['node_modules', '.git', '.DS_Store'])
  *   before the artifact rename swap. Ignored for local-dir sources,
  *   which keep their non-interactive behavior by design.
  * @returns {Promise<FetchResult>}
- * @ref LLP 0007#install-path-git-artifact-never-npm-install [implements] — copy a prebuilt artifact in; kernel never runs npm install
+ * @ref LLP 0007#install-path-git-artifact-never-npm-install [implements]: copy a prebuilt artifact in; kernel never runs npm install
  */
 export async function fetchPlugin({ source, stateDir, beforeCommit }) {
   switch (source.kind) {

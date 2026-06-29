@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { createBlobStoreIO } from '../../hypaware-core/plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -167,6 +167,6 @@ test('writer onWrite observer that throws does not break the commit', async () =
   if (!resolver.writer) throw new Error('writer required')
   const writer = resolver.writer(`blob://${KEY}`, { ifNoneMatch: '*' })
   writer.appendBytes(new Uint8Array([1]))
-  // Must not throw — observer failures are best-effort.
+  // Must not throw: observer failures are best-effort.
   await writer.finish()
 })

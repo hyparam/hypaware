@@ -3,7 +3,7 @@
 import { COMMITTED_DATASET, PLUGIN_NAME } from './datasets.js'
 
 /**
- * @import { ContractLike, GraphKit } from './types.d.ts'
+ * @import { ContractLike, GraphKit } from './types.js'
  */
 
 export const PROJECTOR = 'enrich.t2'
@@ -18,7 +18,7 @@ const SELECT_COMMITTED =
 /**
  * Build the enrichment projection contract. Projects ONLY committed
  * knowledge (the graph contract never sees prospects), so a rejected
- * prospect — absent from `enrichment_committed` — never reaches the graph.
+ * prospect (absent from `enrichment_committed`) never reaches the graph.
  *
  * One node rule emits a node of `item_type` per committed item (the
  * projector keys node-vs-edge off `rule.kind`, not `rule.type`, so a single
@@ -28,11 +28,11 @@ const SELECT_COMMITTED =
  * activity node rather than a duplicate.
  *
  * Multi-session provenance falls out of this for free: every contributing
- * session writes its own committed row (commit/deepen, and `merge` too — see
+ * session writes its own committed row (commit/deepen, and `merge` too): see
  * curate.js `routeDecision`) under the same canonical `(item_type, item_id)`.
  * The content-addressed node id collapses the rows to **one node** (LLP 0023
  * dedup-by-id), while each row's distinct anchor yields a separate `produced`
- * edge — so the node carries a `produced` edge **per contributing session**,
+ * edge, so the node carries a `produced` edge **per contributing session**,
  * append-only. @ref LLP 0028#committed-only-projection
  *
  * @param {GraphKit} kit
@@ -123,7 +123,7 @@ function asObject(v) {
       const parsed = JSON.parse(v)
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
     } catch {
-      // not JSON — ignore
+      // not JSON: ignore
     }
   }
   return {}

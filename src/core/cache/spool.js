@@ -7,8 +7,8 @@ import path from 'node:path'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from './types.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from '../../../src/core/cache/types.js'
  */
 
 export const SPOOL_DIR = '_hypaware_spool'
@@ -189,14 +189,14 @@ export function createCacheSpool(args) {
 }
 
 /**
- * Read every row currently pending in a table's spool — the rows that
+ * Read every row currently pending in a table's spool: the rows that
  * `append` wrote but `flushTable` has not yet committed to Iceberg.
  * Walks `active.jsonl` and every rotated `flush-*.jsonl`, parsing each
  * line's `{ version, columns, rows }` envelope and yielding the raw
  * `rows`. This is a read-only inspection surface; it never rotates,
  * removes, or advances flush progress, so it is safe to call alongside
  * live capture. Any error (missing dir, unreadable file, malformed
- * line) degrades to skipping that file/line rather than throwing — the
+ * line) degrades to skipping that file/line rather than throwing: the
  * spool is provisional (LLP 0013) and a partial read is always better
  * than aborting the caller.
  *
@@ -235,7 +235,7 @@ async function* readSpooledRows(tablePath) {
       // Mirror streamFlushFile's envelope-validity contract exactly: a
       // parseable envelope missing `columns` is malformed, and the flush
       // reader drops it (its rows never reach a committed partition).
-      // Backfill dedupe must skip the same rows — otherwise it would dedupe
+      // Backfill dedupe must skip the same rows: otherwise it would dedupe
       // against, and so refuse to materialize, rows flush will never commit.
       if (
         !envelope ||

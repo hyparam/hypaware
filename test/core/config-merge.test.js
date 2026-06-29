@@ -89,7 +89,7 @@ test('query is local-only: the local block wins, a central query block is ignore
 // ---- resolveLayeredConfig: the validation-driven drop pass (LLP 0031
 // §central-layer-is-sacrosanct). A fake validator keeps these unit-level:
 // "two encoders enabled together is a capability tie".
-// @ref LLP 0031#central-layer-is-sacrosanct [tests]
+// @ref LLP 0031#central-layer-is-sacrosanct [tests]:
 
 /** @param {any} cfg */
 function fakeValidate(cfg) {
@@ -123,7 +123,7 @@ test('resolveLayeredConfig: a valid-in-isolation local addition that invalidates
 })
 
 test('resolveLayeredConfig: an error the central layer carries alone never drops a local entry', () => {
-  // Central is already ambiguous on its own — that is apply-time's concern.
+  // Central is already ambiguous on its own: that is apply-time's concern.
   // The local layer is blameless, so nothing local is dropped.
   const central = {
     version: 2,

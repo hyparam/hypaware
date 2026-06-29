@@ -9,7 +9,7 @@ import path from 'node:path'
 import { runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
 import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
-/** @import { BackfillFinaleResult } from '../../src/core/cli/types.d.ts' */
+/** @import { BackfillFinaleResult } from '../../src/core/cli/types.js' */
 
 /**
  * Fake picker backfill runner. Records every `run` call and returns a
@@ -155,7 +155,7 @@ test('--yes mode runs bounded backfill automatically without a consent prompt', 
   assert.equal(backfill.calls[0].retentionDays, 7, 'backfill is bounded by the retention window')
 })
 
-test('--no-daemon still backfills — it is a local file import', async () => {
+test('--no-daemon still backfills - it is a local file import', async () => {
   const env = await tmpEnv('hypaware-bf-nodaemon-')
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -271,8 +271,8 @@ test('picked clients without a registered backfill provider are skipped', async 
   // The injected runner advertises only `claude`, so a codex pick has no
   // matching provider: the finale intersects picks with the runner's
   // `available` set and skips the rest. (In production both claude and
-  // codex are registered — see the all-available boot test in
-  // boot-installed.test.js — this exercises the empty-intersection path.)
+  // codex are registered. See the all-available boot test in
+  // boot-installed.test.js. This exercises the empty-intersection path.)
   const backfill = makeBackfill(['claude'])
 
   const result = await runPickerWalkthrough({

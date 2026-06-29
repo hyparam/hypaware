@@ -19,7 +19,7 @@ import {
  *   BuildUnitOptions,
  *   PlanSystemdInstallOptions,
  *   SystemdInstallPlan,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 export class SystemdUnitError extends Error {
@@ -175,7 +175,7 @@ export function unitPathFor(unitDir, label = SYSTEMD_UNIT_BASE) {
  *
  * @param {PlanSystemdInstallOptions} options
  * @returns {SystemdInstallPlan}
- * @ref LLP 0017#install-global-package-then-service-manager [implements] — systemd user unit pointed at the stable global binary, never an npx path
+ * @ref LLP 0017#install-global-package-then-service-manager [implements]: systemd user unit pointed at the stable global binary, never an npx path
  */
 export function planSystemdInstall(options) {
   const label = options.label ?? SYSTEMD_UNIT_BASE
@@ -265,7 +265,7 @@ export async function installSystemdUnit(options) {
 /**
  * Stop, disable, and remove a HypAware systemd unit. Tolerates
  * already-stopped / already-disabled state and a missing unit file.
- * Removes only the service artifact — config, recordings, and logs are
+ * Removes only the service artifact. Config, recordings, and logs are
  * left untouched.
  *
  * @param {{ label?: string, unitDir?: string, homeDir?: string, systemctl?: SystemctlAdapter }} options

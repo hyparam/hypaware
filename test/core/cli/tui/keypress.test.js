@@ -5,7 +5,11 @@ import assert from 'node:assert/strict'
 
 import { reduce } from '../../../../src/core/cli/tui/keypress.js'
 
-/** @returns {import('../../../../src/core/cli/tui/keypress.js').MultiselectState} */
+/**
+ * @import { MultiselectState, SelectState, TextState, ConfirmState } from '../../../../src/core/cli/tui/types.js'
+ */
+
+/** @returns {MultiselectState} */
 function multiselectState(overrides = {}) {
   return {
     kind: 'multiselect',
@@ -21,7 +25,7 @@ function multiselectState(overrides = {}) {
   }
 }
 
-/** @returns {import('../../../../src/core/cli/tui/keypress.js').SelectState} */
+/** @returns {SelectState} */
 function selectState(overrides = {}) {
   return {
     kind: 'select',
@@ -37,7 +41,7 @@ function selectState(overrides = {}) {
   }
 }
 
-/** @returns {import('../../../../src/core/cli/tui/keypress.js').TextState} */
+/** @returns {TextState} */
 function textState(overrides = {}) {
   return {
     kind: 'text',
@@ -49,7 +53,7 @@ function textState(overrides = {}) {
   }
 }
 
-/** @returns {import('../../../../src/core/cli/tui/keypress.js').ConfirmState} */
+/** @returns {ConfirmState} */
 function confirmState(overrides = {}) {
   return {
     kind: 'confirm',

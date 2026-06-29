@@ -13,13 +13,13 @@ import { readBackfillPolicy } from './backfill_policy.js'
  *   BackfillSpawnResult,
  *   CreateBackfillHandlerOptions,
  *   DesiredAction,
- * } from './types.d.ts'
+ * } from '../../../src/core/config/types.js'
  */
 
 const MS_PER_DAY = 86_400_000
 
 /**
- * The backfill action handler — the v1 instance of the generic client-action
+ * The backfill action handler: the v1 instance of the generic client-action
  * reconciler (LLP 0036 / LLP 0037). It is the run-once "import this client's
  * local history once the central config that enabled it is confirmed" effect,
  * realized as a subprocess `hyp backfill` launch so a months-deep import can
@@ -33,8 +33,8 @@ const MS_PER_DAY = 86_400_000
  *
  * @param {CreateBackfillHandlerOptions} [opts]
  * @returns {ActionHandler}
- * @ref LLP 0041#run-once-flow-backfill-handler [implements] — backfillHandler.desired() over selectProviders + per-plugin config.backfill; perform() resolves window_days->--since and spawns `hyp backfill <provider> --json`
- * @ref LLP 0037 — backfill on join (the instance this realizes)
+ * @ref LLP 0041#run-once-flow-backfill-handler [implements]: backfillHandler.desired() over selectProviders + per-plugin config.backfill; perform() resolves window_days->--since and spawns `hyp backfill <provider> --json`
+ * @ref LLP 0037: backfill on join (the instance this realizes)
  */
 export function createBackfillHandler(opts = {}) {
   const spawn = opts.spawn ?? defaultBackfillSpawn
@@ -47,12 +47,12 @@ export function createBackfillHandler(opts = {}) {
      * "enabled-in-config" predicate `hyp backfill` uses (`selectProviders`
      * with no explicit names), then drops any provider whose owning plugin
      * set `backfill.on_join: false` (the operator opt-out, which rides the
-     * locked `plugins[]` entry — there is no local override). Pure: no
+     * locked `plugins[]` entry - there is no local override). Pure: no
      * effects, no spawn.
      *
      * @param {ActionContext} ctx
      * @returns {DesiredAction[]}
-     * @ref LLP 0041#consent-gating [constrained-by] — default-on; suppression is `backfill.on_join:false` in the locked central plugin entry, not a local override
+     * @ref LLP 0041#consent-gating [constrained-by]: default-on; suppression is `backfill.on_join:false` in the locked central plugin entry, not a local override
      */
     desired(ctx) {
       const activePlugins = ctx.config.plugins ?? []
@@ -74,7 +74,7 @@ export function createBackfillHandler(opts = {}) {
         // Default-on: only an explicit `on_join: false` opts out.
         if (policy.onJoin === false) continue
         desired.push({
-          // The marker key is the owning plugin name — a per-(machine,
+          // The marker key is the owning plugin name: a per-(machine,
           // provider) boolean (LLP 0041 §request-key). The CLI positional,
           // however, is the *provider* name (`hyp backfill claude`, not
           // `@hypaware/claude`), carried separately in params.
@@ -100,7 +100,7 @@ export function createBackfillHandler(opts = {}) {
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0041#run-once-flow-backfill-handler [implements] — spawn `hyp backfill <provider> [--since <iso>] --json` (runSmoke spawn pattern), parse providers[].rows_written, never advance to done on non-zero exit
+     * @ref LLP 0041#run-once-flow-backfill-handler [implements]: spawn `hyp backfill <provider> [--since <iso>] --json` (runSmoke spawn pattern), parse providers[].rows_written, never advance to done on non-zero exit
      */
     async perform(action, ctx) {
       const params = action.params ?? {}
@@ -132,10 +132,10 @@ export function createBackfillHandler(opts = {}) {
       let result
       try {
         // Spawn with the daemon's resolved env (HYP_HOME forced to the
-        // daemon's hypHome upstream in the reconcile input) — NOT
+        // daemon's hypHome upstream in the reconcile input): NOT
         // `process.env`, which can name a different HYP_HOME on the
         // direct-`runDaemon`/hermetic-smoke path and import into the wrong
-        // cache. @ref LLP 0041#run-once-flow-backfill-handler [constrained-by]
+        // cache. @ref LLP 0041#run-once-flow-backfill-handler [constrained-by]:
         result = await spawn({ args, env: ctx.env })
       } catch (err) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
@@ -150,7 +150,7 @@ export function createBackfillHandler(opts = {}) {
 
       const rows = parseRowsWritten(result.stdout)
       // Exit 0 is authoritative: the import committed. A row count is
-      // best-effort — an unparseable payload still records `done` (rows
+      // best-effort: an unparseable payload still records `done` (rows
       // omitted) rather than re-running a successful import.
       return rows !== undefined ? { status: 'done', rows } : { status: 'done' }
     },
@@ -197,7 +197,7 @@ function parseRowsWritten(stdout) {
 /**
  * The real subprocess seam: spawn `process.execPath bin/hypaware.js <args>`
  * resolved off `import.meta.url` (the `runSmoke` spawn pattern) and capture
- * stdout. Async (not `spawnSync`) on purpose — a multi-minute import must not
+ * stdout. Async (not `spawnSync`) on purpose: a multi-minute import must not
  * block the daemon's event loop (LLP 0041 §Execution isolation). Inherits the
  * daemon's `env` so the child writes the same cache (`HYP_HOME`).
  *

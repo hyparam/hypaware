@@ -9,8 +9,8 @@ import { activate } from '../../hypaware-core/plugins-workspace/s3/src/index.js'
  * Build a stub `PluginActivationContext` capturing the datasets the
  * plugin registers and recording every `listObjects` call the injected
  * S3 client sees. The recorded `Bucket`/`Prefix` reveal how
- * `buildQuerySourceBlobStore` rooted each query source — the
- * Iceberg-critical `(bucket, root-prefix)` split — without reaching into
+ * `buildQuerySourceBlobStore` rooted each query source: the
+ * Iceberg-critical `(bucket, root-prefix)` split, without reaching into
  * the BlobStore internals.
  *
  * @param {Record<string, unknown>} config

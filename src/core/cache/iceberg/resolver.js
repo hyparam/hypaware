@@ -60,7 +60,7 @@ export function tableUrlForDir(dir) {
 }
 
 /**
- * Inverse of `tableUrlForDir` — resolves a `file://` URL or a relative
+ * Inverse of `tableUrlForDir` - resolves a `file://` URL or a relative
  * path back into an absolute filesystem path.
  *
  * @param {string} url

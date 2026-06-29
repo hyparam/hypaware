@@ -16,7 +16,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { BlobStore } from '../../collectivus-plugin-kernel-types.js'
  */
 
 /**
@@ -129,7 +129,7 @@ test('local-fs BlobStore deleteObject removes the key and is idempotent', async 
     assert.ok(store.deleteObject)
     await store.deleteObject({ key: 'a/one.bin' })
     assert.equal(await store.getObject({ key: 'a/one.bin' }), null)
-    // Idempotent — deleting a missing key is not an error.
+    // Idempotent: deleting a missing key is not an error.
     await store.deleteObject({ key: 'a/one.bin' })
   } finally {
     await fs.rm(base, { recursive: true, force: true })
@@ -240,8 +240,8 @@ test('local-fs BlobStore accepts a Readable stream as body', async () => {
 /**
  * Build a minimal in-memory `BlobStore` fixture used to exercise the
  * BlobStore contract from the consumer side (e.g. a future
- * format-iceberg plugin). The fixture is intentionally simple — a Map
- * keyed by object key — but honours every contract bit the surface
+ * format-iceberg plugin). The fixture is intentionally simple (a Map
+ * keyed by object key), but honours every contract bit the surface
  * needs: kind, ordering, prefix filtering, ifNoneMatch, return shape.
  *
  * @returns {BlobStore}

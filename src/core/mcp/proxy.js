@@ -10,11 +10,11 @@ import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
- * `hyp mcp --remote <target>` — the **stdio proxy fallback** (LLP 0034
+ * `hyp mcp --remote <target>`: the **stdio proxy fallback** (LLP 0034
  * §proxy-fallback). For AI clients that can't add a remote HTTP MCP
  * directly, this serves a local stdio MCP that transparently forwards each
  * JSON-RPC message to the remote endpoint, injecting the stored
@@ -27,13 +27,13 @@ import { serveStdio } from './stdio.js'
  *
  * @param {{ target: string, ctx: CommandRunContext }} args
  * @returns {Promise<number>}
- * @ref LLP 0034#proxy-fallback [implements] — stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
+ * @ref LLP 0034#proxy-fallback [implements]: stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
  */
 export async function runMcpProxy({ target, ctx }) {
   const remotes = ctx.config?.query?.remotes ?? {}
   const entry = remotes[target]
   if (!entry) {
-    ctx.stderr.write(`hyp mcp: unknown remote target '${target}' — add it with 'hyp remote add ${target} <url>'\n`)
+    ctx.stderr.write(`hyp mcp: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'\n`)
     return 2
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
@@ -52,7 +52,7 @@ export async function runMcpProxy({ target, ctx }) {
   let sessionId
   const log = getLogger('mcp')
   log.info('mcp.proxy_start', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.proxy', target, url: entry.url })
-  // Lifecycle line to stderr — stdout is the protocol channel.
+  // Lifecycle line to stderr: stdout is the protocol channel.
   ctx.stderr.write(`hyp mcp: proxying stdio → ${entry.url} (target '${target}')\n`)
 
   const server = {

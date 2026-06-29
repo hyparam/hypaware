@@ -19,7 +19,7 @@ import {
  *   BuildPlistOptions,
  *   PlanLaunchAgentInstallOptions,
  *   LaunchAgentInstallPlan,
- * } from './types.d.ts'
+ * } from '../../../src/core/daemon/types.js'
  */
 
 export class LaunchAgentError extends Error {
@@ -187,7 +187,7 @@ function defaultUserDomain(uid) {
  *
  * @param {PlanLaunchAgentInstallOptions} options
  * @returns {LaunchAgentInstallPlan}
- * @ref LLP 0017#install-global-package-then-service-manager [implements] — launchd LaunchAgent pointed at the stable global binary, never an npx path
+ * @ref LLP 0017#install-global-package-then-service-manager [implements]: launchd LaunchAgent pointed at the stable global binary, never an npx path
  */
 export function planLaunchAgentInstall(options) {
   const label = options.label ?? LAUNCH_LABEL
@@ -272,15 +272,15 @@ function isTransientBootstrapError(res) {
 
 /**
  * Install or refresh a HypAware LaunchAgent. Idempotent: if the agent is
- * already loaded it is booted out first — and we wait for launchd to fully
- * release it — before the new plist is written and bootstrapped back in.
+ * already loaded it is booted out first, and we wait for launchd to fully
+ * release it before the new plist is written and bootstrapped back in.
  * Bootstrap retries the transient EIO (`error 5`) launchd raises while an
  * unfinished teardown still holds the label, so a reinstall over a live
  * agent doesn't fail; genuine load errors still surface immediately.
  *
  * @param {PlanLaunchAgentInstallOptions & { launchctl?: LaunchctlAdapter, userDomain?: string, sleep?: (ms: number) => Promise<void> }} options
  * @returns {Promise<LaunchAgentInstallPlan>}
- * @ref LLP 0017#reinstall-waits-for-launchd-release [implements] — bootout is async; poll until released + bounded EIO retry
+ * @ref LLP 0017#reinstall-waits-for-launchd-release [implements]: bootout is async; poll until released + bounded EIO retry
  */
 export async function installLaunchAgent(options) {
   const plan = planLaunchAgentInstall(options)
@@ -321,8 +321,8 @@ export async function installLaunchAgent(options) {
 
 /**
  * Boot out and remove a HypAware LaunchAgent. Tolerates already-unloaded
- * state and a missing plist file. Removes only the service artifact —
- * config, recordings, and logs are left untouched.
+ * state and a missing plist file. Removes only the service artifact.
+ * Config, recordings, and logs are left untouched.
  *
  * @param {{ label?: string, plistDir?: string, homeDir?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
  * @returns {Promise<void>}

@@ -18,8 +18,8 @@ import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
  * @import { AddressInfo } from 'node:net'
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.d.ts'
- * @import { PluginActivationEntry } from '../../../src/core/runtime/loader.d.ts'
+ * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -39,16 +39,16 @@ const COLUMNS = [{ name: 'text', type: 'STRING', nullable: true }]
  * the real CLI dispatch path, and the daemon-style refresh source.
  *
  * Steps (each a `smoke_step`-tagged root span):
- *  1. populate       — seed two cache partitions with distinct texts.
- *  2. plugin_activate — activate both plugins against the fake server.
- *  3. status_missing — `hyp vector status --json` reports missing shards.
- *  4. first_search   — `hyp vector search` auto-builds both shards and
+ *  1. populate: seed two cache partitions with distinct texts.
+ *  2. plugin_activate: activate both plugins against the fake server.
+ *  3. status_missing: `hyp vector status --json` reports missing shards.
+ *  4. first_search: `hyp vector search` auto-builds both shards and
  *                      ranks the matching text first.
- *  5. staleness      — appending rows flips one shard to stale_rows.
- *  6. timer_refresh  — the `vector-search-refresh` source tick rebuilds
+ *  5. staleness: appending rows flips one shard to stale_rows.
+ *  6. timer_refresh: the `vector-search-refresh` source tick rebuilds
  *                      exactly the stale shard.
- *  7. no_refresh_search — `--no-refresh` finds the newly indexed row.
- *  8. telemetry      — spans prove the build/search/tick paths ran, and
+ *  7. no_refresh_search: `--no-refresh` finds the newly indexed row.
+ *  8. telemetry: spans prove the build/search/tick paths ran, and
  *                      neither the API key nor raw text leaked.
  *
  * @param {{ harness: any, expect: any }} args
@@ -130,7 +130,7 @@ export async function run({ harness, expect }) {
           path.join(PLUGINS_WORKSPACE, 'vector-search'),
         ])
         if (failed.length > 0) {
-          throw new Error(`manifest failures — ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`)
+          throw new Error(`manifest failures - ${failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`)
         }
         // Embedder first: vector-search requires hypaware.embedder.
         const byName = new Map(loaded.map((l) => [l.manifest.name, l]))
@@ -150,7 +150,7 @@ export async function run({ harness, expect }) {
             config: {
               indexes: [{ dataset: DATASET, column: 'text' }],
               // ~120ms so the timer step is fast; the budget fields keep
-              // their defaults — this smoke never approaches them.
+              // their defaults, this smoke never approaches them.
               refresh: { interval_minutes: 0.002 },
             },
           },

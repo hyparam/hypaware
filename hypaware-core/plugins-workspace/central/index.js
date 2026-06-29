@@ -8,11 +8,11 @@ import { IdentityClient } from './src/identity_client.js'
 import { createForwardSink } from './src/sink.js'
 
 /**
- * @import { PluginActivationContext, SinkCreateContext } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationContext, SinkCreateContext } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 /**
- * `@hypaware/central` — request sink that forwards ready cache
+ * `@hypaware/central`: request sink that forwards ready cache
  * partitions to a central HypAware server. The plugin replaces the
  * `role: gateway` config from collectivus: a host becomes "the
  * gateway" purely by configuring this sink under
@@ -70,7 +70,7 @@ export async function activate(ctx) {
 
       if (!configControl) return sink
 
-      // @ref LLP 0025#config-pull-loop [implements] — pull immediately on bootstrap success, then on the steady timer
+      // @ref LLP 0025#config-pull-loop [implements]: pull immediately on bootstrap success, then on the steady timer
       const pullLoop = createConfigPullLoop({
         centralUrl: config.url,
         identityClient,

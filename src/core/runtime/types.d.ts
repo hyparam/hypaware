@@ -1,16 +1,32 @@
 import type {
   ActivePlugin,
+  AgentRegistry,
+  BackfillMaterializerRegistry,
+  BackfillRegistry,
+  CommandRegistry,
   ConfigControlFacade,
+  ConfigRegistry,
   HypAwareV2Config,
+  InitPresetRegistry,
+  JsonObject,
+  PluginActivationContext,
   PluginLockEntry,
+  PluginManifest,
   PluginName,
+  PluginPaths,
+  QueryRegistry,
+  SkillRegistry,
+  VerbRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
-import type { LoadedManifest, FailedManifest } from '../manifest.d.ts'
-import type { ClientDescriptor } from '../plugin_catalog.js'
-import type { KernelRuntime } from './activation.d.ts'
-import type { ActivationResult } from './loader.d.ts'
+import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
+import type { ClientDescriptor, LoadedManifest, FailedManifest } from '../types.d.ts'
+import type {
+  CapabilityRegistryHandle,
+  ExtendedSinkRegistry,
+  ExtendedSourceRegistry,
+} from '../registry/types.d.ts'
 
 /**
  * Boot profiles that drive plugin selection.
@@ -106,4 +122,108 @@ export interface DiscoverInstalledResult {
   failed: FailedManifest[]
   /** All lock entries that were considered (loaded + failed). */
   lockEntries: PluginLockEntry[]
+}
+
+// --- activation ---
+
+/**
+ * The kernel-side aggregate that activation contexts facade over.
+ * Registries beyond `capabilities`, `commands`, `sources`, `sinks`,
+ * `query`, and `storage` are still Phase-2 placeholders; later phases
+ * promote each one in place without touching this surface.
+ *
+ * `activationContexts` is the per-plugin `PluginActivationContext`
+ * map populated by `createActivationContext`. The daemon reads from
+ * it to drive `sources.start(name, ctx)` and `sources.reload(name,
+ * ctx)` for plugins that don't auto-start in their `activate()`.
+ */
+export interface KernelRuntime {
+  capabilities: CapabilityRegistryHandle
+  commands: CommandRegistry
+  configRegistry: ConfigRegistry
+  sources: ExtendedSourceRegistry
+  sinks: ExtendedSinkRegistry
+  query: QueryRegistry
+  verbs: VerbRegistry
+  storage: ExtendedQueryStorageService
+  cacheRoot: string
+  skills: SkillRegistry
+  agents: AgentRegistry
+  initPresets: InitPresetRegistry
+  backfills: BackfillRegistry
+  backfillMaterializers: BackfillMaterializerRegistry
+  activationContexts: Map<PluginName, PluginActivationContext>
+  /**
+   * Plugin-facing facade of the daemon's config apply engine. Set only
+   * when the host process runs one (daemon mode); CLI boots leave it
+   * undefined so transport plugins skip their pull loops.
+   */
+  configControl?: ConfigControlFacade
+}
+
+export interface CreateKernelRuntimeArgs {
+  capabilityRegistry?: CapabilityRegistryHandle
+  commandRegistry?: CommandRegistry
+  queryRegistry?: QueryRegistry
+  verbRegistry?: VerbRegistry
+  sourceRegistry?: ExtendedSourceRegistry
+  sinkRegistry?: ExtendedSinkRegistry
+  backfillRegistry?: BackfillRegistry
+  backfillMaterializerRegistry?: BackfillMaterializerRegistry
+  storage?: ExtendedQueryStorageService
+  cacheRoot?: string
+  configControl?: ConfigControlFacade
+}
+
+export interface CreateActivationContextArgs {
+  runtime: KernelRuntime
+  plugin: ActivePlugin
+  paths: PluginPaths
+  config?: JsonObject
+  env?: NodeJS.ProcessEnv
+}
+
+// --- paths ---
+
+export interface CreatePluginPathsArgs {
+  pluginName: PluginName
+  rootDir: string
+  stateRoot: string
+  runId: string
+  tmpRoot?: string
+}
+
+// --- loader ---
+
+export interface PluginActivationEntry {
+  manifest: PluginManifest
+  rootDir: string
+  config?: JsonObject
+}
+
+export interface ActivationSuccess {
+  ok: true
+  plugin: ActivePlugin
+}
+
+export interface ActivationFailure {
+  ok: false
+  plugin: ActivePlugin
+  errorKind: string
+  message: string
+}
+
+export type ActivationResult = ActivationSuccess | ActivationFailure
+
+export interface ActivatePluginsArgs {
+  plugins: PluginActivationEntry[]
+  stateRoot: string
+  runId: string
+  runtime?: KernelRuntime
+  tmpRoot?: string
+}
+
+export interface ActivatePluginsResult {
+  runtime: KernelRuntime
+  results: ActivationResult[]
 }

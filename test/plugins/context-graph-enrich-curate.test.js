@@ -15,7 +15,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/curate.js'
 
 /**
- * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.d.ts'
+ * @import { EnrichConfig } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/types.js'
  */
 
 const AT = '2026-06-15T00:00:00.000Z'
@@ -66,7 +66,7 @@ test('routeDecision deepen also commits an item', () => {
   assert.equal(r.resolution?.decision, 'deepen')
 })
 
-test('routeDecision reject commits nothing — a rejected prospect never reaches the graph', () => {
+test('routeDecision reject commits nothing - a rejected prospect never reaches the graph', () => {
   const r = routeDecision(prospect(), VIEW, { index: 1, decision: 'reject', note: 'noise' }, AT)
   assert.equal(r.rejected, true)
   assert.equal(r.committed, null)
@@ -98,7 +98,7 @@ test('routeDecision merge writes a committed row under the canonical key with th
   assert.deepEqual(r.resolution?.committed_ids, ['redis-decision'])
 })
 
-test('routeDecision leaves an under-specified merge pending (no commit, no resolution) — avoids mis-routing the produced edge', () => {
+test('routeDecision leaves an under-specified merge pending (no commit, no resolution) - avoids mis-routing the produced edge', () => {
   // merge_into present but item_type missing: the canonical node type is unknown,
   // so committing would derive the content-addressed id from the PROSPECT's own
   // type and attach the produced edge to the wrong node. Leave it pending.
@@ -194,7 +194,7 @@ function fakeQuery(query, tables) {
  * Fake EnrichRuntime backed by in-memory tables + injected execSql, a stub
  * completion returning a fixed `curate_decisions` call, a stub vector search,
  * and a stub embedder returning identical vectors (so the no-recall remainder
- * collapses into ONE cluster — deterministic). `appendRows` mutates `tables`.
+ * collapses into ONE cluster, deterministic). `appendRows` mutates `tables`.
  *
  * @param {{ cfg: EnrichConfig, prospects: Record<string, unknown>[], resolutions?: Record<string, unknown>[], decisions: Array<Record<string, unknown>>, vectorHits?: Array<{ id: string, score: number }>, providerThrows?: boolean }} args
  */
@@ -298,7 +298,7 @@ test('runCurateTick curates pending prospects, writes committed + resolution row
   assert.equal(tables.enrichment_resolutions.length, 3, 'p1 + p2 resolutions added to the pre-existing p3')
 })
 
-test('runCurateTick merges cross-session duplicates — each contributing session gets a committed row (produced edge)', async () => {
+test('runCurateTick merges cross-session duplicates - each contributing session gets a committed row (produced edge)', async () => {
   // Two sessions propose the same thing; the curator commits one and merges the
   // other into its key. Both write a committed row under the canonical item_id
   // (the node dedups by content-addressed id), each carrying its own session
@@ -399,7 +399,7 @@ test('runCurateTick leaves a cluster pending (no resolution) when the curator re
 })
 
 test('runCurateTick derefs the source with the shared content filter (T1/T2 parity)', async () => {
-  // @ref LLP 0028#row-selection — safeDeref must AND the same content filter as
+  // @ref LLP 0028#row-selection: safeDeref must AND the same content filter as
   // the T1 scan into the deref WHERE, so an excluded part (e.g. tool_result)
   // sharing a message_id with a kept text part is not re-admitted into the
   // curator excerpt. The fakeQuery ignores WHERE, so assert on the SQL itself.

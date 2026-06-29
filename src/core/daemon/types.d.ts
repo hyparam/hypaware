@@ -4,10 +4,11 @@ import type {
   QueryRegistry,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
-import type { ExtendedSourceRegistry } from '../registry/sources.js'
-import type { ExtendedSinkRegistry } from '../registry/sinks.js'
-import type { KernelRuntime } from '../runtime/activation.js'
-import type { BootKernelResult } from '../runtime/boot.js'
+import type {
+  ExtendedSinkRegistry,
+  ExtendedSourceRegistry,
+} from '../registry/types.d.ts'
+import type { KernelRuntime } from '../runtime/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -237,10 +238,10 @@ export interface CollectStatusOptions {
   homeDir?: string
   /** Absolute path to the daemon binary the installer recorded. */
   binPath?: string
-  isLaunchAgentInstalled?: (opts: any) => boolean
-  launchAgentStatus?: (opts: any) => Promise<{ loaded: boolean; pid?: number }>
-  isSystemdUnitInstalled?: (opts: any) => boolean
-  systemdUnitStatus?: (opts: any) => Promise<{ loaded: boolean; pid?: number }>
+  isLaunchAgentInstalled?: (opts: { label?: string; plistDir?: string; homeDir?: string }) => boolean
+  launchAgentStatus?: (opts: { label?: string; launchctl?: LaunchctlAdapter; userDomain?: string; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
+  isSystemdUnitInstalled?: (opts: { label?: string; unitDir?: string; homeDir?: string }) => boolean
+  systemdUnitStatus?: (opts: { label?: string; systemctl?: SystemctlAdapter; homeDir?: string; platform?: NodeJS.Platform }) => Promise<{ loaded: boolean; pid?: number }>
 }
 
 export interface SystemctlResult {
