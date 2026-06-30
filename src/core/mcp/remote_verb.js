@@ -34,6 +34,14 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
     }
   }
 
+  // Both the silent refresh and the remote tool call need a global fetch; fail
+  // with a clear reason here rather than letting an oidc refresh throw the
+  // identity client's lower-level "no fetch" deep inside the attach path (the
+  // stdio proxy guards the same way).
+  if (typeof (/** @type {unknown} */ (globalThis.fetch)) !== 'function') {
+    return { ok: false, error: 'no fetch implementation available for the remote verb', exitCode: 1 }
+  }
+
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const identityBase = deriveIdentityBase(entry.url) ?? undefined
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
