@@ -1,7 +1,7 @@
 # LLP 0055: Stream Aggregates via `scanColumn` Rather Than Buffering Rows
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Query, Cache
 **Author:** Phil / Claude
 **Date:** 2026-06-30
