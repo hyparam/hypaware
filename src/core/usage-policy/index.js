@@ -5,3 +5,6 @@
 // import it exactly as they import `src/core/observability`.
 export { parseHypignore } from './format.js'
 export { createUsagePolicyResolver } from './matcher.js'
+// Repo-root resolution for the `hyp ignore` CLI (LLP 0049 #cli): place a
+// single repo-wide `.hypignore` at the git toplevel.
+export { findRepoRoot } from './repo_root.js'
