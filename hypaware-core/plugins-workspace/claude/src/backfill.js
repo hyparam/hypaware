@@ -9,10 +9,12 @@ import {
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
 import { anthropicMessageAttributes } from './anthropic.js'
+import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { SessionContextRecord, TranscriptEntry } from './types.js'
+ * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -66,6 +68,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
  *   clientName?: string,
  *   pluginName?: string,
  *   deriveRepo?: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
+ *   resolver?: UsagePolicyResolver,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -78,6 +81,10 @@ export function createClaudeBackfillProvider(opts) {
   // recover it by running git in the session's cwd at backfill time. Injectable
   // so tests stub the git lookup and stay hermetic.
   const deriveRepo = opts.deriveRepo ?? deriveRepoFromCwd
+  // One resolver per backfill run (LLP 0050): the per-cwd cache reflects disk at
+  // run time and is shared across the whole scan. Injectable for hermetic tests.
+  // @ref LLP 0050 [implements]: skip ignored sessions at the capture seam.
+  const resolver = opts.resolver ?? createUsagePolicyResolver()
 
   return {
     name: clientName,
@@ -85,7 +92,7 @@ export function createClaudeBackfillProvider(opts) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Claude Code transcripts into ai_gateway_messages',
     async *run(ctx) {
-      yield* runClaudeBackfill({ ctx, projectsDir, stateFile, clientName, deriveRepo })
+      yield* runClaudeBackfill({ ctx, projectsDir, stateFile, clientName, deriveRepo, resolver })
     },
   }
 }
@@ -103,11 +110,12 @@ export function createClaudeBackfillProvider(opts) {
  *   stateFile: string,
  *   clientName: string,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
+ *   resolver: UsagePolicyResolver,
  * }} args
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, stateFile, clientName, deriveRepo } = args
+  const { ctx, projectsDir, stateFile, clientName, deriveRepo, resolver } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and
@@ -166,11 +174,31 @@ async function* runClaudeBackfill(args) {
 
     for (const [sessionId, sessionEntries] of groupBySession(entries)) {
       const windowed = filterByWindow(sessionEntries, window)
+      const record = pickLatestMatching(sessionRecords, { sessionId, transcriptPath: filePath })
+
+      // @ref LLP 0050 [implements]: capture-seam drop for backfill. Skip an
+      // ignored session BEFORE projecting/writing it, else `hyp backfill` would
+      // silently re-import the exact sessions ignored live (LLP 0049#requirements
+      // R1). The cwd precedence mirrors projectedExchangeFromEntries (the
+      // hook-written record wins, else the first transcript line's cwd), so the
+      // session is tested on the same cwd the row would have carried.
+      const sessionCwd = record?.cwd ?? windowed.find((entry) => entry.cwd)?.cwd
+      if (sessionCwd && resolver.isIgnored(sessionCwd)) {
+        log.info('claude.backfill.usage_policy_drop', {
+          component: 'plugin.claude.backfill',
+          operation: 'usage_policy_drop',
+          session_id: sessionId,
+          governed_by: resolver.resolve(sessionCwd).governedBy,
+          status: 'ok',
+        })
+        continue
+      }
+
       const exchange = await projectedExchangeFromEntries({
         sessionId,
         entries: windowed,
         clientName,
-        record: pickLatestMatching(sessionRecords, { sessionId, transcriptPath: filePath }),
+        record,
         agentMeta,
         deriveRepo: deriveRepoCached,
       })
