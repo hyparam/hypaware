@@ -7,7 +7,7 @@ import test from 'node:test'
 import {
   createCodexExchangeProjector,
 } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
-import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
  * A real usage-policy resolver wired to an injected fs that reports exactly one
@@ -57,7 +57,10 @@ test('project() returns no projection when the exchange cwd is .hypignore-ignore
     }),
     response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
   }), context())
-  assert.equal(projection, undefined)
+  // The drop returns the terminal USAGE_POLICY_DROP sentinel (not a bare
+  // `undefined` decline), so the dispatcher stops the projector walk and logs
+  // it as a drop. Either way the gateway write guard persists nothing.
+  assert.equal(projection, USAGE_POLICY_DROP)
 })
 
 test('project() is unaffected when the exchange cwd is not ignored', () => {
@@ -130,8 +133,9 @@ test('project() escalates a fail-safe clamp to a warn-level drop with the declar
     }),
   }), { log })
 
-  // Still dropped (privacy fail-safe), but now observable as a clamp.
-  assert.equal(projection, undefined)
+  // Still dropped (privacy fail-safe) via the terminal sentinel, but now
+  // observable as a clamp.
+  assert.equal(projection, USAGE_POLICY_DROP)
   assert.equal(infos.length, 0, 'a fail-safe clamp does not log at info level')
   const drop = warns.find((e) => e.message === 'plugin.codex.usage_policy_drop')
   assert.ok(drop, 'a fail-safe clamp emits a warn-level usage_policy_drop')

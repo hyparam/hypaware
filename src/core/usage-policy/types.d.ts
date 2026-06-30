@@ -31,3 +31,13 @@ export interface UsagePolicyResolver {
   resolve(cwd: string): ResolveResult
   isIgnored(cwd: string): boolean
 }
+
+// Terminal sentinel an adapter's exchange projector returns to express an
+// intentional `.hypignore` usage-policy drop (the exchange must never be
+// recorded). Distinct from a bare `undefined` "this projector declined" return
+// so the gateway dispatcher stops the projector walk on it and logs it as a
+// privacy drop, not a `no_projector_match` miss (LLP 0050). Compared by
+// reference identity against the `USAGE_POLICY_DROP` singleton.
+export interface UsagePolicyDrop {
+  readonly usagePolicyDrop: true
+}

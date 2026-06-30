@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 
-import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
@@ -75,11 +75,15 @@ export function createCodexExchangeProjector(opts = {}) {
 
       // @ref LLP 0050 [implements]: capture-seam drop, symmetric to the
       // @hypaware/claude projector. Once this exchange's cwd is resolved, an
-      // ancestor `.hypignore` of class `ignore` drops the row by returning no
-      // projection (the gateway source's `messageRows.length > 0` write guard
-      // then persists nothing). The response has already streamed, so the live
-      // call is untouched: only persistence is suppressed (LLP 0049 R1/R2).
-      // This is the same cwd `resolveRecordedContext` would stamp on the row.
+      // ancestor `.hypignore` of class `ignore` drops the exchange by returning
+      // the terminal `USAGE_POLICY_DROP` sentinel (the gateway source's
+      // `messageRows.length > 0` write guard then persists nothing). The
+      // sentinel (NOT a bare `undefined`) stops the dispatcher's projector walk
+      // so no later overlapping projector can record the suppressed exchange,
+      // and is logged as a drop rather than a `no_projector_match` miss. The
+      // response has already streamed, so the live call is untouched: only
+      // persistence is suppressed (LLP 0049 R1/R2). This is the same cwd
+      // `resolveRecordedContext` would stamp on the row.
       const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
       if (cwd) {
         const policy = resolver.resolve(cwd)
@@ -95,7 +99,7 @@ export function createCodexExchangeProjector(opts = {}) {
             cwd_sha256: sha256Hex(cwd).slice(0, 16),
             ...(policy.warn ? { warn: policy.warn } : {}),
           })
-          return undefined
+          return USAGE_POLICY_DROP
         }
       }
 

@@ -114,6 +114,20 @@ test('resolve: unimplemented class in a governing file fails safe to ignore', ()
   assert.equal(result.governedBy, '/work/repo/.hypignore')
 })
 
+test('resolve: a present-but-unreadable .hypignore fails closed to ignore (privacy-protecting)', () => {
+  // safeRead clamps a read error to an empty body, which the format parses as
+  // `ignore`: an uninterpretable privacy signal must suppress, never record.
+  // Without the try/catch this throws; with it the cwd resolves to `ignore`.
+  const resolver = createUsagePolicyResolver({
+    existsSync: () => true,
+    readFileSync: () => { throw new Error('EACCES') },
+  })
+  const result = resolver.resolve('/work/repo/sub')
+  assert.equal(result.class, 'ignore', 'an unreadable governing .hypignore must fail closed to ignore')
+  assert.equal(result.governedBy, '/work/repo/sub/.hypignore', 'the nearest existing file governs')
+  assert.equal(resolver.isIgnored('/work/repo/sub'), true)
+})
+
 test('resolve: per-cwd cache is stable and reads the file once', () => {
   const fs = fakeFs({ '/work/repo/.hypignore': 'ignore\n' })
   const resolver = createUsagePolicyResolver(fs)

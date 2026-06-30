@@ -10,10 +10,12 @@ import {
   createAiGatewayConversationState,
   createAiGatewayMessageProjector,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
+import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
+ * @import { UsagePolicyDrop } from '../../src/core/usage-policy/types.js'
  */
 
 const EXPECTED_COLUMNS = [
@@ -163,6 +165,63 @@ test('projector returning undefined or an empty messages array is skipped', asyn
   const rows = await projector.projectExchange(exchange())
   assert.ok(rows.length > 0)
   assert.equal(rows[0].provider, 'ok')
+})
+
+test('a usage-policy drop is terminal: dispatch stops, writes no row, and is logged as a drop (not no_projector_match)', async () => {
+  // @ref LLP 0050 [tests]: an intentional `.hypignore` drop returns the
+  // USAGE_POLICY_DROP sentinel. It must STOP the projector walk (no later
+  // matching projector may record the suppressed exchange), write zero rows,
+  // and be logged as a drop rather than a `no_projector_match` miss.
+  /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
+  const logs = []
+  const log = collectingLogger(logs)
+  let secondConsulted = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      // Higher priority: the .hypignore-governed adapter drops the exchange.
+      registered('drop', { priority: 20, project: () => USAGE_POLICY_DROP }),
+      // Lower priority but ALSO matching. A spy: it must never be consulted, or
+      // it could record the very exchange the user asked to suppress.
+      registered('would-record', {
+        priority: 10,
+        project: () => { secondConsulted++; return projection('would-record') },
+      }),
+    ],
+    log,
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 0, 'a usage-policy drop writes no row')
+  assert.equal(secondConsulted, 0, 'a terminal drop must NOT fall through to a second matching projector')
+  assert.ok(
+    !logs.some((entry) => entry.fields?.reason === 'no_projector_match'),
+    'a privacy drop must not be logged as a no_projector_match miss',
+  )
+  assert.ok(
+    logs.some((entry) => entry.message === 'aigw.usage_policy_drop' && entry.fields?.reason === 'usage_policy_drop'),
+    'a drop is logged with the usage_policy_drop reason',
+  )
+})
+
+test('a bare undefined decline still falls through to the next matching projector (only the drop sentinel is terminal)', async () => {
+  // Guardrail: the terminal contract applies ONLY to the drop sentinel. A
+  // projector that genuinely declines with bare `undefined` must still let the
+  // next matching projector win, and a normal exchange still projects.
+  let secondConsulted = 0
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [
+      registered('declines', { priority: 20, project: () => undefined }),
+      registered('records', {
+        priority: 10,
+        project: () => { secondConsulted++; return projection('records') },
+      }),
+    ],
+  })
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(secondConsulted, 1, 'a declining projector must still let the next matching one be consulted')
+  assert.ok(rows.length > 0, 'a normal exchange still projects rows')
+  assert.equal(rows[0].provider, 'records')
 })
 
 test('projector returning an invalid shape is skipped and the next one is tried', async () => {
@@ -819,7 +878,7 @@ function projection(provider) {
  * @param {{
  *   priority?: number,
  *   match?: (input: AiGatewayExchangeInput) => boolean,
- *   project: (input: AiGatewayExchangeInput, ctx: AiGatewayExchangeProjectorContext) => AiGatewayProjectedExchange | Promise<AiGatewayProjectedExchange | undefined> | undefined,
+ *   project: (input: AiGatewayExchangeInput, ctx: AiGatewayExchangeProjectorContext) => AiGatewayProjectedExchange | UsagePolicyDrop | Promise<AiGatewayProjectedExchange | UsagePolicyDrop | undefined> | undefined,
  * }} body
  */
 function registered(name, body) {

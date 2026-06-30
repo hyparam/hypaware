@@ -82,11 +82,28 @@ export async function run({ harness, expect }) {
       return fn()
     })
 
-  // ----- smoke_step: setup -----
-  // Stage the echo upstream, the two cwds (ignored vs clean), the v2 config,
-  // and the two session-context records the projector reads back per exchange.
-  const setup = await step('setup', async () => {
-    const echo = await startAnthropicEchoUpstream()
+  // Track the upstream + daemon + the env keys setup mutates in an OUTER scope
+  // so the finally below always tears them down, even when an assertion throws
+  // mid-flow. Otherwise a failed run leaks a live daemon and echo server plus an
+  // unflushed telemetry pipeline into the next smoke (and leaves HYP_HOME /
+  // HYP_CONFIG / HOME pointing at this run's temp dirs).
+  const envSnapshot = {
+    HYP_HOME: process.env.HYP_HOME,
+    HYP_CONFIG: process.env.HYP_CONFIG,
+    HOME: process.env.HOME,
+  }
+  /** @type {Awaited<ReturnType<typeof startAnthropicEchoUpstream>> | undefined} */
+  let echo
+  /** @type {Awaited<ReturnType<typeof runDaemon>> | undefined} */
+  let handle
+  let obsShutDown = false
+
+  try {
+    // ----- smoke_step: setup -----
+    // Stage the echo upstream, the two cwds (ignored vs clean), the v2 config,
+    // and the two session-context records the projector reads back per exchange.
+    const setup = await step('setup', async () => {
+    echo = await startAnthropicEchoUpstream()
 
     // A Claude HOME with an (empty) projects dir so the plugin never reaches
     // for the developer's real `~/.claude`. Neither session has a transcript:
@@ -178,16 +195,16 @@ export async function run({ harness, expect }) {
       .split('\n').filter((l) => l.length > 0).length
     expect.that('hook: state file got both session-context records', stateLines, (v) => v === 2)
 
-    return { echo, configPath, ignoredCwd, cleanCwd, hypignorePath, ignoredSession, cleanSession }
+    return { configPath, ignoredCwd, cleanCwd, hypignorePath, ignoredSession, cleanSession }
   })
 
-  const { echo, configPath, ignoredCwd, cleanCwd, hypignorePath, ignoredSession, cleanSession } = setup
+  const { configPath, ignoredCwd, cleanCwd, hypignorePath, ignoredSession, cleanSession } = setup
 
   // ----- smoke_step: drive_exchanges -----
   // Boot the daemon, then send one exchange from the ignored cwd and one from
   // the clean cwd. Both must return 200 (the gateway is pass-through, R2).
-  const handle = await step('drive_exchanges', async () => {
-    const handle = await runDaemon({
+  await step('drive_exchanges', async () => {
+    handle = await runDaemon({
       hypHome: harness.hypHome,
       configPath,
       env: process.env,
@@ -233,14 +250,20 @@ export async function run({ harness, expect }) {
 
     // Let at least one sink tick fire so the recorder drains before stop.
     await sleep(120)
-    return handle
   })
 
   // ----- Shut down + flush so the JSONL artifacts are complete -----
-  await handle.stop()
-  await handle.done
+  // The assert steps below read the on-disk logs/traces, so the daemon must
+  // stop and obs must flush FIRST. The finally backstops the case where a
+  // failure prevents reaching here. Null out each handle as it is released so
+  // the finally only acts on what the normal path left running.
+  await handle?.stop()
+  await handle?.done
+  handle = undefined
   await obs.shutdown()
-  await echo.close()
+  obsShutDown = true
+  await echo?.close()
+  echo = undefined
 
   // ----- smoke_step: assert_cache (only the clean row lands) -----
   await step('assert_cache', async () => {
@@ -359,7 +382,39 @@ export async function run({ harness, expect }) {
       shutdownSpans,
       (v) => Array.isArray(v) && v.length >= 1,
     )
-  })
+    })
+  } finally {
+    // Always release the daemon + upstream + env, even when a step threw before
+    // the normal teardown ran. A failed assertion must never leave the daemon
+    // or echo server running, the telemetry pipeline unflushed, or HYP_HOME /
+    // HYP_CONFIG / HOME leaked into the next smoke. Each release is best-effort
+    // so the original failure (not teardown noise) is what surfaces.
+    if (handle) {
+      try { await handle.stop() } catch { /* already stopping or stopped */ }
+      try { await handle.done } catch { /* surface the original failure */ }
+    }
+    if (!obsShutDown) {
+      try { await obs.shutdown() } catch { /* best-effort flush */ }
+    }
+    if (echo) {
+      try { await echo.close() } catch { /* best-effort close */ }
+    }
+    restoreEnv('HYP_HOME', envSnapshot.HYP_HOME)
+    restoreEnv('HYP_CONFIG', envSnapshot.HYP_CONFIG)
+    restoreEnv('HOME', envSnapshot.HOME)
+  }
+}
+
+/**
+ * Restore a `process.env` key to a snapshot value, deleting it when the
+ * snapshot was unset (assigning `undefined` coerces to the string "undefined").
+ *
+ * @param {string} key
+ * @param {string | undefined} value
+ */
+function restoreEnv(key, value) {
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
 }
 
 // ---------------------------------------------------------------------

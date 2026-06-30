@@ -33,7 +33,7 @@ import {
   pickLatestMatching,
   readSessionContext,
 } from './session_context.js'
-import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
@@ -163,13 +163,14 @@ export function createClaudeExchangeProjector(opts) {
 
       // @ref LLP 0050 [implements]: capture-seam drop. Once the exchange's cwd
       // is resolved, an ancestor `.hypignore` that resolves to `ignore` means
-      // this exchange is never recorded: return no rows BEFORE building any, so
-      // the gateway source's write guard (`if (messageRows.length > 0)`)
-      // persists nothing. The response has already streamed to the client, so
-      // the live LLM call is untouched (LLP 0049#requirements R2). Returning
-      // `undefined` is this projector's "no rows" signal (the dispatcher treats
-      // it, and an empty `messages`, identically): a literal `[]` is not a valid
-      // projection and would log a spurious invalid-output warning.
+      // this exchange is never recorded: return BEFORE building any rows, so the
+      // gateway source's write guard (`if (messageRows.length > 0)`) persists
+      // nothing. The response has already streamed to the client, so the live
+      // LLM call is untouched (LLP 0049#requirements R2). The drop returns the
+      // terminal `USAGE_POLICY_DROP` sentinel (NOT a bare `undefined`): the
+      // dispatcher stops the projector walk on it so no later projector can
+      // record the suppressed exchange, and logs it as a drop rather than a
+      // `no_projector_match` miss.
       const cwd = sessionContextRecord?.cwd
       const policy = cwd ? resolver.resolve(cwd) : null
       if (policy?.class === 'ignore') {
@@ -183,7 +184,7 @@ export function createClaudeExchangeProjector(opts) {
           governed_by: policy.governedBy,
           ...(policy.warn ? { warn: policy.warn } : {}),
         })
-        return undefined
+        return USAGE_POLICY_DROP
       }
 
       const transcriptEntries = sessionId
