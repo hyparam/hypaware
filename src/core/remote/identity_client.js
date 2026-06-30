@@ -161,12 +161,17 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
   } finally {
     clearTimeout(timer)
   }
+  // Parse failure is not fatal on its own: an error response may carry an empty
+  // or non-JSON body, and we still want to classify it by status below. Only a
+  // *successful* response with an unparseable body is an error (we can't read
+  // the tokens out of it).
   /** @type {any} */
-  let json
+  let json = {}
+  let parseFailed = false
   try {
     json = text ? JSON.parse(text) : {}
   } catch {
-    throw new Error(`identity endpoint returned a non-JSON response (HTTP ${res.status})`)
+    parseFailed = true
   }
   if (!res.ok) {
     const errCode = json && typeof json.error === 'string' ? json.error : undefined
@@ -176,14 +181,19 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
       [Attr.STATUS]: 'failed',
       [Attr.ERROR_KIND]: errCode ?? `http_${res.status}`,
     })
-    // Key the typed rejection on the OAuth error code, not the HTTP status:
-    // RFC 6749 §5.2 returns 400 for `invalid_grant`, but some deployments use
-    // 401. Either way a revoked/expired refresh row must reach the re-login
-    // guidance, so trust the body's `error` field over the status code.
-    if (errCode === 'invalid_grant') {
+    // A revoked/expired refresh row must reach the re-login guidance even when
+    // the body is empty or non-JSON: the only credential this endpoint
+    // authenticates is the refresh token, so a 401 means re-login regardless of
+    // whether an OAuth error object came back. RFC 6749 §5.2 returns 400 for
+    // `invalid_grant`, so honor an explicit `invalid_grant` at any status too;
+    // a different 400 (a malformed request) stays a generic error.
+    if (errCode === 'invalid_grant' || res.status === 401) {
       throw new InvalidGrantError()
     }
     throw new Error(`identity endpoint rejected the grant (HTTP ${res.status}${errCode ? ` ${errCode}` : ''})`)
+  }
+  if (parseFailed) {
+    throw new Error(`identity endpoint returned a non-JSON response (HTTP ${res.status})`)
   }
   log.info('remote.token_ok', {
     [Attr.COMPONENT]: 'remote-oidc',

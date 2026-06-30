@@ -85,6 +85,24 @@ test('a 401 invalid_grant surfaces a typed InvalidGrantError', async () => {
   )
 })
 
+test('a 401 with an empty body still surfaces InvalidGrantError (re-login guidance)', async () => {
+  // An edge proxy may answer the revoked refresh row with a bare 401, no OAuth
+  // error object. It must still map to session-expired, not a generic error.
+  const { fetchImpl } = stubFetch({ status: 401, body: '' })
+  await assert.rejects(
+    () => refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'stale', fetchImpl }),
+    (err) => err instanceof InvalidGrantError,
+  )
+})
+
+test('a 401 with a non-JSON body still surfaces InvalidGrantError', async () => {
+  const { fetchImpl } = stubFetch({ status: 401, body: '<html>unauthorized</html>' })
+  await assert.rejects(
+    () => refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'stale', fetchImpl }),
+    (err) => err instanceof InvalidGrantError,
+  )
+})
+
 test('a non-invalid_grant error throws a generic error, not InvalidGrantError', async () => {
   const { fetchImpl } = stubFetch({ status: 500, body: { error: 'server_error' } })
   await assert.rejects(
