@@ -554,7 +554,7 @@ export function describeAuthRejection({ target, status, resolved }) {
     }
   }
   return {
-    message: `remote rejected the credential (HTTP ${status}) - re-run 'hyp remote login'`,
+    message: `remote rejected the credential for '${target}' (HTTP ${status}) - re-run 'hyp remote login ${target}'`,
     exitCode: 1,
   }
 }

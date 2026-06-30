@@ -171,7 +171,7 @@ test('a static token that 401s is not retried (cannot refresh)', async (t) => {
   const code = await cmd.run(['SELECT 1', '--remote', 'prod'], ctx)
   assert.equal(code, 1)
   assert.equal(state.refreshCalls, 0)
-  assert.match(err.join(''), /re-run 'hyp remote login'/)
+  assert.match(err.join(''), /re-run 'hyp remote login prod'/)
 })
 
 test('an env-override token that 401s does not advise a re-login it cannot fix', async (t) => {
