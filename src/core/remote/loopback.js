@@ -98,13 +98,12 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
     const error = params.get('error')
     const code = params.get('code')
 
-    // A callback whose state does not match is rejected without reading the
-    // code (CSRF guard). Serve a neutral page either way.
-    if (returnedState !== state) {
-      respond(res, 'Login state mismatch. You can close this tab.')
-      fail(new Error('loopback received a callback with a mismatched state'), 'state_mismatch')
-      return
-    }
+    // An `error` callback is surfaced before the state check: it carries no
+    // authorization code, so the CSRF guard (which exists only to stop an
+    // attacker's code being adopted) does not apply, and a provider that drops
+    // `state` on an error redirect (RFC 6749 only requires echoing it when
+    // present) must still report the real failure rather than a misleading
+    // "state mismatch" plus a headless-token hint.
     if (params.has('error')) {
       // The redirect's `error` is attacker-influenceable (anyone can hit the
       // loopback port). Bound it to a safe token before it reaches the error
@@ -113,6 +112,13 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       const safeError = sanitizeErrorCode(error ?? '')
       respond(res, 'Login failed. You can close this tab and return to the terminal.')
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
+      return
+    }
+    // A callback whose state does not match is rejected without reading the
+    // code (CSRF guard). Serve a neutral page either way.
+    if (returnedState !== state) {
+      respond(res, 'Login state mismatch. You can close this tab.')
+      fail(new Error('loopback received a callback with a mismatched state'), 'state_mismatch')
       return
     }
     if (!code) {

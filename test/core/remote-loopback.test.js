@@ -75,6 +75,21 @@ test('an error= callback rejects with the error code attached', async () => {
   await assertion
 })
 
+test('an error= callback with no state reports the real error, not a state mismatch', async () => {
+  const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
+  // A provider that drops `state` on an error redirect must still surface the
+  // denial, not be misreported as a CSRF/state mismatch (which also appends a
+  // misleading headless-token hint downstream).
+  const assertion = assert.rejects(() => recv.waitForCode(), (err) => {
+    assert.match(/** @type {Error} */ (err).message, /access_denied/)
+    assert.doesNotMatch(/** @type {Error} */ (err).message, /mismatched state/)
+    assert.equal(/** @type {any} */ (err).callbackError, 'access_denied')
+    return true
+  })
+  await hitCallback(recv.redirectUri, { error: 'access_denied' })
+  await assertion
+})
+
 test('a timeout rejects', async () => {
   const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 50 })
   await assert.rejects(() => recv.waitForCode(), /timed out/)
