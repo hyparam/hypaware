@@ -1,11 +1,147 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
   createCodexExchangeProjector,
 } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
+
+/**
+ * A real usage-policy resolver wired to an injected fs that reports exactly one
+ * governing `.hypignore` (class `ignore`) at `ignoredDir`. Mirrors how the
+ * @hypaware/claude projector's drop is tested (T2): exercise the actual shared
+ * matcher, not a hand-rolled stub.
+ * @ref LLP 0050 [tests]: the codex live projector's capture-seam drop
+ *
+ * @param {string} ignoredDir
+ */
+function ignoringResolver(ignoredDir) {
+  const hypignore = path.join(ignoredDir, '.hypignore')
+  return createUsagePolicyResolver({
+    existsSync: (p) => p === hypignore,
+    readFileSync: () => 'ignore\n',
+  })
+}
+
+/**
+ * Like `ignoringResolver`, but the governing `.hypignore` declares an
+ * unimplemented class (`local-only`), so the matcher fail-safe clamps it to
+ * `ignore` and carries a `warn` (R3). Used to assert the drop escalates to
+ * warn level with the declared token.
+ *
+ * @param {string} ignoredDir
+ */
+function clampingResolver(ignoredDir) {
+  const hypignore = path.join(ignoredDir, '.hypignore')
+  return createUsagePolicyResolver({
+    existsSync: (p) => p === hypignore,
+    readFileSync: () => 'local-only\n',
+  })
+}
+
+// @ref LLP 0050 [tests]: capture-seam drop: an ignored cwd yields no rows so
+// the gateway write guard persists nothing; a clean cwd is unaffected (R1/R2).
+test('project() returns no projection when the exchange cwd is .hypignore-ignored', () => {
+  const projector = createCodexExchangeProjector({
+    env: {},
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '/work/ignored/sub',
+      messages: [{ role: 'user', content: 'secret' }],
+    }),
+    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+  }), context())
+  // The drop returns the terminal USAGE_POLICY_DROP sentinel (not a bare
+  // `undefined` decline), so the dispatcher stops the projector walk and logs
+  // it as a drop. Either way the gateway write guard persists nothing.
+  assert.equal(projection, USAGE_POLICY_DROP)
+})
+
+test('project() is unaffected when the exchange cwd is not ignored', () => {
+  const projector = createCodexExchangeProjector({
+    env: {},
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '/work/clean',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+  }), context()))
+  assert.ok(projection)
+  assert.deepEqual(projection.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
+})
+
+test('project() emits a usage_policy_drop log on an ignored cwd', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const infos = []
+  const projector = createCodexExchangeProjector({
+    env: {},
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const log = {
+    debug() {},
+    warn() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    info: (message, fields) => { infos.push({ message, fields }) },
+  }
+  projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '/work/ignored',
+      messages: [{ role: 'user', content: 'secret' }],
+    }),
+  }), { log })
+  const drop = infos.find((e) => e.message === 'plugin.codex.usage_policy_drop')
+  assert.ok(drop, 'expected a usage_policy_drop log entry')
+  assert.equal(drop.fields?.operation, 'usage_policy_drop')
+  assert.equal(drop.fields?.governed_by, '/work/ignored/.hypignore')
+  assert.equal(drop.fields?.declared, 'ignore', 'an intended ignore carries declared=ignore')
+})
+
+test('project() escalates a fail-safe clamp to a warn-level drop with the declared token (R3)', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const infos = []
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector({
+    env: {},
+    resolver: clampingResolver('/work/ignored'),
+  })
+  const log = {
+    debug() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    info: (message, fields) => { infos.push({ message, fields }) },
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  const projection = projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '/work/ignored',
+      messages: [{ role: 'user', content: 'secret' }],
+    }),
+  }), { log })
+
+  // Still dropped (privacy fail-safe) via the terminal sentinel, but now
+  // observable as a clamp.
+  assert.equal(projection, USAGE_POLICY_DROP)
+  assert.equal(infos.length, 0, 'a fail-safe clamp does not log at info level')
+  const drop = warns.find((e) => e.message === 'plugin.codex.usage_policy_drop')
+  assert.ok(drop, 'a fail-safe clamp emits a warn-level usage_policy_drop')
+  assert.equal(drop.fields?.declared, 'local-only', 'the declared token is carried for diagnosis')
+  assert.match(String(drop.fields?.warn), /local-only/)
+})
 
 test('match() accepts the three transports it owns and rejects others', () => {
   const projector = createCodexExchangeProjector({ env: {} })

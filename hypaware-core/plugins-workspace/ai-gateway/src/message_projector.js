@@ -2,11 +2,14 @@
 
 import { createHash } from 'node:crypto'
 
+import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
+
 export const SCHEMA_VERSION = 7
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
  * @import { RegisteredProjector } from './types.js'
  */
 
@@ -165,6 +168,20 @@ export function createAiGatewayMessageProjector(opts) {
     async projectExchange(exchange) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
       const projection = await dispatchProjector(projectors, input, log)
+      // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
+      // a projection miss: the adapter already logged the rich
+      // `plugin.<adapter>.usage_policy_drop` event at the seam, so the gateway
+      // records the drop at info level (NOT the `no_projector_match` warn below,
+      // which would mislabel a privacy drop as a failure) and writes no rows.
+      // @ref LLP 0050 [implements]
+      if (isUsagePolicyDrop(projection)) {
+        log?.info?.('aigw.usage_policy_drop', {
+          exchange_id: stringValue(input.exchange_id) ?? '',
+          upstream: stringValue(input.upstream) ?? '',
+          reason: 'usage_policy_drop',
+        })
+        return []
+      }
       if (!projection) {
         log?.warn?.('aigw.message_projection_skipped', {
           exchange_id: stringValue(input.exchange_id) ?? '',
@@ -490,7 +507,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
  * @param {RegisteredProjector[]} projectors
  * @param {AiGatewayExchangeInput} input
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
- * @returns {Promise<AiGatewayProjectedExchange | undefined>}
+ * @returns {Promise<AiGatewayProjectedExchange | UsagePolicyDrop | undefined>}
  */
 async function dispatchProjector(projectors, input, log) {
   if (projectors.length === 0) return undefined
@@ -509,6 +526,12 @@ async function dispatchProjector(projectors, input, log) {
       })
       continue
     }
+    // A usage-policy drop is TERMINAL: stop the walk and propagate the sentinel
+    // so the drop wins outright. Crucially we do NOT `continue` here (which is
+    // what a bare `undefined` decline does below) so a later overlapping
+    // projector can never record an exchange the user asked to suppress.
+    // @ref LLP 0050 [implements]
+    if (isUsagePolicyDrop(result)) return result
     if (!isValidProjection(result)) {
       if (result !== undefined) {
         log?.warn?.('aigw.projector_invalid_output', {

@@ -17,6 +17,7 @@
 
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
 import type { CachePartitioningDeclaration } from './src/core/iceberg/types.d.ts'
+import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
@@ -1463,6 +1464,12 @@ export interface AiGatewayClientStatusContext {
  * no projector succeeds the gateway still emits pass-through
  * telemetry (the `aigw.exchange` log and `aigw.exchange_bytes` meter)
  * but writes zero rows into `ai_gateway_messages`.
+ *
+ * Returning the `USAGE_POLICY_DROP` sentinel is distinct from declining
+ * with `undefined`: it is a TERMINAL `.hypignore` usage-policy drop
+ * (LLP 0050). The dispatcher stops the projector walk on it (no later
+ * projector is consulted) and logs it as an intentional drop, never as
+ * a `no_projector_match` miss, while still writing zero rows.
  */
 export interface AiGatewayExchangeProjector {
   name: string
@@ -1471,7 +1478,11 @@ export interface AiGatewayExchangeProjector {
   project(
     input: AiGatewayExchangeInput,
     ctx: AiGatewayExchangeProjectorContext
-  ): AiGatewayProjectedExchange | Promise<AiGatewayProjectedExchange | undefined> | undefined
+  ):
+    | AiGatewayProjectedExchange
+    | UsagePolicyDrop
+    | Promise<AiGatewayProjectedExchange | UsagePolicyDrop | undefined>
+    | undefined
 }
 
 export interface AiGatewayExchangeProjectorContext {

@@ -33,10 +33,12 @@ import {
   pickLatestMatching,
   readSessionContext,
 } from './session_context.js'
+import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { TranscriptEntry } from './types.js'
+ * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -80,6 +82,7 @@ import {
  *   projectsDir?: string,
  *   clientName?: string,
  *   logger?: { warn(message: string, fields?: Record<string, unknown>): void, debug?: (m: string, f?: Record<string, unknown>) => void },
+ *   resolver?: UsagePolicyResolver,
  * }} opts
  * @returns {AiGatewayExchangeProjector}
  */
@@ -89,6 +92,11 @@ export function createClaudeExchangeProjector(opts) {
   const clientName = opts.clientName ?? 'claude'
   const logger = opts.logger
   const sessionContextCache = createSessionContextCache()
+  // One resolver per projector (per daemon run): the per-cwd cache rides the
+  // projector's lifetime so the capture hot path adds no unbounded fs work.
+  // @ref LLP 0050 [implements]: the .hypignore capture-seam drop lives in the
+  // client adapter, the only place that resolves a cwd; injectable for tests.
+  const resolver = opts.resolver ?? createUsagePolicyResolver()
 
   return {
     name: 'claude-anthropic-messages',
@@ -152,6 +160,33 @@ export function createClaudeExchangeProjector(opts) {
           sessionId,
         })
         : undefined
+
+      // @ref LLP 0050 [implements]: capture-seam drop. Once the exchange's cwd
+      // is resolved, an ancestor `.hypignore` that resolves to `ignore` means
+      // this exchange is never recorded: return BEFORE building any rows, so the
+      // gateway source's write guard (`if (messageRows.length > 0)`) persists
+      // nothing. The response has already streamed to the client, so the live
+      // LLM call is untouched (LLP 0049#requirements R2). The drop returns the
+      // terminal `USAGE_POLICY_DROP` sentinel (NOT a bare `undefined`): the
+      // dispatcher stops the projector walk on it so no later projector can
+      // record the suppressed exchange, and logs it as a drop rather than a
+      // `no_projector_match` miss.
+      const cwd = sessionContextRecord?.cwd
+      const policy = cwd ? resolver.resolve(cwd) : null
+      if (policy?.class === 'ignore') {
+        // A fail-safe clamp (declared token unimplemented) escalates to warn
+        // so an operator can tell it from an intended ignore (R3 SHOULD).
+        ctx.log[policy.warn ? 'warn' : 'info']('plugin.claude.usage_policy_drop', {
+          component: 'claude',
+          operation: 'usage_policy_drop',
+          exchange_id: input.exchange_id,
+          declared: policy.declared,
+          governed_by: policy.governedBy,
+          ...(policy.warn ? { warn: policy.warn } : {}),
+        })
+        return USAGE_POLICY_DROP
+      }
+
       const transcriptEntries = sessionId
         ? await loadTranscriptSafe({
           projectsDir,

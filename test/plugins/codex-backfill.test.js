@@ -12,6 +12,23 @@ import {
   aiGatewayBackfillMaterializer,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
+import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
+
+/**
+ * A real usage-policy resolver wired to an injected fs that reports exactly one
+ * governing `.hypignore` (class `ignore`) at `ignoredDir`. Mirrors the T2
+ * @hypaware/claude backfill drop test: exercise the shared matcher, not a stub.
+ * @ref LLP 0050 [tests]: the codex backfill capture-seam skip
+ *
+ * @param {string} ignoredDir
+ */
+function ignoringResolver(ignoredDir) {
+  const hypignore = path.join(ignoredDir, '.hypignore')
+  return createUsagePolicyResolver({
+    existsSync: (p) => p === hypignore,
+    readFileSync: () => 'ignore\n',
+  })
+}
 
 /**
  * End-to-end tests for the `@hypaware/codex` backfill provider. They run the
@@ -313,6 +330,56 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
     assert.equal(resultRow.content_text, 'file-a\nfile-b')
     // Tool name is back-filled from the earlier call within the conversation.
     assert.equal(resultRow.tool_name, 'shell')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0050 [tests]: capture-seam drop for backfill: a session whose
+// recorded cwd is .hypignore-ignored is skipped before projecting or yielding
+// any row, so `hyp backfill` never re-imports sessions ignored live (R1).
+test('backfill skips a session whose cwd is .hypignore-ignored', async () => {
+  const env = await stageEnv()
+  try {
+    // modernConversation stamps meta.cwd = '/work/repo'.
+    await writeModernRollout(env, '2026/05/25/rollout-1.jsonl', modernConversation('sess-ignored'))
+
+    const provider = createCodexBackfillProvider({
+      homeDir: env.homeDir,
+      resolver: ignoringResolver('/work/repo'),
+    })
+    const { ctx, entries: logs } = runContext()
+    const { items } = await collect(provider.run(ctx))
+
+    assert.equal(items.length, 0, 'no rows yielded for an ignored session')
+    const drop = logs.find((e) => e.message === 'codex.backfill.usage_policy_drop')
+    assert.ok(drop, 'expected a usage_policy_drop log entry')
+    assert.equal(drop?.fields?.operation, 'usage_policy_drop')
+    assert.equal(drop?.fields?.conversation_id, 'sess-ignored')
+    assert.equal(drop?.fields?.governed_by, '/work/repo/.hypignore')
+    const scanDone = logs.find((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(scanDone?.fields?.sessions_projected, 0)
+    assert.equal(scanDone?.fields?.sessions_ignored, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('backfill is unaffected when a different cwd is ignored', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, '2026/05/25/rollout-1.jsonl', modernConversation('sess-clean'))
+
+    const provider = createCodexBackfillProvider({
+      homeDir: env.homeDir,
+      // Ignore an unrelated directory; the session's '/work/repo' is clean.
+      resolver: ignoringResolver('/work/other'),
+    })
+    const { ctx } = runContext()
+    const { items } = await collect(provider.run(ctx))
+
+    assert.equal(items.length, 1, 'a non-ignored session still backfills')
+    assert.equal(value(items[0]).conversation_id, 'sess-clean')
   } finally {
     await env.cleanup()
   }
