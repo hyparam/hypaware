@@ -76,16 +76,20 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
     // throw; an uncaught throw in the request listener would crash the whole
     // `hyp remote login` process. Treat it as a stray request: 400 and ignore,
     // never settle the flow, so the real callback can still arrive.
+    // `connection: close` on these stray-request replies for the same reason
+    // respond() sets it: a browser favicon/probe over keep-alive would otherwise
+    // hold an idle socket open, and server.close() (on the real callback) waits
+    // for it to drain, hanging `hyp remote login` at exit for ~5s.
     let url
     try {
       url = new URL(req.url ?? '/', 'http://127.0.0.1')
     } catch {
-      res.writeHead(400, { 'content-type': 'text/plain' })
+      res.writeHead(400, { 'content-type': 'text/plain', connection: 'close' })
       res.end('bad request')
       return
     }
     if (url.pathname !== CALLBACK_PATH) {
-      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.writeHead(404, { 'content-type': 'text/plain', connection: 'close' })
       res.end('not found')
       return
     }
