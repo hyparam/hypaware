@@ -8,7 +8,6 @@ import { loginWithBrowser } from '../../../src/core/remote/oidc_login.js'
 import {
   readCredentials,
   writeSession,
-  remoteCredentialsPath,
 } from '../../../src/core/remote/credentials.js'
 import { querySqlVerb } from '../../../src/core/query/verb.js'
 import { verbToCommand } from '../../../src/core/cli/verb_command.js'
@@ -139,11 +138,18 @@ function runQuery(mcpUrl) {
  * @param {string} target
  */
 async function forceExpiry(stateDir, target) {
-  const fs = await import('node:fs/promises')
   const creds = await readCredentials(stateDir)
   const rec = /** @type {any} */ (creds[target])
-  rec.expiresAt = '2000-01-01T00:00:00Z'
-  await fs.writeFile(remoteCredentialsPath(stateDir), JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 })
+  // Write through writeSession (not a raw fs.writeFile) so the credential
+  // module's parse cache is invalidated. A raw same-size rewrite landing within
+  // one mtime tick would be hidden behind that cache, and the next resolve would
+  // read the pre-expiry record, skip the refresh, and flake this smoke.
+  await writeSession(stateDir, target, {
+    refreshToken: rec.refreshToken,
+    accessJwt: rec.accessJwt,
+    expiresAt: '2000-01-01T00:00:00Z',
+    org: rec.org,
+  })
 }
 
 /**
