@@ -112,7 +112,15 @@ export async function executeQuerySql(args) {
           tables[name] = source
         }
 
-        const results = squirrelExecuteSql({ tables, query: trimmed })
+        // The engine's blocking operators already check `context.signal`
+        // (sort.js, aggregates.js) and the leaf parquet scan honors it at the
+        // row-group boundary, but that abort path stays dead until the kernel
+        // supplies a signal here. Compose the caller's signal with an optional
+        // deadline so a long or runaway query can be torn down mid-scan;
+        // undefined when neither is set leaves the unbounded path unchanged.
+        const signal = buildExecutionSignal({ signal: args.signal, timeoutMs: args.timeoutMs })
+        // @ref LLP 0054#signal-threading [implements] — kernel constructs and forwards the AbortSignal the operators read via context.signal but never received; enabler only, bounds nothing on its own
+        const results = squirrelExecuteSql({ tables, query: trimmed, signal })
         const rows = await collect(results)
         const columns = results.columns ?? []
         span.setAttribute('row_count', rows.length)
@@ -165,6 +173,26 @@ async function settlePendingCacheForQuery(args) {
 function formatAgeMinutes(ageMs) {
   const minutes = Math.max(0, Math.floor(ageMs / 60_000))
   return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
+}
+
+/**
+ * Compose the abort signal forwarded into the engine from any caller-supplied
+ * `signal` and an optional relative `timeoutMs` deadline. Returns undefined when
+ * neither is set, so a caller that wants no bound runs exactly as before.
+ *
+ * @param {{ signal?: AbortSignal, timeoutMs?: number }} args
+ * @returns {AbortSignal | undefined}
+ */
+function buildExecutionSignal(args) {
+  /** @type {AbortSignal[]} */
+  const signals = []
+  if (args.signal) signals.push(args.signal)
+  if (typeof args.timeoutMs === 'number' && args.timeoutMs > 0) {
+    signals.push(AbortSignal.timeout(args.timeoutMs))
+  }
+  if (signals.length === 0) return undefined
+  if (signals.length === 1) return signals[0]
+  return AbortSignal.any(signals)
 }
 
 /**
