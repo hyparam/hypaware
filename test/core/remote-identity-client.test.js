@@ -123,6 +123,21 @@ test('a response missing access_jwt is rejected', async () => {
   )
 })
 
+test('a 2xx with an empty body fails as transient, not a misleading missing-field error', async () => {
+  // safeText returns '' for both an empty body and a mid-body read failure; on a
+  // success status that is a transient truncation, so it must not surface as
+  // "missing 'access_jwt'" (which reads like a permanent contract violation).
+  const { fetchImpl } = stubFetch({ status: 200, body: '' })
+  await assert.rejects(
+    () => refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt', fetchImpl }),
+    (err) => {
+      assert.match(/** @type {Error} */ (err).message, /empty response/)
+      assert.doesNotMatch(/** @type {Error} */ (err).message, /missing/)
+      return true
+    },
+  )
+})
+
 test('a non-date expires_at is rejected at refresh time, not stored to loop forever', async () => {
   const { fetchImpl } = stubFetch({ body: { access_jwt: 'jwt', expires_at: '1719600000', org: 'acme' } })
   await assert.rejects(

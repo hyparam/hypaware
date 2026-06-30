@@ -163,8 +163,8 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
   }
   // Parse failure is not fatal on its own: an error response may carry an empty
   // or non-JSON body, and we still want to classify it by status below. Only a
-  // *successful* response with an unparseable body is an error (we can't read
-  // the tokens out of it).
+  // *successful* response with an empty or unparseable body is an error (we
+  // can't read the tokens out of it) - see the post-status guards.
   /** @type {any} */
   let json = {}
   let parseFailed = false
@@ -194,6 +194,13 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
   }
   if (parseFailed) {
     throw new Error(`identity endpoint returned a non-JSON response (HTTP ${res.status})`)
+  }
+  if (text === '') {
+    // safeText returns '' for both an empty body and a mid-body read failure
+    // (a reset connection). On a 2xx that is a transient truncation, not a
+    // contract violation, so fail with that framing rather than letting the
+    // field extractors below report a misleading "missing 'access_jwt'".
+    throw new Error(`identity endpoint returned an empty response (HTTP ${res.status}) - try again`)
   }
   log.info('remote.token_ok', {
     [Attr.COMPONENT]: 'remote-oidc',
