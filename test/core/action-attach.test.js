@@ -56,7 +56,7 @@ const CODEX_DESCRIPTOR = {
 /**
  * A client descriptor with **no `attachProbe`**. perform() can attach it (it
  * only needs a live adapter), but the disk-driven reverse() has nothing to
- * replay — so it must be excluded from attach-eligibility and, if a marker is
+ * replay, so it must be excluded from attach-eligibility and, if a marker is
  * ever applied out-of-band, treated as a failed (not no-op) reverse (#212).
  * @type {ClientDescriptor}
  */
@@ -219,11 +219,11 @@ test('desired() does not fail open on a non-boolean on_join (treats it as opt-ou
   assert.deepEqual(stringFalse, [], 'on_join:"false" (string) must not attach')
 })
 
-test('desired() excludes a probe-less descriptor — attach-eligibility requires reverse-capability (#212)', () => {
+test('desired() excludes a probe-less descriptor - attach-eligibility requires reverse-capability (#212)', () => {
   const handler = createAttachHandler()
   // Enabled plugin + registered client, but the descriptor declares no
   // attachProbe. perform() could attach it, but reverse() (disk-driven) could
-  // never undo it — so it must never be named as an attach target, otherwise a
+  // never undo it, so it must never be named as an attach target, otherwise a
   // later config-drop drops the marker while the settings stay written.
   const desired = handler.desired(makeCtx({
     plugins: [{ name: '@hypaware/probeless', enabled: true, config: {} }],
@@ -446,12 +446,12 @@ test('reverse() replays the real core undo from disk with no adapter loaded (fs 
   }
 })
 
-test('reverse() of a probe-less descriptor fails — never silently drops the marker, orphaning settings (#212)', async () => {
+test('reverse() of a probe-less descriptor fails - never silently drops the marker, orphaning settings (#212)', async () => {
   // A marker applied out-of-band (manual `hyp attach`, or a pre-fix marker) for
   // a probe-less client: the core undo returns { changed:false } for "no probe"
   // exactly as it does for "already clean", so a `done` here would drop the
   // marker while the settings stay on disk. reverse() must short-circuit on the
-  // missing probe and fail (retryable/visible) — without consulting the undo.
+  // missing probe and fail (retryable/visible), without consulting the undo.
   let detachCalled = false
   const handler = createAttachHandler({
     detach: async () => { detachCalled = true; return { changed: false } },

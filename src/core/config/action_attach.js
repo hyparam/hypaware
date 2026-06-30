@@ -58,7 +58,7 @@ export function createAttachHandler(opts = {}) {
      * enabled in `ctx.config.plugins`, whose entry does not set
      * `attach.on_join: false` (read via `attach_policy.js`, the
      * `backfill_policy.js` twin), whose descriptor declares an `attachProbe`
-     * (so the effect is reversible — see below), and whose client the runtime
+     * (so the effect is reversible, see below), and whose client the runtime
      * registry has (`ctx.clients.getClient(name)` defined) so it never names a
      * client `perform()` cannot reach. The owning plugin comes from the
      * descriptor, not from `listClients()` (which omits it). Daemon-only by
@@ -69,7 +69,7 @@ export function createAttachHandler(opts = {}) {
      * @returns {DesiredAction[]}
      * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements] — desired() over clientDescriptors ∩ enabled plugins ∩ attach_policy, guarded on the runtime registry having the client
      * @ref LLP 0044#consent--join-implies-consent-default-on [constrained-by] — default-on; only `attach.on_join:false` in the locked central plugin entry opts out
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
+     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
      */
     desired(ctx) {
       const descriptors = ctx.clientDescriptors
@@ -98,7 +98,7 @@ export function createAttachHandler(opts = {}) {
         // on-disk settings by replaying the descriptor's `attachProbe` (Part 3);
         // perform() needs no probe (it just calls the live adapter). A probe-less
         // client would therefore attach and mark `done` but could never be
-        // reversed — on a config-drop the marker drops while the settings stay
+        // reversed: on a config-drop the marker drops while the settings stay
         // written, orphaning them. Never name a client we cannot also undo (#212).
         if (!descriptor.attachProbe) continue
         // Never name a client the runtime registry can't reach.
@@ -191,7 +191,7 @@ export function createAttachHandler(opts = {}) {
      * A descriptor with **no `attachProbe`** cannot be honestly reversed: the
      * core undo returns `{ changed: false }` for "no probe" exactly as it does
      * for "already clean", so a `done` here would silently drop the marker while
-     * the settings `attach()` wrote stay on disk — orphaned and invisible to a
+     * the settings `attach()` wrote stay on disk, orphaned and invisible to a
      * later detach. Treat a missing probe as a **failed** (retryable, visible)
      * reverse instead. `desired()` already refuses to attach a probe-less client,
      * so this only fires for a marker applied out-of-band (e.g. manual
@@ -200,7 +200,7 @@ export function createAttachHandler(opts = {}) {
      * @param {string} requestKey  The client name whose attach to reverse.
      * @param {ActionContext} ctx
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
+     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
      */
     async reverse(requestKey, ctx) {
       const descriptor = ctx.clientDescriptors?.get(requestKey)
@@ -216,7 +216,7 @@ export function createAttachHandler(opts = {}) {
         // stays visible and retryable rather than silently dropped (#212).
         return {
           status: 'failed',
-          reason: `client '${descriptor.name}' has no attach_probe; cannot reverse its on-disk settings — keeping the marker rather than orphaning them`,
+          reason: `client '${descriptor.name}' has no attach_probe; cannot reverse its on-disk settings - keeping the marker rather than orphaning them`,
         }
       }
 

@@ -11,6 +11,7 @@ import {
   createActionReconciler,
   readClientActionStatus,
 } from '../../src/core/config/action_reconciler.js'
+import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
 /**
  * @import {
@@ -19,6 +20,7 @@ import {
  *   ActionOutcome,
  *   DesiredAction,
  * } from '../../src/core/config/types.d.ts'
+ * @import { ClientDescriptor } from '../../src/core/types.js'
  */
 
 /** A quiet logger so tests don't spam stderr. */
@@ -48,6 +50,19 @@ function markerPath(stateRoot) {
 
 function readMarkerFile(stateRoot) {
   return JSON.parse(fs.readFileSync(markerPath(stateRoot), 'utf8'))
+}
+
+/**
+ * A client descriptor with no `attachProbe`: perform() could attach it, but the
+ * disk-driven reverse() has nothing to replay, so a marker applied out-of-band
+ * for it must reverse as a `failed` (not a marker-dropping no-op). Mirrors the
+ * `PROBELESS_DESCRIPTOR` fixture in `action-attach.test.js` (#212).
+ * @type {ClientDescriptor}
+ */
+const PROBELESS_DESCRIPTOR = {
+  plugin: /** @type {any} */ ('@hypaware/probeless'),
+  name: 'probeless',
+  skillDir: 'skills/probeless',
 }
 
 /**
@@ -345,6 +360,64 @@ test('a reversible handler undoes a previously-applied key the config no longer 
     assert.deepEqual(handler.reverseCalls, ['client-a'])
     assert.equal(report.results[0].outcome, 'reversed')
     assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('a failed reverse keeps the marker in the store (probe-less attach is never orphaned) (#212)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // Seed a pre-existing applied `attach` marker for a probe-less client, as
+    // if it had been written out-of-band (a manual `hyp attach`, or a pre-fix
+    // marker). The real attach handler's reverse() short-circuits on the
+    // missing attachProbe and returns `failed` rather than a marker-dropping
+    // no-op, so the reconciler must KEEP the marker. Dropping it would orphan
+    // the on-disk settings: present, but invisible to a later detach.
+    const controlDir = path.join(stateRoot, 'config-control')
+    fs.mkdirSync(controlDir, { recursive: true })
+    fs.writeFileSync(
+      markerPath(stateRoot),
+      JSON.stringify(
+        { attach: { probeless: { status: 'done', request_key: 'probeless', at: '2026-06-25T00:00:00.000Z' } } },
+        null,
+        2
+      ) + '\n'
+    )
+
+    // Inject a detach spy so we can prove reverse() never even consulted the
+    // disk undo (it short-circuits on the missing probe).
+    let detachCalled = false
+    const handler = createAttachHandler({
+      detach: async () => {
+        detachCalled = true
+        return { changed: false }
+      },
+    })
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+
+    // desired() returns [] (no `clients` registry on this input), so `probeless`
+    // is no-longer-desired and the reverse gap fires for the seeded marker.
+    const report = await reconciler.reconcile({
+      ...INPUT,
+      clientDescriptors: new Map([[PROBELESS_DESCRIPTOR.name, PROBELESS_DESCRIPTOR]]),
+    })
+
+    // (a) the reverse failure is reported, not a `reversed`.
+    assert.deepEqual(
+      report.results.map((r) => [r.kind, r.requestKey, r.outcome]),
+      [['attach', 'probeless', 'failed']]
+    )
+    assert.match(String(report.results[0].reason), /attach_probe/)
+    assert.equal(detachCalled, false, 'a probe-less reverse must not pretend the disk undo ran')
+
+    // (b) the marker REMAINS in the store: never dropped, so the settings stay
+    // owned and a later detach can still find them.
+    assert.equal(readMarkerFile(stateRoot).attach.probeless.status, 'done')
+    assert.equal(
+      readClientActionStatus({ stateRoot }).byKind.attach.probeless.status,
+      'done'
+    )
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }
