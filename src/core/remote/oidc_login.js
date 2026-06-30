@@ -60,9 +60,10 @@ export async function loginWithBrowser({
 
     const opened = noBrowser ? false : openBrowser(startUrl)
     if (opened) {
-      // The opener boolean is best-effort (a silently-failed launcher still
-      // returns true), so always print the URL as a fallback path.
-      print(`Opened your browser to sign in. Waiting for the redirect...`)
+      // The opener boolean is best-effort: a launcher that exists but fails (no
+      // display on a headless box) still returns true. So phrase this as an
+      // attempt, not a fact, and always print the URL as the real fallback.
+      print(`Opening your browser to sign in. Waiting for the redirect...`)
       print(`If it did not open, visit:\n\n  ${startUrl}\n`)
     } else {
       print(`Open this URL in your browser to sign in:\n\n  ${startUrl}\n`)
