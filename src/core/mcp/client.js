@@ -51,13 +51,7 @@ export function createHttpMcpClient(opts) {
       method,
       ...(params !== undefined ? { params } : {}),
     }
-    /** @type {Record<string, string>} */
-    const headers = {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
-      ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
-    }
+    const headers = mcpRequestHeaders({ token: opts.token, sessionId })
     const res = await doFetch(opts.url, { method: 'POST', headers, body: JSON.stringify(body) })
     const sid = res.headers?.get?.('mcp-session-id')
     if (sid) sessionId = sid
@@ -103,6 +97,24 @@ export function createHttpMcpClient(opts) {
     async listTools() {
       return rpc('tools/list', {})
     },
+  }
+}
+
+/**
+ * Build the headers an MCP Streamable-HTTP POST needs: JSON + SSE content
+ * negotiation, an optional bearer, and the session id once the server has
+ * issued one. The single home for the request header shape, shared with the
+ * stdio proxy's per-message forward so the two transports can't drift.
+ *
+ * @param {{ token?: string, sessionId?: string }} args
+ * @returns {Record<string, string>}
+ */
+export function mcpRequestHeaders({ token, sessionId }) {
+  return {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
   }
 }
 

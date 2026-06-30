@@ -6,7 +6,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
-import { isAuthStatus, parseRpcResponse } from './client.js'
+import { isAuthStatus, mcpRequestHeaders, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
 
@@ -70,13 +70,7 @@ export async function runMcpProxy({ target, ctx }) {
 
   /** Forward one message to the remote with the given bearer token. */
   const forward = (/** @type {any} */ message, /** @type {string} */ token) => {
-    /** @type {Record<string, string>} */
-    const headers = {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      authorization: `Bearer ${token}`,
-      ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
-    }
+    const headers = mcpRequestHeaders({ token, sessionId })
     return fetchImpl(entry.url, { method: 'POST', headers, body: JSON.stringify(message) })
   }
 
