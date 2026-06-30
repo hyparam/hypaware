@@ -14,6 +14,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { createConfigControl } from '../config/apply.js'
 import { buildConfigApplyDeps } from '../config/apply_deps.js'
 import { createActionReconciler } from '../config/action_reconciler.js'
+import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
@@ -29,9 +30,11 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
- * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, JsonObject } from '../../../collectivus-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
+ * @import { ActionHandler } from '../../../src/core/config/types.js'
  */
 
 /**
@@ -47,6 +50,19 @@ import { statusFilePath, writeStatusFile } from './status.js'
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000
 const MIN_TICK_INTERVAL_MS = 25
+
+/**
+ * The client-action handlers the daemon constructs its reconciler with, in the
+ * order the reconciler runs them: **attach first, then backfill**. The
+ * reconciler runs handlers serially and `backfillHandler.perform()` awaits a
+ * (possibly multi-minute) `hyp backfill` subprocess, so attach — an in-process
+ * settings write — must lead, or live capture is stranded behind the historical
+ * import. Exported so the ordering is a unit-testable invariant.
+ *
+ * @type {ActionHandler[]}
+ * @ref LLP 0045#module--seam-breakdown-independently-mergeable-tasks [implements] — register [attachHandler, backfillHandler], attach first so live capture leads the backfill subprocess
+ */
+export const DEFAULT_ACTION_HANDLERS = [attachHandler, backfillHandler]
 
 /**
  * Exit code a foreground daemon uses to request its own relaunch after
@@ -289,20 +305,49 @@ export async function runDaemon(opts = {}) {
   )
   configControl.armProbationWatchdog()
 
-  // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041) -----
+  // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041 / LLP 0045) -----
   // The daemon is the only host with `configControl`, so a reconciler
   // attached here is daemon-only by construction: `hyp status` (a plain CLI
-  // boot) never performs a machine effect. v1 ships one handler, the
-  // run-once backfill-on-join. Constructed only after boot because a pass
-  // needs the effective config + the kernel backfill registry.
-  // @ref LLP 0041#the-reconciler-component [implements]: construct the reconciler with [backfillHandler] in the daemon
+  // boot) never performs a machine effect. v1 ships two handlers — attach
+  // (LLP 0045) and the run-once backfill-on-join (LLP 0037). Constructed only
+  // after boot because a pass needs the effective config + the kernel backfill
+  // registry, and the attach seam reads the gateway capability the boot bound.
+  // @ref LLP 0041#the-reconciler-component [implements] — construct the reconciler in the daemon
   const actionReconciler =
     opts.actionReconciler ??
     createActionReconciler({
       stateRoot,
-      handlers: [backfillHandler],
+      // Attach first so in-process live-capture wiring starts ahead of the
+      // (possibly multi-minute) backfill subprocess: the reconciler runs
+      // handlers serially and `backfillHandler.perform()` awaits its child, so
+      // attach-first avoids stranding live capture behind the historical import
+      // (data is order-insensitive — this is purely the latency ordering).
+      // @ref LLP 0045#module--seam-breakdown-independently-mergeable-tasks [implements] — register [attachHandler, backfillHandler], attach first
+      handlers: DEFAULT_ACTION_HANDLERS,
       log: getLogger('action-reconciler'),
     })
+
+  // The client-action seam the attach handler needs (LLP 0045 §Part 1),
+  // resolved once from boot now that `startConfiguredSources` has bound the
+  // gateway source (so `localEndpoint()` is live, not racing):
+  //  - `clientDescriptors` enumerates the client adapters + their owning
+  //    plugins (the static catalog the boot already built);
+  //  - `clients` is the runtime gateway capability used only to invoke a
+  //    client's attach effect, present only when the gateway plugin is enabled;
+  //  - `endpoint` is the proven-bound local gateway base URL from
+  //    `localEndpoint()` (no configured-`listen` fallback on the daemon path —
+  //    auto-attach must never record a URL for a port nothing bound).
+  // All three stay undefined on a non-gateway boot, leaving the attach handler
+  // inert by construction.
+  //
+  // Resolved ONCE here and then closed over by `runReconcilePass` below: the
+  // same `clientSeam` is reused, unchanged, for every reconcile pass for the
+  // daemon's lifetime — it is never re-derived per pass. So a pass can never
+  // observe a half-resolved seam (e.g. a transiently-empty `clients`); the
+  // attach handler's `desired()` always reads the fully-resolved-at-boot value,
+  // and reversal can never over-fire on a momentary `clients` gap.
+  // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — daemon resolves clientDescriptors from the catalog, clients/endpoint from boot.runtime.capabilities when the gateway is enabled
+  const clientSeam = resolveClientActionSeam({ boot, fileLog })
 
   /**
    * Run one reconcile pass against the effective config + backfill registry.
@@ -334,6 +379,11 @@ export async function runDaemon(opts = {}) {
           // process.env.HYP_HOME happened to be (LLP 0041 §Run-once flow).
           // @ref LLP 0041#run-once-flow-backfill-handler [implements]: the child runs against the daemon's resolved HYP_HOME, not process.env
           env: { ...env, HYP_HOME: hypHome },
+          // The client-action seam (LLP 0045 §Part 1) the attach handler reads.
+          // Undefined on a non-gateway boot — the handler stays inert.
+          clientDescriptors: clientSeam.clientDescriptors,
+          clients: clientSeam.clients,
+          endpoint: clientSeam.endpoint,
         })
         fileLog.info('daemon.reconcile_pass', {
           hyp_reason: reason,
@@ -750,6 +800,67 @@ export function createReconcilePassScheduler({ run, log }) {
 }
 
 /**
+ * Resolve the client-action seam (LLP 0045 §Part 1) the attach handler reads
+ * off the reconcile context: the static `clientDescriptors` catalog the boot
+ * built, and — only when the AI gateway plugin is enabled — the runtime gateway
+ * capability (`clients`) plus its local base URL (`endpoint`).
+ *
+ * The split is load-bearing: `clientDescriptors` carries the owning-plugin field
+ * the registry lacks (for `desired()`'s "is this client's plugin enabled?" and
+ * the disk-driven undo's `attachProbe`), while `clients` only *invokes* the
+ * effect (`getClient(name).attach`). A client adapter requires the gateway
+ * capability (LLP 0016), so whenever a client plugin is enabled the gateway is
+ * too; on a non-gateway boot `clients`/`endpoint` stay undefined and the attach
+ * handler is inert by construction.
+ *
+ * `endpoint` is the live `localEndpoint()` and *only* that — a **proven-bound**
+ * gateway URL. The gateway source is already bound by the time the reconciler is
+ * constructed (`startConfiguredSources` ran during boot), so `localEndpoint()`
+ * returns the real bound port. If it throws — the gateway never bound (e.g. its
+ * listen failed) — the daemon must **not** fall back to the configured-`listen`
+ * URL: auto-attach is involuntary, and recording a base URL for a port nothing
+ * bound would point clients at a dead endpoint. Instead `endpoint` stays
+ * undefined and the attach handler's `perform()` guard keeps it inert this pass
+ * (attaching once the gateway is proven-bound on a later boot). Manual
+ * `hyp attach`/`init` keep the configured-`listen` fallback — there the user
+ * asked explicitly (`core_commands.js`).
+ *
+ * @param {{ boot: BootKernelResult, fileLog: ReturnType<typeof openDaemonLog> }} args
+ * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: AiGatewayCapability | undefined, endpoint: string | undefined }}
+ * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability; daemon endpoint requires a proven-bound localEndpoint() (no configured-listen fallback — that's the manual path's)
+ */
+function resolveClientActionSeam({ boot, fileLog }) {
+  const clientDescriptors = boot.clientDescriptors
+  /** @type {AiGatewayCapability | undefined} */
+  let clients
+  /** @type {string | undefined} */
+  let endpoint
+
+  if (boot.runtime.capabilities.has('hypaware.ai-gateway', '^2.0.0')) {
+    clients = /** @type {AiGatewayCapability} */ (
+      boot.runtime.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
+    )
+    try {
+      endpoint = clients.localEndpoint()
+    } catch {
+      // The gateway never bound (e.g. its listen failed). Unlike manual
+      // `hyp attach`, the daemon does NOT fall back to the configured-`listen`
+      // URL — auto-attach must never record a base URL for an unbound port.
+      // Leave `endpoint` undefined; the handler stays inert until a later boot
+      // observes a proven-bound gateway.
+      endpoint = undefined
+    }
+    if (!endpoint) {
+      fileLog.warn('daemon.attach_endpoint_unresolved', {
+        hyp_reason: 'no_bound_local_endpoint',
+      })
+    }
+  }
+
+  return { clientDescriptors, clients, endpoint }
+}
+
+/**
  * @param {number|undefined} value
  * @returns {number}
  */
@@ -975,4 +1086,5 @@ function sleep(ms) {
 export {
   pidFilePath,
   statusFilePath,
+  resolveClientActionSeam,
 }

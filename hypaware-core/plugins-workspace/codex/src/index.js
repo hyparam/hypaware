@@ -9,10 +9,10 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
-import { attach, defaultConfigPath, detach } from './settings.js'
+import { attach, defaultConfigPath } from './settings.js'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, AiGatewayClientDetachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/codex'
@@ -38,13 +38,14 @@ export const configSection = { section: CODEX_CONFIG_SECTION, validate: validate
  *
  * Resolves the `hypaware.ai-gateway` capability, registers the
  * OpenAI-compatible upstream preset, wires Codex's config.toml
- * attach/detach, and contributes the `hypaware-query` skill plus
+ * `attach()`, and contributes the `hypaware-query` skill plus
  * the AI report skills (adoption/improvement/security/spend) for
  * Codex installs.
  *
- * Each attach/detach emits a `client.attach`/`client.detach` span
- * tagged with `hyp_plugin`, `client_name`, `status`, and
- * `restored=true|false`.
+ * `attach()` emits a `client.attach` span tagged with `hyp_plugin`,
+ * `client_name`, `status`, and `restored=true|false`. The reversing
+ * detach is the single core disk-driven undo (LLP 0045 §Part 3), not a
+ * per-adapter hook.
  *
  * @param {PluginActivationContext} ctx
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: adapter requires the ai-gateway capability; registers client + upstream presets
@@ -159,70 +160,6 @@ export async function activate(ctx) {
               changed: result.changed === true,
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
-                : undefined,
-            })
-          } catch (err) {
-            span.setAttribute('status', 'failed')
-            span.setAttribute('restored', false)
-            throw err
-          }
-        },
-        { component: 'plugin.codex' }
-      )
-    },
-    /** @param {AiGatewayClientDetachContext} detachCtx */
-    async detach(detachCtx) {
-      const configPath = resolveConfigPath(ctx)
-
-      return withSpan(
-        'client.detach',
-        {
-          [Attr.PLUGIN]: PLUGIN_NAME,
-          [Attr.OPERATION]: 'client.detach',
-          client_name: CLIENT_NAME,
-          hyp_client: CLIENT_NAME,
-          dry_run: detachCtx.dryRun === true,
-        },
-        async (span) => {
-          if (detachCtx.dryRun) {
-            span.setAttribute('status', 'ok')
-            span.setAttribute('restored', false)
-            writeDetachOutput(detachCtx, {
-              status: 'ok',
-              client: CLIENT_NAME,
-              dryRun: true,
-              configPath,
-              changed: false,
-            })
-            return
-          }
-          try {
-            const result = await detach({ configPath })
-            const restored = result.changed === true
-            span.setAttribute('status', 'ok')
-            span.setAttribute('restored', restored)
-            if (restored) {
-              logger.info('client.detach.write', {
-                hyp_plugin: PLUGIN_NAME,
-                hyp_client: CLIENT_NAME,
-                config_path: configPath,
-                changed: true,
-              })
-            }
-            writeDetachOutput(detachCtx, {
-              status: 'ok',
-              client: CLIENT_NAME,
-              dryRun: false,
-              configPath,
-              changed: restored,
-              removed: result.changed && result.removed !== undefined
-                ? result.removed
-                : undefined,
-              restoredValue: result.changed && result.restoredValue !== undefined
-                ? result.restoredValue
-                : undefined,
-              warning: result.changed && result.warning !== undefined
-                ? result.warning
                 : undefined,
             })
           } catch (err) {
@@ -421,55 +358,3 @@ function writeAttachOutput(attachCtx, fields) {
   }
 }
 
-/**
- * Render detach output: JSON when the detach context sets `json`,
- * otherwise the human prose.
- *
- * @param {AiGatewayClientDetachContext} detachCtx
- * @param {{
- *   status: 'ok' | 'failed',
- *   client: string,
- *   dryRun: boolean,
- *   configPath: string,
- *   changed: boolean,
- *   removed?: string,
- *   restoredValue?: string,
- *   warning?: string,
- * }} fields
- */
-function writeDetachOutput(detachCtx, fields) {
-  if (detachCtx.json) {
-    /** @type {Record<string, unknown>} */
-    const payload = {
-      status: fields.status,
-      action: 'detach',
-      client: fields.client,
-      dry_run: fields.dryRun,
-      config_path: fields.configPath,
-      changed: fields.changed,
-    }
-    if (fields.removed !== undefined) payload.removed = fields.removed
-    if (fields.restoredValue !== undefined) payload.restored_value = fields.restoredValue
-    if (fields.warning !== undefined) payload.warning = fields.warning
-    detachCtx.stdout.write(JSON.stringify(payload) + '\n')
-    return
-  }
-  if (fields.dryRun) {
-    detachCtx.stdout.write(`(dry-run) Would detach Codex from ${fields.configPath}\n`)
-    return
-  }
-  if (fields.changed) {
-    detachCtx.stdout.write(`✓ Codex reverted (${fields.configPath})\n`)
-    if (fields.removed !== undefined) {
-      detachCtx.stdout.write(`  Removed base_url=${fields.removed}\n`)
-    }
-    if (fields.restoredValue !== undefined) {
-      detachCtx.stdout.write(`  Restored model_provider=${fields.restoredValue}\n`)
-    }
-    if (fields.warning !== undefined) {
-      detachCtx.stdout.write(`  warning: ${fields.warning}\n`)
-    }
-  } else {
-    detachCtx.stdout.write(`No HypAware marker found in ${fields.configPath}; nothing to do.\n`)
-  }
-}

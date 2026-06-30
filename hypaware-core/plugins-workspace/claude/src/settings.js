@@ -6,19 +6,28 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * Claude Code settings.json attach/detach writer. Ported from the
+ * Claude Code settings.json attach writer. Ported from the
  * Collectivus donor `src/claude-code/settings.js`, with the managed
  * marker key renamed `_collectivus` → `_hypaware` and the embedded
  * hook command pointed at `hyp` instead of `ctvs`.
  *
  * Writes are atomic (temp file + rename) and gated on mtime so a
  * concurrent edit is detected instead of silently overwritten. The
- * `_hypaware` marker is what `detach()` keys off to know which keys
- * it inserted and is safe to remove.
+ * `_hypaware` marker is the self-describing undo record the single core
+ * undo (`detachClientFromDisk`, LLP 0045 §Part 3) replays — there is no
+ * adapter `detach()`; the reverse lives in core so it survives the
+ * plugin being unloaded (legacy pre-record markers included).
+ *
+ * The marker is also a **self-describing undo record**: it records
+ * `prev_base_url` (the restore target) and the managed
+ * `env.ANTHROPIC_BASE_URL` / session-context hook entries it added, so
+ * a format-aware but plugin-agnostic core routine can reverse the
+ * attach from disk alone — with the plugin unloaded. See LLP 0045
+ * Part 3.
  */
 
 /**
- * @import { ClaudeAttachOptions, ClaudeAttachResult, ClaudeDetachOptions, ClaudeDetachResult } from './types.js'
+ * @import { ClaudeAttachOptions, ClaudeAttachResult } from './types.js'
  * @import { FileHandle } from 'node:fs/promises'
  */
 
@@ -73,72 +82,46 @@ export async function attach(opts) {
   validateStateFile(stateFile)
 
   const { value, mtimeMs } = await readSettings(settingsPath)
+  const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
   const env = ensureObject(value, 'env')
-  const previous = env.ANTHROPIC_BASE_URL
-  const prevValue = typeof previous === 'string' ? previous : undefined
+  const liveBaseUrl = typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : undefined
+  // Preserve the recorded original across a re-attach: once we own the
+  // URL the live value is *our* gateway URL, so keep the marker's
+  // recorded `prev_base_url` rather than backing up the gateway URL
+  // over it. A first attach backs up whatever was live.
+  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by] — the marker IS the backup restored on leave
+  const prevBaseUrl = priorMarker
+    ? (typeof priorMarker.prev_base_url === 'string' ? priorMarker.prev_base_url : undefined)
+    : liveBaseUrl
 
-  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`
-  installSessionContextHooks(value, managedHookCommand(binPath, stateFile))
+  const baseUrl = `http://127.0.0.1:${port}`
+  const command = managedHookCommand(binPath, stateFile)
+
+  env.ANTHROPIC_BASE_URL = baseUrl
+  installSessionContextHooks(value, command)
+  // Self-describing undo record: enough for the format-aware core undo
+  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, strip the managed
+  // hook entries, and delete the marker without loading this plugin —
+  // leaving no orphaned `hyp claude-hook` entries.
+  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,
     port,
     state_file: stateFile,
+    managed: {
+      env: { ANTHROPIC_BASE_URL: baseUrl },
+      hooks: managedHookEntries(command),
+    },
+    ...(prevBaseUrl !== undefined ? { prev_base_url: prevBaseUrl } : {}),
   }
 
   await writeAtomic(settingsPath, value, mtimeMs)
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
-  if (prevValue !== undefined) result.prevValue = prevValue
-  return result
-}
-
-/**
- * Reverse a previous `attach`. No-op when settings.json is absent or
- * has no `_hypaware` marker. Removes `env.ANTHROPIC_BASE_URL` only
- * when it still matches the recorded port; otherwise leaves it and
- * surfaces a warning.
- *
- * @param {ClaudeDetachOptions} [opts]
- * @returns {Promise<ClaudeDetachResult>}
- */
-export async function detach(opts = {}) {
-  const { settingsPath = defaultSettingsPath() } = opts
-  const { value, existed, mtimeMs } = await readSettings(settingsPath)
-
-  if (!existed) return { changed: false }
-
-  const marker = value[MARKER_KEY]
-  if (!isPlainObject(marker)) return { changed: false }
-
-  const markerPort = typeof marker.port === 'number' ? marker.port : undefined
-  delete value[MARKER_KEY]
-  removeSessionContextHooks(value)
-
-  /** @type {string | undefined} */
-  let removed
-  /** @type {string | undefined} */
-  let warning
-  if (isPlainObject(value.env)) {
-    const env = /** @type {Record<string, unknown>} */ (value.env)
-    const current = env.ANTHROPIC_BASE_URL
-    if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
-      removed = /** @type {string} */ (current)
-      delete env.ANTHROPIC_BASE_URL
-    } else if (typeof current === 'string') {
-      warning = 'ANTHROPIC_BASE_URL was overridden externally; leaving in place'
-    }
-    if (Object.keys(env).length === 0) delete value.env
-  }
-
-  await writeAtomic(settingsPath, value, mtimeMs)
-
-  /** @type {ClaudeDetachResult} */
-  const result = { changed: true }
-  if (removed !== undefined) result.removed = removed
-  if (warning !== undefined) result.warning = warning
+  if (prevBaseUrl !== undefined) result.prevValue = prevBaseUrl
   return result
 }
 
@@ -278,29 +261,20 @@ function installSessionContextHooks(value, command) {
 }
 
 /**
- * @param {Record<string, unknown>} value
+ * The managed session-context hook entries this attach installs,
+ * recorded into the marker's undo record so the core undo can strip
+ * exactly what `installSessionContextHooks` added without re-deriving
+ * them from the (possibly unloaded) plugin.
+ *
+ * @param {string} command
+ * @returns {{ event: string, matcher?: string, command: string }[]}
  */
-function removeSessionContextHooks(value) {
-  const hooksRoot = value.hooks
-  if (!isPlainObject(hooksRoot)) return
-  for (const event of managedHookEvents()) {
-    const existing = hooksRoot[event]
-    if (!Array.isArray(existing)) continue
-    const groups = existing
-      .filter((group) => !isManagedHookGroup(group))
-      .map(removeManagedHandlers)
-      .filter((group) => !isEmptyHookGroup(group))
-    if (groups.length > 0) {
-      hooksRoot[event] = groups
-    } else {
-      delete hooksRoot[event]
-    }
-  }
-  if (Object.keys(hooksRoot).length === 0) delete value.hooks
-}
-
-function managedHookEvents() {
-  return [...new Set(MANAGED_HOOK_SPECS.map((spec) => spec.event))]
+function managedHookEntries(command) {
+  return MANAGED_HOOK_SPECS.map((spec) => ({
+    event: spec.event,
+    ...(spec.matcher ? { matcher: spec.matcher } : {}),
+    command,
+  }))
 }
 
 /** @param {unknown} group */
@@ -321,11 +295,6 @@ function isManagedHookGroup(group) {
   return Array.isArray(handlers) &&
     handlers.length > 0 &&
     handlers.every(isManagedHookHandler)
-}
-
-/** @param {unknown} group */
-function isEmptyHookGroup(group) {
-  return isPlainObject(group) && Array.isArray(group.hooks) && group.hooks.length === 0
 }
 
 /** @param {unknown} handler */

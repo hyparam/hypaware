@@ -1110,6 +1110,36 @@ export interface QueryScope {
 }
 
 /**
+ * Opaque, versioned continuation token marking a sink's incremental-read
+ * watermark: the highest `_hyp_ingest_seq` a `(sink instance, partition)` has
+ * durably exported. `seq` is an int64 encoded as a decimal string to dodge
+ * bigint/JSON precision hazards. Opaque + versioned so the underlying watermark
+ * mechanism can change without invalidating persisted watermarks. See LLP 0040 §2.
+ */
+export interface SinkContinuation {
+  v: 1
+  seq: string
+}
+
+/** Options for the back-compatible incremental extension to `readRows`. */
+export interface ReadRowsOptions {
+  /**
+   * Yield only rows newer than this watermark (`_hyp_ingest_seq > since.seq`).
+   * Absent ⇒ full scan (today's behaviour).
+   */
+  since?: SinkContinuation
+  /**
+   * Disposition of pre-upgrade null-seq "legacy" rows when `since` is set.
+   * `true` (default) treats them as new (one-time backlog export); `false`
+   * treats them as already-exported (skip). A sink passes `false` once it has a
+   * durable watermark, so the legacy backlog re-exports exactly once instead of
+   * on every tick (LLP 0040 §6 risk #1). No new null-seq row can appear
+   * post-upgrade, so excluding them after the first export never skips live data.
+   */
+  includeLegacy?: boolean
+}
+
+/**
  * Intrinsic storage service exposed by core to plugins that materialize
  * rows into the local Iceberg-backed cache. Plugins do not configure
  * storage — the cache root is HypAware-managed.
@@ -1132,7 +1162,20 @@ export interface QueryStorageService {
   discoverCachePartitions(scope?: Partial<QueryScope>): Promise<CachePartitionMeta[]>
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string
-  readRows(tablePath: string, columns?: string[]): AsyncIterable<Record<string, unknown>>
+  readRows(tablePath: string, columns?: string[], opts?: ReadRowsOptions): AsyncIterable<Record<string, unknown>>
+  /**
+   * Cursor-aware sibling of `readRows` for sinks that must advance a
+   * per-(sink instance, partition) watermark. Pairs each internal-stripped row
+   * with the `after` continuation to persist ONCE that row is durably exported.
+   * The internal `_hyp_ingest_seq` never reaches the row payload — it is read to
+   * derive `after`, then stripped. `after` is a monotonic high-water mark, so a
+   * null-seq legacy row carries the prior watermark forward unchanged. See
+   * LLP 0040 §2.
+   */
+  readRowsSince(
+    tablePath: string,
+    opts: { since?: SinkContinuation; columns?: string[]; includeLegacy?: boolean },
+  ): AsyncIterable<{ row: Record<string, unknown>; after: SinkContinuation }>
 }
 
 export interface CachePartitionMeta {
@@ -1273,9 +1316,10 @@ export interface VerbRegistry {
  * - register upstream presets (`registerUpstreamPreset`) that own
  *   routing — the gateway no longer has any hardcoded provider routing
  *   such as Anthropic-header or `/v1/messages` matching;
- * - register client attach/detach helpers (`registerClient`) so the
- *   shared `hyp attach`/`hyp detach` CLI can dispatch without coupling
- *   core to client-specific code;
+ * - register a client `attach()` helper (`registerClient`) so the
+ *   shared `hyp attach` CLI can dispatch without coupling core to
+ *   client-specific code (the reversing detach is a core disk-driven
+ *   undo, not a per-adapter hook);
  * - register exchange projectors (`registerExchangeProjector`) that
  *   turn a captured HTTP/SSE exchange into a normalized list of
  *   conversation messages. The gateway expands the projector's output
@@ -1304,8 +1348,8 @@ export interface AiGatewayCapability {
   /**
    * Look up a registered client by name. Returns `undefined` when no
    * adapter plugin has registered under that name. Used by the shared
-   * `hyp attach`/`hyp detach` command router to dispatch to the right
-   * adapter without coupling core to plugin-specific code.
+   * `hyp attach` command router to dispatch to the right adapter
+   * without coupling core to plugin-specific code.
    */
   getClient(name: string): AiGatewayClientRegistration | undefined
   /**
@@ -1369,11 +1413,19 @@ export interface AiGatewayEndpointOptions {
   upstream?: string
 }
 
+/**
+ * An adapter owns only `attach()`. The reversing detach is the single
+ * core, disk-driven undo (`detachClientFromDisk`) that both the manual
+ * `hyp detach` command and the daemon reconciler's `reverse()` route
+ * through, so there is no per-adapter detach for the one undo to drift
+ * from.
+ *
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — AiGatewayClientRegistration.detach is retired; the sole undo lives in core
+ */
 export interface AiGatewayClientRegistration {
   name: string
   defaultUpstream: string
   attach(ctx: AiGatewayClientAttachContext): Promise<void>
-  detach(ctx: AiGatewayClientDetachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
 }
 
@@ -1393,18 +1445,6 @@ export interface AiGatewayClientAttachContext {
    * containing at minimum `status`, `action`, `client`, `dry_run`,
    * and any adapter-specific fields (e.g. `settings_path`, `port`,
    * `changed`, `prev_value`).
-   */
-  json?: boolean
-}
-
-export interface AiGatewayClientDetachContext {
-  config: JsonObject
-  stdout: WriteStream
-  stderr: WriteStream
-  dryRun?: boolean
-  /**
-   * When true the adapter must emit machine-readable JSON on stdout
-   * instead of human prose. One JSON object per detach call.
    */
   json?: boolean
 }

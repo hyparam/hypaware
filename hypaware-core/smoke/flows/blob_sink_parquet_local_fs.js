@@ -206,12 +206,19 @@ export async function run({ harness, expect }) {
   )
 
   // Path: <destinationDir>/<dataset>/<partition-segment>/<filename>.
-  // The fixture's only partition is `{partition: 'all'}`, so both the
-  // directory and the file render as `partition=all` (different encoders
-  // can short-circuit to `all.parquet` for partition-less datasets via
-  // the empty-entries branch).
+  // The fixture's only partition is `{partition: 'all'}`, so the directory
+  // renders as `partition=all`. Incremental sink reads (LLP 0040) embed the
+  // exported `[sinceSeq, lastSeq]` ingest-seq range in the filename for
+  // idempotent re-PUT, so the blob is `partition=all.<since>-<last>.parquet`
+  // (a first export starts at sinceSeq 0).
   const expectedDir = path.join(destinationDir, DATASET, 'partition=all')
-  const expectedFile = path.join(expectedDir, 'partition=all.parquet')
+  const blobNames = (await fs.readdir(expectedDir)).filter((n) => /^partition=all\.\d+-\d+\.parquet$/.test(n))
+  expect.that(
+    `destination: exactly one ranged parquet blob under ${expectedDir}`,
+    blobNames,
+    (names) => Array.isArray(names) && names.length === 1
+  )
+  const expectedFile = path.join(expectedDir, blobNames[0] ?? 'partition=all.0-0.parquet')
   const stat = await fs.stat(expectedFile)
   expect.that(
     `destination: ${expectedFile} is a non-empty regular file`,

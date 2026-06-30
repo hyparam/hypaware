@@ -80,11 +80,3 @@ export interface ClaudeAttachOptions {
 }
 
 export type ClaudeAttachResult = { changed: true; prevValue?: string } | { changed: false }
-
-export interface ClaudeDetachOptions {
-  settingsPath?: string
-}
-
-export type ClaudeDetachResult =
-  | { changed: true; removed?: string; warning?: string }
-  | { changed: false }

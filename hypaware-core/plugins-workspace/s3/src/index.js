@@ -2,7 +2,14 @@
 
 import { Buffer } from 'node:buffer'
 
-import { encodePartition, clusterColumnsForDataset } from 'hypaware/core/sinks'
+import {
+  encodePartition,
+  clusterColumnsForDataset,
+  createInstanceWatermarkStore,
+  openIncrementalRows,
+  watermarkKeyFor,
+  withSeqRangeFilename,
+} from 'hypaware/core/sinks'
 
 import {
   createS3BlobStore,
@@ -18,6 +25,7 @@ import { keyIsWithinPrefix, renderObjectKey } from './keys.js'
 
 /**
  * @import { BlobStore, ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { S3BlobStoreClientFactory, S3ClientFactory, S3ClientHandle, S3ErrorKind, S3QuerySourceConfig, S3SinkConfig } from './types.js'
  */
 
@@ -109,6 +117,7 @@ export async function activate(ctx) {
         sinkCtx,
         query: ctx.query,
         storage: ctx.storage,
+        watermarks: createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name }),
       })
     },
   })
@@ -240,10 +249,11 @@ function resolveClientFactory(sinkCtx) {
  *   sinkCtx: SinkCreateContext,
  *   query: QueryRegistry,
  *   storage: QueryStorageService,
+ *   watermarks: SinkWatermarkStore,
  * }} args
  * @returns {Sink}
  */
-function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
+function buildSink({ config, client, encoder, sinkCtx, query, storage, watermarks }) {
   return {
     /**
      * @param {ExportBatch} batch
@@ -263,14 +273,30 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
           if (partition.tablePath) {
             await flushPartition(storage, partition.tablePath, 'sink_export')
           }
-          const rows = openRows(storage, partition)
+          // Incremental read: only rows added since this (instance, partition)
+          // last durably PUT. The watermark is keyed by the stable logical
+          // partition path, so it survives retention prunes and compaction
+          // generation swaps. @ref LLP 0040#applying-it-to-both-sinks
+          const wmKey = watermarkKeyFor(watermarks, storage, partition)
+          const prev = wmKey ? await watermarks.read(wmKey) : null
+          const reader = await openIncrementalRows(storage, partition, prev?.continuation)
+          if (reader.empty) {
+            // No new rows since the watermark ⇒ PUT no object (0 bytes).
+            sinkCtx.log.debug('s3.put_object.skip_empty', {
+              hyp_plugin: PLUGIN_NAME,
+              hyp_sink_instance: sinkCtx.name,
+              hyp_dataset: partition.dataset,
+              since_seq: reader.sinceSeq,
+            })
+            continue
+          }
           let blob
           try {
             blob = await encodePartition(encoder, partition, {
               log: sinkCtx.log,
               tempDir: sinkCtx.paths.tempDir,
               columns,
-              rows,
+              rows: reader.rows,
               clusterColumns: clusterColumnsForDataset(query, partition.dataset),
               sinkInstance: sinkCtx.name,
               plugin: PLUGIN_NAME,
@@ -278,10 +304,13 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
           } catch (err) {
             throw tagError(err, 'encoder_failed')
           }
+          // Embed [sinceSeq, lastSeq] so a crash-retry re-PUTs the same object
+          // key (idempotent overwrite) — the blob sink's server-ledger stand-in.
+          const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)
           const objectKey = renderObjectKey({
             prefix: config.prefix,
             partition,
-            filename: blob.filename,
+            filename,
           })
           if (!keyIsWithinPrefix({ prefix: config.prefix, dataset: partition.dataset, key: objectKey })) {
             throw new Error(`${PLUGIN_NAME}: rendered key '${objectKey}' is outside prefix '${config.prefix}'`)
@@ -299,6 +328,13 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
           else if (encoder.format === 'jsonl') putInput.ContentType = 'application/jsonl'
 
           await client.putObject(putInput)
+          // Durable now: advance the watermark to this object's last row.
+          if (wmKey) {
+            await watermarks.write(wmKey, {
+              continuation: reader.lastAfter,
+              exportedRowCount: (prev?.exportedRowCount ?? 0) + reader.rowCount,
+            })
+          }
           const partitionBytes = blob.bytesWritten ?? body.byteLength
           bytesWritten += partitionBytes
           exported += 1
@@ -311,7 +347,9 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage }) {
             prefix: config.prefix,
             object_key: objectKey,
             bytes_written: partitionBytes,
-            row_count: blob.rowCount ?? 0,
+            row_count: reader.rowCount,
+            since_seq: reader.sinceSeq,
+            last_seq: reader.lastAfter.seq,
             status: 'ok',
           })
         } catch (err) {
@@ -423,24 +461,6 @@ async function flushPartition(storage, tablePath, reason) {
   const extended = /** @type {QueryStorageService & { flushTable?: (tablePath: string, opts?: { reason?: string, force?: boolean }) => Promise<unknown> }} */ (storage)
   if (typeof extended.flushTable === 'function') {
     await extended.flushTable(tablePath, { force: true, reason })
-  }
-}
-
-/**
- * @param {QueryStorageService} storage
- * @param {QueryPartition} partition
- * @returns {AsyncIterable<Record<string, unknown>>}
- */
-function openRows(storage, partition) {
-  if (!partition.tablePath) return emptyAsyncIterable()
-  if (!storage.tableExists(partition.tablePath)) return emptyAsyncIterable()
-  return storage.readRows(partition.tablePath)
-}
-
-/** @returns {AsyncIterable<Record<string, unknown>>} */
-function emptyAsyncIterable() {
-  return {
-    async *[Symbol.asyncIterator]() {},
   }
 }
 

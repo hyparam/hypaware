@@ -57,8 +57,10 @@ export function createAiGatewayApi(state) {
       if (typeof client.defaultUpstream !== 'string' || client.defaultUpstream.length === 0) {
         throw new TypeError(`registerClient '${client.name}': defaultUpstream is required`)
       }
-      if (typeof client.attach !== 'function' || typeof client.detach !== 'function') {
-        throw new TypeError(`registerClient '${client.name}': attach()/detach() are required`)
+      // An adapter owns only attach(); the reversing detach is the single
+      // core disk-driven undo (LLP 0045 §Part 3), not a per-adapter hook.
+      if (typeof client.attach !== 'function') {
+        throw new TypeError(`registerClient '${client.name}': attach() is required`)
       }
       state.clients.set(client.name, client)
     },
