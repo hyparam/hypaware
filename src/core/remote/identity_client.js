@@ -16,6 +16,13 @@ import { Attr, getLogger } from '../observability/index.js'
  */
 
 /**
+ * Upper bound on a single `/token` request. The stdio proxy refreshes on the
+ * per-message hot path (resolveAccessJwt -> refreshSession), so a hung or very
+ * slow identity endpoint must not block a forwarded JSON-RPC message forever.
+ */
+const TOKEN_TIMEOUT_MS = 30 * 1000
+
+/**
  * Error thrown when the token endpoint rejects a refresh with
  * `invalid_grant` (the refresh row was revoked or expired). The attach path
  * turns this into the "re-run `hyp remote login`" guidance (LLP 0046 D5).
@@ -122,12 +129,31 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
   }
   const log = getLogger('remote')
   const url = `${trimSlash(identityBase)}/token`
-  const res = await doFetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const text = await safeText(res)
+  // Bound the whole request (connect + body read) so a hung endpoint can't wedge
+  // the proxy hot path. clearTimeout in `finally` so a fast response doesn't keep
+  // the timer (and the event loop) alive.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS)
+  /** @type {Awaited<ReturnType<typeof doFetch>>} */
+  let res
+  /** @type {string} */
+  let text
+  try {
+    res = await doFetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    text = await safeText(res)
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error(`identity endpoint did not respond within ${TOKEN_TIMEOUT_MS / 1000}s`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
   /** @type {any} */
   let json
   try {
