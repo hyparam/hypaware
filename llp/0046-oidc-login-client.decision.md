@@ -105,12 +105,30 @@ browser flow. Rejected refreshing eagerly on every call (needless token-endpoint
 traffic). The per-target env override (`HYP_REMOTE_TOKEN_<TARGET>`) still wins for CI.
 
 Because the `0600` store is shared by concurrent `hyp` processes (a second MCP client,
-or a verb call beside a running proxy), an `invalid_grant` is not unconditionally
-terminal: with one-time-use refresh tokens, the loser of a refresh race sees
-`invalid_grant` only because the winner already rotated the row. The resolver re-reads
-the store once on `invalid_grant`; if the stored refresh token changed, it adopts the
-winner's freshly-minted session instead of forcing a re-login. An unchanged token is a
-genuine revocation and still surfaces the re-login guidance.
+or a verb call beside a running proxy), refreshing a one-time-use refresh token is
+**single-flight under the write lock**, not an optimistic race. A resolver that finds a
+stale (or force-refreshed) JWT takes the cross-process lock, re-reads the store, and then
+either adopts a sibling's session if one was minted while it waited (a different,
+still-fresh JWT, with no token-endpoint call) or performs the refresh and commits, all
+inside the one lock hold. Only one process ever calls the token endpoint for a given
+store at a time, so the lost-refresh-race case disappears at the source: a sibling never
+sees `invalid_grant` from contention because it never refreshes concurrently. An
+`invalid_grant` observed under the lock is therefore an unambiguous revocation and
+surfaces the "re-run `hyp remote login`" guidance. **Rejected** the optimistic
+compare-and-swap (refresh outside the lock, commit only if the stored token still
+matched): its "unchanged token means revoked" test had a race window, because a loser
+could re-read before the winner committed and then wrongly force a re-login.
+
+The lock is held across the bounded (token-endpoint timeout) refresh call, so it is a
+real mutex, not a millisecond commit latch. **Decision:** the lock file records the
+holder's `{host, pid}`, and a contender steals it only when that holder is confirmed dead
+(a same-host liveness probe), not by a fixed age guess; the steal is an atomic rename so
+two contenders can never both adopt the same abandoned lock, and a holder only ever
+removes a lock that is still its own. A long age threshold remains a backstop for a
+holder on another machine (a shared `HOME`) or an unparseable lock. **Rejected** stealing
+purely by lock-file age: a fixed age cannot tell a crashed holder from a merely slow
+refresh, so it both wedged longer than needed on crashes and let two live writers clobber
+each other (the later rename dropping the other's just-rotated refresh token).
 
 ### D6: Identity endpoints derive from the configured remote URL origin
 

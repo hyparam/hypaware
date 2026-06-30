@@ -233,44 +233,40 @@ test('resolveAccessJwt keeps the stored refresh token when the server does not r
   assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt-stable')
 })
 
-test('resolveAccessJwt adopts a sibling login instead of clobbering it on a successful refresh', async () => {
+test('concurrent resolveAccessJwt is single-flight: the loser adopts the winner with no second token call', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
   let calls = 0
-  // While our refresh is in flight, a concurrent `hyp remote login` rotates the
-  // session on disk to a brand-new refresh token. Our refresh still succeeds,
-  // but its result was derived from the now-superseded rt-old, so committing it
-  // would clobber the fresh login. The compare-and-swap must adopt the login's
-  // session instead.
+  // Two `hyp` processes resolve the same stale session at once. The write lock
+  // serializes them: the winner refreshes once under the lock and commits; the
+  // loser then acquires the lock, sees the fresh JWT, and adopts it without a
+  // second token-endpoint call. No lost-refresh-race, no double-spend.
   const fetchImpl = /** @type {any} */ (async () => {
     calls++
-    await writeSession(dir, 'prod', { refreshToken: 'rt-login', accessJwt: 'jwt-login', expiresAt: FUTURE, org: 'acme' })
     return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }) }
   })
-  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
-  assert.equal(/** @type {any} */ (r).token, 'jwt-login')
-  assert.equal(calls, 1)
-  // The login's refresh token survives; our refresh result did not overwrite it.
-  assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod).refreshToken, 'rt-login')
+  const both = await Promise.all([
+    resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl }),
+    resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl }),
+  ])
+  assert.equal(/** @type {any} */ (both[0]).token, 'jwt-new')
+  assert.equal(/** @type {any} */ (both[1]).token, 'jwt-new')
+  assert.equal(calls, 1) // only one process hit the token endpoint
+  assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod).refreshToken, 'rt-new')
 })
 
-test('resolveAccessJwt honors a concurrent remove instead of resurrecting the session', async () => {
+test('resolveAccessJwt does not resurrect a session removed before the refresh', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
-  let calls = 0
-  // While our refresh is in flight, the user runs `hyp remote remove prod`,
-  // deleting the row. Our refresh still succeeds, but committing its result
-  // would write the removed session back. The compare-and-swap must observe the
-  // deletion under the lock and decline to resurrect it.
-  const fetchImpl = /** @type {any} */ (async () => {
-    calls++
-    await removeToken(dir, 'prod')
-    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }) }
-  })
+  // A concurrent `hyp remote remove prod` deletes the row. removeToken and the
+  // single-flight refresh share the write lock, so the removal lands fully before
+  // the refresher re-reads under the lock; it then finds nothing and declines to
+  // write a refreshed session back.
+  assert.equal(await removeToken(dir, 'prod'), true)
+  const fetchImpl = /** @type {any} */ (async () => { throw new Error('must not refresh a removed session') })
   const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
   assert.equal(r.ok, false)
   assert.match(/** @type {any} */ (r).error, /no token for 'prod' - run 'hyp remote login prod'/)
-  assert.equal(calls, 1)
   // The removed session stays removed; nothing was written back.
   assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod), undefined)
 })
@@ -297,43 +293,51 @@ test('resolveAccessJwt errors with login guidance when no record exists', async 
   assert.match(/** @type {any} */ (r).error, /no token for 'prod' - run 'hyp remote login prod'/)
 })
 
-test('resolveAccessJwt adopts a concurrent process\'s fresh session on invalid_grant', async () => {
+test('resolveAccessJwt with forceRefresh refreshes even when the cached JWT is still clock-fresh', async () => {
   const dir = await tmpState()
-  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  // The stored JWT is nowhere near expiry, but a live request just got a 401, so
+  // the attach path forces a refresh. forceRefresh must bypass the fresh-cache
+  // fast path and the under-lock adopt-guard (which compares against the same
+  // failing JWT) and actually mint a new token.
+  await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-fresh', expiresAt: FUTURE, org: 'acme' })
   let calls = 0
-  // A second `hyp` process refreshed first, rotating the row out from under us,
-  // and stored its fresh session. Our refresh comes back invalid_grant; we must
-  // adopt the winner's JWT rather than force a re-login.
   const fetchImpl = /** @type {any} */ (async () => {
     calls++
-    await writeSession(dir, 'prod', { refreshToken: 'rt-winner', accessJwt: 'jwt-winner', expiresAt: FUTURE, org: 'acme' })
-    return { ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_grant' }) }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-forced', expires_at: FUTURE, org: 'acme', refresh_token: 'rt2' }) }
   })
-  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
-  assert.equal(/** @type {any} */ (r).token, 'jwt-winner')
-  assert.equal(calls, 1) // the fresh adopted JWT means no second refresh
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl, forceRefresh: true })
+  assert.equal(/** @type {any} */ (r).token, 'jwt-forced')
+  assert.equal(calls, 1)
 })
 
-test('resolveAccessJwt refreshes with a rotated token when the adopted session is also stale', async () => {
+test('resolveAccessJwt refreshes with the freshest stored refresh token in one shot', async () => {
   const dir = await tmpState()
-  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  // A sibling rotated the refresh token to rt-new but its JWT is itself already
+  // stale (e.g. clock skew or an immediately-expiring grant). Single-flight reads
+  // the rotated token under the lock and refreshes from it once - no retry loop.
+  await writeSession(dir, 'prod', { refreshToken: 'rt-new', accessJwt: 'jwt-mid', expiresAt: PAST, org: 'acme' })
   let calls = 0
   const fetchImpl = /** @type {any} */ (async (/** @type {string} */ _url, /** @type {any} */ opts) => {
     calls++
-    const sent = JSON.parse(opts.body).refresh_token
-    if (sent === 'rt-old') {
-      // Winner rotated to rt-new but its JWT is also already stale.
-      await writeSession(dir, 'prod', { refreshToken: 'rt-new', accessJwt: 'jwt-mid', expiresAt: PAST, org: 'acme' })
-      return { ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_grant' }) }
-    }
-    // Retry with the rotated token succeeds.
+    assert.equal(JSON.parse(opts.body).refresh_token, 'rt-new') // refreshed from the freshest stored token
     return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-final', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-final' }) }
   })
   const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
   assert.equal(/** @type {any} */ (r).token, 'jwt-final')
-  assert.equal(calls, 2)
-  const creds = await readCredentials(dir)
-  assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt-final')
+  assert.equal(calls, 1)
+  assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod).refreshToken, 'rt-final')
+})
+
+test('a write steals a lock abandoned by a crashed holder (dead pid)', async () => {
+  const dir = await tmpState()
+  await writeToken(dir, 'prod', 'sk-1') // creates the store
+  const lockPath = `${remoteCredentialsPath(dir)}.lock`
+  // Simulate a crashed holder: a lock file naming a dead pid on this host.
+  await fs.writeFile(lockPath, JSON.stringify({ host: os.hostname(), pid: 999999999 }))
+  // The next write must steal the lock by liveness (the pid is dead) and succeed,
+  // not wait out the age backstop or time out.
+  await writeToken(dir, 'prod', 'sk-2')
+  assert.deepEqual((await readCredentials(dir)).prod, { kind: 'static', token: 'sk-2' })
 })
 
 test('resolveAccessJwt propagates a refresh failure (invalid_grant)', async () => {

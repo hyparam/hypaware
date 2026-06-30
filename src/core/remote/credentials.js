@@ -1,10 +1,11 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { InvalidGrantError, refreshSession, sessionExpiredMessage } from './identity_client.js'
+import { refreshSession, sessionExpiredMessage } from './identity_client.js'
 
 /**
  * @import { Stats } from 'node:fs'
@@ -34,18 +35,23 @@ const CREDENTIALS_BASENAME = 'remote-credentials.json'
 /** Refresh an `oidc` access JWT once it is within this window of expiry. */
 const REFRESH_SKEW_MS = 60 * 1000
 
-/** Max time to wait for the cross-process write lock before giving up. */
-const LOCK_TIMEOUT_MS = 5 * 1000
-
-/** A lock file older than this is treated as abandoned by a crashed holder. */
-const LOCK_STALE_MS = 30 * 1000
+/**
+ * Max time to wait for the cross-process write lock before giving up. The lock
+ * is now held across the bounded token-endpoint refresh (single-flight, see
+ * {@link refreshOidcSession}), so a waiter must outlast one in-flight refresh
+ * rather than a millisecond commit. A crashed holder is stolen immediately by
+ * liveness, so this only bounds waiting on a *live* sibling's refresh.
+ */
+const LOCK_TIMEOUT_MS = 45 * 1000
 
 /**
- * Bound on the optimistic refresh compare-and-swap loop. Each extra attempt
- * means a sibling rotated the refresh token between our refresh and our commit;
- * a handful of rounds is far more than any real contention reaches.
+ * Age backstop for stealing an abandoned lock when liveness can't be checked: a
+ * holder on another machine (a shared `HOME`) or an unparseable/legacy lock
+ * file. It must exceed the longest legitimate hold (one refresh) so a live, slow
+ * holder is never stolen; same-host crashes are caught far sooner by pid
+ * liveness, not by this age.
  */
-const REFRESH_MAX_ATTEMPTS = 4
+const LOCK_STALE_MS = 90 * 1000
 
 /**
  * Single-entry parse cache for the credential file. The stdio proxy resolves a
@@ -378,21 +384,23 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
 }
 
 /**
- * Refresh an oidc session with an optimistic compare-and-swap commit, so two
- * `hyp` processes sharing this 0600 store (a verb call beside a proxy, two MCP
- * clients) never double-spend a one-time-use refresh row or clobber a session a
- * sibling just rotated.
+ * Refresh an oidc session **single-flight under the write lock**, so two `hyp`
+ * processes sharing this 0600 store (a verb call beside a proxy, two MCP clients)
+ * never double-spend a one-time-use refresh row or clobber a session a sibling
+ * just rotated.
  *
- * The network refresh runs OUTSIDE the write lock: a 30s identity call must not
- * wedge the 5s lock that static-token writes also contend for. Only the commit
- * takes the lock, and persists our result solely when the stored refresh token
- * still matches the one we refreshed from. A mismatch means a sibling rotated
- * first (a parallel proxy refresh, or a concurrent `hyp remote login`); we adopt
- * the stored session when it is usable, or loop and refresh again with the
- * rotated token, rather than overwriting it. On `invalid_grant` we re-read under
- * the lock - which blocks until any in-flight sibling commit lands, closing the
- * window where a loser refreshed before the winner persisted - and adopt a
- * changed token; an unchanged token is a genuine revocation and re-throws.
+ * The whole read-decide-refresh-commit runs inside one lock hold, so only one
+ * process ever calls the token endpoint for a given store at a time. After
+ * acquiring the lock we re-read the store: if a sibling already minted a newer,
+ * still-fresh JWT while we waited, we adopt it with no network call; otherwise we
+ * refresh from the freshest stored refresh token and commit. Because no sibling
+ * refreshes concurrently, an `invalid_grant` here is an unambiguous revocation,
+ * not a lost race - it propagates (as a typed error) to the re-login guidance,
+ * with none of the old "did the token change since I refreshed" re-read to get
+ * wrong. The adopt check compares against the JWT we entered with (`from`), so a
+ * forced refresh of that same failing JWT still refreshes rather than re-adopting
+ * it. Holding the lock across the bounded token call is the cost of removing the
+ * race entirely; see {@link withCredentialsLock} for why that is safe.
  *
  * @param {{
  *   target: string,
@@ -404,64 +412,35 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  *   envName: string,
  * }} args
  * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'oidc' } | { ok: false, error: string }>}
- * @ref LLP 0046#d5 [implements]: serialized refresh commit - no double-spend or clobber across concurrent hyp processes
+ * @ref LLP 0046#d5 [implements]: single-flight refresh under the lock - no double-spend, clobber, or lost-race re-login across concurrent hyp processes
  */
 async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, now, from, envName }) {
-  for (let attempt = 0; attempt < REFRESH_MAX_ATTEMPTS; attempt++) {
-    let refreshed
-    try {
-      refreshed = await refreshSession({ identityBase, refreshToken: from.refreshToken, fetchImpl })
-    } catch (err) {
-      if (!(err instanceof InvalidGrantError)) throw err
-      // Our refresh row was consumed. Re-read under the lock so a sibling's
-      // winning commit is guaranteed visible (it holds the lock across its
-      // write). A changed-and-fresh token is an adoptable rotation; a changed
-      // stale token means loop and refresh with it; an unchanged token is a
-      // genuine revocation - re-throw.
-      const latest = await withCredentialsLock(stateDir, () => readOidcRecord(stateDir, target))
-      if (!latest || latest.refreshToken === from.refreshToken) throw err
-      if (isFresh(latest, now)) {
-        return { ok: true, token: latest.accessJwt, source: 'file', kind: 'oidc' }
-      }
-      from = latest
-      continue
+  return withCredentialsLock(stateDir, async () => {
+    const latest = await readOidcRecord(stateDir, target)
+    if (!latest) {
+      // `hyp remote remove` ran (or a static login replaced the record) before we
+      // got the lock. Honor that instead of resurrecting a refreshed session.
+      return { ok: false, error: noTokenError(target, envName) }
     }
-    const outcome = await withCredentialsLock(stateDir, async () => {
-      const latest = await readOidcRecord(stateDir, target)
-      if (!latest) {
-        // `hyp remote remove` deleted the session while our refresh was in
-        // flight. Honor the deletion under the lock instead of writing the
-        // stale row back and resurrecting removed credentials.
-        return { removed: true }
-      }
-      if (latest.refreshToken !== from.refreshToken) {
-        // A sibling rotated the one-time-use session under us while our refresh
-        // was in flight. Adopt a usable stored session; otherwise loop and
-        // refresh with the rotated token rather than clobber it.
-        if (isFresh(latest, now)) return { token: latest.accessJwt }
-        return { retryFrom: latest }
-      }
-      // No rotation: our result is authoritative. A rotated refresh token (from
-      // a one-time-use server) replaces the consumed one, otherwise the stored
-      // token is kept; `org` is fixed for the token's life, so an omitted one
-      // keeps the stored value.
-      await commitSession(stateDir, target, {
-        refreshToken: refreshed.refreshToken || latest.refreshToken,
-        accessJwt: refreshed.accessJwt,
-        expiresAt: refreshed.expiresAt,
-        org: refreshed.org || latest.org,
-      })
-      return { token: refreshed.accessJwt }
+    // A sibling refreshed (or the user re-logged in) while we waited for the
+    // lock: adopt its newer, still-fresh JWT with no token-endpoint call.
+    if (latest.accessJwt !== from.accessJwt && isFresh(latest, now)) {
+      return { ok: true, token: latest.accessJwt, source: 'file', kind: 'oidc' }
+    }
+    // We are the single in-flight refresher. Refresh from the freshest stored
+    // refresh token (a sibling may have rotated it to a token whose JWT is itself
+    // already stale) and commit. A rotated one-time-use token replaces the
+    // consumed one; otherwise the stored token is kept. `org` is fixed for the
+    // token's life, so an omitted one keeps the stored value.
+    const refreshed = await refreshSession({ identityBase, refreshToken: latest.refreshToken, fetchImpl })
+    await commitSession(stateDir, target, {
+      refreshToken: refreshed.refreshToken || latest.refreshToken,
+      accessJwt: refreshed.accessJwt,
+      expiresAt: refreshed.expiresAt,
+      org: refreshed.org || latest.org,
     })
-    if (outcome.removed) return { ok: false, error: noTokenError(target, envName) }
-    if (outcome.token !== undefined) {
-      return { ok: true, token: outcome.token, source: 'file', kind: 'oidc' }
-    }
-    from = /** @type {RemoteOidcRecord} */ (outcome.retryFrom)
-  }
-  // The stored session kept rotating under us past the attempt bound; treat it
-  // as unresolvable rather than spin forever.
-  return { ok: false, error: noTokenError(target, envName) }
+    return { ok: true, token: refreshed.accessJwt, source: 'file', kind: 'oidc' }
+  })
 }
 
 /**
@@ -614,20 +593,115 @@ function delay(ms) {
 }
 
 /**
+ * This process's lock-owner tag, written into the lock file so a contender can
+ * tell a crashed holder (steal it) from a live one (wait). Host-qualified so a
+ * pid recorded on a different machine (a shared `HOME`) is never probed against
+ * this machine's process table.
+ */
+const LOCK_OWNER = JSON.stringify({ host: os.hostname(), pid: process.pid })
+
+/**
+ * Whether the process that wrote a lock file is gone, so its lock is safe to
+ * steal. A same-host holder is probed with signal 0: `ESRCH` means no such
+ * process (dead); a delivered signal or `EPERM` means it is alive. A holder on a
+ * different host, or an unparseable/legacy lock, can't be probed and is reported
+ * "not dead" so the caller falls back to the age backstop.
+ *
+ * @param {string} ownerText raw lock-file contents
+ * @returns {boolean}
+ */
+function lockHolderIsDead(ownerText) {
+  /** @type {{ host?: unknown, pid?: unknown }} */
+  let owner
+  try {
+    owner = JSON.parse(ownerText)
+  } catch {
+    return false
+  }
+  if (!owner || owner.host !== os.hostname() || typeof owner.pid !== 'number') return false
+  try {
+    process.kill(owner.pid, 0)
+    return false // signal accepted: the holder is alive
+  } catch (err) {
+    return /** @type {NodeJS.ErrnoException} */ (err).code === 'ESRCH'
+  }
+}
+
+/**
+ * Try to steal a held lock, returning whether the caller should retry the
+ * acquire (the lock is gone or was abandoned) versus keep waiting (a live
+ * holder). Stealing is atomic: we rename the lock aside before removing it, and
+ * a given lock can be renamed by exactly one contender (the loser sees `ENOENT`),
+ * so two stealers can never both adopt it and clobber each other. We only delete
+ * the captured file when its contents still match the abandoned lock we
+ * inspected, so a fresh lock a new holder grabbed in the race window is restored,
+ * not evicted.
+ *
+ * @param {string} lockPath
+ * @returns {Promise<boolean>} true to retry the acquire, false to keep waiting
+ */
+async function stealLockIfAbandoned(lockPath) {
+  /** @type {Stats} */
+  let st
+  /** @type {string} */
+  let ownerText
+  try {
+    st = await fs.stat(lockPath)
+    ownerText = await fs.readFile(lockPath, 'utf8')
+  } catch {
+    return true // the lock vanished between the failed open and now: retry
+  }
+  const abandoned = lockHolderIsDead(ownerText) || Date.now() - st.mtimeMs > LOCK_STALE_MS
+  if (!abandoned) return false // a live holder mid-refresh: wait it out
+  const captured = `${lockPath}.stale-${process.pid}`
+  try {
+    await fs.rename(lockPath, captured)
+  } catch {
+    return true // another contender captured it first: retry the acquire
+  }
+  // We now exclusively own the captured file. Confirm it is the same abandoned
+  // lock we inspected (a new holder would have written a different owner tag) and
+  // only then discard it; otherwise put it back without clobbering whatever sits
+  // at lockPath now, and keep waiting.
+  let capturedText = ''
+  try {
+    capturedText = await fs.readFile(captured, 'utf8')
+  } catch { /* already gone: treat as removed */ }
+  if (capturedText === ownerText) {
+    await fs.rm(captured, { force: true })
+    return true
+  }
+  try {
+    await fs.rename(captured, lockPath)
+  } catch {
+    await fs.rm(captured, { force: true })
+  }
+  return false
+}
+
+/**
  * Serialize the read-modify-write of the shared 0600 store across concurrent
  * `hyp` processes (a verb call beside a proxy, two MCP clients). Without it two
  * writers to *different* targets each read the whole map and rename; the later
  * rename clobbers the earlier writer's just-rotated one-time-use refresh token
  * for the other target, forcing a needless re-login. An `O_EXCL` lock file is
- * the cross-process mutex, and the cache is dropped on entry so the locked body
- * reads the freshest on-disk map (an identical-size sibling rewrite the parse
- * cache would otherwise miss). A stale lock left by a crashed holder is stolen
- * by age, so a crash can't wedge every future write.
+ * the cross-process mutex; it records this process's `{host, pid}` so the lock
+ * is a real mutex even though it is now held across the bounded token-endpoint
+ * refresh ({@link refreshOidcSession}). The cache is dropped on entry so the
+ * locked body reads the freshest on-disk map (an identical-size sibling rewrite
+ * the parse cache would otherwise miss).
+ *
+ * A crashed holder's lock is stolen as soon as its pid is seen dead, not after a
+ * blind age wait, so a crash neither wedges every future write nor (the inverse)
+ * lets a fixed age threshold misfire on a merely slow live holder. The steal is
+ * atomic and single-winner (see {@link stealLockIfAbandoned}), and release only
+ * removes a lock that is still ours, so a holder can never evict a successor.
  *
  * @template T
  * @param {string} stateDir
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
+ * @ref LLP 0046#d5 [implements]: pid-identified mutex with liveness-based, single-winner steal
  */
 async function withCredentialsLock(stateDir, fn) {
   await fs.mkdir(stateDir, { recursive: true })
@@ -636,18 +710,15 @@ async function withCredentialsLock(stateDir, fn) {
   for (;;) {
     try {
       const handle = await fs.open(lockPath, 'wx')
-      await handle.close()
+      try {
+        await handle.writeFile(LOCK_OWNER)
+      } finally {
+        await handle.close()
+      }
       break
     } catch (err) {
       if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
-      // Steal a lock abandoned by a crashed holder, identified by age.
-      try {
-        const st = await fs.stat(lockPath)
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-          await fs.rm(lockPath, { force: true })
-          continue
-        }
-      } catch { /* lock vanished between open and stat: retry the acquire */ }
+      if (await stealLockIfAbandoned(lockPath)) continue
       if (Date.now() > deadline) {
         throw new Error('timed out acquiring the remote credentials lock')
       }
@@ -659,7 +730,12 @@ async function withCredentialsLock(stateDir, fn) {
     rawCache = null
     return await fn()
   } finally {
-    await fs.rm(lockPath, { force: true })
+    // Remove only our own lock: if a slow hold ever overran the age backstop and
+    // a contender stole it, the file now belongs to a successor we must not evict.
+    try {
+      const owner = await fs.readFile(lockPath, 'utf8')
+      if (owner === LOCK_OWNER) await fs.rm(lockPath, { force: true })
+    } catch { /* already gone */ }
   }
 }
 
