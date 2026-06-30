@@ -173,3 +173,53 @@ test('a static token that 401s is not retried (cannot refresh)', async (t) => {
   assert.equal(state.refreshCalls, 0)
   assert.match(err.join(''), /re-run 'hyp remote login'/)
 })
+
+test('an env-override token that 401s does not advise a re-login it cannot fix', async (t) => {
+  const hypHome = await tmpHome()
+  // The env override wins and is never read from the store, so re-login cannot
+  // fix it. The verb must point at the env var, not tell the user to re-login
+  // (matching the stdio proxy, LLP 0046 D5).
+  const state = stubServers(t, { validJwt: 'something-else' })
+  const { ctx, err } = ctxWith(hypHome)
+  ctx.env.HYP_REMOTE_TOKEN_PROD = 'env-bad'
+  const code = await cmd.run(['SELECT 1', '--remote', 'prod'], ctx)
+  assert.equal(code, 1)
+  assert.equal(state.refreshCalls, 0)
+  const joined = err.join('')
+  assert.match(joined, /HYP_REMOTE_TOKEN_PROD/)
+  assert.doesNotMatch(joined, /re-run 'hyp remote login/)
+})
+
+test('an oidc session whose freshly-refreshed JWT is still rejected gets re-login guidance (exit 2)', async (t) => {
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  const hypHome = await tmpHome()
+  const stateDir = path.join(hypHome, 'hypaware')
+  await writeSession(stateDir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: FUTURE, org: 'acme' })
+
+  // The refresh succeeds (mints jwt-new), but the MCP side rejects every JWT
+  // (server-side clock skew, or a revocation independent of the refresh row).
+  // The surviving 401 is a dead session: re-login guidance, exit 2.
+  let refreshCalls = 0
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url, /** @type {any} */ init) => {
+    const reply = (/** @type {any} */ obj, status = 200) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (/** @type {string} */ k) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+      text: async () => JSON.stringify(obj),
+    })
+    if (String(url).includes('/v1/identity/token')) {
+      refreshCalls++
+      return reply({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme' })
+    }
+    const req = JSON.parse(init.body)
+    if (req.method === 'initialize') return reply({ jsonrpc: '2.0', id: req.id, result: { protocolVersion: '2025-06-18' } })
+    return reply({ jsonrpc: '2.0', id: req.id }, 401)
+  })
+
+  const { ctx, err } = ctxWith(hypHome)
+  const code = await cmd.run(['SELECT 1', '--remote', 'prod'], ctx)
+  assert.equal(code, 2)
+  assert.equal(refreshCalls, 1)
+  assert.match(err.join(''), /remote session expired - re-run 'hyp remote login prod'/)
+})

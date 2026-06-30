@@ -23,6 +23,13 @@ import { Attr, getLogger } from '../observability/index.js'
 const TOKEN_TIMEOUT_MS = 30 * 1000
 
 /**
+ * Shared base wording for a missing global `fetch`, so every attach entrypoint
+ * (the verb, the stdio proxy, this identity client) reports the same phrase with
+ * its own context appended rather than three independently-drifting strings.
+ */
+export const NO_FETCH_MESSAGE = 'no fetch implementation available'
+
+/**
  * Error thrown when the token endpoint rejects a refresh with
  * `invalid_grant` (the refresh row was revoked or expired). The attach path
  * turns this into the "re-run `hyp remote login`" guidance (LLP 0046 D5).
@@ -125,7 +132,7 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
 async function postToken({ identityBase, body, fetchImpl, operation }) {
   const doFetch = fetchImpl ?? /** @type {typeof fetch | undefined} */ (globalThis.fetch)
   if (typeof doFetch !== 'function') {
-    throw new Error('no fetch implementation available for the identity client')
+    throw new Error(`${NO_FETCH_MESSAGE} for the identity client`)
   }
   const log = getLogger('remote')
   const url = `${trimSlash(identityBase)}/token`

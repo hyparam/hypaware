@@ -4,8 +4,8 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { attachWithRefresh, deriveIdentityBase, isRefreshable, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
-import { describeRefreshError, sessionExpiredMessage } from '../remote/identity_client.js'
+import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
+import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { isAuthStatus, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
@@ -57,7 +57,7 @@ export async function runMcpProxy({ target, ctx }) {
   }
   const fetchImpl = /** @type {typeof fetch | undefined} */ (globalThis.fetch)
   if (typeof fetchImpl !== 'function') {
-    ctx.stderr.write('hyp mcp: no fetch implementation available for the proxy\n')
+    ctx.stderr.write(`hyp mcp: ${NO_FETCH_MESSAGE} for the proxy\n`)
     return 1
   }
 
@@ -139,16 +139,13 @@ export async function runMcpProxy({ target, ctx }) {
       if (isNotify) return null
       if (!res.ok) {
         // A 401/403 that survives the refresh + retry above is a dead
-        // credential. For a refreshable OIDC session (server-side clock skew, or
-        // a JWT revoked independently of the refresh row) the fix is re-login.
-        // For an env/static token re-login cannot help (an env override is never
-        // read from the store, a CI token needs replacing), so point at the
-        // credential itself rather than mis-advising a login.
+        // credential. Explain by why it is dead - a refreshable OIDC session is
+        // an expired session (re-login), a per-target env override re-login
+        // cannot fix, a static file token re-login replaces - via the shared
+        // policy the verb attach path also uses, so the two never drift.
         const detail = !isAuthStatus(res.status)
           ? `remote returned HTTP ${res.status}`
-          : isRefreshable(resolved)
-            ? sessionExpiredMessage(target)
-            : `remote rejected the credential for '${target}' (HTTP ${res.status}) - check the token`
+          : describeAuthRejection({ target, status: res.status, resolved }).message
         return jsonRpcError(id, INTERNAL_ERROR, detail)
       }
       try {

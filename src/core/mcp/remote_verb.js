@@ -1,8 +1,8 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
-import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt } from '../remote/credentials.js'
-import { describeRefreshError } from '../remote/identity_client.js'
+import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
+import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { createHttpMcpClient, isAuthStatus } from './client.js'
 
 /**
@@ -39,7 +39,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
   // identity client's lower-level "no fetch" deep inside the attach path (the
   // stdio proxy guards the same way).
   if (typeof (/** @type {unknown} */ (globalThis.fetch)) !== 'function') {
-    return { ok: false, error: 'no fetch implementation available for the remote verb', exitCode: 1 }
+    return { ok: false, error: `${NO_FETCH_MESSAGE} for the remote verb`, exitCode: 1 }
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
@@ -61,13 +61,18 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
   // thrown 401/403 (stale or revoked OIDC JWT) is reported as `authFailed` so
   // the shared policy can force one refresh and retry; any other throw is a
   // terminal non-auth error folded into the returned verb-result.
+  // The status of the most recent auth rejection, so a 401/403 that survives the
+  // refresh + retry can be explained with the real code (defaults to 401).
+  let lastAuthStatus = 401
   const op = async (/** @type {string} */ token) => {
     try {
       return { authFailed: false, value: await callRemoteTool({ url: entry.url, token, verb, params }) }
     } catch (err) {
+      const authFailed = isAuthError(err)
+      if (authFailed) lastAuthStatus = Number(/** @type {any} */ (err).status) || lastAuthStatus
       /** @type {{ ok: false, error: string, exitCode: number }} */
       const value = { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
-      return { authFailed: isAuthError(err), value }
+      return { authFailed, value }
     }
   }
 
@@ -77,7 +82,16 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
       refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
       op,
     })
-    return out.ok ? out.value : { ok: false, error: out.error, exitCode: 2 }
+    if (!out.ok) return { ok: false, error: out.error, exitCode: 2 }
+    // A 401/403 that survived the one-shot refresh + retry is a dead credential.
+    // Advise by *why* it is dead - identically to the stdio proxy - rather than
+    // surfacing client.js's blanket "re-run hyp remote login", which mis-advises
+    // an env override that re-login can never fix (LLP 0046 D5).
+    if (out.authFailed) {
+      const { message, exitCode } = describeAuthRejection({ target, status: lastAuthStatus, resolved })
+      return { ok: false, error: message, exitCode }
+    }
+    return out.value
   } catch (refreshErr) {
     return mapRefreshError(refreshErr, target)
   }
