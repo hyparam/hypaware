@@ -16,6 +16,12 @@
 > dataset — no plugin work. Remote SQL ([LLP 0033](./0033-remote-query-attach.spec.md))
 > calls that tool over MCP and renders with the same formatters.
 
+> **Extended by [LLP 0054](./0054-bounded-query-execution.spec.md).** The
+> intrinsic execution path is memory-bounded: a per-query execution budget plus
+> a threaded abort signal cap peak intermediate memory, so no single query can
+> OOM the host by buffering an unbounded scan
+> ([hyparam/hypaware-server#9](https://github.com/hyparam/hypaware-server/issues/9)).
+
 ## Query is intrinsic
 
 Query and Iceberg storage are intrinsic services. Plugins register datasets;
