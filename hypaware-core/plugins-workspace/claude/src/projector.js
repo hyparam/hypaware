@@ -33,10 +33,12 @@ import {
   pickLatestMatching,
   readSessionContext,
 } from './session_context.js'
+import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { TranscriptEntry } from './types.js'
+ * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -80,6 +82,7 @@ import {
  *   projectsDir?: string,
  *   clientName?: string,
  *   logger?: { warn(message: string, fields?: Record<string, unknown>): void, debug?: (m: string, f?: Record<string, unknown>) => void },
+ *   resolver?: UsagePolicyResolver,
  * }} opts
  * @returns {AiGatewayExchangeProjector}
  */
@@ -89,6 +92,11 @@ export function createClaudeExchangeProjector(opts) {
   const clientName = opts.clientName ?? 'claude'
   const logger = opts.logger
   const sessionContextCache = createSessionContextCache()
+  // One resolver per projector (per daemon run): the per-cwd cache rides the
+  // projector's lifetime so the capture hot path adds no unbounded fs work.
+  // @ref LLP 0050 [implements]: the .hypignore capture-seam drop lives in the
+  // client adapter, the only place that resolves a cwd; injectable for tests.
+  const resolver = opts.resolver ?? createUsagePolicyResolver()
 
   return {
     name: 'claude-anthropic-messages',
@@ -152,6 +160,27 @@ export function createClaudeExchangeProjector(opts) {
           sessionId,
         })
         : undefined
+
+      // @ref LLP 0050 [implements]: capture-seam drop. Once the exchange's cwd
+      // is resolved, an ancestor `.hypignore` that resolves to `ignore` means
+      // this exchange is never recorded: return no rows BEFORE building any, so
+      // the gateway source's write guard (`if (messageRows.length > 0)`)
+      // persists nothing. The response has already streamed to the client, so
+      // the live LLM call is untouched (LLP 0049#requirements R2). Returning
+      // `undefined` is this projector's "no rows" signal (the dispatcher treats
+      // it, and an empty `messages`, identically): a literal `[]` is not a valid
+      // projection and would log a spurious invalid-output warning.
+      const cwd = sessionContextRecord?.cwd
+      if (cwd && resolver.isIgnored(cwd)) {
+        ctx.log.info('plugin.claude.usage_policy_drop', {
+          component: 'claude',
+          operation: 'usage_policy_drop',
+          exchange_id: input.exchange_id,
+          governed_by: resolver.resolve(cwd).governedBy,
+        })
+        return undefined
+      }
+
       const transcriptEntries = sessionId
         ? await loadTranscriptSafe({
           projectsDir,
