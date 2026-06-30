@@ -79,6 +79,16 @@ test('an oidc record with a refresh token but no cached accessJwt is kept (refre
   assert.deepEqual((await readCredentials(dir)).prod, { kind: 'oidc', refreshToken: 'rt', accessJwt: '', expiresAt: '', org: '' })
 })
 
+test('a static record with an empty token is dropped on read (not reported as stored)', async () => {
+  const dir = await tmpState()
+  // A hand-edited / partially-written record with no usable token. It must read
+  // as absent so `remote list` and the resolvers agree it is logged out.
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { token: '' } }))
+  assert.deepEqual(await readCredentials(dir), {})
+  const r = await resolveToken({ target: 'prod', env: {}, stateDir: dir })
+  assert.equal(r.ok, false)
+})
+
 test('an oidc record with neither a refresh token nor a static token is dropped on read', async () => {
   const dir = await tmpState()
   await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { kind: 'oidc', accessJwt: 'orphan-jwt' } }))

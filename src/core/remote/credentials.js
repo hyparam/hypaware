@@ -206,8 +206,11 @@ function normalizeRecord(entry) {
     // record that also carries a static `token` is not hijacked away from it.
     return oidc(e.accessJwt)
   }
-  // Legacy / static: a bare token with no (or static) kind.
-  if (typeof e.token === 'string') {
+  // Legacy / static: a bare token with no (or static) kind. An empty token is
+  // no credential at all - resolveToken/resolveAccessJwt both reject it - so
+  // drop it here too, otherwise `remote list` would report a present-but-unusable
+  // record as `stored` while every query says the target is logged out.
+  if (typeof e.token === 'string' && e.token.length > 0) {
     return { kind: 'static', token: e.token }
   }
   return null
