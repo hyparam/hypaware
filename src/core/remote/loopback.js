@@ -201,6 +201,12 @@ function sanitizeErrorCode(error) {
 /** @param {ServerResponse} res @param {string} message */
 function respond(res, message) {
   const body = `<!doctype html><html><head><meta charset="utf-8"><title>HypAware login</title></head><body style="font-family:system-ui;padding:2rem"><p>${message}</p></body></html>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+  // Browsers open the callback over a keep-alive connection. `server.close()`
+  // waits for in-flight sockets to drain, so without `Connection: close` the
+  // idle keep-alive socket would hold the event loop until Node's
+  // keepAliveTimeout (~5s) and `hyp remote login` would hang that long at exit.
+  // Asking the browser to close after this single response lets close() finish
+  // promptly while the user still sees the page.
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' })
   res.end(body)
 }
