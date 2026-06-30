@@ -223,6 +223,27 @@ test('resolveAccessJwt keeps the stored refresh token when the server does not r
   assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt-stable')
 })
 
+test('resolveAccessJwt adopts a sibling login instead of clobbering it on a successful refresh', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  let calls = 0
+  // While our refresh is in flight, a concurrent `hyp remote login` rotates the
+  // session on disk to a brand-new refresh token. Our refresh still succeeds,
+  // but its result was derived from the now-superseded rt-old, so committing it
+  // would clobber the fresh login. The compare-and-swap must adopt the login's
+  // session instead.
+  const fetchImpl = /** @type {any} */ (async () => {
+    calls++
+    await writeSession(dir, 'prod', { refreshToken: 'rt-login', accessJwt: 'jwt-login', expiresAt: FUTURE, org: 'acme' })
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }) }
+  })
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  assert.equal(/** @type {any} */ (r).token, 'jwt-login')
+  assert.equal(calls, 1)
+  // The login's refresh token survives; our refresh result did not overwrite it.
+  assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod).refreshToken, 'rt-login')
+})
+
 test('resolveAccessJwt keeps the stored org when a refresh response omits it', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })

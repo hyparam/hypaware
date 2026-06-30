@@ -41,6 +41,13 @@ const LOCK_TIMEOUT_MS = 5 * 1000
 const LOCK_STALE_MS = 30 * 1000
 
 /**
+ * Bound on the optimistic refresh compare-and-swap loop. Each extra attempt
+ * means a sibling rotated the refresh token between our refresh and our commit;
+ * a handful of rounds is far more than any real contention reaches.
+ */
+const REFRESH_MAX_ATTEMPTS = 4
+
+/**
  * Single-entry parse cache for the credential file. The stdio proxy resolves a
  * token per forwarded message, so without this every message re-read and
  * re-parsed the 0600 file. Keyed by path + mtime + size and busted on every
@@ -234,17 +241,30 @@ export async function writeToken(stateDir, target, token) {
  * @ref LLP 0046#d4 [implements]: oidc session written through the same atomic 0600 store as static tokens
  */
 export async function writeSession(stateDir, target, session) {
-  await withCredentialsLock(stateDir, async () => {
-    const current = await readRawCredentials(stateDir, { mutable: true })
-    current[target] = {
-      kind: 'oidc',
-      refreshToken: session.refreshToken,
-      accessJwt: session.accessJwt,
-      expiresAt: session.expiresAt,
-      org: session.org,
-    }
-    await writeCredentials(stateDir, current)
-  })
+  await withCredentialsLock(stateDir, () => commitSession(stateDir, target, session))
+}
+
+/**
+ * Persist an oidc session WITHOUT taking the write lock: the caller must already
+ * hold it. {@link writeSession} is the locked public entry point; the refresh
+ * compare-and-swap in {@link refreshOidcSession} re-reads and writes inside one
+ * lock acquisition and uses this directly to keep that read-modify-write atomic.
+ *
+ * @param {string} stateDir
+ * @param {string} target
+ * @param {{ refreshToken: string, accessJwt: string, expiresAt: string, org: string }} session
+ * @returns {Promise<void>}
+ */
+async function commitSession(stateDir, target, session) {
+  const current = await readRawCredentials(stateDir, { mutable: true })
+  current[target] = {
+    kind: 'oidc',
+    refreshToken: session.refreshToken,
+    accessJwt: session.accessJwt,
+    expiresAt: session.expiresAt,
+    org: session.org,
+  }
+  await writeCredentials(stateDir, current)
 }
 
 /**
@@ -331,13 +351,10 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   }
 
   // A forced refresh is the live-401 retry: drop the parse cache so the read
-  // below sees the freshest refresh token. A concurrent rotation may have
-  // rewritten the file with an identical size within one mtime tick, which the
-  // cache key (path + mtime + size) would otherwise miss - symmetric with the
-  // invalid_grant re-read below.
+  // below sees the freshest refresh token a sibling may have just rotated in.
   if (forceRefresh) rawCache = null
   const creds = await readCredentials(stateDir)
-  let entry = creds[target]
+  const entry = creds[target]
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
   }
@@ -347,53 +364,109 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
       : { ok: false, error: noTokenError(target, envName) }
   }
 
-  // oidc: refresh if forced (a live 401 retry), or the cached JWT is missing,
-  // unparseable, or near expiry.
-  if (forceRefresh || !isFresh(entry, now)) {
-    if (!identityBase) {
-      return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
-    }
+  // oidc: a fresh cached JWT needs neither a network call nor the lock.
+  if (!forceRefresh && isFresh(entry, now)) {
+    return { ok: true, token: entry.accessJwt, source: 'file', kind: 'oidc' }
+  }
+  if (!identityBase) {
+    return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
+  }
+  return refreshOidcSession({ target, stateDir, identityBase, fetchImpl, now, from: entry, envName })
+}
+
+/**
+ * Refresh an oidc session with an optimistic compare-and-swap commit, so two
+ * `hyp` processes sharing this 0600 store (a verb call beside a proxy, two MCP
+ * clients) never double-spend a one-time-use refresh row or clobber a session a
+ * sibling just rotated.
+ *
+ * The network refresh runs OUTSIDE the write lock: a 30s identity call must not
+ * wedge the 5s lock that static-token writes also contend for. Only the commit
+ * takes the lock, and persists our result solely when the stored refresh token
+ * still matches the one we refreshed from. A mismatch means a sibling rotated
+ * first (a parallel proxy refresh, or a concurrent `hyp remote login`); we adopt
+ * the stored session when it is usable, or loop and refresh again with the
+ * rotated token, rather than overwriting it. On `invalid_grant` we re-read under
+ * the lock - which blocks until any in-flight sibling commit lands, closing the
+ * window where a loser refreshed before the winner persisted - and adopt a
+ * changed token; an unchanged token is a genuine revocation and re-throws.
+ *
+ * @param {{
+ *   target: string,
+ *   stateDir: string,
+ *   identityBase: string,
+ *   fetchImpl?: typeof fetch,
+ *   now: number,
+ *   from: RemoteOidcRecord,
+ *   envName: string,
+ * }} args
+ * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'oidc' } | { ok: false, error: string }>}
+ * @ref LLP 0046#d5 [implements]: serialized refresh commit - no double-spend or clobber across concurrent hyp processes
+ */
+async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, now, from, envName }) {
+  for (let attempt = 0; attempt < REFRESH_MAX_ATTEMPTS; attempt++) {
     let refreshed
     try {
-      refreshed = await refreshSession({ identityBase, refreshToken: entry.refreshToken, fetchImpl })
+      refreshed = await refreshSession({ identityBase, refreshToken: from.refreshToken, fetchImpl })
     } catch (err) {
-      // Concurrent-rotation tolerance: another `hyp` process sharing this 0600
-      // store (a second MCP client, or a verb call alongside a proxy) may have
-      // refreshed first, consuming our refresh row so this refresh comes back
-      // `invalid_grant`. Re-read once: if the stored refresh token changed, that
-      // process already minted a fresh session - adopt it (its JWT if still
-      // fresh, else refresh with the rotated token) rather than forcing a
-      // needless re-login. An unchanged token is a real revocation; re-throw.
       if (!(err instanceof InvalidGrantError)) throw err
-      // Drop the parse cache before re-reading: we are reacting to a probable
-      // concurrent write, and a same-size rewrite landing within one mtime tick
-      // would otherwise be hidden behind the cache, making us miss the rotation.
-      rawCache = null
-      const latest = (await readCredentials(stateDir))[target]
-      if (!latest || latest.kind !== 'oidc' || latest.refreshToken === entry.refreshToken) throw err
+      // Our refresh row was consumed. Re-read under the lock so a sibling's
+      // winning commit is guaranteed visible (it holds the lock across its
+      // write). A changed-and-fresh token is an adoptable rotation; a changed
+      // stale token means loop and refresh with it; an unchanged token is a
+      // genuine revocation - re-throw.
+      const latest = await withCredentialsLock(stateDir, () => readOidcRecord(stateDir, target))
+      if (!latest || latest.refreshToken === from.refreshToken) throw err
       if (isFresh(latest, now)) {
         return { ok: true, token: latest.accessJwt, source: 'file', kind: 'oidc' }
       }
-      entry = latest
-      refreshed = await refreshSession({ identityBase, refreshToken: latest.refreshToken, fetchImpl })
+      from = latest
+      continue
     }
-    /** @type {RemoteOidcRecord} */
-    // `org` is fixed for the refresh token's life; keep the stored one when the
-    // refresh response omits it (refreshSession returns '' in that case). A
-    // rotated refresh token (one-time-use servers) replaces the stored one;
-    // otherwise keep it, so the next refresh sends a live token rather than a
-    // consumed one that would 401 and force a re-login every session.
-    const next = {
-      ...entry,
-      accessJwt: refreshed.accessJwt,
-      expiresAt: refreshed.expiresAt,
-      org: refreshed.org || entry.org,
-      refreshToken: refreshed.refreshToken || entry.refreshToken,
+    const outcome = await withCredentialsLock(stateDir, async () => {
+      const latest = await readOidcRecord(stateDir, target)
+      if (latest && latest.refreshToken !== from.refreshToken) {
+        // A sibling rotated the one-time-use session under us while our refresh
+        // was in flight. Adopt a usable stored session; otherwise loop and
+        // refresh with the rotated token rather than clobber it.
+        if (isFresh(latest, now)) return { token: latest.accessJwt }
+        return { retryFrom: latest }
+      }
+      // No rotation: our result is authoritative. A rotated refresh token (from
+      // a one-time-use server) replaces the consumed one, otherwise the stored
+      // token is kept; `org` is fixed for the token's life, so an omitted one
+      // keeps the stored value.
+      const base = latest || from
+      await commitSession(stateDir, target, {
+        refreshToken: refreshed.refreshToken || base.refreshToken,
+        accessJwt: refreshed.accessJwt,
+        expiresAt: refreshed.expiresAt,
+        org: refreshed.org || base.org,
+      })
+      return { token: refreshed.accessJwt }
+    })
+    if (outcome.token !== undefined) {
+      return { ok: true, token: outcome.token, source: 'file', kind: 'oidc' }
     }
-    await writeSession(stateDir, target, next)
-    return { ok: true, token: refreshed.accessJwt, source: 'file', kind: 'oidc' }
+    from = /** @type {RemoteOidcRecord} */ (outcome.retryFrom)
   }
-  return { ok: true, token: entry.accessJwt, source: 'file', kind: 'oidc' }
+  // The stored session kept rotating under us past the attempt bound; treat it
+  // as unresolvable rather than spin forever.
+  return { ok: false, error: noTokenError(target, envName) }
+}
+
+/**
+ * Read a target's normalized record inside a held lock, returning it only when
+ * it is an oidc session (a static record or absent target yields null). The
+ * caller's lock acquisition dropped the parse cache, so this reads from disk.
+ *
+ * @param {string} stateDir
+ * @param {string} target
+ * @returns {Promise<RemoteOidcRecord | null>}
+ */
+async function readOidcRecord(stateDir, target) {
+  const rec = (await readCredentials(stateDir))[target]
+  return rec && rec.kind === 'oidc' ? rec : null
 }
 
 /**
