@@ -54,6 +54,19 @@ const CODEX_DESCRIPTOR = {
 }
 
 /**
+ * A client descriptor with **no `attachProbe`**. perform() can attach it (it
+ * only needs a live adapter), but the disk-driven reverse() has nothing to
+ * replay, so it must be excluded from attach-eligibility and, if a marker is
+ * ever applied out-of-band, treated as a failed (not no-op) reverse (#212).
+ * @type {ClientDescriptor}
+ */
+const PROBELESS_DESCRIPTOR = {
+  plugin: /** @type {any} */ ('@hypaware/probeless'),
+  name: 'probeless',
+  skillDir: 'skills/probeless',
+}
+
+/**
  * @param {ClientDescriptor[]} list
  * @returns {Map<string, ClientDescriptor>}
  */
@@ -204,6 +217,20 @@ test('desired() does not fail open on a non-boolean on_join (treats it as opt-ou
     clients: clientsWith({ claude: attachRegistration('claude') }),
   }))
   assert.deepEqual(stringFalse, [], 'on_join:"false" (string) must not attach')
+})
+
+test('desired() excludes a probe-less descriptor - attach-eligibility requires reverse-capability (#212)', () => {
+  const handler = createAttachHandler()
+  // Enabled plugin + registered client, but the descriptor declares no
+  // attachProbe. perform() could attach it, but reverse() (disk-driven) could
+  // never undo it, so it must never be named as an attach target, otherwise a
+  // later config-drop drops the marker while the settings stay written.
+  const desired = handler.desired(makeCtx({
+    plugins: [{ name: '@hypaware/probeless', enabled: true, config: {} }],
+    descriptors: descriptorMap([PROBELESS_DESCRIPTOR]),
+    clients: clientsWith({ probeless: attachRegistration('probeless') }),
+  }))
+  assert.deepEqual(desired, [], 'a probe-less client must never be named as an attach target')
 })
 
 test('desired() guards on the runtime registry actually having the client', () => {
@@ -417,6 +444,25 @@ test('reverse() replays the real core undo from disk with no adapter loaded (fs 
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
+})
+
+test('reverse() of a probe-less descriptor fails - never silently drops the marker, orphaning settings (#212)', async () => {
+  // A marker applied out-of-band (manual `hyp attach`, or a pre-fix marker) for
+  // a probe-less client: the core undo returns { changed:false } for "no probe"
+  // exactly as it does for "already clean", so a `done` here would drop the
+  // marker while the settings stay on disk. reverse() must short-circuit on the
+  // missing probe and fail (retryable/visible), without consulting the undo.
+  let detachCalled = false
+  const handler = createAttachHandler({
+    detach: async () => { detachCalled = true; return { changed: false } },
+  })
+  const outcome = await reverseOf(handler)('probeless', makeCtx({
+    descriptors: descriptorMap([PROBELESS_DESCRIPTOR]),
+    clients: undefined,
+  }))
+  assert.equal(outcome.status, 'failed', 'a probe-less reverse is a failure, not a marker-dropping no-op')
+  assert.match(String(outcome.reason), /attach_probe/)
+  assert.equal(detachCalled, false, 'reverse must not pretend the disk undo ran')
 })
 
 test('reverse() returns failed (retry next pass) when the descriptor is gone from the catalog', async () => {
