@@ -213,7 +213,14 @@ async function runStaticLogin(name, tokenFile, stdin, ctx) {
  */
 async function persistStaticToken(name, token, ctx) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  await writeToken(stateDir, name, token)
+  try {
+    await writeToken(stateDir, name, token)
+  } catch (err) {
+    // writeToken now contends for the cross-process credentials lock and can
+    // throw a lock timeout; keep the friendly `hyp remote login:` contract.
+    ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
   ctx.stdout.write(`stored query-scoped token for '${name}' (mode 0600)\n`)
 
   // A friendly nudge if the target isn't configured: the token still
@@ -365,7 +372,19 @@ export async function runRemoteRemove(argv, ctx) {
     return 1
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const removedToken = await removeToken(stateDir, name)
+  let removedToken = false
+  try {
+    removedToken = await removeToken(stateDir, name)
+  } catch (err) {
+    // removeToken now contends for the cross-process credentials lock and can
+    // throw a lock timeout. The config edit above already landed, so report the
+    // partial state rather than letting a raw error escape.
+    ctx.stderr.write(`hyp remote remove: ${err instanceof Error ? err.message : String(err)}\n`)
+    if (removedConfig) {
+      ctx.stderr.write(`  (removed '${name}' from config; its stored token could not be removed)\n`)
+    }
+    return 1
+  }
   if (!removedConfig && !removedToken) {
     ctx.stderr.write(`hyp remote remove: no target or token named '${name}'\n`)
     return 1

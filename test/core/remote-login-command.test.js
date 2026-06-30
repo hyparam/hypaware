@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin } from '../../src/core/cli/remote_commands.js'
+import { runRemoteLogin, runRemoteRemove } from '../../src/core/cli/remote_commands.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 
 async function tmpHome() {
@@ -163,6 +163,30 @@ test('the static --token-file path is unchanged (stores kind: static)', async ()
   const stateDir = path.join(hypHome, 'hypaware')
   const creds = await readCredentials(stateDir)
   assert.deepEqual(creds.prod, { kind: 'static', token: 'sk-static' })
+})
+
+test('a static login write failure keeps the friendly hyp remote login: message', async () => {
+  const hypHome = await tmpHome()
+  // Put a file where the state dir must be created, so writeToken's lock setup
+  // (mkdir) fails like a contended lock would, surfacing a thrown error.
+  await fs.writeFile(path.join(hypHome, 'hypaware'), 'not a dir')
+  const tokenFile = path.join(hypHome, 'tok.txt')
+  await fs.writeFile(tokenFile, 'sk-static\n')
+  const { ctx, err } = await makeCtx({ hypHome })
+  const code = await runRemoteLogin(['prod', '--token-file', tokenFile], ctx, {})
+  assert.equal(code, 1)
+  assert.match(err.join(''), /^hyp remote login: /m)
+})
+
+test('a remove whose token removal fails reports the partial state, not a raw throw', async () => {
+  const hypHome = await tmpHome()
+  await fs.writeFile(path.join(hypHome, 'hypaware'), 'not a dir')
+  const { ctx, err } = await makeCtx({ hypHome })
+  const code = await runRemoteRemove(['prod'], ctx)
+  assert.equal(code, 1)
+  assert.match(err.join(''), /^hyp remote remove: /m)
+  // The config edit already landed, so the user is told the token lingered.
+  assert.match(err.join(''), /removed 'prod' from config; its stored token could not be removed/)
 })
 
 test('a piped stdin token still takes the static path', async () => {
