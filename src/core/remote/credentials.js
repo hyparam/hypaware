@@ -428,7 +428,13 @@ async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, n
     }
     const outcome = await withCredentialsLock(stateDir, async () => {
       const latest = await readOidcRecord(stateDir, target)
-      if (latest && latest.refreshToken !== from.refreshToken) {
+      if (!latest) {
+        // `hyp remote remove` deleted the session while our refresh was in
+        // flight. Honor the deletion under the lock instead of writing the
+        // stale row back and resurrecting removed credentials.
+        return { removed: true }
+      }
+      if (latest.refreshToken !== from.refreshToken) {
         // A sibling rotated the one-time-use session under us while our refresh
         // was in flight. Adopt a usable stored session; otherwise loop and
         // refresh with the rotated token rather than clobber it.
@@ -439,15 +445,15 @@ async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, n
       // a one-time-use server) replaces the consumed one, otherwise the stored
       // token is kept; `org` is fixed for the token's life, so an omitted one
       // keeps the stored value.
-      const base = latest || from
       await commitSession(stateDir, target, {
-        refreshToken: refreshed.refreshToken || base.refreshToken,
+        refreshToken: refreshed.refreshToken || latest.refreshToken,
         accessJwt: refreshed.accessJwt,
         expiresAt: refreshed.expiresAt,
-        org: refreshed.org || base.org,
+        org: refreshed.org || latest.org,
       })
       return { token: refreshed.accessJwt }
     })
+    if (outcome.removed) return { ok: false, error: noTokenError(target, envName) }
     if (outcome.token !== undefined) {
       return { ok: true, token: outcome.token, source: 'file', kind: 'oidc' }
     }

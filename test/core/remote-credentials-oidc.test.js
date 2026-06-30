@@ -254,6 +254,27 @@ test('resolveAccessJwt adopts a sibling login instead of clobbering it on a succ
   assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod).refreshToken, 'rt-login')
 })
 
+test('resolveAccessJwt honors a concurrent remove instead of resurrecting the session', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  let calls = 0
+  // While our refresh is in flight, the user runs `hyp remote remove prod`,
+  // deleting the row. Our refresh still succeeds, but committing its result
+  // would write the removed session back. The compare-and-swap must observe the
+  // deletion under the lock and decline to resurrect it.
+  const fetchImpl = /** @type {any} */ (async () => {
+    calls++
+    await removeToken(dir, 'prod')
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }) }
+  })
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  assert.equal(r.ok, false)
+  assert.match(/** @type {any} */ (r).error, /no token for 'prod' - run 'hyp remote login prod'/)
+  assert.equal(calls, 1)
+  // The removed session stays removed; nothing was written back.
+  assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod), undefined)
+})
+
 test('resolveAccessJwt keeps the stored org when a refresh response omits it', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
