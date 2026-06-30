@@ -1,7 +1,7 @@
 # LLP 0056: Refuse Over Spill or Truncate When a Query Exceeds Its Budget
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Query
 **Author:** Phil / Claude
 **Date:** 2026-06-30

@@ -1,7 +1,7 @@
 # LLP 0054: Bounded Query Execution
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Query, Cache
 **Author:** Phil / Claude
 **Date:** 2026-06-30
