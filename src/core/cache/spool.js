@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 
+import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
 /**
@@ -36,6 +37,10 @@ export function createCacheSpool(args) {
   const states = new Map()
   /** @type {Set<string>} */
   const knownTables = new Set()
+  // One cache-global allocator shared across every table's flush, so a seq is
+  // monotonic across the whole cache (and thus strictly increasing within each
+  // destination partition, which can receive rows from more than one spool path).
+  const seqAllocator = createIngestSeqAllocator({ cacheRoot: args.cacheRoot })
 
   /**
    * @param {string} tablePath
@@ -121,7 +126,7 @@ export function createCacheSpool(args) {
           const batchId = `flush-${Date.now()}-${process.pid}`
           let fileMalformed = 0
 
-          for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit })) {
+          for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
             const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
             rowCount += batch.chunk.rows.length
             chunkCount += 1

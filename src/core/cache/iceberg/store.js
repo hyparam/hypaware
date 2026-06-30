@@ -30,6 +30,7 @@ import {
   partitionSpecForDeclaration,
   validatePartitionSpecStability,
 } from '../../iceberg/partition-spec.js'
+import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
 
 /**
  * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
@@ -283,22 +284,90 @@ export async function readRowsFromTable(tablePath) {
  * time so callers (in particular `QueryStorageService.readRows`) never
  * materialize the full table in memory.
  *
+ * When `opts.since` is set (a bigint `_hyp_ingest_seq` watermark) only rows
+ * NEWER than the watermark are yielded. A row whose `_hyp_ingest_seq` is
+ * `null`/absent is a pre-column "legacy" row; its disposition is governed by
+ * `opts.includeLegacy`:
+ *
+ * - `includeLegacy` true (default) — legacy rows are treated as NEW (yielded).
+ *   This is the safe migration default: a fresh sink with no durable watermark
+ *   exports the pre-upgrade backlog once rather than silently skipping it
+ *   (LLP 0040 risk #1, the data-loss hazard).
+ * - `includeLegacy` false — legacy rows are treated as ALREADY EXPORTED
+ *   (skipped). A sink passes this once it HAS a durable watermark, so the
+ *   pre-upgrade backlog is re-exported exactly once, never on every subsequent
+ *   tick (LLP 0040 §6 risk #1). No new null-seq row can appear post-upgrade —
+ *   the `decorateRow` chokepoint stamps a real seq on every flushed row — so
+ *   excluding legacy rows after the first export is safe.
+ *
+ * A real seq is yielded iff strictly `> since`. The seq column is force-projected
+ * so the predicate can be evaluated even when the caller asked for a narrower
+ * set; `QueryStorageService` strips it from the row afterwards.
+ *
+ * The predicate is applied as a yielded-row filter rather than pushed into
+ * icebird's `scan({ where })`. icebird couples file/row-group pruning with a
+ * per-row match that DROPS nulls (`null > since` is false in both hyparquet's
+ * matcher and JS), which would skip exactly the legacy null-seq rows the
+ * migration must preserve. The design (LLP 0040 §2) names this yielded-row
+ * filter as the fallback; a future null-aware icebird filter can layer the
+ * file-skip optimization on top without changing this contract.
+ *
+ * @ref LLP 0040#storage-api-extension [implements] — since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
+ * @param {{ since?: bigint, includeLegacy?: boolean }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
-export async function* scanRowsFromTable(tablePath, columns) {
+export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (!tableExists(tablePath)) return
+  const since = opts?.since
+  const filtering = since !== undefined
+  const includeLegacy = opts?.includeLegacy !== false
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return
   const source = await icebergDataSource({ tableUrl: url, metadata, resolver, lister })
-  const projected = columns && columns.length > 0 ? columns : source.columns
+  // A table that has never been flushed under the seq-column schema carries no
+  // seq field: every row is implicitly null-seq, so the seq is read as `null`
+  // and the `includeLegacy` policy decides it.
+  const hasSeqColumn = source.columns.includes(INGEST_SEQ_COLUMN.name)
+  let projected = columns && columns.length > 0 ? columns : source.columns
+  if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
+    projected = [...projected, INGEST_SEQ_COLUMN.name]
+  }
   const scan = source.scan({ columns: projected })
   for await (const row of scan.rows()) {
-    yield await resolveAsyncRow(row, projected)
+    const resolved = await resolveAsyncRow(row, projected)
+    if (filtering) {
+      const seq = hasSeqColumn ? seqValue(resolved[INGEST_SEQ_COLUMN.name]) : null
+      if (seq === null) {
+        // Legacy (pre-upgrade) row: new on a fresh sink, already-exported once a
+        // durable watermark exists.
+        if (!includeLegacy) continue
+      } else if (seq <= /** @type {bigint} */ (since)) {
+        continue
+      }
+    }
+    yield resolved
   }
+}
+
+/**
+ * Decode a raw `_hyp_ingest_seq` cell to a bigint, or `null` when the row has
+ * no usable seq — a pre-column legacy row (null/absent), or an unparseable
+ * value. Returning `null` for an unparseable value is the safe direction: the
+ * caller treats `null` as a NEW row and never skips it (LLP 0040 risk #1).
+ *
+ * @param {unknown} raw
+ * @returns {bigint | null}
+ */
+export function seqValue(raw) {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw === 'bigint') return raw
+  if (typeof raw === 'number' && Number.isInteger(raw)) return BigInt(raw)
+  if (typeof raw === 'string' && /^-?\d+$/.test(raw)) return BigInt(raw)
+  return null
 }
 
 /**

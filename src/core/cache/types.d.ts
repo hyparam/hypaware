@@ -48,6 +48,16 @@ export interface ProgressState {
   updatedAt: string
 }
 
+/**
+ * Crash-safe, never-regressing monotonic int64 allocator for the
+ * `_hyp_ingest_seq` column. `next()` reserves seq blocks durably
+ * (reserve-before-stamp) so a resumed flush never re-issues a seq `<=` one
+ * already stamped. See `createIngestSeqAllocator`.
+ */
+export interface IngestSeqAllocator {
+  next(): Promise<bigint>
+}
+
 export interface SpoolAppendResult {
   bytesWritten: number
   pendingBytes: number

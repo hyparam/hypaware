@@ -31,6 +31,7 @@ function makeStorage(tablePath, count, rowFactory) {
   const factory = rowFactory ?? ((i) => ({ message_id: `m${i}`, content_text: `row ${i}` }))
   let flushes = 0
   return {
+    cacheRoot: '/cache',
     get flushes() { return flushes },
     /** @param {string} p */
     tableExists: (p) => p === tablePath,
@@ -41,6 +42,57 @@ function makeStorage(tablePath, count, rowFactory) {
       for (let i = 0; i < count; i += 1) {
         yield factory(i)
       }
+    },
+    // Cursor-aware sibling: row `i` carries `_hyp_ingest_seq = i + 1`, so a
+    // `since` watermark of seq K skips the first K rows. `after` is the
+    // running high-water as a decimal string, mirroring storage.js.
+    /**
+     * @param {string} _p
+     * @param {{ since?: { v: 1, seq: string } }} [opts]
+     */
+    async *readRowsSince(_p, opts) {
+      const since = opts?.since ? BigInt(opts.since.seq) : 0n
+      for (let i = 0; i < count; i += 1) {
+        const seq = BigInt(i + 1)
+        if (seq <= since) continue
+        yield { row: factory(i), after: { v: 1, seq: seq.toString() } }
+      }
+    },
+  }
+}
+
+/**
+ * In-memory stand-in for the per-(sink instance, partition) watermark store.
+ * `keyFor` collapses to a single key (these tests forward one partition), and
+ * `write` records every advance so a test can assert per-chunk progress and the
+ * ship-first/advance-second ordering.
+ *
+ * @param {{ v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null} [initial]
+ */
+function makeWatermarks(initial) {
+  let record = initial ?? null
+  /** @type {Array<{ v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string }>} */
+  const writes = []
+  return {
+    get record() { return record },
+    get writes() { return writes },
+    keyFor: () => ({ dataset: 'ai_gateway_messages', partitionKey: 'source=claude' }),
+    /** @param {any} _key */
+    filePath: (_key) => '/state/watermarks/ai_gateway_messages/source=claude.json',
+    async read() { return record },
+    /**
+     * @param {any} _key
+     * @param {{ continuation: { v: 1, seq: string }, exportedRowCount?: number }} update
+     */
+    async write(_key, update) {
+      record = {
+        v: 1,
+        continuation: update.continuation,
+        exportedRowCount: update.exportedRowCount ?? 0,
+        updatedAt: '2026-06-25T00:00:00.000Z',
+      }
+      writes.push(record)
+      return record
     },
   }
 }
@@ -111,13 +163,15 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   rowFactory?: (i: number) => Record<string, unknown>,
  *   signal?: string | null,
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
+ *   watermark?: { v: 1, continuation: { v: 1, seq: string }, exportedRowCount: number, updatedAt: string } | null,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs', sleepFn }) {
+function buildSink({ count, responder, rowFactory, signal = 'logs', sleepFn, watermark }) {
   const storage = makeStorage(TABLE, count, rowFactory)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
   const log = makeLog()
+  const watermarks = makeWatermarks(watermark)
   // Default sleep records the requested delay and returns instantly, so
   // backpressure pacing is asserted without real waits; a test can pass
   // the real abortableSleep to exercise close()-driven abort.
@@ -129,11 +183,12 @@ function buildSink({ count, responder, rowFactory, signal = 'logs', sleepFn }) {
     identityClient: /** @type {any} */ (identityClient),
     query: /** @type {any} */ (makeQuery(signal)),
     storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ (watermarks),
     log: /** @type {any} */ (log),
     fetchFn: fn,
     sleepFn: sleepFn ?? recordingSleep,
   })
-  return { sink, calls, storage, identityClient, log, sleeps, drains }
+  return { sink, calls, storage, identityClient, log, sleeps, drains, watermarks }
 }
 
 const batch = { partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE }] }
@@ -438,4 +493,192 @@ test('close() aborts a chunk paused on backpressure (no shutdown wedge)', async 
   assert.equal(result.retryPartitions?.length, 1)
   assert.match(String(result.error), /closed/)
   assert.equal(calls.length, 1) // never got past the first throttled POST
+})
+
+// ---- Incremental reads: per-(sink, partition) watermark (LLP 0040, T4) ----
+
+test('a tick with no new rows transmits zero bytes and zero chunks', async () => {
+  // Watermark already at the partition's max seq (10 rows -> seq 10): the
+  // since-filtered read yields nothing, so the sink POSTs nothing.
+  const { sink, calls, watermarks } = buildSink({
+    count: 10,
+    watermark: { v: 1, continuation: { v: 1, seq: '10' }, exportedRowCount: 10, updatedAt: '' },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 1)
+  assert.equal(result.bytesWritten, 0)
+  assert.equal(calls.length, 0)
+  // nothing acked -> watermark untouched
+  assert.equal(watermarks.writes.length, 0)
+  assert.equal(watermarks.record?.continuation.seq, '10')
+})
+
+test('a tick after N new rows reads/sends only the new suffix and advances the watermark', async () => {
+  // 10 rows total, watermark at seq 7: only rows 8,9,10 are new.
+  const { sink, calls, watermarks } = buildSink({
+    count: 10,
+    watermark: { v: 1, continuation: { v: 1, seq: '7' }, exportedRowCount: 7, updatedAt: '' },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].rowCount, 3) // not 10 — the prefix is skipped
+  // watermark advanced to the last row's seq, count carried forward
+  assert.equal(watermarks.record?.continuation.seq, '10')
+  assert.equal(watermarks.record?.exportedRowCount, 10)
+})
+
+test('the watermark advances once, at end-of-partition, to the high-water after', async () => {
+  // 12000 rows -> chunks of 5000,5000,2000. The watermark is NOT advanced per
+  // chunk (that would be unsafe under an unordered scan: a chunk's running-max
+  // `after` could skip lower-seq rows in a later chunk — LLP 0040 §4 risk #3).
+  // It advances exactly once, after every chunk acks, to the partition max.
+  const { sink, watermarks } = buildSink({ count: 12_000 })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(watermarks.writes.length, 1, 'one watermark write per partition, not per chunk')
+  assert.equal(watermarks.writes[0].continuation.seq, '12000')
+  assert.equal(watermarks.writes[0].exportedRowCount, 12_000)
+  assert.equal(watermarks.record?.continuation.seq, '12000')
+})
+
+test('a mid-partition failure leaves the watermark unadvanced (no partial checkpoint)', async () => {
+  // Fail the 2nd chunk: chunk 0 acked but chunk 1 did not. Because the watermark
+  // advances only at end-of-partition, a partial partition NEVER checkpoints, so
+  // the next tick re-reads the whole partition (the server ledger dedupes the
+  // already-acked prefix). Advancing to chunk 0's running-max `after` here would
+  // risk skipping lower-seq rows in the un-acked chunk 1 forever.
+  let n = 0
+  const { sink, watermarks } = buildSink({ count: 12_000, responder: () => (++n === 2 ? 500 : 202) })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'failed')
+  assert.equal(watermarks.writes.length, 0, 'no checkpoint past an un-acked chunk')
+  assert.equal(watermarks.record, null)
+})
+
+test('a respool re-reads the whole partition with STABLE batch-ids (ledger-dedups the acked prefix)', async () => {
+  // Cross-tick idempotency: tick 1 acks chunk 0 (seq 5000) then chunk 1 fails
+  // AFTER the server may have committed it. Because the partition did not
+  // complete, the watermark is NOT advanced, so tick 2 re-reads the whole
+  // partition. The re-sent prefix chunks MUST carry the batch-ids they had in
+  // tick 1 so the server ledger drops the redelivery; an id keyed on the
+  // per-tick chunk ordinal would still be stable here, but keying on the chunk
+  // start seq keeps it stable even when the watermark DOES advance elsewhere.
+  let n = 0
+  const built = buildSink({ count: 12_000, responder: () => (++n === 2 ? 500 : 202) })
+  const r1 = await built.sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(r1.status, 'failed')
+  assert.equal(built.calls.length, 2) // chunk 0 (202) + chunk 1 (500), then stop
+  assert.equal(built.watermarks.writes.length, 0, 'partial partition does not checkpoint')
+  const tick1Chunk0BatchId = built.calls[0].batchId
+  const tick1Chunk1BatchId = built.calls[1].batchId
+
+  // Tick 2: same sink, server now healthy. The respool re-reads the whole
+  // partition (no advanced watermark) and replays every chunk.
+  const r2 = await built.sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(r2.status, 'exported')
+  const tick2 = built.calls.slice(2)
+  assert.deepEqual(tick2.map((c) => c.rowCount), [5000, 5000, 2000], 'whole partition re-read')
+  assert.equal(
+    tick2[0].batchId,
+    tick1Chunk0BatchId,
+    'acked prefix chunk re-sends with its tick-1 batch-id (server dedupes the redelivery)'
+  )
+  assert.equal(
+    tick2[1].batchId,
+    tick1Chunk1BatchId,
+    'the previously-failed chunk re-sends with a stable batch-id too'
+  )
+  assert.equal(built.watermarks.record?.continuation.seq, '12000')
+})
+
+test('a fresh partition (no watermark) reads from the start and advances', async () => {
+  // No persisted watermark -> since undefined -> full read (the safe
+  // at-least-once direction), then the watermark is created.
+  const { sink, calls, watermarks } = buildSink({ count: 10 })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].rowCount, 10)
+  assert.equal(watermarks.record?.continuation.seq, '10')
+})
+
+test('an unordered scan never skips a lower-seq row when a later chunk fails (BLOCKER, LLP 0040 §4 risk #3)', async () => {
+  // The scan is NOT seq-ordered: a high-seq row leads the partition, so the
+  // running-max `after` saturates inside chunk 0 while chunk 1 holds LOWER seqs.
+  // Per-chunk advance would jump the watermark past chunk 1's rows on the
+  // chunk-0 ack; a chunk-1 failure would then strip them from every future
+  // `seq > watermark` read — silent permanent data loss. End-of-partition advance
+  // refuses to checkpoint a partial partition, so the next tick re-reads them.
+  const TOTAL = 5006 // chunk 0 = 5000 rows (MAX_CHUNK_ROWS), chunk 1 = 6 rows
+  /** @type {{ id: number, seq: bigint }[]} */
+  const physical = [{ id: 0, seq: 1_000_000n }] // high seq first -> running max saturates
+  for (let i = 1; i < 5000; i += 1) physical.push({ id: i, seq: BigInt(i) })
+  for (let i = 5000; i < TOTAL; i += 1) physical.push({ id: i, seq: BigInt(i) }) // chunk 1: low seqs
+
+  const storage = {
+    cacheRoot: '/cache',
+    /** @param {string} p */
+    tableExists: (p) => p === TABLE,
+    async flushTable() {},
+    /**
+     * @param {string} _p
+     * @param {{ since?: { v: 1, seq: string } }} [opts]
+     */
+    async *readRowsSince(_p, opts) {
+      const since = opts?.since ? BigInt(opts.since.seq) : 0n
+      let high = since
+      for (const { id, seq } of physical) {
+        if (seq <= since) continue // mirrors the real since-filter
+        if (seq > high) high = seq // `after` is a RUNNING MAX, not the row's own seq
+        yield { row: { id }, after: { v: 1, seq: high.toString() } }
+      }
+    },
+  }
+
+  // Fail chunk 1 the FIRST time it is POSTed (tick 1); accept it on the retry.
+  let chunk1Failed = false
+  /** @type {number[]} */
+  const acked = []
+  /** @type {typeof fetch} */
+  const fetchFn = /** @type {any} */ (async (_url, init) => {
+    const body = String(init?.body ?? '')
+    const ids = body.split('\n').filter((l) => l.length > 0).map((l) => Number(JSON.parse(l).id))
+    const isChunk1 = ids.includes(5000)
+    let status = 202
+    if (isChunk1 && !chunk1Failed) { chunk1Failed = true; status = 500 }
+    if (status === 202) acked.push(...ids)
+    return /** @type {any} */ ({
+      status, ok: status >= 200 && status < 300,
+      headers: { get: () => null }, async text() { return '' }, body: { cancel: async () => {} },
+    })
+  })
+
+  const watermarks = makeWatermarks(null)
+  const sink = createForwardSink({
+    config: /** @type {any} */ ({ url: 'http://server:8740', identity: {} }),
+    identityClient: /** @type {any} */ (makeIdentity()),
+    query: /** @type {any} */ (makeQuery('logs')),
+    storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ (watermarks),
+    log: /** @type {any} */ (makeLog()),
+    fetchFn,
+    sleepFn: async () => {},
+  })
+
+  // Tick 1: chunk 0 acks, chunk 1 fails -> partition fails.
+  const r1 = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(r1.status, 'failed')
+
+  // Tick 2: server healthy. The whole partition re-reads (watermark unadvanced),
+  // so the low-seq chunk-1 rows are delivered — never skipped.
+  const r2 = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  assert.equal(r2.status, 'exported')
+
+  for (let i = 5000; i < TOTAL; i += 1) {
+    assert.ok(acked.includes(i), `low-seq row ${i} from the previously-failed chunk was delivered (no skip)`)
+  }
+  assert.equal(new Set(acked).size, TOTAL, 'every row delivered exactly once across the retry')
+  assert.equal(watermarks.record?.continuation.seq, '1000000', 'watermark advances only after the whole partition acks')
 })
