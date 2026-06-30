@@ -18,6 +18,7 @@ import { loginWithBrowser } from '../remote/oidc_login.js'
 
 /**
  * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { OidcSession } from '../../../src/core/remote/types.js'
  */
 
 /**
@@ -258,16 +259,15 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+  /** @type {OidcSession} */
+  let session
   try {
-    const session = await login({
+    session = await login({
       identityBase,
       org,
       noBrowser,
       print: (line) => ctx.stderr.write(`${line}\n`),
     })
-    await writeSession(stateDir, name, session)
-    ctx.stdout.write(`logged in to '${name}' as org '${session.org}' (session stored, mode 0600)\n`)
-    return 0
   } catch (err) {
     const callbackError = /** @type {any} */ (err)?.callbackError
     ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
@@ -280,6 +280,19 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
     }
     return 1
   }
+  // The single-use code is already spent by here, so a write failure (most
+  // likely a lock timeout under a concurrent hyp process) is not a login
+  // failure: say the sign-in worked but the store did not, and do not print the
+  // headless hint, which would wrongly imply the browser flow itself failed.
+  try {
+    await writeSession(stateDir, name, session)
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: signed in but could not store the session: ${err instanceof Error ? err.message : String(err)}\n`)
+    ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
+    return 1
+  }
+  ctx.stdout.write(`logged in to '${name}' as org '${session.org}' (session stored, mode 0600)\n`)
+  return 0
 }
 
 /**

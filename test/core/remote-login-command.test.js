@@ -64,6 +64,24 @@ test('browser mode forwards --org and the derived identity base, then stores the
   assert.equal(/** @type {any} */ (creds.prod).refreshToken, 'rt')
 })
 
+test('a successful sign-in whose session write fails reports a store failure, not a login failure', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  // Make the session write fail: put a plain file where the state dir must be,
+  // so withCredentialsLock's mkdir throws. The single-use code is already spent.
+  await fs.writeFile(path.join(hypHome, 'hypaware'), 'not a dir')
+  const login = /** @type {any} */ (async () => ({
+    refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme',
+  }))
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 1)
+  // The browser flow itself worked, so do not blame it or print the headless hint.
+  assert.match(err.join(''), /signed in but could not store the session/)
+  assert.doesNotMatch(err.join(''), /machine with no browser/)
+  assert.equal(out.join(''), '')
+})
+
 test('--no-browser passes noBrowser through to the flow', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })
