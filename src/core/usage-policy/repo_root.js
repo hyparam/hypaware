@@ -7,7 +7,7 @@ const GIT_ENTRY = '.git'
 
 /**
  * Find the git repository root governing `startDir`: the nearest ancestor
- * (inclusive) that contains a `.git` entry — a directory for an ordinary
+ * (inclusive) that contains a `.git` entry: a directory for an ordinary
  * clone, a file for a linked worktree or submodule. Returns `null` when
  * `startDir` is not inside a git repository.
  *
@@ -15,8 +15,8 @@ const GIT_ENTRY = '.git'
  * single repo-wide `.hypignore` at the toplevel, mirroring what the
  * Claude/Codex adapters derive with `git rev-parse --show-toplevel` when they
  * stamp `repo_root` (LLP 0049 #cli). It is kept as dependency-free,
- * fs-injectable path logic — an ancestor walk in the same shape as the
- * `.hypignore` matcher — so the CLI need not spawn git and so it stays
+ * fs-injectable path logic (an ancestor walk in the same shape as the
+ * `.hypignore` matcher) so the CLI need not spawn git and so it stays
  * hermetically unit-testable.
  *
  * @param {string} startDir

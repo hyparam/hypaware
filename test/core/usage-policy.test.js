@@ -137,6 +137,53 @@ test('resolve: relative cwd is normalized before caching', () => {
   assert.equal(result.class, 'full')
 })
 
+test('resolve: a .hypignore written after a cwd was cached `full` is honored once the TTL elapses', () => {
+  // The privacy-critical staleness direction (R1): a long-lived daemon
+  // resolver must not keep recording a folder forever just because it cached
+  // `full` before the user ran `hyp ignore`.
+  const files = /** @type {Record<string, string>} */ ({})
+  let clock = 1_000
+  const resolver = createUsagePolicyResolver({
+    existsSync: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    readFileSync: (p) => files[p] ?? '',
+    now: () => clock,
+    ttlMs: 5_000,
+  })
+
+  // First resolve: nothing governs => full, cached with a 5s expiry.
+  assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
+
+  // User writes a .hypignore. Within the TTL the cached `full` still wins.
+  files['/work/repo/.hypignore'] = 'ignore\n'
+  clock += 1_000
+  assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
+
+  // Once the entry expires, the walk re-runs and the new file is honored,
+  // without a daemon restart.
+  clock += 5_000
+  assert.equal(resolver.resolve('/work/repo/sub').class, 'ignore')
+  assert.equal(resolver.isIgnored('/work/repo/sub'), true)
+})
+
+test('resolve: removing a .hypignore is honored once the TTL elapses (unignore)', () => {
+  // The inverse direction: after `hyp unignore` the subtree records again
+  // within the TTL rather than staying suppressed until restart.
+  const files = /** @type {Record<string, string>} */ ({ '/work/repo/.hypignore': 'ignore\n' })
+  let clock = 1_000
+  const resolver = createUsagePolicyResolver({
+    existsSync: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    readFileSync: (p) => files[p] ?? '',
+    now: () => clock,
+    ttlMs: 5_000,
+  })
+
+  assert.equal(resolver.resolve('/work/repo/sub').class, 'ignore')
+
+  delete files['/work/repo/.hypignore']
+  clock += 5_001
+  assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
+})
+
 test('createUsagePolicyResolver defaults fs to node:fs when none injected', () => {
   // A directory tree with no .hypignore resolves to full without throwing.
   const resolver = createUsagePolicyResolver()

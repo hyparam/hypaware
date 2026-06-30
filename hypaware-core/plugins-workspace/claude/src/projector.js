@@ -171,12 +171,17 @@ export function createClaudeExchangeProjector(opts) {
       // it, and an empty `messages`, identically): a literal `[]` is not a valid
       // projection and would log a spurious invalid-output warning.
       const cwd = sessionContextRecord?.cwd
-      if (cwd && resolver.isIgnored(cwd)) {
-        ctx.log.info('plugin.claude.usage_policy_drop', {
+      const policy = cwd ? resolver.resolve(cwd) : null
+      if (policy?.class === 'ignore') {
+        // A fail-safe clamp (declared token unimplemented) escalates to warn
+        // so an operator can tell it from an intended ignore (R3 SHOULD).
+        ctx.log[policy.warn ? 'warn' : 'info']('plugin.claude.usage_policy_drop', {
           component: 'claude',
           operation: 'usage_policy_drop',
           exchange_id: input.exchange_id,
-          governed_by: resolver.resolve(cwd).governedBy,
+          declared: policy.declared,
+          governed_by: policy.governedBy,
+          ...(policy.warn ? { warn: policy.warn } : {}),
         })
         return undefined
       }

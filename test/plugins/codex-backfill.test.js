@@ -335,7 +335,7 @@ test('modern rollout projects into canonical ai_gateway_messages rows', async ()
   }
 })
 
-// @ref LLP 0050 [tests]: capture-seam drop for backfill — a session whose
+// @ref LLP 0050 [tests]: capture-seam drop for backfill: a session whose
 // recorded cwd is .hypignore-ignored is skipped before projecting or yielding
 // any row, so `hyp backfill` never re-imports sessions ignored live (R1).
 test('backfill skips a session whose cwd is .hypignore-ignored', async () => {

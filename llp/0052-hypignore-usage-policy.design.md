@@ -86,10 +86,22 @@ export function createUsagePolicyResolver({ readFileSync, existsSync } = nodeFs)
   ancestor containing a `.hypignore` governs. Found ⇒ `parseHypignore(read)`; none ⇒
   `{ class: 'full', governedBy: null }`. Because V1 has no un-ignore directive, "any
   ancestor `.hypignore` ⇒ ignored" (LLP 0049 §scope).
-- **Per-`cwd` cache** (LLP 0049 R6): memoize `resolve` by absolute `cwd` so the capture
-  hot path adds no unbounded fs work. Cache is process-lifetime (a resolver instance per
-  daemon/backfill run); `--check` constructs a fresh resolver so it always reflects disk.
-- fs injected for tests; defaults to `node:fs`.
+- **Per-`cwd` cache with a short TTL** (LLP 0049 R6): memoize `resolve` by absolute `cwd`
+  so the capture hot path does at most one ancestor walk per `cwd` per TTL window, not one
+  per exchange. Entries carry an expiry (`CACHE_TTL_MS`, 5s); a resolver instance is held
+  per daemon/backfill run, and `--check` constructs a fresh resolver so it always reflects
+  disk immediately.
+  - **Why TTL, not process-lifetime.** A process-lifetime cache made `hyp ignore` silently
+    ineffective on a running daemon: a `cwd` already resolved+cached as `full` by the live
+    projector kept recording after the user wrote a `.hypignore`, until the daemon
+    restarted, a silent leak window against R1 (raised by both reviewers on PR #211). A
+    bounded TTL re-walks once an entry expires, so a `.hypignore` written (or removed)
+    mid-run is honored within the window. Not "don't cache `full`": that reintroduces the
+    per-exchange walk R6 forbids. The TTL is the interim leak bound.
+  - **Future enhancement (not V1):** `hyp ignore` / `hyp unignore` signal the running
+    daemon to invalidate and prime the affected `cwd`'s cache entry, collapsing apply
+    latency from "within the TTL" to zero. The CLI writes a forward-note pointing here.
+- fs and the clock (`now`) are injected for tests; default to `node:fs` and `Date.now`.
 
 ## Enforcement: four adapter drop-sites {#enforcement}
 

@@ -3677,7 +3677,7 @@ function expandClientName(requested, gateway) {
 // first meaningful token is the `ignore` usage class. The comment header
 // explains the file to whoever finds it in a checkout; the matcher only ever
 // reads the token (LLP 0049 #file-format).
-const HYPIGNORE_TEMPLATE = `# HypAware usage policy — .hypignore
+const HYPIGNORE_TEMPLATE = `# HypAware usage policy (.hypignore)
 #
 # This folder and everything beneath it is IGNORED: AI gateway exchanges
 # (Claude / Codex) whose working directory is at or under this directory are
@@ -3722,7 +3722,7 @@ function parseIgnoreArgs(argv) {
  * write is idempotent (LLP 0049 R5): a path already governed by an ancestor
  * `.hypignore` is left as-is. With `--check`, reports status without writing.
  *
- * @ref LLP 0049#cli [implements]: the `hyp ignore` verb — write the dotfile at the repo root, idempotent, with a prospective-only `--check`
+ * @ref LLP 0049#cli [implements]: the `hyp ignore` verb: write the dotfile at the repo root, idempotent, with a prospective-only `--check`
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -3739,7 +3739,7 @@ async function runIgnore(argv, ctx) {
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
   // Idempotent (R5): a fresh resolver reflects disk. Any governing ancestor
-  // `.hypignore` already ignores `base` (V1 has no un-ignore directive — any
+  // `.hypignore` already ignores `base` (V1 has no un-ignore directive, any
   // `.hypignore` resolves to `ignore`), so re-ignoring is a no-op success
   // rather than a redundant nested file.
   const existing = createUsagePolicyResolver().resolve(base)
@@ -3749,7 +3749,7 @@ async function runIgnore(argv, ctx) {
   }
 
   // Default target: the repo root when `base` is in a git repo, else `base`.
-  // An explicit `path` overrides — write exactly where the caller pointed.
+  // An explicit `path` overrides: write exactly where the caller pointed.
   const targetDir = parsed.path ? base : (findRepoRoot(base) ?? base)
   const file = path.join(targetDir, '.hypignore')
   try {
@@ -3764,6 +3764,10 @@ async function runIgnore(argv, ctx) {
     [Attr.OPERATION]: 'usage_policy.ignore_write',
     status: 'ok',
   })
+  // A running daemon holds its own usage-policy resolver, so this new file is
+  // honored within the matcher's cache TTL, not instantly (matcher.js
+  // CACHE_TTL_MS). Future enhancement: signal the daemon here to invalidate and
+  // prime this cwd's cache entry so the drop applies with zero latency.
   ctx.stdout.write(`wrote ${file}\n`)
   return 0
 }
@@ -3775,7 +3779,7 @@ async function runIgnore(argv, ctx) {
  * subtree. Idempotent (LLP 0049 R5): unignoring a path that no `.hypignore`
  * governs succeeds as a no-op.
  *
- * @ref LLP 0049#cli [implements]: the `hyp unignore` verb — remove the governing dotfile, idempotent
+ * @ref LLP 0049#cli [implements]: the `hyp unignore` verb: remove the governing dotfile, idempotent
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -3820,7 +3824,7 @@ async function runUnignore(argv, ctx) {
  *
  * Reports whether `path` (default cwd) is currently ignored, which
  * `.hypignore` governs, and the residual count of already-cached rows from the
- * scope. This is prospective-only: `--check` never purges — it just surfaces
+ * scope. This is prospective-only: `--check` never purges; it just surfaces
  * the residue so the rule stays debuggable (LLP 0049 #prospective-only).
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
@@ -3861,7 +3865,7 @@ async function runIgnoreCheck(parsed, ctx) {
 
 /**
  * Count already-cached `ai_gateway_messages` rows whose `cwd`/`repo_root` lies
- * under `scopeDir` — the residue an `ignore` does NOT purge (prospective-only).
+ * under `scopeDir`: the residue an `ignore` does NOT purge (prospective-only).
  *
  * A LIKE pushes a *superset* filter into the scan (squirreling's LIKE treats
  * `_`/`%` as wildcards, so a path containing them can only over-match, never

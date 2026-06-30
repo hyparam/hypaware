@@ -26,7 +26,23 @@ function ignoringResolver(ignoredDir) {
   })
 }
 
-// @ref LLP 0050 [tests]: capture-seam drop — an ignored cwd yields no rows so
+/**
+ * Like `ignoringResolver`, but the governing `.hypignore` declares an
+ * unimplemented class (`local-only`), so the matcher fail-safe clamps it to
+ * `ignore` and carries a `warn` (R3). Used to assert the drop escalates to
+ * warn level with the declared token.
+ *
+ * @param {string} ignoredDir
+ */
+function clampingResolver(ignoredDir) {
+  const hypignore = path.join(ignoredDir, '.hypignore')
+  return createUsagePolicyResolver({
+    existsSync: (p) => p === hypignore,
+    readFileSync: () => 'local-only\n',
+  })
+}
+
+// @ref LLP 0050 [tests]: capture-seam drop: an ignored cwd yields no rows so
 // the gateway write guard persists nothing; a clean cwd is unaffected (R1/R2).
 test('project() returns no projection when the exchange cwd is .hypignore-ignored', () => {
   const projector = createCodexExchangeProjector({
@@ -86,6 +102,41 @@ test('project() emits a usage_policy_drop log on an ignored cwd', () => {
   assert.ok(drop, 'expected a usage_policy_drop log entry')
   assert.equal(drop.fields?.operation, 'usage_policy_drop')
   assert.equal(drop.fields?.governed_by, '/work/ignored/.hypignore')
+  assert.equal(drop.fields?.declared, 'ignore', 'an intended ignore carries declared=ignore')
+})
+
+test('project() escalates a fail-safe clamp to a warn-level drop with the declared token (R3)', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const infos = []
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector({
+    env: {},
+    resolver: clampingResolver('/work/ignored'),
+  })
+  const log = {
+    debug() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    info: (message, fields) => { infos.push({ message, fields }) },
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  const projection = projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '/work/ignored',
+      messages: [{ role: 'user', content: 'secret' }],
+    }),
+  }), { log })
+
+  // Still dropped (privacy fail-safe), but now observable as a clamp.
+  assert.equal(projection, undefined)
+  assert.equal(infos.length, 0, 'a fail-safe clamp does not log at info level')
+  const drop = warns.find((e) => e.message === 'plugin.codex.usage_policy_drop')
+  assert.ok(drop, 'a fail-safe clamp emits a warn-level usage_policy_drop')
+  assert.equal(drop.fields?.declared, 'local-only', 'the declared token is carried for diagnosis')
+  assert.match(String(drop.fields?.warn), /local-only/)
 })
 
 test('match() accepts the three transports it owns and rejects others', () => {

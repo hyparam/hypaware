@@ -78,18 +78,22 @@ export function createCodexExchangeProjector(opts = {}) {
       // ancestor `.hypignore` of class `ignore` drops the row by returning no
       // projection (the gateway source's `messageRows.length > 0` write guard
       // then persists nothing). The response has already streamed, so the live
-      // call is untouched — only persistence is suppressed (LLP 0049 R1/R2).
+      // call is untouched: only persistence is suppressed (LLP 0049 R1/R2).
       // This is the same cwd `resolveRecordedContext` would stamp on the row.
       const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
       if (cwd) {
         const policy = resolver.resolve(cwd)
         if (policy.class === 'ignore') {
-          ctx?.log?.info?.('plugin.codex.usage_policy_drop', {
+          // `declared` distinguishes an intended `ignore` from a fail-safe clamp
+          // of an unimplemented token; on a clamp escalate to warn (R3 SHOULD).
+          ctx?.log?.[policy.warn ? 'warn' : 'info']?.('plugin.codex.usage_policy_drop', {
             component: 'codex',
             operation: 'usage_policy_drop',
             class: policy.class,
+            declared: policy.declared,
             governed_by: policy.governedBy,
             cwd_sha256: sha256Hex(cwd).slice(0, 16),
+            ...(policy.warn ? { warn: policy.warn } : {}),
           })
           return undefined
         }

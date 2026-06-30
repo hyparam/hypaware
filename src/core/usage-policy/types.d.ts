@@ -18,11 +18,13 @@ export interface ParseResult {
 // `class` is the resolved, implemented class (`full` when nothing governs);
 // `governedBy` is the absolute path of the nearest governing file, or null;
 // `declared` is the raw token before fail-safe (null when nothing governs or
-// the file was empty/comment-only).
+// the file was empty/comment-only); `warn` is carried from the parse and is
+// present only on a fail-safe clamp, so adapters can warn on it (R3).
 export interface ResolveResult {
   class: UsageClass
   governedBy: string | null
   declared: string | null
+  warn?: string
 }
 
 export interface UsagePolicyResolver {

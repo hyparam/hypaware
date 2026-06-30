@@ -183,13 +183,18 @@ async function* runClaudeBackfill(args) {
       // hook-written record wins, else the first transcript line's cwd), so the
       // session is tested on the same cwd the row would have carried.
       const sessionCwd = record?.cwd ?? windowed.find((entry) => entry.cwd)?.cwd
-      if (sessionCwd && resolver.isIgnored(sessionCwd)) {
-        log.info('claude.backfill.usage_policy_drop', {
+      const sessionPolicy = sessionCwd ? resolver.resolve(sessionCwd) : null
+      if (sessionPolicy?.class === 'ignore') {
+        // A fail-safe clamp (declared token unimplemented) escalates to warn
+        // so an operator can tell it from an intended ignore (R3 SHOULD).
+        log[sessionPolicy.warn ? 'warn' : 'info']('claude.backfill.usage_policy_drop', {
           component: 'plugin.claude.backfill',
           operation: 'usage_policy_drop',
           session_id: sessionId,
-          governed_by: resolver.resolve(sessionCwd).governedBy,
+          declared: sessionPolicy.declared,
+          governed_by: sessionPolicy.governedBy,
           status: 'ok',
+          ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
         })
         continue
       }

@@ -193,15 +193,20 @@ async function* runCodexBackfill(args) {
       // an ancestor `.hypignore` of class `ignore` is skipped before projecting
       // or yielding any row, so `hyp backfill` never re-imports the exact
       // sessions ignored live (LLP 0049 R1).
-      if (session.cwd && resolver.resolve(session.cwd).class === 'ignore') {
+      const sessionPolicy = session.cwd ? resolver.resolve(session.cwd) : null
+      if (sessionPolicy?.class === 'ignore') {
         sessionsIgnored += 1
-        log.info('codex.backfill.usage_policy_drop', {
+        // A fail-safe clamp (declared token unimplemented) escalates to warn
+        // so an operator can tell it from an intended ignore (R3 SHOULD).
+        log[sessionPolicy.warn ? 'warn' : 'info']('codex.backfill.usage_policy_drop', {
           component: COMPONENT,
           operation: 'usage_policy_drop',
           conversation_id: session.sessionId,
           class: 'ignore',
-          governed_by: resolver.resolve(session.cwd).governedBy,
+          declared: sessionPolicy.declared,
+          governed_by: sessionPolicy.governedBy,
           status: 'skipped',
+          ...(sessionPolicy.warn ? { warn: sessionPolicy.warn } : {}),
         })
         continue
       }
