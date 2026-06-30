@@ -3,11 +3,13 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
+ * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -74,6 +76,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
  *   unsupportedLocations?: Array<{ kind: string, path: string }>,
  *   clientName?: string,
  *   pluginName?: string,
+ *   resolver?: UsagePolicyResolver,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -83,6 +86,9 @@ export function createCodexBackfillProvider(opts) {
   const codexHome = opts.codexHome ?? defaultCodexHome(opts.homeDir)
   const sessionsDir = opts.sessionsDir ?? path.join(codexHome, 'sessions')
   const unsupportedLocations = opts.unsupportedLocations ?? defaultUnsupportedLocations(opts.homeDir)
+  // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
+  // the whole scan (LLP 0049 R6).
+  const resolver = opts.resolver ?? createUsagePolicyResolver()
 
   return {
     name: clientName,
@@ -90,7 +96,7 @@ export function createCodexBackfillProvider(opts) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Codex session rollouts into ai_gateway_messages',
     async *run(ctx) {
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName })
+      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver })
     },
   }
 }
@@ -131,11 +137,12 @@ function defaultUnsupportedLocations(homeDir) {
  *   sessionsDir: string,
  *   unsupportedLocations: Array<{ kind: string, path: string }>,
  *   clientName: string,
+ *   resolver: UsagePolicyResolver,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
 async function* runCodexBackfill(args) {
-  const { ctx, codexHome, sessionsDir, unsupportedLocations, clientName } = args
+  const { ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
 
@@ -158,6 +165,7 @@ async function* runCodexBackfill(args) {
 
   let filesSeen = 0
   let sessionsProjected = 0
+  let sessionsIgnored = 0
   let messagesProjected = 0
 
   for (const filePath of await listRolloutFiles(sessionsDir)) {
@@ -180,6 +188,24 @@ async function* runCodexBackfill(args) {
     }
 
     for (const session of sessions) {
+      // @ref LLP 0050 [implements]: capture-seam drop for backfill, symmetric
+      // to the @hypaware/claude backfill skip. A session whose recorded cwd has
+      // an ancestor `.hypignore` of class `ignore` is skipped before projecting
+      // or yielding any row, so `hyp backfill` never re-imports the exact
+      // sessions ignored live (LLP 0049 R1).
+      if (session.cwd && resolver.resolve(session.cwd).class === 'ignore') {
+        sessionsIgnored += 1
+        log.info('codex.backfill.usage_policy_drop', {
+          component: COMPONENT,
+          operation: 'usage_policy_drop',
+          conversation_id: session.sessionId,
+          class: 'ignore',
+          governed_by: resolver.resolve(session.cwd).governedBy,
+          status: 'skipped',
+        })
+        continue
+      }
+
       const exchange = projectedExchangeFromSession({
         session,
         items: filterByWindow(session.items, window),
@@ -211,6 +237,7 @@ async function* runCodexBackfill(args) {
     operation: 'backfill.scan',
     files_seen: filesSeen,
     sessions_projected: sessionsProjected,
+    sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
     status: 'ok',
   })

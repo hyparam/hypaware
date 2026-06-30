@@ -2,11 +2,13 @@
 
 import { createHash } from 'node:crypto'
 
+import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { CodexLogReader } from './types.js'
+ * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -27,6 +29,7 @@ import { redactRemoteUserinfo } from './git-remote.js'
  * @param {{
  *   logReaders?: CodexLogReader[],
  *   env?: Record<string, string | undefined>,
+ *   resolver?: UsagePolicyResolver,
  * }} [opts]
  * @returns {AiGatewayExchangeProjector}
  */
@@ -36,6 +39,10 @@ export function createCodexExchangeProjector(opts = {}) {
   const logReaders = sqliteReadsEnabled && Array.isArray(opts.logReaders)
     ? opts.logReaders
     : []
+  // One `.hypignore` resolver per projector instance (one per started
+  // listener): the per-cwd cache then spans the listener's lifetime so the
+  // capture hot path adds no unbounded fs work (LLP 0049 R6).
+  const resolver = opts.resolver ?? createUsagePolicyResolver()
 
   return {
     name: 'codex-exchange',
@@ -54,14 +61,40 @@ export function createCodexExchangeProjector(opts = {}) {
       return false
     },
 
-    /** @param {AiGatewayExchangeInput} input */
-    project(input) {
+    /**
+     * @param {AiGatewayExchangeInput} input
+     * @param {{ log?: { info?: (m: string, f?: Record<string, unknown>) => void } }} [ctx]
+     */
+    project(input, ctx) {
       const reqBody = parseMaybeJson(input.request_body)
       if (!isPlainObject(reqBody)) return undefined
 
       const path = input.path ?? ''
       const provider = resolveProvider(input, reqBody, path)
       const codexContext = resolveCodexContext(input, provider, path, reqBody)
+
+      // @ref LLP 0050 [implements]: capture-seam drop, symmetric to the
+      // @hypaware/claude projector. Once this exchange's cwd is resolved, an
+      // ancestor `.hypignore` of class `ignore` drops the row by returning no
+      // projection (the gateway source's `messageRows.length > 0` write guard
+      // then persists nothing). The response has already streamed, so the live
+      // call is untouched — only persistence is suppressed (LLP 0049 R1/R2).
+      // This is the same cwd `resolveRecordedContext` would stamp on the row.
+      const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
+      if (cwd) {
+        const policy = resolver.resolve(cwd)
+        if (policy.class === 'ignore') {
+          ctx?.log?.info?.('plugin.codex.usage_policy_drop', {
+            component: 'codex',
+            operation: 'usage_policy_drop',
+            class: policy.class,
+            governed_by: policy.governedBy,
+            cwd_sha256: sha256Hex(cwd).slice(0, 16),
+          })
+          return undefined
+        }
+      }
+
       const responseBody = parseMaybeJson(input.response_body)
       const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
       const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
