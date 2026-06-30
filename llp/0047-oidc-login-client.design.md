@@ -69,9 +69,11 @@ Realizes LLP 0046 D3.
 `startLoopbackReceiver({ state, timeoutMs })` → `{ redirectUri, waitForCode() }`. Binds
 `http://127.0.0.1:0` (OS-assigned port) and returns `redirectUri` so the caller can build
 the start URL before opening the browser. `waitForCode()` resolves `{ code }` when
-`/callback` arrives with a matching `state`; rejects on `error=`, `state` mismatch, or
-timeout. Serves a minimal "login complete, you can close this tab" page, then closes.
-Single-shot. Realizes LLP 0046 D2.
+`/callback` arrives with a matching `state`; rejects on a matching-state `error=`, a
+matching-state callback with no `code`, or timeout. A callback whose `state` does not
+match (or is absent) is served a neutral page and ignored, never settling the flow, so a
+stray or hostile hit on the loopback port cannot abort the login. Serves a minimal "login
+complete, you can close this tab" page, then closes. Single-shot. Realizes LLP 0046 D2.
 
 ### `open_browser.js`
 `openBrowser(url)` spawns the platform opener (`open` darwin, `xdg-open` linux, `start`
@@ -122,8 +124,10 @@ re-run the browser flow).
 
 ## Security notes
 
-- `state` is a random per-login CSRF token; a callback whose `state` does not match is
-  rejected without reading `code`.
+- `state` is a random per-login CSRF token. A callback whose `state` matches settles the
+  flow (a `code` resolves it, an `error=` rejects it); a callback whose `state` does not
+  match is ignored without reading `code`, not rejected, so a stray or hostile request to
+  the loopback port cannot abort the in-flight login.
 - The loopback listener binds only `127.0.0.1`, is single-shot, and times out.
 - The PKCE verifier lives in memory for one flow, is never logged, never persisted.
 - The refresh token and access JWT inherit the 0600 atomic-write store; neither is ever
@@ -145,8 +149,9 @@ token, or access JWT (hash or redact if identity matters). Give the smoke a stab
 
 Traditional unit tests (deterministic; injected clock, fetch, and http):
 - `pkce`: challenge is the base64url SHA-256 of the verifier; pairs differ.
-- `loopback`: a matching `state` resolves `{ code }`; a mismatched `state`, an `error=`,
-  and a timeout each reject; the listener closes after one request.
+- `loopback`: a matching `state` resolves `{ code }`; a matching-state `error=` and a
+  timeout each reject; a mismatched `state` is ignored (the flow keeps waiting and a later
+  valid callback still resolves); the listener closes after the settling request.
 - `identity_client`: `exchangeCode` and `refreshSession` post the right body and parse
   the response; a 401 surfaces a typed `invalid_grant`.
 - `credentials`: an `oidc` record round-trips; a legacy `token`-only record reads as

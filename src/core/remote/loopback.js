@@ -98,27 +98,28 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
     const error = params.get('error')
     const code = params.get('code')
 
-    // An `error` callback is surfaced before the state check: it carries no
-    // authorization code, so the CSRF guard (which exists only to stop an
-    // attacker's code being adopted) does not apply, and a provider that drops
-    // `state` on an error redirect (RFC 6749 only requires echoing it when
-    // present) must still report the real failure rather than a misleading
-    // "state mismatch" plus a headless-token hint.
+    // CSRF guard, applied to every callback before it can settle the login: only
+    // a request carrying our exact `state` can have come from the browser we sent
+    // to the IdP. Anything else gets a neutral page and is IGNORED, never settling
+    // the flow, so it cannot abort an in-flight login - we keep waiting for the
+    // genuine redirect or the timeout. This is deliberate: the ephemeral loopback
+    // port is reachable by any local process and by any page the user is browsing
+    // (a no-cors GET still reaches us), so failing the login on the first stray or
+    // hostile `?error=` / wrong-`?state=` hit would be a trivial login DoS. The
+    // identity server echoes `state` on both success and error (LLP 0047), so a
+    // real provider error still matches here and surfaces below.
+    if (returnedState !== state) {
+      respond(res, 'Unexpected login callback. You can close this tab.')
+      return
+    }
     if (params.has('error')) {
-      // The redirect's `error` is attacker-influenceable (anyone can hit the
-      // loopback port). Bound it to a safe token before it reaches the error
-      // message, the log ERROR_KIND, and the terminal, so a crafted value can't
-      // inject newlines into logs or terminal output.
+      // The redirect's `error` is attacker-influenceable (anyone who learns the
+      // state, or guesses it, can hit the port). Bound it to a safe token before
+      // it reaches the error message, the log ERROR_KIND, and the terminal, so a
+      // crafted value can't inject newlines into logs or terminal output.
       const safeError = sanitizeErrorCode(error ?? '')
       respond(res, 'Login failed. You can close this tab and return to the terminal.')
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
-      return
-    }
-    // A callback whose state does not match is rejected without reading the
-    // code (CSRF guard). Serve a neutral page either way.
-    if (returnedState !== state) {
-      respond(res, 'Login state mismatch. You can close this tab.')
-      fail(new Error('loopback received a callback with a mismatched state'), 'state_mismatch')
       return
     }
     if (!code) {

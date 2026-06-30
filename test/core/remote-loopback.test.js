@@ -55,13 +55,17 @@ test('a matching state resolves { code } and closes the listener', async () => {
   await assert.rejects(() => hitCallback(recv.redirectUri, { code: 'x', state: 's-good' }))
 })
 
-test('a mismatched state rejects without yielding a code', async () => {
+test('a mismatched state is ignored, not consumed: the flow keeps waiting', async () => {
   const recv = await startLoopbackReceiver({ state: 's-real', timeoutMs: 2000 })
-  // Attach the rejection assertion synchronously so the (synchronous) reject
-  // inside the request handler always lands on a handler.
-  const assertion = assert.rejects(() => recv.waitForCode(), /mismatched state/)
-  await hitCallback(recv.redirectUri, { code: 'leak', state: 's-forged' })
-  await assertion
+  const waiting = recv.waitForCode()
+  // A forged-state callback (a CSRF attempt, or any stray hit on the loopback
+  // port) must NOT settle the login: failing on it would be a trivial login DoS.
+  // It gets a neutral page and is ignored.
+  const status = await hitCallback(recv.redirectUri, { code: 'leak', state: 's-forged' })
+  assert.equal(status, 200)
+  // The genuine callback still resolves afterward.
+  await hitCallback(recv.redirectUri, { code: 'real', state: 's-real' })
+  assert.deepEqual(await waiting, { code: 'real' })
 })
 
 test('an error= callback rejects with the error code attached', async () => {
@@ -75,19 +79,18 @@ test('an error= callback rejects with the error code attached', async () => {
   await assertion
 })
 
-test('an error= callback with no state reports the real error, not a state mismatch', async () => {
+test('an error= callback with no state is ignored, not surfaced (anti-DoS)', async () => {
   const recv = await startLoopbackReceiver({ state: 's1', timeoutMs: 2000 })
-  // A provider that drops `state` on an error redirect must still surface the
-  // denial, not be misreported as a CSRF/state mismatch (which also appends a
-  // misleading headless-token hint downstream).
-  const assertion = assert.rejects(() => recv.waitForCode(), (err) => {
-    assert.match(/** @type {Error} */ (err).message, /access_denied/)
-    assert.doesNotMatch(/** @type {Error} */ (err).message, /mismatched state/)
-    assert.equal(/** @type {any} */ (err).callbackError, 'access_denied')
-    return true
-  })
-  await hitCallback(recv.redirectUri, { error: 'access_denied' })
-  await assertion
+  const waiting = recv.waitForCode()
+  // A stateless `?error=` is indistinguishable from an attacker poking the
+  // loopback port, so it must not abort the login. Our identity server echoes
+  // `state` on error redirects, so a genuine denial still matches (see the
+  // matching-state error= test above) and surfaces.
+  const status = await hitCallback(recv.redirectUri, { error: 'access_denied' })
+  assert.equal(status, 200)
+  // The real callback still resolves afterward; the stray error did not settle it.
+  await hitCallback(recv.redirectUri, { code: 'real', state: 's1' })
+  assert.deepEqual(await waiting, { code: 'real' })
 })
 
 test('a timeout rejects', async () => {
