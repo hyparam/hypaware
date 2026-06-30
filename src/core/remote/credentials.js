@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
-import { InvalidGrantError, refreshSession } from './identity_client.js'
+import { InvalidGrantError, refreshSession, sessionExpiredMessage } from './identity_client.js'
 
 /**
  * @import { Stats } from 'node:fs'
@@ -33,6 +33,12 @@ const CREDENTIALS_BASENAME = 'remote-credentials.json'
 
 /** Refresh an `oidc` access JWT once it is within this window of expiry. */
 const REFRESH_SKEW_MS = 60 * 1000
+
+/** Max time to wait for the cross-process write lock before giving up. */
+const LOCK_TIMEOUT_MS = 5 * 1000
+
+/** A lock file older than this is treated as abandoned by a crashed holder. */
+const LOCK_STALE_MS = 30 * 1000
 
 /**
  * Single-entry parse cache for the credential file. The stdio proxy resolves a
@@ -210,10 +216,11 @@ function normalizeRecord(entry) {
  * @returns {Promise<void>}
  */
 export async function writeToken(stateDir, target, token) {
-  await fs.mkdir(stateDir, { recursive: true })
-  const current = await readRawCredentials(stateDir, { mutable: true })
-  current[target] = { kind: 'static', token }
-  await writeCredentials(stateDir, current)
+  await withCredentialsLock(stateDir, async () => {
+    const current = await readRawCredentials(stateDir, { mutable: true })
+    current[target] = { kind: 'static', token }
+    await writeCredentials(stateDir, current)
+  })
 }
 
 /**
@@ -227,16 +234,17 @@ export async function writeToken(stateDir, target, token) {
  * @ref LLP 0046#d4 [implements]: oidc session written through the same atomic 0600 store as static tokens
  */
 export async function writeSession(stateDir, target, session) {
-  await fs.mkdir(stateDir, { recursive: true })
-  const current = await readRawCredentials(stateDir, { mutable: true })
-  current[target] = {
-    kind: 'oidc',
-    refreshToken: session.refreshToken,
-    accessJwt: session.accessJwt,
-    expiresAt: session.expiresAt,
-    org: session.org,
-  }
-  await writeCredentials(stateDir, current)
+  await withCredentialsLock(stateDir, async () => {
+    const current = await readRawCredentials(stateDir, { mutable: true })
+    current[target] = {
+      kind: 'oidc',
+      refreshToken: session.refreshToken,
+      accessJwt: session.accessJwt,
+      expiresAt: session.expiresAt,
+      org: session.org,
+    }
+    await writeCredentials(stateDir, current)
+  })
 }
 
 /**
@@ -250,11 +258,13 @@ export async function writeSession(stateDir, target, session) {
 export async function removeToken(stateDir, target) {
   // Operate on the raw file so a record we can't normalize is still removable,
   // and so removing one target never drops an unrelated sibling.
-  const current = await readRawCredentials(stateDir, { mutable: true })
-  if (!Object.prototype.hasOwnProperty.call(current, target)) return false
-  delete current[target]
-  await writeCredentials(stateDir, current)
-  return true
+  return withCredentialsLock(stateDir, async () => {
+    const current = await readRawCredentials(stateDir, { mutable: true })
+    if (!Object.prototype.hasOwnProperty.call(current, target)) return false
+    delete current[target]
+    await writeCredentials(stateDir, current)
+    return true
+  })
 }
 
 /**
@@ -275,8 +285,8 @@ export async function removeToken(stateDir, target) {
  */
 export async function resolveToken({ target, env, stateDir }) {
   const envName = remoteTokenEnvVar(target)
-  const fromEnv = env[envName]
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+  const fromEnv = envOverride(env, target)
+  if (fromEnv !== undefined) {
     return { ok: true, token: fromEnv, source: 'env' }
   }
   const creds = await readCredentials(stateDir)
@@ -315,11 +325,17 @@ export async function resolveToken({ target, env, stateDir }) {
  */
 export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
   const envName = remoteTokenEnvVar(target)
-  const fromEnv = env[envName]
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+  const fromEnv = envOverride(env, target)
+  if (fromEnv !== undefined) {
     return { ok: true, token: fromEnv, source: 'env', kind: 'static' }
   }
 
+  // A forced refresh is the live-401 retry: drop the parse cache so the read
+  // below sees the freshest refresh token. A concurrent rotation may have
+  // rewritten the file with an identical size within one mtime tick, which the
+  // cache key (path + mtime + size) would otherwise miss - symmetric with the
+  // invalid_grant re-read below.
+  if (forceRefresh) rawCache = null
   const creds = await readCredentials(stateDir)
   let entry = creds[target]
   if (!entry) {
@@ -407,24 +423,58 @@ export function isRefreshable(resolved) {
  * even when it too failed auth. A `refresh()` that throws (e.g. a typed
  * `invalid_grant`) propagates to the caller, which maps it to re-login guidance.
  *
+ * The `ok` result carries the final attempt's `authFailed` so the caller can
+ * tell a 401 that *survived* the refresh + retry (a dead credential) from a
+ * clean success, and word the guidance accordingly via {@link describeAuthRejection}.
+ *
  * @template T
  * @param {{
  *   resolved: { ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' },
  *   refresh: () => Promise<{ ok: true, token: string, source?: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>,
  *   op: (token: string) => Promise<{ authFailed: boolean, value: T }>,
  * }} args
- * @returns {Promise<{ ok: true, value: T } | { ok: false, error: string }>}
+ * @returns {Promise<{ ok: true, value: T, authFailed: boolean } | { ok: false, error: string }>}
  * @ref LLP 0046#d5 [implements]: the 401 -> force refresh -> retry-once policy, one home for both attach paths
  */
 export async function attachWithRefresh({ resolved, refresh, op }) {
   const first = await op(resolved.token)
   if (!first.authFailed || !isRefreshable(resolved)) {
-    return { ok: true, value: first.value }
+    return { ok: true, value: first.value, authFailed: first.authFailed }
   }
   const refreshed = await refresh()
   if (!refreshed.ok) return { ok: false, error: refreshed.error }
   const second = await op(refreshed.token)
-  return { ok: true, value: second.value }
+  return { ok: true, value: second.value, authFailed: second.authFailed }
+}
+
+/**
+ * Explain a 401/403 that survived the one-shot refresh + retry, by *why* the
+ * credential is dead, so the stdio proxy and the verb attach path advise the
+ * user identically (LLP 0046 D5). One home so the two can never drift:
+ *  - a refreshable oidc session that still 401s is an expired session: re-login
+ *    (exit 2, same as an invalid_grant refresh failure);
+ *  - a per-target env override can't be fixed by re-login (it always wins over
+ *    the store), so point at the env var (exit 1);
+ *  - a static file token re-login *does* replace, so advise re-login (exit 1).
+ *
+ * @param {{ target: string, status: number, resolved: { source?: 'env' | 'file', kind?: 'static' | 'oidc' } }} args
+ * @returns {{ message: string, exitCode: number }}
+ * @ref LLP 0046#d5 [implements]: 401-after-retry guidance, one home for both attach paths
+ */
+export function describeAuthRejection({ target, status, resolved }) {
+  if (isRefreshable(resolved)) {
+    return { message: sessionExpiredMessage(target), exitCode: 2 }
+  }
+  if (resolved.source === 'env') {
+    return {
+      message: `remote rejected the credential for '${target}' (HTTP ${status}) - re-login cannot fix an env override; check ${remoteTokenEnvVar(target)}`,
+      exitCode: 1,
+    }
+  }
+  return {
+    message: `remote rejected the credential (HTTP ${status}) - re-run 'hyp remote login'`,
+    exitCode: 1,
+  }
 }
 
 /**
@@ -454,12 +504,81 @@ function bearerOf(record) {
 }
 
 /**
+ * The per-target env override, or `undefined`. `HYP_REMOTE_TOKEN_<TARGET>`
+ * always wins over the stored file (LLP 0033 §credentials); both resolvers read
+ * it through here so the "env always wins" rule has one home.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} target
+ * @returns {string | undefined}
+ */
+function envOverride(env, target) {
+  const value = env[remoteTokenEnvVar(target)]
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
  * @param {string} target
  * @param {string} envName
  * @returns {string}
  */
 function noTokenError(target, envName) {
   return `no token for '${target}' - run 'hyp remote login ${target}' (or set ${envName})`
+}
+
+/** @param {number} ms @returns {Promise<void>} */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Serialize the read-modify-write of the shared 0600 store across concurrent
+ * `hyp` processes (a verb call beside a proxy, two MCP clients). Without it two
+ * writers to *different* targets each read the whole map and rename; the later
+ * rename clobbers the earlier writer's just-rotated one-time-use refresh token
+ * for the other target, forcing a needless re-login. An `O_EXCL` lock file is
+ * the cross-process mutex, and the cache is dropped on entry so the locked body
+ * reads the freshest on-disk map (an identical-size sibling rewrite the parse
+ * cache would otherwise miss). A stale lock left by a crashed holder is stolen
+ * by age, so a crash can't wedge every future write.
+ *
+ * @template T
+ * @param {string} stateDir
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withCredentialsLock(stateDir, fn) {
+  await fs.mkdir(stateDir, { recursive: true })
+  const lockPath = `${remoteCredentialsPath(stateDir)}.lock`
+  const deadline = Date.now() + LOCK_TIMEOUT_MS
+  for (;;) {
+    try {
+      const handle = await fs.open(lockPath, 'wx')
+      await handle.close()
+      break
+    } catch (err) {
+      if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
+      // Steal a lock abandoned by a crashed holder, identified by age.
+      try {
+        const st = await fs.stat(lockPath)
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          await fs.rm(lockPath, { force: true })
+          continue
+        }
+      } catch { /* lock vanished between open and stat: retry the acquire */ }
+      if (Date.now() > deadline) {
+        throw new Error('timed out acquiring the remote credentials lock')
+      }
+      await delay(25)
+    }
+  }
+  try {
+    // Read the freshest on-disk map inside the lock; see the doc comment.
+    rawCache = null
+    return await fn()
+  } finally {
+    await fs.rm(lockPath, { force: true })
+  }
 }
 
 /**
