@@ -8,6 +8,7 @@ import process from 'node:process'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
+import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
@@ -31,7 +32,7 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../../../src/core/config/types.js'
  * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
@@ -484,15 +485,13 @@ export async function collectHypAwareStatus(opts = {}) {
   let clientActions = null
   try {
     const actionStatus = readClientActionStatus({ stateRoot })
-    // Backfill-capable plugins, derived statically from the catalog's client
-    // descriptors (claude/codex). Status cannot see the runtime backfill
-    // registry without activating plugins, so the client descriptors are the
-    // honest static proxy for "this enabled plugin imports on join".
-    /** @type {Set<string>} */
-    const backfillPlugins = new Set(
-      [...(catalog?.clientDescriptors?.values() ?? [])].map((d) => d.plugin)
-    )
-    clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral, backfillPlugins })
+    // The catalog's client descriptors (claude/codex) are the honest static
+    // proxy for both declared-target derivations: status cannot see the runtime
+    // backfill/attach registries without activating plugins, so "this enabled
+    // plugin is a client adapter" is read off the descriptors. backfill keys its
+    // markers by owning-plugin name, attach by client name (the handlers'
+    // request keys) — buildClientActionsReport derives both from the one map.
+    clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral, clientDescriptors })
   } catch { /* best-effort probe */ }
 
   // ----- recent errors -----
@@ -552,27 +551,38 @@ export async function collectHypAwareStatus(opts = {}) {
  * Per-provider state:
  * - `done` / `failed` come straight from a persisted marker (any request
  *   key, even one whose plugin has since left the config).
- * - `pending` / `n/a` are derived for *declared* backfill targets: a
- *   plugin entry carrying its own `config.backfill` block. Backfill
- *   capability is a runtime fact (a registered `BackfillContribution`,
- *   LLP 0041 §per-plugin-capability) the status collector cannot see
- *   without activating plugins, so the declared policy is the honest,
- *   provider-agnostic signal: `on_join: false` or a non-joined host ->
- *   `n/a` (the reconciler is a no-op); otherwise desired-but-unrun ->
- *   `pending`.
+ * - `pending` / `n/a` are derived for *declared* targets the reconciler would
+ *   act on but has not yet. Two handlers declare such targets:
+ *   - **backfill** (LLP 0037) — a plugin entry's `config.backfill` block,
+ *     keyed by owning-plugin name.
+ *   - **attach** (LLP 0044 / 0045) — an enabled client adapter, keyed by
+ *     *client* name (the attach handler's request key), opted out by
+ *     `config.attach.on_join: false`.
+ *   Neither capability is visible to the status collector without activating
+ *   plugins (both are runtime registrations — LLP 0041 §per-plugin-capability),
+ *   so the catalog's client descriptors are the honest, provider-agnostic
+ *   proxy: `on_join: false` or a non-joined host → `n/a` (the reconciler is a
+ *   no-op); otherwise desired-but-unrun → `pending`.
  *
- * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean, backfillPlugins?: Set<string> }} args
+ * @param {{ status: ClientActionStatus, config: HypAwareV2Config | null, hasCentral: boolean, clientDescriptors?: Map<string, ClientDescriptor> }} args
  * @returns {ClientActionsReport | null}
  * @ref LLP 0041#idempotency-and-completion-state [implements]: Per-provider done/failed/pending/n-a derived from the per-handler/per-request-key marker store, no reconcile pass
  */
-function buildClientActionsReport({ status, config, hasCentral, backfillPlugins }) {
+function buildClientActionsReport({ status, config, hasCentral, clientDescriptors }) {
   /** @type {ClientActionReport[]} */
   const actions = []
   const byKind = status?.byKind ?? {}
-  const backfillCapable = backfillPlugins ?? new Set()
+  // Client-adapter plugins (claude/codex), derived statically from the catalog
+  // descriptors — the set the backfill default-on derivation needs ("this
+  // enabled plugin imports on join") and, via the descriptors themselves, the
+  // universe of attach targets below.
+  const clientAdapterPlugins = new Set(
+    [...(clientDescriptors?.values() ?? [])].map((d) => d.plugin)
+  )
 
   // Declared backfill targets: enabled plugin entries that drive
-  // backfill-on-join (LLP 0037, policy rides the owning plugin). Two cases:
+  // backfill-on-join (LLP 0037 — policy rides the owning plugin). Keyed by
+  // owning-plugin name (the backfill handler's request key, LLP 0041). Two cases:
   //   1. An explicit `config.backfill` block (any host).
   //   2. *Default-on*: a known backfill provider with no explicit block. On
   //      a joined host `backfillHandler.desired()` still emits for it, so it
@@ -593,22 +603,60 @@ function buildClientActionsReport({ status, config, hasCentral, backfillPlugins 
       // (block present, `on_join` absent) is default-on → not suppressed.
       const onJoin = readBackfillPolicy(entry).onJoin !== false
       declared.set(entry.name, { onJoin })
-    } else if (hasCentral && backfillCapable.has(entry.name)) {
+    } else if (hasCentral && clientAdapterPlugins.has(entry.name)) {
       declared.set(entry.name, { onJoin: true })
     }
   }
 
-  // Kinds to render: every kind the markers record, plus `backfill` when
-  // any target is declared (so a configured-but-unrun target still shows).
+  // Declared attach targets (LLP 0044 / 0045): symmetric to backfill, but keyed
+  // by *client* name — the attach handler's request key is the client name
+  // (`descriptor.name`), not the owning plugin — so a `done` attach marker the
+  // handler writes merges with the declared target instead of doubling it. Every
+  // enabled client adapter on a joined host is a desired attach target by
+  // default; an explicit `config.attach` block opts out via `on_join: false`,
+  // read through the shared `readAttachPolicy` (the `backfill_policy.js` twin) so
+  // status can never disagree with `action_attach.js` about what a block means.
+  // The default-on case is gated on `hasCentral` for the same V1-surface reason
+  // as backfill: a bare local claude/codex install shows nothing.
+  // @ref LLP 0044#status-surface [implements] — per-client done/failed/pending/n-a; `on_join:false` or non-joined → n/a, never degrading
+  /** @type {Map<string, PluginConfigInstance>} */
+  const enabledByPlugin = new Map()
+  for (const entry of config?.plugins ?? []) {
+    if (entry.enabled === false) continue
+    enabledByPlugin.set(entry.name, entry)
+  }
+  /** @type {Map<string, { onJoin: boolean }>} */
+  const declaredAttach = new Map()
+  for (const [clientName, descriptor] of clientDescriptors ?? new Map()) {
+    const entry = enabledByPlugin.get(descriptor.plugin)
+    if (!entry) continue
+    const raw = entry.config?.attach
+    const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
+    if (hasBlock) {
+      const onJoin = readAttachPolicy(entry).onJoin !== false
+      declaredAttach.set(clientName, { onJoin })
+    } else if (hasCentral) {
+      declaredAttach.set(clientName, { onJoin: true })
+    }
+  }
+
+  // Kinds to render: every kind the markers record, plus a kind for each
+  // handler that declared a target (so a configured-but-unrun target shows even
+  // with no marker yet). `backfill` keys by plugin, `attach` by client name.
+  /** @type {Record<string, Map<string, { onJoin: boolean }>>} */
+  const declaredByKind = { backfill: declared, attach: declaredAttach }
   /** @type {Set<string>} */
   const kinds = new Set(Object.keys(byKind))
-  if (declared.size > 0) kinds.add('backfill')
+  for (const [k, m] of Object.entries(declaredByKind)) {
+    if (m.size > 0) kinds.add(k)
+  }
 
   for (const kind of [...kinds].sort()) {
     const markers = byKind[kind] ?? {}
+    const declaredForKind = declaredByKind[kind]
     /** @type {Set<string>} */
     const keys = new Set(Object.keys(markers))
-    if (kind === 'backfill') for (const name of declared.keys()) keys.add(name)
+    if (declaredForKind) for (const name of declaredForKind.keys()) keys.add(name)
     for (const requestKey of [...keys].sort()) {
       const marker = markers[requestKey]
       if (marker && marker.status === 'failed') {
@@ -621,7 +669,8 @@ function buildClientActionsReport({ status, config, hasCentral, backfillPlugins 
           ...(typeof marker.attempts === 'number' ? { attempts: marker.attempts } : {}),
         })
       } else if (marker) {
-        // `done` (run-once) or `applied` (reversible), the effect is in place.
+        // `done` (run-once / attached) or `applied` (reversible) — the effect
+        // is in place. For attach a `done` marker is the "attached" rendering.
         actions.push({
           kind,
           requestKey,
@@ -630,10 +679,10 @@ function buildClientActionsReport({ status, config, hasCentral, backfillPlugins 
           ...(typeof marker.at === 'string' ? { at: marker.at } : {}),
         })
       } else {
-        // No marker: a declared backfill target. Suppressed (on_join:false)
-        // or inert (host never joined → the reconciler is a no-op) → n/a;
-        // otherwise desired and simply not run yet → pending.
-        const decl = declared.get(requestKey)
+        // No marker: a declared backfill or attach target. Suppressed
+        // (on_join:false) or inert (host never joined → the reconciler is a
+        // no-op) → n/a; otherwise desired and simply not run yet → pending.
+        const decl = declaredForKind?.get(requestKey)
         const suppressed = decl ? !decl.onJoin : false
         const state = suppressed || !hasCentral ? 'n/a' : 'pending'
         actions.push({ kind, requestKey, state })

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 
 import {
   CLAUDE_CONFIG_SECTION,
+  validateAttachSection,
   validateBackfillSection,
   validateClaudeConfig,
 } from '../../hypaware-core/plugins-workspace/claude/src/config.js'
@@ -64,6 +65,42 @@ test('validateBackfillSection mounts pointers under the supplied prefix', () => 
   assert.equal(errors[0].pointer, '/plugins/0/config/backfill/on_join')
 })
 
+test('validateClaudeConfig accepts an attach block', () => {
+  assert.deepEqual(validateClaudeConfig({ attach: { on_join: true } }), { ok: true })
+  assert.deepEqual(validateClaudeConfig({ attach: { on_join: false } }), { ok: true })
+  assert.deepEqual(validateClaudeConfig({ attach: {} }), { ok: true })
+  assert.deepEqual(
+    validateClaudeConfig({ proxy: '@hypaware/ai-gateway', backfill: { on_join: true }, attach: { on_join: false } }),
+    { ok: true }
+  )
+})
+
+test('validateClaudeConfig rejects a malformed attach block', () => {
+  /** @type {Array<[unknown, string]>} */
+  const cases = [
+    [{ attach: [] }, '/attach'],
+    [{ attach: 7 }, '/attach'],
+    [{ attach: null }, '/attach'],
+    [{ attach: { on_join: 'yes' } }, '/attach/on_join'],
+    [{ attach: { on_join: 1 } }, '/attach/on_join'],
+    [{ attach: { window_days: 30 } }, '/attach/window_days'],
+    [{ attach: { on_joins: true } }, '/attach/on_joins'],
+  ]
+  for (const [config, pointer] of cases) {
+    const result = validateClaudeConfig(config)
+    assert.equal(result.ok, false, `${JSON.stringify(config)} must fail`)
+    if (result.ok) continue
+    assert.equal(result.errors[0].pointer, pointer, `${JSON.stringify(config)} pointer`)
+  }
+})
+
+test('validateAttachSection mounts pointers under the supplied prefix', () => {
+  assert.deepEqual(validateAttachSection(undefined, '/attach'), [])
+  const errors = validateAttachSection({ on_join: 1 }, '/plugins/0/config/attach')
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].pointer, '/plugins/0/config/attach/on_join')
+})
+
 test('the registered claude section drives validatePluginConfig', () => {
   const registry = createConfigRegistry()
   registry.registerSection({
@@ -96,6 +133,31 @@ test('a central-locked backfill.on_join cannot be flipped by a colliding local e
   assert.equal(merged.effective.plugins?.length, 1)
   assert.deepEqual(
     /** @type {any} */ (merged.effective.plugins?.[0].config).backfill,
+    { on_join: false }
+  )
+  assert.deepEqual(merged.drops, [
+    { section: 'plugins', key: '@hypaware/claude', reason: 'collides_with_central' },
+  ])
+})
+
+test('a central-locked attach.on_join cannot be flipped by a colliding local entry', () => {
+  // LLP 0031 merge model + LLP 0044 opt-out (operator-only, no local
+  // override): a local entry that collides with a central-named plugin is
+  // dropped, so the operator's `attach.on_join: false` survives and the
+  // user cannot re-enable auto-attach locally.
+  const central = {
+    version: 2,
+    plugins: [{ name: '@hypaware/claude', config: { attach: { on_join: false } } }],
+  }
+  const local = {
+    version: 2,
+    plugins: [{ name: '@hypaware/claude', config: { attach: { on_join: true } } }],
+  }
+  const merged = mergeConfigLayers(/** @type {any} */ (central), /** @type {any} */ (local))
+
+  assert.equal(merged.effective.plugins?.length, 1)
+  assert.deepEqual(
+    /** @type {any} */ (merged.effective.plugins?.[0].config).attach,
     { on_join: false }
   )
   assert.deepEqual(merged.drops, [

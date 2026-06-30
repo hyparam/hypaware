@@ -6,7 +6,13 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createReconcilePassScheduler, runDaemon } from '../../src/core/daemon/runtime.js'
+import {
+  createReconcilePassScheduler,
+  runDaemon,
+  DEFAULT_ACTION_HANDLERS,
+} from '../../src/core/daemon/runtime.js'
+import { attachHandler } from '../../src/core/config/action_attach.js'
+import { backfillHandler } from '../../src/core/config/action_backfill.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 
@@ -161,6 +167,13 @@ test('runDaemon runs the boot already-confirmed pass when a central layer is pre
     assert.ok(calls[0].config)
     assert.ok(calls[0].backfills)
     assert.equal(typeof calls[0].backfills.list, 'function')
+    // The client-action seam (LLP 0045 §Part 1) is threaded onto every input:
+    // clientDescriptors always (from the boot catalog), but with no gateway
+    // plugin enabled the runtime registry + endpoint are undefined, so the
+    // attach handler is inert by construction.
+    assert.ok(calls[0].clientDescriptors instanceof Map)
+    assert.equal(calls[0].clients, undefined)
+    assert.equal(calls[0].endpoint, undefined)
   } finally {
     if (handle) {
       await handle.stop()
@@ -333,6 +346,86 @@ test('the confirmation edge during active probation drives exactly one reconcile
     assert.ok(calls[0].config)
     assert.equal(typeof calls[0].backfills.list, 'function')
     assert.equal(calls[0].env.HYP_HOME, hypHome)
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Client-attach daemon wiring (LLP 0045 §Module / seam breakdown item 7 / T7)
+// ---------------------------------------------------------------------------
+
+test('the daemon registers [attachHandler, backfillHandler] — attach first (LLP 0045 §Module / seam breakdown item 7)', () => {
+  // The order is a unit-testable invariant: attach (in-process) must lead the
+  // backfill subprocess so live-capture wiring is not stranded behind a
+  // multi-minute historical import.
+  assert.deepEqual(DEFAULT_ACTION_HANDLERS.map((h) => h.kind), ['attach', 'backfill'])
+  assert.equal(DEFAULT_ACTION_HANDLERS[0], attachHandler)
+  assert.equal(DEFAULT_ACTION_HANDLERS[1], backfillHandler)
+})
+
+test('the daemon resolves clientDescriptors/clients/endpoint from boot when the gateway is enabled', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-reconcile-gateway-'))
+  let handle
+  try {
+    const stateRoot = path.join(hypHome, 'hypaware')
+    // A central seed (joined host, no applied slot ⇒ no probation marker) that
+    // enables the real bundled gateway + claude client adapter, so the boot
+    // already-confirmed pass fires AND the gateway capability is registered.
+    const seedPath = centralSeedPath(stateRoot)
+    await fs.mkdir(path.dirname(seedPath), { recursive: true })
+    await fs.writeFile(
+      seedPath,
+      JSON.stringify({
+        version: 2,
+        plugins: [
+          {
+            name: '@hypaware/ai-gateway',
+            config: {
+              listen: '127.0.0.1:0',
+              upstreams: [
+                { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' },
+              ],
+            },
+          },
+          { name: '@hypaware/claude' },
+        ],
+      }) + '\n'
+    )
+
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+    const { reconciler, calls } = makeFakeReconciler()
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'reconcile-gateway-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+      actionReconciler: reconciler,
+    })
+
+    await waitFor(() => calls.length === 1)
+    // The static client→plugin catalog is threaded and names the claude adapter.
+    assert.ok(calls[0].clientDescriptors instanceof Map)
+    assert.ok(
+      calls[0].clientDescriptors?.get('claude'),
+      'clientDescriptors carries the claude descriptor'
+    )
+    // The runtime gateway capability is present (clients) and exposes the
+    // attach-invocation surface the handler reaches perform() through.
+    assert.ok(calls[0].clients, 'the gateway capability is threaded as clients')
+    assert.equal(typeof calls[0].clients?.getClient, 'function')
+    // The endpoint resolved from the live gateway source (bound on an ephemeral
+    // port before the reconciler was constructed).
+    assert.match(String(calls[0].endpoint), /^http:\/\/127\.0\.0\.1:\d+$/)
   } finally {
     if (handle) {
       await handle.stop()

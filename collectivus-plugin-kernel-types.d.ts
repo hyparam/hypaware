@@ -1273,9 +1273,10 @@ export interface VerbRegistry {
  * - register upstream presets (`registerUpstreamPreset`) that own
  *   routing — the gateway no longer has any hardcoded provider routing
  *   such as Anthropic-header or `/v1/messages` matching;
- * - register client attach/detach helpers (`registerClient`) so the
- *   shared `hyp attach`/`hyp detach` CLI can dispatch without coupling
- *   core to client-specific code;
+ * - register a client `attach()` helper (`registerClient`) so the
+ *   shared `hyp attach` CLI can dispatch without coupling core to
+ *   client-specific code (the reversing detach is a core disk-driven
+ *   undo, not a per-adapter hook);
  * - register exchange projectors (`registerExchangeProjector`) that
  *   turn a captured HTTP/SSE exchange into a normalized list of
  *   conversation messages. The gateway expands the projector's output
@@ -1304,8 +1305,8 @@ export interface AiGatewayCapability {
   /**
    * Look up a registered client by name. Returns `undefined` when no
    * adapter plugin has registered under that name. Used by the shared
-   * `hyp attach`/`hyp detach` command router to dispatch to the right
-   * adapter without coupling core to plugin-specific code.
+   * `hyp attach` command router to dispatch to the right adapter
+   * without coupling core to plugin-specific code.
    */
   getClient(name: string): AiGatewayClientRegistration | undefined
   /**
@@ -1369,11 +1370,19 @@ export interface AiGatewayEndpointOptions {
   upstream?: string
 }
 
+/**
+ * An adapter owns only `attach()`. The reversing detach is the single
+ * core, disk-driven undo (`detachClientFromDisk`) that both the manual
+ * `hyp detach` command and the daemon reconciler's `reverse()` route
+ * through, so there is no per-adapter detach for the one undo to drift
+ * from.
+ *
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — AiGatewayClientRegistration.detach is retired; the sole undo lives in core
+ */
 export interface AiGatewayClientRegistration {
   name: string
   defaultUpstream: string
   attach(ctx: AiGatewayClientAttachContext): Promise<void>
-  detach(ctx: AiGatewayClientDetachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
 }
 
@@ -1393,18 +1402,6 @@ export interface AiGatewayClientAttachContext {
    * containing at minimum `status`, `action`, `client`, `dry_run`,
    * and any adapter-specific fields (e.g. `settings_path`, `port`,
    * `changed`, `prev_value`).
-   */
-  json?: boolean
-}
-
-export interface AiGatewayClientDetachContext {
-  config: JsonObject
-  stdout: WriteStream
-  stderr: WriteStream
-  dryRun?: boolean
-  /**
-   * When true the adapter must emit machine-readable JSON on stdout
-   * instead of human prose. One JSON object per detach call.
    */
   json?: boolean
 }

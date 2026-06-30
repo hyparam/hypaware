@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import readline from 'node:readline/promises'
@@ -20,6 +21,9 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { createMcpServer } from '../mcp/server.js'
@@ -3425,13 +3429,15 @@ async function runAttach(argv, ctx) {
 /**
  * `hyp detach [client] [--client <name>]`
  *
- * Resolves the gateway capability, looks up the named client, and
- * dispatches to its `detach()`. `detach()` is invoked with the
- * adapter's config slice (currently empty until per-adapter config
- * lands) plus stdout/stderr.
+ * Reverses a client's attach. Unlike `attach`, detach does **not**
+ * dispatch to a per-adapter hook: it routes through the single core,
+ * disk-driven undo (`detachClientFromDisk`), resolved per client via its
+ * `clientDescriptor`. That one undo is shared with the daemon
+ * reconciler's `reverse()`, so the two can never drift.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach routes through the one core undo via the clientDescriptor, not a per-adapter detach()
  */
 async function runDetach(argv, ctx) {
   return runClientLifecycle('detach', argv, ctx)
@@ -3450,6 +3456,50 @@ async function runClientLifecycle(action, argv, ctx) {
     return 2
   }
 
+  // Detach is the single core, disk-driven undo (LLP 0045 §Part 3): it reverses
+  // an on-disk attach from the static client descriptor map (owning plugin +
+  // attach_probe), never the live gateway registry. So it must keep working
+  // with the @hypaware/ai-gateway capability absent/unloaded — resolve and
+  // reverse here, AHEAD of the gateway gate. Attach genuinely needs the live
+  // adapter, so it stays gated below.
+  if (action === 'detach') {
+    const clientDescriptors = await buildClientDescriptorMap(ctx)
+    const clientNames = expandDetachClientNames(parsed.client, clientDescriptors)
+    if (clientNames.length === 0) {
+      const known = [...clientDescriptors.keys()]
+      ctx.stderr.write(
+        `error: unknown client '${parsed.client}'. Known clients: ${known.join(', ') || '(none)'}\n`
+      )
+      return 1
+    }
+    let exitCode = 0
+    for (const name of clientNames) {
+      try {
+        const descriptor = clientDescriptors.get(name)
+        if (!descriptor) {
+          ctx.stderr.write(`error: unknown client '${name}'\n`)
+          exitCode = 1
+          continue
+        }
+        await detachClientViaCore({
+          name,
+          descriptor,
+          dryRun: parsed.dryRun,
+          json: parsed.json,
+          ctx,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        ctx.stderr.write(`error: detach client '${name}' failed: ${message}\n`)
+        exitCode = 1
+      }
+    }
+    return exitCode
+  }
+
+  // Attach dispatches to the per-adapter attach() hook and threads the
+  // gateway's localEndpoint(), so it requires the live @hypaware/ai-gateway
+  // capability.
   if (!ctx.capabilities.has('hypaware.ai-gateway')) {
     await withSpan(
       `client.${action}`,
@@ -3489,61 +3539,50 @@ async function runClientLifecycle(action, argv, ctx) {
 
   const clientNames = expandClientName(parsed.client, gateway)
   if (clientNames.length === 0) {
+    const known = gateway.listClients().map((c) => c.name)
     ctx.stderr.write(
-      `error: unknown client '${parsed.client}'. Registered clients: ${
-        gateway.listClients().map((c) => c.name).join(', ') || '(none)'
-      }\n`
+      `error: unknown client '${parsed.client}'. Registered clients: ${known.join(', ') || '(none)'}\n`
     )
     return 1
   }
 
   let exitCode = 0
   for (const name of clientNames) {
-    const client = gateway.getClient(name)
-    if (!client) {
-      ctx.stderr.write(`error: unknown client '${name}'\n`)
-      exitCode = 1
-      continue
-    }
     try {
-      if (action === 'attach') {
-        // In dry-run mode the gateway source may not be started yet,
-        // so `localEndpoint()` could throw. Fall back to a placeholder
-        // endpoint (adapters are expected to short-circuit before
-        // touching it.
-        let endpoint
-        if (parsed.dryRun) {
-          try {
-            endpoint = gateway.localEndpoint()
-          } catch {
-            endpoint = configuredGatewayEndpoint(ctx.config) ?? 'http://127.0.0.1:0'
-          }
-        } else {
-          try {
-            endpoint = gateway.localEndpoint()
-          } catch (err) {
-            const configured = configuredGatewayEndpoint(ctx.config)
-            if (!configured) throw err
-            endpoint = configured
-          }
-        }
-        await client.attach({
-          endpoint,
-          config: {},
-          stdout: ctx.stdout,
-          stderr: ctx.stderr,
-          dryRun: parsed.dryRun,
-          json: parsed.json,
-        })
-      } else {
-        await client.detach({
-          config: {},
-          stdout: ctx.stdout,
-          stderr: ctx.stderr,
-          dryRun: parsed.dryRun,
-          json: parsed.json,
-        })
+      const client = gateway.getClient(name)
+      if (!client) {
+        ctx.stderr.write(`error: unknown client '${name}'\n`)
+        exitCode = 1
+        continue
       }
+      // In dry-run mode the gateway source may not be started yet,
+      // so `localEndpoint()` could throw. Fall back to a placeholder
+      // endpoint — adapters are expected to short-circuit before
+      // touching it.
+      let endpoint
+      if (parsed.dryRun) {
+        try {
+          endpoint = gateway.localEndpoint()
+        } catch {
+          endpoint = configuredGatewayEndpoint(ctx.config) ?? 'http://127.0.0.1:0'
+        }
+      } else {
+        try {
+          endpoint = gateway.localEndpoint()
+        } catch (err) {
+          const configured = configuredGatewayEndpoint(ctx.config)
+          if (!configured) throw err
+          endpoint = configured
+        }
+      }
+      await client.attach({
+        endpoint,
+        config: {},
+        stdout: ctx.stdout,
+        stderr: ctx.stderr,
+        dryRun: parsed.dryRun,
+        json: parsed.json,
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       ctx.stderr.write(`error: ${action} client '${name}' failed: ${message}\n`)
@@ -3554,42 +3593,134 @@ async function runClientLifecycle(action, argv, ctx) {
 }
 
 /**
- * Resolve the gateway endpoint from the active config when the gateway
- * source is not live in this process yet. This is the normal shape for
- * commands like `hyp attach`, which only need to write client settings
- * to the same fixed port the daemon will bind later.
+ * Reverse a client's attach from disk — the single core undo
+ * (`detachClientFromDisk`). The manual `hyp detach` command and the
+ * daemon reconciler's `reverse()` both route through this one
+ * implementation, resolved per client via its `descriptor` (owning
+ * plugin + `attach_probe`), so there is no per-adapter detach for the
+ * one undo to drift from. Emits a `client.detach` span and the same
+ * `done`/`no-op` output shape callers grep.
  *
- * @param {HypAwareV2Config} config
- * @returns {string | undefined}
+ * @param {{
+ *   name: string,
+ *   descriptor: ClientDescriptor | undefined,
+ *   dryRun: boolean,
+ *   json: boolean,
+ *   ctx: CommandRunContext,
+ * }} args
+ * @returns {Promise<void>}
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-function configuredGatewayEndpoint(config) {
-  const entry = config.plugins?.find((p) => p.name === '@hypaware/ai-gateway')
-  const cfg = entry?.config
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return undefined
-  const listen = /** @type {Record<string, unknown>} */ (cfg).listen
-  if (typeof listen !== 'string') return undefined
-  return endpointFromListen(listen)
+async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
+  if (!descriptor) {
+    throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
+  }
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  return withSpan(
+    'client.detach',
+    {
+      [Attr.PLUGIN]: descriptor.plugin,
+      [Attr.OPERATION]: 'client.detach',
+      client_name: name,
+      hyp_client: name,
+      dry_run: dryRun === true,
+    },
+    async (span) => {
+      if (dryRun) {
+        span.setAttribute('status', 'ok')
+        span.setAttribute('restored', false)
+        const settingsPath = descriptor.attachProbe
+          ? resolveClientSettingsPath(name, descriptor.attachProbe.settings_file, ctx.env, homeDir)
+          : undefined
+        if (json) {
+          ctx.stdout.write(
+            JSON.stringify({
+              status: 'ok',
+              action: 'detach',
+              client: name,
+              dry_run: true,
+              ...(settingsPath !== undefined ? { settings_path: settingsPath } : {}),
+              changed: false,
+            }) + '\n'
+          )
+        } else {
+          ctx.stdout.write(
+            `(dry-run) Would detach ${name}${settingsPath !== undefined ? ` from ${settingsPath}` : ''}\n`
+          )
+        }
+        return
+      }
+      try {
+        const result = await detachClientFromDisk({ descriptor, homeDir, env: ctx.env })
+        const restored = result.changed === true
+        span.setAttribute('status', 'ok')
+        span.setAttribute('restored', restored)
+        if (restored) {
+          getLogger('cmd-detach').info('client.detach.write', {
+            hyp_client: name,
+            hyp_plugin: descriptor.plugin,
+            settings_path: result.settingsPath,
+            changed: true,
+          })
+        }
+        writeCoreDetachOutput({ ctx, name, json, result })
+      } catch (err) {
+        span.setAttribute('status', 'failed')
+        span.setAttribute('restored', false)
+        throw err
+      }
+    },
+    { component: 'cmd-detach' }
+  )
 }
 
 /**
- * @param {string} listen
- * @returns {string | undefined}
+ * Render the core detach output: machine-readable JSON when `json` is
+ * set, otherwise human prose. The shape mirrors the retired adapter
+ * output (`status`/`action`/`client`/`settings_path`/`changed`) so
+ * callers that grepped it keep working.
+ *
+ * @param {{
+ *   ctx: CommandRunContext,
+ *   name: string,
+ *   json: boolean,
+ *   result: {
+ *     changed: boolean,
+ *     settingsPath?: string,
+ *     removed?: string,
+ *     restoredValue?: string,
+ *     warning?: string,
+ *   },
+ * }} args
  */
-function endpointFromListen(listen) {
-  const idx = listen.lastIndexOf(':')
-  if (idx === -1) return undefined
-  const rawHost = listen.slice(0, idx)
-  const rawPort = listen.slice(idx + 1)
-  const port = Number.parseInt(rawPort, 10)
-  if (!Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== rawPort) {
-    return undefined
+function writeCoreDetachOutput({ ctx, name, json, result }) {
+  const settingsPath = result.settingsPath
+  if (json) {
+    /** @type {Record<string, unknown>} */
+    const payload = {
+      status: 'ok',
+      action: 'detach',
+      client: name,
+      dry_run: false,
+      changed: result.changed === true,
+    }
+    if (settingsPath !== undefined) payload.settings_path = settingsPath
+    if (result.removed !== undefined) payload.removed = result.removed
+    if (result.restoredValue !== undefined) payload.restored_value = result.restoredValue
+    if (result.warning !== undefined) payload.warning = result.warning
+    ctx.stdout.write(JSON.stringify(payload) + '\n')
+    return
   }
-  const host = rawHost.startsWith('[') && rawHost.endsWith(']')
-    ? rawHost.slice(1, -1)
-    : rawHost
-  if (host.length === 0) return undefined
-  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-  return `http://${formattedHost}:${port}`
+  if (result.changed === true) {
+    ctx.stdout.write(`✓ Detached ${name}${settingsPath !== undefined ? ` (${settingsPath})` : ''}\n`)
+    if (result.removed !== undefined) ctx.stdout.write(`  Removed ${result.removed}\n`)
+    if (result.restoredValue !== undefined) ctx.stdout.write(`  Restored ${result.restoredValue}\n`)
+    if (result.warning !== undefined) ctx.stdout.write(`  warning: ${result.warning}\n`)
+  } else {
+    ctx.stdout.write(
+      `No HypAware marker found${settingsPath !== undefined ? ` in ${settingsPath}` : ''}; nothing to do.\n`
+    )
+  }
 }
 
 /**
@@ -3666,6 +3797,22 @@ function expandClientName(requested, gateway) {
 }
 
 /**
+ * Resolve `--client all` to every known client name from the descriptor map
+ * (bundled+installed) for the disk-driven detach; otherwise return the
+ * requested name verbatim (validated against the map at the call site). Detach
+ * must not consult the live gateway registry — a client whose adapter was
+ * dropped/unloaded still has an on-disk attach to reverse (LLP 0045 §Part 3).
+ *
+ * @param {string} requested
+ * @param {Map<string, ClientDescriptor> | undefined} descriptors
+ * @returns {string[]}
+ */
+function expandDetachClientNames(requested, descriptors) {
+  if (requested === 'all') return [...(descriptors?.keys() ?? [])]
+  return [requested]
+}
+
+/**
  * @param {string[]} _argv
  * @param {CommandRunContext} ctx
  */
@@ -3704,7 +3851,7 @@ async function runSkillsInstall(argv, ctx) {
     return 1
   }
 
-  const descriptorMap = await buildClientDescriptorMap()
+  const descriptorMap = await buildClientDescriptorMap(ctx)
 
   let count = 0
   for (const skill of skills) {
@@ -3762,7 +3909,7 @@ async function runAgentsInstall(argv, ctx) {
     return 1
   }
 
-  const descriptorMap = await buildClientDescriptorMap()
+  const descriptorMap = await buildClientDescriptorMap(ctx)
 
   let count = 0
   for (const agent of agents) {
@@ -3801,18 +3948,36 @@ async function runAgentsInstall(argv, ctx) {
  * manifests. This avoids hardcoding `.claude/skills` / `.codex/skills`
  * / `.claude/agents` in core.
  *
+ * Built from the same **bundled + installed** catalog that `boot.js` and
+ * `status.js` use, so an installed (non-bundled) client adapter that can
+ * attach-on-join is also resolvable here — its `hyp detach` / skill / agent
+ * install must not silently miss the descriptor.
+ *
+ * @param {CommandRunContext} ctx
  * @returns {Promise<Map<string, ClientDescriptor>>}
  */
-async function buildClientDescriptorMap() {
+async function buildClientDescriptorMap(ctx) {
   /** @type {Map<string, ClientDescriptor>} */
   const map = new Map()
+  /** @type {LoadedManifest[]} */
+  let bundledLoaded = []
+  /** @type {LoadedManifest[]} */
+  let installedLoaded = []
   try {
     const bundled = await discoverBundledPlugins()
-    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+    bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+  } catch { /* bundled discovery failure is non-fatal */ }
+  try {
+    const stateDir = pluginStateDir(ctx)
+    const installed = await discoverInstalledPlugins({ stateDir })
+    installedLoaded = installed.loaded
+  } catch { /* installed discovery failure is non-fatal */ }
+  try {
+    const catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
     for (const [clientName, descriptor] of catalog.clientDescriptors) {
       map.set(clientName, descriptor)
     }
-  } catch { /* discovery failure → empty map → warnings per contribution */ }
+  } catch { /* catalog build failure → empty map → warnings per contribution */ }
   return map
 }
 

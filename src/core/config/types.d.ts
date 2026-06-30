@@ -11,7 +11,9 @@ import type {
   BackfillRegistry,
   PluginLogger,
   JsonObject,
+  AiGatewayCapability,
 } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { ClientDescriptor } from '../../../src/core/types.d.ts'
 
 /**
  * Outcome of the `init` overwrite guard (LLP 0031). `proceed` is true
@@ -374,6 +376,29 @@ export interface ActionContext {
    * `process.env.HYP_HOME` happened to be (LLP 0041 §Run-once flow step 2).
    */
   env: NodeJS.ProcessEnv
+  /**
+   * Static client→plugin map (`clientName -> { plugin, name, attachProbe? }`)
+   * derived from manifests by `buildPluginCatalog`. The attach handler
+   * enumerates `desired()` off this map — the runtime `clients` registry
+   * carries no owning-plugin field, so descriptors are the source of truth
+   * for "is this client's plugin enabled?" and hand the disk-driven undo the
+   * `attachProbe` it replays from (LLP 0045 §Part 1, §Part 3). Daemon-only —
+   * a plain CLI boot leaves it unset and any client handler stays inert.
+   */
+  clientDescriptors?: Map<string, ClientDescriptor>
+  /**
+   * Runtime gateway capability, used only to *invoke* a client's effect
+   * (`getClient(name).attach(...)`). Present when the AI gateway plugin is
+   * enabled; `desired()` guards on `getClient(name)` so it never names a
+   * client `perform()` cannot reach (LLP 0045 §Part 1).
+   */
+  clients?: AiGatewayCapability
+  /**
+   * The local gateway base URL clients attach to, resolved from
+   * `gateway.localEndpoint()` with the configured-`listen` fallback the CLI
+   * uses. Set whenever `clients` is (LLP 0045 §Part 1).
+   */
+  endpoint?: string
   /** Injectable clock (test seam). */
   now: () => number
   log: PluginLogger
@@ -414,6 +439,23 @@ export interface ReconcileInput {
    * diverge from `process.env` (the direct-`runDaemon`/hermetic-smoke path).
    */
   env: NodeJS.ProcessEnv
+  /**
+   * Static client→plugin map the daemon resolves from the plugin catalog and
+   * threads onto {@link ActionContext} so a client handler can enumerate
+   * `desired()` and read each descriptor's `attachProbe` (LLP 0045 §Part 1).
+   * Absent on a plain CLI boot.
+   */
+  clientDescriptors?: Map<string, ClientDescriptor>
+  /**
+   * Runtime gateway capability for invoking a client's attach effect, present
+   * when the AI gateway plugin is enabled (LLP 0045 §Part 1).
+   */
+  clients?: AiGatewayCapability
+  /**
+   * The local gateway base URL clients attach to; set whenever `clients` is
+   * (LLP 0045 §Part 1).
+   */
+  endpoint?: string
 }
 
 /** What the reconciler did with one (handler, requestKey) unit on a pass. */
@@ -516,6 +558,53 @@ export type BackfillSpawn = (args: BackfillSpawnArgs) => Promise<BackfillSpawnRe
 export interface CreateBackfillHandlerOptions {
   /** Subprocess seam; defaults to a real async `hyp backfill` spawn. */
   spawn?: BackfillSpawn
+  log?: PluginLogger
+}
+
+// =============================================================================
+// Attach action handler (LLP 0044 / LLP 0045 Part 2)
+// =============================================================================
+
+/**
+ * The disk-driven undo seam the attach handler's `reverse()` invokes — the
+ * single core detach (`detachClientFromDisk`, LLP 0045 §Part 3). Injected in
+ * tests so `reverse()` can be exercised against a fixture / fake without a live
+ * gateway; the default is the real `detachClientFromDisk`. The seam only needs
+ * the fields the handler passes (`descriptor` + the daemon-resolved `env`); the
+ * real implementation accepts more (an injectable `fs` / `homeDir`), so it is
+ * assignable to this narrower type.
+ */
+/**
+ * Outcome of the single core disk-driven undo (`detachClientFromDisk`, LLP 0045
+ * §Part 3). Defined here (not as a `@typedef` in the implementation) so it is a
+ * shared `interface` other modules import via `@import`.
+ */
+export interface DetachFromDiskResult {
+  /** True when the settings file was rewritten. */
+  changed: boolean
+  /** The resolved settings path (when one exists). */
+  settingsPath?: string
+  /** The managed value deleted (e.g. the gateway base URL) when there was no prior to restore. */
+  removed?: string
+  /** The prior value restored from the undo record. */
+  restoredValue?: string
+  /** Set when the managed value was overridden externally and left in place. */
+  warning?: string
+}
+
+export type ClientDetachFromDisk = (args: {
+  descriptor: ClientDescriptor
+  homeDir?: string
+  env?: NodeJS.ProcessEnv
+}) => Promise<DetachFromDiskResult>
+
+export interface CreateAttachHandlerOptions {
+  /**
+   * The disk-driven undo seam `reverse()` calls; defaults to the real
+   * `detachClientFromDisk`. Injected in tests to assert the undo runs without
+   * touching `ctx.clients` (which lacks the dropped client at reverse time).
+   */
+  detach?: ClientDetachFromDisk
   log?: PluginLogger
 }
 
