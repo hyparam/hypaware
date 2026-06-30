@@ -133,34 +133,11 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
     return runStaticLogin(name, tokenFile, stdin, ctx)
   }
 
-  // `--no-browser` with a piped token is contradictory: the flag is a browser
-  // mode modifier ("print the URL") but a piped token signals static intent.
-  // Peek stdin to tell a real token apart from an empty pipe: a non-empty value
-  // is stored statically (never silently discarded), while an empty pipe falls
-  // through to the browser flow (which is what `--no-browser` is for).
-  // `!useStatic` already guarantees no `--token-file` here (it forces the static
-  // path), so this only needs the browser-mode + piped-stdin conditions.
-  if (stdinPiped && noBrowser && !forceBrowser) {
-    /** @type {string} */
-    let piped
-    try {
-      piped = (await readAllStdin(stdin)).trim()
-    } catch (err) {
-      ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
-      return 1
-    }
-    if (piped) {
-      ctx.stderr.write('note: --no-browser is ignored because a token was piped on stdin (storing it statically)\n')
-      if (org) {
-        ctx.stderr.write('note: --org is ignored with a static token (it applies to the browser login flow)\n')
-      }
-      return persistStaticToken(name, piped, ctx)
-    }
-    // Empty pipe: this is the documented "print the URL" path. The browser flow
-    // below must not re-read the (now exhausted) stdin, so signal it explicitly.
-    return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
-  }
-
+  // Browser flow. `--no-browser` selects it explicitly ("print the URL instead
+  // of opening one"), so the flag wins outright: with it set we never read stdin
+  // as a static token. A piped token *without* a browser-mode flag already took
+  // the static path above (`useStatic`), so nothing is swallowed silently there;
+  // only an explicit `--no-browser` ignores a pipe, by design.
   return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
 }
 
