@@ -120,7 +120,17 @@ matched): its "unchanged token means revoked" test had a race window, because a 
 could re-read before the winner committed and then wrongly force a re-login.
 
 The lock is held across the bounded (token-endpoint timeout) refresh call, so it is a
-real mutex, not a millisecond commit latch. **Decision:** the lock file records the
+real mutex, not a millisecond commit latch.
+
+> **Superseded in part by [LLP 0049](./0049-remote-credentials-lock.decision.md).**
+> The *single-flight refresh under the lock* above stands. The crash-recovery
+> mechanism originally decided here (a `{host, pid}` liveness probe plus an age
+> backstop plus a rename-aside-and-restore steal) shipped with six defects and is
+> replaced by LLP 0049 D1: one age threshold, break by `fs.rm`, grant only by
+> `O_EXCL`, release guarded by a per-acquisition nonce. The original recovery
+> reasoning is retained below for history.
+
+**Decision (superseded):** the lock file records the
 holder's `{host, pid}`, and a contender steals it only when that holder is confirmed dead
 (a same-host liveness probe), not by a fixed age guess; the steal is an atomic rename so
 two contenders can never both adopt the same abandoned lock, and a holder only ever

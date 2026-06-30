@@ -1,7 +1,7 @@
 // @ts-check
 
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -36,22 +36,18 @@ const CREDENTIALS_BASENAME = 'remote-credentials.json'
 const REFRESH_SKEW_MS = 60 * 1000
 
 /**
- * Max time to wait for the cross-process write lock before giving up. The lock
- * is now held across the bounded token-endpoint refresh (single-flight, see
- * {@link refreshOidcSession}), so a waiter must outlast one in-flight refresh
- * rather than a millisecond commit. A crashed holder is stolen immediately by
- * liveness, so this only bounds waiting on a *live* sibling's refresh.
+ * The one lock constant: a lock whose mtime is older than this is treated as
+ * abandoned by a dead holder and broken (LLP 0049 D1). It is set comfortably
+ * above the longest *legitimate* hold - the 30s-bounded token-endpoint refresh
+ * ({@link refreshOidcSession}) plus a millisecond commit - so a live holder mid
+ * refresh is never broken, and comfortably below user patience. There is no
+ * separate wait timeout and no liveness probe: because a lock's mtime is fixed at
+ * acquisition and the clock only advances, every waiter is guaranteed to either
+ * acquire (the holder released) or break the lock (its age crossed this) within
+ * one stale interval. {@link withCredentialsLock} keeps a `2x` overall deadline
+ * only as a runaway-loop backstop.
  */
-const LOCK_TIMEOUT_MS = 45 * 1000
-
-/**
- * Age backstop for stealing an abandoned lock when liveness can't be checked: a
- * holder on another machine (a shared `HOME`) or an unparseable/legacy lock
- * file. It must exceed the longest legitimate hold (one refresh) so a live, slow
- * holder is never stolen; same-host crashes are caught far sooner by pid
- * liveness, not by this age.
- */
-const LOCK_STALE_MS = 90 * 1000
+const LOCK_STALE_MS = 60 * 1000
 
 /**
  * Single-entry parse cache for the credential file. The stdio proxy resolves a
@@ -593,90 +589,28 @@ function delay(ms) {
 }
 
 /**
- * This process's lock-owner tag, written into the lock file so a contender can
- * tell a crashed holder (steal it) from a live one (wait). Host-qualified so a
- * pid recorded on a different machine (a shared `HOME`) is never probed against
- * this machine's process table.
- */
-const LOCK_OWNER = JSON.stringify({ host: os.hostname(), pid: process.pid })
-
-/**
- * Whether the process that wrote a lock file is gone, so its lock is safe to
- * steal. A same-host holder is probed with signal 0: `ESRCH` means no such
- * process (dead); a delivered signal or `EPERM` means it is alive. A holder on a
- * different host, or an unparseable/legacy lock, can't be probed and is reported
- * "not dead" so the caller falls back to the age backstop.
- *
- * @param {string} ownerText raw lock-file contents
- * @returns {boolean}
- */
-function lockHolderIsDead(ownerText) {
-  /** @type {{ host?: unknown, pid?: unknown }} */
-  let owner
-  try {
-    owner = JSON.parse(ownerText)
-  } catch {
-    return false
-  }
-  if (!owner || owner.host !== os.hostname() || typeof owner.pid !== 'number') return false
-  try {
-    process.kill(owner.pid, 0)
-    return false // signal accepted: the holder is alive
-  } catch (err) {
-    return /** @type {NodeJS.ErrnoException} */ (err).code === 'ESRCH'
-  }
-}
-
-/**
- * Try to steal a held lock, returning whether the caller should retry the
- * acquire (the lock is gone or was abandoned) versus keep waiting (a live
- * holder). Stealing is atomic: we rename the lock aside before removing it, and
- * a given lock can be renamed by exactly one contender (the loser sees `ENOENT`),
- * so two stealers can never both adopt it and clobber each other. We only delete
- * the captured file when its contents still match the abandoned lock we
- * inspected, so a fresh lock a new holder grabbed in the race window is restored,
- * not evicted.
+ * Break a lock whose holder is past {@link LOCK_STALE_MS}, so a crashed holder can
+ * never wedge the store for longer than one stale interval (LLP 0049 D1). The
+ * break is a plain `fs.rm`: it does not grant the lock, it only clears a dead
+ * file, so the contender that broke it must still win the `O_EXCL` create like
+ * everyone else. That is what makes a four-line break safe where the old
+ * rename-aside-and-restore steal was not - exclusivity is decided by the create,
+ * never by the break.
  *
  * @param {string} lockPath
- * @returns {Promise<boolean>} true to retry the acquire, false to keep waiting
+ * @returns {Promise<void>}
  */
-async function stealLockIfAbandoned(lockPath) {
+async function breakLockIfStale(lockPath) {
   /** @type {Stats} */
   let st
-  /** @type {string} */
-  let ownerText
   try {
     st = await fs.stat(lockPath)
-    ownerText = await fs.readFile(lockPath, 'utf8')
   } catch {
-    return true // the lock vanished between the failed open and now: retry
+    return // vanished between the failed open and now: the loop retries the create
   }
-  const abandoned = lockHolderIsDead(ownerText) || Date.now() - st.mtimeMs > LOCK_STALE_MS
-  if (!abandoned) return false // a live holder mid-refresh: wait it out
-  const captured = `${lockPath}.stale-${process.pid}`
-  try {
-    await fs.rename(lockPath, captured)
-  } catch {
-    return true // another contender captured it first: retry the acquire
-  }
-  // We now exclusively own the captured file. Confirm it is the same abandoned
-  // lock we inspected (a new holder would have written a different owner tag) and
-  // only then discard it; otherwise put it back without clobbering whatever sits
-  // at lockPath now, and keep waiting.
-  let capturedText = ''
-  try {
-    capturedText = await fs.readFile(captured, 'utf8')
-  } catch { /* already gone: treat as removed */ }
-  if (capturedText === ownerText) {
-    await fs.rm(captured, { force: true })
-    return true
-  }
-  try {
-    await fs.rename(captured, lockPath)
-  } catch {
-    await fs.rm(captured, { force: true })
-  }
-  return false
+  // A holder within its budget is alive (or recently so): wait it out. Only an
+  // age past the bounded-hold ceiling marks it dead and breakable.
+  if (Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lockPath, { force: true })
 }
 
 /**
@@ -684,41 +618,48 @@ async function stealLockIfAbandoned(lockPath) {
  * `hyp` processes (a verb call beside a proxy, two MCP clients). Without it two
  * writers to *different* targets each read the whole map and rename; the later
  * rename clobbers the earlier writer's just-rotated one-time-use refresh token
- * for the other target, forcing a needless re-login. An `O_EXCL` lock file is
- * the cross-process mutex; it records this process's `{host, pid}` so the lock
- * is a real mutex even though it is now held across the bounded token-endpoint
- * refresh ({@link refreshOidcSession}). The cache is dropped on entry so the
- * locked body reads the freshest on-disk map (an identical-size sibling rewrite
- * the parse cache would otherwise miss).
+ * for the other target, forcing a needless re-login. An `O_EXCL` lock file is the
+ * cross-process mutex, held across the bounded token-endpoint refresh
+ * ({@link refreshOidcSession}). The cache is dropped on entry so the locked body
+ * reads the freshest on-disk map (an identical-size sibling rewrite the parse
+ * cache would otherwise miss).
  *
- * A crashed holder's lock is stolen as soon as its pid is seen dead, not after a
- * blind age wait, so a crash neither wedges every future write nor (the inverse)
- * lets a fixed age threshold misfire on a merely slow live holder. The steal is
- * atomic and single-winner (see {@link stealLockIfAbandoned}), and release only
- * removes a lock that is still ours, so a holder can never evict a successor.
+ * Crash recovery is age-only (LLP 0049 D1): the lock is granted solely by the
+ * `O_EXCL` create, a holder past {@link LOCK_STALE_MS} is broken with a plain
+ * `fs.rm`, and release removes the file only if its per-acquisition nonce is still
+ * ours, so a holder whose overran lock was broken and re-acquired never evicts the
+ * successor. No liveness probe, no `{host, pid}` tag, no second timeout: the only
+ * deadline is a `2x` runaway-loop backstop, because a fixed-mtime lock is
+ * guaranteed to be acquired or broken within one stale interval.
  *
  * @template T
  * @param {string} stateDir
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
- * @ref LLP 0046#d5 [implements]: pid-identified mutex with liveness-based, single-winner steal
+ * @ref LLP 0049#d1 [implements]: age-stale mutex - grant only by O_EXCL, break by rm, release by nonce
  */
 async function withCredentialsLock(stateDir, fn) {
   await fs.mkdir(stateDir, { recursive: true })
   const lockPath = `${remoteCredentialsPath(stateDir)}.lock`
-  const deadline = Date.now() + LOCK_TIMEOUT_MS
+  const nonce = crypto.randomUUID()
+  const deadline = Date.now() + LOCK_STALE_MS * 2
   for (;;) {
     try {
       const handle = await fs.open(lockPath, 'wx')
       try {
-        await handle.writeFile(LOCK_OWNER)
+        await handle.writeFile(nonce)
+      } catch (err) {
+        // A create that could not record its nonce must not leave an empty lock
+        // that wedges contenders until the stale age; drop our own fresh file.
+        await fs.rm(lockPath, { force: true })
+        throw err
       } finally {
         await handle.close()
       }
       break
     } catch (err) {
       if (!err || /** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
-      if (await stealLockIfAbandoned(lockPath)) continue
+      await breakLockIfStale(lockPath)
       if (Date.now() > deadline) {
         throw new Error('timed out acquiring the remote credentials lock')
       }
@@ -730,11 +671,11 @@ async function withCredentialsLock(stateDir, fn) {
     rawCache = null
     return await fn()
   } finally {
-    // Remove only our own lock: if a slow hold ever overran the age backstop and
-    // a contender stole it, the file now belongs to a successor we must not evict.
+    // Remove only our own lock: if a hold ever overran the stale age and a
+    // contender broke and re-acquired it, the file now belongs to a successor.
     try {
       const owner = await fs.readFile(lockPath, 'utf8')
-      if (owner === LOCK_OWNER) await fs.rm(lockPath, { force: true })
+      if (owner === nonce) await fs.rm(lockPath, { force: true })
     } catch { /* already gone */ }
   }
 }

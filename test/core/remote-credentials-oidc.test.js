@@ -328,14 +328,16 @@ test('resolveAccessJwt refreshes with the freshest stored refresh token in one s
   assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod).refreshToken, 'rt-final')
 })
 
-test('a write steals a lock abandoned by a crashed holder (dead pid)', async () => {
+test('a write breaks a lock left stale by a crashed holder', async () => {
   const dir = await tmpState()
   await writeToken(dir, 'prod', 'sk-1') // creates the store
   const lockPath = `${remoteCredentialsPath(dir)}.lock`
-  // Simulate a crashed holder: a lock file naming a dead pid on this host.
-  await fs.writeFile(lockPath, JSON.stringify({ host: os.hostname(), pid: 999999999 }))
-  // The next write must steal the lock by liveness (the pid is dead) and succeed,
-  // not wait out the age backstop or time out.
+  // Simulate a crashed holder: a leftover lock file, back-dated well past the
+  // stale age so it reads as abandoned (LLP 0049 D1 - age, not liveness).
+  await fs.writeFile(lockPath, 'crashed-holder-nonce')
+  const stale = new Date(Date.now() - 5 * 60 * 1000)
+  await fs.utimes(lockPath, stale, stale)
+  // The next write must break the stale lock by age and succeed, not time out.
   await writeToken(dir, 'prod', 'sk-2')
   assert.deepEqual((await readCredentials(dir)).prod, { kind: 'static', token: 'sk-2' })
 })
