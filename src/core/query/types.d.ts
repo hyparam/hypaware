@@ -36,6 +36,19 @@ export interface ExecuteSqlOptions {
   scope?: QueryScope
   refresh?: RefreshMode
   log?: PluginLogger
+  /**
+   * Caller-supplied abort signal. Composed with `timeoutMs` (if set) into the
+   * single signal the engine reads via `context.signal`, so the caller can tear
+   * down a long or runaway query mid-scan. Enabler only; bounds nothing on its
+   * own (the execution budget is separate). See LLP 0054 #signal-threading.
+   */
+  signal?: AbortSignal
+  /**
+   * Optional execution deadline as a relative timeout in milliseconds. When set
+   * and positive, an `AbortSignal.timeout(timeoutMs)` is composed with `signal`
+   * to bound how long the engine may run before it is aborted.
+   */
+  timeoutMs?: number
 }
 
 export interface ExecuteSqlResult {
