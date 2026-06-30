@@ -70,9 +70,18 @@ test('a record with a refreshToken but no accessJwt still yields its usable stat
   assert.deepEqual(creds.prod, { kind: 'static', token: 'still-good' })
 })
 
-test('a malformed oidc record (no accessJwt, no token) is dropped on read', async () => {
+test('an oidc record with a refresh token but no cached accessJwt is kept (refreshable)', async () => {
   const dir = await tmpState()
+  // A partial write / interrupted refresh: the refresh token survives but the
+  // cached JWT does not. The record is still usable - resolveAccessJwt can mint
+  // a fresh JWT - so it must be kept (with an empty accessJwt), not dropped.
   await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { kind: 'oidc', refreshToken: 'rt' } }))
+  assert.deepEqual((await readCredentials(dir)).prod, { kind: 'oidc', refreshToken: 'rt', accessJwt: '', expiresAt: '', org: '' })
+})
+
+test('an oidc record with neither a refresh token nor a static token is dropped on read', async () => {
+  const dir = await tmpState()
+  await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { kind: 'oidc', accessJwt: 'orphan-jwt' } }))
   assert.deepEqual(await readCredentials(dir), {})
 })
 

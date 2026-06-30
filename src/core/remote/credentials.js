@@ -169,19 +169,29 @@ async function readRawCredentials(stateDir, { mutable = false } = {}) {
 function normalizeRecord(entry) {
   if (!entry || typeof entry !== 'object') return null
   const e = /** @type {Record<string, any>} */ (entry)
-  // A complete oidc record (explicit kind, or an inferable refresh+access pair).
-  if (e.kind === 'oidc' || (e.kind === undefined && typeof e.refreshToken === 'string')) {
-    if (typeof e.refreshToken === 'string' && typeof e.accessJwt === 'string') {
-      return {
-        kind: 'oidc',
-        refreshToken: e.refreshToken,
-        accessJwt: e.accessJwt,
-        expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
-        org: typeof e.org === 'string' ? e.org : '',
-      }
+  /** @param {string} accessJwt @returns {RemoteOidcRecord} */
+  const oidc = (accessJwt) => ({
+    kind: 'oidc',
+    refreshToken: e.refreshToken,
+    accessJwt,
+    expiresAt: typeof e.expiresAt === 'string' ? e.expiresAt : '',
+    org: typeof e.org === 'string' ? e.org : '',
+  })
+  if (e.kind === 'oidc') {
+    // Explicit oidc: the refresh token is what makes the record usable - the
+    // cached access JWT is derivable from it. So keep a record whose `accessJwt`
+    // is missing or empty (a partial write, an interrupted refresh, a hand edit)
+    // rather than dropping it; resolveAccessJwt mints a fresh JWT from the
+    // refresh token, where dropping it would force a needless full re-login.
+    if (typeof e.refreshToken === 'string' && e.refreshToken.length > 0) {
+      return oidc(typeof e.accessJwt === 'string' ? e.accessJwt : '')
     }
-    // Incomplete oidc shape: fall through so a usable static `token` on the
-    // same (corrupt/hand-edited) record is not silently dropped.
+    // No usable refresh token: fall through to the static `token` check.
+  } else if (e.kind === undefined && typeof e.refreshToken === 'string' && e.refreshToken.length > 0 && typeof e.accessJwt === 'string') {
+    // Inferred oidc (legacy file with no explicit kind): require the full
+    // refresh + access pair before reading an unkinded record as oidc, so a
+    // record that also carries a static `token` is not hijacked away from it.
+    return oidc(e.accessJwt)
   }
   // Legacy / static: a bare token with no (or static) kind.
   if (typeof e.token === 'string') {
@@ -250,10 +260,15 @@ export async function removeToken(stateDir, target) {
 /**
  * Resolve a target's bearer token at query time, **without** session-aware
  * refresh. Order: per-target env var (CI/ephemeral) → stored file → error. An
- * env override never falls through to the file (LLP 0033 §credentials). For an
- * `oidc` record this returns the cached access JWT as-is. Both the query attach
- * path and the stdio proxy now use {@link resolveAccessJwt} for session-aware
- * refresh; this lower-level reader is kept for any non-refreshing caller.
+ * env override never falls through to the file (LLP 0033 §credentials).
+ *
+ * This is a **presence** check, not a working-token guarantee: an `oidc` record
+ * reports `ok` whenever it can yield a token, which includes a refreshable
+ * record whose cached JWT is empty or stale (the returned `token` is then that
+ * cached value, possibly `''`). A caller that needs a usable bearer must go
+ * through {@link resolveAccessJwt}, which refreshes; this lower-level reader
+ * exists for the stdio proxy's fail-fast probe, which only asks "is there a
+ * credential here at all" and must not refuse a session it could refresh.
  *
  * @param {{ target: string, env: NodeJS.ProcessEnv, stateDir: string }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file' } | { ok: false, error: string }>}
@@ -266,9 +281,14 @@ export async function resolveToken({ target, env, stateDir }) {
   }
   const creds = await readCredentials(stateDir)
   const entry = creds[target]
-  const token = entry ? bearerOf(entry) : ''
-  if (token.length > 0) {
-    return { ok: true, token, source: 'file' }
+  if (entry) {
+    const token = bearerOf(entry)
+    // A non-empty cached bearer is usable as-is; an oidc record is also present
+    // when only its refresh token survives (normalizeRecord guarantees a
+    // non-empty refreshToken), since resolveAccessJwt can mint a fresh JWT.
+    if (token.length > 0 || entry.kind === 'oidc') {
+      return { ok: true, token, source: 'file' }
+    }
   }
   return { ok: false, error: noTokenError(target, envName) }
 }
