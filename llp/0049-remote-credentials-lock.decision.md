@@ -104,12 +104,16 @@ holds.
   `age > LOCK_STALE_MS`) and its `rm`: two adjacent filesystem awaits.
 - **Bounded worst case.** Even in that window, both writers commit via atomic
   `tmp + rename` of the credential file, so no torn or partial file is ever
-  observed. The only possible loss is one one-time-use refresh-token rotation being
-  overwritten, costing **at most one needless re-login**, which self-heals on the
-  next refresh. We accept this bounded, self-healing edge instead of chasing
-  perfect exclusion, which is unattainable without OS-auto-released advisory locks
-  (`flock`/`fcntl`) that Node's standard `fs` does not expose and that we will not
-  add a native dependency to reach.
+  observed. The refresh commit is a **compare-and-swap** against the refresh token
+  it read under the lock, so a second writer in the double-hold window cannot
+  resurrect a session a concurrent `remove` deleted nor clobber a fresh login - it
+  declines to write when the on-disk record is no longer the one it refreshed from.
+  The only remaining loss is the two writers double-spending one one-time-use
+  refresh-token rotation (the loser gets `invalid_grant`), costing **at most one
+  needless re-login**, which self-heals on the next refresh. We accept this bounded,
+  self-healing edge instead of chasing perfect exclusion, which is unattainable
+  without OS-auto-released advisory locks (`flock`/`fcntl`) that Node's standard
+  `fs` does not expose and that we will not add a native dependency to reach.
 - **No deadlock.** A crashed holder's lock is always broken within `LOCK_STALE_MS`,
   so no contender waits longer than one stale interval.
 - **Single-flight preserved.** Absent the crash-recovery window, exactly one

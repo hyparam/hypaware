@@ -271,6 +271,38 @@ test('resolveAccessJwt does not resurrect a session removed before the refresh',
   assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod), undefined)
 })
 
+test('a refresh does not resurrect a record removed during the network call (commit is a compare-and-swap)', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  // Simulate the bounded lock-break double-hold window (LLP 0049): while this
+  // refresher is on the network, a concurrent holder removes the record (writing
+  // the file directly, as if it too held the lock). The commit must honor that
+  // removal, not write the refreshed session back over it.
+  const fetchImpl = /** @type {any} */ (async () => {
+    await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({}))
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }) }
+  })
+  const r = await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  // The in-flight request still gets the freshly minted JWT...
+  assert.equal(/** @type {any} */ (r).token, 'jwt-new')
+  // ...but the removed record stays removed - nothing is resurrected on disk.
+  assert.equal(/** @type {any} */ ((await readCredentials(dir)).prod), undefined)
+})
+
+test('a refresh does not clobber a record a concurrent login replaced during the network call', async () => {
+  const dir = await tmpState()
+  await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
+  // A concurrent holder re-logs in (static token) while we are refreshing the old
+  // oidc session. The CAS on the refreshed-from token must leave the newer login.
+  const fetchImpl = /** @type {any} */ (async () => {
+    await fs.writeFile(remoteCredentialsPath(dir), JSON.stringify({ prod: { kind: 'static', token: 'sk-fresh' } }))
+    return { ok: true, status: 200, text: async () => JSON.stringify({ access_jwt: 'jwt-new', expires_at: FUTURE, org: 'acme', refresh_token: 'rt-new' }) }
+  })
+  await resolveAccessJwt({ target: 'prod', env: {}, stateDir: dir, identityBase: 'https://h/v1/identity', fetchImpl })
+  // The concurrent login wins; the stale refresh did not overwrite it.
+  assert.deepEqual(/** @type {any} */ ((await readCredentials(dir)).prod), { kind: 'static', token: 'sk-fresh' })
+})
+
 test('resolveAccessJwt keeps the stored org when a refresh response omits it', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })

@@ -251,17 +251,32 @@ export async function writeSession(stateDir, target, session) {
 
 /**
  * Persist an oidc session WITHOUT taking the write lock: the caller must already
- * hold it. {@link writeSession} is the locked public entry point; the refresh
- * compare-and-swap in {@link refreshOidcSession} re-reads and writes inside one
- * lock acquisition and uses this directly to keep that read-modify-write atomic.
+ * hold it. {@link writeSession} is the locked public entry point; the single-flight
+ * refresh in {@link refreshOidcSession} re-reads and writes inside one lock
+ * acquisition and uses this directly to keep that read-modify-write atomic.
+ *
+ * When `ifRefreshToken` is given, the write is a compare-and-swap: it commits only
+ * if the on-disk record is still the oidc record that token came from. Under the
+ * lock that always holds, so a normal refresh always commits. It diverges only in
+ * the bounded lock-break double-hold window (LLP 0049): there a concurrent `remove`
+ * or re-login may have changed the record while the refresher was on the network,
+ * and honoring that newer write - rather than resurrecting a removed session or
+ * clobbering a fresh login - is what keeps the worst case at the one needless
+ * re-login LLP 0049 promises. Returns whether the write happened.
  *
  * @param {string} stateDir
  * @param {string} target
  * @param {{ refreshToken: string, accessJwt: string, expiresAt: string, org: string }} session
- * @returns {Promise<void>}
+ * @param {string} [ifRefreshToken] commit only if the stored record still carries this refresh token
+ * @returns {Promise<boolean>}
+ * @ref LLP 0049#d1 [implements]: refresh commit is a compare-and-swap, so the double-hold window cannot resurrect or clobber a sibling write
  */
-async function commitSession(stateDir, target, session) {
+async function commitSession(stateDir, target, session, ifRefreshToken) {
   const current = await readRawCredentials(stateDir, { mutable: true })
+  if (ifRefreshToken !== undefined) {
+    const cur = /** @type {Record<string, any> | undefined} */ (current[target])
+    if (!cur || typeof cur !== 'object' || cur.refreshToken !== ifRefreshToken) return false
+  }
   current[target] = {
     kind: 'oidc',
     refreshToken: session.refreshToken,
@@ -270,6 +285,7 @@ async function commitSession(stateDir, target, session) {
     org: session.org,
   }
   await writeCredentials(stateDir, current)
+  return true
 }
 
 /**
@@ -376,7 +392,7 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   if (!identityBase) {
     return { ok: false, error: `cannot refresh '${target}': no identity endpoint resolved` }
   }
-  return refreshOidcSession({ target, stateDir, identityBase, fetchImpl, now, from: entry, envName })
+  return refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from: entry, envName })
 }
 
 /**
@@ -398,19 +414,25 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  * it. Holding the lock across the bounded token call is the cost of removing the
  * race entirely; see {@link withCredentialsLock} for why that is safe.
  *
+ * Two decisions deliberately re-validate against disk at the point of use rather
+ * than trusting a pre-lock observation, since acquiring the lock can take tens of
+ * seconds: the adopt freshness check re-samples the clock (a JWT that looked fresh
+ * at entry may now be within the skew window), and the commit is a compare-and-swap
+ * against the token we refreshed from (the record may have been removed or replaced
+ * in the bounded double-hold window of LLP 0049).
+ *
  * @param {{
  *   target: string,
  *   stateDir: string,
  *   identityBase: string,
  *   fetchImpl?: typeof fetch,
- *   now: number,
  *   from: RemoteOidcRecord,
  *   envName: string,
  * }} args
  * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'oidc' } | { ok: false, error: string }>}
  * @ref LLP 0046#d5 [implements]: single-flight refresh under the lock - no double-spend, clobber, or lost-race re-login across concurrent hyp processes
  */
-async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, now, from, envName }) {
+async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from, envName }) {
   return withCredentialsLock(stateDir, async () => {
     const latest = await readOidcRecord(stateDir, target)
     if (!latest) {
@@ -418,23 +440,29 @@ async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, n
       // got the lock. Honor that instead of resurrecting a refreshed session.
       return { ok: false, error: noTokenError(target, envName) }
     }
-    // A sibling refreshed (or the user re-logged in) while we waited for the
-    // lock: adopt its newer, still-fresh JWT with no token-endpoint call.
-    if (latest.accessJwt !== from.accessJwt && isFresh(latest, now)) {
+    // A sibling refreshed (or the user re-logged in) while we waited for the lock:
+    // adopt its newer JWT with no token-endpoint call. Freshness is re-checked
+    // against the clock now, not the `now` sampled before the (possibly long) lock
+    // wait, so we never adopt a sibling token that expired while we waited.
+    if (latest.accessJwt !== from.accessJwt && isFresh(latest, Date.now())) {
       return { ok: true, token: latest.accessJwt, source: 'file', kind: 'oidc' }
     }
     // We are the single in-flight refresher. Refresh from the freshest stored
     // refresh token (a sibling may have rotated it to a token whose JWT is itself
     // already stale) and commit. A rotated one-time-use token replaces the
     // consumed one; otherwise the stored token is kept. `org` is fixed for the
-    // token's life, so an omitted one keeps the stored value.
+    // token's life, so an omitted one keeps the stored value. The commit is a
+    // compare-and-swap on `latest.refreshToken`: should the bounded double-hold
+    // window have let a concurrent remove or login change the record while we were
+    // on the network, we surface the fresh JWT for this in-flight request but leave
+    // the newer on-disk state untouched rather than resurrecting or clobbering it.
     const refreshed = await refreshSession({ identityBase, refreshToken: latest.refreshToken, fetchImpl })
     await commitSession(stateDir, target, {
       refreshToken: refreshed.refreshToken || latest.refreshToken,
       accessJwt: refreshed.accessJwt,
       expiresAt: refreshed.expiresAt,
       org: refreshed.org || latest.org,
-    })
+    }, latest.refreshToken)
     return { ok: true, token: refreshed.accessJwt, source: 'file', kind: 'oidc' }
   })
 }
