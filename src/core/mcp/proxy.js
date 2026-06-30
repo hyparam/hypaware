@@ -4,7 +4,7 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { attachWithRefresh, deriveIdentityBase, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
+import { attachWithRefresh, deriveIdentityBase, isRefreshable, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { describeRefreshError, sessionExpiredMessage } from '../remote/identity_client.js'
 import { isAuthStatus, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
@@ -138,11 +138,17 @@ export async function runMcpProxy({ target, ctx }) {
       if (sid) sessionId = sid
       if (isNotify) return null
       if (!res.ok) {
-        // A 401/403 that survives the refresh + retry above (server-side clock
-        // skew, or a JWT revoked independently of the refresh row) is a dead
-        // credential: give the same re-login guidance the verb path does rather
-        // than a bare status the caller can't act on.
-        const detail = isAuthStatus(res.status) ? sessionExpiredMessage(target) : `remote returned HTTP ${res.status}`
+        // A 401/403 that survives the refresh + retry above is a dead
+        // credential. For a refreshable OIDC session (server-side clock skew, or
+        // a JWT revoked independently of the refresh row) the fix is re-login.
+        // For an env/static token re-login cannot help (an env override is never
+        // read from the store, a CI token needs replacing), so point at the
+        // credential itself rather than mis-advising a login.
+        const detail = !isAuthStatus(res.status)
+          ? `remote returned HTTP ${res.status}`
+          : isRefreshable(resolved)
+            ? sessionExpiredMessage(target)
+            : `remote rejected the credential for '${target}' (HTTP ${res.status}) - check the token`
         return jsonRpcError(id, INTERNAL_ERROR, detail)
       }
       try {
