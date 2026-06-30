@@ -69,7 +69,7 @@ export function createAttachHandler(opts = {}) {
      * @returns {DesiredAction[]}
      * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements] — desired() over clientDescriptors ∩ enabled plugins ∩ attach_policy, guarded on the runtime registry having the client
      * @ref LLP 0044#consent--join-implies-consent-default-on [constrained-by] — default-on; only `attach.on_join:false` in the locked central plugin entry opts out
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
+     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
      */
     desired(ctx) {
       const descriptors = ctx.clientDescriptors
@@ -200,7 +200,7 @@ export function createAttachHandler(opts = {}) {
      * @param {string} requestKey  The client name whose attach to reverse.
      * @param {ActionContext} ctx
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
+     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
      */
     async reverse(requestKey, ctx) {
       const descriptor = ctx.clientDescriptors?.get(requestKey)
