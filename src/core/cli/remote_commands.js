@@ -97,15 +97,15 @@ export async function runRemoteAdd(argv, ctx) {
  * @ref LLP 0046#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
-  const tokenFileIdx = argv.indexOf('--token-file')
-  const tokenFile = tokenFileIdx >= 0 ? argv[tokenFileIdx + 1] : undefined
-  if (tokenFileIdx >= 0 && (!tokenFile || tokenFile.startsWith('-'))) {
+  const tokenFileArg = valueFlag(argv, '--token-file')
+  const tokenFile = tokenFileArg.value
+  if (tokenFileArg.present && !tokenFile) {
     ctx.stderr.write('hyp remote login: --token-file expects a path\n')
     return 2
   }
-  const orgIdx = argv.indexOf('--org')
-  const org = orgIdx >= 0 ? argv[orgIdx + 1] : undefined
-  if (orgIdx >= 0 && (!org || org.startsWith('-'))) {
+  const orgArg = valueFlag(argv, '--org')
+  const org = orgArg.value
+  if (orgArg.present && !org) {
     ctx.stderr.write('hyp remote login: --org expects an org name\n')
     return 2
   }
@@ -158,12 +158,38 @@ function positionals(argv, valueFlags = new Set()) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a.startsWith('-')) {
-      if (valueFlags.has(a)) i++ // consume its value
+      if (valueFlags.has(a)) i++ // consume its value (`--flag value`; `--flag=value` carries its own)
       continue
     }
     out.push(a)
   }
   return out
+}
+
+/**
+ * Read a value-taking flag in either `--flag value` or `--flag=value` form. The
+ * `=` form is accepted because the rest of the CLI takes it (e.g. core_commands'
+ * `--token-file=`), so `login prod --org=acme` must not silently drop the org and
+ * fall through to a no-org browser flow. In the space form a following token that
+ * is itself a flag (or absent) is not a value, so the caller can report "expects
+ * a value"; in the `=` form the value is explicit (even `''`, which the caller
+ * rejects).
+ *
+ * @param {string[]} argv
+ * @param {string} flag e.g. `--org`
+ * @returns {{ present: boolean, value: string | undefined }}
+ */
+function valueFlag(argv, flag) {
+  const eq = `${flag}=`
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === flag) {
+      const next = argv[i + 1]
+      return { present: true, value: next !== undefined && !next.startsWith('-') ? next : undefined }
+    }
+    if (a.startsWith(eq)) return { present: true, value: a.slice(eq.length) }
+  }
+  return { present: false, value: undefined }
 }
 
 /**

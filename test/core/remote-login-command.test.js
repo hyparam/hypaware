@@ -306,3 +306,38 @@ test('--org is noted as ignored when a static token forces the static path', asy
   assert.equal(code, 0)
   assert.match(err.join(''), /--org is ignored with a static token/)
 })
+
+test('--org=acme (equals form) is honored, not silently dropped', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  /** @type {any} */ let seen
+  const login = /** @type {any} */ (async (/** @type {any} */ args) => {
+    seen = args
+    return { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }
+  })
+  const code = await runRemoteLogin(['prod', '--org=acme'], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(seen.org, 'acme') // not undefined, which would run a no-org browser flow
+})
+
+test('--token-file=path (equals form) takes the static path, not the browser flow', async () => {
+  const hypHome = await tmpHome()
+  const tokenFile = path.join(hypHome, 'tok.txt')
+  await fs.writeFile(tokenFile, 'sk-static\n')
+  const { ctx } = await makeCtx({ hypHome })
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return {} })
+  const code = await runRemoteLogin(['prod', `--token-file=${tokenFile}`], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(called, false) // equals form must not fall through to the browser flow
+  const creds = await readCredentials(path.join(hypHome, 'hypaware'))
+  assert.deepEqual(creds.prod, { kind: 'static', token: 'sk-static' })
+})
+
+test('--org= (equals form, empty value) is a usage error', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const code = await runRemoteLogin(['prod', '--org='], ctx, {})
+  assert.equal(code, 2)
+  assert.match(err.join(''), /--org expects an org name/)
+})
