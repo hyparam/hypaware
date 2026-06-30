@@ -85,6 +85,20 @@ test('a 401 invalid_grant surfaces a typed InvalidGrantError', async () => {
   )
 })
 
+test('a 401 on the authorization_code grant does not borrow the refresh-token wording', async () => {
+  // A first-time login has no refresh token, so a rejected code (expired,
+  // replayed, mis-scoped client) must not report "refresh token was rejected".
+  const { fetchImpl } = stubFetch({ status: 401, body: { error: 'invalid_grant' } })
+  await assert.rejects(
+    () => exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'spent', codeVerifier: 'v', fetchImpl }),
+    (err) => {
+      assert.ok(!(err instanceof InvalidGrantError))
+      assert.match(/** @type {Error} */ (err).message, /authorization code was rejected/)
+      return true
+    },
+  )
+})
+
 test('a 401 with an empty body still surfaces InvalidGrantError (re-login guidance)', async () => {
   // An edge proxy may answer the revoked refresh row with a bare 401, no OAuth
   // error object. It must still map to session-expired, not a generic error.

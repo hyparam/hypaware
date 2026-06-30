@@ -188,6 +188,12 @@ async function postToken({ identityBase, body, fetchImpl, operation }) {
     // `invalid_grant`, so honor an explicit `invalid_grant` at any status too;
     // a different 400 (a malformed request) stays a generic error.
     if (errCode === 'invalid_grant' || res.status === 401) {
+      // The authorization_code grant has no refresh token: a rejected code
+      // (expired, replayed, or mis-scoped client) must not borrow the refresh
+      // wording, or a first-time login reports a refresh token it never had.
+      if (body.grant_type === 'authorization_code') {
+        throw new Error('the authorization code was rejected (it may have expired or already been used) - run the login again')
+      }
       throw new InvalidGrantError()
     }
     throw new Error(`identity endpoint rejected the grant (HTTP ${res.status}${errCode ? ` ${errCode}` : ''})`)
