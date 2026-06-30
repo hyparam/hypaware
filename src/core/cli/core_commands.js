@@ -35,6 +35,8 @@ import {
 } from './remote_commands.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
+import { createUsagePolicyResolver, findRepoRoot } from '../usage-policy/index.js'
+import { executeQuerySql } from '../query/sql.js'
 
 // `query sql` migrated to a verb (LLP 0034 §verbs): it is registered by
 // `registerCoreVerbs` and projected into both a CLI command and an MCP
@@ -260,9 +262,15 @@ function buildCoreCommands() {
     },
     {
       name: 'ignore',
-      summary: 'Mark the current session as ignored by recording sources',
-      usage: 'hyp ignore',
+      summary: 'Write a .hypignore so HypAware never records this folder subtree (--check reports status)',
+      usage: 'hyp ignore [path] [--check] [--json]',
       run: runIgnore,
+    },
+    {
+      name: 'unignore',
+      summary: 'Remove the governing .hypignore so HypAware records this folder subtree again',
+      usage: 'hyp unignore [path]',
+      run: runUnignore,
     },
     {
       name: 'skills install',
@@ -3665,13 +3673,237 @@ function expandClientName(requested, gateway) {
   return [requested]
 }
 
+// The body written by `hyp ignore`: a self-documenting `.hypignore` whose
+// first meaningful token is the `ignore` usage class. The comment header
+// explains the file to whoever finds it in a checkout; the matcher only ever
+// reads the token (LLP 0049 #file-format).
+const HYPIGNORE_TEMPLATE = `# HypAware usage policy — .hypignore
+#
+# This folder and everything beneath it is IGNORED: AI gateway exchanges
+# (Claude / Codex) whose working directory is at or under this directory are
+# never written to the local HypAware cache, for live capture and backfill
+# alike. Recording is suppressed at the capture seam; the live LLM call is
+# untouched (LLP 0049 / LLP 0050).
+#
+# Managed by \`hyp ignore\` / \`hyp unignore\`; \`hyp ignore --check\` reports
+# status. Removing this file re-enables recording for the subtree.
+#
+# The token below names the usage class. V1 implements only \`ignore\`.
+ignore
+`
+
 /**
- * @param {string[]} _argv
+ * Parse `hyp ignore` / `hyp unignore` argv: an optional positional path and
+ * the `--check` / `--json` flags (`--check` is meaningful for `ignore` only).
+ *
+ * @param {string[]} argv
+ * @returns {{ check: boolean, json: boolean, path?: string, error?: string }}
+ */
+function parseIgnoreArgs(argv) {
+  /** @type {{ check: boolean, json: boolean, path?: string, error?: string }} */
+  const r = { check: false, json: false }
+  for (const arg of argv) {
+    if (arg === '--check') { r.check = true; continue }
+    if (arg === '--json') { r.json = true; continue }
+    if (arg.startsWith('-')) { r.error = `unknown argument: ${arg}`; return r }
+    if (r.path !== undefined) { r.error = `unexpected extra argument: ${arg}`; return r }
+    r.path = arg
+  }
+  return r
+}
+
+/**
+ * `hyp ignore [path] [--check]`
+ *
+ * Without `--check`, writes a self-documenting `.hypignore` (comment header +
+ * `ignore` token) so HypAware stops recording the folder subtree. The file
+ * lands at the git **repo root** when the target is inside a repo, else at the
+ * target directory; an explicit `path` overrides the default (cwd) target. The
+ * write is idempotent (LLP 0049 R5): a path already governed by an ancestor
+ * `.hypignore` is left as-is. With `--check`, reports status without writing.
+ *
+ * @ref LLP 0049#cli [implements]: the `hyp ignore` verb — write the dotfile at the repo root, idempotent, with a prospective-only `--check`
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-async function runIgnore(_argv, ctx) {
-  ctx.stdout.write('(session ignore is contributed by recording-source plugins)\n')
+async function runIgnore(argv, ctx) {
+  const parsed = parseIgnoreArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  if (parsed.check) return runIgnoreCheck(parsed, ctx)
+
+  const base = path.resolve(parsed.path ?? ctx.cwd)
+  // Idempotent (R5): a fresh resolver reflects disk. Any governing ancestor
+  // `.hypignore` already ignores `base` (V1 has no un-ignore directive — any
+  // `.hypignore` resolves to `ignore`), so re-ignoring is a no-op success
+  // rather than a redundant nested file.
+  const existing = createUsagePolicyResolver().resolve(base)
+  if (existing.governedBy) {
+    ctx.stdout.write(`already ignored (governed by ${existing.governedBy})\n`)
+    return 0
+  }
+
+  // Default target: the repo root when `base` is in a git repo, else `base`.
+  // An explicit `path` overrides — write exactly where the caller pointed.
+  const targetDir = parsed.path ? base : (findRepoRoot(base) ?? base)
+  const file = path.join(targetDir, '.hypignore')
+  try {
+    await fs.writeFile(file, HYPIGNORE_TEMPLATE)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`error: could not write ${file}: ${message}\n`)
+    return 1
+  }
+  getLogger('usage-policy').info('usage_policy.ignore_write', {
+    [Attr.COMPONENT]: 'cmd-ignore',
+    [Attr.OPERATION]: 'usage_policy.ignore_write',
+    status: 'ok',
+  })
+  ctx.stdout.write(`wrote ${file}\n`)
   return 0
+}
+
+/**
+ * `hyp unignore [path]`
+ *
+ * Removes the nearest governing `.hypignore`, re-enabling recording for the
+ * subtree. Idempotent (LLP 0049 R5): unignoring a path that no `.hypignore`
+ * governs succeeds as a no-op.
+ *
+ * @ref LLP 0049#cli [implements]: the `hyp unignore` verb — remove the governing dotfile, idempotent
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ */
+async function runUnignore(argv, ctx) {
+  const parsed = parseIgnoreArgs(argv)
+  if (parsed.error) {
+    ctx.stderr.write(`error: ${parsed.error}\n`)
+    return 2
+  }
+  if (parsed.check) {
+    ctx.stderr.write('error: --check is only valid for `hyp ignore`\n')
+    return 2
+  }
+
+  const base = path.resolve(parsed.path ?? ctx.cwd)
+  const { governedBy } = createUsagePolicyResolver().resolve(base)
+  if (!governedBy) {
+    ctx.stdout.write(`not ignored (no .hypignore governs ${base})\n`)
+    return 0
+  }
+  try {
+    await fs.rm(governedBy, { force: true })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`error: could not remove ${governedBy}: ${message}\n`)
+    return 1
+  }
+  getLogger('usage-policy').info('usage_policy.unignore_remove', {
+    [Attr.COMPONENT]: 'cmd-unignore',
+    [Attr.OPERATION]: 'usage_policy.unignore_remove',
+    status: 'ok',
+  })
+  ctx.stdout.write(`removed ${governedBy}\n`)
+  return 0
+}
+
+/**
+ * `hyp ignore --check [path]`
+ *
+ * Reports whether `path` (default cwd) is currently ignored, which
+ * `.hypignore` governs, and the residual count of already-cached rows from the
+ * scope. This is prospective-only: `--check` never purges — it just surfaces
+ * the residue so the rule stays debuggable (LLP 0049 #prospective-only).
+ *
+ * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
+ * @param {{ json: boolean, path?: string }} parsed
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runIgnoreCheck(parsed, ctx) {
+  const base = path.resolve(parsed.path ?? ctx.cwd)
+  const result = createUsagePolicyResolver().resolve(base)
+  const ignored = result.class === 'ignore'
+  const scopeDir = result.governedBy ? path.dirname(result.governedBy) : base
+  const residual = ignored ? await countResidualCachedRows(scopeDir, ctx) : 0
+
+  if (parsed.json) {
+    ctx.stdout.write(
+      JSON.stringify({
+        path: base,
+        ignored,
+        governedBy: result.governedBy,
+        class: result.class,
+        declared: result.declared,
+        residualCachedRows: residual,
+      }) + '\n'
+    )
+    return 0
+  }
+
+  ctx.stdout.write(`path: ${base}\n`)
+  ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
+  ctx.stdout.write(`governed-by: ${result.governedBy ?? '(none)'}\n`)
+  ctx.stdout.write(`residual-cached-rows: ${residual === null ? 'unknown' : residual}\n`)
+  return 0
+}
+
+/**
+ * Count already-cached `ai_gateway_messages` rows whose `cwd`/`repo_root` lies
+ * under `scopeDir` — the residue an `ignore` does NOT purge (prospective-only).
+ *
+ * A LIKE pushes a *superset* filter into the scan (squirreling's LIKE treats
+ * `_`/`%` as wildcards, so a path containing them can only over-match, never
+ * under-match), then an exact `startsWith` refine in JS removes the false
+ * positives so the reported count is precise. Best-effort: when the dataset is
+ * not registered (the gateway plugin is inactive) or the cache cannot be read,
+ * returns `null` so the caller renders `unknown` rather than failing.
+ *
+ * @param {string} scopeDir
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number | null>}
+ */
+async function countResidualCachedRows(scopeDir, ctx) {
+  const lit = scopeDir.replace(/'/g, "''")
+  const likePrefix = `${scopeDir}/`.replace(/'/g, "''")
+  const sql =
+    `SELECT cwd, repo_root FROM ai_gateway_messages ` +
+    `WHERE cwd = '${lit}' OR cwd LIKE '${likePrefix}%' ` +
+    `OR repo_root = '${lit}' OR repo_root LIKE '${likePrefix}%'`
+  try {
+    const out = await executeQuerySql({
+      query: sql,
+      registry: ctx.query,
+      storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+      refresh: 'never',
+      config: ctx.config,
+    })
+    let n = 0
+    for (const row of out.rows ?? []) {
+      const cwd = row.cwd == null ? '' : String(row.cwd)
+      const repoRoot = row.repo_root == null ? '' : String(row.repo_root)
+      if (isUnderDir(cwd, scopeDir) || isUnderDir(repoRoot, scopeDir)) n += 1
+    }
+    return n
+  } catch {
+    return null
+  }
+}
+
+/**
+ * True when `p` is `dir` itself or a path strictly beneath it.
+ *
+ * @param {string} p
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function isUnderDir(p, dir) {
+  if (p === '') return false
+  if (p === dir) return true
+  const prefix = dir.endsWith('/') ? dir : `${dir}/`
+  return p.startsWith(prefix)
 }
 
 /**

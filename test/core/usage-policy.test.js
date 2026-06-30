@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseHypignore, createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
+import { parseHypignore, createUsagePolicyResolver, findRepoRoot } from '../../src/core/usage-policy/index.js'
 
 // --- format.js: parseHypignore -------------------------------------------
 
@@ -143,4 +143,32 @@ test('createUsagePolicyResolver defaults fs to node:fs when none injected', () =
   const result = resolver.resolve(process.cwd())
   assert.ok(result.class === 'full' || result.class === 'ignore')
   assert.equal(typeof resolver.isIgnored(process.cwd()), 'boolean')
+})
+
+// --- repo_root.js: findRepoRoot ------------------------------------------
+
+/** @param {string[]} present Absolute paths existsSync should report true for. */
+function fakeExistsFs(present) {
+  const set = new Set(present)
+  return { existsSync: (/** @type {string} */ p) => set.has(p) }
+}
+
+test('findRepoRoot: nearest ancestor with a .git entry is the repo root', () => {
+  const fs = fakeExistsFs(['/work/repo/.git'])
+  assert.equal(findRepoRoot('/work/repo/src/deep', fs), '/work/repo')
+})
+
+test('findRepoRoot: the start dir itself can be the repo root', () => {
+  const fs = fakeExistsFs(['/work/repo/.git'])
+  assert.equal(findRepoRoot('/work/repo', fs), '/work/repo')
+})
+
+test('findRepoRoot: returns null when no ancestor has a .git', () => {
+  const fs = fakeExistsFs([])
+  assert.equal(findRepoRoot('/work/repo/src', fs), null)
+})
+
+test('findRepoRoot: defaults fs to node:fs without throwing', () => {
+  const result = findRepoRoot(process.cwd())
+  assert.ok(result === null || typeof result === 'string')
 })
