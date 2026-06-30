@@ -3734,7 +3734,10 @@ async function runIgnore(argv, ctx) {
   }
   if (parsed.check) return runIgnoreCheck(parsed, ctx)
 
-  const base = path.resolve(parsed.path ?? ctx.cwd)
+  // Resolve a relative `path` arg against the command-context cwd (matching the
+  // sibling verbs above), not the Node process cwd, so injected/remote/test
+  // dispatch writes/removes/checks the tree the caller actually pointed at.
+  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
   // Idempotent (R5): a fresh resolver reflects disk. Any governing ancestor
   // `.hypignore` already ignores `base` (V1 has no un-ignore directive — any
   // `.hypignore` resolves to `ignore`), so re-ignoring is a no-op success
@@ -3787,7 +3790,10 @@ async function runUnignore(argv, ctx) {
     return 2
   }
 
-  const base = path.resolve(parsed.path ?? ctx.cwd)
+  // Resolve a relative `path` arg against the command-context cwd (matching the
+  // sibling verbs above), not the Node process cwd, so injected/remote/test
+  // dispatch writes/removes/checks the tree the caller actually pointed at.
+  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
   const { governedBy } = createUsagePolicyResolver().resolve(base)
   if (!governedBy) {
     ctx.stdout.write(`not ignored (no .hypignore governs ${base})\n`)
@@ -3823,7 +3829,10 @@ async function runUnignore(argv, ctx) {
  * @returns {Promise<number>}
  */
 async function runIgnoreCheck(parsed, ctx) {
-  const base = path.resolve(parsed.path ?? ctx.cwd)
+  // Resolve a relative `path` arg against the command-context cwd (matching the
+  // sibling verbs above), not the Node process cwd, so injected/remote/test
+  // dispatch writes/removes/checks the tree the caller actually pointed at.
+  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
   const result = createUsagePolicyResolver().resolve(base)
   const ignored = result.class === 'ignore'
   const scopeDir = result.governedBy ? path.dirname(result.governedBy) : base
