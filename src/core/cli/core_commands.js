@@ -22,6 +22,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
+import { clearClientActionMarker } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
@@ -3669,6 +3670,29 @@ async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
             hyp_plugin: descriptor.plugin,
             settings_path: result.settingsPath,
             changed: true,
+          })
+        }
+        // Retract the attach marker so the CLI undo and the marker store stay in
+        // sync, exactly as the reconciler's reverse() does after its own disk
+        // undo. Otherwise this manual detach reverses the settings but leaves an
+        // orphaned `done` attach marker, and the next `hyp join`'s forward gap
+        // short-circuits on it and never re-attaches the client (#217). Runs even
+        // on a no-op reversal (changed:false) so a stale marker over already-clean
+        // settings is still cleared. Best-effort: a marker we cannot retract is a
+        // status blemish, not a detach failure (the settings undo already landed).
+        // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker via the one core undo's store, so CLI and reconciler reverse cannot drift (#217)
+        try {
+          clearClientActionMarker({
+            stateRoot: readObservabilityEnv(ctx.env).stateDir,
+            kind: 'attach',
+            requestKey: name,
+          })
+        } catch (markerErr) {
+          getLogger('cmd-detach').warn('client.detach.marker_retract_failed', {
+            hyp_client: name,
+            hyp_plugin: descriptor.plugin,
+            error_kind: 'marker_retract_failed',
+            detail: markerErr instanceof Error ? markerErr.message : String(markerErr),
           })
         }
         writeCoreDetachOutput({ ctx, name, json, result })
