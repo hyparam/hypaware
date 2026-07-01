@@ -84,7 +84,7 @@ export async function runRemoteAdd(argv, ctx) {
 /**
  * `hyp remote login <name>`: populate the target's query-scoped credential.
  *
- * Two modes, one store (LLP 0046 D1). A **static** token still comes from
+ * Two modes, one store (LLP 0058 D1). A **static** token still comes from
  * `--token-file <path>` or piped stdin, unchanged (the headless escape hatch,
  * D8). Otherwise an interactive **browser** authorization-code flow runs
  * against the target's identity endpoint and stores an OIDC session. `--org`
@@ -94,7 +94,7 @@ export async function runRemoteAdd(argv, ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{ login?: typeof loginWithBrowser }} [deps] test seam for the browser flow
- * @ref LLP 0046#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
+ * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
   const tokenFileArg = valueFlag(argv, '--token-file')
@@ -201,7 +201,7 @@ function valueFlag(argv, flag) {
  * @param {any} stdin
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
- * @ref LLP 0046#d8 [implements]: static token stays the documented headless fallback
+ * @ref LLP 0058#d8 [implements]: static token stays the documented headless fallback
  */
 async function runStaticLogin(name, tokenFile, stdin, ctx) {
   /** @type {string} */
@@ -260,7 +260,7 @@ async function persistStaticToken(name, token, ctx) {
 }
 
 /**
- * The browser authorization-code path (LLP 0046 D1/D6/D7). Derives the
+ * The browser authorization-code path (LLP 0058 D1/D6/D7). Derives the
  * identity base from the configured target URL's origin, runs the loopback
  * flow, and stores the resulting OIDC session.
  *
@@ -300,7 +300,7 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
     // A server-surfaced callback error (org selection, membership) is already
     // actionable. A local failure - most importantly a timeout, which is what a
     // headless box hits when the opener silently fails - is not, so point at the
-    // headless escape hatches rather than leaving the user stuck (LLP 0046 D8).
+    // headless escape hatches rather than leaving the user stuck (LLP 0058 D8).
     if (!callbackError) {
       ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
     }
@@ -329,7 +329,7 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
  * @param {string | undefined} callbackError
  * @param {unknown} err
  * @returns {string}
- * @ref LLP 0046#d7 [implements]: org selector errors explained; never enumerate the user's orgs
+ * @ref LLP 0058#d7 [implements]: org selector errors explained; never enumerate the user's orgs
  */
 function explainLoginError(callbackError, err) {
   switch (callbackError) {

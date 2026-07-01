@@ -5,23 +5,23 @@
 **Systems:** CLI, Query, MCP
 **Author:** Kenny / Claude
 **Date:** 2026-06-30
-**Related:** LLP 0033, LLP 0046
+**Related:** LLP 0033, LLP 0058
 
-> LLP 0046 D5 introduced a cross-process write lock on the shared `0600`
+> LLP 0058 D5 introduced a cross-process write lock on the shared `0600`
 > credential store so a one-time-use refresh token is rotated single-flight. The
 > lock worked; its *crash-recovery* mechanism (a `{host, pid}` liveness probe plus
 > an age backstop plus a rename-aside-and-restore steal) did not. A review of the
 > shipped code found six defects clustered entirely in that recovery path. This
 > decision replaces the recovery mechanism with the simplest thing that is
-> provably safe, and supersedes the second half of LLP 0046 D5.
+> provably safe, and supersedes the second half of LLP 0058 D5.
 
 ## What stays (and why)
 
-The **single-flight refresh under the lock** decision of LLP 0046 D5 is sound and
+The **single-flight refresh under the lock** decision of LLP 0058 D5 is sound and
 unchanged: the read-decide-refresh-commit still runs inside one lock hold, so only
 one process calls the token endpoint for a given store at a time, and an
 `invalid_grant` observed under the lock is an unambiguous revocation rather than a
-lost race. We do **not** move the network refresh outside the lock. LLP 0046 D5
+lost race. We do **not** move the network refresh outside the lock. LLP 0058 D5
 already rejected that ("optimistic compare-and-swap"), and the rejection is
 correct: the refresh token is one-time-use, so two processes refreshing the same
 token concurrently would double-spend it, and a loser that re-read before the
@@ -118,7 +118,7 @@ holds.
   so no contender waits longer than one stale interval.
 - **Single-flight preserved.** Absent the crash-recovery window, exactly one
   process holds the lock and therefore exactly one refreshes, so one-time-use
-  rotation is never double-spent (the property LLP 0046 D5 needs).
+  rotation is never double-spent (the property LLP 0058 D5 needs).
 
 ## Consequences
 
@@ -138,5 +138,5 @@ holds.
 ## References
 
 - [LLP 0033](./0033-remote-query-attach.spec.md) (the `0600` query-scoped store)
-- [LLP 0046](./0046-oidc-login-client.decision.md) D5 (single-flight refresh; this
+- [LLP 0058](./0058-oidc-login-client.decision.md) D5 (single-flight refresh; this
   doc supersedes its recovery mechanism)

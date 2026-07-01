@@ -92,7 +92,7 @@ a free invariant. The URL is non-secret and committable; the token is not config
   single map `{ "<target>": { "kind": "…", … } }` (kernel-managed state,
   [LLP 0004](./0004-activation-and-paths.spec.md); mirrors `central`'s
   `identity.json` single-file precedent). One `hyp remote login` per server. Each
-  record is **discriminated by `kind`** ([LLP 0046 D4](./0046-oidc-login-client.decision.md#d4)):
+  record is **discriminated by `kind`** ([LLP 0058 D4](./0058-oidc-login-client.decision.md#d4)):
   a `static` record is the bare `{ token }` of this spec; an `oidc` record carries
   a refresh token plus a cached short-lived access JWT from a browser login. A
   legacy `token`-only record (no `kind`) reads as `static`, so existing files keep
@@ -101,7 +101,7 @@ a free invariant. The URL is non-secret and committable; the token is not config
   (CI/ephemeral) → stored file → error (`no token for '<target>' — run 'hyp
   remote login <target>'`). A *per-target* env var so a stored var can never
   silently authenticate the wrong server. For an `oidc` record the attach path is
-  **session-aware** ([LLP 0046 D5](./0046-oidc-login-client.decision.md#d5)): it
+  **session-aware** ([LLP 0058 D5](./0058-oidc-login-client.decision.md#d5)): it
   silently refreshes a near-expiry access JWT, and on a live `401`/`403` it
   refreshes once and retries before surfacing; a refresh that fails `invalid_grant`
   surfaces the same re-login guidance, now meaning re-run the browser flow. The

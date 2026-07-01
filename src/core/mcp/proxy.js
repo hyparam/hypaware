@@ -93,7 +93,7 @@ export async function runMcpProxy({ target, ctx }) {
       }
 
       // Forward via the shared attach policy: a live 401/403 on a refreshable
-      // OIDC session forces one refresh + retry before surfacing (LLP 0046 D5);
+      // OIDC session forces one refresh + retry before surfacing (LLP 0058 D5);
       // an env/static token cannot refresh, so its 401 falls through. `op` folds
       // both the fetch outcome and a fetch failure into `value`, so the retry
       // decision stays in attachWithRefresh and never throws here.

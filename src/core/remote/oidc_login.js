@@ -9,7 +9,7 @@ import { openBrowser as defaultOpenBrowser } from './open_browser.js'
 import { createPkcePair } from './pkce.js'
 
 /**
- * Orchestrate the browser authorization-code flow (LLP 0046 D2/D3): generate
+ * Orchestrate the browser authorization-code flow (LLP 0058 D2/D3): generate
  * a PKCE pair and a random CSRF `state`, start the ephemeral loopback
  * receiver, build the `/login/start` URL, open the browser (or print the URL),
  * await the loopback `code`, exchange it at `/token`, and return the session.
@@ -30,7 +30,7 @@ import { createPkcePair } from './pkce.js'
  *   print?: (line: string) => void,
  * }} args
  * @returns {Promise<OidcSession>}
- * @ref LLP 0046#d3 [implements]: client orchestrates the downstream PKCE leg; verifier held in memory, presented at /token
+ * @ref LLP 0058#d3 [implements]: client orchestrates the downstream PKCE leg; verifier held in memory, presented at /token
  */
 export async function loginWithBrowser({
   identityBase,
@@ -91,7 +91,7 @@ export async function loginWithBrowser({
 }
 
 /**
- * Build the `GET /login/start` URL the browser navigates to (LLP 0047 §the-
+ * Build the `GET /login/start` URL the browser navigates to (LLP 0059 §the-
  * server-contract). `org` is an optional selector only; the server resolves
  * the real org.
  *

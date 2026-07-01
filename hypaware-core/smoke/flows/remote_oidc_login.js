@@ -18,7 +18,7 @@ import { verbToCommand } from '../../../src/core/cli/verb_command.js'
  */
 
 /**
- * Hermetic smoke for the multi-tenant OIDC client login (LLP 0046-0048). One
+ * Hermetic smoke for the multi-tenant OIDC client login (LLP 0058-0060). One
  * in-process server plays both roles against a single origin:
  *
  *  - the identity surface `<origin>/v1/identity/{login/start,token}` (signs
@@ -36,7 +36,7 @@ import { verbToCommand } from '../../../src/core/cli/verb_command.js'
  * remote-oidc modules emit (Log-Driven Development).
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0046#d5 [tests]: silent refresh + re-login on the attach path, end to end against a stub identity server
+ * @ref LLP 0058#d5 [tests]: silent refresh + re-login on the attach path, end to end against a stub identity server
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

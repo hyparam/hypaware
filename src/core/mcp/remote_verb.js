@@ -86,7 +86,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
     // A 401/403 that survived the one-shot refresh + retry is a dead credential.
     // Advise by *why* it is dead - identically to the stdio proxy - rather than
     // surfacing client.js's blanket "re-run hyp remote login", which mis-advises
-    // an env override that re-login can never fix (LLP 0046 D5).
+    // an env override that re-login can never fix (LLP 0058 D5).
     if (out.authFailed) {
       const { message, exitCode } = describeAuthRejection({ target, status: lastAuthStatus, resolved })
       return { ok: false, error: message, exitCode }
@@ -119,7 +119,7 @@ async function callRemoteTool({ url, token, verb, params }) {
 
 /**
  * Map a refresh failure to a verb result: a typed `invalid_grant` (the refresh
- * row was revoked or expired) becomes the re-login guidance (LLP 0046 D5); any
+ * row was revoked or expired) becomes the re-login guidance (LLP 0058 D5); any
  * other failure is a generic error.
  *
  * @param {unknown} err

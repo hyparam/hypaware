@@ -6,7 +6,7 @@ import { Attr, getLogger } from '../observability/index.js'
 /**
  * Plain JSON client for hypaware-server's identity surface
  * (`<origin>/v1/identity`), distinct from the MCP JSON-RPC `client.js`. It
- * speaks the two token grants the server exposes (LLP 0047 §the-server-
+ * speaks the two token grants the server exposes (LLP 0059 §the-server-
  * contract): `authorization_code` (browser login) and `refresh_token` (silent
  * refresh). The response field is `access_jwt` (not `access_token`) and
  * `expires_at` is an ISO timestamp; the JWT is hypaware-server's own
@@ -32,7 +32,7 @@ export const NO_FETCH_MESSAGE = 'no fetch implementation available'
 /**
  * Error thrown when the token endpoint rejects a refresh with
  * `invalid_grant` (the refresh row was revoked or expired). The attach path
- * turns this into the "re-run `hyp remote login`" guidance (LLP 0046 D5).
+ * turns this into the "re-run `hyp remote login`" guidance (LLP 0058 D5).
  */
 export class InvalidGrantError extends Error {
   /** @param {string} [message] */
@@ -46,7 +46,7 @@ export class InvalidGrantError extends Error {
 
 /**
  * The user-facing re-login guidance for an expired or revoked OIDC session
- * (LLP 0046 D5). Lives with {@link InvalidGrantError} so the wording has one
+ * (LLP 0058 D5). Lives with {@link InvalidGrantError} so the wording has one
  * home, shared by the stdio proxy and the one-shot verb attach path.
  *
  * @param {string} target
@@ -66,7 +66,7 @@ export function sessionExpiredMessage(target) {
  * @param {unknown} err
  * @param {string} target
  * @returns {{ sessionExpired: boolean, message: string }}
- * @ref LLP 0046#d5 [implements]: invalid_grant -> re-login guidance, one home for both attach paths
+ * @ref LLP 0058#d5 [implements]: invalid_grant -> re-login guidance, one home for both attach paths
  */
 export function describeRefreshError(err, target) {
   if (err instanceof InvalidGrantError) {

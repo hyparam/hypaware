@@ -28,7 +28,7 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
  *
  * @param {{ state: string, timeoutMs?: number }} args
  * @returns {Promise<{ redirectUri: string, port: number, waitForCode: () => Promise<{ code: string }>, close: () => void }>}
- * @ref LLP 0046#d2 [implements]: ephemeral 127.0.0.1 redirect, single-shot, timed out (RFC 8252)
+ * @ref LLP 0058#d2 [implements]: ephemeral 127.0.0.1 redirect, single-shot, timed out (RFC 8252)
  */
 export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const log = getLogger('remote')
@@ -106,7 +106,7 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
     // port is reachable by any local process and by any page the user is browsing
     // (a no-cors GET still reaches us), so failing the login on the first stray or
     // hostile `?error=` / wrong-`?state=` hit would be a trivial login DoS. The
-    // identity server echoes `state` on both success and error (LLP 0047), so a
+    // identity server echoes `state` on both success and error (LLP 0059), so a
     // real provider error still matches here and surfaces below.
     if (returnedState !== state) {
       respond(res, 'Unexpected login callback. You can close this tab.')
