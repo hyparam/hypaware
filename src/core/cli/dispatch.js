@@ -39,9 +39,12 @@ const VERSION_FLAGS = new Set(['--version', '-V'])
  * Map a sink materialization failure to a one-line, actionable hint.
  * The raw `[errorKind]: message` line stays for operators; this adds a
  * "what do I do about it" line for the common, confusing cases: a host
- * that hasn't joined a fleet, and the expected-but-noisy plugin-not-active
- * warning that read-only commands emit because they don't load sink
- * writer plugins.
+ * that hasn't joined a fleet, and a configured sink whose writer or
+ * destination plugin isn't enabled in the active config.
+ *
+ * Note this only runs for commands that actually activate plugins.
+ * Lifecycle/read-only commands (boot profile `{ activate: [] }`) skip
+ * sink materialization entirely, so they never reach this hint.
  *
  * @param {{ instance: string, errorKind: string, message: string }} err
  * @returns {string | undefined}
@@ -51,9 +54,27 @@ function sinkWarningHint(err) {
     return "this host hasn't joined a fleet. Run `hyp join <central-url> <token>` to enable the central sink, or ignore this warning if you only capture locally"
   }
   if (err.errorKind === 'sink_plugin_not_active') {
-    return `expected for read-only commands (the writer/destination plugin for '${err.instance}' isn't loaded here); the running daemon is unaffected`
+    return `sink '${err.instance}' names a writer/destination plugin that isn't enabled in the active config. Add it to plugins[] or remove the sink`
   }
   return undefined
+}
+
+/**
+ * Whether a boot profile intends to activate any plugins. Lifecycle and
+ * read-only commands boot with `{ activate: [] }` (see `decideBootProfile`)
+ * so they never load sink writer/destination plugins; a sink can therefore
+ * never materialize and every `sink_plugin_not_active` warning would be
+ * structurally guaranteed noise. Sink materialization only carries signal
+ * when the command actually intended to load those plugins.
+ *
+ * @param {BootProfile} bootProfile
+ * @returns {boolean}
+ */
+function bootProfileActivatesPlugins(bootProfile) {
+  if (typeof bootProfile === 'object' && Array.isArray(bootProfile.activate)) {
+    return bootProfile.activate.length > 0
+  }
+  return true
 }
 
 /**
@@ -158,16 +179,23 @@ export async function dispatch(argv, opts = {}) {
     activePlugins = boot.activePlugins
     if (boot.config) activeConfig = boot.config
 
-    const sinkResult = await materializeSinks(kernel, boot.config, {
-      stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
-      runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
-    })
-    for (const err of sinkResult.errors) {
-      stderr.write(
-        `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
-      )
-      const hint = sinkWarningHint(err)
-      if (hint) stderr.write(`  → ${hint}\n`)
+    // Lifecycle/read-only commands boot with no plugins, so no sink can
+    // ever materialize; skip the pass rather than emit a guaranteed
+    // `sink_plugin_not_active` warning per configured sink. The daemon's
+    // own materialization (src/core/daemon/runtime.js) is untouched, so a
+    // sink that genuinely fails to materialize there still surfaces.
+    if (bootProfileActivatesPlugins(bootProfile)) {
+      const sinkResult = await materializeSinks(kernel, boot.config, {
+        stateRoot: path.join(obsEnv.hypHome, 'hypaware'),
+        runId: env.DEV_RUN_ID ?? `cli-${process.pid}`,
+      })
+      for (const err of sinkResult.errors) {
+        stderr.write(
+          `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
+        )
+        const hint = sinkWarningHint(err)
+        if (hint) stderr.write(`  → ${hint}\n`)
+      }
     }
   }
 

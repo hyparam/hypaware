@@ -504,6 +504,60 @@ test('dispatch surfaces boot-path sink materialization warnings', async () => {
   )
 })
 
+test('zero-plugin lifecycle commands skip sink materialization warnings; config-profile commands still warn', async () => {
+  // Regression for #219: lifecycle/read-only commands (`status`, `daemon`,
+  // `version`, …) boot with `{ activate: [] }`, so no writer/destination
+  // plugin is ever loaded and no configured sink can materialize. Emitting a
+  // `sink_plugin_not_active` warning per sink there is structurally
+  // guaranteed noise. The warning must only survive when the command
+  // actually intended to activate those plugins (the `config` profile).
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-lifecycle-sink-warning-'))
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/local-fs' }],
+    sinks: {
+      local: {
+        writer: '@hypaware/format-parquet',
+        destination: '@hypaware/local-fs',
+      },
+    },
+  }))
+  const env = { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: configPath }
+
+  /** @param {string[]} argv */
+  async function run(argv) {
+    const registry = createCommandRegistry()
+    // `status` → lifecycle boot profile `{ activate: [] }`.
+    // `noop`   → ordinary `config` boot profile.
+    registry.register({ name: 'status', summary: 'Test lifecycle command', usage: 'hyp status', async run() { return 0 } })
+    registry.register({ name: 'noop', summary: 'Test config command', usage: 'hyp noop', async run() { return 0 } })
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(argv, { stdout, stderr, registry, env })
+    return { code, stdout: stdout.text(), stderr: stderr.text() }
+  }
+
+  // Zero-plugin lifecycle command: must NOT emit the guaranteed-noise warning.
+  const lifecycle = await run(['status'])
+  assert.equal(lifecycle.code, 0)
+  assert.equal(
+    lifecycle.stderr.includes('sink_plugin_not_active'),
+    false,
+    `lifecycle command must not warn; got stderr: ${JSON.stringify(lifecycle.stderr)}`
+  )
+
+  // Config-profile command over the SAME config: it activates config plugins
+  // and genuinely expected the sink's writer to be active, so a real
+  // misconfiguration (writer plugin not enabled) must still surface.
+  const ordinary = await run(['noop'])
+  assert.equal(ordinary.code, 0)
+  assert.match(
+    ordinary.stderr,
+    /warning: sink 'local' not materialized \[sink_plugin_not_active\]/
+  )
+})
+
 test('attach accepts a positional client name', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
   const stdout = makeBuf()
