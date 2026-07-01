@@ -89,13 +89,25 @@ a free invariant. The URL is non-secret and committable; the token is not config
 (secrets-never-in-config, server LLP 0000). Resolution for the human-CLI path:
 
 - **Storage:** `<state>/remote-credentials.json`, mode `0600`, atomic tmp+rename, a
-  single map `{ "<target>": { "token": "…" } }` (kernel-managed state,
+  single map `{ "<target>": { "kind": "…", … } }` (kernel-managed state,
   [LLP 0004](./0004-activation-and-paths.spec.md); mirrors `central`'s
-  `identity.json` single-file precedent). One `hyp remote login` per server.
+  `identity.json` single-file precedent). One `hyp remote login` per server. Each
+  record is **discriminated by `kind`** ([LLP 0046 D4](./0046-oidc-login-client.decision.md#d4)):
+  a `static` record is the bare `{ token }` of this spec; an `oidc` record carries
+  a refresh token plus a cached short-lived access JWT from a browser login. A
+  legacy `token`-only record (no `kind`) reads as `static`, so existing files keep
+  working without a rewrite.
 - **Resolution at query time:** per-target env `HYP_REMOTE_TOKEN_<NAME>`
   (CI/ephemeral) → stored file → error (`no token for '<target>' — run 'hyp
   remote login <target>'`). A *per-target* env var so a stored var can never
-  silently authenticate the wrong server.
+  silently authenticate the wrong server. For an `oidc` record the attach path is
+  **session-aware** ([LLP 0046 D5](./0046-oidc-login-client.decision.md#d5)): it
+  silently refreshes a near-expiry access JWT, and on a live `401`/`403` it
+  refreshes once and retries before surfacing; a refresh that fails `invalid_grant`
+  surfaces the same re-login guidance, now meaning re-run the browser flow. The
+  stdio proxy fallback ([LLP 0034 §proxy-fallback](./0034-mcp-host-intrinsic.decision.md#proxy-fallback))
+  shares this session-aware path, resolving a fresh JWT per forwarded message so a
+  long-lived proxy does not pin one short-lived access JWT.
 - AI clients that install the endpoint directly hold the token in **their own** MCP
   config — `hyp`'s store is only for the human-CLI client path.
 

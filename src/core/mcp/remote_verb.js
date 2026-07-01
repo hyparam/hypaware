@@ -1,8 +1,9 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
-import { resolveToken } from '../remote/credentials.js'
-import { createHttpMcpClient } from './client.js'
+import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
+import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
+import { createHttpMcpClient, isAuthStatus } from './client.js'
 
 /**
  * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
@@ -33,25 +34,113 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
     }
   }
 
+  // Both the silent refresh and the remote tool call need a global fetch; fail
+  // with a clear reason here rather than letting an oidc refresh throw the
+  // identity client's lower-level "no fetch" deep inside the attach path (the
+  // stdio proxy guards the same way).
+  if (typeof (/** @type {unknown} */ (globalThis.fetch)) !== 'function') {
+    return { ok: false, error: `${NO_FETCH_MESSAGE} for the remote verb`, exitCode: 1 }
+  }
+
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const resolved = await resolveToken({ target, env: ctx.env, stateDir })
+  const identityBase = deriveIdentityBase(entry.url) ?? undefined
+  /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
+  let resolved
+  try {
+    // The initial resolve can itself refresh (and fail) when the stored JWT is
+    // already stale; map an invalid_grant here too, not only on the 401 retry.
+    resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+  } catch (err) {
+    return mapRefreshError(err, target)
+  }
   if (!resolved.ok) {
     return { ok: false, error: resolved.error, exitCode: 2 }
   }
 
-  const client = createHttpMcpClient({ url: entry.url, token: resolved.token })
-  try {
-    await client.initialize()
-    const toolResult = await client.callTool(verb.tool, params)
-    if (toolResult?.isError) {
-      const text = firstTextContent(toolResult) ?? 'remote tool reported an error'
-      return { ok: false, error: text, exitCode: 1 }
+  // One full attach attempt, folded into the shape attachWithRefresh wants: a
+  // thrown 401/403 (stale or revoked OIDC JWT) is reported as `authFailed` so
+  // the shared policy can force one refresh and retry; any other throw is a
+  // terminal non-auth error folded into the returned verb-result.
+  // The status of the most recent auth rejection, so a 401/403 that survives the
+  // refresh + retry can be explained with the real code (defaults to 401).
+  let lastAuthStatus = 401
+  const op = async (/** @type {string} */ token) => {
+    try {
+      return { authFailed: false, value: await callRemoteTool({ url: entry.url, token, verb, params }) }
+    } catch (err) {
+      const authFailed = isAuthError(err)
+      if (authFailed) lastAuthStatus = Number(/** @type {any} */ (err).status) || lastAuthStatus
+      /** @type {{ ok: false, error: string, exitCode: number }} */
+      const value = { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
+      return { authFailed, value }
     }
-    const structured = toolResult?.structuredContent ?? parseTextContent(toolResult)
-    return { ok: true, result: structured, notices: serverCapNotices(structured) }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
   }
+
+  try {
+    const out = await attachWithRefresh({
+      resolved,
+      refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+      op,
+    })
+    if (!out.ok) return { ok: false, error: out.error, exitCode: 2 }
+    // A 401/403 that survived the one-shot refresh + retry is a dead credential.
+    // Advise by *why* it is dead - identically to the stdio proxy - rather than
+    // surfacing client.js's blanket "re-run hyp remote login", which mis-advises
+    // an env override that re-login can never fix (LLP 0046 D5).
+    if (out.authFailed) {
+      const { message, exitCode } = describeAuthRejection({ target, status: lastAuthStatus, resolved })
+      return { ok: false, error: message, exitCode }
+    }
+    return out.value
+  } catch (refreshErr) {
+    return mapRefreshError(refreshErr, target)
+  }
+}
+
+/**
+ * One remote attach attempt: initialize, call the tool, and shape the result.
+ * Throws on transport/auth errors (so the caller can retry); a tool-level
+ * `isError` is a normal return, not a throw (it is not retryable).
+ *
+ * @param {{ url: string, token: string, verb: VerbRegistration, params: Record<string, unknown> }} args
+ * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode: number }>}
+ */
+async function callRemoteTool({ url, token, verb, params }) {
+  const client = createHttpMcpClient({ url, token })
+  await client.initialize()
+  const toolResult = await client.callTool(verb.tool, params)
+  if (toolResult?.isError) {
+    const text = firstTextContent(toolResult) ?? 'remote tool reported an error'
+    return { ok: false, error: text, exitCode: 1 }
+  }
+  const structured = toolResult?.structuredContent ?? parseTextContent(toolResult)
+  return { ok: true, result: structured, notices: serverCapNotices(structured) }
+}
+
+/**
+ * Map a refresh failure to a verb result: a typed `invalid_grant` (the refresh
+ * row was revoked or expired) becomes the re-login guidance (LLP 0046 D5); any
+ * other failure is a generic error.
+ *
+ * @param {unknown} err
+ * @param {string} target
+ * @returns {{ ok: false, error: string, exitCode: number }}
+ */
+function mapRefreshError(err, target) {
+  const { sessionExpired, message } = describeRefreshError(err, target)
+  return { ok: false, error: message, exitCode: sessionExpired ? 2 : 1 }
+}
+
+/**
+ * Whether a thrown error is an MCP-client auth rejection (a 401/403 tagged by
+ * `client.js`), eligible for a one-shot refresh + retry.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isAuthError(err) {
+  return !!err && typeof err === 'object' &&
+    (/** @type {any} */ (err).authError === true || isAuthStatus(/** @type {any} */ (err).status))
 }
 
 /**

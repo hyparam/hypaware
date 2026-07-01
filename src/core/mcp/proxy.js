@@ -4,8 +4,9 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { resolveToken } from '../remote/credentials.js'
-import { parseRpcResponse } from './client.js'
+import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
+import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
+import { isAuthStatus, mcpRequestHeaders, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
 
@@ -37,14 +38,26 @@ export async function runMcpProxy({ target, ctx }) {
     return 2
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const resolved = await resolveToken({ target, env: ctx.env, stateDir })
-  if (!resolved.ok) {
-    ctx.stderr.write(`hyp mcp: ${resolved.error}\n`)
+  const identityBase = deriveIdentityBase(entry.url) ?? undefined
+  // Fail fast (exit 2) if there is no usable credential at all. This is a
+  // presence check only - resolveToken never refreshes - so a near-expiry OIDC
+  // JWT does not trigger a network refresh here that the first handleMessage
+  // would immediately repeat, and a transient refresh blip can't abort a proxy
+  // that would otherwise start. The per-message resolveAccessJwt below does the
+  // session-aware refresh.
+  try {
+    const probe = await resolveToken({ target, env: ctx.env, stateDir })
+    if (!probe.ok) {
+      ctx.stderr.write(`hyp mcp: ${probe.error}\n`)
+      return 2
+    }
+  } catch (err) {
+    ctx.stderr.write(`hyp mcp: ${describeRefreshError(err, target).message}\n`)
     return 2
   }
   const fetchImpl = /** @type {typeof fetch | undefined} */ (globalThis.fetch)
   if (typeof fetchImpl !== 'function') {
-    ctx.stderr.write('hyp mcp: no fetch implementation available for the proxy\n')
+    ctx.stderr.write(`hyp mcp: ${NO_FETCH_MESSAGE} for the proxy\n`)
     return 1
   }
 
@@ -55,33 +68,84 @@ export async function runMcpProxy({ target, ctx }) {
   // Lifecycle line to stderr: stdout is the protocol channel.
   ctx.stderr.write(`hyp mcp: proxying stdio → ${entry.url} (target '${target}')\n`)
 
+  /** Forward one message to the remote with the given bearer token. */
+  const forward = (/** @type {any} */ message, /** @type {string} */ token) => {
+    const headers = mcpRequestHeaders({ token, sessionId })
+    return fetchImpl(entry.url, { method: 'POST', headers, body: JSON.stringify(message) })
+  }
+
   const server = {
     /** @param {any} message */
     async handleMessage(message) {
       const isNotify = message && typeof message === 'object' && message.id === undefined
-      /** @type {Record<string, string>} */
-      const headers = {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        authorization: `Bearer ${resolved.token}`,
-        ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
-      }
-      let res
+      const id = message?.id ?? null
+
+      // Resolve a fresh access JWT per message: an OIDC session silently
+      // refreshes a near-expiry JWT, env/static tokens pass through unchanged.
+      let resolved
       try {
-        res = await fetchImpl(entry.url, { method: 'POST', headers, body: JSON.stringify(message) })
+        resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
       } catch (err) {
-        return isNotify ? null : jsonRpcError(message?.id ?? null, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, describeRefreshError(err, target).message)
       }
+      if (!resolved.ok) {
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, resolved.error)
+      }
+
+      // Forward via the shared attach policy: a live 401/403 on a refreshable
+      // OIDC session forces one refresh + retry before surfacing (LLP 0046 D5);
+      // an env/static token cannot refresh, so its 401 falls through. `op` folds
+      // both the fetch outcome and a fetch failure into `value`, so the retry
+      // decision stays in attachWithRefresh and never throws here.
+      /** @type {(token: string) => Promise<{ authFailed: boolean, value: { res: Awaited<ReturnType<typeof forward>> } | { err: unknown } }>} */
+      const op = async (token) => {
+        try {
+          const res = await forward(message, token)
+          return { authFailed: isAuthStatus(res.status), value: { res } }
+        } catch (err) {
+          return { authFailed: false, value: { err } }
+        }
+      }
+      let out
+      try {
+        out = await attachWithRefresh({
+          resolved,
+          refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+          op,
+        })
+      } catch (err) {
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, describeRefreshError(err, target).message)
+      }
+      if (!out.ok) {
+        // The forced refresh could not produce a token (e.g. no identity
+        // endpoint). Surface that reason rather than letting the stale 401
+        // fall through to a generic "remote returned HTTP 401" with no guidance.
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, out.error)
+      }
+      if ('err' in out.value) {
+        const err = out.value.err
+        return isNotify ? null : jsonRpcError(id, INTERNAL_ERROR, `proxy fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      const res = out.value.res
+
       const sid = res.headers?.get?.('mcp-session-id')
       if (sid) sessionId = sid
       if (isNotify) return null
       if (!res.ok) {
-        return jsonRpcError(message?.id ?? null, INTERNAL_ERROR, `remote returned HTTP ${res.status}`)
+        // A 401/403 that survives the refresh + retry above is a dead
+        // credential. Explain by why it is dead - a refreshable OIDC session is
+        // an expired session (re-login), a per-target env override re-login
+        // cannot fix, a static file token re-login replaces - via the shared
+        // policy the verb attach path also uses, so the two never drift.
+        const detail = !isAuthStatus(res.status)
+          ? `remote returned HTTP ${res.status}`
+          : describeAuthRejection({ target, status: res.status, resolved }).message
+        return jsonRpcError(id, INTERNAL_ERROR, detail)
       }
       try {
         return await parseRpcResponse(res, message?.id)
       } catch (err) {
-        return jsonRpcError(message?.id ?? null, INTERNAL_ERROR, err instanceof Error ? err.message : String(err))
+        return jsonRpcError(id, INTERNAL_ERROR, err instanceof Error ? err.message : String(err))
       }
     },
   }

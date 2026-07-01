@@ -7,14 +7,18 @@ import process from 'node:process'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import {
+  deriveIdentityBase,
   readCredentials,
   remoteTokenEnvVar,
   removeToken,
+  writeSession,
   writeToken,
 } from '../remote/credentials.js'
+import { loginWithBrowser } from '../remote/oidc_login.js'
 
 /**
  * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { OidcSession } from '../../../src/core/remote/types.js'
  */
 
 /**
@@ -34,6 +38,8 @@ export async function runRemoteHelp(argv, ctx) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write('usage: hyp remote <subcommand> [args...]\n')
     ctx.stdout.write('  subcommands: add, login, list, remove\n')
+    ctx.stdout.write('  login: browser sign-in by default; --token-file/stdin for a static token,\n')
+    ctx.stdout.write('         --org <name> to select an org, --no-browser to print the URL\n')
     return 0
   }
   ctx.stderr.write(`hyp remote: unknown subcommand '${argv[0]}'\n`)
@@ -50,8 +56,7 @@ export async function runRemoteHelp(argv, ctx) {
  * @ref LLP 0033#commands [implements]: `remote add` is a local-layer writer; URL in config, token never in config
  */
 export async function runRemoteAdd(argv, ctx) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const [name, url] = positional
+  const [name, url] = positionals(argv)
   if (!name || !url) {
     ctx.stderr.write('usage: hyp remote add <name> <url>\n')
     return 2
@@ -77,52 +82,172 @@ export async function runRemoteAdd(argv, ctx) {
 }
 
 /**
- * `hyp remote login <name>`: store the query-scoped token for a target.
- * Token source: `--token-file <path>` or piped stdin (a TTY with neither is
- * an error, never a hang).
+ * `hyp remote login <name>`: populate the target's query-scoped credential.
+ *
+ * Two modes, one store (LLP 0046 D1). A **static** token still comes from
+ * `--token-file <path>` or piped stdin, unchanged (the headless escape hatch,
+ * D8). Otherwise an interactive **browser** authorization-code flow runs
+ * against the target's identity endpoint and stores an OIDC session. `--org`
+ * selects an org; `--browser` forces the flow even with stdin piped;
+ * `--no-browser` prints the URL instead of opening it.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0033#credentials [implements]: token to the 0600 store, never config; one login per server
+ * @param {{ login?: typeof loginWithBrowser }} [deps] test seam for the browser flow
+ * @ref LLP 0046#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
-export async function runRemoteLogin(argv, ctx) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const name = positional[0]
-  if (!name) {
-    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>]\n')
-    return 2
-  }
-  const tokenFileIdx = argv.indexOf('--token-file')
-  const tokenFile = tokenFileIdx >= 0 ? argv[tokenFileIdx + 1] : undefined
-  if (tokenFileIdx >= 0 && (!tokenFile || tokenFile.startsWith('-'))) {
+export async function runRemoteLogin(argv, ctx, deps = {}) {
+  const tokenFileArg = valueFlag(argv, '--token-file')
+  const tokenFile = tokenFileArg.value
+  if (tokenFileArg.present && !tokenFile) {
     ctx.stderr.write('hyp remote login: --token-file expects a path\n')
     return 2
   }
+  const orgArg = valueFlag(argv, '--org')
+  const org = orgArg.value
+  if (orgArg.present && !org) {
+    ctx.stderr.write('hyp remote login: --org expects an org name\n')
+    return 2
+  }
+  // The target name is the first positional. Skip the VALUE slot of a
+  // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
+  // as the target 'acme'.
+  const name = positionals(argv, new Set(['--token-file', '--org']))[0]
+  if (!name) {
+    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--no-browser]\n')
+    return 2
+  }
+  const forceBrowser = argv.includes('--browser')
+  const noBrowser = argv.includes('--no-browser')
 
+  const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
+  const stdinPiped = !!stdin && !stdin.isTTY
+  // Static path: an explicit token file, or a piped token unless a browser
+  // mode flag forces the authorization-code flow.
+  const useStatic = !!tokenFile || (stdinPiped && !forceBrowser && !noBrowser)
+
+  if (useStatic) {
+    // --org only applies to the browser flow; say so rather than silently drop it.
+    if (org) {
+      ctx.stderr.write('note: --org is ignored with a static token (it applies to the browser login flow)\n')
+    }
+    return runStaticLogin(name, tokenFile, stdin, ctx)
+  }
+
+  // Browser flow. `--no-browser` selects it explicitly ("print the URL instead
+  // of opening one"), so the flag wins outright: with it set we never read stdin
+  // as a static token. A piped token *without* a browser-mode flag already took
+  // the static path above (`useStatic`), so nothing is swallowed silently there;
+  // only an explicit `--no-browser` ignores a pipe, by design.
+  return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
+}
+
+/**
+ * Return the positional arguments in order, skipping flags and the value slot
+ * of any value-taking flag (so e.g. `--org acme` is not read as a positional).
+ * The one parser every `remote` subcommand uses, so a value flag added to any
+ * of them never misreads its value as a positional.
+ *
+ * @param {string[]} argv
+ * @param {Set<string>} [valueFlags]
+ * @returns {string[]}
+ */
+function positionals(argv, valueFlags = new Set()) {
+  /** @type {string[]} */
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a.startsWith('-')) {
+      if (valueFlags.has(a)) i++ // consume its value (`--flag value`; `--flag=value` carries its own)
+      continue
+    }
+    out.push(a)
+  }
+  return out
+}
+
+/**
+ * Read a value-taking flag in either `--flag value` or `--flag=value` form. The
+ * `=` form is accepted because the rest of the CLI takes it (e.g. core_commands'
+ * `--token-file=`), so `login prod --org=acme` must not silently drop the org and
+ * fall through to a no-org browser flow. In the space form a following token that
+ * is itself a flag (or absent) is not a value, so the caller can report "expects
+ * a value"; in the `=` form the value is explicit (even `''`, which the caller
+ * rejects).
+ *
+ * @param {string[]} argv
+ * @param {string} flag e.g. `--org`
+ * @returns {{ present: boolean, value: string | undefined }}
+ */
+function valueFlag(argv, flag) {
+  const eq = `${flag}=`
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === flag) {
+      const next = argv[i + 1]
+      return { present: true, value: next !== undefined && !next.startsWith('-') ? next : undefined }
+    }
+    if (a.startsWith(eq)) return { present: true, value: a.slice(eq.length) }
+  }
+  return { present: false, value: undefined }
+}
+
+/**
+ * The static-token path (LLP 0033, unchanged behavior): read a token from
+ * `--token-file` or piped stdin and store it as a `kind: 'static'` record.
+ *
+ * @param {string} name
+ * @param {string | undefined} tokenFile
+ * @param {any} stdin
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0046#d8 [implements]: static token stays the documented headless fallback
+ */
+async function runStaticLogin(name, tokenFile, stdin, ctx) {
   /** @type {string} */
   let token
   try {
-    if (tokenFile) {
-      token = (await fs.readFile(tokenFile, 'utf8')).trim()
-    } else {
-      const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
-      if (stdin && stdin.isTTY) {
-        ctx.stderr.write("hyp remote login: provide the token via --token-file <path> or pipe it on stdin\n")
-        return 2
-      }
-      token = (await readAllStdin(stdin)).trim()
-    }
+    token = tokenFile
+      ? (await fs.readFile(tokenFile, 'utf8')).trim()
+      : (await readAllStdin(stdin)).trim()
   } catch (err) {
     ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
   if (!token) {
     ctx.stderr.write('hyp remote login: empty token\n')
+    // Non-TTY stdin without a browser-mode flag routes here even when no
+    // token was piped; point at the browser flow it bypassed.
+    if (!tokenFile) {
+      ctx.stderr.write('  (to sign in with a browser instead, re-run with --browser)\n')
+    }
     return 2
   }
 
+  return persistStaticToken(name, token, ctx)
+}
+
+/**
+ * Store an already-read static token to the 0600 store and print the
+ * confirmation, with a nudge when the target isn't configured. Shared by the
+ * `--token-file`/piped static path and the `--no-browser`-with-a-piped-token
+ * peek.
+ *
+ * @param {string} name
+ * @param {string} token a non-empty, trimmed token
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function persistStaticToken(name, token, ctx) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  await writeToken(stateDir, name, token)
+  try {
+    await writeToken(stateDir, name, token)
+  } catch (err) {
+    // writeToken now contends for the cross-process credentials lock and can
+    // throw a lock timeout; keep the friendly `hyp remote login:` contract.
+    ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
   ctx.stdout.write(`stored query-scoped token for '${name}' (mode 0600)\n`)
 
   // A friendly nudge if the target isn't configured: the token still
@@ -132,6 +257,93 @@ export async function runRemoteLogin(argv, ctx) {
     ctx.stderr.write(`note: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>'\n`)
   }
   return 0
+}
+
+/**
+ * The browser authorization-code path (LLP 0046 D1/D6/D7). Derives the
+ * identity base from the configured target URL's origin, runs the loopback
+ * flow, and stores the resulting OIDC session.
+ *
+ * @param {string} name
+ * @param {{ org?: string, noBrowser: boolean }} opts
+ * @param {CommandRunContext} ctx
+ * @param {typeof loginWithBrowser} login
+ * @returns {Promise<number>}
+ */
+async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
+  const remotes = await readConfiguredRemotes(ctx)
+  const entry = remotes[name]
+  if (!entry) {
+    ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it first with 'hyp remote add ${name} <url>'\n`)
+    ctx.stderr.write("  (or pass a static token with --token-file <path>)\n")
+    return 2
+  }
+  const identityBase = deriveIdentityBase(entry.url)
+  if (!identityBase) {
+    ctx.stderr.write(`hyp remote login: target '${name}' has an invalid url (${entry.url})\n`)
+    return 2
+  }
+
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  /** @type {OidcSession} */
+  let session
+  try {
+    session = await login({
+      identityBase,
+      org,
+      noBrowser,
+      print: (line) => ctx.stderr.write(`${line}\n`),
+    })
+  } catch (err) {
+    const callbackError = /** @type {any} */ (err)?.callbackError
+    ctx.stderr.write(`hyp remote login: ${explainLoginError(callbackError, err)}\n`)
+    // A server-surfaced callback error (org selection, membership) is already
+    // actionable. A local failure - most importantly a timeout, which is what a
+    // headless box hits when the opener silently fails - is not, so point at the
+    // headless escape hatches rather than leaving the user stuck (LLP 0046 D8).
+    if (!callbackError) {
+      ctx.stderr.write("  (on a machine with no browser, pass a static token with --token-file <path> or pipe it on stdin; --no-browser prints the URL to open elsewhere)\n")
+    }
+    return 1
+  }
+  // The single-use code is already spent by here, so a write failure (most
+  // likely a lock timeout under a concurrent hyp process) is not a login
+  // failure: say the sign-in worked but the store did not, and do not print the
+  // headless hint, which would wrongly imply the browser flow itself failed.
+  try {
+    await writeSession(stateDir, name, session)
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: signed in but could not store the session: ${err instanceof Error ? err.message : String(err)}\n`)
+    ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
+    return 1
+  }
+  ctx.stdout.write(`logged in to '${name}' as org '${session.org}' (session stored, mode 0600)\n`)
+  return 0
+}
+
+/**
+ * Translate a server-surfaced callback `error` (D7) into a clear message. The
+ * client never sees the user's org list, so `org_selection_required` instructs
+ * a re-run with `--org` rather than enumerating.
+ *
+ * @param {string | undefined} callbackError
+ * @param {unknown} err
+ * @returns {string}
+ * @ref LLP 0046#d7 [implements]: org selector errors explained; never enumerate the user's orgs
+ */
+function explainLoginError(callbackError, err) {
+  switch (callbackError) {
+    case 'access_denied':
+      return 'login was denied at the provider'
+    case 'no_membership':
+      return 'this account is not a member of any org on this server - ask an admin to invite you'
+    case 'org_selection_required':
+      return 'this account has more than one org - re-run with --org <name> to choose one'
+    case 'org_not_permitted':
+      return 'the selected org is not permitted for this account - check the --org name'
+    default:
+      return err instanceof Error ? err.message : String(err)
+  }
 }
 
 /**
@@ -179,8 +391,7 @@ export async function runRemoteList(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runRemoteRemove(argv, ctx) {
-  const positional = argv.filter((a) => !a.startsWith('-'))
-  const name = positional[0]
+  const name = positionals(argv)[0]
   if (!name) {
     ctx.stderr.write('usage: hyp remote remove <name>\n')
     return 2
@@ -200,7 +411,19 @@ export async function runRemoteRemove(argv, ctx) {
     return 1
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const removedToken = await removeToken(stateDir, name)
+  let removedToken = false
+  try {
+    removedToken = await removeToken(stateDir, name)
+  } catch (err) {
+    // removeToken now contends for the cross-process credentials lock and can
+    // throw a lock timeout. The config edit above already landed, so report the
+    // partial state rather than letting a raw error escape.
+    ctx.stderr.write(`hyp remote remove: ${err instanceof Error ? err.message : String(err)}\n`)
+    if (removedConfig) {
+      ctx.stderr.write(`  (removed '${name}' from config; its stored token could not be removed)\n`)
+    }
+    return 1
+  }
   if (!removedConfig && !removedToken) {
     ctx.stderr.write(`hyp remote remove: no target or token named '${name}'\n`)
     return 1

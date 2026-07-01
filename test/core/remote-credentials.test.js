@@ -34,7 +34,7 @@ test('writeToken persists, is 0600, and round-trips', async () => {
   const dir = await tmpState()
   await writeToken(dir, 'prod', 'sk-1')
   const creds = await readCredentials(dir)
-  assert.equal(creds.prod.token, 'sk-1')
+  assert.deepEqual(creds.prod, { kind: 'static', token: 'sk-1' })
   const st = await fs.stat(remoteCredentialsPath(dir))
   assert.equal(st.mode & 0o777, 0o600)
 })
@@ -47,7 +47,7 @@ test('writeToken merges, removeToken drops only the named target', async () => {
   assert.equal(await removeToken(dir, 'prod'), false) // already gone
   const creds = await readCredentials(dir)
   assert.equal(creds.prod, undefined)
-  assert.equal(creds.staging.token, 'sk-2')
+  assert.deepEqual(creds.staging, { kind: 'static', token: 'sk-2' })
 })
 
 test('resolveToken order: env overrides file', async () => {

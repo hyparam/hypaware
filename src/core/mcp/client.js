@@ -1,5 +1,7 @@
 // @ts-check
 
+import { safeText } from '../http_text.js'
+
 /**
  * MCP **client** over Streamable HTTP: the consumer half of remote attach
  * (LLP 0033). `hyp` is an MCP client, so `hyp <verb> --remote <target>`
@@ -49,26 +51,21 @@ export function createHttpMcpClient(opts) {
       method,
       ...(params !== undefined ? { params } : {}),
     }
-    /** @type {Record<string, string>} */
-    const headers = {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
-      ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
-    }
+    const headers = mcpRequestHeaders({ token: opts.token, sessionId })
     const res = await doFetch(opts.url, { method: 'POST', headers, body: JSON.stringify(body) })
     const sid = res.headers?.get?.('mcp-session-id')
     if (sid) sessionId = sid
 
     if (notify) {
       // A notification gets `202 Accepted` with no body.
-      if (!res.ok && res.status !== 202) throw new Error(`MCP ${method} failed: HTTP ${res.status}`)
+      if (!res.ok && res.status !== 202) {
+        if (isAuthStatus(res.status)) throw authRejectionError(res.status)
+        throw new Error(`MCP ${method} failed: HTTP ${res.status}`)
+      }
       return undefined
     }
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        throw new Error(`remote rejected the credential (HTTP ${res.status}) - re-run 'hyp remote login'`)
-      }
+      if (isAuthStatus(res.status)) throw authRejectionError(res.status)
       const text = await safeText(res)
       throw new Error(`MCP ${method} failed: HTTP ${res.status}${text ? ` - ${text.slice(0, 200)}` : ''}`)
     }
@@ -101,6 +98,51 @@ export function createHttpMcpClient(opts) {
       return rpc('tools/list', {})
     },
   }
+}
+
+/**
+ * Build the headers an MCP Streamable-HTTP POST needs: JSON + SSE content
+ * negotiation, an optional bearer, and the session id once the server has
+ * issued one. The single home for the request header shape, shared with the
+ * stdio proxy's per-message forward so the two transports can't drift.
+ *
+ * @param {{ token?: string, sessionId?: string }} args
+ * @returns {Record<string, string>}
+ */
+export function mcpRequestHeaders({ token, sessionId }) {
+  return {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+  }
+}
+
+/**
+ * Whether an HTTP status is an auth rejection (401/403) eligible for a one-shot
+ * refresh + retry. The single home for "which statuses mean auth", shared with
+ * the stdio proxy's per-message forward.
+ *
+ * @param {number} status
+ * @returns {boolean}
+ */
+export function isAuthStatus(status) {
+  return status === 401 || status === 403
+}
+
+/**
+ * Tag the error so the attach path can recognize an auth rejection and attempt
+ * a single silent refresh + retry.
+ *
+ * @param {number} status
+ * @returns {Error}
+ * @ref LLP 0046#d5 [implements]: live MCP 401/403 failures are tagged so attach can refresh once
+ */
+function authRejectionError(status) {
+  return Object.assign(
+    new Error(`remote rejected the credential (HTTP ${status}) - re-run 'hyp remote login'`),
+    { authError: true, status },
+  )
 }
 
 /**
@@ -160,11 +202,3 @@ function pickById(messages, id) {
   return messages.find((m) => m && typeof m === 'object' && m.id === id)
 }
 
-/** @param {any} res */
-async function safeText(res) {
-  try {
-    return await res.text()
-  } catch {
-    return ''
-  }
-}
