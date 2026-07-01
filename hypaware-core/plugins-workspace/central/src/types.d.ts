@@ -34,6 +34,15 @@ export interface PersistedIdentity {
    * gateway identity against a new tenant/server.
    */
   bootstrap_token_fp?: string
+  /**
+   * Present when this identity was seeded by `hyp remote login` (a
+   * login-minted gateway, LLP 0061 D3) rather than a bootstrap-token
+   * mint. No bootstrap token was involved, so the re-enrollment guard
+   * must not read the missing `bootstrap_token_fp` as a mint mismatch;
+   * only a `central_url` change counts. Absent on bootstrap-minted
+   * identities.
+   */
+  origin?: 'login'
 }
 
 /** Request body for `POST /v1/identity/bootstrap`. */

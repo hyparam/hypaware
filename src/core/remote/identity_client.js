@@ -15,7 +15,7 @@ import { Attr, getLogger } from '../observability/index.js'
  * ISO-based. The JWT is hypaware-server's own credential, so there is no
  * external JWKS trust on the client.
  *
- * @import { OidcSession, RefreshedAccess } from '../../../src/core/remote/types.js'
+ * @import { LoginGatewayCredential, OidcSession, RefreshedAccess } from '../../../src/core/remote/types.js'
  */
 
 /**
@@ -80,19 +80,49 @@ export function describeRefreshError(err, target) {
 
 /**
  * Exchange an authorization code for a session (the `authorization_code`
- * grant). Presents the held PKCE verifier.
+ * grant). Presents the held PKCE verifier. `host` is the advisory machine
+ * label the server folds into its login-gateway dedup key (LLP 0061 D6);
+ * it is omitted from the body when empty.
  *
- * @param {{ identityBase: string, code: string, codeVerifier: string, fetchImpl?: typeof fetch }} args
+ * @param {{ identityBase: string, code: string, codeVerifier: string, host?: string, fetchImpl?: typeof fetch }} args
  * @returns {Promise<OidcSession>}
  */
-export async function exchangeCode({ identityBase, code, codeVerifier, fetchImpl }) {
-  const body = { grant_type: 'authorization_code', code, code_verifier: codeVerifier }
+export async function exchangeCode({ identityBase, code, codeVerifier, host, fetchImpl }) {
+  const body = { grant_type: 'authorization_code', code, code_verifier: codeVerifier, ...(host ? { host } : {}) }
   const json = await postToken({ identityBase, body, fetchImpl, operation: 'remote.exchange_code' })
-  return {
+  /** @type {OidcSession} */
+  const session = {
     refreshToken: str(json.refresh_token, 'refresh_token'),
     accessJwt: str(json.access_jwt, 'access_jwt'),
     expiresAt: expiryTimestamp(json.expires_at, 'expires_at'),
     org: str(json.org, 'org'),
+  }
+  const gateway = gatewayCredential(json)
+  if (gateway) session.gateway = gateway
+  return session
+}
+
+/**
+ * Read the login-minted gateway credential off a token response (LLP 0061
+ * D1). A server without login-gateway support omits all three `gateway_*`
+ * fields and the session simply carries no gateway; a *partial* set is a
+ * server contract violation and fails loudly, because silently dropping it
+ * would break forwarding with no visible cause. The fields stay out of the
+ * query-scoped record entirely; the login command routes them to the
+ * central sink's forward store.
+ *
+ * @param {Record<string, any>} json
+ * @returns {LoginGatewayCredential | undefined}
+ * @ref LLP 0061#d1 [implements]: capture the gateway_* triple off the authorization_code response; absent fields mean no gateway, partial fields fail loudly
+ */
+function gatewayCredential(json) {
+  if (json.gateway_jwt === undefined && json.gateway_expires_at === undefined && json.gateway_id === undefined) {
+    return undefined
+  }
+  return {
+    jwt: str(json.gateway_jwt, 'gateway_jwt'),
+    expiresAt: epochSecond(json.gateway_expires_at, 'gateway_expires_at'),
+    gatewayId: str(json.gateway_id, 'gateway_id'),
   }
 }
 
@@ -251,6 +281,29 @@ function expiryTimestamp(v, field) {
     throw new Error(`identity response field '${field}' is not a valid timestamp`)
   }
   return s
+}
+
+/**
+ * Normalize an expiry to a Unix epoch second. The inverse framing of
+ * {@link expiryTimestamp}: the gateway credential seeds the central sink's
+ * persisted `identity.json`, whose `expires_at` is an integer epoch second,
+ * so here the epoch is the stored form and an ISO string (an older mock) is
+ * converted down to it.
+ *
+ * @param {unknown} v @param {string} field @returns {number}
+ */
+function epochSecond(v, field) {
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || v <= 0) {
+      throw new Error(`identity response field '${field}' is not a valid timestamp`)
+    }
+    return Math.floor(v)
+  }
+  const ms = Date.parse(str(v, field))
+  if (Number.isNaN(ms)) {
+    throw new Error(`identity response field '${field}' is not a valid timestamp`)
+  }
+  return Math.floor(ms / 1000)
 }
 
 /**

@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -14,6 +15,7 @@ import {
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
+import { seedLoginGateway } from '../remote/gateway_seed.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 
 /**
@@ -39,7 +41,8 @@ export async function runRemoteHelp(argv, ctx) {
     ctx.stdout.write('usage: hyp remote <subcommand> [args...]\n')
     ctx.stdout.write('  subcommands: add, login, list, remove\n')
     ctx.stdout.write('  login: browser sign-in by default; --token-file/stdin for a static token,\n')
-    ctx.stdout.write('         --org <name> to select an org, --no-browser to print the URL\n')
+    ctx.stdout.write('         --org <name> to select an org, --no-browser to print the URL,\n')
+    ctx.stdout.write('         --host <label> to override the forwarding host label (default: hostname)\n')
     return 0
   }
   ctx.stderr.write(`hyp remote: unknown subcommand '${argv[0]}'\n`)
@@ -89,11 +92,12 @@ export async function runRemoteAdd(argv, ctx) {
  * D8). Otherwise an interactive **browser** authorization-code flow runs
  * against the target's identity endpoint and stores an OIDC session. `--org`
  * selects an org; `--browser` forces the flow even with stdin piped;
- * `--no-browser` prints the URL instead of opening it.
+ * `--no-browser` prints the URL instead of opening it; `--host` overrides
+ * the advisory machine label sent with the token exchange (LLP 0061 D6).
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser }} [deps] test seam for the browser flow
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway }} [deps] test seam for the browser flow + gateway seeding
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
@@ -109,12 +113,18 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
     ctx.stderr.write('hyp remote login: --org expects an org name\n')
     return 2
   }
+  const hostArg = valueFlag(argv, '--host')
+  const host = hostArg.value
+  if (hostArg.present && !host) {
+    ctx.stderr.write('hyp remote login: --host expects a host label\n')
+    return 2
+  }
   // The target name is the first positional. Skip the VALUE slot of a
   // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
   // as the target 'acme'.
-  const name = positionals(argv, new Set(['--token-file', '--org']))[0]
+  const name = positionals(argv, new Set(['--token-file', '--org', '--host']))[0]
   if (!name) {
-    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--no-browser]\n')
+    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--host <label>] [--no-browser]\n')
     return 2
   }
   const forceBrowser = argv.includes('--browser')
@@ -127,9 +137,12 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   const useStatic = !!tokenFile || (stdinPiped && !forceBrowser && !noBrowser)
 
   if (useStatic) {
-    // --org only applies to the browser flow; say so rather than silently drop it.
+    // --org/--host only apply to the browser flow; say so rather than silently drop them.
     if (org) {
       ctx.stderr.write('note: --org is ignored with a static token (it applies to the browser login flow)\n')
+    }
+    if (host) {
+      ctx.stderr.write('note: --host is ignored with a static token (it applies to the browser login flow)\n')
     }
     return runStaticLogin(name, tokenFile, stdin, ctx)
   }
@@ -139,7 +152,10 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, noBrowser }, ctx, deps.login ?? loginWithBrowser)
+  return runBrowserLogin(name, { org, host, noBrowser }, ctx, {
+    login: deps.login ?? loginWithBrowser,
+    seed: deps.seed ?? seedLoginGateway,
+  })
 }
 
 /**
@@ -262,15 +278,17 @@ async function persistStaticToken(name, token, ctx) {
 /**
  * The browser authorization-code path (LLP 0058 D1/D6/D7). Derives the
  * identity base from the configured target URL's origin, runs the loopback
- * flow, and stores the resulting OIDC session.
+ * flow, and stores the resulting OIDC session. When the server also mints a
+ * login gateway (LLP 0061), the returned credential is seeded into the
+ * matching `central` forward sinks' persisted identity.
  *
  * @param {string} name
- * @param {{ org?: string, noBrowser: boolean }} opts
+ * @param {{ org?: string, host?: string, noBrowser: boolean }} opts
  * @param {CommandRunContext} ctx
- * @param {typeof loginWithBrowser} login
+ * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway }} deps
  * @returns {Promise<number>}
  */
-async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
+async function runBrowserLogin(name, { org, host, noBrowser }, ctx, { login, seed }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -291,6 +309,9 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
     session = await login({
       identityBase,
       org,
+      // The host label is advisory (server-side dedup + admin attribution,
+      // LLP 0061 D6): the machine hostname unless overridden with --host.
+      host: host ?? os.hostname(),
       noBrowser,
       print: (line) => ctx.stderr.write(`${line}\n`),
     })
@@ -318,6 +339,43 @@ async function runBrowserLogin(name, { org, noBrowser }, ctx, login) {
     return 1
   }
   ctx.stdout.write(`logged in to '${name}' as org '${session.org}' (session stored, mode 0600)\n`)
+
+  // One login, two credentials (LLP 0061 D1): the gateway credential, when the
+  // server minted one, seeds the matching central forward sinks so the user can
+  // forward without a bootstrap token. The query session above is already
+  // stored, so a seed failure is reported as exactly that - not a login failure.
+  // @ref LLP 0061#d1 [implements]: gateway credential routes to the forward store; the query record is untouched by it
+  if (session.gateway) {
+    /** @type {Awaited<ReturnType<typeof seedLoginGateway>>} */
+    let seeded
+    try {
+      seeded = await seed({
+        stateDir,
+        configPath: localConfigPath(ctx),
+        targetUrl: entry.url,
+        gateway: session.gateway,
+      })
+    } catch (err) {
+      ctx.stderr.write(`hyp remote login: signed in, but could not seed the forwarding credential: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+    if (seeded.length === 0) {
+      ctx.stderr.write(`note: the server issued a forwarding credential, but no '@hypaware/central' sink targets this server - configure one to forward logs\n`)
+    }
+    for (const s of seeded) {
+      ctx.stdout.write(`seeded forwarding identity for sink '${s.sink}' (gateway ${session.gateway.gatewayId})\n`)
+      // Never silent about a displaced identity (LLP 0061 D4). A re-login over a
+      // prior login seed for the same server is idempotent (the server dedups to
+      // the same gateway), so only a different provenance is worth a note.
+      if (s.replaced && !(s.replaced.origin === 'login' && s.replaced.central_url === s.centralUrl)) {
+        const provenance = s.replaced.origin === 'login' ? 'login-minted' : 'bootstrap-minted'
+        const from = s.replaced.central_url && s.replaced.central_url !== s.centralUrl
+          ? ` for ${s.replaced.central_url}`
+          : ''
+        ctx.stderr.write(`note: this replaced a ${provenance} gateway identity${from} (was gateway ${s.replaced.gateway_id})\n`)
+      }
+    }
+  }
   return 0
 }
 

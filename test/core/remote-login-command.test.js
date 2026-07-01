@@ -17,23 +17,34 @@ async function tmpHome() {
  * Build a ctx with a stub stdin (TTY by default so the browser path is the
  * default), captured streams, and a configured `prod` target written to a
  * real config file (the command resolves targets from the config file).
+ * `sinks` lands in the same config file, so gateway seeding resolves it the
+ * way the daemon would.
  *
- * @param {{ hypHome: string, stdin?: any, remotes?: any }} opts
+ * @param {{ hypHome: string, stdin?: any, remotes?: any, sinks?: any }} opts
  */
-async function makeCtx({ hypHome, stdin, remotes }) {
+async function makeCtx({ hypHome, stdin, remotes, sinks }) {
   /** @type {string[]} */ const out = []
   /** @type {string[]} */ const err = []
   const configPath = path.join(hypHome, 'config.json')
   const resolvedRemotes = remotes ?? { prod: { url: 'https://hyp.internal/mcp' } }
-  await fs.writeFile(configPath, JSON.stringify({ version: 2, query: { remotes: resolvedRemotes } }))
+  const config = { version: 2, query: { remotes: resolvedRemotes }, ...(sinks ? { sinks } : {}) }
+  await fs.writeFile(configPath, JSON.stringify(config))
   const ctx = /** @type {any} */ ({
     env: { HYP_HOME: hypHome, HYP_CONFIG: configPath },
-    config: { version: 2, query: { remotes: resolvedRemotes } },
+    config,
     stdin: stdin ?? { isTTY: true },
     stdout: { write: (/** @type {string} */ s) => out.push(s) },
     stderr: { write: (/** @type {string} */ s) => err.push(s) },
   })
   return { ctx, out, err }
+}
+
+/** An OidcSession carrying a login-minted gateway credential (LLP 0061). */
+function gatewaySession() {
+  return {
+    refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme',
+    gateway: { jwt: 'gw-jwt', expiresAt: 1_920_000_000, gatewayId: 'gw-1' },
+  }
 }
 
 test('deriveIdentityBase yields <origin>/v1/identity', () => {
@@ -109,6 +120,142 @@ test('--no-browser still uses browser mode when stdin is non-TTY', async () => {
   const code = await runRemoteLogin(['prod', '--no-browser'], ctx, { login })
   assert.equal(code, 0)
   assert.equal(seen.noBrowser, true)
+})
+
+test('a login-minted gateway credential seeds the matching central sink (LLP 0061 D2/D5)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /seeded forwarding identity for sink 'fwd' \(gateway gw-1\)/)
+  assert.doesNotMatch(err.join(''), /replaced/)
+
+  // The seed is the sink's persisted identity, at the per-plugin default path.
+  const persistedPath = path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')
+  const persisted = JSON.parse(await fs.readFile(persistedPath, 'utf8'))
+  assert.deepEqual(persisted, {
+    jwt: 'gw-jwt',
+    expires_at: 1_920_000_000,
+    gateway_id: 'gw-1',
+    central_url: 'https://hyp.internal',
+    origin: 'login',
+  })
+
+  // Two scopes, two stores (D1): the query record carries no gateway fields.
+  const raw = await fs.readFile(path.join(hypHome, 'hypaware', 'remote-credentials.json'), 'utf8')
+  assert.ok(!raw.includes('gw-jwt'))
+  assert.ok(!raw.includes('gateway'))
+})
+
+test('a configured persisted_path is honored and non-matching central sinks are not seeded', async () => {
+  const hypHome = await tmpHome()
+  const seedPath = path.join(hypHome, 'custom-identity.json')
+  const otherPath = path.join(hypHome, 'other-identity.json')
+  const { ctx } = await makeCtx({
+    hypHome,
+    sinks: {
+      fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: { persisted_path: seedPath } } },
+      other: { plugin: '@hypaware/central', config: { url: 'https://elsewhere.example', identity: { persisted_path: otherPath } } },
+    },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 0)
+  const persisted = JSON.parse(await fs.readFile(seedPath, 'utf8'))
+  assert.equal(persisted.central_url, 'https://hyp.internal')
+  // The second central target's sink is never touched by this login.
+  await assert.rejects(fs.access(otherPath))
+})
+
+test('a gateway credential with no matching central sink notes the skip and still succeeds', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(err.join(''), /no '@hypaware\/central' sink targets this server/)
+})
+
+test('a session without a gateway credential seeds nothing and prints no forwarding output', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => ({
+    refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme',
+  }))
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 0)
+  assert.doesNotMatch(out.join(''), /forwarding/)
+  assert.doesNotMatch(err.join(''), /forwarding/)
+  const persistedPath = path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')
+  await assert.rejects(fs.access(persistedPath))
+})
+
+test('replacing a bootstrap-minted identity is reported, never silent (LLP 0061 D4)', async () => {
+  const hypHome = await tmpHome()
+  const persistedPath = path.join(hypHome, 'identity.json')
+  await fs.writeFile(persistedPath, JSON.stringify({
+    jwt: 'old-jwt', expires_at: 1_910_000_000, gateway_id: 'gw-boot',
+    central_url: 'https://hyp.internal', bootstrap_token_fp: 'fp',
+  }))
+  const { ctx, err } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: { persisted_path: persistedPath } } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(err.join(''), /replaced a bootstrap-minted gateway identity \(was gateway gw-boot\)/)
+})
+
+test('a seed write failure reports signed-in-but-not-seeded, not a login failure', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const seed = /** @type {any} */ (async () => { throw new Error('disk is sad') })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, seed })
+  assert.equal(code, 1)
+  assert.match(out.join(''), /logged in to 'prod'/)
+  assert.match(err.join(''), /signed in, but could not seed the forwarding credential: disk is sad/)
+})
+
+test('the host label defaults to the machine hostname and --host overrides it (LLP 0061 D6)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  /** @type {any} */ let seen
+  const login = /** @type {any} */ (async (/** @type {any} */ args) => {
+    seen = args
+    return { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }
+  })
+
+  await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(seen.host, os.hostname())
+
+  await runRemoteLogin(['prod', '--host', 'lab-box'], ctx, { login })
+  assert.equal(seen.host, 'lab-box')
+})
+
+test('--host as the last arg with no value is a usage error', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const code = await runRemoteLogin(['prod', '--host'], ctx, {})
+  assert.equal(code, 2)
+  assert.match(err.join(''), /--host expects a host label/)
 })
 
 test('a callback error maps to a clear org-selection message', async () => {
