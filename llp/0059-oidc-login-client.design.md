@@ -54,8 +54,10 @@ the client sent; `error` is a provider error or a resolution error (`access_deni
 - `{ "grant_type": "refresh_token", "refresh_token": "..." }`
   → `200 { access_jwt, expires_at, org }` or `401 { error: "invalid_grant" }`
 
-Note the response field is `access_jwt` (not `access_token`) and `expires_at` is an ISO
-timestamp. This is hypaware-server's own token, verified by its own resource path; there
+Note the response field is `access_jwt` (not `access_token`) and `expires_at` is a Unix
+epoch-second (the JWT `exp`, matching the server's bootstrap/refresh identity endpoints);
+the client normalizes it to an ISO string on the way in, so the stored session stays
+ISO-based. This is hypaware-server's own token, verified by its own resource path; there
 is no external JWKS on the client.
 
 ## Modules to add (under `src/core/remote/`)

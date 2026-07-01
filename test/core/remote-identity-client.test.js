@@ -44,6 +44,29 @@ test('exchangeCode posts the authorization_code grant and maps the response', as
   assert.deepEqual(JSON.parse(calls[0].init.body), { grant_type: 'authorization_code', code: 'auth-code', code_verifier: 'verifier-1' })
 })
 
+test('exchangeCode accepts the server epoch-second expires_at and normalizes it to ISO', async () => {
+  // The server sends `expires_at` as a Unix epoch-second (the JWT `exp`); the
+  // client stores an ISO string, so it must convert rather than reject.
+  const epoch = 1814400000
+  const { fetchImpl } = stubFetch({
+    body: { session_id: 'sess-1', refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: epoch, org: 'acme' },
+  })
+  const session = await exchangeCode({
+    identityBase: 'https://hyp.internal/v1/identity',
+    code: 'auth-code',
+    codeVerifier: 'verifier-1',
+    fetchImpl,
+  })
+  assert.equal(session.expiresAt, new Date(epoch * 1000).toISOString())
+})
+
+test('refreshSession accepts the server epoch-second expires_at and normalizes it to ISO', async () => {
+  const epoch = 1814400000
+  const { fetchImpl } = stubFetch({ body: { access_jwt: 'jwt-2', expires_at: epoch, org: 'acme' } })
+  const refreshed = await refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt-1', fetchImpl })
+  assert.equal(refreshed.expiresAt, new Date(epoch * 1000).toISOString())
+})
+
 test('refreshSession posts the refresh_token grant and maps the response', async () => {
   const { fetchImpl, calls } = stubFetch({
     body: { access_jwt: 'jwt-2', expires_at: '2026-06-29T13:00:00Z', org: 'acme' },
@@ -152,7 +175,10 @@ test('a 2xx with an empty body fails as transient, not a misleading missing-fiel
   )
 })
 
-test('a non-date expires_at is rejected at refresh time, not stored to loop forever', async () => {
+test('a non-date expires_at string is rejected at refresh time, not stored to loop forever', async () => {
+  // A numeric epoch as a *string* is still rejected (only a JSON number is the
+  // epoch-second wire form); this prevents storing an unparseable value that
+  // would make every forwarded message refresh forever.
   const { fetchImpl } = stubFetch({ body: { access_jwt: 'jwt', expires_at: '1719600000', org: 'acme' } })
   await assert.rejects(
     () => refreshSession({ identityBase: 'https://hyp.internal/v1/identity', refreshToken: 'rt', fetchImpl }),
