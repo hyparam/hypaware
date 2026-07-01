@@ -22,6 +22,7 @@ import { createPkcePair } from './pkce.js'
  * @param {{
  *   identityBase: string,
  *   org?: string,
+ *   host?: string,
  *   noBrowser?: boolean,
  *   openBrowser?: typeof defaultOpenBrowser,
  *   fetchImpl?: typeof fetch,
@@ -35,6 +36,7 @@ import { createPkcePair } from './pkce.js'
 export async function loginWithBrowser({
   identityBase,
   org,
+  host,
   noBrowser = false,
   openBrowser = defaultOpenBrowser,
   fetchImpl,
@@ -77,7 +79,7 @@ export async function loginWithBrowser({
     })
 
     const { code } = await receiver.waitForCode()
-    const session = await exchangeCode({ identityBase, code, codeVerifier: verifier, fetchImpl })
+    const session = await exchangeCode({ identityBase, code, codeVerifier: verifier, host, fetchImpl })
     log.info('remote.login_complete', {
       [Attr.COMPONENT]: 'remote-oidc',
       [Attr.OPERATION]: 'remote.login',

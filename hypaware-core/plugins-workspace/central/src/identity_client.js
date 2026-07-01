@@ -100,8 +100,13 @@ export class IdentityClient {
       // operator must re-run `hyp join` against the new server.
       // @ref LLP 0031#physical-layout [implements]: a re-point with no token cannot safely reuse the old identity, so loading is refused
       if (persisted.central_url !== undefined && persisted.central_url !== this.centralUrl) {
+        // A login-seeded identity re-enrolls with a fresh login, not a join
+        // token (LLP 0061 D3): point the operator at the seam that minted it.
+        const remedy = persisted.origin === 'login'
+          ? 'Re-run `hyp remote login` against the new server to enroll this host'
+          : `Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
         throw new Error(
-          `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. Run \`hyp join ${this.centralUrl} <token>\` to enroll this host with the new server`
+          `identity central URL mismatch: persisted identity was minted by ${persisted.central_url} but the configured central server is ${this.centralUrl}. ${remedy}`
         )
       }
       this.identity = persisted
@@ -201,6 +206,7 @@ export class IdentityClient {
     // persisted identity rather than recomputing.
     identity.central_url = this.identity.central_url
     identity.bootstrap_token_fp = this.identity.bootstrap_token_fp
+    if (this.identity.origin !== undefined) identity.origin = this.identity.origin
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -249,7 +255,7 @@ function readPersistedFile(filePath) {
   if (!isPlainObject(parsed)) {
     throw new Error(`persisted identity ${filePath} must be an object`)
   }
-  const { jwt, expires_at, gateway_id, central_url, bootstrap_token_fp } =
+  const { jwt, expires_at, gateway_id, central_url, bootstrap_token_fp, origin } =
     /** @type {Record<string, unknown>} */ (parsed)
   if (typeof jwt !== 'string' || jwt.length === 0) {
     throw new Error(`persisted identity ${filePath}: missing or invalid jwt`)
@@ -264,6 +270,7 @@ function readPersistedFile(filePath) {
   const identity = { jwt, expires_at, gateway_id }
   if (typeof central_url === 'string') identity.central_url = central_url
   if (typeof bootstrap_token_fp === 'string') identity.bootstrap_token_fp = bootstrap_token_fp
+  if (origin === 'login') identity.origin = origin
   return identity
 }
 
@@ -282,6 +289,14 @@ function readPersistedFile(filePath) {
 function mintChanged(persisted, centralUrl, bootstrapToken) {
   if (persisted.central_url !== undefined && persisted.central_url !== centralUrl) {
     return true
+  }
+  // A login-seeded identity was minted by a human login, not by any bootstrap
+  // token, so its missing token fingerprint is not a mint mismatch. With the
+  // URL matching (above), a configured bootstrap token coexists with the login
+  // seed rather than re-bootstrapping over it on every daemon start.
+  // @ref LLP 0061#d3 [implements]: the origin marker keeps the re-enrollment guard from reading a login seed as a swapped bootstrap token
+  if (persisted.origin === 'login') {
+    return false
   }
   return persisted.bootstrap_token_fp !== fingerprintToken(bootstrapToken)
 }

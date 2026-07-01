@@ -1,14 +1,18 @@
 // @ts-check
 
+import fsp from 'node:fs/promises'
 import http from 'node:http'
+import path from 'node:path'
 import process from 'node:process'
 
+import { IdentityClient } from '../../plugins-workspace/central/src/identity_client.js'
 import { installObservability } from '../../../src/core/observability/index.js'
 import { loginWithBrowser } from '../../../src/core/remote/oidc_login.js'
 import {
   readCredentials,
   writeSession,
 } from '../../../src/core/remote/credentials.js'
+import { seedLoginGateway } from '../../../src/core/remote/gateway_seed.js'
 import { querySqlVerb } from '../../../src/core/query/verb.js'
 import { verbToCommand } from '../../../src/core/cli/verb_command.js'
 
@@ -31,6 +35,10 @@ import { verbToCommand } from '../../../src/core/cli/verb_command.js'
  *   kind: 'oidc' -> query attaches the access JWT -> a forced expiry drives a
  *   silent refresh + persist -> a revoked refresh row drives the re-login
  *   message.
+ *
+ * The same login also mints a gateway credential (LLP 0061): the flow seeds
+ * it into a configured central sink and proves the sink's own IdentityClient
+ * loads it with no bootstrap token.
  *
  * Asserts both the user-visible result and the `smoke_step` telemetry the
  * remote-oidc modules emit (Log-Driven Development).
@@ -59,13 +67,37 @@ export async function run({ harness, expect }) {
       fetch(url).catch(() => {})
       return true
     }
-    const session = await loginWithBrowser({ identityBase, org: 'acme', openBrowser })
+    const session = await loginWithBrowser({ identityBase, org: 'acme', host: 'smoke-host', openBrowser })
     await writeSession(stateDir, 'prod', session)
 
     const afterLogin = await readCredentials(stateDir)
     expect.that('login: session stored as kind oidc', afterLogin.prod?.kind, (v) => v === 'oidc')
     expect.that('login: resolved org is acme', session.org, (v) => v === 'acme')
     expect.that('login: a refresh token was issued', session.refreshToken, (v) => typeof v === 'string' && v.length > 0)
+
+    // ----- smoke_step: gateway_seed -----
+    // The same login minted a gateway credential (LLP 0061 D1); seed it into a
+    // configured central sink and prove the sink's own IdentityClient loads it
+    // with no bootstrap token (D2/D3). The query record must not carry it (D1).
+    // @ref LLP 0061#d2 [tests]: login seed is loaded by the sink's unchanged acquire() path, end to end
+    expect.that('gateway: credential captured on login', session.gateway?.gatewayId, (v) => v === 'gw-smoke')
+    expect.that('gateway: host label sent with the exchange', server.state.lastHost, (v) => v === 'smoke-host')
+    expect.that('gateway: jwt kept out of the query record', JSON.stringify(afterLogin.prod), (s) => !s.includes('gw-jwt-smoke'))
+    const smokeConfigPath = path.join(String(process.env.HYP_HOME), 'smoke-config.json')
+    await fsp.writeFile(smokeConfigPath, JSON.stringify({
+      version: 2,
+      sinks: { fwd: { plugin: '@hypaware/central', config: { url: origin, identity: {} } } },
+    }))
+    const seeded = await seedLoginGateway({
+      stateDir,
+      configPath: smokeConfigPath,
+      targetUrl: mcpUrl,
+      gateway: /** @type {any} */ (session.gateway),
+    })
+    expect.that('gateway: the origin-matched sink was seeded', seeded.map((s) => s.sink).join(','), (v) => v === 'fwd')
+    const sinkIdentity = new IdentityClient({ centralUrl: origin, persistedPath: seeded[0].persistedPath })
+    expect.that('gateway: sink loads the seed without a bootstrap token', await sinkIdentity.acquire(), (v) => v === 'loaded')
+    expect.that('gateway: sink presents the login-minted jwt', await sinkIdentity.getCurrentJwt(), (v) => v === 'gw-jwt-smoke')
 
     // ----- smoke_step: attach_query -----
     const cmd = verbToCommand(querySqlVerb)
@@ -159,7 +191,7 @@ async function forceExpiry(stateDir, target) {
  * @returns {Promise<{ port: number, state: any, close: (cb: () => void) => void, closeAllConnections: () => void }>}
  */
 function startStubServer() {
-  const state = { jwtSeq: 0, validJwt: '', refreshToken: 'rt-smoke', refreshRevoked: false, refreshCalls: 0 }
+  const state = { jwtSeq: 0, validJwt: '', refreshToken: 'rt-smoke', refreshRevoked: false, refreshCalls: 0, lastHost: '' }
   const mint = () => {
     state.jwtSeq += 1
     state.validJwt = `jwt-${state.jwtSeq}`
@@ -191,7 +223,13 @@ function startStubServer() {
       readBody(req).then((body) => {
         const grant = body.grant_type
         if (grant === 'authorization_code') {
-          return json({ session_id: 'sess-1', refresh_token: state.refreshToken, access_jwt: mint(), expires_at: FUTURE, org: 'acme' })
+          state.lastHost = typeof body.host === 'string' ? body.host : ''
+          // A login-configured server also mints a gateway credential on the
+          // same response (LLP 0061); the refresh grant never carries it.
+          return json({
+            session_id: 'sess-1', refresh_token: state.refreshToken, access_jwt: mint(), expires_at: FUTURE, org: 'acme',
+            gateway_jwt: 'gw-jwt-smoke', gateway_expires_at: FUTURE, gateway_id: 'gw-smoke',
+          })
         }
         if (grant === 'refresh_token') {
           state.refreshCalls += 1

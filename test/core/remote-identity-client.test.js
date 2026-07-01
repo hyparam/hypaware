@@ -44,6 +44,74 @@ test('exchangeCode posts the authorization_code grant and maps the response', as
   assert.deepEqual(JSON.parse(calls[0].init.body), { grant_type: 'authorization_code', code: 'auth-code', code_verifier: 'verifier-1' })
 })
 
+test('exchangeCode sends the host label with the authorization_code grant when given', async () => {
+  const { fetchImpl, calls } = stubFetch({
+    body: { refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: '2026-06-29T12:00:00Z', org: 'acme' },
+  })
+  await exchangeCode({
+    identityBase: 'https://hyp.internal/v1/identity',
+    code: 'auth-code',
+    codeVerifier: 'verifier-1',
+    host: 'dev-laptop',
+    fetchImpl,
+  })
+  assert.equal(JSON.parse(calls[0].init.body).host, 'dev-laptop')
+})
+
+test('exchangeCode omits host from the body when none is given', async () => {
+  const { fetchImpl, calls } = stubFetch({
+    body: { refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: '2026-06-29T12:00:00Z', org: 'acme' },
+  })
+  await exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'c', codeVerifier: 'v', fetchImpl })
+  assert.ok(!('host' in JSON.parse(calls[0].init.body)))
+})
+
+test('exchangeCode captures the login-minted gateway credential (LLP 0061 D1)', async () => {
+  const gatewayExp = 1_820_000_000
+  const { fetchImpl } = stubFetch({
+    body: {
+      refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: '2026-06-29T12:00:00Z', org: 'acme',
+      gateway_jwt: 'gw-jwt', gateway_expires_at: gatewayExp, gateway_id: 'gw-42',
+    },
+  })
+  const session = await exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'c', codeVerifier: 'v', fetchImpl })
+  assert.deepEqual(session.gateway, { jwt: 'gw-jwt', expiresAt: gatewayExp, gatewayId: 'gw-42' })
+})
+
+test('exchangeCode against a server without login-gateway support carries no gateway', async () => {
+  const { fetchImpl } = stubFetch({
+    body: { refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: '2026-06-29T12:00:00Z', org: 'acme' },
+  })
+  const session = await exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'c', codeVerifier: 'v', fetchImpl })
+  assert.equal(session.gateway, undefined)
+})
+
+test('a partial gateway_* set is a contract violation, not a silent drop', async () => {
+  // Silently dropping a half-present gateway credential would break forwarding
+  // with no visible cause; a server that sends any of the triple must send all.
+  const { fetchImpl } = stubFetch({
+    body: {
+      refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: '2026-06-29T12:00:00Z', org: 'acme',
+      gateway_jwt: 'gw-jwt', gateway_expires_at: 1_820_000_000,
+    },
+  })
+  await assert.rejects(
+    () => exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'c', codeVerifier: 'v', fetchImpl }),
+    /missing 'gateway_id'/,
+  )
+})
+
+test('an ISO gateway_expires_at converts down to an epoch second (identity.json stores epochs)', async () => {
+  const { fetchImpl } = stubFetch({
+    body: {
+      refresh_token: 'rt-1', access_jwt: 'jwt-1', expires_at: '2026-06-29T12:00:00Z', org: 'acme',
+      gateway_jwt: 'gw-jwt', gateway_expires_at: '2027-07-01T00:00:30Z', gateway_id: 'gw-42',
+    },
+  })
+  const session = await exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'c', codeVerifier: 'v', fetchImpl })
+  assert.equal(session.gateway?.expiresAt, Math.floor(Date.parse('2027-07-01T00:00:30Z') / 1000))
+})
+
 test('exchangeCode accepts the server epoch-second expires_at and normalizes it to ISO', async () => {
   // The server sends `expires_at` as a Unix epoch-second (the JWT `exp`); the
   // client stores an ISO string, so it must convert rather than reject.
