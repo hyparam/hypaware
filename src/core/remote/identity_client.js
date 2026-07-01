@@ -9,8 +9,11 @@ import { Attr, getLogger } from '../observability/index.js'
  * speaks the two token grants the server exposes (LLP 0059 §the-server-
  * contract): `authorization_code` (browser login) and `refresh_token` (silent
  * refresh). The response field is `access_jwt` (not `access_token`) and
- * `expires_at` is an ISO timestamp; the JWT is hypaware-server's own
- * credential, so there is no external JWKS trust on the client.
+ * `expires_at` is a Unix epoch-second (the JWT `exp`, matching the server's
+ * bootstrap/refresh identity endpoints); this client normalizes it to an ISO
+ * string internally, so the stored session and its refresh-decision stay
+ * ISO-based. The JWT is hypaware-server's own credential, so there is no
+ * external JWKS trust on the client.
  *
  * @import { OidcSession, RefreshedAccess } from '../../../src/core/remote/types.js'
  */
@@ -88,7 +91,7 @@ export async function exchangeCode({ identityBase, code, codeVerifier, fetchImpl
   return {
     refreshToken: str(json.refresh_token, 'refresh_token'),
     accessJwt: str(json.access_jwt, 'access_jwt'),
-    expiresAt: isoTimestamp(json.expires_at, 'expires_at'),
+    expiresAt: expiryTimestamp(json.expires_at, 'expires_at'),
     org: str(json.org, 'org'),
   }
 }
@@ -105,7 +108,7 @@ export async function refreshSession({ identityBase, refreshToken, fetchImpl }) 
   const json = await postToken({ identityBase, body, fetchImpl, operation: 'remote.refresh' })
   return {
     accessJwt: str(json.access_jwt, 'access_jwt'),
-    expiresAt: isoTimestamp(json.expires_at, 'expires_at'),
+    expiresAt: expiryTimestamp(json.expires_at, 'expires_at'),
     // The refresh grant only has to re-mint the access JWT; `org` is fixed for
     // the life of the refresh token. Treat it as optional here and let the
     // caller keep the org it already stored, so a server that omits it on
@@ -225,15 +228,24 @@ function str(v, field) {
 }
 
 /**
- * A non-empty string that also parses as a date. The stdio proxy refreshes
- * whenever the stored expiry is unparseable, so accepting a non-date
- * `expires_at` (e.g. epoch-seconds-as-string) would make every forwarded
- * message a fresh refresh that re-stores the same bad value and never
- * self-corrects. Fail the refresh loudly at parse time instead.
+ * Normalize the server's `expires_at` to an ISO string. The wire value is a
+ * Unix epoch-second (the JWT `exp`); we convert it to ISO so the rest of the
+ * client (storage, `isFresh`) keeps its ISO-based, millisecond comparison.
+ * An ISO string is also accepted so older mocks/servers still parse. The stdio
+ * proxy refreshes whenever the stored expiry is unparseable, so a value that is
+ * neither a finite epoch-second nor a parseable date (e.g. epoch-seconds-as-a-
+ * string) would make every forwarded message a fresh refresh that re-stores the
+ * same bad value and never self-corrects. Fail loudly at parse time instead.
  *
  * @param {unknown} v @param {string} field @returns {string}
  */
-function isoTimestamp(v, field) {
+function expiryTimestamp(v, field) {
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || v <= 0) {
+      throw new Error(`identity response field '${field}' is not a valid timestamp`)
+    }
+    return new Date(v * 1000).toISOString()
+  }
   const s = str(v, field)
   if (Number.isNaN(Date.parse(s))) {
     throw new Error(`identity response field '${field}' is not a valid timestamp`)

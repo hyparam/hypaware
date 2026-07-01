@@ -165,7 +165,9 @@ function startStubServer() {
     state.validJwt = `jwt-${state.jwtSeq}`
     return state.validJwt
   }
-  const FUTURE = '2999-01-01T00:00:00Z'
+  // The server sends `expires_at` as a Unix epoch-second (the JWT `exp`), so the
+  // stub mirrors that wire form; the client normalizes it to ISO on the way in.
+  const FUTURE = Math.floor(Date.parse('2999-01-01T00:00:00Z') / 1000)
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
