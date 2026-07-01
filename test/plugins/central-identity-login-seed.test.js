@@ -6,7 +6,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { IdentityClient, writeLoginSeed } from '../../hypaware-core/plugins-workspace/central/src/identity_client.js'
+import { IdentityClient } from '../../hypaware-core/plugins-workspace/central/src/identity_client.js'
+import { writeLoginSeed } from '../../src/core/remote/gateway_seed.js'
 
 const DAY = 24 * 60 * 60
 

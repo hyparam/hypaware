@@ -302,59 +302,6 @@ function mintChanged(persisted, centralUrl, bootstrapToken) {
 }
 
 /**
- * Seed the sink's persisted identity from a login-minted gateway credential
- * (LLP 0061 D2): the file `acquire()` already loads, pre-populated, so the
- * sink skips `bootstrap()` and the unchanged refresh / 401-retry path
- * carries the credential from there. Same atomic 0600 write as the sink's
- * own persistence. Stamps `central_url` so the re-point guards apply to a
- * login seed exactly as to a bootstrap mint (LLP 0061 D4), and
- * `origin: 'login'` for the re-enrollment guard and diagnostics.
- *
- * The write always lands (the login is a fresh mint for this server, the
- * same authority a re-bootstrap has), but never silently: the replaced
- * identity is returned so the caller can report what the seed displaced -
- * a prior login seed (idempotent: the server dedups to the same gateway),
- * a bootstrap-minted identity, or a stale identity from another server.
- *
- * @param {{ persistedPath: string, centralUrl: string, jwt: string, expiresAt: number, gatewayId: string }} args
- * @returns {{ replaced: PersistedIdentity | undefined }}
- * @ref LLP 0061#d2 [implements]: a login seed is the persisted identity pre-populated; only the writer is new, the forward path is untouched
- */
-export function writeLoginSeed({ persistedPath, centralUrl, jwt, expiresAt, gatewayId }) {
-  if (typeof jwt !== 'string' || jwt.length === 0) {
-    throw new Error('writeLoginSeed: jwt is required')
-  }
-  if (typeof expiresAt !== 'number' || !Number.isInteger(expiresAt) || expiresAt <= 0) {
-    throw new Error('writeLoginSeed: expiresAt must be a Unix epoch second')
-  }
-  if (typeof gatewayId !== 'string' || gatewayId.length === 0) {
-    throw new Error('writeLoginSeed: gatewayId is required')
-  }
-  if (typeof centralUrl !== 'string' || centralUrl.length === 0) {
-    throw new Error('writeLoginSeed: centralUrl is required')
-  }
-  // Read the current identity for the caller's report; a corrupt file is
-  // replaced rather than blocking the seed (the fresh mint supersedes it).
-  /** @type {PersistedIdentity | undefined} */
-  let replaced
-  try {
-    replaced = readPersistedFile(persistedPath)
-  } catch {
-    replaced = undefined
-  }
-  /** @type {PersistedIdentity} */
-  const identity = {
-    jwt,
-    expires_at: expiresAt,
-    gateway_id: gatewayId,
-    central_url: centralUrl,
-    origin: 'login',
-  }
-  writePersistedFile(persistedPath, identity)
-  return { replaced }
-}
-
-/**
  * Atomic tmp+rename write at mode 0600. The JWT is the gateway's only
  * credential against the central server, so a crash mid-write must
  * never leave a half-finished file in place.

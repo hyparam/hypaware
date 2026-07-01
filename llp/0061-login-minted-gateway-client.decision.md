@@ -159,9 +159,9 @@ committed task breakdown.
 - **Capture** (`src/core/remote/identity_client.js` `exchangeCode()`, `types.d.ts`
   `OidcSession`): read `gateway_jwt` / `gateway_expires_at` / `gateway_id`; send
   `host`.
-- **Seed** (`src/core/cli/remote_commands.js` `runBrowserLogin`, plus a writer next
-  to the sink's persisted store): resolve the sink's `persistedPath` for the target
-  and write the login-origin `identity.json` seed (D2, D4, D5).
+- **Seed** (`src/core/cli/remote_commands.js` `runBrowserLogin`, plus the resolver
+  and writer in `src/core/remote/gateway_seed.js`): resolve the sink's `persistedPath`
+  for the target and write the login-origin `identity.json` seed (D2, D4, D5).
 - **Consume** (`central/src/identity_client.js`, `types.d.ts` `PersistedIdentity`):
   widen the persisted shape with `origin?: 'login'`; `acquire()` already loads and
   refreshes it. Verify the re-point guard treats a login seed correctly (D4).
@@ -186,9 +186,14 @@ committed task breakdown.
   `@hypaware/central` sink block, takes `identity.persisted_path` when set,
   defaulting to the per-plugin state path
   `<stateRoot>/plugins/@hypaware/central/identity.json` (LLP 0004
-  state-directories, mirroring the sink's `sinkCtx.paths.stateDir` default). Lives
-  in `src/core/remote/gateway_seed.js`; the writer itself sits beside the sink's
-  persisted store in `central/src/identity_client.js`.
+  state-directories, mirroring the sink's `sinkCtx.paths.stateDir` default). The
+  resolver and the seed writer both live in `src/core/remote/gateway_seed.js`: the
+  login command is the seed's producer and the sink (`hypaware-core`) only reads and
+  refreshes the file, so the writer sits on the `src` side of the package boundary
+  rather than importing a sink value across it (the published declaration build
+  compiles `src` alone, `rootDir: src`, so a `src` value import into `hypaware-core`
+  would not resolve). The file format is the contract between the two halves; the
+  sink validates it on read.
 - **Multiple central targets.** *Resolved (implementation):* the mapping is by URL
   **origin**, the same derivation that maps a target to its identity endpoints
   (LLP 0058 D6). `hyp remote login <target>` seeds every `central` sink whose
