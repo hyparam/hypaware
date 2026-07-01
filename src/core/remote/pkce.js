@@ -18,7 +18,7 @@ import crypto from 'node:crypto'
  * encoded; the challenge is the base64url SHA-256 of the verifier ASCII.
  *
  * @returns {{ verifier: string, challenge: string }}
- * @ref LLP 0046#d3 [implements]: client owns the downstream PKCE leg; verifier + S256 challenge, in-memory for one flow
+ * @ref LLP 0058#d3 [implements]: client owns the downstream PKCE leg; verifier + S256 challenge, in-memory for one flow
  */
 export function createPkcePair() {
   // `base64url` is unpadded base64url (RFC 7636 §A) natively, no replace chain.

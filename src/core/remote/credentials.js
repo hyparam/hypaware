@@ -18,7 +18,7 @@ import { refreshSession, sessionExpiredMessage } from './identity_client.js'
  * lives in a single `0600` file, written atomically, mirroring `central`'s
  * `identity.json` single-file precedent.
  *
- * Each per-target record is discriminated by `kind` (LLP 0046 D4): a
+ * Each per-target record is discriminated by `kind` (LLP 0058 D4): a
  * `static` record is the LLP 0033 `{ token }`; an `oidc` record carries the
  * refresh token + cached access JWT of a browser-login session. Migration is
  * read-implicit: a legacy record with a `token` and no `kind` reads as
@@ -62,13 +62,13 @@ let rawCache = null
 
 /**
  * Derive the identity base `<origin>/v1/identity` from a target's MCP URL
- * (LLP 0046 D6): identity is mounted at the same origin, so no second URL is
+ * (LLP 0058 D6): identity is mounted at the same origin, so no second URL is
  * configured. Returns `null` for an unparseable URL. Shared by the login
  * command and the attach path.
  *
  * @param {string} url
  * @returns {string | null}
- * @ref LLP 0046#d6 [implements]: identity endpoints derive from the configured remote URL origin
+ * @ref LLP 0058#d6 [implements]: identity endpoints derive from the configured remote URL origin
  */
 export function deriveIdentityBase(url) {
   try {
@@ -103,11 +103,11 @@ export function remoteTokenEnvVar(target) {
  * {@link RemoteCredentialRecord}. Returns `{}` when the file is absent; throws
  * on a corrupt file so a silent empty map can't mask a broken store. A legacy
  * `token`-only record is read as `kind: 'static'` (read-implicit migration,
- * LLP 0046 D4).
+ * LLP 0058 D4).
  *
  * @param {string} stateDir
  * @returns {Promise<Record<string, RemoteCredentialRecord>>}
- * @ref LLP 0046#d4 [implements]: discriminated kind record; legacy token-only reads as static
+ * @ref LLP 0058#d4 [implements]: discriminated kind record; legacy token-only reads as static
  * @ref LLP 0033#credentials [constrained-by]: single 0600 per-target store, secrets never in config
  */
 export async function readCredentials(stateDir) {
@@ -237,13 +237,13 @@ export async function writeToken(stateDir, target, token) {
 
 /**
  * Store (or replace) an OIDC session for a target, stamped `kind: 'oidc'`.
- * Same atomic 0600 path as {@link writeToken} (LLP 0046 D4).
+ * Same atomic 0600 path as {@link writeToken} (LLP 0058 D4).
  *
  * @param {string} stateDir
  * @param {string} target
  * @param {{ refreshToken: string, accessJwt: string, expiresAt: string, org: string }} session
  * @returns {Promise<void>}
- * @ref LLP 0046#d4 [implements]: oidc session written through the same atomic 0600 store as static tokens
+ * @ref LLP 0058#d4 [implements]: oidc session written through the same atomic 0600 store as static tokens
  */
 export async function writeSession(stateDir, target, session) {
   await withCredentialsLock(stateDir, () => commitSession(stateDir, target, session))
@@ -345,7 +345,7 @@ export async function resolveToken({ target, env, stateDir }) {
 }
 
 /**
- * Session-aware resolver for the query attach path (LLP 0046 D5). The
+ * Session-aware resolver for the query attach path (LLP 0058 D5). The
  * per-target env override still wins. A `static` record returns its token. An
  * `oidc` record returns a fresh access JWT, calling `refreshSession` and
  * persisting the new JWT/expiry when the stored one is within a skew window of
@@ -362,7 +362,7 @@ export async function resolveToken({ target, env, stateDir }) {
  *   forceRefresh?: boolean,
  * }} args
  * @returns {Promise<{ ok: true, token: string, source: 'env' | 'file', kind?: 'static' | 'oidc' } | { ok: false, error: string }>}
- * @ref LLP 0046#d5 [implements]: silent refresh on the attach path; env override still wins
+ * @ref LLP 0058#d5 [implements]: silent refresh on the attach path; env override still wins
  */
 export async function resolveAccessJwt({ target, env, stateDir, identityBase, now = Date.now(), fetchImpl, forceRefresh = false }) {
   const envName = remoteTokenEnvVar(target)
@@ -430,7 +430,7 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  *   envName: string,
  * }} args
  * @returns {Promise<{ ok: true, token: string, source: 'file', kind: 'oidc' } | { ok: false, error: string }>}
- * @ref LLP 0046#d5 [implements]: single-flight refresh under the lock - no double-spend, clobber, or lost-race re-login across concurrent hyp processes
+ * @ref LLP 0058#d5 [implements]: single-flight refresh under the lock - no double-spend, clobber, or lost-race re-login across concurrent hyp processes
  */
 async function refreshOidcSession({ target, stateDir, identityBase, fetchImpl, from, envName }) {
   return withCredentialsLock(stateDir, async () => {
@@ -485,7 +485,7 @@ async function readOidcRecord(stateDir, target) {
  * Whether a resolved credential can be silently refreshed: an `oidc` record
  * read from the file. A per-target env override and a `static` token cannot be
  * refreshed. The attach paths call this instead of each re-deriving the
- * kind+source rule, so "what is refreshable" has one owner (LLP 0046 D5).
+ * kind+source rule, so "what is refreshable" has one owner (LLP 0058 D5).
  *
  * @param {{ source?: 'env' | 'file', kind?: 'static' | 'oidc' }} resolved a successful resolveAccessJwt result
  * @returns {boolean}
@@ -495,7 +495,7 @@ export function isRefreshable(resolved) {
 }
 
 /**
- * The one-shot refresh + retry policy both attach paths share (LLP 0046 D5):
+ * The one-shot refresh + retry policy both attach paths share (LLP 0058 D5):
  * run `op(token)` with the already-resolved token; if `op` reports an auth
  * failure on a refreshable (oidc/file) credential, force one refresh and run
  * `op` once more. Env overrides and static tokens cannot refresh, so their auth
@@ -519,7 +519,7 @@ export function isRefreshable(resolved) {
  *   op: (token: string) => Promise<{ authFailed: boolean, value: T }>,
  * }} args
  * @returns {Promise<{ ok: true, value: T, authFailed: boolean } | { ok: false, error: string }>}
- * @ref LLP 0046#d5 [implements]: the 401 -> force refresh -> retry-once policy, one home for both attach paths
+ * @ref LLP 0058#d5 [implements]: the 401 -> force refresh -> retry-once policy, one home for both attach paths
  */
 export async function attachWithRefresh({ resolved, refresh, op }) {
   const first = await op(resolved.token)
@@ -535,7 +535,7 @@ export async function attachWithRefresh({ resolved, refresh, op }) {
 /**
  * Explain a 401/403 that survived the one-shot refresh + retry, by *why* the
  * credential is dead, so the stdio proxy and the verb attach path advise the
- * user identically (LLP 0046 D5). One home so the two can never drift:
+ * user identically (LLP 0058 D5). One home so the two can never drift:
  *  - a refreshable oidc session that still 401s is an expired session: re-login
  *    (exit 2, same as an invalid_grant refresh failure);
  *  - a per-target env override can't be fixed by re-login (it always wins over
@@ -544,7 +544,7 @@ export async function attachWithRefresh({ resolved, refresh, op }) {
  *
  * @param {{ target: string, status: number, resolved: { source?: 'env' | 'file', kind?: 'static' | 'oidc' } }} args
  * @returns {{ message: string, exitCode: number }}
- * @ref LLP 0046#d5 [implements]: 401-after-retry guidance, one home for both attach paths
+ * @ref LLP 0058#d5 [implements]: 401-after-retry guidance, one home for both attach paths
  */
 export function describeAuthRejection({ target, status, resolved }) {
   if (isRefreshable(resolved)) {

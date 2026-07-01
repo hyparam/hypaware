@@ -136,7 +136,7 @@ export function isAuthStatus(status) {
  *
  * @param {number} status
  * @returns {Error}
- * @ref LLP 0046#d5 [implements]: live MCP 401/403 failures are tagged so attach can refresh once
+ * @ref LLP 0058#d5 [implements]: live MCP 401/403 failures are tagged so attach can refresh once
  */
 function authRejectionError(status) {
   return Object.assign(

@@ -178,7 +178,7 @@ test('an env-override token that 401s does not advise a re-login it cannot fix',
   const hypHome = await tmpHome()
   // The env override wins and is never read from the store, so re-login cannot
   // fix it. The verb must point at the env var, not tell the user to re-login
-  // (matching the stdio proxy, LLP 0046 D5).
+  // (matching the stdio proxy, LLP 0058 D5).
   const state = stubServers(t, { validJwt: 'something-else' })
   const { ctx, err } = ctxWith(hypHome)
   ctx.env.HYP_REMOTE_TOKEN_PROD = 'env-bad'

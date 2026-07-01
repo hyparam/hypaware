@@ -1,14 +1,14 @@
-# LLP 0047: Multi-tenant OIDC login on the client, implementation design
+# LLP 0059: Multi-tenant OIDC login on the client, implementation design
 
 **Type:** design
-**Status:** Accepted
+**Status:** Implemented
 **Systems:** CLI, Onboarding, Query, MCP, Config
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0009, LLP 0011, LLP 0033, LLP 0046
-**Decided-by:** LLP 0046: multi-tenant OIDC login on the client
+**Related:** LLP 0009, LLP 0011, LLP 0033, LLP 0058
+**Decided-by:** LLP 0058: multi-tenant OIDC login on the client
 
-> [LLP 0046](./0046-oidc-login-client.decision.md) grilled and decided the client-local
+> [LLP 0058](./0058-oidc-login-client.decision.md) grilled and decided the client-local
 > shape of chunk 2: a browser mode on `hyp remote login`, an ephemeral loopback
 > redirect, the downstream PKCE leg, a discriminated `kind` record in the existing 0600
 > store, origin-derived identity endpoints, and silent refresh on the attach path. This
@@ -25,7 +25,7 @@ login` command are extended, not replaced.
 
 ## The server contract (what the client speaks)
 
-All paths are under the identity base `<origin-of-target-url>/v1/identity` (LLP 0046 D6).
+All paths are under the identity base `<origin-of-target-url>/v1/identity` (LLP 0058 D6).
 
 **Start (browser navigates here):** `GET /login/start` with query params:
 
@@ -63,7 +63,7 @@ is no external JWKS on the client.
 ### `pkce.js`
 `createPkcePair()` → `{ verifier, challenge }`. Verifier is 32 random bytes base64url;
 challenge is base64url SHA-256 of the verifier. Pure, synchronous, stdlib `crypto`.
-Realizes LLP 0046 D3.
+Realizes LLP 0058 D3.
 
 ### `loopback.js`
 `startLoopbackReceiver({ state, timeoutMs })` → `{ redirectUri, waitForCode() }`. Binds
@@ -73,12 +73,12 @@ the start URL before opening the browser. `waitForCode()` resolves `{ code }` wh
 matching-state callback with no `code`, or timeout. A callback whose `state` does not
 match (or is absent) is served a neutral page and ignored, never settling the flow, so a
 stray or hostile hit on the loopback port cannot abort the login. Serves a minimal "login
-complete, you can close this tab" page, then closes. Single-shot. Realizes LLP 0046 D2.
+complete, you can close this tab" page, then closes. Single-shot. Realizes LLP 0058 D2.
 
 ### `open_browser.js`
 `openBrowser(url)` spawns the platform opener (`open` darwin, `xdg-open` linux, `start`
 win32) detached; returns whether an opener was found. `--no-browser` skips it and prints
-the URL. Realizes LLP 0046 D8.
+the URL. Realizes LLP 0058 D8.
 
 ### `identity_client.js`
 Plain JSON over an injectable `fetchImpl`, distinct from the MCP JSON-RPC `client.js`:
@@ -96,7 +96,7 @@ the browser (or print it), await the code, exchange it, and return the session
 
 ## Modules to extend
 
-### `credentials.js` (LLP 0046 D4)
+### `credentials.js` (LLP 0058 D4)
 Records gain a discriminator `kind: 'static' | 'oidc'`. Additions:
 - `writeSession(stateDir, target, { refreshToken, accessJwt, expiresAt, org })` writes a
   `kind: 'oidc'` record through the same atomic 0600 path as `writeToken`.
@@ -109,14 +109,14 @@ Records gain a discriminator `kind: 'static' | 'oidc'`. Additions:
   window of expiry. The env override `HYP_REMOTE_TOKEN_<TARGET>` still wins.
 - `removeToken` already drops the whole per-target record, so it covers both kinds.
 
-### `remote_commands.js` (LLP 0046 D1, D7, D8)
+### `remote_commands.js` (LLP 0058 D1, D7, D8)
 `runRemoteLogin` gains browser mode: parse `--browser` / `--no-browser` / `--org <name>`
 / `--token-file <path>`. With a token file or piped stdin, behave exactly as today
 (`kind: 'static'`). Otherwise run `loginWithBrowser` against the target's identity base,
 then `writeSession`. Print the resolved org on success. Translate a callback `error` into
 a clear message per D7.
 
-### `remote_verb.js` and `client.js` (LLP 0046 D5)
+### `remote_verb.js` and `client.js` (LLP 0058 D5)
 The attach path calls `resolveAccessJwt` instead of `resolveToken`. On a live 401/403
 from `client.js`, the attach path refreshes once and retries before surfacing the error;
 a refresh that fails with `invalid_grant` surfaces the existing re-login message (now:
@@ -168,17 +168,17 @@ triggers the re-login message.
 
 ## @refs to add when the code lands
 
-- `oidc_login.js`: `@ref LLP 0046#d3 [implements]` (downstream PKCE leg owned by client)
-- `loopback.js`: `@ref LLP 0046#d2 [implements]` (ephemeral 127.0.0.1 redirect, RFC 8252)
-- `credentials.js` session additions: `@ref LLP 0046#d4 [implements]` (discriminated
+- `oidc_login.js`: `@ref LLP 0058#d3 [implements]` (downstream PKCE leg owned by client)
+- `loopback.js`: `@ref LLP 0058#d2 [implements]` (ephemeral 127.0.0.1 redirect, RFC 8252)
+- `credentials.js` session additions: `@ref LLP 0058#d4 [implements]` (discriminated
   `kind` record), and `@ref LLP 0033#credentials [constrained-by]`
-- `resolveAccessJwt` / attach path: `@ref LLP 0046#d5 [implements]` (silent refresh and
+- `resolveAccessJwt` / attach path: `@ref LLP 0058#d5 [implements]` (silent refresh and
   401 re-login on the attach path)
-- `runRemoteLogin` browser mode: `@ref LLP 0046#d1 [implements]` (browser mode of `hyp
+- `runRemoteLogin` browser mode: `@ref LLP 0058#d1 [implements]` (browser mode of `hyp
   remote login`)
 
 ## References
 
 - `../hypaware-server/llp/0018-oidc-login-server.design.md` (the server side of this contract)
-- [LLP 0046](./0046-oidc-login-client.decision.md) (decisions), [LLP 0033](./0033-remote-query-attach.spec.md) (credential store + attach), [LLP 0009](./0009-cli-registry.spec.md) (command registry)
-- Sequenced in [LLP 0048](./0048-oidc-login-client.plan.md)
+- [LLP 0058](./0058-oidc-login-client.decision.md) (decisions), [LLP 0033](./0033-remote-query-attach.spec.md) (credential store + attach), [LLP 0009](./0009-cli-registry.spec.md) (command registry)
+- Sequenced in [LLP 0060](./0060-oidc-login-client.plan.md)

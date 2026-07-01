@@ -1,7 +1,7 @@
-# LLP 0046: Multi-tenant OIDC login on the client
+# LLP 0058: Multi-tenant OIDC login on the client
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Implemented
 **Systems:** CLI, Onboarding, Query, MCP
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
@@ -206,4 +206,4 @@ flow would require new server work and is out of scope.
 - `../hypaware-server/llp/0018-oidc-login-server.design.md` (server design)
 - `../hypaware-server/llp/0019-oidc-login-server.plan.md` (shipped server plan)
 - [LLP 0009](./0009-cli-registry.spec.md), [LLP 0011](./0011-setup-and-onboarding.decision.md), [LLP 0033](./0033-remote-query-attach.spec.md)
-- Designed in [LLP 0047](./0047-oidc-login-client.design.md); sequenced in [LLP 0048](./0048-oidc-login-client.plan.md)
+- Designed in [LLP 0059](./0059-oidc-login-client.design.md); sequenced in [LLP 0060](./0060-oidc-login-client.plan.md)

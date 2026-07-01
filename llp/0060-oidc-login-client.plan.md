@@ -1,14 +1,14 @@
-# LLP 0048: Multi-tenant OIDC login on the client, plan
+# LLP 0060: Multi-tenant OIDC login on the client, plan
 
 **Type:** plan
-**Status:** Accepted
+**Status:** Implemented
 **Systems:** CLI, Onboarding, Query, MCP, Config
 **Author:** Kenny / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0033, LLP 0046, LLP 0047
-**Generated-by:** LLP 0047: multi-tenant OIDC login on the client, implementation design
+**Related:** LLP 0033, LLP 0058, LLP 0059
+**Generated-by:** LLP 0059: multi-tenant OIDC login on the client, implementation design
 
-> [LLP 0047](./0047-oidc-login-client.design.md) named the modules and the wire
+> [LLP 0059](./0059-oidc-login-client.design.md) named the modules and the wire
 > contract. This plan turns them into a task graph of independently-mergeable PRs, with
 > the dependency edges that let the local primitives land in parallel before the command
 > and attach-path wiring that consume them.
@@ -25,7 +25,7 @@ M1 local primitives (parallel)            M2 command           M3 attach        
 ```
 
 Each task is a PR with its own unit tests, lands green under `npm test`, and carries the
-`@ref` annotations LLP 0047 lists. Follow the same discipline the server used in its LLP
+`@ref` annotations LLP 0059 lists. Follow the same discipline the server used in its LLP
 0019: typecheck and tests gate every merge; the LLP edit lands with its code.
 
 ## Milestone 1: local primitives
@@ -33,17 +33,17 @@ Each task is a PR with its own unit tests, lands green under `npm test`, and car
 No command wiring, no network beyond injected fetch; each is unit-testable in isolation.
 
 - **T1 `pkce.js`.** `createPkcePair()`. Test: challenge is the base64url SHA-256 of the
-  verifier; two pairs differ. (`@ref LLP 0046#d3`)
+  verifier; two pairs differ. (`@ref LLP 0058#d3`)
 - **T2 `loopback.js`.** `startLoopbackReceiver({ state, timeoutMs })`. Test (injected
   requests against the real bound port): matching `state` resolves `{ code }`; mismatch,
-  `error=`, and timeout reject; the listener closes after one request. (`@ref LLP 0046#d2`)
+  `error=`, and timeout reject; the listener closes after one request. (`@ref LLP 0058#d2`)
 - **T3 `identity_client.js`.** `exchangeCode`, `refreshSession` over an injected
   `fetchImpl`. Test: correct request body and parsed response; a 401 surfaces a typed
   `invalid_grant`.
 - **T4 `credentials.js` discriminated `kind`.** Add `writeSession`, the read-normalizing
   of legacy `token`-only records to `static`, and a `RemoteCredentialRecord` interface in
   the sibling `.d.ts`. Test: `oidc` record round-trips; legacy record reads as `static`;
-  `removeToken` still clears both. (`@ref LLP 0046#d4`, `@ref LLP 0033#credentials`)
+  `removeToken` still clears both. (`@ref LLP 0058#d4`, `@ref LLP 0033#credentials`)
 - **T5 `oidc_login.js`.** `loginWithBrowser(...)`, composing T1+T2+T3 plus
   `open_browser.js`. Depends on T1, T2, T3. Test: a scripted loopback + stub identity
   server drives a full code-to-session exchange; `--no-browser` prints the URL.
@@ -56,7 +56,7 @@ T1 to T4 are mutually independent and parallelize; T5 joins them.
   `--org` / `--token-file`), origin-derive the identity base from the target's `url`, run
   `loginWithBrowser`, persist with `writeSession`, print the resolved org. Translate
   callback `error` codes into clear messages (D7). Static `--token-file`/stdin path
-  unchanged. Depends on M1. (`@ref LLP 0046#d1`, `#d6`, `#d7`)
+  unchanged. Depends on M1. (`@ref LLP 0058#d1`, `#d6`, `#d7`)
   Test: `--org` forwarded; each error code maps to its message; static path untouched.
 
 ## Milestone 3: attach-path integration
@@ -64,7 +64,7 @@ T1 to T4 are mutually independent and parallelize; T5 joins them.
 - **T7 silent refresh + 401 retry.** Swap the attach path (`remote_verb.js`) to
   `resolveAccessJwt`; add the one-shot refresh-and-retry on a live 401 in `client.js`;
   keep the env override winning. A failed refresh surfaces the re-login message. Depends
-  on T4 (and benefits from T6 existing for end-to-end manual check). (`@ref LLP 0046#d5`)
+  on T4 (and benefits from T6 existing for end-to-end manual check). (`@ref LLP 0058#d5`)
   Test: a stale stored JWT is refreshed and persisted before the call; a 401 mid-flight
   triggers exactly one refresh+retry; `invalid_grant` maps to re-login guidance.
 
@@ -83,7 +83,7 @@ T1 to T4 are mutually independent and parallelize; T5 joins them.
   refresh-then-retry behavior, so 0033 stays the honest source for the attach path.
 - **Promote 0046/0047/0048.** Move them Draft → Accepted/Active as the design is approved,
   and to Implemented when the milestones land (the server-side 0015/0016 precedent).
-- **Decide the `Identity` System tag** (LLP 0046 open question) before tagging the code;
+- **Decide the `Identity` System tag** (LLP 0058 open question) before tagging the code;
   if adopted, update LLP 0000's vocabulary in the same change.
 - **Run `/ref-check`** after each milestone so no `@ref` dangles and every `#anchor`
   resolves.
@@ -95,10 +95,10 @@ T1 to T4 are mutually independent and parallelize; T5 joins them.
   future gateway-token field.
 - Self-serve DNS-TXT domain claiming (server chunk 5).
 - OS keychain for the refresh token (LLP 0033 follow-up).
-- Path-prefixed identity hosting / explicit `identityUrl` (LLP 0046 D6 caveat).
+- Path-prefixed identity hosting / explicit `identityUrl` (LLP 0058 D6 caveat).
 
 ## References
 
-- [LLP 0046](./0046-oidc-login-client.decision.md) (decisions), [LLP 0047](./0047-oidc-login-client.design.md) (design)
+- [LLP 0058](./0058-oidc-login-client.decision.md) (decisions), [LLP 0059](./0059-oidc-login-client.design.md) (design)
 - [LLP 0033](./0033-remote-query-attach.spec.md) (credential store + attach), [LLP 0009](./0009-cli-registry.spec.md) (command registry), [LLP 0011](./0011-setup-and-onboarding.decision.md) (onboarding)
 - `../hypaware-server/llp/0019-oidc-login-server.plan.md` (the server-side plan this mirrors)
