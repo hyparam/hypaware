@@ -220,6 +220,7 @@ export async function activate(ctx) {
   // @ref LLP 0011#interactive-walkthrough [implements]: contributes client skills the first-run walkthrough installs
   for (const skillName of [
     'hypaware-query',
+    'hypaware-reference',
     'hypaware-ignore',
     'hypaware-unignore',
     'hypaware-ai-adoption-report',
