@@ -35,17 +35,26 @@ graph instead of scanning messages; keep token figures on messages.
    (`agent_id` / `is_sidechain` / `parent_thread_id`, transcript-enriched, may not survive
    ingest). Decide cost-capable vs volume-only, and which parallelism dimensions are real vs
    proxied (the `Task`-call proxy). State N; if it's effectively one gateway / dogfood, say so.
-   If the source is GitHub-enriched, also record graph coverage and freshness: whether `Repo` /
-   `PullRequest` / `Review` nodes exist and the max `first_seen` per type. A stale projection
-   undercounts reach, so state the graph's as-of date and treat every reach figure as a floor.
+   **ALWAYS verify GitHub enrichment before deciding it's out of scope: probe, never assume.**
+   A conditional ("if enriched…") obligates you to *test* the condition, not guess it. Run the
+   probe every run: `hyp query sql "SELECT node_type, projector, count(*) AS n, max(first_seen)
+   AS newest FROM node GROUP BY node_type, projector" --remote <SRC>` (and check `edge` exists via
+   `hyp query status`). If a `github.t0` projector with `PullRequest` / `Review` nodes is present,
+   **GitHub reach is IN SCOPE and MUST be computed in step 2**: record the node counts and the max
+   `first_seen` per type as the graph's as-of date, and treat every reach figure as a floor (a stale
+   projection undercounts). If the probe returns no `github.t0` / PR / Review nodes, state
+   **"checked - no GitHub enrichment present"** explicitly. **Never write "not assessed" / "not
+   queried" for reach**: that phrasing means you skipped the probe, which is the one thing this step
+   forbids.
 2. **Per-gateway utilization.** One row per gateway: volume (messages, sessions, active days,
    first/last seen), tokens + cache-read ratio `cache_read/(cache_read+input)`, then its focus:
    top models (+ `(unknown)`), tools (Bash dominance + top commands), repos, client
    (claude/codex), and 2–4 recurring work themes (sampled, redacted). Distill each into a
-   one-line **focus label**. Where the graph is GitHub-enriched, add each gateway's real *reach*
-   from it: the repos and PRs its work actually landed in (`Session -at-> Commit <-references-
-   PullRequest`), and whether that work drew review (`... PullRequest <-on- Review <-submitted-
-   Actor`). This is footprint the messages cannot show. Keep it descriptive (route any "review
+   one-line **focus label**. When the step-1 probe found `github.t0` enrichment, you **MUST** add
+   each gateway's real *reach* from it: the repos and PRs its work actually landed in (`Session -at->
+   Commit <-references- PullRequest`), and whether that work drew review (`... PullRequest <-on- Review
+   <-submitted- Actor`); attribute sessions to a gateway/person via session `cwd` (`/Users/<name>`).
+   This is footprint the messages cannot show and is not optional when the graph supports it. Keep it descriptive (route any "review
    more" action to hypaware-ai-improvement-report) and dated to the graph's freshness from step 1.
 3. **Parallelism / fan-out.** Adoption (% conversations with ≥1 subagent, incl. the zero
    bucket); breadth (subagents per parent) and depth (`parent_thread_id` chains); concurrency
