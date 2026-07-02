@@ -82,6 +82,10 @@ Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, 
 
 Run `hyp query schema ai_gateway_messages --format markdown` for the authoritative column reference.
 
+## When the graph answers it cheaper
+
+Some questions are relationships, not row scans. For descriptive "who used what" rollups (distinct sessions per repo / model / tool / file, or session to commit to PR joins), the **hypaware-graph** skill reads compact `node` / `edge` adjacency instead of scanning `ai_gateway_messages`, and it reaches GitHub facets (repos, PRs, reviewers) that are not in the messages at all. Keep per-message measures here on `ai_gateway_messages`: token sums, `count(*)` call totals, error / stop-reason, and `content_text`. See the hypaware-graph skill for the full boundary.
+
 ## Guardrails
 
 - Do not assume the cache auto-refreshes. Query commands default to `--refresh never`.

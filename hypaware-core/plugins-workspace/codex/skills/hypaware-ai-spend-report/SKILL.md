@@ -73,3 +73,12 @@ SELECT sum(inp) t_in, sum(outp) t_out, sum(cwrite) t_cw, sum(cread) t_cr FROM ms
 - **Formatting (human-readable):** open each section with its one-sentence takeaway, then the
   table; **bold** headline numbers; split the four token types (never collapse them); keep the
   bottom line + ranked table a ~1-minute read.
+- **Every section is analysis, not inventory.** Detail sections (or sub-pages, if the report is
+  split) hold the same standard as the main page: each argues one claim, opens with that
+  takeaway, and ties every number to what it means for the reader. Cut table narration ("how to
+  read the table") and standing bookkeeping prose; compress source/window/method to a few lines
+  and fold stat-only content into the table it supports.
+- **No scope apologies.** Scope rules (what routes to which report) are authoring guidance,
+  never report copy. Don't write "no recommendations here" or routing disclaimers in the report;
+  state findings plainly, and where a sibling report owns the action a plain cross-link is
+  enough.

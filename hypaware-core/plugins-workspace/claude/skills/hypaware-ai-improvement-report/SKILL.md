@@ -16,7 +16,9 @@ and let the user choose which to query: **local logs** (this machine's own recor
 `query_sql` / `graph_neighbors` tool in your toolset); the same server can appear both ways —
 list it once). Present the options,
 ask which one (or more) to run the review against, then proceed against the chosen source.
-Query mechanics live in the **hypaware-query** skill; read it first.
+Query mechanics live in the **hypaware-query** skill; read it first. For descriptive
+who-used-what rollups (distinct sessions per repo/model/tool/file), prefer the **hypaware-graph**
+skill: it reads relationships from the projected graph instead of scanning messages.
 
 Focus on these signals:
 
@@ -41,7 +43,10 @@ Focus on these signals:
    - **Sticking points** — where agents got stuck or redid work, ranked by impact: failing
      tools (`is_error` by `tool_name`), retry loops (same tool + first `tool_args` token
      ≥3×/session), refusals/truncations (stop-reason), abandoned costly sessions,
-     repeatedly-violated conventions.
+     repeatedly-violated conventions. Optional outcome lens where the graph is GitHub-enriched:
+     work that never landed (sessions whose commits reach no `PullRequest`) or drew heavy review
+     churn can corroborate a sticking point, but treat it as a proxy, not proof (unmerged or
+     heavily-reviewed work is not necessarily bad).
    - **Inefficiency** (reuse the spend spine) — model over-spec, context bloat (no
      `is_compact_summary`), low cache-read (`cache_read/(cache_read+input)`), redo loops.
 3. **Collect, dedup, prioritize.** Gather the candidates into a list of possible
@@ -75,3 +80,12 @@ Focus on these signals:
 - **Formatting (human-readable):** every candidate states its evidence inline; show
   AGENTS.md edits as real diffs/code blocks, not prose; **bold** the artifact type; keep
   it a ~1-minute read.
+- **Every section is analysis, not inventory.** Detail sections (or sub-pages, if the report is
+  split) hold the same standard as the main page: each argues one claim, opens with that
+  takeaway, and ties every number to what it means for the reader. Cut table narration ("how to
+  read the table") and standing bookkeeping prose; compress source/window/method to a few lines
+  and fold stat-only content into the table it supports.
+- **No scope apologies.** Scope rules (what routes to which report) are authoring guidance,
+  never report copy. Don't write "no recommendations here" or routing disclaimers in the report;
+  state findings plainly, and where a sibling report owns the action a plain cross-link is
+  enough.

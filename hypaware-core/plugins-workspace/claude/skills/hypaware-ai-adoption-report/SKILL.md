@@ -26,7 +26,9 @@ ask which one (or more) to profile, then proceed against the chosen source.
 **Descriptive only** — route every *action* out: "fan out more/less" and tooling go to
 **hypaware-ai-improvement-report**, token waste to **hypaware-ai-spend-report**. Query mechanics
 live in the **hypaware-query** skill; reuse hypaware-ai-spend-report's deduped token spine for
-any token figure.
+any token figure. For descriptive who-used-what rollups (distinct sessions per
+repo/model/tool/file), prefer the **hypaware-graph** skill, which reads them from the projected
+graph instead of scanning messages; keep token figures on messages.
 
 ## Procedure
 1. **Scope + coverage.** Distinct `gateway_id` (the unit — `user_id` is ~always null, so don't
@@ -34,12 +36,18 @@ any token figure.
    (`agent_id` / `is_sidechain` / `parent_thread_id` — transcript-enriched, may not survive
    ingest). Decide cost-capable vs volume-only, and which parallelism dimensions are real vs
    proxied (the `Task`-call proxy). State N; if it's effectively one gateway / dogfood, say so.
+   If the source is GitHub-enriched, also record graph coverage and freshness: whether `Repo` /
+   `PullRequest` / `Review` nodes exist and the max `first_seen` per type. A stale projection
+   undercounts reach, so state the graph's as-of date and treat every reach figure as a floor.
 2. **Per-gateway utilization.** One row per gateway: volume (messages, sessions, active days,
    first/last seen), tokens + cache-read ratio `cache_read/(cache_read+input)`, then its focus —
    top models (+ `(unknown)`), tools (Bash dominance + top commands), repos, client
    (claude/codex), and 2–4 recurring work themes (sampled, redacted). Distill each into a
-   one-line **focus label**. Use the activity graph for structural focus (Session→Repo/PR via
-   GitHub enrichment) where projected.
+   one-line **focus label**. Where the graph is GitHub-enriched, add each gateway's real *reach*
+   from it: the repos and PRs its work actually landed in (`Session -at-> Commit <-references-
+   PullRequest`), and whether that work drew review (`... PullRequest <-on- Review <-submitted-
+   Actor`). This is footprint the messages cannot show. Keep it descriptive (route any "review
+   more" action to hypaware-ai-improvement-report) and dated to the graph's freshness from step 1.
 3. **Parallelism / fan-out.** Adoption (% conversations with ≥1 subagent, incl. the zero
    bucket); breadth (subagents per parent) and depth (`parent_thread_id` chains); concurrency
    (do subagent time-spans actually *overlap*, or is it serial?); cost split (token share main
@@ -56,9 +64,21 @@ any token figure.
   split) · **focus label**. Busiest first — this table is the spine.
 - **Then the detail**, in these sections: **Scope & coverage · Per-gateway utilization ·
   Per-gateway focus · Parallelism & fan-out · Payoff (descriptive) · Fleet view · Caveats**.
+- **GitHub reach (where enriched):** in Per-gateway focus, show each gateway's repos and PRs
+  reached, as of the graph's projection date from step 1 (a stale graph makes reach a floor, not
+  an upper bound).
 - **Formatting (human-readable):** open each section with its takeaway; **bold** headline
   numbers; one sortable footprint table as the centerpiece; keep the bottom line + table a
   ~1-minute read.
+- **Every section is analysis, not inventory.** Detail sections (or sub-pages, if the report is
+  split) hold the same standard as the main page: each argues one claim, opens with that
+  takeaway, and ties every number to what it means for the reader. Cut table narration ("how to
+  read the table") and standing bookkeeping prose; compress source/window/method to a few lines
+  and fold stat-only content into the table it supports.
+- **No scope apologies.** The scope rules above ("descriptive only", what routes to which
+  report) are authoring guidance, never report copy. Don't write "no recommendations here" or
+  routing disclaimers in the report; state findings plainly, and where a sibling report owns the
+  action a plain cross-link is enough.
 - **Capture-health note:** if subagent provenance doesn't reach the server, the standing #1
   caveat is "subagent identity must survive ingest" — run adoption off the sub-agent-invocation
   proxy (the tool calls that spawn sub-agents) and flag it.

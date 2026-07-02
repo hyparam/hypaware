@@ -61,5 +61,14 @@ than the same command in a gated session.
   · Guardrails · Trends · Capture caveats**. **All examples redacted.**
 - **Formatting (human-readable):** open each section with its takeaway; **bold** severities; one
   severity-ranked findings table as the centerpiece; keep the bottom line + table a ~1-minute read.
+- **Every section is analysis, not inventory.** Detail sections (or sub-pages, if the report is
+  split) hold the same standard as the main page: each argues one claim, opens with that
+  takeaway, and ties every number to what it means for the reader. Cut table narration ("how to
+  read the table") and standing bookkeeping prose; compress source/window/method to a few lines
+  and fold stat-only content into the table it supports.
+- **No scope apologies.** Scope rules (what routes to which report) are authoring guidance,
+  never report copy. Don't write "no recommendations here" or routing disclaimers in the report;
+  state findings plainly, and where a sibling report owns the action a plain cross-link is
+  enough.
 - **Capture-health note:** if raw credentials appear in `tool_args`, the standing #1 finding is
   "gateway must redact secrets in tool_args" — put it in Capture caveats without reproducing it.
