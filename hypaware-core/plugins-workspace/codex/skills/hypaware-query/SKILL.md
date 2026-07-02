@@ -76,7 +76,7 @@ Key columns:
 - `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
 - `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
 
-**Token counts** live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`): `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`. Codex (`provider='openai'`) omits `cache_write_tokens` and adds `reasoning_tokens` + `total_tokens`. Extract with `CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens') AS BIGINT)`; usage repeats across a message's content parts, so dedup per `message_id` (e.g. `max(...)`) before summing.
+**Token counts** live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`): `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`. Codex (`provider='openai'`) omits `cache_write_tokens` and adds `reasoning_tokens` + `total_tokens`. Extract with `CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens') AS BIGINT)`. Usage rides exactly one row per response (the last assistant part; non-carrier parts are null), so a plain `SUM` over assistant rows is correct with no dedup (the one-carrier rule, LLP 0035). If you prefer a defensive dedup, `max(...) GROUP BY session_id, message_id` returns the same number: key on `session_id` (`conversation_id` is null for Claude, and only separates threads within a Codex session).
 
 Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
 
