@@ -5,8 +5,9 @@ Modular logs and telemetry collector. Plugin-kernel architecture.
 HypAware captures conversations and traffic from local AI clients (Claude
 Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
 logs / traces / metrics into a local query cache and optional Parquet
-exports. Everything runs on the local machine — no central server is
-required for V1.
+exports. It runs fully local by default, no central server required, and a
+host can optionally join a fleet (`hyp join`) to forward its recordings to a
+central server.
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
@@ -59,7 +60,30 @@ Other init flags:
 | `--from-file <config.json>`| Skip the picker and load a known-good config            |
 | `--bin <path>`             | Override the binary path the daemon installer uses      |
 
-## Where things live
+## Joining a centrally-managed fleet (`hyp join`)
+
+`hyp join` enrolls a host in a fleet so its recordings are forwarded to a
+central sink:
+
+```sh
+hyp join <url> [token]
+hyp join <url> --token-file <path>     # read the token from a file (recommended for MDM)
+echo "<token>" | hyp join <url>        # or from stdin
+hyp join <url> <token> --no-daemon     # write the seed only, skip daemon install
+```
+
+It writes a central-enrollment config (mode `0600`) to a dedicated layer under
+`config-control/`, never to your local `hypaware-config.json`, so joining
+augments an existing install rather than replacing it, then installs and starts
+the daemon (unless `--no-daemon` is passed).
+
+The policy token is a multi-use fleet-wide credential. Prefer `--token-file`
+or stdin over a positional argument, which would otherwise land in shell
+history and process listings. Other flags: `--bin <path>` overrides the binary
+the daemon installer records, and `--no-daemon` writes the seed without
+installing or restarting the daemon.
+
+## Files and directories
 
 | Path                                           | Contents                                                 |
 |------------------------------------------------|----------------------------------------------------------|
@@ -85,6 +109,33 @@ hyp query sql "select count(*) from logs"
 
 Use `hyp query schema <dataset>` to see the columns available on each
 dataset, and `hyp query status` to inspect cache freshness per dataset.
+
+## Building and querying the activity graph
+
+Alongside the row datasets, HypAware can project captured activity into a
+node/edge **activity graph**: which sessions ran in which app, against which
+model, using which tools, touching which files. The projection is
+deterministic (exact-key matching, no models), and the `context-graph` plugins
+are active by default.
+
+Projection is a manual, cheap-to-rerun step. Build or refresh the graph from
+what has been captured, then walk it from a seed node:
+
+```sh
+hyp graph project                       # project captured data into the node/edge graph
+hyp graph compact                       # merge duplicate rows (optional housekeeping)
+hyp graph neighbors <node> --depth 2    # walk out from a seed node
+```
+
+`hyp graph neighbors` takes a `node_id`, natural key, or label as the seed,
+plus `--depth`, `--direction out|in|both`, `--type <node_type>`, `--edge-type
+<type>` (repeatable), and `--limit`. The graph is also plain data: the `node`
+and `edge` datasets are queryable through `hyp query sql` like any other
+dataset.
+
+Claude Code and Codex additionally get a `hypaware-graph` skill (and a
+`graph_neighbors` tool) so an assistant can project and walk the graph on your
+behalf.
 
 ## Attaching and detaching AI clients
 
@@ -115,6 +166,46 @@ scripting. Claude writes only HypAware-related keys to
 `~/.claude/settings.json`; Codex writes a `hypaware` provider entry to
 `~/.codex/config.toml`. Unrelated keys in either file are preserved.
 
+## Opting a folder out of recording (`.hypignore`)
+
+A `.hypignore` file declares a data-usage policy for a directory subtree. It
+currently carries exactly one class, `ignore`: AI gateway exchanges (Claude /
+Codex) whose working directory is at or under a directory containing a
+`.hypignore` are never written to the local cache. The live LLM call is
+untouched; only persistence is suppressed.
+
+Resolution is gitignore-style: from an exchange's `cwd`, HypAware walks up the
+directory tree, and any `.hypignore` found on the way governs. Dropping one
+file at a repo root covers the whole repo, but the file works anywhere in the
+ancestor chain, including outside a git repo.
+
+Manage it with the CLI (idempotent; hand-authoring the dotfile is optional):
+
+```sh
+hyp ignore              # write a .hypignore at the repo root (or cwd if not in a repo)
+hyp ignore <path>       # ignore a specific directory subtree
+hyp ignore --check      # report whether cwd is ignored, which file governs, and
+                        # how many already-cached rows from the scope remain
+hyp unignore            # remove the governing .hypignore, re-enabling recording
+```
+
+`hyp ignore` writes a self-documenting file (a comment header plus the `ignore`
+token); an empty or comment-only `.hypignore` also means `ignore`. Pass
+`--json` to `hyp ignore` for a machine-readable result.
+
+Two things to know:
+
+- **Prospective only.** A `.hypignore` gates future recording and backfills.
+  Rows already captured before the file existed are left in place; `hyp ignore
+  --check` surfaces that residual count.
+- **Folder matching needs a `cwd`.** Only the Claude and Codex pathways supply
+  one, so `.hypignore` is a no-op for the `raw-anthropic` / `raw-openai`
+  proxy and OTEL sources.
+
+To pause recording for just the current Claude session (in-memory, reversible,
+not committed) use the `/hypaware-ignore` and `/hypaware-unignore` skills
+instead.
+
 ## Daemon lifecycle
 
 ```sh
@@ -129,33 +220,6 @@ hyp daemon uninstall    # remove the service file (config + recordings are kept)
 `hyp daemon install --dry-run --json` prints the rendered plist or unit
 content and target paths without touching the filesystem — useful for
 verifying what `hyp init` will install.
-
-## V1 scope
-
-V1 ships with:
-
-- Bundled plugins (no external plugin install required for the default
-  flow): `@hypaware/ai-gateway`, `@hypaware/claude`, `@hypaware/codex`,
-  `@hypaware/otel`, `@hypaware/local-fs`, `@hypaware/format-parquet`,
-  `@hypaware/format-jsonl`, plus Anthropic and OpenAI upstreams.
-- Local capture for Claude Code, Codex, raw Anthropic API, raw OpenAI
-  API, and OTEL logs / traces / metrics.
-- Local query (`hyp query sql`) across captured AI gateway messages,
-  logs, traces, and metrics.
-- Local Parquet export through the `local-fs` sink and the
-  `format-parquet` encoder.
-- Claude Code attach and Codex attach (idempotent, reversible).
-- Persistent macOS / Linux user daemon (`launchd` LaunchAgent or
-  `systemd --user` unit).
-
-## Out of scope for V1
-
-- The central / enterprise sink.
-- Gascity (multi-tenant aggregation).
-- Extracting the kernel or bundled plugins into separate repos.
-- Migrating an existing Collectivus install.
-- An external first-party plugin registry. Only bundled plugins are
-  required for the default V1 path.
 
 ## Troubleshooting
 
@@ -208,7 +272,7 @@ npm run typecheck         # if a typecheck script is present
 npm pack --dry-run        # verify the published file set
 ```
 
-Re-run the V1 smoke battery and confirm every one is green:
+Re-run the smoke battery and confirm every one is green:
 
 ```sh
 hyp smoke package_bin_boot
@@ -265,8 +329,8 @@ hypaware-core/
     format-jsonl/       # @hypaware/format-jsonl
     claude/             # @hypaware/claude
     codex/              # @hypaware/codex
-    central/            # @hypaware/central (out of scope for V1)
-    gascity/            # @hypaware/gascity (out of scope for V1)
+    central/            # @hypaware/central (bundled, opt-in via `hyp join`)
+    gascity/            # @hypaware/gascity (bundled, opt-in)
 bin/
   hypaware.js           # CLI entrypoint (bound to both `hypaware` and `hyp`)
 ```
