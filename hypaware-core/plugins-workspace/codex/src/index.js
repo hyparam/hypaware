@@ -176,6 +176,7 @@ export async function activate(ctx) {
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
   for (const skillName of [
     'hypaware-query',
+    'hypaware-reference',
     'hypaware-ai-adoption-report',
     'hypaware-ai-improvement-report',
     'hypaware-ai-security-report',

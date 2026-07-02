@@ -33,6 +33,7 @@
     },
     "skills": [
       { "name": "hypaware-query", "clients": ["claude"] },
+      { "name": "hypaware-reference", "clients": ["claude"] },
       { "name": "hypaware-ignore", "clients": ["claude"] },
       { "name": "hypaware-unignore", "clients": ["claude"] },
       { "name": "hypaware-ai-adoption-report", "clients": ["claude"] },
