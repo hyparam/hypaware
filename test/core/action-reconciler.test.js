@@ -10,6 +10,7 @@ import path from 'node:path'
 import {
   createActionReconciler,
   readClientActionStatus,
+  clearClientActionMarker,
 } from '../../src/core/config/action_reconciler.js'
 import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
@@ -17,6 +18,7 @@ import { createAttachHandler } from '../../src/core/config/action_attach.js'
  * @import {
  *   ActionContext,
  *   ActionHandler,
+ *   ActionMarkerStore,
  *   ActionOutcome,
  *   DesiredAction,
  * } from '../../src/core/config/types.d.ts'
@@ -440,6 +442,101 @@ test('a run-once handler never reverses a no-longer-desired done marker', async 
     const report = await reconciler.reconcile(INPUT)
     assert.deepEqual(report.results, [])
     assert.equal(readMarkerFile(stateRoot).backfill['@hypaware/claude'].status, 'done')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Directly seed the client-actions marker store on disk (bypassing the
+ * reconciler) so `clearClientActionMarker`'s retraction branches can be
+ * exercised in isolation.
+ *
+ * @param {string} stateRoot
+ * @param {ActionMarkerStore} store
+ */
+function seedMarkerFile(stateRoot, store) {
+  const p = markerPath(stateRoot)
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  fs.writeFileSync(p, JSON.stringify(store, null, 2) + '\n')
+}
+
+test('clearClientActionMarker is a no-op (returns false, writes nothing) when the file, bucket, or key is missing', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // (a) Missing store file: nothing to retract, and none is created.
+    assert.equal(
+      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'missing marker file returns false'
+    )
+    assert.equal(
+      fs.existsSync(markerPath(stateRoot)),
+      false,
+      'no marker file is written for a missing store'
+    )
+
+    // (b) Missing bucket: an `attach` retraction over a store that only has a
+    //     `backfill` bucket leaves the file byte-for-byte unchanged.
+    seedMarkerFile(stateRoot, {
+      backfill: { '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude' } },
+    })
+    const beforeBucket = fs.readFileSync(markerPath(stateRoot), 'utf8')
+    assert.equal(
+      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'missing bucket returns false'
+    )
+    assert.equal(
+      fs.readFileSync(markerPath(stateRoot), 'utf8'),
+      beforeBucket,
+      'missing bucket does not rewrite the file'
+    )
+
+    // (c) Missing key: the `attach` bucket exists but names a different client.
+    seedMarkerFile(stateRoot, {
+      attach: { codex: { status: 'done', request_key: 'codex' } },
+    })
+    const beforeKey = fs.readFileSync(markerPath(stateRoot), 'utf8')
+    assert.equal(
+      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      false,
+      'missing key returns false'
+    )
+    assert.equal(
+      fs.readFileSync(markerPath(stateRoot), 'utf8'),
+      beforeKey,
+      'missing key does not rewrite the file'
+    )
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('clearClientActionMarker drops an emptied bucket but preserves sibling buckets and keys', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // `attach` holds a single key; `backfill` is a sibling bucket with two.
+    seedMarkerFile(stateRoot, {
+      attach: { claude: { status: 'done', request_key: 'claude' } },
+      backfill: {
+        '@hypaware/claude': { status: 'done', request_key: '@hypaware/claude' },
+        '@hypaware/codex': { status: 'done', request_key: '@hypaware/codex' },
+      },
+    })
+
+    assert.equal(
+      clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: 'claude' }),
+      true,
+      'retracting the last attach key returns true'
+    )
+
+    const store = readMarkerFile(stateRoot)
+    // Emptied bucket dropped entirely, not left dangling as an empty `{}`.
+    assert.equal('attach' in store, false, 'the emptied attach bucket is dropped')
+    // The sibling bucket and both its keys survive untouched.
+    assert.equal(store.backfill['@hypaware/claude'].status, 'done', 'sibling backfill key survives')
+    assert.equal(store.backfill['@hypaware/codex'].status, 'done', 'sibling backfill key survives')
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

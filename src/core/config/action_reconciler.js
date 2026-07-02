@@ -329,3 +329,46 @@ export function readClientActionStatus({ stateRoot }) {
   }
   return { byKind: store }
 }
+
+/**
+ * Retract a single client-action marker (`kind` + `requestKey`) from the store:
+ * the write counterpart to {@link readClientActionStatus}, callable from any
+ * process (the CLI is not the daemon, so it never constructs the reconciler).
+ *
+ * The manual `hyp detach` command calls it after a successful disk reversal so
+ * the CLI undo and the marker store stay in sync, doing the same
+ * `delete markers[requestKey]` the reconciler's `reverse()` does once its own
+ * disk undo succeeds. Without it a manual detach reverses the on-disk settings
+ * but leaves an orphaned `done` attach marker; the next join's forward gap then
+ * short-circuits on that stale marker and never re-attaches the client (#217).
+ * That is why detach-via-config-drop was rejoin-recoverable while detach-via-CLI
+ * was not: this retraction is what makes the single core undo's two call sites
+ * converge instead of drift.
+ *
+ * Atomic (tmp+rename, mode 0600), mirroring `writeStore`. A missing store, kind
+ * bucket, or key is a no-op returning `false`; an emptied bucket is dropped so a
+ * stale empty namespace never lingers, matching `reconcile()`'s own cleanup.
+ *
+ * @param {{ stateRoot: string, kind: string, requestKey: string, now?: () => number }} args
+ * @returns {boolean} whether a marker was found and the store rewritten
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
+ */
+export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
+  const controlDir = path.join(stateRoot, CONTROL_DIRNAME)
+  const markerPath = path.join(controlDir, CLIENT_ACTIONS_BASENAME)
+  const store = readMarkerStore(markerPath)
+  const markers = store[kind]
+  if (!markers || !(requestKey in markers)) return false
+  delete markers[requestKey]
+  // Drop an emptied bucket so a no-op namespace never lingers (mirrors reconcile).
+  if (Object.keys(markers).length > 0) {
+    store[kind] = markers
+  } else {
+    delete store[kind]
+  }
+  fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
+  const tmp = `${markerPath}.tmp.${process.pid}.${now()}`
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
+  fs.renameSync(tmp, markerPath)
+  return true
+}
