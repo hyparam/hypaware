@@ -7,6 +7,7 @@ import process from 'node:process'
 
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { BUILTIN_REMOTES, effectiveDefaultRemote } from '../remote/builtin_remotes.js'
 import {
   deriveIdentityBase,
   readCredentials,
@@ -122,11 +123,10 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   // The target name is the first positional. Skip the VALUE slot of a
   // value-taking flag so e.g. `login --org acme` (name omitted) is not misread
   // as the target 'acme'.
-  const name = positionals(argv, new Set(['--token-file', '--org', '--host']))[0]
-  if (!name) {
-    ctx.stderr.write('usage: hyp remote login <name> [--token-file <path>] [--org <name>] [--host <label>] [--no-browser]\n')
-    return 2
-  }
+  // A bare `hyp remote login` (no target) signs in to the default target: an
+  // explicit query.default_remote, else the shipped built-in central server.
+  // @ref LLP 0062#bare-remote [implements]: bare `remote login` resolves the default target, the companion of bare `--remote`
+  const name = positionals(argv, new Set(['--token-file', '--org', '--host']))[0] ?? effectiveDefaultRemote(ctx.config)
   const forceBrowser = argv.includes('--browser')
   const noBrowser = argv.includes('--no-browser')
 
@@ -509,16 +509,18 @@ function localConfigPath(ctx) {
  * @returns {Promise<Record<string, { url: string }>>}
  */
 async function readConfiguredRemotes(ctx) {
+  // Ship the built-in targets under any user-defined ones, so `remote login`
+  // and `remote list` see the central server even before a `remote add`; a
+  // user entry of the same name overrides it.
+  /** @type {Record<string, { url: string }>} */
+  const out = { ...BUILTIN_REMOTES }
   const config = await readLocalConfigRaw(localConfigPath(ctx))
   if (isObject(config.query) && isObject(config.query.remotes)) {
-    /** @type {Record<string, { url: string }>} */
-    const out = {}
     for (const [name, entry] of Object.entries(config.query.remotes)) {
       if (isObject(entry) && typeof entry.url === 'string') out[name] = { url: entry.url }
     }
-    return out
   }
-  return {}
+  return out
 }
 
 /**

@@ -83,6 +83,11 @@ client now core (LLP 0034), "which server a verb talks to" is a core concern, an
 the **central layer can never inject a remote target** ([LLP 0031](./0031-layered-config.decision.md#query-is-local-only)) —
 a free invariant. The URL is non-secret and committable; the token is not config.
 
+> **Extended-by: [LLP 0062](./0062-builtin-default-remote.decision.md).** The
+> client now ships a built-in `hyparam` target and wires `default_remote`, so
+> bare `hyp <verb> --remote` and bare `hyp remote login` resolve the central
+> server with no `remote add`. User `query.remotes` still layers on top.
+
 ## Credentials
 
 <a id="credentials"></a>The query-scoped token is **never in config**
