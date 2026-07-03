@@ -5,13 +5,18 @@
 **Systems:** Gateway, Sinks, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0014, LLP 0029, LLP 0030, LLP 0039, LLP 0049, LLP 0050
+**Related:** LLP 0014, LLP 0029, LLP 0030, LLP 0039, LLP 0049, LLP 0050, LLP 0062
 
 > Two capabilities deliberately **out of V1 scope** for the hypignore mechanism
 > ([LLP 0049](./0049-hypignore-usage-policy.spec.md)), captured so the V1 design
 > stays forward-compatible with them: the `local-only` usage class, and the
 > ephemeral per-session opt-out. This document records *that they are deferred*
 > and *the seam each will use*, not a commitment to build them.
+>
+> **Update (2026-07-03):** the ephemeral per-session opt-out has since been
+> promoted to its own spec, [LLP 0062](./0062-session-opt-out.spec.md); this
+> document retains it only as historical context ([§session-opt-out](#session-opt-out)).
+> `local-only` remains deferred.
 
 ## Why this is written now
 
@@ -49,33 +54,37 @@ encounters it resolves to `ignore` via the
 [fail-safe](./0049-hypignore-usage-policy.spec.md#fail-safe), so no data marked
 `local-only` is ever exported by a version that cannot honor the restriction.
 
-## Deferred 2: ephemeral per-session opt-out {#session-opt-out}
+## Promoted: ephemeral per-session opt-out {#session-opt-out}
 
-**Intent.** "Don't record *this conversation*" — a temporary, in-memory,
+**Promoted to [LLP 0062](./0062-session-opt-out.spec.md) on 2026-07-03.** The
+authoritative spec for this mechanism now lives there; the notes below are the
+original deferred sketch, kept for provenance.
+
+**Intent.** "Don't record *this conversation*": a temporary, in-memory,
 session-scoped drop that does not write a committable file and reverses when the
 session ends. This is what the `hypaware-ignore` / `hypaware-unignore` skills
-*originally* advertised (`POST` / `DELETE /_hypaware/ignore/session`), against an
-endpoint that was never built.
+advertise (`POST` / `DELETE /_hypaware/ignore/session`), against an endpoint that
+was never built.
 
 **Why it is distinct from `.hypignore`.** It is a different product: *session*-
 scoped and *ephemeral*, versus the folder `.hypignore` which is *directory*-scoped
 and *persistent/committable* (it stops recording the whole tree for everyone).
 Repointing the skills at `.hypignore` would over-broaden "ignore this session"
-into "ignore this repo forever," so the session opt-out stays a separate future
+into "ignore this repo forever," so the session opt-out stays a separate
 mechanism.
 
-**Seam.** Unlike folder rules, a session opt-out keys off the **`session_id`**,
-which the gateway *does* see inline on the wire — so this one **can** live in the
-gateway (a small in-memory set + the control route), and does **not** contradict
-[LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)'s "gateway is
-cwd-blind": session-id is not cwd.
-
-**V1 interim.** The two skills are reconciled to be honest — they point at
-`hyp ignore` / `.hypignore` and state plainly that per-session in-memory opt-out
-is not yet available — rather than POSTing to a 404.
+**Seam (refined in [LLP 0062](./0062-session-opt-out.spec.md#enforcement)).** The
+original sketch put the whole thing in the gateway. LLP 0062 splits it: the
+**control route + in-memory set** are gateway-resident (the gateway holds opaque
+`session_id` strings it never interprets), but the **drop itself stays in the
+client adapter projector**, keyed on the `session_id` the adapter already
+resolves and returning the same `USAGE_POLICY_DROP` sentinel as the `.hypignore`
+drop. That keeps [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)
+intact rather than moving provider awareness into the gateway.
 
 ## Status
 
-Both are **Draft / not scheduled.** When either is built, this document either
-spawns a dedicated spec/decision and is superseded, or is promoted in place. It
-exists today so V1's reviewers can confirm the V1 design does not foreclose them.
+`local-only` ([§local-only](#local-only)) is **Draft / not scheduled**. The
+ephemeral per-session opt-out ([§session-opt-out](#session-opt-out)) has been
+**promoted to [LLP 0062](./0062-session-opt-out.spec.md)**. This document exists
+today so V1's reviewers can confirm the V1 design does not foreclose either.
