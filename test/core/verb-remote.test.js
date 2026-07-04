@@ -77,6 +77,34 @@ test('server-cap truncation is surfaced as its own stderr line', async (t) => {
   assert.match(err.join(''), /remote: showing first 1 rows \(server cap rows:10000\)/)
 })
 
+test('bare --remote routes to the shipped default target (central server)', async (t) => {
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  /** @type {string[]} */ const urls = []
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url, /** @type {any} */ init) => {
+    urls.push(String(url))
+    const req = JSON.parse(init.body)
+    const json = (/** @type {any} */ obj, status = 200, ct = 'application/json') => ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (/** @type {string} */ k) => k.toLowerCase() === 'content-type' ? ct : (k.toLowerCase() === 'mcp-session-id' ? 'sess-1' : null) },
+      text: async () => JSON.stringify(obj),
+    })
+    if (req.method === 'initialize') return json({ jsonrpc: '2.0', id: req.id, result: { protocolVersion: '2025-06-18', serverInfo: { name: 'srv' } } })
+    if (req.method === 'notifications/initialized') return { ok: true, status: 202, headers: { get: () => null }, text: async () => '' }
+    if (req.method === 'tools/call') return json({ jsonrpc: '2.0', id: req.id, result: { structuredContent: { columns: ['n'], rows: [{ n: 1 }] }, isError: false } })
+    return json({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'no' } })
+  })
+  // No default_remote and no 'hyparam' entry in config: bare --remote falls to
+  // the shipped built-in, whose per-target token env is HYP_REMOTE_TOKEN_HYPARAM.
+  const { ctx, out } = ctxWith({ HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_HYPARAM: 'tok' })
+  const code = await cmd.run(['SELECT 1', '--remote', '--format', 'json'], ctx)
+  assert.equal(code, 0)
+  assert.ok(urls.length > 0)
+  assert.match(urls[0], /^https:\/\/hypaware\.hyperparam\.app/)
+  assert.deepEqual(JSON.parse(out.join('')), [{ n: 1 }])
+})
+
 test('--remote with --refresh is a hard error (server owns its freshness)', async (t) => {
   stubServer(t, { toolResult: {} })
   const { ctx, err } = ctxWith({ HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_PROD: 'tok' })

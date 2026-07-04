@@ -112,9 +112,12 @@ export function parseControlFlags(argv) {
         break
       }
       case '--remote': {
-        const v = takeVal()
-        if (v === undefined) return { ok: false, error: '--remote expects a target name' }
-        controls.remote = v
+        // Bare `--remote` (no value) selects the default target, resolved
+        // downstream against config + built-ins; `--remote <name>` names one.
+        // The empty-string sentinel distinguishes "default remote" from
+        // `undefined` ("stay local").
+        // @ref LLP 0062#bare-remote [implements]: bare --remote parses to the empty-string sentinel; undefined stays local
+        controls.remote = takeVal() ?? ''
         break
       }
       default:

@@ -55,7 +55,7 @@ export async function runVerbCommand(verb, argv, ctx) {
 
   /** @type {unknown} */
   let result
-  if (ctrl.controls.remote) {
+  if (ctrl.controls.remote !== undefined) {
     // `--refresh` is a local-cache control; the server owns its freshness,
     // so combining it with `--remote` is a hard error, not a silent ignore.
     // @ref LLP 0033#flag-compat [implements]: --remote with --refresh is rejected; other render flags stay valid
@@ -68,7 +68,12 @@ export async function runVerbCommand(verb, argv, ctx) {
     // Lazy-loaded: the remote stack (MCP client, credential store) is only
     // reached on `--remote`, so a local `hyp <verb>` never pays for it.
     const { runRemoteVerb } = await import('../mcp/remote_verb.js')
-    const remote = await runRemoteVerb({ verb, params: parsed.params, target: ctrl.controls.remote, ctx })
+    const { effectiveDefaultRemote } = await import('../remote/builtin_remotes.js')
+    // Bare `--remote` (empty sentinel) resolves to the default target; a named
+    // `--remote <name>` passes straight through.
+    // @ref LLP 0062#bare-remote [implements]: bare --remote uses query.default_remote, else the shipped built-in default
+    const target = ctrl.controls.remote === '' ? effectiveDefaultRemote(ctx.config) : ctrl.controls.remote
+    const remote = await runRemoteVerb({ verb, params: parsed.params, target, ctx })
     if (!remote.ok) {
       ctx.stderr.write(`hyp ${verb.name}: ${remote.error}\n`)
       return remote.exitCode ?? 1

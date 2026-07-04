@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 
 /**
  * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
@@ -540,14 +541,20 @@ function parseQueryConfig(obj, pointer, errors) {
   }
 
   // default_remote must name a defined target, so `--remote` with no arg
-  // never silently resolves to nothing.
+  // never silently resolves to nothing. A shipped built-in target counts as
+  // defined, so a config may default to the central server without also
+  // restating its URL under `remotes`.
   if (obj.default_remote !== undefined) {
-    if (!isNonEmptyString(obj.default_remote)) {
+    const defaultName = obj.default_remote
+    const defined =
+      (result.remotes && Object.prototype.hasOwnProperty.call(result.remotes, defaultName)) ||
+      Object.prototype.hasOwnProperty.call(BUILTIN_REMOTES, defaultName)
+    if (!isNonEmptyString(defaultName)) {
       errors.push({ pointer: `${pointer}/default_remote`, message: 'query.default_remote must be a non-empty string' })
-    } else if (!result.remotes || !Object.prototype.hasOwnProperty.call(result.remotes, obj.default_remote)) {
-      errors.push({ pointer: `${pointer}/default_remote`, message: `query.default_remote '${obj.default_remote}' is not a defined remote target` })
+    } else if (!defined) {
+      errors.push({ pointer: `${pointer}/default_remote`, message: `query.default_remote '${defaultName}' is not a defined remote target` })
     } else {
-      result.default_remote = obj.default_remote
+      result.default_remote = defaultName
     }
   }
 

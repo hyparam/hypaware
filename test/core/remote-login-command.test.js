@@ -424,16 +424,23 @@ test('--browser overrides a piped stdin token and takes the browser flow', async
   assert.equal(called, true)
 })
 
-test('a missing target name (only flags) is a usage error, not a flag value misread as the name', async () => {
+test('a missing target name resolves the default (built-in) target; a value flag is not misread as the name', async () => {
   const hypHome = await tmpHome()
-  const { ctx, err } = await makeCtx({ hypHome })
-  let called = false
-  const login = /** @type {any} */ (async () => { called = true; return {} })
-  // `--org acme` with no positional name must not be read as target 'acme'.
+  const { ctx, out } = await makeCtx({ hypHome })
+  /** @type {any} */
+  let seen = null
+  const login = /** @type {any} */ (async (opts) => {
+    seen = opts
+    return { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' }
+  })
+  // `--org acme` with no positional name resolves the shipped default target
+  // (the central server), and is never read as target 'acme'.
   const code = await runRemoteLogin(['--org', 'acme'], ctx, { login })
-  assert.equal(code, 2)
-  assert.equal(called, false)
-  assert.match(err.join(''), /usage: hyp remote login <name>/)
+  assert.equal(code, 0)
+  assert.ok(seen)
+  assert.match(seen.identityBase, /hypaware\.hyperparam\.app/)
+  assert.equal(seen.org, 'acme')
+  assert.match(out.join(''), /logged in to 'hyparam' as org 'acme'/)
 })
 
 test('--org as the last arg with no value is a usage error', async () => {

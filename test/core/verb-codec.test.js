@@ -64,6 +64,15 @@ test('control flags: strip render/transport flags, keep the verb tail in rest', 
   assert.deepEqual(p.rest, ['conv-1', '--depth', '2'])
 })
 
+test('control flags: bare --remote selects the default target (empty sentinel)', () => {
+  // No value, at end of argv: the empty-string sentinel means "default target".
+  assert.equal(okCtrl(parseControlFlags(['SELECT 1', '--remote'])).controls.remote, '')
+  // A following flag is not consumed as the target name: still the default.
+  assert.equal(okCtrl(parseControlFlags(['SELECT 1', '--remote', '--format', 'json'])).controls.remote, '')
+  // An explicit name still passes through unchanged.
+  assert.equal(okCtrl(parseControlFlags(['SELECT 1', '--remote', 'prod'])).controls.remote, 'prod')
+})
+
 test('control flags: --refresh sets refreshExplicit (for the --remote conflict check)', () => {
   assert.equal(okCtrl(parseControlFlags(['x', '--refresh', 'always'])).controls.refreshExplicit, true)
   assert.equal(okCtrl(parseControlFlags(['x'])).controls.refreshExplicit, false)

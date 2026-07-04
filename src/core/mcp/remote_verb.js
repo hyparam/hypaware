@@ -1,6 +1,7 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
+import { effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { createHttpMcpClient, isAuthStatus } from './client.js'
@@ -24,7 +25,9 @@ import { createHttpMcpClient, isAuthStatus } from './client.js'
  * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
 export async function runRemoteVerb({ verb, params, target, ctx }) {
-  const remotes = ctx.config?.query?.remotes ?? {}
+  // Built-in targets (the shipped central server) layered under the user's
+  // own `query.remotes`, so `--remote hyparam` works with no `remote add`.
+  const remotes = effectiveRemotes(ctx.config)
   const entry = remotes[target]
   if (!entry) {
     return {
