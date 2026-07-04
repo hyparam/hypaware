@@ -164,6 +164,13 @@ A forward-only variant (a `config_pull` gate on the central plugin) was consider
 and rejected: it adds a mode LLP 0025 doesn't have, creates a third half-enrolled
 machine state, and fails the one-command goal anyway.
 
+*Caveat (verified 2026-07-04):* the cascade currently fires only for
+token-joined gateways — a login-origin gateway pulls `404` because config
+resolution is token-derived, so completing the cascade for login enrollees
+depends on the server-side per-org default config follow-up; see
+[§login-config-pull](#login-config-pull) for the verification and the interim
+behavior this doc binds.
+
 *Tension resolved (layer):* `join` is unattended/MDM and central-seed is
 unambiguously right for it. Login is **attended** — an argument exists that
 anything a human triggers interactively belongs in the local layer. Counter, and
@@ -367,17 +374,51 @@ conspicuous by the ladder:
   per-login `--no-forward`; a broader policy model is a later concern.
 - **Zero-touch device-cert enrollment** (server LLP 0017 Q9) — remains the join lane.
 
+## Config pull for login-enrolled machines (review concern 2, resolved 2026-07-04)
+
+<a id="login-config-pull"></a>
+Verified against both repos; the clobber scenario is **impossible** and the doc's
+cascade claim needed the opposite correction.
+
+- **No clobber, three independent guards.** (1) A login-minted gateway has
+  `tokenId: ''` (server `identity/store.js` `enrollLoginGateway`), and
+  `GET /v1/config` resolution is strictly token-derived, so a login-origin
+  gateway pulls **`404 config_not_registered`** — the server never serves a
+  document that could replace the seed (server `routes-ingest.js`,
+  `@ref` server LLP 0001#config-pull-404). (2) The central-sink guard is
+  implemented (server `configs/save-pipeline.js`, server LLP
+  0009#central-sink-guard): no servable config can lack a central sink targeting
+  the server. (3) The client pull loop treats 404 as a polite-backoff
+  **legitimate steady state** (`central/src/config_client.js`,
+  `LEGACY_404_BACKOFF_SECONDS`); the seed stays and forwarding continues.
+  Identity cannot wedge either: `identity.json` is state, not config —
+  `acquire()` prefers the persisted identity over any configured
+  `bootstrap_token`.
+- **But the D2 cascade does not fire for login enrollees today.** 404-forever
+  means no org config is ever pulled, so the LLP 0044 attach cascade never runs;
+  a fresh login-enrolled box forwards but captures nothing until someone runs
+  `hyp attach <client>` by hand. D2's cascade rationale is therefore
+  **conditional on a server-side follow-up**:
+- **Server follow-up (out of tree): per-org default config.** Resolution becomes
+  gateway → enrolling token → config, **else `gateway.org` → org default
+  config**, else 404. Client change: zero — the 200 path is the existing apply
+  engine, the 404 path is the existing steady state. This keeps the operator in
+  the LLP 0044 consent loop (the default config is authored and
+  central-sink-guarded), and makes the BYOD knob emergent: an org that publishes
+  no default config gets *minimal* login enrollment — forwarding only, no
+  dotfile touches. Rejected alternatives: inject-at-serve (violates server LLP
+  0009's authored-config philosophy), client-side auto-attach fallback (removes
+  the operator from the consent loop), config-bound-at-mint (static; strands
+  early enrollees).
+- **Interim client behavior (this doc, binding).** Until the server follow-up
+  ships — and permanently, for orgs that never publish a default config — an
+  enrolling login that leaves the machine with no attached client prints one
+  hint: `nothing is captured yet — run 'hyp attach <client>' to start`. Never
+  silent (LLP 0061 D4), and `hyp status` shows "enrolled; no org config
+  published" for the 404 steady state.
+
 ## Open questions
 
-- **Does the pulled org config re-include the central sink for login-origin
-  gateways?** (Review round 1, concern 2.) LLP 0025's apply semantics replace the
-  central layer on pull; if the operator's org config omits the
-  `@hypaware/central` sink block (or names it with a `bootstrap_token` this
-  machine never had), the first pull could silently disable forwarding. Needs
-  verification against hypaware-server (LLP 0009/0020) before implementation:
-  either the server guarantees the sink block, or this doc adds a client-side
-  invariant that the seed's sink survives the merge (LLP 0031 layering may
-  already give this — verify and cite).
 - **Does `hyp leave` best-effort revoke the server-side gateway row, or is
   teardown local-only?** Local-only is defensible (the credential expires), but
   worth one sentence in the leave implementation.
