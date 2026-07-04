@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "type": "module",
   "description": "HypAware: modular logs and telemetry collector with a plugin kernel. Captures Claude Code, Codex, OTEL, and raw AI gateway traffic locally, queryable from a single CLI.",
   "bin": {
@@ -43,17 +43,17 @@
     "@aws-sdk/credential-provider-ini": "3.972.60",
     "hyparquet": "1.26.2",
     "hyparquet-compressors": "1.1.1",
-    "icebird": "0.8.11",
-    "squirreling": "0.12.25"
+    "icebird": "0.8.12",
+    "squirreling": "0.12.27"
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.16.1",
-    "hypvector": "0.2.1"
+    "hypvector": "0.2.2"
   },
   "overrides": {
     "hyparquet": "1.26.2",
     "hyparquet-writer": "0.16.1",
-    "squirreling": "0.12.25"
+    "squirreling": "0.12.27"
   },
   "devDependencies": {
     "@types/node": "26.1.0",
