@@ -5,7 +5,7 @@
 **Systems:** Gateway, Sinks, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0014, LLP 0029, LLP 0030, LLP 0039, LLP 0049, LLP 0050, LLP 0062
+**Related:** LLP 0014, LLP 0029, LLP 0030, LLP 0039, LLP 0049, LLP 0050, LLP 0066
 
 > Two capabilities deliberately **out of V1 scope** for the hypignore mechanism
 > ([LLP 0049](./0049-hypignore-usage-policy.spec.md)), captured so the V1 design
@@ -14,7 +14,7 @@
 > and *the seam each will use*, not a commitment to build them.
 >
 > **Update (2026-07-03):** the ephemeral per-session opt-out has since been
-> promoted to its own spec, [LLP 0062](./0062-session-opt-out.spec.md); this
+> promoted to its own spec, [LLP 0066](./0066-session-opt-out.spec.md); this
 > document retains it only as historical context ([§session-opt-out](#session-opt-out)).
 > `local-only` remains deferred.
 
@@ -56,7 +56,7 @@ encounters it resolves to `ignore` via the
 
 ## Promoted: ephemeral per-session opt-out {#session-opt-out}
 
-**Promoted to [LLP 0062](./0062-session-opt-out.spec.md) on 2026-07-03.** The
+**Promoted to [LLP 0066](./0066-session-opt-out.spec.md) on 2026-07-03.** The
 authoritative spec for this mechanism now lives there; the notes below are the
 original deferred sketch, kept for provenance.
 
@@ -73,8 +73,8 @@ Repointing the skills at `.hypignore` would over-broaden "ignore this session"
 into "ignore this repo forever," so the session opt-out stays a separate
 mechanism.
 
-**Seam (refined in [LLP 0062](./0062-session-opt-out.spec.md#enforcement)).** The
-original sketch put the whole thing in the gateway. LLP 0062 splits it: the
+**Seam (refined in [LLP 0066](./0066-session-opt-out.spec.md#enforcement)).** The
+original sketch put the whole thing in the gateway. LLP 0066 splits it: the
 **control route + in-memory set** are gateway-resident (the gateway holds opaque
 `session_id` strings it never interprets), but the **drop itself stays in the
 client adapter projector**, keyed on the `session_id` the adapter already
@@ -86,5 +86,5 @@ intact rather than moving provider awareness into the gateway.
 
 `local-only` ([§local-only](#local-only)) is **Draft / not scheduled**. The
 ephemeral per-session opt-out ([§session-opt-out](#session-opt-out)) has been
-**promoted to [LLP 0062](./0062-session-opt-out.spec.md)**. This document exists
+**promoted to [LLP 0066](./0066-session-opt-out.spec.md)**. This document exists
 today so V1's reviewers can confirm the V1 design does not foreclose either.

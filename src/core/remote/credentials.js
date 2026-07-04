@@ -37,7 +37,7 @@ const REFRESH_SKEW_MS = 60 * 1000
 
 /**
  * The one lock constant: a lock whose mtime is older than this is treated as
- * abandoned by a dead holder and broken (LLP 0049 D1). It is set comfortably
+ * abandoned by a dead holder and broken (LLP 0065 D1). It is set comfortably
  * above the longest *legitimate* hold - the 30s-bounded token-endpoint refresh
  * ({@link refreshOidcSession}) plus a millisecond commit - so a live holder mid
  * refresh is never broken, and comfortably below user patience. There is no
@@ -258,18 +258,18 @@ export async function writeSession(stateDir, target, session) {
  * When `ifRefreshToken` is given, the write is a compare-and-swap: it commits only
  * if the on-disk record is still the oidc record that token came from. Under the
  * lock that always holds, so a normal refresh always commits. It diverges only in
- * the bounded lock-break double-hold window (LLP 0049): there a concurrent `remove`
+ * the bounded lock-break double-hold window (LLP 0065): there a concurrent `remove`
  * or re-login may have changed the record while the refresher was on the network,
  * and honoring that newer write - rather than resurrecting a removed session or
  * clobbering a fresh login - is what keeps the worst case at the one needless
- * re-login LLP 0049 promises. Returns whether the write happened.
+ * re-login LLP 0065 promises. Returns whether the write happened.
  *
  * @param {string} stateDir
  * @param {string} target
  * @param {{ refreshToken: string, accessJwt: string, expiresAt: string, org: string }} session
  * @param {string} [ifRefreshToken] commit only if the stored record still carries this refresh token
  * @returns {Promise<boolean>}
- * @ref LLP 0049#d1 [implements]: refresh commit is a compare-and-swap, so the double-hold window cannot resurrect or clobber a sibling write
+ * @ref LLP 0065#d1 [implements]: refresh commit is a compare-and-swap, so the double-hold window cannot resurrect or clobber a sibling write
  */
 async function commitSession(stateDir, target, session, ifRefreshToken) {
   const current = await readRawCredentials(stateDir, { mutable: true })
@@ -419,7 +419,7 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
  * seconds: the adopt freshness check re-samples the clock (a JWT that looked fresh
  * at entry may now be within the skew window), and the commit is a compare-and-swap
  * against the token we refreshed from (the record may have been removed or replaced
- * in the bounded double-hold window of LLP 0049).
+ * in the bounded double-hold window of LLP 0065).
  *
  * @param {{
  *   target: string,
@@ -618,7 +618,7 @@ function delay(ms) {
 
 /**
  * Break a lock whose holder is past {@link LOCK_STALE_MS}, so a crashed holder can
- * never wedge the store for longer than one stale interval (LLP 0049 D1). The
+ * never wedge the store for longer than one stale interval (LLP 0065 D1). The
  * break is a plain `fs.rm`: it does not grant the lock, it only clears a dead
  * file, so the contender that broke it must still win the `O_EXCL` create like
  * everyone else. That is what makes a four-line break safe where the old
@@ -652,7 +652,7 @@ async function breakLockIfStale(lockPath) {
  * reads the freshest on-disk map (an identical-size sibling rewrite the parse
  * cache would otherwise miss).
  *
- * Crash recovery is age-only (LLP 0049 D1): the lock is granted solely by the
+ * Crash recovery is age-only (LLP 0065 D1): the lock is granted solely by the
  * `O_EXCL` create, a holder past {@link LOCK_STALE_MS} is broken with a plain
  * `fs.rm`, and release removes the file only if its per-acquisition nonce is still
  * ours, so a holder whose overran lock was broken and re-acquired never evicts the
@@ -664,7 +664,7 @@ async function breakLockIfStale(lockPath) {
  * @param {string} stateDir
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
- * @ref LLP 0049#d1 [implements]: age-stale mutex - grant only by O_EXCL, break by rm, release by nonce
+ * @ref LLP 0065#d1 [implements]: age-stale mutex - grant only by O_EXCL, break by rm, release by nonce
  */
 async function withCredentialsLock(stateDir, fn) {
   await fs.mkdir(stateDir, { recursive: true })

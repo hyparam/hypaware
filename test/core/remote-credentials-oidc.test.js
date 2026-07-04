@@ -274,7 +274,7 @@ test('resolveAccessJwt does not resurrect a session removed before the refresh',
 test('a refresh does not resurrect a record removed during the network call (commit is a compare-and-swap)', async () => {
   const dir = await tmpState()
   await writeSession(dir, 'prod', { refreshToken: 'rt-old', accessJwt: 'jwt-old', expiresAt: PAST, org: 'acme' })
-  // Simulate the bounded lock-break double-hold window (LLP 0049): while this
+  // Simulate the bounded lock-break double-hold window (LLP 0065): while this
   // refresher is on the network, a concurrent holder removes the record (writing
   // the file directly, as if it too held the lock). The commit must honor that
   // removal, not write the refreshed session back over it.
@@ -365,7 +365,7 @@ test('a write breaks a lock left stale by a crashed holder', async () => {
   await writeToken(dir, 'prod', 'sk-1') // creates the store
   const lockPath = `${remoteCredentialsPath(dir)}.lock`
   // Simulate a crashed holder: a leftover lock file, back-dated well past the
-  // stale age so it reads as abandoned (LLP 0049 D1 - age, not liveness).
+  // stale age so it reads as abandoned (LLP 0065 D1 - age, not liveness).
   await fs.writeFile(lockPath, 'crashed-holder-nonce')
   const stale = new Date(Date.now() - 5 * 60 * 1000)
   await fs.utimes(lockPath, stale, stale)

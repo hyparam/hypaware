@@ -150,7 +150,7 @@ dotfile should not be the only path:
    ([LLP 0036](./0036-central-config-driven-client-actions.decision.md)).
    Org-forced policy is a future concern tied to `local-only`.
 4. **Ephemeral per-session opt-out** is a separate mechanism, not part of this
-   folder spec. It is specced in [LLP 0062](./0062-session-opt-out.spec.md)
+   folder spec. It is specced in [LLP 0066](./0066-session-opt-out.spec.md)
    (session-scoped, in-memory, keyed on `session_id`), promoted from the deferred
    sketch in [LLP 0051](./0051-usage-policy-future-extensions.decision.md#session-opt-out).
 

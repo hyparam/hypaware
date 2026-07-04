@@ -5,7 +5,7 @@
 **Systems:** Core, Plugins, Query, MCP
 **Author:** Phil / Claude
 **Date:** 2026-06-23
-**Related:** LLP 0003, LLP 0015, LLP 0016, LLP 0024, LLP 0026, LLP 0033; hypaware-server LLP 0006, LLP 0010 (out of tree)
+**Related:** LLP 0003, LLP 0015, LLP 0016, LLP 0024, LLP 0064, LLP 0033; hypaware-server LLP 0006, LLP 0010 (out of tree)
 
 > A HypAware **host** — a local gateway *or* the fleet server — can expose an
 > authenticated **MCP server** whose tools are assembled **dynamically from the
@@ -62,7 +62,7 @@ The split that already governs query governs tools:
   dataset schemas as MCP resources) **for free, on every host** with a registered
   dataset. No plugin work.
 - **Other modalities are plugin capabilities** → graph traversal
-  ([LLP 0026](./0026-context-graph-query.decision.md)), vector search
+  ([LLP 0064](./0064-context-graph-query.decision.md)), vector search
   ([LLP 0024](./0024-vector-search-plugin.decision.md)) contribute their own typed
   tools, present only where those plugins are active.
 
@@ -96,7 +96,7 @@ tool share the middle and differ at the edges:
 | **Operation** | **`operation(params)` — identical** | **`operation(params)` — identical** |
 | Render | `render` → stdout + exit code | return structured result |
 
-This is the split [LLP 0026](./0026-context-graph-query.decision.md#thin-in-memory-traversal)
+This is the split [LLP 0064](./0064-context-graph-query.decision.md#thin-in-memory-traversal)
 already mandates ("the traversal core is a **pure function**… the IO wrapper is
 thin glue"), generalized: the kernel owns both adapters, so the CLI flag set and
 the MCP JSON Schema can never drift — they are the same `inputSchema`. The

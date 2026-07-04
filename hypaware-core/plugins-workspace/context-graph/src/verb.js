@@ -15,7 +15,7 @@ const LARGE_GRAPH = 500_000
 /**
  * `graph neighbors` as a verb: one declaration projecting the CLI command
  * **and** the `graph_neighbors` MCP tool. The traversal core
- * (`queryNeighbors`, LLP 0026) is already pure; this is the thin glue the
+ * (`queryNeighbors`, LLP 0064) is already pure; this is the thin glue the
  * kernel owns once. Read-class: a query-scoped MCP client may call it.
  *
  * @type {VerbRegistration}
@@ -81,7 +81,7 @@ export const graphNeighborsVerb = {
  *
  * @param {TraversalOk & { depth: number, direction: Direction }} result
  * @returns {VerbRenderResult}
- * @ref LLP 0026#honest-limits [implements]: flag truncation with the true total; nudge to the index path on a large in-memory load
+ * @ref LLP 0064#honest-limits [implements]: flag truncation with the true total; nudge to the index path on a large in-memory load
  */
 function renderNeighbors(result) {
   const out = [`graph neighbors: ${display(result.seed)} (${result.seed.node_type}) [${shortId(result.seed.node_id)}]`]
@@ -95,7 +95,7 @@ function renderNeighbors(result) {
   // rather than collapses. Rendered by label alone they look like duplicate
   // rows. Disambiguate only the colliders (≥2 neighbors with one display text)
   // so unique labels stay readable; `--json` already carries `natural_key`.
-  // @ref LLP 0026#query-reads-the-published-surface: same-basename Files are genuine distinct nodes, not duplicates to fold
+  // @ref LLP 0064#query-reads-the-published-surface: same-basename Files are genuine distinct nodes, not duplicates to fold
   const labelCounts = new Map()
   for (const n of result.neighbors) {
     const text = display(n.node)
@@ -134,7 +134,7 @@ function renderNeighbors(result) {
   /** @type {string | undefined} */
   let stderr
   if (result.totalNodes + result.totalEdges >= LARGE_GRAPH) {
-    stderr = `hyp graph neighbors: loaded ${result.totalNodes} node(s) + ${result.totalEdges} edge(s) in memory; at this size consider the persisted index path (LLP 0026 §honest-limits)\n`
+    stderr = `hyp graph neighbors: loaded ${result.totalNodes} node(s) + ${result.totalEdges} edge(s) in memory; at this size consider the persisted index path (LLP 0064 §honest-limits)\n`
   }
   return { stdout: out.join('\n') + '\n', ...(stderr ? { stderr } : {}) }
 }

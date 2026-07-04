@@ -115,6 +115,12 @@ a free invariant. The URL is non-secret and committable; the token is not config
   long-lived proxy does not pin one short-lived access JWT.
 - AI clients that install the endpoint directly hold the token in **their own** MCP
   config — `hyp`'s store is only for the human-CLI client path.
+- **Browser login is additionally gated by the machine's server connection**
+  ([LLP 0063 D4](./0063-login-auto-provision-forward-sink.decision.md#d4)): while a
+  `@hypaware/central` sink targets server A, `hyp remote login` against a different
+  origin is rejected (disconnect first). Static-token records and env resolution
+  for other targets are unaffected — the gate exists because a browser login can
+  enroll the machine, which those paths cannot.
 
 <a id="credential-stakes"></a>**Stakes — much reduced by scoping.** The credential
 `hyp` stores is the **query-scoped** token ([LLP 0034 §scoped-credential](./0034-mcp-host-intrinsic.decision.md#scoped-credential)):

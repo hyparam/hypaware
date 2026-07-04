@@ -5,7 +5,7 @@
 **Systems:** Gateway, Plugins, Core
 **Author:** Phil / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0012, LLP 0016, LLP 0049, LLP 0062
+**Related:** LLP 0012, LLP 0016, LLP 0049, LLP 0066
 
 > The `.hypignore` capture-seam drop ([LLP 0049](./0049-hypignore-usage-policy.spec.md))
 > lives in the `@hypaware/claude` and `@hypaware/codex` adapters — the only
@@ -91,7 +91,7 @@ worse coupling than both importing core.
 - The gateway source and recorder are not modified.
 - A future caller-supplied `cwd` for raw-proxy traffic would add a *new* call
   site that reuses the same core matcher — no change to this decision.
-- The ephemeral per-session opt-out ([LLP 0062](./0062-session-opt-out.spec.md))
+- The ephemeral per-session opt-out ([LLP 0066](./0066-session-opt-out.spec.md))
   reuses this same adapter drop with a *different key*: it matches on the
   `session_id` the adapter resolves instead of on `cwd`, and returns the same
   `USAGE_POLICY_DROP` sentinel. That mechanism adds a gateway *control route* and

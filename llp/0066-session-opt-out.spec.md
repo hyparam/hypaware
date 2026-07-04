@@ -1,4 +1,4 @@
-# LLP 0062: ephemeral per-session opt-out
+# LLP 0066: ephemeral per-session opt-out
 
 **Type:** Spec
 **Status:** Accepted
@@ -173,7 +173,7 @@ lightweight session convenience, and the committable, durable mechanism is
 ## `@ref` annotations code will carry {#refs}
 
 - The gateway control route and the ignored-session set:
-  `@ref LLP 0062#control-path [implements]` and `@ref LLP 0062#ephemeral`.
+  `@ref LLP 0066#control-path [implements]` and `@ref LLP 0066#ephemeral`.
 - The adapter projector drop keyed on `session_id`:
-  `@ref LLP 0062#enforcement [implements]`, alongside the existing
+  `@ref LLP 0066#enforcement [implements]`, alongside the existing
   `@ref LLP 0050` on the same drop site.

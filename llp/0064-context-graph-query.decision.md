@@ -1,4 +1,4 @@
-# LLP 0026: Context-graph basic query
+# LLP 0064: Context-graph basic query
 
 **Type:** Decision
 **Status:** Active

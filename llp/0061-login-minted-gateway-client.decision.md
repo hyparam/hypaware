@@ -5,7 +5,7 @@
 **Systems:** CLI, Onboarding, Sinks, Gateway
 **Author:** Kenny / Claude
 **Date:** 2026-07-01
-**Related:** LLP 0033, LLP 0049, LLP 0058, LLP 0031
+**Related:** LLP 0033, LLP 0065, LLP 0058, LLP 0031
 
 > The server side of login-minted gateway enrollment already shipped:
 > hypaware-server now provisions a gateway on a successful human login and returns
@@ -212,6 +212,6 @@ committed task breakdown.
   credential record, D4 kind-discrimination, D6 identity-base derivation)
 - [LLP 0033](./0033-remote-query-attach.spec.md) (query-scoped credential store,
   credential stakes)
-- [LLP 0049](./0049-remote-credentials-lock.decision.md) (single-flight write lock)
+- [LLP 0065](./0065-remote-credentials-lock.decision.md) (single-flight write lock)
 - [LLP 0031](./0031-layered-config.decision.md) (`#physical-layout`: persisted
   identity.json, re-join re-bootstrap / cross-tenant re-point guards)
