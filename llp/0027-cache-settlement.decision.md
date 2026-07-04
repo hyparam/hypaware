@@ -148,6 +148,8 @@ coupling between core compaction and the gateway is the documented
 
 ## Open questions / residue (out of scope here)
 
+<a id="open-questions"></a>
+
 - ~~A fallback row committed before its uuid twin arrives, then never re-flushed,
   is not merged.~~ **Resolved** by the [re-settle sweep](#re-settle-sweep): a
   committed fallback row is upgraded and de-twinned during compaction.

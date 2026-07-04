@@ -122,11 +122,11 @@ could re-read before the winner committed and then wrongly force a re-login.
 The lock is held across the bounded (token-endpoint timeout) refresh call, so it is a
 real mutex, not a millisecond commit latch.
 
-> **Superseded in part by [LLP 0049](./0049-remote-credentials-lock.decision.md).**
+> **Superseded in part by [LLP 0065](./0065-remote-credentials-lock.decision.md).**
 > The *single-flight refresh under the lock* above stands. The crash-recovery
 > mechanism originally decided here (a `{host, pid}` liveness probe plus an age
 > backstop plus a rename-aside-and-restore steal) shipped with six defects and is
-> replaced by LLP 0049 D1: one age threshold, break by `fs.rm`, grant only by
+> replaced by LLP 0065 D1: one age threshold, break by `fs.rm`, grant only by
 > `O_EXCL`, release guarded by a per-acquisition nonce. The original recovery
 > reasoning is retained below for history.
 

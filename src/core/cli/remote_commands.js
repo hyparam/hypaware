@@ -264,7 +264,7 @@ async function persistStaticToken(name, token, ctx) {
     ctx.stderr.write(`hyp remote login: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
-  ctx.stdout.write(`stored query-scoped token for '${name}' (mode 0600)\n`)
+  ctx.stdout.write(`stored query-scoped token for '${name}'\n`)
 
   // A friendly nudge if the target isn't configured: the token still
   // stores (an env override may use it), but a typo here is common.
@@ -338,7 +338,7 @@ async function runBrowserLogin(name, { org, host, noBrowser }, ctx, { login, see
     ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
     return 1
   }
-  ctx.stdout.write(`logged in to '${name}' as org '${session.org}' (session stored, mode 0600)\n`)
+  ctx.stdout.write(`logged in to '${name}' as org '${session.org}'\n`)
 
   // One login, two credentials (LLP 0061 D1): the gateway credential, when the
   // server minted one, seeds the matching central forward sinks so the user can

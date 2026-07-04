@@ -39,7 +39,7 @@ const CAPABILITY_VERSION = '1.0.0'
  *  - command `graph compact` - merges duplicate node/edge rows and
  *    rewrites affected partitions into sorted tables
  *  - command `graph neighbors` - walks the activity graph from a seed node out
- *    to N hops, reading the published node/edge datasets ([LLP 0026])
+ *    to N hops, reading the published node/edge datasets ([LLP 0064])
  *  - skill `hypaware-graph` - teaches AI clients (Claude, Codex) how to project
  *    and query the graph; installed by `hyp skills install` when this plugin is
  *    active

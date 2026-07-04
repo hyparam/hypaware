@@ -1,4 +1,4 @@
-# LLP 0049: The remote-credentials lock is an age-stale mutex, not a liveness probe
+# LLP 0065: The remote-credentials lock is an age-stale mutex, not a liveness probe
 
 **Type:** Decision
 **Status:** Accepted
