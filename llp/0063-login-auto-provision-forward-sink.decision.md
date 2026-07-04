@@ -196,7 +196,11 @@ Mechanics:
    replacing today's dead-end note (LLP 0061 D4 never-silent, upheld).
 3. **`hyp remote login --no-forward`** logs in for queries only: the gateway
    credential is discarded unseeded and no sink is written. The flag keeps its
-   LLP 0061-era name deliberately. Declining at login is *not joining*; it does
+   LLP 0061-era name deliberately; because the name undersells its scope, the
+   help text must carry the load — it declines *enrollment* (config pull, attach
+   cascade, service install), not merely forwarding. The pre-auth notice copy is
+   likewise load-bearing (it is the consent surface) and should be pinned
+   verbatim by a test, as the dead-end note is today. Declining at login is *not joining*; it does
    not contradict LLP 0037's "no local opt-out" doctrine, which governs a machine
    that **is** enrolled overriding locked fleet policy. Post-enrollment, LLP
    0037/0044 rules apply unchanged.
@@ -232,15 +236,31 @@ central-seed file is a single slot (LLP 0031), and two config-pull loops would
 mean two operators reconciling one machine (two LLP 0044 attach reconcilers
 fighting over one `~/.claude/settings.json`).
 
-**Scope of the rejection: the machine's connection, not the session store.** A
-machine that is *not* connected (no domain claim matched, or `--no-forward`) still
-holds multiple per-target OIDC sessions freely — LLP 0033 §credentials / LLP 0058 /
-LLP 0062 are unchanged for the query-only population. While connected to A,
-querying B via a **static token** (`--token-file`, `HYP_REMOTE_TOKEN_<NAME>`)
-remains allowed: those paths mint no gateway credential and cannot disturb the
-enrollment (and env access is unenforceable regardless). What the gate blocks is
-exactly the browser login, the only path that could re-enroll. LLP 0033
-§credentials gains one sentence pointing here; no supersede.
+**The gate is total: at most one server per machine.** While connected to A,
+`hyp remote login` against any other origin is rejected — **including with
+`--no-forward`**, even though a `--no-forward` login could not technically
+re-enroll. The rationale is deliberately *not* just re-enrollment risk; it is
+model simplicity: one machine, one server, one mental model (review round 1,
+concern 1, resolved 2026-07-04). A rule with a "query-only logins are exempt"
+carve-out is a rule users have to think about; this one they don't.
+
+**Scope: the machine's connection, not the session store.** A machine that is
+*not* connected (no domain claim matched, or `--no-forward` on a first login)
+still holds multiple per-target OIDC sessions freely — LLP 0033 §credentials /
+LLP 0058 / LLP 0062 are unchanged for the query-only population. While connected
+to A, querying B via a **static token** (`--token-file`,
+`HYP_REMOTE_TOKEN_<NAME>`) remains possible: those paths mint no gateway
+credential, cannot disturb the enrollment, and env access is unenforceable
+regardless — they are the documented escape for the enrolled-consultant case,
+not a hole in the gate. LLP 0033 §credentials gains one sentence pointing here;
+no supersede.
+
+**The gate is re-checked under the credentials lock at seed time.** The pre-auth
+check is advisory (fail fast, no wasted auth); the authoritative check re-runs
+under the same cross-process lock the credential write already takes (LLP 0065),
+and "a seed appeared since the pre-auth check" is a D4 rejection at seed time.
+Two concurrent first logins against different servers therefore cannot both
+provision; the loser is told the machine connected elsewhere mid-flight.
 
 Naming falls out: the provisioned sink is always join's instance name `central`;
 no origin-suffixed second sink exists. Idempotency: same-origin re-login finds the
@@ -303,6 +323,20 @@ same `hyp leave` reversal.
 - **The forward path itself is unchanged.** This adds a config writer on the login
   side; `IdentityClient`, refresh, the 401 loop, and materialization are reused
   verbatim (as in LLP 0061).
+- **BYOD, stated plainly.** A *personal* machine enrolls into an org's fleet
+  because a claimed email domain matched — and post-enrollment, LLP 0037 backfill
+  is default-on with no local opt-out, so pre-existing local history can ship to
+  the org's server. The pre-auth notice (D3) is the one moment the user can
+  decline, which is why its copy is load-bearing and must name backfill
+  explicitly. A tenant that wants login-enrollment off for unmanaged machines is
+  a server-side policy concern (an org `login_enrollment` knob would surface to
+  this client as the absence of `gateway_*` — zero client change); recorded here
+  as a named follow-up, not silently emergent.
+- **A dead credential must not be a silent state.** If the login-minted gateway
+  is revoked or refresh permanently fails (server LLP 0020 D5), the machine is
+  locally enrolled but cannot forward or pull. `hyp status` must distinguish
+  "enrolled, forwarding" from "enrolled, credential dead — re-run `hyp remote
+  login`", or the #126 silent gap returns in a new costume.
 
 ## Prerequisites
 
@@ -335,11 +369,25 @@ conspicuous by the ladder:
 
 ## Open questions
 
-None remaining — consent default, config layer, enablement scope, daemon install,
-exclusivity, and rejection scope were all resolved in the 2026-07-04 grilling
-session and captured as D1–D6 above. (Host-label interplay with LLP 0061 D6
-resolved by inspection: the label rides the token exchange, which is upstream of
-provisioning, so 0061 D6 applies unchanged.)
+- **Does the pulled org config re-include the central sink for login-origin
+  gateways?** (Review round 1, concern 2.) LLP 0025's apply semantics replace the
+  central layer on pull; if the operator's org config omits the
+  `@hypaware/central` sink block (or names it with a `bootstrap_token` this
+  machine never had), the first pull could silently disable forwarding. Needs
+  verification against hypaware-server (LLP 0009/0020) before implementation:
+  either the server guarantees the sink block, or this doc adds a client-side
+  invariant that the seed's sink survives the merge (LLP 0031 layering may
+  already give this — verify and cite).
+- **Does `hyp leave` best-effort revoke the server-side gateway row, or is
+  teardown local-only?** Local-only is defensible (the credential expires), but
+  worth one sentence in the leave implementation.
+
+Everything else — consent default, config layer, enablement scope, daemon
+install, exclusivity, rejection scope (total gate, at most one server per
+machine) — was resolved in the 2026-07-04 grilling session and review round 1,
+captured as D1–D6 above. (Host-label interplay with LLP 0061 D6 resolved by
+inspection: the label rides the token exchange, upstream of provisioning, so
+0061 D6 applies unchanged.)
 
 ## References
 
