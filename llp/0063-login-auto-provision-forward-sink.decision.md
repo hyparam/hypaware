@@ -399,17 +399,25 @@ cascade claim needed the opposite correction.
   a fresh login-enrolled box forwards but captures nothing until someone runs
   `hyp attach <client>` by hand. D2's cascade rationale is therefore
   **conditional on a server-side follow-up**:
-- **Server follow-up (out of tree): per-org default config.** Resolution becomes
-  gateway → enrolling token → config, **else `gateway.org` → org default
-  config**, else 404. Client change: zero — the 200 path is the existing apply
-  engine, the 404 path is the existing steady state. This keeps the operator in
-  the LLP 0044 consent loop (the default config is authored and
-  central-sink-guarded), and makes the BYOD knob emergent: an org that publishes
-  no default config gets *minimal* login enrollment — forwarding only, no
-  dotfile touches. Rejected alternatives: inject-at-serve (violates server LLP
-  0009's authored-config philosophy), client-side auto-attach fallback (removes
-  the operator from the consent loop), config-bound-at-mint (static; strands
-  early enrollees).
+- **Server follow-up (out of tree): org default config, implicit when
+  unambiguous.** Resolution becomes gateway → enrolling token → config, **else
+  `gateway.org` → org default config**, else 404. The default is
+  convention-first: **exactly one config in the org's scope → it is the
+  default, no admin step**; multiple configs → explicit designation required
+  (never guess — "newest wins" would let saving an experimental config silently
+  retarget every login-enrolled machine); zero configs → 404, today's minimal
+  enrollment. Prerequisite discovered in verification: `ConfigRecord` has no
+  org field (flat global namespace), so multi-tenant servers need org-scoped
+  configs before *any* default rule — otherwise an implicit default would serve
+  one tenant's config to another tenant's login users. Client change: zero —
+  the 200 path is the existing apply engine, the 404 path is the existing
+  steady state. This keeps the operator in the LLP 0044 consent loop (the
+  default config is authored and central-sink-guarded), and makes the BYOD knob
+  emergent: an org that publishes no config gets *minimal* login enrollment —
+  forwarding only, no dotfile touches. Rejected alternatives: inject-at-serve
+  (violates server LLP 0009's authored-config philosophy), client-side
+  auto-attach fallback (removes the operator from the consent loop),
+  config-bound-at-mint (static; strands early enrollees).
 - **Interim client behavior (this doc, binding).** Until the server follow-up
   ships — and permanently, for orgs that never publish a default config — an
   enrolling login that leaves the machine with no attached client prints one
