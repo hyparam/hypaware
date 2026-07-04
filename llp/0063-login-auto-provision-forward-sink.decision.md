@@ -400,7 +400,9 @@ cascade claim needed the opposite correction.
   `hyp attach <client>` by hand. D2's cascade rationale is therefore
   **conditional on a server-side follow-up**:
 - **Server follow-up (out of tree): org default config, implicit when
-  unambiguous.** Resolution becomes gateway → enrolling token → config, **else
+  unambiguous — drafted as server LLP 0043
+  (`../hypaware-server/llp/0043-org-default-config.decision.md`).** Resolution
+  becomes gateway → enrolling token → config, **else
   `gateway.org` → org default config**, else 404. The default is
   convention-first: **exactly one config in the org's scope → it is the
   default, no admin step**; multiple configs → explicit designation required
