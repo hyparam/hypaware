@@ -103,6 +103,54 @@ export function renderDaemonInstall(options) {
 }
 
 /**
+ * Run one installer-facing operation inside a `daemon.<op>` span with
+ * the uniform ok / failed structured logs.
+ *
+ * @template T
+ * @param {string} op
+ * @param {NodeJS.Platform} platform
+ * @param {string} label
+ * @param {() => Promise<T>} fn
+ * @param {(result: T) => Record<string, unknown>} [okFields]  extra fields for the success log
+ * @returns {Promise<T>}
+ */
+function withDaemonOp(op, platform, label, fn, okFields) {
+  const log = getLogger('daemon')
+  return withSpan(
+    `daemon.${op}`,
+    {
+      [Attr.COMPONENT]: 'daemon',
+      [Attr.OPERATION]: `daemon.${op}`,
+      hyp_platform: platform,
+      service_label: label,
+      status: 'ok',
+    },
+    async function() {
+      try {
+        const result = await fn()
+        log.info(`daemon.${op}`, {
+          hyp_platform: platform,
+          service_label: label,
+          ...okFields?.(result),
+          exit_status: 'ok',
+        })
+        return result
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        log.error(`daemon.${op}_failed`, {
+          hyp_platform: platform,
+          service_label: label,
+          message,
+          exit_status: 'failed',
+        })
+        throw err
+      }
+    },
+    { component: 'daemon' },
+  )
+}
+
+/**
  * Install the platform-appropriate persistent service. Wraps the
  * platform-specific call in a `daemon.install` span and emits a
  * structured `daemon.install` log including platform, target path,
@@ -121,40 +169,13 @@ export async function installDaemon(options) {
   const configPath = options.configPath ?? defaultConfigPath(options.homeDir)
   const logDir = options.logDir ?? defaultLogDir(options.homeDir)
   const merged = { ...options, configPath, logDir }
-  const log = getLogger('daemon')
-  return withSpan(
-    'daemon.install',
-    {
-      [Attr.COMPONENT]: 'daemon',
-      [Attr.OPERATION]: 'daemon.install',
-      hyp_platform: platform,
-      service_label: merged.label ?? defaultLabelFor(platform),
-      status: 'ok',
-    },
-    async function() {
-      try {
-        const plan = platform === 'darwin'
-          ? await macos.installLaunchAgent(merged)
-          : await linux.installSystemdUnit(merged)
-        log.info('daemon.install', {
-          hyp_platform: platform,
-          service_label: plan.label,
-          target_path: plan.targetPath,
-          exit_status: 'ok',
-        })
-        return plan
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        log.error('daemon.install_failed', {
-          hyp_platform: platform,
-          service_label: merged.label ?? defaultLabelFor(platform),
-          message,
-          exit_status: 'failed',
-        })
-        throw err
-      }
-    },
-    { component: 'daemon' },
+  return withDaemonOp(
+    'install',
+    platform,
+    merged.label ?? defaultLabelFor(platform),
+    /** @returns {Promise<DaemonInstallPlan>} */
+    () => platform === 'darwin' ? macos.installLaunchAgent(merged) : linux.installSystemdUnit(merged),
+    (plan) => ({ target_path: plan.targetPath }),
   )
 }
 
@@ -172,41 +193,11 @@ export async function uninstallDaemon(options) {
       `unsupported platform: ${platform} (only darwin and linux are supported)`
     )
   }
-  const log = getLogger('daemon')
-  const label = options.label ?? defaultLabelFor(platform)
-  await withSpan(
-    'daemon.uninstall',
-    {
-      [Attr.COMPONENT]: 'daemon',
-      [Attr.OPERATION]: 'daemon.uninstall',
-      hyp_platform: platform,
-      service_label: label,
-      status: 'ok',
-    },
-    async function() {
-      try {
-        if (platform === 'darwin') {
-          await macos.uninstallLaunchAgent(options)
-        } else {
-          await linux.uninstallSystemdUnit(options)
-        }
-        log.info('daemon.uninstall', {
-          hyp_platform: platform,
-          service_label: label,
-          exit_status: 'ok',
-        })
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        log.error('daemon.uninstall_failed', {
-          hyp_platform: platform,
-          service_label: label,
-          message,
-          exit_status: 'failed',
-        })
-        throw err
-      }
-    },
-    { component: 'daemon' },
+  await withDaemonOp(
+    'uninstall',
+    platform,
+    options.label ?? defaultLabelFor(platform),
+    () => platform === 'darwin' ? macos.uninstallLaunchAgent(options) : linux.uninstallSystemdUnit(options),
   )
 }
 
@@ -221,41 +212,11 @@ export async function startServiceDaemon(options) {
   if (!platformIsSupported(platform)) {
     throw new DaemonInstallError(`unsupported platform: ${platform}`)
   }
-  const log = getLogger('daemon')
-  const label = options.label ?? defaultLabelFor(platform)
-  await withSpan(
-    'daemon.start',
-    {
-      [Attr.COMPONENT]: 'daemon',
-      [Attr.OPERATION]: 'daemon.start',
-      hyp_platform: platform,
-      service_label: label,
-      status: 'ok',
-    },
-    async function() {
-      try {
-        if (platform === 'darwin') {
-          await macos.startLaunchAgent(options)
-        } else {
-          await linux.startSystemdUnit(options)
-        }
-        log.info('daemon.start', {
-          hyp_platform: platform,
-          service_label: label,
-          exit_status: 'ok',
-        })
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        log.error('daemon.start_failed', {
-          hyp_platform: platform,
-          service_label: label,
-          message,
-          exit_status: 'failed',
-        })
-        throw err
-      }
-    },
-    { component: 'daemon' },
+  await withDaemonOp(
+    'start',
+    platform,
+    options.label ?? defaultLabelFor(platform),
+    () => platform === 'darwin' ? macos.startLaunchAgent(options) : linux.startSystemdUnit(options),
   )
 }
 
