@@ -84,6 +84,58 @@ test('native DAG identity: uuid from JSONL transcript becomes message_id and pro
   }
 })
 
+test('transcript-matched live rows carry the minimized raw_frame, never the full line', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-rf', [
+      jsonlRow({
+        sessionId: 'sess-rf',
+        uuid: 'u-user-rf',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'a distinctive prompt payload' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+      jsonlRow({
+        sessionId: 'sess-rf',
+        uuid: 'u-assistant-rf',
+        parentUuid: 'u-user-rf',
+        type: 'assistant',
+        message: { role: 'assistant', id: 'msg_rf', content: [{ type: 'text', text: 'a distinctive answer payload' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-rf' }) },
+        messages: [{ role: 'user', content: 'a distinctive prompt payload' }],
+      },
+      responseBody: { id: 'msg_rf', role: 'assistant', content: [{ type: 'text', text: 'a distinctive answer payload' }], stop_reason: 'end_turn' },
+    })
+
+    const assistant = rows.find((r) => r.role === 'assistant')
+    assert.ok(assistant)
+    const frame = typeof assistant.raw_frame === 'string' ? JSON.parse(assistant.raw_frame) : assistant.raw_frame
+    assert.ok(frame, 'matched row keeps a raw_frame')
+    // The minimized native-identity stub backfill has always stored...
+    assert.equal(frame.uuid, 'u-assistant-rf')
+    assert.equal(frame.parent_uuid, 'u-user-rf')
+    assert.equal(frame.type, 'assistant')
+    assert.equal(frame.message_id, 'msg_rf')
+    // ...never the raw transcript line: no message payload, no content copy.
+    assert.equal(frame.message, undefined)
+    assert.equal(frame.sessionId, undefined)
+    for (const row of rows) {
+      const rowFrame = typeof row.raw_frame === 'string' ? row.raw_frame : JSON.stringify(row.raw_frame ?? {})
+      assert.ok(!rowFrame.includes('distinctive'), 'raw_frame must not embed conversation content')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('live: response-level usage lands once, on the last block of a split turn', async () => {
   const env = await stageClaudeEnv()
   try {

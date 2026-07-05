@@ -1,6 +1,5 @@
 // @ts-check
 
-import fsp from 'node:fs/promises'
 
 import {
   anthropicConversationFields,
@@ -29,9 +28,9 @@ import {
   matchKey,
 } from './transcripts.js'
 import {
+  createSessionContextReader,
   defaultSessionContextFile,
   pickLatestMatching,
-  readSessionContext,
 } from './session_context.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
@@ -92,7 +91,14 @@ export function createClaudeExchangeProjector(opts) {
   const stateFile = opts.stateFile
   const clientName = opts.clientName ?? 'claude'
   const logger = opts.logger
-  const sessionContextCache = createSessionContextCache()
+  // Cached by size+mtime so the capture hot path re-reads the channel
+  // only when the hook appended a record.
+  const readSessionRecords = createSessionContextReader(stateFile, (err) => {
+    logger?.warn('plugin.claude.session_context_read_failed', {
+      state_file: stateFile,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
   // One resolver per projector (per daemon run): the per-cwd cache rides the
   // projector's lifetime so the capture hot path adds no unbounded fs work.
   // @ref LLP 0050 [implements]: the .hypignore capture-seam drop lives in the
@@ -157,9 +163,7 @@ export function createClaudeExchangeProjector(opts) {
       // context channel; if it's missing we still try a sessionId
       // scan under `<homeDir>/.claude/projects/`.
       const sessionContextRecord = sessionId
-        ? pickLatestMatching(await readSessionContextSafe(stateFile, logger, sessionContextCache), {
-          sessionId,
-        })
+        ? pickLatestMatching(await readSessionRecords(), { sessionId })
         : undefined
 
       // @ref LLP 0050 [implements]: capture-seam drop. Once the exchange's cwd
@@ -604,58 +608,6 @@ export function anthropicUpstreamPreset() {
       // expects (the route input uses `Record<string, string[]>`).
       return hasAnthropicHeaderSignature(input.headers)
     },
-  }
-}
-
-/**
- * @param {string} stateFile
- * @param {{ warn(m: string, f?: Record<string, unknown>): void } | undefined} logger
- * @param {ReturnType<typeof createSessionContextCache>} cache
- */
-async function readSessionContextSafe(stateFile, logger, cache) {
-  try {
-    const stat = await statIfExists(stateFile)
-    if (!stat) {
-      cache.size = 0
-      cache.mtimeMs = 0
-      cache.records = []
-      return cache.records
-    }
-    if (cache.size === stat.size && cache.mtimeMs === stat.mtimeMs) {
-      return cache.records
-    }
-    const records = await readSessionContext(stateFile)
-    cache.size = stat.size
-    cache.mtimeMs = stat.mtimeMs
-    cache.records = records
-    return records
-  } catch (err) {
-    logger?.warn('plugin.claude.session_context_read_failed', {
-      state_file: stateFile,
-      error: err instanceof Error ? err.message : String(err),
-    })
-    return []
-  }
-}
-
-function createSessionContextCache() {
-  return {
-    /** @type {number | undefined} */
-    size: undefined,
-    /** @type {number | undefined} */
-    mtimeMs: undefined,
-    /** @type {any[]} */
-    records: [],
-  }
-}
-
-/** @param {string} filePath */
-async function statIfExists(filePath) {
-  try {
-    return await fsp.stat(filePath)
-  } catch (err) {
-    if (/** @type {{ code?: string }} */ (err)?.code === 'ENOENT') return undefined
-    throw err
   }
 }
 

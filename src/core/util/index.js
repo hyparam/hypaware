@@ -16,6 +16,7 @@ export {
 } from './fs_atomic.js'
 export { copyDir } from './fs_copy.js'
 export {
+  VOLATILE_BLOCK_FIELDS,
   canonicalJson,
   errCode,
   isPlainObject,
@@ -23,4 +24,5 @@ export {
   sha256Hex,
   sortKeys,
   stringValue,
+  stripVolatileBlockFields,
 } from './json_util.js'

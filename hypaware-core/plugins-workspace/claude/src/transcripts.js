@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
-import { canonicalJson, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
+import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBlockFields } from 'hypaware/core/util'
 
 /**
  * Claude Code JSONL transcript reader. The Claude CLI writes one
@@ -28,6 +28,7 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue } from 'hypaware/c
  */
 
 /**
+ * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { TranscriptEntry } from './types.js'
  */
 
@@ -337,7 +338,33 @@ export function assignTranscriptIdentity(target, match) {
   if (match.hook_event) target.hook_event = match.hook_event
   if (match.is_compact_summary !== undefined) target.is_compact_summary = match.is_compact_summary
   if (match.compact_metadata !== undefined) target.compact_metadata = match.compact_metadata
-  if (isPlainObject(match.raw_frame)) target.raw_frame = match.raw_frame
+  const rawFrame = minimizedRawFrame(match)
+  if (rawFrame) target.raw_frame = rawFrame
+}
+
+/**
+ * Minimized native frame: enough to trace a row back to its Claude
+ * transcript line (native uuids, type/subtype, timestamp) without
+ * copying the full transcript or any prompt / response content. Per the
+ * bead contract: store a minimized, redacted native frame, never the
+ * raw line. Applied by {@link assignTranscriptIdentity}, so live
+ * capture, flush-time settlement, and backfill all store the same
+ * minimized shape.
+ *
+ * @param {TranscriptEntry} entry
+ * @returns {JsonObject | undefined}
+ */
+export function minimizedRawFrame(entry) {
+  /** @type {JsonObject} */
+  const frame = {}
+  if (entry.provider_uuid) frame.uuid = entry.provider_uuid
+  if (entry.parent_uuid) frame.parent_uuid = entry.parent_uuid
+  if (entry.logical_parent_uuid) frame.logical_parent_uuid = entry.logical_parent_uuid
+  if (entry.provider_type) frame.type = entry.provider_type
+  if (entry.provider_subtype) frame.subtype = entry.provider_subtype
+  if (entry.messageId) frame.message_id = entry.messageId
+  if (entry.timestampMs !== undefined) frame.timestamp = new Date(entry.timestampMs).toISOString()
+  return Object.keys(frame).length > 0 ? frame : undefined
 }
 
 /**
@@ -475,22 +502,16 @@ function transcriptEntryFromRow(row) {
  * byte-identical: the wire side carries `cache_control` (prompt-cache
  * breakpoints, absent from transcripts and moving between exchanges)
  * and the transcript side annotates tool_use blocks with `caller`
- * (absent on the wire). Both are stripped before hashing so the key
- * compares what the block says, not which channel it came from.
+ * (absent on the wire). The canonical strip list
+ * (`VOLATILE_BLOCK_FIELDS` in core util) is shared with the
+ * ai-gateway's fallback message id, so the key compares what the block
+ * says, not which channel it came from.
  *
  * @param {string} role
  * @param {unknown} content
  */
 function contentKey(role, content) {
-  const blocks = Array.isArray(content)
-    ? content.map((block) => {
-      if (!isPlainObject(block)) return block
-      if (!('cache_control' in block) && !('caller' in block)) return block
-      const { cache_control: _cache_control, caller: _caller, ...rest } = block
-      return rest
-    })
-    : content
-  return sha256Hex(`${role}:${canonicalJson(blocks)}`)
+  return sha256Hex(`${role}:${canonicalJson(stripVolatileBlockFields(content))}`)
 }
 
 /** @param {unknown} content */

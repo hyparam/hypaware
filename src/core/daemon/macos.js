@@ -1,6 +1,5 @@
 // @ts-check
 
-import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -11,6 +10,7 @@ import {
   defaultPlistDir,
   plistFileName,
 } from './platform.js'
+import { ServiceOpError, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -23,45 +23,47 @@ import { atomicWriteFileSync } from '../util/fs_atomic.js'
  * } from '../../../src/core/daemon/types.js'
  */
 
-export class LaunchAgentError extends Error {
+export class LaunchAgentError extends ServiceOpError {
   /**
    * @param {string} message
    * @param {{ exitCode?: number, stderr?: string }} [opts]
    */
-  constructor(message, opts = {}) {
-    super(message)
+  constructor(message, opts) {
+    super(message, opts)
     this.name = 'LaunchAgentError'
-    /** @type {number | undefined} */
-    this.exitCode = opts.exitCode
-    /** @type {string | undefined} */
-    this.stderr = opts.stderr
   }
 }
 
 /** @type {LaunchctlAdapter} */
 export const realLaunchctl = {
-  bootstrap(args) { return runLaunchctl(['bootstrap', ...args]) },
-  bootout(args) { return runLaunchctl(['bootout', ...args]) },
-  kickstart(args) { return runLaunchctl(['kickstart', ...args]) },
-  print(args) { return runLaunchctl(['print', ...args]) },
+  bootstrap(args) { return runServiceCommand('launchctl', ['bootstrap', ...args]) },
+  bootout(args) { return runServiceCommand('launchctl', ['bootout', ...args]) },
+  kickstart(args) { return runServiceCommand('launchctl', ['kickstart', ...args]) },
+  print(args) { return runServiceCommand('launchctl', ['print', ...args]) },
 }
 
 /**
- * @param {string[]} args
- * @returns {Promise<LaunchctlResult>}
+ * Throw a {@link LaunchAgentError} when a launchctl command failed.
+ *
+ * @param {LaunchctlResult} res
+ * @param {string} what
+ * @returns {LaunchctlResult}
  */
-function runLaunchctl(args) {
-  return new Promise(function(resolve, reject) {
-    const proc = spawn('launchctl', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout.on('data', function(chunk) { stdout += chunk.toString('utf8') })
-    proc.stderr.on('data', function(chunk) { stderr += chunk.toString('utf8') })
-    proc.on('error', reject)
-    proc.on('close', function(code) {
-      resolve({ exitCode: code === null ? -1 : code, stdout, stderr })
-    })
-  })
+function ensure(res, what) {
+  return ensureOk(res, what, LaunchAgentError)
+}
+
+/**
+ * Resolve the launchctl adapter, label, and `<domain>/<label>` target
+ * shared by every LaunchAgent operation.
+ *
+ * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
+ */
+function resolveTarget(options) {
+  const launchctl = options.launchctl ?? realLaunchctl
+  const label = options.label ?? LAUNCH_LABEL
+  const userDomain = options.userDomain ?? defaultUserDomain()
+  return { launchctl, label, userDomain, target: `${userDomain}/${label}` }
 }
 
 /**
@@ -285,10 +287,8 @@ function isTransientBootstrapError(res) {
  */
 export async function installLaunchAgent(options) {
   const plan = planLaunchAgentInstall(options)
-  const launchctl = options.launchctl ?? realLaunchctl
-  const userDomain = options.userDomain ?? defaultUserDomain()
+  const { launchctl, userDomain, target } = resolveTarget(options)
   const sleep = options.sleep ?? defaultSleep
-  const target = `${userDomain}/${plan.label}`
 
   fs.mkdirSync(plan.plistDir, { recursive: true })
   fs.mkdirSync(plan.logDir, { recursive: true })
@@ -311,12 +311,7 @@ export async function installLaunchAgent(options) {
     await sleep(BOOTSTRAP_RETRY_PAUSE_MS)
     bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
   }
-  if (bootstrapRes.exitCode !== 0) {
-    throw new LaunchAgentError(
-      `failed to bootstrap LaunchAgent ${plan.label}: ${bootstrapRes.stderr.trim() || `exit ${bootstrapRes.exitCode}`}`,
-      { exitCode: bootstrapRes.exitCode, stderr: bootstrapRes.stderr }
-    )
-  }
+  ensure(bootstrapRes, `bootstrap LaunchAgent ${plan.label}`)
   return plan
 }
 
@@ -329,23 +324,13 @@ export async function installLaunchAgent(options) {
  * @returns {Promise<void>}
  */
 export async function uninstallLaunchAgent(options) {
-  const launchctl = options.launchctl ?? realLaunchctl
-  const label = options.label ?? LAUNCH_LABEL
+  const { launchctl, label, target } = resolveTarget(options)
   const plistDir = options.plistDir ?? defaultPlistDir(options.homeDir)
   const plistPath = plistPathFor(plistDir, label)
-  const userDomain = options.userDomain ?? defaultUserDomain()
-  const target = `${userDomain}/${label}`
 
   if (fs.existsSync(plistPath)) {
     await launchctl.bootout([target]).catch(function() { /* best-effort */ })
-    try {
-      fs.unlinkSync(plistPath)
-    } catch (err) {
-      const code = err && typeof err === 'object' && 'code' in err
-        ? /** @type {NodeJS.ErrnoException} */ (err).code
-        : undefined
-      if (code !== 'ENOENT') throw err
-    }
+    unlinkServiceFile(plistPath)
   }
 }
 
@@ -356,17 +341,8 @@ export async function uninstallLaunchAgent(options) {
  * @returns {Promise<void>}
  */
 export async function startLaunchAgent(options) {
-  const launchctl = options.launchctl ?? realLaunchctl
-  const label = options.label ?? LAUNCH_LABEL
-  const userDomain = options.userDomain ?? defaultUserDomain()
-  const target = `${userDomain}/${label}`
-  const res = await launchctl.kickstart([target])
-  if (res.exitCode !== 0) {
-    throw new LaunchAgentError(
-      `failed to kickstart ${label}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
-      { exitCode: res.exitCode, stderr: res.stderr }
-    )
-  }
+  const { launchctl, label, target } = resolveTarget(options)
+  ensure(await launchctl.kickstart([target]), `kickstart ${label}`)
 }
 
 /**
@@ -379,16 +355,11 @@ export async function startLaunchAgent(options) {
  * @returns {Promise<void>}
  */
 export async function stopLaunchAgent(options) {
-  const launchctl = options.launchctl ?? realLaunchctl
-  const label = options.label ?? LAUNCH_LABEL
-  const userDomain = options.userDomain ?? defaultUserDomain()
-  const target = `${userDomain}/${label}`
+  const { launchctl, label, target } = resolveTarget(options)
   const res = await launchctl.bootout([target])
-  if (res.exitCode !== 0 && !/No such process|Could not find|not\s*loaded/i.test(res.stderr)) {
-    throw new LaunchAgentError(
-      `failed to bootout ${label}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
-      { exitCode: res.exitCode, stderr: res.stderr }
-    )
+  // Tolerate an agent that is already unloaded.
+  if (!/No such process|Could not find|not\s*loaded/i.test(res.stderr)) {
+    ensure(res, `bootout ${label}`)
   }
 }
 
@@ -401,17 +372,8 @@ export async function stopLaunchAgent(options) {
  * @returns {Promise<void>}
  */
 export async function restartLaunchAgent(options) {
-  const launchctl = options.launchctl ?? realLaunchctl
-  const label = options.label ?? LAUNCH_LABEL
-  const userDomain = options.userDomain ?? defaultUserDomain()
-  const target = `${userDomain}/${label}`
-  const res = await launchctl.kickstart(['-k', target])
-  if (res.exitCode !== 0) {
-    throw new LaunchAgentError(
-      `failed to kickstart -k ${label}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
-      { exitCode: res.exitCode, stderr: res.stderr }
-    )
-  }
+  const { launchctl, label, target } = resolveTarget(options)
+  ensure(await launchctl.kickstart(['-k', target]), `kickstart -k ${label}`)
 }
 
 /**
@@ -437,10 +399,8 @@ export function isLaunchAgentInstalled(options) {
  * @returns {Promise<{ loaded: boolean, pid?: number }>}
  */
 export async function launchAgentStatus(options) {
-  const launchctl = options.launchctl ?? realLaunchctl
-  const label = options.label ?? LAUNCH_LABEL
-  const userDomain = options.userDomain ?? defaultUserDomain()
-  const result = await launchctl.print([`${userDomain}/${label}`])
+  const { launchctl, target } = resolveTarget(options)
+  const result = await launchctl.print([target])
   if (result.exitCode !== 0) return { loaded: false }
   const pid = parsePrintedPid(result.stdout)
   return pid === undefined ? { loaded: true } : { loaded: true, pid }
@@ -458,4 +418,3 @@ function parsePrintedPid(stdout) {
   const n = Number.parseInt(match[1], 10)
   return Number.isInteger(n) && n > 0 ? n : undefined
 }
-

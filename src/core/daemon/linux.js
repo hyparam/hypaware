@@ -1,6 +1,5 @@
 // @ts-check
 
-import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -11,6 +10,7 @@ import {
   defaultUnitDir,
   unitFileName,
 } from './platform.js'
+import { ServiceOpError, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -23,51 +23,52 @@ import { atomicWriteFileSync } from '../util/fs_atomic.js'
  * } from '../../../src/core/daemon/types.js'
  */
 
-export class SystemdUnitError extends Error {
+export class SystemdUnitError extends ServiceOpError {
   /**
    * @param {string} message
    * @param {{ exitCode?: number, stderr?: string }} [opts]
    */
-  constructor(message, opts = {}) {
-    super(message)
+  constructor(message, opts) {
+    super(message, opts)
     this.name = 'SystemdUnitError'
-    /** @type {number | undefined} */
-    this.exitCode = opts.exitCode
-    /** @type {string | undefined} */
-    this.stderr = opts.stderr
   }
 }
 
 /** @type {SystemctlAdapter} */
 export const realSystemctl = {
-  daemonReload() { return runSystemctl(['--user', 'daemon-reload']) },
-  enable(unit) { return runSystemctl(['--user', 'enable', unit]) },
-  disable(unit) { return runSystemctl(['--user', 'disable', unit]) },
-  start(unit) { return runSystemctl(['--user', 'start', unit]) },
-  stop(unit) { return runSystemctl(['--user', 'stop', unit]) },
-  restart(unit) { return runSystemctl(['--user', 'restart', unit]) },
-  status(unit) { return runSystemctl(['--user', 'status', unit]) },
+  daemonReload() { return runServiceCommand('systemctl', ['--user', 'daemon-reload']) },
+  enable(unit) { return runServiceCommand('systemctl', ['--user', 'enable', unit]) },
+  disable(unit) { return runServiceCommand('systemctl', ['--user', 'disable', unit]) },
+  start(unit) { return runServiceCommand('systemctl', ['--user', 'start', unit]) },
+  stop(unit) { return runServiceCommand('systemctl', ['--user', 'stop', unit]) },
+  restart(unit) { return runServiceCommand('systemctl', ['--user', 'restart', unit]) },
+  status(unit) { return runServiceCommand('systemctl', ['--user', 'status', unit]) },
   show(unit) {
-    return runSystemctl(['--user', 'show', unit, '--property=LoadState,ActiveState,MainPID'])
+    return runServiceCommand('systemctl', ['--user', 'show', unit, '--property=LoadState,ActiveState,MainPID'])
   },
 }
 
 /**
- * @param {string[]} args
- * @returns {Promise<SystemctlResult>}
+ * Throw a {@link SystemdUnitError} when a systemctl command failed.
+ *
+ * @param {SystemctlResult} res
+ * @param {string} what
+ * @returns {SystemctlResult}
  */
-function runSystemctl(args) {
-  return new Promise(function(resolve, reject) {
-    const proc = spawn('systemctl', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout.on('data', function(chunk) { stdout += chunk.toString('utf8') })
-    proc.stderr.on('data', function(chunk) { stderr += chunk.toString('utf8') })
-    proc.on('error', reject)
-    proc.on('close', function(code) {
-      resolve({ exitCode: code === null ? -1 : code, stdout, stderr })
-    })
-  })
+function ensure(res, what) {
+  return ensureOk(res, what, SystemdUnitError)
+}
+
+/**
+ * Resolve the systemctl adapter, label, and unit file name shared by
+ * every systemd operation.
+ *
+ * @param {{ label?: string, systemctl?: SystemctlAdapter }} options
+ */
+function resolveUnit(options) {
+  const systemctl = options.systemctl ?? realSystemctl
+  const label = options.label ?? SYSTEMD_UNIT_BASE
+  return { systemctl, label, unitName: unitFileName(label) }
 }
 
 /**
@@ -236,29 +237,9 @@ export async function installSystemdUnit(options) {
 
   atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 })
 
-  const reload = await systemctl.daemonReload()
-  if (reload.exitCode !== 0) {
-    throw new SystemdUnitError(
-      `failed to systemctl --user daemon-reload: ${reload.stderr.trim() || `exit ${reload.exitCode}`}`,
-      { exitCode: reload.exitCode, stderr: reload.stderr }
-    )
-  }
-
-  const enableRes = await systemctl.enable(plan.unitName)
-  if (enableRes.exitCode !== 0) {
-    throw new SystemdUnitError(
-      `failed to enable ${plan.unitName}: ${enableRes.stderr.trim() || `exit ${enableRes.exitCode}`}`,
-      { exitCode: enableRes.exitCode, stderr: enableRes.stderr }
-    )
-  }
-
-  const restartRes = await systemctl.restart(plan.unitName)
-  if (restartRes.exitCode !== 0) {
-    throw new SystemdUnitError(
-      `failed to restart ${plan.unitName}: ${restartRes.stderr.trim() || `exit ${restartRes.exitCode}`}`,
-      { exitCode: restartRes.exitCode, stderr: restartRes.stderr }
-    )
-  }
+  ensure(await systemctl.daemonReload(), 'systemctl --user daemon-reload')
+  ensure(await systemctl.enable(plan.unitName), `enable ${plan.unitName}`)
+  ensure(await systemctl.restart(plan.unitName), `restart ${plan.unitName}`)
 
   return plan
 }
@@ -273,9 +254,7 @@ export async function installSystemdUnit(options) {
  * @returns {Promise<void>}
  */
 export async function uninstallSystemdUnit(options) {
-  const systemctl = options.systemctl ?? realSystemctl
-  const label = options.label ?? SYSTEMD_UNIT_BASE
-  const unitName = unitFileName(label)
+  const { systemctl, label, unitName } = resolveUnit(options)
   const unitDir = options.unitDir ?? defaultUnitDir(options.homeDir)
   const unitPath = unitPathFor(unitDir, label)
 
@@ -283,16 +262,7 @@ export async function uninstallSystemdUnit(options) {
 
   await systemctl.stop(unitName).catch(function() { /* best-effort */ })
   await systemctl.disable(unitName).catch(function() { /* best-effort */ })
-
-  try {
-    fs.unlinkSync(unitPath)
-  } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err
-      ? /** @type {NodeJS.ErrnoException} */ (err).code
-      : undefined
-    if (code !== 'ENOENT') throw err
-  }
-
+  unlinkServiceFile(unitPath)
   await systemctl.daemonReload().catch(function() { /* best-effort */ })
 }
 
@@ -303,16 +273,8 @@ export async function uninstallSystemdUnit(options) {
  * @returns {Promise<void>}
  */
 export async function startSystemdUnit(options) {
-  const systemctl = options.systemctl ?? realSystemctl
-  const label = options.label ?? SYSTEMD_UNIT_BASE
-  const unitName = unitFileName(label)
-  const res = await systemctl.start(unitName)
-  if (res.exitCode !== 0) {
-    throw new SystemdUnitError(
-      `failed to start ${unitName}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
-      { exitCode: res.exitCode, stderr: res.stderr }
-    )
-  }
+  const { systemctl, unitName } = resolveUnit(options)
+  ensure(await systemctl.start(unitName), `start ${unitName}`)
 }
 
 /**
@@ -322,16 +284,8 @@ export async function startSystemdUnit(options) {
  * @returns {Promise<void>}
  */
 export async function stopSystemdUnit(options) {
-  const systemctl = options.systemctl ?? realSystemctl
-  const label = options.label ?? SYSTEMD_UNIT_BASE
-  const unitName = unitFileName(label)
-  const res = await systemctl.stop(unitName)
-  if (res.exitCode !== 0) {
-    throw new SystemdUnitError(
-      `failed to stop ${unitName}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
-      { exitCode: res.exitCode, stderr: res.stderr }
-    )
-  }
+  const { systemctl, unitName } = resolveUnit(options)
+  ensure(await systemctl.stop(unitName), `stop ${unitName}`)
 }
 
 /**
@@ -341,16 +295,8 @@ export async function stopSystemdUnit(options) {
  * @returns {Promise<void>}
  */
 export async function restartSystemdUnit(options) {
-  const systemctl = options.systemctl ?? realSystemctl
-  const label = options.label ?? SYSTEMD_UNIT_BASE
-  const unitName = unitFileName(label)
-  const res = await systemctl.restart(unitName)
-  if (res.exitCode !== 0) {
-    throw new SystemdUnitError(
-      `failed to restart ${unitName}: ${res.stderr.trim() || `exit ${res.exitCode}`}`,
-      { exitCode: res.exitCode, stderr: res.stderr }
-    )
-  }
+  const { systemctl, unitName } = resolveUnit(options)
+  ensure(await systemctl.restart(unitName), `restart ${unitName}`)
 }
 
 /**
@@ -373,9 +319,7 @@ export function isSystemdUnitInstalled(options) {
  * @returns {Promise<{ loaded: boolean, pid?: number }>}
  */
 export async function systemdUnitStatus(options) {
-  const systemctl = options.systemctl ?? realSystemctl
-  const label = options.label ?? SYSTEMD_UNIT_BASE
-  const unitName = unitFileName(label)
+  const { systemctl, unitName } = resolveUnit(options)
   const result = await systemctl.show(unitName)
   if (result.exitCode !== 0) return { loaded: false }
   const props = parseShowOutput(result.stdout)
@@ -408,4 +352,3 @@ function parsePid(value) {
   const n = Number.parseInt(value, 10)
   return Number.isInteger(n) && n > 0 ? n : undefined
 }
-

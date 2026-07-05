@@ -4,11 +4,30 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import {
+  AI_GATEWAY_MESSAGES_DATASET,
+  errMessage,
+  filterByWindow,
+  projectedExchangeItem,
+  resolveWindow,
+} from '../../../../src/core/backfill/scan_util.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import {
+  copyNumberAlias,
+  firstString,
+  netInputUsage,
+  numberValue,
+  reasoningMessageFromPayload,
+  setIfString,
+  stampUsageOnLastAssistant,
+  textBlocksFromContent,
+  toolResultBlockFromPayload,
+  toolUseBlockFromPayload,
+} from './response-items.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
@@ -53,16 +72,7 @@ const DEFAULT_PLUGIN_NAME = '@hypaware/codex'
 const PROVIDER = 'openai'
 const CONVERSATION_SOURCE = 'codex'
 
-// Dataset name and materializer dispatch key owned by `@hypaware/ai-gateway`
-// (DATASET_NAME / AI_GATEWAY_PROJECTED_EXCHANGE_KIND in its dataset.js).
-// Held as plain constants so this adapter does not pull the gateway's
-// runtime module graph in just for two strings; the end-to-end test pins
-// them by feeding yielded items through the real materializer.
-const AI_GATEWAY_MESSAGES_DATASET = 'ai_gateway_messages'
-const PROJECTED_EXCHANGE_KIND = 'ai_gateway.projected_exchange'
-
 const COMPONENT = 'plugin.codex.backfill'
-const DAY_MS = 24 * 60 * 60 * 1000
 
 /**
  * Build the Codex backfill provider. Registered at plugin activation via
@@ -230,7 +240,7 @@ async function* runCodexBackfill(args) {
         status: 'ok',
       })
 
-      yield backfillItem(exchange, {
+      yield projectedExchangeItem(exchange, {
         client_name: clientName,
         source_path: filePath,
         native_id: session.sessionId,
@@ -521,14 +531,14 @@ function projectedExchangeFromSession(args) {
   let nativeIdCount = 0
   // Index in `messages` where the current turn began. A token_count marker
   // closes the turn: its usage is stamped onto that turn's LAST assistant
-  // message (mirroring the live projector's stampUsageOnLastAssistant), then
+  // message (via the same stampUsageOnLastAssistant the live path uses), then
   // the next turn starts. Reasoning-only assistant messages are skipped as
   // stamp targets so live and backfilled rows carry usage on the same logical
   // message and dedupe to one row. @ref LLP 0035#per-turn
   let turnStartIndex = 0
   for (const item of items) {
     if (item.usageAttributes) {
-      stampUsageOnTurn(messages, turnStartIndex, item.usageAttributes)
+      stampUsageOnLastAssistant(messages, item.usageAttributes, turnStartIndex)
       turnStartIndex = messages.length
       continue
     }
@@ -624,15 +634,19 @@ function projectedMessageFromItem(item) {
     message = messageItemToProjected(payload)
     break
   case 'function_call':
-  case 'custom_tool_call':
-    message = toolCallItemToProjected(payload)
+  case 'custom_tool_call': {
+    const block = toolUseBlockFromPayload(payload)
+    message = block ? { role: 'assistant', content: [block] } : undefined
     break
+  }
   case 'function_call_output':
-  case 'custom_tool_call_output':
-    message = toolOutputItemToProjected(payload)
+  case 'custom_tool_call_output': {
+    const block = toolResultBlockFromPayload(payload)
+    message = block ? { role: 'tool', content: [block] } : undefined
     break
+  }
   case 'reasoning':
-    message = reasoningItemToProjected(payload)
+    message = reasoningMessageFromPayload(payload)
     break
   default:
     return undefined
@@ -656,85 +670,6 @@ function messageItemToProjected(payload) {
   const content = textBlocksFromContent(payload.content)
   if (content.length === 0) return undefined
   return { role, content }
-}
-
-/**
- * Codex message content blocks use `input_text` / `output_text` (the
- * Responses API), which both normalize to the gateway's `text` block. A
- * bare string content is tolerated for older/leaner records.
- *
- * @param {unknown} content
- * @returns {JsonObject[]}
- */
-function textBlocksFromContent(content) {
-  if (typeof content === 'string') {
-    return content.length > 0 ? [{ type: 'text', text: content }] : []
-  }
-  if (!Array.isArray(content)) return []
-  /** @type {JsonObject[]} */
-  const blocks = []
-  for (const raw of content) {
-    if (typeof raw === 'string') {
-      if (raw.length > 0) blocks.push({ type: 'text', text: raw })
-      continue
-    }
-    if (!isPlainObject(raw)) continue
-    const text = stringValue(raw.text) ?? stringValue(raw.input_text) ?? stringValue(raw.output_text)
-    if (text) blocks.push({ type: 'text', text })
-  }
-  return blocks
-}
-
-/**
- * `function_call` (arguments as a JSON string) and `custom_tool_call`
- * (input string) both become an assistant `tool_use` block keyed on the
- * Codex `call_id`, so the gateway can pair it with the matching output.
- *
- * @param {Record<string, unknown>} payload
- * @returns {AiGatewayProjectedMessage | undefined}
- */
-function toolCallItemToProjected(payload) {
-  const name = stringValue(payload.name)
-  const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
-  if (!name || !callId) return undefined
-  const rawArgs = payload.arguments !== undefined ? payload.arguments : payload.input
-  return {
-    role: 'assistant',
-    content: [{ type: 'tool_use', id: callId, name, input: normalizeToolInput(rawArgs) }],
-  }
-}
-
-/**
- * `function_call_output` / `custom_tool_call_output` become a `tool_result`
- * block referencing the originating `call_id`. The gateway maps it to a
- * `tool_result` part and back-fills the tool name from the earlier call.
- *
- * @param {Record<string, unknown>} payload
- * @returns {AiGatewayProjectedMessage | undefined}
- */
-function toolOutputItemToProjected(payload) {
-  const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
-  if (!callId) return undefined
-  const text = toolOutputText(payload.output)
-  /** @type {JsonObject} */
-  const block = { type: 'tool_result', tool_use_id: callId }
-  if (text !== undefined) block.content = text
-  return { role: 'tool', content: [block] }
-}
-
-/**
- * `reasoning` items carry plaintext `summary` and/or `content` plus opaque
- * `encrypted_content`. Only the plaintext is projected (as a `thinking`
- * block → `reasoning` part); encrypted reasoning is never decoded or
- * stored. No plaintext → no message.
- *
- * @param {Record<string, unknown>} payload
- * @returns {AiGatewayProjectedMessage | undefined}
- */
-function reasoningItemToProjected(payload) {
-  const text = reasoningText(payload.summary) ?? reasoningText(payload.content)
-  if (!text) return undefined
-  return { role: 'assistant', content: [{ type: 'thinking', thinking: text }] }
 }
 
 // ---------------------------------------------------------------------
@@ -767,174 +702,15 @@ function codexUsageFromTokenCount(payload) {
  */
 function codexUsageAttributes(rawUsage) {
   if (!isPlainObject(rawUsage)) return undefined
-  /** @type {JsonObject} */
-  const usage = {}
-
-  // @ref LLP 0035#net-input: Codex `input_tokens` is gross (it includes
-  // `cached_input_tokens`); HypAware stores input_tokens NET of cache so it
-  // never double-counts against cache_read_tokens and matches the Claude /
-  // live-Codex convention. total_tokens stays raw, so net + cache_read +
-  // output == total.
-  const cachedInput = numberValue(rawUsage.cached_input_tokens)
-  const grossInput = numberValue(rawUsage.input_tokens)
-  if (grossInput !== undefined) {
-    usage.input_tokens = cachedInput !== undefined ? Math.max(0, grossInput - cachedInput) : grossInput
-  }
-  if (cachedInput !== undefined) usage.cache_read_tokens = cachedInput
+  // Codex `input_tokens` is gross: it includes `cached_input_tokens`
+  // (@ref LLP 0035#net-input, netInputUsage).
+  const usage = netInputUsage(numberValue(rawUsage.input_tokens), numberValue(rawUsage.cached_input_tokens))
 
   copyNumberAlias(rawUsage, usage, 'output_tokens', 'output_tokens')
   copyNumberAlias(rawUsage, usage, 'reasoning_output_tokens', 'reasoning_tokens')
   copyNumberAlias(rawUsage, usage, 'total_tokens', 'total_tokens')
 
   return Object.keys(usage).length === 0 ? undefined : { usage }
-}
-
-/**
- * Stamp a turn's usage onto the LAST assistant message at or after
- * `startIndex` that carries text or a tool_use: the same target the live
- * projector picks (its terminal output item), so live and backfilled rows fold
- * usage onto the one logical message and dedupe cleanly, and the row carrying
- * usage is the response's last assistant row for both Codex and Claude.
- * Reasoning-only (thinking) messages are skipped; if the turn produced no
- * eligible message (e.g. windowed out) the usage is dropped rather than
- * mis-attributed. @ref LLP 0035#one-carrier
- *
- * @param {AiGatewayProjectedMessage[]} messages
- * @param {number} startIndex
- * @param {JsonObject} usageAttributes
- */
-function stampUsageOnTurn(messages, startIndex, usageAttributes) {
-  for (let i = messages.length - 1; i >= startIndex; i--) {
-    const message = messages[i]
-    if (message.role !== 'assistant' || !hasTextOrToolUse(message)) continue
-    message.attributes = { ...(message.attributes ?? {}), ...usageAttributes }
-    return
-  }
-}
-
-/** @param {AiGatewayProjectedMessage} message */
-function hasTextOrToolUse(message) {
-  if (!Array.isArray(message.content)) return false
-  return message.content.some((block) => {
-    const type = isPlainObject(block) ? block.type : undefined
-    return type === 'text' || type === 'tool_use'
-  })
-}
-
-// ---------------------------------------------------------------------
-// Value helpers
-// ---------------------------------------------------------------------
-
-/** @param {unknown} value @returns {JsonValue} */
-function normalizeToolInput(value) {
-  if (typeof value === 'string') {
-    const parsed = tryParseJson(value)
-    return parsed === undefined ? value : /** @type {JsonValue} */ (parsed)
-  }
-  if (value === undefined) return null
-  return /** @type {JsonValue} */ (value)
-}
-
-/**
- * Codex tool output is usually a string, sometimes a wrapper object
- * (`{ output | content | text: "..." }`) or a structured payload. Reduce it
- * to display text best-effort; structured payloads are JSON-stringified so
- * the row keeps a faithful, queryable trace.
- *
- * @param {unknown} output
- * @returns {string | undefined}
- */
-function toolOutputText(output) {
-  if (typeof output === 'string') return output.length > 0 ? output : undefined
-  if (isPlainObject(output)) {
-    const inner = stringValue(output.output) ?? stringValue(output.content) ?? stringValue(output.text)
-    return inner ?? JSON.stringify(output)
-  }
-  if (output === undefined || output === null) return undefined
-  return JSON.stringify(output)
-}
-
-/** @param {unknown} value @returns {string | undefined} */
-function reasoningText(value) {
-  if (typeof value === 'string') return value.length > 0 ? value : undefined
-  if (!Array.isArray(value)) return undefined
-  /** @type {string[]} */
-  const parts = []
-  for (const raw of value) {
-    if (typeof raw === 'string') {
-      if (raw) parts.push(raw)
-      continue
-    }
-    if (!isPlainObject(raw)) continue
-    const text = stringValue(raw.text) ?? stringValue(raw.summary_text)
-    if (text) parts.push(text)
-  }
-  return parts.length > 0 ? parts.join('\n') : undefined
-}
-
-/**
- * Wrap a projection in the `BackfillItem` envelope the runner expects. The
- * kernel types `value` as `Record<string, unknown>`; the projection is a
- * concrete interface, so bridge through `unknown`.
- *
- * @param {AiGatewayProjectedExchange} exchange
- * @param {BackfillProvenance} provenance
- * @returns {BackfillItem}
- */
-function backfillItem(exchange, provenance) {
-  return {
-    dataset: AI_GATEWAY_MESSAGES_DATASET,
-    kind: PROJECTED_EXCHANGE_KIND,
-    value: /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (exchange)),
-    provenance,
-  }
-}
-
-/**
- * Resolve the import window in epoch millis. Explicit `since` / `until` win;
- * otherwise a positive `retentionDays` sets the lower bound so a default run
- * does not import history older than the cache retains. Both ends may be
- * open (`undefined`).
- *
- * @param {BackfillRunContext} ctx
- * @returns {{ sinceMs?: number, untilMs?: number }}
- */
-function resolveWindow(ctx) {
-  const untilMs = parseIsoMs(ctx.until)
-  let sinceMs = parseIsoMs(ctx.since)
-  if (sinceMs === undefined && typeof ctx.retentionDays === 'number' && ctx.retentionDays > 0) {
-    sinceMs = Date.now() - ctx.retentionDays * DAY_MS
-  }
-  return { sinceMs, untilMs }
-}
-
-/**
- * Keep items whose timestamp falls within the window. Items with no
- * timestamp (legacy rollouts, untimestamped records) are kept rather than
- * silently dropped.
- *
- * @param {CodexRolloutItem[]} items
- * @param {{ sinceMs?: number, untilMs?: number }} window
- * @returns {CodexRolloutItem[]}
- */
-function filterByWindow(items, window) {
-  if (window.sinceMs === undefined && window.untilMs === undefined) return items
-  return items.filter((item) => {
-    if (item.timestampMs === undefined) return true
-    if (window.sinceMs !== undefined && item.timestampMs < window.sinceMs) return false
-    if (window.untilMs !== undefined && item.timestampMs > window.untilMs) return false
-    return true
-  })
-}
-
-/**
- * @param {string | undefined} value
- * @returns {number | undefined}
- */
-function parseIsoMs(value) {
-  if (typeof value !== 'string' || value.length === 0) return undefined
-  const ms = Date.parse(value)
-  return Number.isFinite(ms) ? ms : undefined
 }
 
 /** @param {unknown} value @returns {number | undefined} */
@@ -1000,50 +776,9 @@ async function pathExists(target) {
   }
 }
 
-/** @param {unknown} value @returns {unknown} */
-function tryParseJson(value) {
-  if (typeof value !== 'string') return undefined
-  try {
-    return JSON.parse(value)
-  } catch {
-    return undefined
-  }
-}
-
 /** @param {unknown} value @returns {boolean | undefined} */
 function boolValue(value) {
   return typeof value === 'boolean' ? value : undefined
-}
-
-/** @param {unknown} value @returns {number | undefined} */
-function numberValue(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string') {
-    const n = Number(value)
-    if (Number.isFinite(n)) return n
-  }
-  return undefined
-}
-
-/**
- * @param {Record<string, unknown>} source
- * @param {JsonObject} target
- * @param {string} sourceKey
- * @param {string} targetKey
- */
-function copyNumberAlias(source, target, sourceKey, targetKey) {
-  const value = numberValue(source[sourceKey])
-  if (value !== undefined) target[targetKey] = value
-}
-
-/** @param {JsonObject} target @param {string} key @param {string | undefined} value */
-function setIfString(target, key, value) {
-  if (value !== undefined) target[key] = value
-}
-
-/** @param {Array<string | undefined>} values */
-function firstString(...values) {
-  return values.find((value) => typeof value === 'string' && value.length > 0)
 }
 
 /** @param {Array<boolean | undefined>} values */
@@ -1051,7 +786,3 @@ function firstBool(...values) {
   return values.find((value) => typeof value === 'boolean')
 }
 
-/** @param {unknown} err */
-function errMessage(err) {
-  return err instanceof Error ? err.message : String(err)
-}

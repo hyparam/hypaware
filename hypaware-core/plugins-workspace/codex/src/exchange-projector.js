@@ -2,6 +2,19 @@
 
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import {
+  copyNumberAlias,
+  firstString,
+  mergeJsonObjects,
+  netInputUsage,
+  numberValue,
+  reasoningMessageFromPayload,
+  setIfString,
+  stampUsageOnLastAssistant,
+  textBlocksFromContent,
+  toolResultBlockFromPayload,
+  toolUseBlockFromPayload,
+} from './response-items.js'
 import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
@@ -267,7 +280,7 @@ function openAiChatMessageToProjected(message) {
     const toolCallId = stringValue(message.tool_call_id)
     const text = typeof message.content === 'string'
       ? message.content
-      : textFromBlocks(openAiContentBlocks(message.content))
+      : textFromBlocks(textBlocksFromContent(message.content))
     return {
       role,
       content: [{
@@ -278,7 +291,7 @@ function openAiChatMessageToProjected(message) {
     }
   }
   /** @type {JsonObject[]} */
-  const content = openAiContentBlocks(message.content)
+  const content = textBlocksFromContent(message.content)
   if (Array.isArray(message.tool_calls)) {
     for (const call of message.tool_calls) {
       if (!isPlainObject(call)) continue
@@ -318,8 +331,11 @@ function openAiResponsesMessages(reqBody, responseBody, streamEvents) {
 }
 
 /**
- * Mirror `codex/src/backfill.js`: fan items out so each `function_call` /
- * `function_call_output` becomes its own projected message.
+ * Fan items out so each `function_call` / `function_call_output` /
+ * `reasoning` becomes its own projected message: the same per-item
+ * projection the backfill applies to rollout items (shared via
+ * `response-items.js`), so a turn-2 input replay hashes equal to the
+ * backfilled session.
  *
  * @param {unknown} input
  * @returns {AiGatewayProjectedMessage[]}
@@ -345,27 +361,18 @@ function responsesInputMessages(input) {
       if (block) out.push({ role: 'tool', content: [block] })
       continue
     }
+    if (itemType === 'reasoning') {
+      // A replayed reasoning item carries no `role`; without this case it
+      // would fall through below and project as a `user` text message,
+      // diverging from the backfill's assistant `thinking` shape.
+      const msg = reasoningMessageFromPayload(item)
+      if (msg) out.push(msg)
+      continue
+    }
     const role = stringValue(item.role) ?? 'user'
-    const blocks = openAiContentBlocks(item.content)
+    const blocks = textBlocksFromContent(item.content)
     if (blocks.length === 0) continue
     out.push({ role, content: blocks })
-  }
-  return out
-}
-
-/** @param {unknown} content @returns {JsonObject[]} */
-function openAiContentBlocks(content) {
-  if (typeof content === 'string') {
-    if (content.length === 0) return []
-    return [{ type: 'text', text: content }]
-  }
-  if (!Array.isArray(content)) return []
-  /** @type {JsonObject[]} */
-  const out = []
-  for (const item of content) {
-    if (!isPlainObject(item)) continue
-    const text = stringValue(item.text) ?? stringValue(item.input_text) ?? stringValue(item.output_text)
-    if (text != null) out.push({ type: 'text', text })
   }
   return out
 }
@@ -392,7 +399,7 @@ function responsesAssistantMessagesFromBody(responseBody) {
       const block = toolUseBlockFromPayload(item)
       if (block) out.push({ role: 'assistant', content: [block] })
     } else if (itemType === 'message' || item.role === 'assistant') {
-      const blocks = openAiContentBlocks(item.content)
+      const blocks = textBlocksFromContent(item.content)
       if (blocks.length > 0) {
         out.push({ role: 'assistant', content: blocks })
         sawMessage = true
@@ -538,24 +545,17 @@ function readOpenAiUsageFromResponsesStream(streamEvents) {
  */
 function openAiUsageAttributes(rawUsage) {
   if (!isPlainObject(rawUsage)) return undefined
-  /** @type {JsonObject} */
-  const usage = {}
-
-  // @ref LLP 0035#net-input: OpenAI/Codex report input_tokens INCLUSIVE of
-  // cached prompt reads; HypAware stores input_tokens NET of cache so it never
-  // double-counts against cache_read_tokens and matches the Claude convention
-  // (input + cache_read [+ cache_write] = total prompt). total_tokens stays the
-  // provider's raw value, so net_input + cache_read + output == total holds.
+  // OpenAI input_tokens/prompt_tokens are gross: they include the cached
+  // reads reported in *_tokens_details (@ref LLP 0035#net-input,
+  // netInputUsage).
   const inputDetails = firstPlainObject(
     readKey(rawUsage, 'input_tokens_details'),
     readKey(rawUsage, 'prompt_tokens_details')
   )
-  const cachedInput = inputDetails ? numberValue(inputDetails.cached_tokens) : undefined
-  const grossInput = numberValue(rawUsage.input_tokens) ?? numberValue(rawUsage.prompt_tokens)
-  if (grossInput !== undefined) {
-    usage.input_tokens = cachedInput !== undefined ? Math.max(0, grossInput - cachedInput) : grossInput
-  }
-  if (cachedInput !== undefined) usage.cache_read_tokens = cachedInput
+  const usage = netInputUsage(
+    numberValue(rawUsage.input_tokens) ?? numberValue(rawUsage.prompt_tokens),
+    inputDetails ? numberValue(inputDetails.cached_tokens) : undefined
+  )
 
   copyNumberAlias(rawUsage, usage, 'output_tokens', 'output_tokens')
   copyNumberAlias(rawUsage, usage, 'completion_tokens', 'output_tokens')
@@ -580,64 +580,11 @@ function openAiUsageAttributes(rawUsage) {
 }
 
 /**
- * Stamp response-level usage onto the LAST assistant message of the response
- * that carries text or a tool_use (the terminal output item, a tool_use on
- * tool-calling turns, else the final text). One carrier per response keeps a
- * SUM over rows honest, and "last text/tool_use assistant" is the SAME
- * predicate the backfill path applies (`backfill.js#stampUsageOnTurn` →
- * `hasTextOrToolUse`), so live and backfilled rows fold usage onto the same
- * logical row and dedupe to one. Sharing the predicate means the rule no longer
- * rests on the implicit invariant that a live Responses reply never ends in a
- * reasoning-only assistant message. Today it never does (reasoning isn't
- * projected as an assistant message live), and if that ever changed the usage
- * would be dropped rather than mis-attributed, exactly as backfill does.
- * @ref LLP 0035#one-carrier
- *
- * @param {AiGatewayProjectedMessage[]} messages
- * @param {JsonObject | undefined} usageAttributes
- */
-function stampUsageOnLastAssistant(messages, usageAttributes) {
-  if (!usageAttributes) return
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
-    if (message.role !== 'assistant' || !hasTextOrToolUse(message)) continue
-    message.attributes = mergeJsonObjects(message.attributes, usageAttributes)
-    return
-  }
-}
-
-/**
- * A message is an eligible usage carrier when it has a text or tool_use block.
- * Mirrors `backfill.js#hasTextOrToolUse` so the live and backfill carrier
- * predicates stay identical. @ref LLP 0035#one-carrier
- *
- * @param {AiGatewayProjectedMessage} message
- */
-function hasTextOrToolUse(message) {
-  if (!Array.isArray(message.content)) return false
-  return message.content.some((block) => {
-    const type = isPlainObject(block) ? block.type : undefined
-    return type === 'text' || type === 'tool_use'
-  })
-}
-
-/**
  * @param {unknown[]} values
  * @returns {Record<string, unknown> | undefined}
  */
 function firstPlainObject(...values) {
   return values.find(isPlainObject)
-}
-
-/**
- * @param {Record<string, unknown>} source
- * @param {JsonObject} target
- * @param {string} sourceKey
- * @param {string} targetKey
- */
-function copyNumberAlias(source, target, sourceKey, targetKey) {
-  const value = numberValue(source[sourceKey])
-  if (value !== undefined) target[targetKey] = value
 }
 
 // ---------------------------------------------------------------------
@@ -956,63 +903,6 @@ function firstChoice(responseBody) {
   return isPlainObject(choice) ? choice : undefined
 }
 
-/**
- * Mirror `codex/src/backfill.js` so live-captured tool calls land in the
- * same shape as backfilled ones.
- *
- * @param {Record<string, unknown>} payload
- * @returns {JsonObject | undefined}
- */
-function toolUseBlockFromPayload(payload) {
-  const name = stringValue(payload.name)
-  const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
-  if (!name || !callId) return undefined
-  const rawArgs = payload.arguments !== undefined ? payload.arguments : payload.input
-  return { type: 'tool_use', id: callId, name, input: normalizeToolInput(rawArgs) }
-}
-
-/**
- * @param {Record<string, unknown>} payload
- * @returns {JsonObject | undefined}
- */
-function toolResultBlockFromPayload(payload) {
-  const callId = stringValue(payload.call_id) ?? stringValue(payload.id)
-  if (!callId) return undefined
-  const text = toolOutputText(payload.output)
-  /** @type {JsonObject} */
-  const block = { type: 'tool_result', tool_use_id: callId }
-  if (text !== undefined) block.content = text
-  return block
-}
-
-/** @param {unknown} value */
-function normalizeToolInput(value) {
-  if (typeof value === 'string') {
-    const parsed = parseMaybeJson(value)
-    return parsed === value ? value : /** @type {any} */ (parsed)
-  }
-  if (value === undefined) return null
-  return /** @type {any} */ (value)
-}
-
-/**
- * Codex tool output can arrive as a string, a `{ output | content | text }`
- * wrapper, or a structured payload. Fall back to JSON.stringify so the
- * row keeps a faithful trace.
- *
- * @param {unknown} output
- * @returns {string | undefined}
- */
-function toolOutputText(output) {
-  if (typeof output === 'string') return output.length > 0 ? output : undefined
-  if (isPlainObject(output)) {
-    const inner = stringValue(output.output) ?? stringValue(output.content) ?? stringValue(output.text)
-    return inner ?? JSON.stringify(output)
-  }
-  if (output === undefined || output === null) return undefined
-  return JSON.stringify(output)
-}
-
 /** @param {JsonObject[]} blocks */
 function textFromBlocks(blocks) {
   const parts = blocks
@@ -1043,36 +933,6 @@ function parseEventData(data) {
   try { return JSON.parse(data) } catch { return undefined }
 }
 
-/**
- * @param {JsonObject | undefined} a
- * @param {JsonObject | undefined} b
- * @returns {JsonObject | undefined}
- */
-function mergeJsonObjects(a, b) {
-  if (!a) return b
-  if (!b) return a
-  /** @type {JsonObject} */
-  const out = { ...a }
-  for (const [key, value] of Object.entries(b)) {
-    if (isPlainObject(value) && isPlainObject(out[key])) {
-      out[key] = { ...(/** @type {JsonObject} */ (out[key])), ...value }
-    } else {
-      out[key] = value
-    }
-  }
-  return out
-}
-
-/** @param {unknown} value */
-function numberValue(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string') {
-    const n = Number(value)
-    if (Number.isFinite(n)) return n
-  }
-  return undefined
-}
-
 /** @param {unknown} obj @param {string} key */
 function readKey(obj, key) {
   if (!isPlainObject(obj)) return undefined
@@ -1083,16 +943,6 @@ function readKey(obj, key) {
 function readStringKey(obj, key) {
   const value = readKey(obj, key)
   return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
-/** @param {JsonObject} target @param {string} key @param {string | undefined} value */
-function setIfString(target, key, value) {
-  if (value !== undefined) target[key] = value
-}
-
-/** @param {...(string | undefined)} values */
-function firstString(...values) {
-  return values.find((value) => typeof value === 'string' && value.length > 0)
 }
 
 /**

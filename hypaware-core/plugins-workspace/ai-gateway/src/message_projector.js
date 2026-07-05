@@ -1,7 +1,7 @@
 // @ts-check
 
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
-import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } from 'hypaware/core/util'
+import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue, stripVolatileBlockFields } from 'hypaware/core/util'
 
 export const SCHEMA_VERSION = 7
 
@@ -773,6 +773,13 @@ function expandMessageParts(ctx) {
  * breakpoint between exchanges, so hashing it would give the same
  * logical message a new id on every replay where the breakpoint
  * shifted (each one a duplicate row the seen-set cannot catch).
+ * The strip list (`VOLATILE_BLOCK_FIELDS` in core util) is shared with
+ * the claude plugin's transcript match key, so the fallback id and the
+ * match key canonicalize a block identically. Reached only for an
+ * *unmatched* assistant tool_use (a matched one carries its native
+ * uuid), so the split is rare, but stripping `caller` keeps the two
+ * representations of one tool_use from landing as duplicate fallback
+ * rows when it does happen.
  *
  * // @ref LLP 0030#decision: the thread scope is `conversation_id ??
  * // session_id`: for Claude (conversation_id null) that is the session
@@ -791,40 +798,6 @@ function expandMessageParts(ctx) {
 export function computeMessageId(threadScope, role, content, agentId) {
   const scope = agentId ? `${threadScope}:${agentId}` : threadScope
   return sha256Hex(`${scope}:${role}:${canonicalJson(stripVolatileBlockFields(content))}`).slice(0, 16)
-}
-
-/**
- * Drop per-block fields that vary across the channels a logical message
- * can arrive on without changing its meaning. Only block-level keys are
- * stripped; block payloads are otherwise untouched.
- *
- * `cache_control` is a wire-only prompt-cache breakpoint that moves
- * between exchanges. `caller` is a tool_use annotation that rides the
- * assistant *response* stream and the transcript but is dropped from
- * the *request-input* echo of the same turn, so the one logical
- * tool_use hashes with-or-without `caller` depending on which
- * representation reaches this fallback. This MUST strip the same set
- * the claude plugin's `contentKey` strips, so the fallback id and the
- * transcript match key canonicalize a block identically. The two lists
- * are kept in sync by hand: the plugins are decoupled (claude reaches
- * the gateway only via the capability, no shared module), so a shared
- * canonicalizer would be the first static link across that boundary and
- * isn't worth it.
- *
- * Reached only for an *unmatched* assistant tool_use (a matched one
- * carries its native uuid and skips this fallback), so the split is
- * rare, but stripping `caller` keeps the two representations from
- * landing as duplicate fallback rows when it does happen.
- *
- * @param {unknown} content
- */
-function stripVolatileBlockFields(content) {
-  if (!Array.isArray(content)) return content
-  return content.map((block) => {
-    if (!isPlainObject(block) || (!('cache_control' in block) && !('caller' in block))) return block
-    const { cache_control: _cache_control, caller: _caller, ...rest } = block
-    return rest
-  })
 }
 
 /** @param {string | undefined | null} stopReason */

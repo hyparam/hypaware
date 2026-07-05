@@ -201,3 +201,53 @@ function positiveInt(value) {
     : undefined
 }
 
+
+/**
+ * Create a cached reader for the session-context channel. Re-reads the
+ * JSONL file only when its size or mtime moved (the live projector
+ * calls it on every captured exchange); degrades to `[]` after
+ * reporting via `onError`, so a missing or unreadable channel never
+ * aborts capture or backfill: the join is best-effort and `cwd` /
+ * `git_branch` are nullable columns.
+ *
+ * @param {string} stateFile
+ * @param {(err: unknown) => void} [onError]
+ * @returns {() => Promise<SessionContextRecord[]>}
+ */
+export function createSessionContextReader(stateFile, onError) {
+  /** @type {number | undefined} */
+  let size
+  /** @type {number | undefined} */
+  let mtimeMs
+  /** @type {SessionContextRecord[]} */
+  let records = []
+  return async function readCached() {
+    try {
+      const stat = await statIfExists(stateFile)
+      if (!stat) {
+        size = 0
+        mtimeMs = 0
+        records = []
+        return records
+      }
+      if (size === stat.size && mtimeMs === stat.mtimeMs) return records
+      records = await readSessionContext(stateFile)
+      size = stat.size
+      mtimeMs = stat.mtimeMs
+      return records
+    } catch (err) {
+      onError?.(err)
+      return []
+    }
+  }
+}
+
+/** @param {string} filePath */
+async function statIfExists(filePath) {
+  try {
+    return await fsp.stat(filePath)
+  } catch (err) {
+    if (/** @type {{ code?: string }} */ (err)?.code === 'ENOENT') return undefined
+    throw err
+  }
+}
