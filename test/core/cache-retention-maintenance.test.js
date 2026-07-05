@@ -9,7 +9,7 @@ import path from 'node:path'
 import { createRetentionEnforcer, DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
-import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, tableExists } from '../../src/core/cache/iceberg/store.js'
+import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
@@ -739,6 +739,40 @@ test('orphan sweep reclaims a stale epoch generation and keeps the live one', as
 
     assert.equal(await pathExists(orphan), false, 'stale epoch orphan should be reclaimed')
     assert.ok(tableExists(live), 'live epoch generation must remain')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('legacy epoch compaction preserves the table sort order', async () => {
+  const cacheRoot = await makeTmpDir('maint-epoch-sort')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'source=test')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      compaction: null,
+      layout: 'epoch',
+    })
+
+    const report = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    assert.ok(report.totalCompacted > 0)
+
+    const epoch1 = path.join(partDir, 'epoch=1')
+    assert.ok(tableExists(epoch1), 'compaction should write the next epoch generation')
+    const { resolver, lister } = await createLocalIcebergIO()
+    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(epoch1), resolver, lister })
+    assert.deepEqual(
+      sortColumnsFromMetadata(metadata),
+      [{ column: 'id', direction: 'asc' }],
+      'the epoch swap must carry the declared sort order'
+    )
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

@@ -169,7 +169,7 @@ test('complete maps a 401 without a key to a hint and never leaks the key or pro
       assert.equal(err.hypErrorKind, 'completion_http_401')
       assert.equal(err.status, 401)
       assert.ok(!err.message.includes('PROVIDER_ECHOED'), 'provider body must not reach the error message')
-      assert.match(err.message, /x-api-key is unset/)
+      assert.match(err.message, /env var TEST_ANT_KEY is unset/)
       return true
     }
   )
