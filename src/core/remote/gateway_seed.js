@@ -89,21 +89,26 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
 }
 
 /**
- * The URL origins that configured `@hypaware/central` sinks target across the
- * effective (local+central) config — i.e. which server(s) this machine is
- * connected to. A fresh, login-first box returns `[]`. Drives login's D4
- * exclusivity gate (LLP 0063): already connected to this origin (re-login,
- * idempotent), to a different origin (reject), or not at all (may enroll).
- * Resolved the same lenient way `seedLoginGateway` resolves sinks, so the two
- * always agree on what counts as a central sink.
+ * The URL origins that `@hypaware/central` sinks target in the **central
+ * config layer** — i.e. which server(s) this machine is *enrolled* to. A
+ * fresh, login-first box returns `[]`. Drives login's D4 exclusivity gate
+ * (LLP 0063): already enrolled to this origin (re-login, idempotent), enrolled
+ * to a different origin (reject), or not enrolled (may enroll).
+ *
+ * Deliberately reads the central layer, **not** the effective (local+central)
+ * config: a hand-authored `@hypaware/central` sink in the user-owned local
+ * layer is not an enrollment (`hyp leave` refuses to touch it, #111), so it
+ * must not count as "connected" — otherwise the gate would block login to a
+ * different server with `hyp leave` advice that cannot clear a local sink. The
+ * gate and `hyp leave` therefore agree that enrollment == the central layer.
  *
  * @param {{ stateDir: string, configPath: string | null }} args
  * @returns {Promise<string[]>}
- * @ref LLP 0063#d4 [implements]: one enrollment per machine — the set of connected central-sink origins is the gate
+ * @ref LLP 0063#d4 [implements]: one enrollment per machine — the central-layer sink origins are the gate; a local sink is the user's own, not an enrollment
  */
 export async function readCentralSinkOrigins({ stateDir, configPath }) {
-  const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
-  const sinks = effective?.sinks ?? {}
+  const { centralConfig } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+  const sinks = centralConfig?.sinks ?? {}
   const origins = new Set()
   for (const entry of Object.values(sinks)) {
     if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue

@@ -385,7 +385,14 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // unseeded (LLP 0063 D3) - declining enrollment, not just forwarding.
   if (!session.gateway) return 0
   if (noForward) {
-    ctx.stdout.write('note: --no-forward - signed in for queries only; this machine is not enrolled and will not forward logs\n')
+    // --no-forward declines *new* enrollment; it cannot un-enroll a machine
+    // that already forwards (that is `hyp leave`). Tell the truth for each case
+    // rather than always claiming "not enrolled".
+    if (alreadyEnrolled) {
+      ctx.stdout.write("note: --no-forward - signed in for queries only; this machine stays enrolled and keeps forwarding (run 'hyp leave' to stop)\n")
+    } else {
+      ctx.stdout.write('note: --no-forward - signed in for queries only; this machine is not enrolled and will not forward logs\n')
+    }
     return 0
   }
 

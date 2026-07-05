@@ -56,6 +56,18 @@ forward; the client acts on that assertion, after warning the user pre-auth (D3)
   old dead-end note with the `provisioned … forwarding to …` line plus the
   interim `run 'hyp attach <client>'` hint.
 
+**The D4 gate keys on the central layer, not the effective (local+central)
+config.** A hand-authored `@hypaware/central` sink in the user-owned *local*
+layer is not an enrollment — `hyp leave` refuses to touch it (#111) — so it must
+not count as "connected"; otherwise the gate would block login to a different
+server with `hyp leave` advice that cannot clear a local sink. The gate and
+`hyp leave` share one definition of "connected": the central layer.
+Provisioning is atomic against partial failure — if seeding the identity into
+the just-written sink fails, the seed is rolled back so no credential-less sink
+lingers (which would otherwise make the daemon demand a bootstrap token the
+login user never had). And `--no-forward` on an already-enrolled machine reports
+the truth ("stays enrolled") rather than a false "not enrolled".
+
 Deferred, named follow-ups: D4's seed-time recheck is not yet under the LLP 0065
 lock ([§D4](#d4)); the D2 attach cascade still needs server LLP 0043
 ([§login-config-pull](#login-config-pull)); `hyp remote logout` and the README

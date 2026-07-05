@@ -76,6 +76,7 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
  * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.js'
  * @import { ConfirmInstall } from '../../../src/core/plugin_install/types.js'
  * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
+ * @import { LoginGatewayCredential } from '../../../src/core/remote/types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { CommandRegistryExtended, InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from '../../../src/core/cli/types.js'
  */
@@ -3376,7 +3377,7 @@ async function runJoin(argv, ctx) {
  * server-owned org), not something the human typed, so provenance — not who
  * ran the command — picks the layer.
  *
- * @param {{ ctx: CommandRunContext, url: string, gateway: import('../remote/types.d.ts').LoginGatewayCredential, noDaemon: boolean }} args
+ * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean }} args
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
  * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
  * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
@@ -3424,7 +3425,23 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   // Seed the login-minted gateway into the freshly written sink's identity
   // (LLP 0061). `seedLoginGateway` resolves sinks from the effective config,
   // which now includes this central seed, so it finds and seeds exactly it.
-  await seedLoginGateway({ stateDir: stateRoot, configPath: localPath, targetUrl: url, gateway })
+  //
+  // The seed config is on disk but its credential is not, so a failure here
+  // (throw, or nothing seeded) would leave a committed sink with no
+  // identity.json — the daemon would then demand a `hyp join` bootstrap token
+  // the login user does not have. Roll the seed back so the machine is cleanly
+  // unenrolled rather than half-enrolled and broken.
+  let seeded
+  try {
+    seeded = await seedLoginGateway({ stateDir: stateRoot, configPath: localPath, targetUrl: url, gateway })
+  } catch (err) {
+    await rollbackCentralSeed(stateRoot)
+    throw err
+  }
+  if (seeded.length === 0) {
+    await rollbackCentralSeed(stateRoot)
+    throw new Error('provisioned the central sink but could not seed its forwarding identity')
+  }
 
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
   const daemonCode = await runDaemonInstall([], ctx)
@@ -3444,6 +3461,19 @@ function safeOrigin(url) {
   } catch {
     return null
   }
+}
+
+/**
+ * Undo a just-written central seed (best-effort): remove the seed file and
+ * clear any applied slot, returning the machine to "no central layer". Used to
+ * roll `enrollCentralSink` back when identity-seeding fails after the seed was
+ * committed, so a partial enrollment never lingers on disk.
+ *
+ * @param {string} stateRoot
+ */
+async function rollbackCentralSeed(stateRoot) {
+  await fs.rm(centralSeedPath(stateRoot), { force: true })
+  resetCentralLayerToSeed(stateRoot)
 }
 
 /**

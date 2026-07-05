@@ -47,6 +47,22 @@ function gatewaySession() {
   }
 }
 
+/**
+ * Enroll a machine by writing a central-layer seed (what `hyp join` / an
+ * enrolling login writes), so the D4 gate sees a real enrollment — as opposed
+ * to a hand-authored sink in the local config, which is not an enrollment.
+ * @param {string} hypHome @param {string} url
+ */
+async function writeCentralSeed(hypHome, url) {
+  const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url, identity: {} } } },
+  }))
+}
+
 test('deriveIdentityBase yields <origin>/v1/identity', () => {
   assert.equal(deriveIdentityBase('https://hyp.internal/mcp'), 'https://hyp.internal/v1/identity')
   assert.equal(deriveIdentityBase('https://hyp.internal:8443/a/b/mcp'), 'https://hyp.internal:8443/v1/identity')
@@ -216,8 +232,9 @@ test('login to a different server than the one this machine is enrolled to is re
   const { ctx, err } = await makeCtx({
     hypHome,
     remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
-    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal' } } },
   })
+  // Enrolled to hyp.internal via the central layer (what join/login writes).
+  await writeCentralSeed(hypHome, 'https://hyp.internal')
   let called = false
   const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
 
@@ -226,6 +243,54 @@ test('login to a different server than the one this machine is enrolled to is re
   assert.equal(called, false) // rejected before any auth
   assert.match(err.join(''), /this machine is connected to https:\/\/hyp\.internal/)
   assert.match(err.join(''), /'hyp leave'/)
+})
+
+test('a hand-authored LOCAL central sink is not an enrollment and does not block login to a different server (LLP 0063 D4)', async () => {
+  const hypHome = await tmpHome()
+  // The central sink lives in the user-owned LOCAL config (via makeCtx `sinks`),
+  // not the central layer. `hyp leave` refuses to touch it, so if the D4 gate
+  // counted it the user would be stuck in a loop with unactionable advice.
+  const { ctx } = await makeCtx({
+    hypHome,
+    remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
+    sinks: { mine: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  let called = false
+  // No gateway minted, so nothing is provisioned; we only assert the gate let us through.
+  const login = /** @type {any} */ (async () => { called = true; return { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme' } })
+
+  const code = await runRemoteLogin(['other'], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(called, true) // the local sink did NOT block the login
+})
+
+test('--no-forward on an already-enrolled machine reports the truth (stays enrolled), not "not enrolled" (LLP 0063 D3)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome, remotes: { prod: { url: 'https://hyp.internal/mcp' } } })
+  await writeCentralSeed(hypHome, 'https://hyp.internal') // already enrolled to prod's origin
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-forward'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /stays enrolled and keeps forwarding/)
+  assert.doesNotMatch(out.join(''), /is not enrolled and will not forward/)
+})
+
+test('a failure seeding the identity rolls the provisioned seed back so no credential-less sink lingers (LLP 0063)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  // Make the real seedLoginGateway's identity write fail: put a directory where
+  // identity.json must be written, so the atomic rename cannot land.
+  const idPath = path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')
+  await fs.mkdir(idPath, { recursive: true })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 1)
+  assert.match(err.join(''), /enrollment failed/)
+  // The seed must NOT be left committed on disk (rollback), or the daemon would
+  // demand a bootstrap token the login user does not have.
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
 })
 
 test('a session without a gateway credential seeds nothing and prints no forwarding output', async () => {
