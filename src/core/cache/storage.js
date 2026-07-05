@@ -25,7 +25,7 @@ import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 import path from 'node:path'
 
 /**
- * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { AsyncCells } from 'squirreling'
  */

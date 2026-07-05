@@ -15,7 +15,7 @@ import { firstPartyPluginMetadata } from '../../src/core/config/validate.js'
 import { createTableFormatProvider } from '../../hypaware-core/plugins-workspace/format-iceberg/src/table-format.js'
 
 /**
- * @import { HypError } from '../../collectivus-plugin-kernel-types.js'
+ * @import { HypError } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))

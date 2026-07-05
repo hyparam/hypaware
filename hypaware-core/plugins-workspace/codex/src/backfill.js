@@ -8,7 +8,7 @@ import { redactRemoteUserinfo } from './git-remote.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CodexRolloutItem, CodexRolloutSession } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */

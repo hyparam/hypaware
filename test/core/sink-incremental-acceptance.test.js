@@ -41,7 +41,7 @@ import { createForwardSink } from '../../hypaware-core/plugins-workspace/central
 import { activate as activateLocalFs } from '../../hypaware-core/plugins-workspace/local-fs/src/index.js'
 
 /**
- * @import { ColumnSpec, QueryPartition, SinkEncoder } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec, QueryPartition, SinkEncoder } from '../../hypaware-plugin-kernel-types.d.ts'
  * @import { Dirent } from 'node:fs'
  */
 

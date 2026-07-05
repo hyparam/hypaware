@@ -3,7 +3,7 @@
 import { Attr, getLogger } from '../observability/index.js'
 
 /**
- * @import { BackfillContribution, BackfillMaterializerContribution, BackfillMaterializerRegistry, BackfillRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillMaterializerContribution, BackfillMaterializerRegistry, BackfillRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

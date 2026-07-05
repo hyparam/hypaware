@@ -13,7 +13,7 @@ import { attach, defaultConfigPath } from './settings.js'
 import { errCode } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/codex'

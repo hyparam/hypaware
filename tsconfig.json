@@ -14,7 +14,7 @@
   },
   "include": [
     "bin",
-    "collectivus-plugin-kernel-types.d.ts",
+    "hypaware-plugin-kernel-types.d.ts",
     "hypaware-core",
     "scripts",
     "src",

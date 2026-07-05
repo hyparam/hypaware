@@ -3,7 +3,7 @@
 import { querySqlVerb } from '../query/verb.js'
 
 /**
- * @import { VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

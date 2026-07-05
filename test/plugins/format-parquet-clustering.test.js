@@ -8,7 +8,7 @@ import { parquetMetadata, parquetReadObjects } from 'hyparquet'
 import { activate } from '../../hypaware-core/plugins-workspace/format-parquet/src/index.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const noopLog = { debug() {}, info() {}, warn() {}, error() {} }

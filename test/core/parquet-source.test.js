@@ -14,7 +14,7 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 /**
  * @import { AsyncBuffer } from 'hyparquet'
  * @import { AsyncDataSource, ExprNode, SelectStatement } from 'squirreling/src/types.js'
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */

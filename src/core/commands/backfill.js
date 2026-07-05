@@ -17,7 +17,7 @@ import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
  */
 

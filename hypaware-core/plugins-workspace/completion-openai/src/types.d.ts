@@ -4,7 +4,7 @@
  * file; these shapes cover config validation and client construction.
  */
 
-import type { PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { PluginLogger } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 export interface OpenAiCompletionConfig {
   /** Origin (or origin + `/v1`) of an OpenAI-compatible chat-completions API. */

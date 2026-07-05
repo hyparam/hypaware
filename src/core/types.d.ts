@@ -3,7 +3,7 @@ import type {
   PluginContributionManifest,
   PluginManifest,
   PluginName,
-} from '../../collectivus-plugin-kernel-types.d.ts'
+} from '../../hypaware-plugin-kernel-types.d.ts'
 import type { CapabilityRegistryHandle } from './registry/types.d.ts'
 import type { PluginMetadata } from './config/types.d.ts'
 

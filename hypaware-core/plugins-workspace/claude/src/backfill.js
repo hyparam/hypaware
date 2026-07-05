@@ -12,7 +12,7 @@ import { anthropicMessageAttributes } from './anthropic.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */

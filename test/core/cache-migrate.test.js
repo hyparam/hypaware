@@ -12,7 +12,7 @@ import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { migrateLegacyPartitions } from '../../src/core/cache/migrate.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */

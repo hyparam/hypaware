@@ -12,7 +12,7 @@ import type {
   PluginLogger,
   JsonObject,
   AiGatewayCapability,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ClientDescriptor } from '../../../src/core/types.d.ts'
 
 /**

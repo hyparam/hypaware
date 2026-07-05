@@ -12,7 +12,7 @@ import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD, SPOOL_DIR } from '../../src/core/cache/spool.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  */
 

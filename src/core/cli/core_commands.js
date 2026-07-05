@@ -48,7 +48,7 @@ import {
 } from '../commands/clients.js'
 
 /**
- * @import { CommandRegistration } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CommandRegistryExtended } from '../../../src/core/cli/types.js'
  */
 

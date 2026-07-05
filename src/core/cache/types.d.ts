@@ -1,4 +1,4 @@
-import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../collectivus-plugin-kernel-types.d.ts'
+import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
 // Partitioning declaration promoted to a neutral core home

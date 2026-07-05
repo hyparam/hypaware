@@ -12,7 +12,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/vector-search/src/shards.js'
 
 /**
- * @import { CachePartitionMeta } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta } from '../../hypaware-plugin-kernel-types.js'
  * @import { ShardMeta, VectorIndexDeclaration } from '../../hypaware-core/plugins-workspace/vector-search/src/types.js'
  */
 

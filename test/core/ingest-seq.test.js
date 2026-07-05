@@ -20,7 +20,7 @@ import { scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { discoverCachePartitions } from '../../src/core/cache/partition.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.d.ts'
  */
 
 /** @returns {Promise<string>} */

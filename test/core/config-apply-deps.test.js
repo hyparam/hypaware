@@ -12,7 +12,7 @@ import { loadLock } from '../../src/core/plugin_install/install.js'
 import { getEntry, writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
- * @import { PluginName } from '../../collectivus-plugin-kernel-types.js'
+ * @import { PluginName } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

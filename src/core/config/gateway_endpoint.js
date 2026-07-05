@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.d.ts'
  */
 
 /**

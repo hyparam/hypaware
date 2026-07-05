@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

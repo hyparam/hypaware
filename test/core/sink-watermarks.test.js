@@ -12,7 +12,7 @@ import {
 } from '../../src/core/sinks/watermarks.js'
 
 /**
- * @import { SinkContinuation } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { SinkContinuation } from '../../hypaware-plugin-kernel-types.d.ts'
  */
 
 /** @returns {Promise<string>} */

@@ -21,7 +21,7 @@ import { appendSessionContext } from '../../hypaware-core/plugins-workspace/clau
  * `ai_gateway.projected_exchange` materializer, so the assertions cover
  * the exact path `hyp backfill claude` exercises in production.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 // ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { OidcSession } from '../../../src/core/remote/types.js'
  */
 

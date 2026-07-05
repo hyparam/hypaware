@@ -5,7 +5,7 @@ import { projectGraph } from './project.js'
 import { requireGraphRuntime } from './runtime.js'
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  */
 

@@ -52,7 +52,7 @@ config section or a new lifecycle phase.
   [`src/core/daemon/runtime.js`](../src/core/daemon/runtime.js) constructs the
   engine and threads it into `bootKernel`; plain CLI boots leave
   `ctx.configControl` undefined (`ConfigControlFacade` in
-  [`collectivus-plugin-kernel-types.d.ts`](../collectivus-plugin-kernel-types.d.ts)).
+  [`hypaware-plugin-kernel-types.d.ts`](../hypaware-plugin-kernel-types.d.ts)).
   So a reconciler attached to the daemon is daemon-only by construction —
   `hyp status` performs no machine effects.
 - **Backfill providers are already enumerable and config-filtered.**

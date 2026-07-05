@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { GitSourceParts } from '../../../src/core/plugin_install/types.js'
  */
 

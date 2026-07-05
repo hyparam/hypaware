@@ -2,7 +2,7 @@
 // This is the curated declaration the `exports` map points at. Re-exporting
 // here is the sanctioned exception to the no-re-export rule because this is a
 // public package entry (see `./integration`). The canonical source of truth
-// for the design types remains `collectivus-plugin-kernel-types.d.ts` at the
+// for the design types remains `hypaware-plugin-kernel-types.d.ts` at the
 // repo root.
 
 // Runtime value exports (mirror src/core/index.js).
@@ -50,7 +50,7 @@ export type {
   DatasetDataSourceContext,
   DatasetSchema,
   ColumnSpec,
-} from '../../collectivus-plugin-kernel-types.d.ts'
+} from '../../hypaware-plugin-kernel-types.d.ts'
 
 // Iceberg partitioning declaration - core surface consumed by the cache and the
 // @hypaware/format-iceberg export (LLP 0003 / LLP 0022#shared-core-helpers).

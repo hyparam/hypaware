@@ -8,7 +8,7 @@ import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
- * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { messagesEndpoint } from './config.js'
 
 /**
- * @import { CompletionBatchRequest, CompletionBatchResult, CompletionBatchStatus, CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CompletionBatchRequest, CompletionBatchResult, CompletionBatchStatus, CompletionCapability, CompletionContentBlock, CompletionDelta, CompletionMessage, CompletionRequest, CompletionResult, HypError, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AnthropicCompletionConfig, CreateAnthropicCompletionOptions, FetchLike } from './types.js'
  */
 

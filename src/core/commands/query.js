@@ -6,7 +6,7 @@ import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
 /**
- * @import { CommandRunContext, VerbInputSchema } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 // `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into

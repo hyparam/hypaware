@@ -9,7 +9,7 @@ import { contentFilterClauses, runSql, sqlQuote } from './sql.js'
 
 /**
  * @import { CurateDecision, EnrichRuntime } from './types.js'
- * @import { CompletionRequest, CompletionResult, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CompletionRequest, CompletionResult, VectorSearchHit } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const CURATOR = 'enrich.t2'

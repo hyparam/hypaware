@@ -6,7 +6,7 @@ import { discoverCachePartitions } from '../../../../src/core/cache/partition.js
 import { unionSources, emptySource } from 'hypaware/core/query'
 
 /**
- * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */

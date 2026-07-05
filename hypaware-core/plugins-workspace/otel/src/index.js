@@ -4,7 +4,7 @@ import { otelDatasetRegistration, PLUGIN_NAME } from './datasets.js'
 import { startOtelSource } from './source.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  */
 

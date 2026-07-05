@@ -17,7 +17,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
- * @import { ColumnSpec, QueryScope } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec, QueryScope } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @param {string} prefix */

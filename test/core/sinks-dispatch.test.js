@@ -8,7 +8,7 @@ import { createSinkRegistry } from '../../src/core/registry/sinks.js'
 import { validateConfig, firstPartyPluginMetadata } from '../../src/core/config/validate.js'
 
 /**
- * @import { BlobStore, Sink, SinkEncoder, TableFormatProvider } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, Sink, SinkEncoder, TableFormatProvider } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

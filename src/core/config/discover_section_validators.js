@@ -7,7 +7,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { createConfigRegistry } from './schema.js'
 
 /**
- * @import { ConfigRegistry, ConfigSectionRegistration, PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigRegistry, ConfigSectionRegistration, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'
  */
 

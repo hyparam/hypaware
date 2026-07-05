@@ -14,7 +14,7 @@
  */
 
 /**
- * @import { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  * @import { GascityRuntime } from './types.js'
  */

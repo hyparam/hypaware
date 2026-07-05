@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 export const SCAFFOLD_KINDS = ['source', 'sink', 'dataset']
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
-const KERNEL_TYPES = path.join(REPO_ROOT, 'collectivus-plugin-kernel-types.d.ts')
+const KERNEL_TYPES = path.join(REPO_ROOT, 'hypaware-plugin-kernel-types.d.ts')
 
 /**
  * Generate a minimal, doctor-clean plugin on disk. The output passes

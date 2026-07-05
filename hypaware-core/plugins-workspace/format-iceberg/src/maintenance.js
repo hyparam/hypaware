@@ -13,7 +13,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { createBlobStoreIO, tableUrlForBlobPrefix } from './blob-io.js'
 
 /**
- * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../../../../src/core/observability/runtime.js'
  * @import { Resolver, Lister, TableMetadata } from 'icebird/src/types.js'
  * @import { ExportCompactionResult, ExportRetentionConfig, ExportMaintenanceDatasetReport, ExportMaintenanceReport } from './types.js'

@@ -13,7 +13,7 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  *   CreateAttachHandlerOptions,
  *   DesiredAction,
  * } from './types.d.ts'
- * @import { JsonObject } from '../../../collectivus-plugin-kernel-types.d.ts'
+ * @import { JsonObject } from '../../../hypaware-plugin-kernel-types.d.ts'
  */
 
 /**

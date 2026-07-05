@@ -11,7 +11,7 @@ import { installPlugin, loadLock } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
 
 /**
- * @import { ConfigRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, ValidationError, ValidationResult } from '../../../hypaware-plugin-kernel-types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'
  * @import { ConfigApplyDeps, PinnedInstallResult } from '../../../src/core/config/types.js'
  */

@@ -7,7 +7,7 @@ import process from 'node:process'
 import { readObservabilityEnv } from '../observability/env.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  */
 

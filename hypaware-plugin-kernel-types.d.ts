@@ -9,10 +9,6 @@
  * [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md) and the
  * per-subsystem LLPs (e.g. plugin manifest LLP 0005, capabilities LLP 0006).
  * When the two disagree the LLPs win; this file is updated to follow.
- *
- * Filename is `collectivus-plugin-kernel-types.d.ts` only because the
- * project rename to HypAware is still pending; the contents already
- * track the HypAware design.
  */
 
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'

@@ -22,7 +22,7 @@ import { executeQuerySql } from '../query/sql.js'
 import { pluginStateDir } from './plugin.js'
 
 /**
- * @import { AiGatewayCapability, CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
  */

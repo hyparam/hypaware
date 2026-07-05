@@ -10,7 +10,7 @@ import {
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 
 /**
- * @import { AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const materializer = aiGatewayBackfillMaterializer()

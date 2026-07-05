@@ -21,7 +21,7 @@ import { runStatus } from './status.js'
 import { isTty } from '../cli/stdio.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { HypAwareStatusReport } from '../../../src/core/daemon/types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from '../../../src/core/cli/types.js'

@@ -7,7 +7,7 @@ import { Attr, getLogger, withSpan } from './observability/index.js'
 import { isPlainObject } from './util/json_util.js'
 
 /**
- * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../collectivus-plugin-kernel-types.js'
+ * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../hypaware-plugin-kernel-types.js'
  * @import { FailedManifest, LoadedManifest, ManifestErrorKind } from '../../src/core/types.js'
  */
 

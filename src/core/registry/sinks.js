@@ -3,7 +3,7 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -19,7 +19,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 
 /**
  * Build the kernel-side SinkRegistry. The contract surface
- * (`register`/`get`/`list`) matches `collectivus-plugin-kernel-types.d.ts
+ * (`register`/`get`/`list`) matches `hypaware-plugin-kernel-types.d.ts
  * §Sinks` and is what plugins see through `ctx.sinks`: plugins call
  * `register(contribution)` to declare a sink type (matching their
  * manifest `contributes.sinks[]` entry). Instance creation (per

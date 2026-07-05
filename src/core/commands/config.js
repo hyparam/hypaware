@@ -8,7 +8,7 @@ import { validateConfig } from '../config/validate.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

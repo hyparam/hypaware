@@ -33,7 +33,7 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigLayerDrop, ConfigValidationError, V1Diagnostic } from '../../../src/core/config/types.js'
  * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonState, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic, StatusDiagnosticKind } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'

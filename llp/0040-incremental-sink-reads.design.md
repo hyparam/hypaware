@@ -139,7 +139,7 @@ cost guarantee.
 ## 2. Storage API extension {#storage-api-extension}
 
 `QueryStorageService.readRows` today
-(`collectivus-plugin-kernel-types.d.ts`, impl in `src/core/cache/storage.js`):
+(`hypaware-plugin-kernel-types.d.ts`, impl in `src/core/cache/storage.js`):
 
 ```ts
 readRows(tablePath: string, columns?: string[]): AsyncIterable<Record<string, unknown>>

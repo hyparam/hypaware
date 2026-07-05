@@ -15,7 +15,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, SinkEncoder } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -477,7 +477,7 @@ function fixturePluginSource() {
 import path from 'node:path'
 
 /**
- * @import { ActivePlugin, SinkEncoder } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, SinkEncoder } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 const DATASET = 'dummy_rows'

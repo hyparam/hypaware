@@ -13,7 +13,7 @@ import {
 import { shardFileBase, shardPaths } from '../../hypaware-core/plugins-workspace/vector-search/src/shards.js'
 
 /**
- * @import { CachePartitionMeta, EmbedderCapability } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta, EmbedderCapability } from '../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
  * @import { ShardMeta, VectorIndexDeclaration } from '../../hypaware-core/plugins-workspace/vector-search/src/types.js'
  */

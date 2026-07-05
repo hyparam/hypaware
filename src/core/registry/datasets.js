@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../../src/core/cache/types.js'
  */
 

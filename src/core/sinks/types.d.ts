@@ -3,7 +3,7 @@ import type {
   HypAwareV2Config,
   QueryRegistry,
   SinkContinuation,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
 import type { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types.d.ts'
 

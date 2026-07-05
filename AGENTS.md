@@ -52,7 +52,7 @@ actually shipped in V1.
   both `src/<P>/x.js` and the generated `types/<P>/x.d.ts`, so consumers of the
   published package get real types instead of `any`. A bare `./types.d.ts`
   resolves in `src` but dangles in `types/`. Imports of the root kernel contract
-  (`collectivus-plugin-kernel-types.js`) and `hypaware-core/...` already reach
+  (`hypaware-plugin-kernel-types.js`) and `hypaware-core/...` already reach
   the root, so they only need the `.js` extension. This is the icebird-style
   no-copy convention.
 

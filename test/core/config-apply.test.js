@@ -19,7 +19,7 @@ import {
 import { parseConfigShape } from '../../src/core/config/schema.js'
 
 /**
- * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.js'
+ * @import { PluginConfigInstance } from '../../hypaware-plugin-kernel-types.js'
  * @import { ConfigApplyDeps, PinnedInstallResult } from '../../src/core/config/types.js'
  */
 

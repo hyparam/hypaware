@@ -7,7 +7,7 @@ import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_clien
 import { createHttpMcpClient, isAuthStatus } from './client.js'
 
 /**
- * @import { CommandRunContext, VerbRegistration } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext, VerbRegistration } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

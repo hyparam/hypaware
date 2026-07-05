@@ -18,7 +18,7 @@ import {
  *   SinkEncoder,
  *   PluginActivationContext,
  *   TableFormatProvider,
- * } from '../../../collectivus-plugin-kernel-types.js'
+ * } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  * @import { MaterializeError, MaterializeResult } from '../../../src/core/sinks/types.js'

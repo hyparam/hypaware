@@ -29,7 +29,7 @@ import { materializeSinks } from '../../src/core/sinks/materialize.js'
  *   Sink,
  *   SinkEncoder,
  *   TableFormatProvider,
- * } from '../../collectivus-plugin-kernel-types.d.ts'
+ * } from '../../hypaware-plugin-kernel-types.d.ts'
  * @import { KernelRuntime } from '../../src/core/runtime/types.js'
  */
 

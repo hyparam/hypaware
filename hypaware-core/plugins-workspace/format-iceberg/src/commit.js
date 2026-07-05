@@ -12,7 +12,7 @@ import { validatePartitionSpecStability } from '../../../../src/core/iceberg/par
 import { icebergSchemaForColumns, mergeFieldIdsFromTable, rowsToIcebergRecords } from './schema.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CommitInput, CommitResult, DatasetPartitioning, TableState } from './types.js'
  * @import { Lister, PartitionSpec, Resolver, Snapshot, TableMetadata } from 'icebird/src/types.js'
  */

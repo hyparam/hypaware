@@ -6,7 +6,7 @@ import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 
 /**
- * @import { AiGatewayCapability, CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { HypAwareStatusReport, ServiceState } from '../../../src/core/daemon/types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */

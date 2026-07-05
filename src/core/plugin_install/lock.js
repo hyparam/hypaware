@@ -6,7 +6,7 @@ import { atomicWriteJson } from '../util/fs_atomic.js'
 import { pluginLockPath } from './paths.js'
 
 /**
- * @import { PluginLockEntry, PluginLockFile, PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginLockEntry, PluginLockFile, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 const SCHEMA_VERSION = 1

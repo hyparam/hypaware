@@ -3,13 +3,13 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { PluginActivationContext, SourceContribution, SourceRegistry, SourceStatus, StartedSource } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext, SourceContribution, SourceRegistry, SourceStatus, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 
 /**
  * Build the kernel-side SourceRegistry. The contract surface
- * (`register`/`get`/`list`) matches `collectivus-plugin-kernel-types.d.ts
+ * (`register`/`get`/`list`) matches `hypaware-plugin-kernel-types.d.ts
  * §Sources` and is what plugins see through `ctx.sources`. The kernel
  * additionally drives lifecycle via `start`/`stop`/`reload`/`status`,
  * which wrap the source's `StartedSource` handle in `source.*` spans

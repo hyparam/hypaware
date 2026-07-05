@@ -10,7 +10,7 @@ import { createSinkWatermarkStore } from './watermarks.js'
  *   QueryPartition,
  *   QueryStorageService,
  *   SinkContinuation,
- * } from '../../../collectivus-plugin-kernel-types.js'
+ * } from '../../../hypaware-plugin-kernel-types.js'
  * @import { IncrementalRowReader, SinkWatermarkKey, SinkWatermarkStore } from '../../../src/core/sinks/types.js'
  */
 

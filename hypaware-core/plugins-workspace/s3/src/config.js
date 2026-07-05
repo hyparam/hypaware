@@ -11,7 +11,7 @@
  */
 
 /**
- * @import { JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { S3ConfigValidationError, S3ConfigValidationResult, S3SinkConfig } from './types.js'
  */
 

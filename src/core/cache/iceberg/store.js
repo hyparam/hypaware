@@ -33,7 +33,7 @@ import {
 import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AppendOptions, CachePartitioningDeclaration } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'

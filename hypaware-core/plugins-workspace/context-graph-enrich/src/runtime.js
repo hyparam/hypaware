@@ -8,7 +8,7 @@
  */
 
 /**
- * @import { CompletionCapability, EmbedderCapability, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CompletionCapability, EmbedderCapability, VectorSearchCapability } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { EnrichRuntime } from './types.js'
  */
 

@@ -23,7 +23,7 @@ import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/trans
  * row during compaction, upgrades it to native identity, and dedupes it
  * against the committed uuid twin, collapsing the pair after the fact.
  *
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

@@ -7,7 +7,7 @@ import { datasetsRoot } from '../cache/paths.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 
 /**
- * @import { SinkContinuation } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkRecord, SinkWatermarkStore } from '../../../src/core/sinks/types.js'
  */
 

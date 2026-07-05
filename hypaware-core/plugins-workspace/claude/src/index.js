@@ -16,7 +16,7 @@ import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/claude'

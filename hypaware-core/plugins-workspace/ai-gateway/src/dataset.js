@@ -9,7 +9,7 @@ import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from '
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
  * @import { AsyncDataSource } from 'squirreling'

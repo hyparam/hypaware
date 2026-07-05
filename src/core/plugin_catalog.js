@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CapabilityName, PluginManifest, PluginName } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CapabilityName, PluginManifest, PluginName } from '../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog, PluginCatalogEntry } from '../../src/core/types.js'
  * @import { PluginMetadata } from '../../src/core/config/types.js'
  */

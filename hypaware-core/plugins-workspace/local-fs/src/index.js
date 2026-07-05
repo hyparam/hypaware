@@ -16,7 +16,7 @@ import {
 import { createLocalFsBlobStore, resolveExportsBaseDir } from './blob-store.js'
 
 /**
- * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  */
 

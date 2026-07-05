@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * @import { CachePartitionMeta } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { RawShardHit, ShardMeta, ShardState, VectorIndexDeclaration } from './types.js'
  */
 

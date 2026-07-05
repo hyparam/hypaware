@@ -20,7 +20,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 
 /**
- * @import { BlobStore } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const DATASET = 'maintain_rows'

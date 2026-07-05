@@ -20,7 +20,7 @@ import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTab
 import { isPlainObject } from '../util/json_util.js'
 
 /**
- * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { QueryCacheMaintenanceConfig } from '../../../hypaware-plugin-kernel-types.js'
  * @import {
  *   CachePartitionMeta,
  *   CacheStatusPartition,
@@ -34,8 +34,8 @@ import { isPlainObject } from '../util/json_util.js'
  *   AppendOptions,
  *   SettleContext,
  * } from '../../../src/core/cache/types.js'
- * @import { QueryStorageService } from '../../../collectivus-plugin-kernel-types.js'
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { QueryStorageService } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PartitionSpec, TableMetadata } from 'icebird/src/types.js'
  * @import { Dirent } from 'node:fs'
  */

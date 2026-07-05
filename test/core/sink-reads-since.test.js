@@ -11,7 +11,7 @@ import { appendRowsToTable, scanRowsFromTable } from '../../src/core/cache/icebe
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.d.ts'
  */
 
 /** @returns {Promise<string>} */

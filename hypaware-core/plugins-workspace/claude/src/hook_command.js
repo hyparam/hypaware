@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { appendSessionContext } from './session_context.js'
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const execFileAsync = promisify(execFile)

@@ -24,7 +24,7 @@ import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { resolveIcebergDir } from '../../src/core/cache/storage.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  */
 

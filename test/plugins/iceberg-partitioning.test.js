@@ -18,7 +18,7 @@ import {
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
- * @import { BlobStore, ColumnSpec, DatasetRegistration, HypError } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec, DatasetRegistration, HypError } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */

@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { HypAwareV2Config, QueryRemoteTarget } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, QueryRemoteTarget } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

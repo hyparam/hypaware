@@ -13,4 +13,4 @@ export type {
   ScanOptions,
   ScanResults,
   QueryStorageService,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'

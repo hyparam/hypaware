@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ConfigLayerDrop, ConfigMergeResult, ConfigValidationError } from '../../../src/core/config/types.js'
  */
 

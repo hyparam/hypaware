@@ -13,7 +13,7 @@ import {
 } from '../../hypaware-core/plugins-workspace/format-iceberg/src/state.js'
 
 /**
- * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, HypError } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

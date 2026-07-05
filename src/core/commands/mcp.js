@@ -10,7 +10,7 @@ import { serveStdio } from '../mcp/stdio.js'
 import { buildOperationContext } from '../cli/verb_command.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

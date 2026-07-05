@@ -1,12 +1,12 @@
 // @ts-check
 
 /**
- * @import { CommandRegistration, CommandRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRegistration, CommandRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
  * Build a kernel CommandRegistry that conforms to
- * `collectivus-plugin-kernel-types.d.ts §CLI Commands`.
+ * `hypaware-plugin-kernel-types.d.ts §CLI Commands`.
  *
  * Behavior:
  *

@@ -27,7 +27,7 @@ import { copyDir } from '../util/fs_copy.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  */

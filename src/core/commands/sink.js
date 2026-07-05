@@ -4,7 +4,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.js'
  * @import { ExtendedSinkRegistry } from '../../../src/core/registry/types.js'

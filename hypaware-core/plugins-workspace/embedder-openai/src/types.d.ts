@@ -4,7 +4,7 @@
  * file; these shapes cover config validation and client construction.
  */
 
-import type { EmbedderCapability, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { EmbedderCapability, PluginLogger } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 export interface EmbedderOpenAiConfig {
   /** Origin (or origin + `/v1`) of an OpenAI-compatible embeddings API. */

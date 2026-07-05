@@ -18,7 +18,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 
 /**
  * @import { AddressInfo } from 'node:net'
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 

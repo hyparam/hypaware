@@ -13,7 +13,7 @@ import {
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjectorContext, AiGatewayProjectedExchange } from '../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../src/core/usage-policy/types.js'
  */

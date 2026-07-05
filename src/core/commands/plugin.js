@@ -28,7 +28,7 @@ import { SCAFFOLD_KINDS, scaffoldPlugin } from '../plugin_doctor/scaffold.js'
 import { isTty } from '../cli/stdio.js'
 
 /**
- * @import { CommandRunContext, PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PluginMetadata } from '../../../src/core/config/types.js'
  * @import { ConfirmInstall } from '../../../src/core/plugin_install/types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'

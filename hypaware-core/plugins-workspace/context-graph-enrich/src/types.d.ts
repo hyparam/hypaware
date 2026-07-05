@@ -14,7 +14,7 @@ import type {
   PluginLogger,
   QueryRegistry,
   VectorSearchCapability,
-} from '../../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
 
 export interface NodeSpec {

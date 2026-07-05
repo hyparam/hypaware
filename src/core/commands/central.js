@@ -18,7 +18,7 @@ import { buildKnownPluginsForCtx } from './plugin.js'
 import { isTty, readAllStdin } from '../cli/stdio.js'
 
 /**
- * @import { CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import { LoginGatewayCredential } from '../../../src/core/remote/types.js'
  */
 

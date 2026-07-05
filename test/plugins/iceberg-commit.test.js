@@ -19,7 +19,7 @@ import { markerSubsumedBySnapshot } from '../../hypaware-core/plugins-workspace/
 import { createLocalFsBlobStore } from '../../hypaware-core/plugins-workspace/local-fs/src/blob-store.js'
 
 /**
- * @import { BlobStore, HypError } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, HypError } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

@@ -37,7 +37,7 @@ function ignoringResolver(ignoredDir) {
  * `ai_gateway.projected_exchange` materializer, so the assertions cover the
  * exact path `hyp backfill codex` exercises in production.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 // ---------------------------------------------------------------------------
