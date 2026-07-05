@@ -3,6 +3,8 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
+import { atomicWriteFile } from 'hypaware/core/util'
+
 export const SESSION_CONTEXT_MAX_BYTES = 1024 * 1024
 export const SESSION_CONTEXT_MAX_RECORDS = 4096
 export const SESSION_CONTEXT_READ_TAIL_BYTES = 512 * 1024
@@ -163,9 +165,7 @@ async function compactSessionContextIfNeeded(filePath, opts) {
     if (body.length > 0) body += '\n'
   }
 
-  const tmpPath = `${filePath}.${process.pid}.compact.tmp`
-  await fsp.writeFile(tmpPath, body, 'utf8')
-  await fsp.rename(tmpPath, filePath)
+  await atomicWriteFile(filePath, body)
 }
 
 /**

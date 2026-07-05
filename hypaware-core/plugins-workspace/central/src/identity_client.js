@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { atomicWriteJsonSync } from 'hypaware/core/util'
+
 /**
  * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.js'
  */
@@ -310,12 +312,9 @@ function mintChanged(persisted, centralUrl, bootstrapToken) {
  * @param {PersistedIdentity} identity
  */
 function writePersistedFile(filePath, identity) {
-  const dir = path.dirname(filePath)
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`
-  fs.writeFileSync(tmp, JSON.stringify(identity, null, 2), { mode: 0o600 })
-  fs.renameSync(tmp, filePath)
+  atomicWriteJsonSync(filePath, identity, { mode: 0o600, dirMode: 0o700 })
   try {
+    // Re-assert in case the write mode was masked by a permissive umask.
     fs.chmodSync(filePath, 0o600)
   } catch {
     // best effort: rename already replaced the file

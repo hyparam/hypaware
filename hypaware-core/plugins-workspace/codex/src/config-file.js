@@ -1,16 +1,13 @@
 // @ts-check
 
-import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { CodexSettingsError } from './errors.js'
+import { ConcurrentEditError, atomicWriteFile } from 'hypaware/core/util'
 
-/**
- * @import { FileHandle } from 'node:fs/promises'
- */
+import { CodexSettingsError } from './errors.js'
 
 /**
  * Default Codex config location: `$CODEX_HOME/config.toml` when set,
@@ -60,45 +57,12 @@ export async function readConfig(configPath) {
  * @returns {Promise<void>}
  */
 export async function writeAtomic(filePath, body, expectedMtimeMs) {
-  if (expectedMtimeMs !== undefined) {
-    let current
-    try {
-      current = await fs.stat(filePath)
-    } catch (err) {
-      if (errCode(err) === 'ENOENT') {
-        throw new CodexSettingsError(
-          `${filePath} disappeared between read and write; retry`,
-          { code: 'CONCURRENT_EDIT', cause: err }
-        )
-      }
-      throw err
-    }
-    if (current.mtimeMs !== expectedMtimeMs) {
-      throw new CodexSettingsError(
-        `${filePath} changed on disk between read and write; retry`,
-        { code: 'CONCURRENT_EDIT' }
-      )
-    }
-  }
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-
-  const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
-
-  /** @type {FileHandle | undefined} */
-  let handle
   try {
-    handle = await fs.open(tmpPath, 'w', 0o600)
-    await handle.writeFile(body, 'utf8')
-    await handle.sync()
-  } finally {
-    if (handle) await handle.close()
-  }
-
-  try {
-    await fs.rename(tmpPath, filePath)
+    await atomicWriteFile(filePath, body, { mode: 0o600, fsync: true, expectedMtimeMs })
   } catch (err) {
-    await fs.rm(tmpPath, { force: true })
+    if (err instanceof ConcurrentEditError) {
+      throw new CodexSettingsError(err.message, { code: 'CONCURRENT_EDIT', cause: err.cause ?? err })
+    }
     throw err
   }
 }

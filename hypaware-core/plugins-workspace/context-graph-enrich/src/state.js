@@ -2,7 +2,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+
+import { atomicWriteJsonSync } from 'hypaware/core/util'
 
 /**
  * Per-host watermark state for the enrichment proposer, persisted as a single
@@ -104,11 +105,7 @@ function readMark(value) {
  * @param {EnrichStateFile} state
  */
 export function writeState(stateDir, state) {
-  fs.mkdirSync(stateDir, { recursive: true })
-  const file = path.join(stateDir, STATE_FILE)
-  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
-  fs.renameSync(tmp, file)
+  atomicWriteJsonSync(path.join(stateDir, STATE_FILE), state)
 }
 
 /**
