@@ -89,6 +89,32 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
 }
 
 /**
+ * The URL origins that configured `@hypaware/central` sinks target across the
+ * effective (local+central) config — i.e. which server(s) this machine is
+ * connected to. A fresh, login-first box returns `[]`. Drives login's D4
+ * exclusivity gate (LLP 0063): already connected to this origin (re-login,
+ * idempotent), to a different origin (reject), or not at all (may enroll).
+ * Resolved the same lenient way `seedLoginGateway` resolves sinks, so the two
+ * always agree on what counts as a central sink.
+ *
+ * @param {{ stateDir: string, configPath: string | null }} args
+ * @returns {Promise<string[]>}
+ * @ref LLP 0063#d4 [implements]: one enrollment per machine — the set of connected central-sink origins is the gate
+ */
+export async function readCentralSinkOrigins({ stateDir, configPath }) {
+  const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
+  const sinks = effective?.sinks ?? {}
+  const origins = new Set()
+  for (const entry of Object.values(sinks)) {
+    if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue
+    const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
+    const origin = typeof config.url === 'string' ? originOf(config.url) : null
+    if (origin) origins.add(origin)
+  }
+  return [...origins]
+}
+
+/**
  * Seed the sink's persisted identity from a login-minted gateway credential
  * (LLP 0061 D2): the file `acquire()` already loads, pre-populated, so the
  * sink skips `bootstrap()` and the unchanged refresh / 401-retry path carries
