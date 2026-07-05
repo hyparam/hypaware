@@ -18,12 +18,61 @@ import { Attr, getLogger } from '../observability/index.js'
 const CALLBACK_PATH = '/callback'
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
 
+// The landing page the human sees after the browser redirect. Self-contained
+// (inline styles + inline Hyperparam mark, no external fetches) since the only
+// thing the browser can reach here is the ephemeral loopback port. `{{title}}`
+// and `{{detail}}` are filled from our own literals in respond().
+const LANDING_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HypAware login</title>
+<style>
+  :root { color-scheme: light dark }
+  html, body { height: 100% }
+  body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 2rem;
+    text-align: center;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: #ffffff;
+    color: #1a1a2e;
+  }
+  .logo { width: 84px; height: 84px; margin-bottom: 2rem }
+  h1 { margin: 0 0 0.75rem; font-size: 2rem; font-weight: 600; letter-spacing: -0.01em }
+  p { margin: 0; font-size: 1.05rem; line-height: 1.5; color: #6b6b7b }
+  @media (prefers-color-scheme: dark) {
+    body { background: #14141b; color: #f0f0f5 }
+    p { color: #a0a0b0 }
+  }
+</style>
+</head>
+<body>
+  <svg class="logo" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Hyperparam">
+    <path d="m48 3.5 38.37 22.25v44.5l-38.37 22.25-38.37-22.25v-44.5z" fill="#4433aa" stroke="#4433aa" stroke-linejoin="round" stroke-width="7"/>
+    <g fill="none" stroke="#ffffff" stroke-linejoin="round" stroke-width="8">
+      <path d="m48 48-29.14-17 2.81e-4 34 29.14 17z"/>
+      <path d="m77.14 31-29.14 17v34l29.14-17z"/>
+      <path d="m48 48-29.14-17 29.14-17 29.14 17z"/>
+    </g>
+  </svg>
+  <h1>{{title}}</h1>
+  <p>{{detail}}</p>
+</body>
+</html>`
+
 /**
  * Start the single-shot loopback receiver. Binds `127.0.0.1:0`, then resolves
  * `{ redirectUri, port, waitForCode, close }` so the caller can build the start
  * URL before opening the browser. `waitForCode()` resolves `{ code }` when
  * `/callback` arrives with a matching `state`; it rejects on `error=`, a
- * `state` mismatch, or timeout. The listener serves a minimal "you can close
+ * `state` mismatch, or timeout. The listener serves a styled "you can close
  * this tab" page, then closes after one request.
  *
  * @param {{ state: string, timeoutMs?: number }} args
@@ -109,7 +158,7 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
     // identity server echoes `state` on both success and error (LLP 0059), so a
     // real provider error still matches here and surfaces below.
     if (returnedState !== state) {
-      respond(res, 'Unexpected login callback. You can close this tab.')
+      respond(res, 'Unexpected login callback', 'You can close this tab.')
       return
     }
     if (params.has('error')) {
@@ -118,16 +167,16 @@ export function startLoopbackReceiver({ state, timeoutMs = DEFAULT_TIMEOUT_MS })
       // it reaches the error message, the log ERROR_KIND, and the terminal, so a
       // crafted value can't inject newlines into logs or terminal output.
       const safeError = sanitizeErrorCode(error ?? '')
-      respond(res, 'Login failed. You can close this tab and return to the terminal.')
+      respond(res, 'Login failed', 'You can close this tab and return to the terminal.')
       fail(Object.assign(new Error(`login failed: ${safeError}`), { callbackError: safeError }), safeError)
       return
     }
     if (!code) {
-      respond(res, 'Login response was missing a code. You can close this tab.')
+      respond(res, 'Login response was missing a code', 'You can close this tab.')
       fail(new Error('loopback callback had neither code nor error'), 'no_code')
       return
     }
-    respond(res, 'Login complete. You can close this tab and return to the terminal.')
+    respond(res, 'Login complete', 'You can close this tab and return to the terminal.')
     deliver({ code })
   })
 
@@ -209,9 +258,18 @@ function sanitizeErrorCode(error) {
   return cleaned || 'unknown_error'
 }
 
-/** @param {ServerResponse} res @param {string} message */
-function respond(res, message) {
-  const body = `<!doctype html><html><head><meta charset="utf-8"><title>HypAware login</title></head><body style="font-family:system-ui;padding:2rem"><p>${message}</p></body></html>`
+/**
+ * Serve the single loopback landing page the human sees after the browser
+ * redirect. `title`/`detail` are always our own literals (never callback input),
+ * so they go into the markup unescaped; the Hyperparam mark is inlined so the
+ * page renders with no network fetch on a host that only reached a loopback port.
+ *
+ * @param {ServerResponse} res
+ * @param {string} title
+ * @param {string} detail
+ */
+function respond(res, title, detail) {
+  const body = LANDING_PAGE.replace('{{title}}', title).replace('{{detail}}', detail)
   // Browsers open the callback over a keep-alive connection. `server.close()`
   // waits for in-flight sockets to drain, so without `Connection: close` the
   // idle keep-alive socket would hold the event loop until Node's
