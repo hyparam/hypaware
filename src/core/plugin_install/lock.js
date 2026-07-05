@@ -1,8 +1,8 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 
+import { atomicWriteJson } from '../util/fs_atomic.js'
 import { pluginLockPath } from './paths.js'
 
 /**
@@ -71,11 +71,7 @@ export async function readLock(stateDir) {
  */
 export async function writeLock(stateDir, lock) {
   const lockPath = pluginLockPath(stateDir)
-  await fs.mkdir(path.dirname(lockPath), { recursive: true })
-  const normalized = normalizeLock(lock)
-  const tmpPath = `${lockPath}.tmp-${process.pid}-${Date.now()}`
-  await fs.writeFile(tmpPath, JSON.stringify(normalized, null, 2) + '\n', 'utf8')
-  await fs.rename(tmpPath, lockPath)
+  await atomicWriteJson(lockPath, normalizeLock(lock))
 }
 
 /**

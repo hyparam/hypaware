@@ -3,6 +3,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
+
 /**
  * @import { PidFileEntry } from '../../../src/core/daemon/types.js'
  */
@@ -42,11 +44,7 @@ export function writePidFile(stateRoot, entry) {
   if (!entry || typeof entry.pid !== 'number' || !Number.isFinite(entry.pid)) {
     throw new TypeError('writePidFile: entry.pid must be a finite number')
   }
-  const dir = daemonRunDir(stateRoot)
-  fs.mkdirSync(dir, { recursive: true })
-  const tmp = path.join(dir, `hypaware.pid.${process.pid}.tmp`)
-  fs.writeFileSync(tmp, JSON.stringify(entry, null, 2) + '\n', 'utf8')
-  fs.renameSync(tmp, pidFilePath(stateRoot))
+  atomicWriteJsonSync(pidFilePath(stateRoot), entry)
 }
 
 /**
@@ -60,14 +58,8 @@ export function writePidFile(stateRoot, entry) {
  */
 export function readPidFile(stateRoot) {
   const file = pidFilePath(stateRoot)
-  /** @type {string} */
-  let raw
-  try {
-    raw = fs.readFileSync(file, 'utf8')
-  } catch (err) {
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return null
-    throw err
-  }
+  const raw = readFileIfExistsSync(file)
+  if (raw === null) return null
   /** @type {unknown} */
   const parsed = JSON.parse(raw)
   if (

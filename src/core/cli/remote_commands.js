@@ -19,6 +19,7 @@ import {
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from './core_commands.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
+import { atomicWriteJson } from '../util/fs_atomic.js'
 
 /**
  * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
@@ -631,10 +632,7 @@ async function mutateLocalConfig(configPath, mutate) {
   const config = await readLocalConfigRaw(configPath)
   if (config.version === undefined) config.version = 2
   mutate(config)
-  await fs.mkdir(path.dirname(configPath), { recursive: true })
-  const tmpPath = `${configPath}.tmp-${process.pid}`
-  await fs.writeFile(tmpPath, JSON.stringify(config, null, 2) + '\n')
-  await fs.rename(tmpPath, configPath)
+  await atomicWriteJson(configPath, config)
 }
 
 /**

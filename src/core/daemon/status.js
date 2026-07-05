@@ -16,6 +16,7 @@ import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -60,11 +61,7 @@ export function statusFilePath(stateRoot) {
  * @param {DaemonStatus} status
  */
 export function writeStatusFile(stateRoot, status) {
-  const dir = daemonRunDir(stateRoot)
-  fs.mkdirSync(dir, { recursive: true })
-  const tmp = path.join(dir, `status.json.${process.pid}.tmp`)
-  fs.writeFileSync(tmp, JSON.stringify(status, null, 2) + '\n', 'utf8')
-  fs.renameSync(tmp, statusFilePath(stateRoot))
+  atomicWriteJsonSync(statusFilePath(stateRoot), status)
 }
 
 /**
@@ -76,14 +73,8 @@ export function writeStatusFile(stateRoot, status) {
  * @returns {DaemonStatus | null}
  */
 export function readStatusFile(stateRoot) {
-  /** @type {string} */
-  let raw
-  try {
-    raw = fs.readFileSync(statusFilePath(stateRoot), 'utf8')
-  } catch (err) {
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return null
-    throw err
-  }
+  const raw = readFileIfExistsSync(statusFilePath(stateRoot))
+  if (raw === null) return null
   /** @type {unknown} */
   const parsed = JSON.parse(raw)
   if (!parsed || typeof parsed !== 'object') {

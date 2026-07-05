@@ -5,6 +5,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
+import { atomicWriteJson } from '../util/fs_atomic.js'
 import { refreshSession, sessionExpiredMessage } from './identity_client.js'
 
 /**
@@ -714,13 +715,9 @@ async function withCredentialsLock(stateDir, fn) {
  * @returns {Promise<void>}
  */
 async function writeCredentials(stateDir, map) {
-  await fs.mkdir(stateDir, { recursive: true })
   const finalPath = remoteCredentialsPath(stateDir)
-  const tmpPath = `${finalPath}.tmp-${process.pid}`
-  await fs.writeFile(tmpPath, JSON.stringify(map, null, 2) + '\n', { mode: 0o600 })
-  // Rename is atomic on the same filesystem; the 0600 mode carries over.
-  await fs.rename(tmpPath, finalPath)
-  // Re-assert the mode in case the file pre-existed with looser perms.
+  await atomicWriteJson(finalPath, map, { mode: 0o600 })
+  // Re-assert in case the write mode was masked by a permissive umask.
   await fs.chmod(finalPath, 0o600).catch(() => {})
   // Invalidate the read cache: our own write must be visible to the next read
   // regardless of mtime resolution.

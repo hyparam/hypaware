@@ -11,6 +11,7 @@ import {
   defaultUnitDir,
   unitFileName,
 } from './platform.js'
+import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
  * @import {
@@ -233,7 +234,7 @@ export async function installSystemdUnit(options) {
   fs.mkdirSync(plan.unitDir, { recursive: true })
   fs.mkdirSync(plan.logDir, { recursive: true })
 
-  atomicWrite(plan.targetPath, plan.content)
+  atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 })
 
   const reload = await systemctl.daemonReload()
   if (reload.exitCode !== 0) {
@@ -408,17 +409,3 @@ function parsePid(value) {
   return Number.isInteger(n) && n > 0 ? n : undefined
 }
 
-/**
- * @param {string} targetPath
- * @param {string} content
- */
-function atomicWrite(targetPath, content) {
-  const tmpPath = `${targetPath}.tmp.${process.pid}.${Date.now()}`
-  fs.writeFileSync(tmpPath, content, { mode: 0o644 })
-  try {
-    fs.renameSync(tmpPath, targetPath)
-  } catch (err) {
-    try { fs.unlinkSync(tmpPath) } catch { /* ignore */ }
-    throw err
-  }
-}

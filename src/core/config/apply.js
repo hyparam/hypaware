@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { parseConfigShape } from './schema.js'
 
 /**
@@ -175,10 +176,7 @@ export function createConfigControl(opts) {
 
   /** @param {ConfigControlState} state */
   function writeState(state) {
-    fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
-    const tmp = `${statePath}.tmp.${process.pid}.${now()}`
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 })
-    fs.renameSync(tmp, statePath)
+    atomicWriteJsonSync(statePath, state, { mode: 0o600, dirMode: 0o700 })
   }
 
   /** @param {ConfigSlot} slot */

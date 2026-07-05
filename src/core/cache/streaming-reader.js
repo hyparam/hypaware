@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 
+import { atomicWriteJson } from '../util/fs_atomic.js'
+
 /**
  * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
  * @import { FlushChunk, ProgressState } from '../../../src/core/cache/types.js'
@@ -259,12 +261,9 @@ export async function readProgress(spoolFilePath) {
  * @param {number} byteOffset
  */
 export async function writeProgress(spoolFilePath, byteOffset) {
-  const dest = progressPath(spoolFilePath)
-  const tmp = `${dest}.tmp.${process.pid}.${Date.now()}`
   /** @type {ProgressState} */
   const state = { byteOffset, updatedAt: new Date().toISOString() }
-  await fs.writeFile(tmp, JSON.stringify(state, null, 2), 'utf8')
-  await fs.rename(tmp, dest)
+  await atomicWriteJson(progressPath(spoolFilePath), state)
 }
 
 /**

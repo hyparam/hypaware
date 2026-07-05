@@ -1,14 +1,12 @@
 // @ts-check
 
-import crypto from 'node:crypto'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
-import path from 'node:path'
 
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 
 /**
- * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
  * @import { DetachFromDiskResult } from './types.d.ts'
  */
@@ -723,56 +721,13 @@ async function writeJsonAtomic(settingsPath, value, expectedMtimeMs, fs) {
  * @param {typeof fsp} fs
  */
 async function writeTextAtomic(filePath, body, expectedMtimeMs, fs) {
-  if (expectedMtimeMs !== undefined) {
-    let current
-    try {
-      current = await fs.stat(filePath)
-    } catch (err) {
-      if (errCode(err) === 'ENOENT') {
-        throw new ClientDetachError(`${filePath} disappeared between read and write; retry`, {
-          code: 'CONCURRENT_EDIT',
-          cause: err,
-        })
-      }
-      throw err
-    }
-    if (current.mtimeMs !== expectedMtimeMs) {
-      throw new ClientDetachError(`${filePath} changed on disk between read and write; retry`, {
-        code: 'CONCURRENT_EDIT',
-      })
-    }
-  }
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-
-  const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
-  // The uniquely-named temp file must never outlive a *failed* write: a
-  // write/sync/close error before the final rename would otherwise orphan it on
-  // disk (these names are unique per call, so a leak accumulates rather than
-  // being overwritten on retry). Track whether the rename committed and
-  // best-effort unlink the temp on every other exit — swallowing the unlink
-  // error so a cleanup hiccup never masks the real write/rename failure.
-  let renamed = false
   try {
-    /** @type {FileHandle | undefined} */
-    let handle
-    try {
-      handle = await fs.open(tmpPath, 'w', 0o600)
-      await handle.writeFile(body, 'utf8')
-      await handle.sync()
-    } finally {
-      if (handle) await handle.close()
+    await atomicWriteFile(filePath, body, { mode: 0o600, fsync: true, expectedMtimeMs, fs })
+  } catch (err) {
+    if (err instanceof ConcurrentEditError) {
+      throw new ClientDetachError(err.message, { code: 'CONCURRENT_EDIT', cause: err.cause ?? err })
     }
-    await fs.rename(tmpPath, filePath)
-    renamed = true
-  } finally {
-    if (!renamed) {
-      try {
-        await fs.rm(tmpPath, { force: true })
-      } catch {
-        // Best-effort: a leaked temp file is preferable to losing the original error.
-      }
-    }
+    throw err
   }
 }
 

@@ -3,6 +3,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { atomicWriteJson } from '../util/fs_atomic.js'
+
 /**
  * @import { IngestSeqAllocator } from '../../../src/core/cache/types.js'
  */
@@ -52,10 +54,8 @@ async function readNextSeq(statePath) {
  * @param {bigint} nextSeq
  */
 async function writeNextSeq(statePath, nextSeq) {
-  const tmp = `${statePath}.tmp.${process.pid}.${Date.now()}`
   const payload = { v: 1, nextSeq: nextSeq.toString(), updatedAt: new Date().toISOString() }
-  await fs.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
-  await fs.rename(tmp, statePath)
+  await atomicWriteJson(statePath, payload)
 }
 
 /**

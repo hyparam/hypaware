@@ -20,6 +20,7 @@ import { validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
+import { atomicWriteJson } from '../util/fs_atomic.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
@@ -3245,10 +3246,7 @@ async function runJoin(argv, ctx) {
     async (span) => {
       // The token is the only credential on disk until the first
       // bootstrap, so the seed write is atomic and mode 0600.
-      await fs.mkdir(path.dirname(seedPath), { recursive: true })
-      const tmp = `${seedPath}.tmp.${process.pid}.${Date.now()}`
-      await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
-      await fs.rename(tmp, seedPath)
+      await atomicWriteJson(seedPath, seed, { mode: 0o600 })
       ctx.stdout.write(`✓ Wrote seed config ${seedPath}\n`)
 
       // A re-enrollment (identity broke, operator re-runs `join`) writes a
@@ -3331,10 +3329,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
       sinks: { central: { plugin: '@hypaware/central', config: { url, identity: {} } } },
     }
     const seedPath = centralSeedPath(stateRoot)
-    await fs.mkdir(path.dirname(seedPath), { recursive: true })
-    const tmp = `${seedPath}.tmp.${process.pid}.${Date.now()}`
-    await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
-    await fs.rename(tmp, seedPath)
+    await atomicWriteJson(seedPath, seed, { mode: 0o600 })
     // Inherit join's #139 fix: supersede a stale applied slot so the fresh
     // enrollment is honored rather than silently shadowed.
     resetCentralLayerToSeed(stateRoot)

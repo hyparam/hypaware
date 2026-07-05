@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 
+import { atomicWriteJson } from '../util/fs_atomic.js'
 import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
@@ -340,16 +341,12 @@ function pendingBytesSync(tablePath) {
  * @param {{ rowCount: number, bytesWritten: number }} details
  */
 async function writeLastFlush(tablePath, details) {
-  const dir = spoolDir(tablePath)
-  await fs.mkdir(dir, { recursive: true })
-  const tmp = path.join(dir, `${LAST_FLUSH_FILE}.tmp.${process.pid}.${Date.now()}`)
   const payload = {
     flushedAt: new Date().toISOString(),
     rowCount: details.rowCount,
     bytesWritten: details.bytesWritten,
   }
-  await fs.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
-  await fs.rename(tmp, path.join(dir, LAST_FLUSH_FILE))
+  await atomicWriteJson(path.join(spoolDir(tablePath), LAST_FLUSH_FILE), payload)
 }
 
 /**
