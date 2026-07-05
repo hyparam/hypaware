@@ -464,6 +464,68 @@ test('OpenAI Responses function_call in input becomes an assistant tool_use mess
   assert.equal(toolResult.content, 'a.txt\nb.txt')
 })
 
+test('OpenAI Responses bare-string content array entries project as text blocks', () => {
+  // Backfill has always tolerated a bare string inside a content array
+  // (older/leaner records); the live path used to silently drop it, so
+  // the live row lost content and stopped hash-matching the backfilled
+  // row for the same conversation.
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: ['hello there'] }],
+    }),
+    response_body: JSON.stringify({ id: 'resp_1', output_text: 'hi' }),
+  }), context()))
+
+  assert.equal(projection.messages[0].role, 'user')
+  assert.deepEqual(projection.messages[0].content, [{ type: 'text', text: 'hello there' }])
+})
+
+test('OpenAI Responses reasoning items in input replay project as assistant thinking', () => {
+  // A replayed reasoning item carries no `role`; before the shared
+  // projection core it fell into the generic branch and was emitted as a
+  // `user` text message (its reasoning_text block carries a `text` key),
+  // diverging from the backfill's assistant `thinking` shape.
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'why?' }] },
+        { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking it through' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'because' }] },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_1', output_text: 'done' }),
+  }), context()))
+
+  assert.deepEqual(
+    projection.messages.map((/** @type {any} */ m) => m.role),
+    ['user', 'assistant', 'assistant', 'assistant']
+  )
+  assert.deepEqual(projection.messages[1].content, [{ type: 'thinking', thinking: 'thinking it through' }])
+
+  // Encrypted-only reasoning still projects nothing.
+  const encryptedOnly = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    provider: 'openai',
+    request_body: JSON.stringify({
+      model: 'gpt-5',
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'why?' }] },
+        { type: 'reasoning', encrypted_content: 'opaque-blob' },
+      ],
+    }),
+    response_body: JSON.stringify({ id: 'resp_2', output_text: 'done' }),
+  }), context()))
+  assert.deepEqual(encryptedOnly.messages.map((/** @type {any} */ m) => m.role), ['user', 'assistant'])
+})
+
 test('OpenAI Responses custom_tool_call uses payload.input when arguments is missing', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
