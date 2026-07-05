@@ -34,6 +34,7 @@ import {
   readSessionContext,
 } from './session_context.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
+import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
@@ -695,14 +696,6 @@ function mergeAttrs(a, b) {
 }
 
 /**
- * @param {string | null | undefined} value
- */
-function parseMaybeJson(value) {
-  if (typeof value !== 'string') return value
-  try { return JSON.parse(value) } catch { return value }
-}
-
-/**
  * @param {string | null | undefined} raw
  */
 function parseHeaders(raw) {
@@ -716,15 +709,3 @@ function parseHeaders(raw) {
   }
 }
 
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}

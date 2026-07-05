@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, JsonValue, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
@@ -1007,19 +1008,6 @@ function tryParseJson(value) {
   } catch {
     return undefined
   }
-}
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value @returns {string | undefined} */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /** @param {unknown} value @returns {boolean | undefined} */

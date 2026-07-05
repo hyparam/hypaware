@@ -5,6 +5,7 @@ import os from 'node:os'
 
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
+import { errCode, isPlainObject } from '../util/json_util.js'
 
 /**
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -732,21 +733,6 @@ async function writeTextAtomic(filePath, body, expectedMtimeMs, fs) {
 }
 
 /* ------------------------------- Utilities -------------------------------- */
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} err */
-function errCode(err) {
-  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
-  const code = Reflect.get(err, 'code')
-  return typeof code === 'string' ? code : undefined
-}
 
 /** @param {unknown} err */
 function errMsg(err) {

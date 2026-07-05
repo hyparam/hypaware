@@ -3,7 +3,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
-import { atomicWriteFile } from 'hypaware/core/util'
+import { atomicWriteFile, isPlainObject, stringValue } from 'hypaware/core/util'
 
 export const SESSION_CONTEXT_MAX_BYTES = 1024 * 1024
 export const SESSION_CONTEXT_MAX_RECORDS = 4096
@@ -201,15 +201,3 @@ function positiveInt(value) {
     : undefined
 }
 
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}

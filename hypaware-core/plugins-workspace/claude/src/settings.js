@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { ConcurrentEditError, atomicWriteFile } from 'hypaware/core/util'
+import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hypaware/core/util'
 
 /**
  * Claude Code settings.json attach writer, keyed on the `_hypaware`
@@ -285,14 +285,6 @@ function shellQuote(value) {
   return quote + value.split(quote).join(quote + '\\' + quote + quote) + quote
 }
 
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 /** @param {string} content */
 function looksLikeJsonc(content) {
   let inString = false
@@ -347,13 +339,6 @@ function validateStateFile(stateFile) {
       { code: 'INVALID_STATE_FILE' }
     )
   }
-}
-
-/** @param {unknown} err */
-function errCode(err) {
-  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
-  const code = Reflect.get(err, 'code')
-  return typeof code === 'string' ? code : undefined
 }
 
 /** @param {unknown} err */

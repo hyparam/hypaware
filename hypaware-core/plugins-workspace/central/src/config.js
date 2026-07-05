@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isPlainObject } from 'hypaware/core/util'
+
 /**
  * @import { CentralSinkConfig } from './types.js'
  */
@@ -66,10 +68,3 @@ function invalid(message) {
   return /** @type {const} */ ({ ok: false, message })
 }
 
-/**
- * @param {unknown} v
- * @returns {v is Record<string, unknown>}
- */
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
-}

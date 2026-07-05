@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { atomicWriteJsonSync } from 'hypaware/core/util'
+import { atomicWriteJsonSync, isPlainObject } from 'hypaware/core/util'
 
 /**
  * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.js'
@@ -418,14 +418,6 @@ async function readErrorDetail(response) {
     return `${response.status} ${body.trim().slice(0, 200)}`
   }
   return `${response.status} ${response.statusText || ''}`.trim()
-}
-
-/**
- * @param {unknown} v
- * @returns {v is Record<string, unknown>}
- */
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
 }
 
 /** @param {unknown} err */

@@ -9,6 +9,7 @@ import { loadManifest } from '../manifest.js'
 import { Attr, withSpan } from '../observability/index.js'
 import { provenanceFromUrl } from './git_source.js'
 import { pluginInstallDir } from './paths.js'
+import { sha256Hex } from '../util/json_util.js'
 
 /**
  * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
@@ -121,7 +122,7 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
       path.join(tmpRepo, 'hypaware.plugin.json'),
       'utf8'
     )
-    const manifestHash = hashString(manifestRaw)
+    const manifestHash = sha256Hex(manifestRaw)
     const stagedContentHash = await hashArtifactTree(tmpRepo)
 
     if (beforeCommit) {
@@ -156,7 +157,7 @@ export async function fetchGitSource({ source, stateDir, runId, beforeCommit }) 
       path.join(installDir, 'hypaware.plugin.json'),
       'utf8'
     )
-    const installedManifestHash = hashString(installedManifestRaw)
+    const installedManifestHash = sha256Hex(installedManifestRaw)
     const contentHash = await hashArtifactTree(installDir)
 
     return {
@@ -625,11 +626,6 @@ function redactGitMessage(msg) {
 /** @param {unknown} err */
 function describeError(err) {
   return err instanceof Error ? err.message : String(err)
-}
-
-/** @param {string} s */
-function hashString(s) {
-  return crypto.createHash('sha256').update(s).digest('hex')
 }
 
 function defaultRunId() {

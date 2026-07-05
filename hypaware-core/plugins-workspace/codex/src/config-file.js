@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
-import { ConcurrentEditError, atomicWriteFile } from 'hypaware/core/util'
+import { ConcurrentEditError, atomicWriteFile, errCode } from 'hypaware/core/util'
 
 import { CodexSettingsError } from './errors.js'
 
@@ -65,13 +65,6 @@ export async function writeAtomic(filePath, body, expectedMtimeMs) {
     }
     throw err
   }
-}
-
-/** @param {unknown} err */
-function errCode(err) {
-  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
-  const code = Reflect.get(err, 'code')
-  return typeof code === 'string' ? code : undefined
 }
 
 /** @param {unknown} err */
