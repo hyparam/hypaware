@@ -1049,3 +1049,22 @@ test('record repo_root is preserved when only the remote is derived', async () =
     await env.cleanup()
   }
 })
+
+test('an already-aborted signal stops the scan before any session is projected', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-abort', 'sess-abort', conversationRows('sess-abort'))
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    // Sanity: the same transcript yields an item when the run is not aborted.
+    const items = await collectItems(provider.run(runContext().ctx))
+    assert.equal(items.length, 1)
+
+    const controller = new AbortController()
+    controller.abort()
+    const aborted = await collectItems(provider.run({ ...runContext().ctx, signal: controller.signal }))
+    assert.equal(aborted.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})

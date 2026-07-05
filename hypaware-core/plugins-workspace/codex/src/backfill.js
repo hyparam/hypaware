@@ -4,6 +4,13 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import {
+  AI_GATEWAY_MESSAGES_DATASET,
+  errMessage,
+  filterByWindow,
+  projectedExchangeItem,
+  resolveWindow,
+} from '../../../../src/core/backfill/scan_util.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
@@ -53,16 +60,7 @@ const DEFAULT_PLUGIN_NAME = '@hypaware/codex'
 const PROVIDER = 'openai'
 const CONVERSATION_SOURCE = 'codex'
 
-// Dataset name and materializer dispatch key owned by `@hypaware/ai-gateway`
-// (DATASET_NAME / AI_GATEWAY_PROJECTED_EXCHANGE_KIND in its dataset.js).
-// Held as plain constants so this adapter does not pull the gateway's
-// runtime module graph in just for two strings; the end-to-end test pins
-// them by feeding yielded items through the real materializer.
-const AI_GATEWAY_MESSAGES_DATASET = 'ai_gateway_messages'
-const PROJECTED_EXCHANGE_KIND = 'ai_gateway.projected_exchange'
-
 const COMPONENT = 'plugin.codex.backfill'
-const DAY_MS = 24 * 60 * 60 * 1000
 
 /**
  * Build the Codex backfill provider. Registered at plugin activation via
@@ -230,7 +228,7 @@ async function* runCodexBackfill(args) {
         status: 'ok',
       })
 
-      yield backfillItem(exchange, {
+      yield projectedExchangeItem(exchange, {
         client_name: clientName,
         source_path: filePath,
         native_id: session.sessionId,
@@ -872,71 +870,6 @@ function reasoningText(value) {
   return parts.length > 0 ? parts.join('\n') : undefined
 }
 
-/**
- * Wrap a projection in the `BackfillItem` envelope the runner expects. The
- * kernel types `value` as `Record<string, unknown>`; the projection is a
- * concrete interface, so bridge through `unknown`.
- *
- * @param {AiGatewayProjectedExchange} exchange
- * @param {BackfillProvenance} provenance
- * @returns {BackfillItem}
- */
-function backfillItem(exchange, provenance) {
-  return {
-    dataset: AI_GATEWAY_MESSAGES_DATASET,
-    kind: PROJECTED_EXCHANGE_KIND,
-    value: /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (exchange)),
-    provenance,
-  }
-}
-
-/**
- * Resolve the import window in epoch millis. Explicit `since` / `until` win;
- * otherwise a positive `retentionDays` sets the lower bound so a default run
- * does not import history older than the cache retains. Both ends may be
- * open (`undefined`).
- *
- * @param {BackfillRunContext} ctx
- * @returns {{ sinceMs?: number, untilMs?: number }}
- */
-function resolveWindow(ctx) {
-  const untilMs = parseIsoMs(ctx.until)
-  let sinceMs = parseIsoMs(ctx.since)
-  if (sinceMs === undefined && typeof ctx.retentionDays === 'number' && ctx.retentionDays > 0) {
-    sinceMs = Date.now() - ctx.retentionDays * DAY_MS
-  }
-  return { sinceMs, untilMs }
-}
-
-/**
- * Keep items whose timestamp falls within the window. Items with no
- * timestamp (legacy rollouts, untimestamped records) are kept rather than
- * silently dropped.
- *
- * @param {CodexRolloutItem[]} items
- * @param {{ sinceMs?: number, untilMs?: number }} window
- * @returns {CodexRolloutItem[]}
- */
-function filterByWindow(items, window) {
-  if (window.sinceMs === undefined && window.untilMs === undefined) return items
-  return items.filter((item) => {
-    if (item.timestampMs === undefined) return true
-    if (window.sinceMs !== undefined && item.timestampMs < window.sinceMs) return false
-    if (window.untilMs !== undefined && item.timestampMs > window.untilMs) return false
-    return true
-  })
-}
-
-/**
- * @param {string | undefined} value
- * @returns {number | undefined}
- */
-function parseIsoMs(value) {
-  if (typeof value !== 'string' || value.length === 0) return undefined
-  const ms = Date.parse(value)
-  return Number.isFinite(ms) ? ms : undefined
-}
-
 /** @param {unknown} value @returns {number | undefined} */
 function timestampToMs(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -1051,7 +984,3 @@ function firstBool(...values) {
   return values.find((value) => typeof value === 'boolean')
 }
 
-/** @param {unknown} err */
-function errMessage(err) {
-  return err instanceof Error ? err.message : String(err)
-}

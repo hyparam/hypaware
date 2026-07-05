@@ -10,6 +10,13 @@ import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
 import { anthropicMessageAttributes } from './anthropic.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import {
+  AI_GATEWAY_MESSAGES_DATASET,
+  errMessage,
+  filterByWindow,
+  projectedExchangeItem,
+  resolveWindow,
+} from '../../../../src/core/backfill/scan_util.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
@@ -43,17 +50,6 @@ import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/ind
 
 const DEFAULT_CLIENT_NAME = 'claude'
 const DEFAULT_PLUGIN_NAME = '@hypaware/claude'
-
-// Dataset name and materializer dispatch key owned by
-// `@hypaware/ai-gateway` (DATASET_NAME / AI_GATEWAY_PROJECTED_EXCHANGE_KIND
-// in its dataset.js). Held as plain constants here so this adapter does
-// not pull the gateway's runtime module graph in just for two strings;
-// the end-to-end test pins them by feeding yielded items through the
-// real materializer.
-const AI_GATEWAY_MESSAGES_DATASET = 'ai_gateway_messages'
-const PROJECTED_EXCHANGE_KIND = 'ai_gateway.projected_exchange'
-
-const DAY_MS = 24 * 60 * 60 * 1000
 
 /**
  * Build the Claude backfill provider. Registered at plugin activation
@@ -155,6 +151,7 @@ async function* runClaudeBackfill(args) {
   let messagesProjected = 0
 
   for (const filePath of walkTranscriptFiles(projectsDir)) {
+    if (ctx.signal?.aborted) break
     filesSeen += 1
     /** @type {TranscriptEntry[]} */
     let entries
@@ -219,7 +216,7 @@ async function* runClaudeBackfill(args) {
         status: 'ok',
       })
 
-      yield backfillItem(exchange, {
+      yield projectedExchangeItem(exchange, {
         client_name: clientName,
         source_path: filePath,
         native_id: sessionId,
@@ -234,55 +231,6 @@ async function* runClaudeBackfill(args) {
     sessions_projected: sessionsProjected,
     messages_projected: messagesProjected,
     status: 'ok',
-  })
-}
-
-/**
- * Resolve the import window in epoch millis. Explicit `since` / `until`
- * win; otherwise a positive `retentionDays` sets the lower bound so a
- * default run does not import history older than the cache retains.
- * Both ends may be open (`undefined`).
- *
- * @param {BackfillRunContext} ctx
- * @returns {{ sinceMs: number | undefined, untilMs: number | undefined }}
- */
-function resolveWindow(ctx) {
-  const untilMs = parseIsoMs(ctx.until)
-  let sinceMs = parseIsoMs(ctx.since)
-  if (sinceMs === undefined && typeof ctx.retentionDays === 'number' && ctx.retentionDays > 0) {
-    sinceMs = Date.now() - ctx.retentionDays * DAY_MS
-  }
-  return { sinceMs, untilMs }
-}
-
-/**
- * Parse an optional ISO-8601 string to epoch millis, returning
- * `undefined` for an absent or unparseable value.
- *
- * @param {string | undefined} value
- * @returns {number | undefined}
- */
-function parseIsoMs(value) {
-  if (typeof value !== 'string' || value.length === 0) return undefined
-  const ms = Date.parse(value)
-  return Number.isFinite(ms) ? ms : undefined
-}
-
-/**
- * Keep entries whose timestamp falls within the window. Entries with an
- * unparseable timestamp are kept rather than silently dropped.
- *
- * @param {TranscriptEntry[]} entries
- * @param {{ sinceMs: number | undefined, untilMs: number | undefined }} window
- * @returns {TranscriptEntry[]}
- */
-function filterByWindow(entries, window) {
-  if (window.sinceMs === undefined && window.untilMs === undefined) return entries
-  return entries.filter((entry) => {
-    if (entry.timestampMs === undefined) return true
-    if (window.sinceMs !== undefined && entry.timestampMs < window.sinceMs) return false
-    if (window.untilMs !== undefined && entry.timestampMs > window.untilMs) return false
-    return true
   })
 }
 
@@ -499,24 +447,6 @@ function minimizedRawFrame(entry) {
 }
 
 /**
- * Wrap a projection in the `BackfillItem` envelope the runner expects.
- * The kernel types `value` as `Record<string, unknown>`; the projection
- * is a concrete interface, so bridge through `unknown`.
- *
- * @param {AiGatewayProjectedExchange} exchange
- * @param {BackfillProvenance} provenance
- * @returns {BackfillItem}
- */
-function backfillItem(exchange, provenance) {
-  return {
-    dataset: AI_GATEWAY_MESSAGES_DATASET,
-    kind: PROJECTED_EXCHANGE_KIND,
-    value: /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (exchange)),
-    provenance,
-  }
-}
-
-/**
  * Read the session-context records, degrading to `[]` on error so a
  * missing or unreadable channel never aborts the backfill (the join is
  * best-effort; `cwd` / `git_branch` are nullable columns).
@@ -539,9 +469,4 @@ async function readSessionContextSafe(stateFile, log) {
     })
     return []
   }
-}
-
-/** @param {unknown} err */
-function errMessage(err) {
-  return err instanceof Error ? err.message : String(err)
 }
