@@ -1,12 +1,13 @@
 // @ts-check
 
 import {
+  assignTranscriptIdentity,
   defaultClaudeProjectsDir,
   loadAgentMeta,
   loadTranscriptFile,
   walkTranscriptFiles,
 } from './transcripts.js'
-import { pickLatestMatching, readSessionContext } from './session_context.js'
+import { createSessionContextReader, pickLatestMatching } from './session_context.js'
 import { deriveRepoFromCwd } from './git_repo.js'
 import { anthropicMessageAttributes } from './anthropic.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
@@ -139,7 +140,19 @@ async function* runClaudeBackfill(args) {
     status: 'ok',
   })
 
-  const sessionRecords = await readSessionContextSafe(stateFile, log)
+  // Degrades to [] on error so a missing or unreadable channel never
+  // aborts the backfill: the join is best-effort and `cwd` /
+  // `git_branch` are nullable columns.
+  const sessionRecords = await createSessionContextReader(stateFile, (err) => {
+    log.warn('claude.backfill.session_context_read_failed', {
+      component: 'plugin.claude.backfill',
+      operation: 'backfill.scan',
+      state_file: stateFile,
+      status: 'error',
+      error_kind: 'session_context_read_failed',
+      error: errMessage(err),
+    })
+  })()
   // Subagent → spawning tool call: one scan of the projects tree builds
   // the agent-id → toolUseId map from the `agent-<id>.meta.json` sidecars,
   // so backfilled subagent rows carry the same `spawned_by_tool_use_id`
@@ -353,11 +366,13 @@ async function projectedExchangeFromEntries(args) {
 }
 
 /**
- * Project one transcript entry into an `AiGatewayProjectedMessage`,
- * mirroring the live Claude projector's native-DAG identity mapping.
- * Differs from live capture in two ways: `role` / `content` come
- * straight from the transcript frame, and `raw_frame` carries only a
- * minimized native-identity stub: never the full transcript line.
+ * Project one transcript entry into an `AiGatewayProjectedMessage`.
+ * Identity and provenance come from `assignTranscriptIdentity`: the
+ * same single-source field copy the live projector applies on a
+ * transcript match, so the two paths cannot drift. `role` / `content`
+ * come straight from the transcript frame, and this path additionally
+ * stamps the per-line model, agent-spawn provenance, usage, and
+ * timestamp the live wire capture recovers elsewhere.
  *
  * @param {TranscriptEntry} entry
  * @param {Map<string, { tool_use_id: string }>} agentMeta
@@ -374,30 +389,15 @@ function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
     role,
     content: /** @type {any} */ (entry.content),
   }
-  if (entry.provider_uuid) {
-    // Native id only: like the live projector, `previous_message_id`
-    // is left to the gateway expansion, which fills the full
-    // prior-message chain; the native DAG parent rides `parent_uuid`.
-    message.message_id = entry.provider_uuid
-    message.provider_uuid = entry.provider_uuid
-  }
-  if (entry.parent_uuid) message.parent_uuid = entry.parent_uuid
-  if (entry.logical_parent_uuid) message.logical_parent_uuid = entry.logical_parent_uuid
-  if (entry.source_tool_assistant_uuid) message.source_tool_assistant_uuid = entry.source_tool_assistant_uuid
-  if (entry.request_id) message.request_id = entry.request_id
-  if (entry.prompt_id) message.prompt_id = entry.prompt_id
-  if (entry.provider_type) message.provider_type = entry.provider_type
-  if (entry.provider_subtype) message.provider_subtype = entry.provider_subtype
+  // Native id only: like the live projector, `previous_message_id` is
+  // left to the gateway expansion, which fills the full prior-message
+  // chain; the native DAG parent rides `parent_uuid`.
+  assignTranscriptIdentity(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (message)), entry)
   // Per-message model: live capture sets one model per exchange, but a
   // backfilled session can switch models mid-stream, so stamp it per assistant
   // line and let the gateway prefer it over the exchange model.
   if (entry.model) message.model = entry.model
-  if (entry.entrypoint) message.entrypoint = entry.entrypoint
-  if (entry.user_type) message.user_type = entry.user_type
-  if (entry.permission_mode) message.permission_mode = entry.permission_mode
-  if (entry.is_sidechain !== undefined) message.is_sidechain = entry.is_sidechain
   if (entry.agent_id) {
-    message.agent_id = entry.agent_id
     // Mirror live capture: a subagent row carries the parent-thread tool
     // call that spawned it, read from the agent's `.meta.json` sidecar.
     const spawnedByToolUseId = agentMeta.get(entry.agent_id)?.tool_use_id
@@ -412,61 +412,6 @@ function projectedMessageFromEntry(entry, agentMeta, stampUsage) {
   // subagent's `claude.spawned_by_tool_use_id` above survives. @ref LLP 0035#one-carrier
   const usageAttrs = stampUsage ? anthropicMessageAttributes(entry) : undefined
   if (usageAttrs) message.attributes = { ...(message.attributes ?? {}), ...usageAttrs }
-  if (entry.attachment_type) message.attachment_type = entry.attachment_type
-  if (entry.hook_event) message.hook_event = entry.hook_event
-  if (entry.is_compact_summary !== undefined) message.is_compact_summary = entry.is_compact_summary
-  if (entry.compact_metadata !== undefined) message.compact_metadata = /** @type {any} */ (entry.compact_metadata)
   if (entry.timestampMs !== undefined) message.message_created_at = new Date(entry.timestampMs).toISOString()
-
-  const rawFrame = minimizedRawFrame(entry)
-  if (rawFrame) message.raw_frame = rawFrame
   return message
-}
-
-/**
- * Minimized native frame: enough to trace a row back to its Claude
- * transcript line (native uuids, type/subtype, timestamp) without
- * copying the full transcript or any prompt / response content. Per the
- * bead contract: store a minimized, redacted native frame, never the
- * raw line.
- *
- * @param {TranscriptEntry} entry
- * @returns {JsonObject | undefined}
- */
-function minimizedRawFrame(entry) {
-  /** @type {JsonObject} */
-  const frame = {}
-  if (entry.provider_uuid) frame.uuid = entry.provider_uuid
-  if (entry.parent_uuid) frame.parent_uuid = entry.parent_uuid
-  if (entry.logical_parent_uuid) frame.logical_parent_uuid = entry.logical_parent_uuid
-  if (entry.provider_type) frame.type = entry.provider_type
-  if (entry.provider_subtype) frame.subtype = entry.provider_subtype
-  if (entry.messageId) frame.message_id = entry.messageId
-  if (entry.timestampMs !== undefined) frame.timestamp = new Date(entry.timestampMs).toISOString()
-  return Object.keys(frame).length > 0 ? frame : undefined
-}
-
-/**
- * Read the session-context records, degrading to `[]` on error so a
- * missing or unreadable channel never aborts the backfill (the join is
- * best-effort; `cwd` / `git_branch` are nullable columns).
- *
- * @param {string} stateFile
- * @param {PluginLogger} log
- * @returns {Promise<SessionContextRecord[]>}
- */
-async function readSessionContextSafe(stateFile, log) {
-  try {
-    return await readSessionContext(stateFile)
-  } catch (err) {
-    log.warn('claude.backfill.session_context_read_failed', {
-      component: 'plugin.claude.backfill',
-      operation: 'backfill.scan',
-      state_file: stateFile,
-      status: 'error',
-      error_kind: 'session_context_read_failed',
-      error: errMessage(err),
-    })
-    return []
-  }
 }

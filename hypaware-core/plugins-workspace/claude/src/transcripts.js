@@ -28,6 +28,7 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue } from 'hypaware/c
  */
 
 /**
+ * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { TranscriptEntry } from './types.js'
  */
 
@@ -337,7 +338,33 @@ export function assignTranscriptIdentity(target, match) {
   if (match.hook_event) target.hook_event = match.hook_event
   if (match.is_compact_summary !== undefined) target.is_compact_summary = match.is_compact_summary
   if (match.compact_metadata !== undefined) target.compact_metadata = match.compact_metadata
-  if (isPlainObject(match.raw_frame)) target.raw_frame = match.raw_frame
+  const rawFrame = minimizedRawFrame(match)
+  if (rawFrame) target.raw_frame = rawFrame
+}
+
+/**
+ * Minimized native frame: enough to trace a row back to its Claude
+ * transcript line (native uuids, type/subtype, timestamp) without
+ * copying the full transcript or any prompt / response content. Per the
+ * bead contract: store a minimized, redacted native frame, never the
+ * raw line. Applied by {@link assignTranscriptIdentity}, so live
+ * capture, flush-time settlement, and backfill all store the same
+ * minimized shape.
+ *
+ * @param {TranscriptEntry} entry
+ * @returns {JsonObject | undefined}
+ */
+export function minimizedRawFrame(entry) {
+  /** @type {JsonObject} */
+  const frame = {}
+  if (entry.provider_uuid) frame.uuid = entry.provider_uuid
+  if (entry.parent_uuid) frame.parent_uuid = entry.parent_uuid
+  if (entry.logical_parent_uuid) frame.logical_parent_uuid = entry.logical_parent_uuid
+  if (entry.provider_type) frame.type = entry.provider_type
+  if (entry.provider_subtype) frame.subtype = entry.provider_subtype
+  if (entry.messageId) frame.message_id = entry.messageId
+  if (entry.timestampMs !== undefined) frame.timestamp = new Date(entry.timestampMs).toISOString()
+  return Object.keys(frame).length > 0 ? frame : undefined
 }
 
 /**
