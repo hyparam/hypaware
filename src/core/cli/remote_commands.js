@@ -17,7 +17,7 @@ import {
   writeToken,
 } from '../remote/credentials.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
-import { enrollCentralSink } from './core_commands.js'
+import { enrollCentralSink } from '../commands/central.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 
