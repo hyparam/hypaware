@@ -21,7 +21,7 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
- * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -322,27 +322,17 @@ export async function run({ harness, expect }) {
     // ----- 5. Span assertions: walkthrough.start/finish + status.render -----
     // The preset path does not by itself invoke the walkthrough spans
     // (they're emitted by the interactive walkthrough), so drive a
-    // headless walkthrough now with pre-baked picks to validate the
-    // span contract documented on the bead.
-    const { runWalkthrough } = await import('../../../src/core/cli/walkthrough.js')
+    // headless picker walkthrough now with pre-baked picks to validate
+    // the span contract documented on the bead.
+    const { runPickerWalkthrough } = await import('../../../src/core/cli/walkthrough.js')
     const headlessStdout = makeBuf()
     const headlessStderr = makeBuf()
-    await runWalkthrough({
-      sources: /** @type {any} */ (kernel.sources),
-      sinks: /** @type {any} */ (kernel.sinks),
+    await runPickerWalkthrough({
       capabilities: kernel.capabilities,
       stdout: headlessStdout,
       stderr: headlessStderr,
       env: { ...smokeEnv(harness), HYP_CONFIG: path.join(harness.tmpDir, 'walkthrough-config.json') },
-      async prompt(q) {
-        // Pre-bake picks so the smoke runs without stdin: every source,
-        // the local-fs sink, every client.
-        if (q.pickType === 'sources') return q.options.map((o) => o.value)
-        if (q.pickType === 'sinks') return q.options.filter((o) => o.value !== '__none__').map((o) => o.value)
-        if (q.pickType === 'clients') return q.options.map((o) => o.value)
-        return []
-      },
-      async retentionPrompt() { return 30 },
+      picks: { sources: ['claude', 'codex'], exportChoice: 'local-parquet', retentionDays: 30 },
     })
 
     await obs.shutdown()
@@ -381,8 +371,8 @@ export async function run({ harness, expect }) {
       (v) =>
         v !== undefined &&
         v.sources_picked === 2 &&
-        v.sinks_picked === 1 &&
-        v.clients_picked === 1 &&
+        v.export_picked === 'local-parquet' &&
+        v.clients_picked === 2 &&
         v.retention_days === 30
     )
 
@@ -393,7 +383,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'logs: walkthrough.pick emitted at least once per pick category',
       new Set(pickLogs.map((/** @type {any} */ l) => l.attributes?.pick_type)),
-      (v) => v instanceof Set && v.has('sources') && v.has('sinks') && v.has('clients')
+      (v) => v instanceof Set && v.has('sources') && v.has('exports')
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME

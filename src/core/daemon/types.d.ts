@@ -2,7 +2,7 @@ import type {
   HypAwareV2Config,
   CapabilityRegistry,
   QueryRegistry,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ActionReconciler, ConfigControlStatus, ConfigLayerDrop, V1Diagnostic, ConfigValidationError } from '../config/types.d.ts'
 import type {
   ExtendedSinkRegistry,

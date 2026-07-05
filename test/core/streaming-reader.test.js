@@ -17,7 +17,7 @@ import {
 } from '../../src/core/cache/streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */

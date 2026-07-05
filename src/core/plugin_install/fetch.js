@@ -10,7 +10,7 @@ import { pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginManifest, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

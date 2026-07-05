@@ -2,7 +2,7 @@
 
 /**
  * @import { Contract } from './types.js'
- * @import { PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

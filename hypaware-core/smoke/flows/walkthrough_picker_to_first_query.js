@@ -21,7 +21,7 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/runtime.js'
 
 /**
- * @import { AiGatewayCapability } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

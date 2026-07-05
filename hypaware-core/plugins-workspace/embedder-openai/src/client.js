@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { embeddingsEndpoint } from './config.js'
 
 /**
- * @import { EmbedderCapability, EmbedResult, HypError } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { EmbedderCapability, EmbedResult, HypError } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CreateEmbedderOptions, EmbedderOpenAiConfig, FetchLike } from './types.js'
  */
 

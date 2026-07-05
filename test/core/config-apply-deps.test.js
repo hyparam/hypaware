@@ -12,7 +12,7 @@ import { loadLock } from '../../src/core/plugin_install/install.js'
 import { getEntry, writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
- * @import { PluginName } from '../../collectivus-plugin-kernel-types.js'
+ * @import { PluginName } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -277,7 +277,10 @@ async function buildGitPluginFixture() {
  */
 function runGit(args, opts = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, {
+    // Neutralize host-level signing config: a global tag.gpgsign=true
+    // would turn the fixture's lightweight `git tag` into a signed tag
+    // that demands a message and a key.
+    const child = spawn('git', ['-c', 'tag.gpgsign=false', '-c', 'commit.gpgsign=false', ...args], {
       cwd: opts.cwd,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       stdio: ['ignore', 'ignore', 'pipe'],

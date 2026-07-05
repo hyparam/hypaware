@@ -34,7 +34,7 @@ import { readState, updateState } from './state.js'
  * @ref LLP 0028#two-regimes [implements]:
  *
  * @import { EnrichRuntime } from './types.js'
- * @import { CompletionBatch, CompletionBatchStatus, CompletionRequest, SourceStatus, StartedSource, VectorSearchHit } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CompletionBatch, CompletionBatchStatus, CompletionRequest, SourceStatus, StartedSource, VectorSearchHit } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

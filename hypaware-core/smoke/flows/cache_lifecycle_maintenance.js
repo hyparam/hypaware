@@ -15,7 +15,7 @@ import { readCursorSync } from '../../../src/core/cache/partition.js'
 import { maintainCache, cacheStatus } from '../../../src/core/cache/maintenance.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  */

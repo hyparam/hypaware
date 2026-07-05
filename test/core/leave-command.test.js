@@ -319,6 +319,6 @@ test('leave help exits 0 and rejects unknown arguments', async () => {
   {
     const { stderr, opts } = await makeDispatchOpts()
     assert.equal(await dispatch(['leave', '--force'], opts), 2)
-    assert.match(stderr.text(), /unknown argument: --force/)
+    assert.match(stderr.text(), /unknown flag --force/)
   }
 })

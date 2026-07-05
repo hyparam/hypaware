@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { VerbInputProperty, VerbInputSchema, VerbRenderControls } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -200,6 +200,30 @@ export function argvToParams(inputSchema, argv) {
 }
 
 /**
+ * Parse a core command's argv against a verb-style input schema. The
+ * schema-driven half is {@link argvToParams} (same flag forms, coercion,
+ * enums, positional binding, and error texts as the verb family); on top
+ * of it, commands conventionally accept `-h`/`--help` and short flag
+ * aliases, and get `{ help: true }` back instead of parsed params when
+ * help was requested anywhere in argv.
+ *
+ * Per-command rules that are not shape (mutual exclusions, conditional
+ * requirements, value cross-checks) stay in the command, applied to the
+ * returned params.
+ *
+ * @param {string[]} argv
+ * @param {VerbInputSchema} inputSchema
+ * @param {{ aliases?: Record<string, string> }} [opts] argv token aliases, e.g. `{ '-y': '--yes' }`
+ * @returns {{ help: true } | { ok: true, params: Record<string, unknown> } | { ok: false, error: string }}
+ */
+export function parseCommandArgv(argv, inputSchema, opts = {}) {
+  const aliases = opts.aliases ?? {}
+  const expanded = argv.map((token) => aliases[token] ?? token)
+  if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
+  return argvToParams(inputSchema, expanded)
+}
+
+/**
  * Validate + coerce an MCP `tools/call` arguments object against the same
  * schema. MCP delivers typed JSON, but a client may send a string for an
  * integer; we coerce defensively, apply defaults, and enforce
@@ -343,7 +367,7 @@ function coerceValue(prop, value, label) {
       for (const part of value.split(',')) {
         const p = part.trim()
         if (!p) continue
-        const c = coerceValue({ type: itemType }, p, label)
+        const c = coerceValue({ type: itemType, ...(prop.items?.enum ? { enum: prop.items.enum } : {}) }, p, label)
         if (!c.ok) return c
         out.push(c.value)
       }
@@ -376,7 +400,21 @@ function bindPositionals(inputSchema, props, positionals, params) {
     const isLast = k === names.length - 1
     if (prop.greedy && isLast) {
       if (pi < positionals.length) {
-        params[name] = positionals.slice(pi).join(' ')
+        // A greedy array positional collects each remaining token as an
+        // item (`hyp backfill claude codex`); a greedy string positional
+        // re-joins them (`hyp query sql select * from logs`).
+        if (prop.type === 'array') {
+          /** @type {unknown[]} */
+          const out = []
+          for (const token of positionals.slice(pi)) {
+            const c = coerceValue({ type: prop.items?.type ?? 'string', ...(prop.items?.enum ? { enum: prop.items.enum } : {}) }, token, name)
+            if (!c.ok) return c
+            out.push(c.value)
+          }
+          params[name] = out
+        } else {
+          params[name] = positionals.slice(pi).join(' ')
+        }
         pi = positionals.length
       }
       continue

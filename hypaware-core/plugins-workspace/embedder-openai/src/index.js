@@ -4,7 +4,7 @@ import { createOpenAiEmbedder } from './client.js'
 import { validateEmbedderConfig } from './config.js'
 
 /**
- * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/embedder-openai'

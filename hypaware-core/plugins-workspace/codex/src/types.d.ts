@@ -1,4 +1,4 @@
-import type { JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { JsonObject } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 /**
  * One Codex rollout session recovered from a `~/.codex/sessions/**` file.

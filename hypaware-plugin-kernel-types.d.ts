@@ -9,10 +9,6 @@
  * [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md) and the
  * per-subsystem LLPs (e.g. plugin manifest LLP 0005, capabilities LLP 0006).
  * When the two disagree the LLPs win; this file is updated to follow.
- *
- * Filename is `collectivus-plugin-kernel-types.d.ts` only because the
- * project rename to HypAware is still pending; the contents already
- * track the HypAware design.
  */
 
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
@@ -1222,7 +1218,7 @@ export interface VerbInputProperty {
   enum?: string[]
   default?: string | number | boolean
   minimum?: number
-  items?: { type: 'string' | 'integer' | 'number' }
+  items?: { type: 'string' | 'integer' | 'number', enum?: string[] }
   /** CLI-only: the final string positional absorbs all remaining tokens (e.g. a SQL string). */
   greedy?: boolean
 }

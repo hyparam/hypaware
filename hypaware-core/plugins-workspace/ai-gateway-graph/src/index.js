@@ -3,7 +3,7 @@
 import { createAiGatewayGraphContract } from './graph_contract.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ContextGraphCapability } from './types.js'
  */
 

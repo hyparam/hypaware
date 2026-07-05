@@ -9,7 +9,7 @@ import path from 'node:path'
 import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
-import { renderStatusJson, renderStatusText } from '../../src/core/cli/core_commands.js'
+import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 
 // `hyp status` on a centrally-managed host must restore inspectability of
 // the merged config: per-entry provenance + the dropped-local section.

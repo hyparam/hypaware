@@ -78,7 +78,7 @@ grounds alone. But it is the right *lookup* axis — recovered here as a sort ke
 The export derives its partition spec **per dataset, at commit time** (a
 `format-iceberg` sink has no single dataset — `createSink` runs once for many),
 from the dataset's `DatasetRegistration`
-(`collectivus-plugin-kernel-types.d.ts`):
+(`hypaware-plugin-kernel-types.d.ts`):
 
 - If the dataset declares a `primaryTimestampColumn` present in its schema,
   partition by **`day(primaryTimestampColumn)`**. For `ai_gateway_messages`,

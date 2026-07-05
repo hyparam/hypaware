@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { readAttachPolicy } from '../../src/core/config/attach_policy.js'
 
 /**
- * @import { PluginConfigInstance } from '../../collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginConfigInstance } from '../../hypaware-plugin-kernel-types.d.ts'
  */
 
 /**

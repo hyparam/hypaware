@@ -11,7 +11,7 @@ import { buildS3QueryDataset } from '../../hypaware-core/plugins-workspace/s3/sr
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec, DatasetRegistration } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** @type {ColumnSpec[]} */

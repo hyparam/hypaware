@@ -9,7 +9,7 @@ import { startProposeSource } from './propose.js'
 import { setEnrichRuntime } from './runtime.js'
 
 /**
- * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { HypError, PluginActivationContext, ValidationResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { ContextGraphCapabilityLike } from './types.js'
  */

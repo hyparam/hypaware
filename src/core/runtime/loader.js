@@ -13,7 +13,7 @@ import { createPluginPaths } from './paths.js'
 import { createActivationContext, createKernelRuntime } from './activation.js'
 
 /**
- * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, JsonObject, PluginManifest } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { ActivationFailure, ActivationResult, ActivationSuccess, PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */

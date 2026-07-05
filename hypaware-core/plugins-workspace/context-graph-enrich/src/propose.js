@@ -10,7 +10,7 @@ import { readState, updateState } from './state.js'
 
 /**
  * @import { EnrichConfig, EnrichRuntime, SessionMark } from './types.js'
- * @import { SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const EXTRACTOR = 'enrich.t1'

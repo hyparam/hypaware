@@ -17,7 +17,7 @@ import type {
   QueryRegistry,
   SkillRegistry,
   VerbRegistry,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
 import type { ExtendedQueryStorageService } from '../cache/types.d.ts'

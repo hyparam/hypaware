@@ -5,7 +5,7 @@ import { Buffer } from 'node:buffer'
 import { collectStream, pathToKey } from './blob-io.js'
 
 /**
- * @import { BlobStore } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExportMarker, ProbeStateLike } from './types.js'
  * @import { TableMetadata } from 'icebird/src/types.js'
  */

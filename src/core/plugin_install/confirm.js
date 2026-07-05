@@ -3,7 +3,7 @@
 import readline from 'node:readline/promises'
 
 /**
- * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from '../../../src/core/plugin_install/types.js'
  */
 

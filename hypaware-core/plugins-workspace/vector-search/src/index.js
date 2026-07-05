@@ -10,7 +10,7 @@ import { startVectorRefreshSource } from './source.js'
 import { collectIndexStatus } from './status.js'
 
 /**
- * @import { EmbedderCapability, HypError, PluginActivationContext, ValidationResult, VectorSearchCapability } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { EmbedderCapability, HypError, PluginActivationContext, ValidationResult, VectorSearchCapability } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { VectorSearchRuntime } from './types.js'
  */

@@ -10,7 +10,7 @@ import { IdentityClient } from './src/identity_client.js'
 import { createForwardSink } from './src/sink.js'
 
 /**
- * @import { PluginActivationContext, SinkCreateContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext, SinkCreateContext } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

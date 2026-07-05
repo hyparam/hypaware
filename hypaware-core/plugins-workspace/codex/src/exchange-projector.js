@@ -5,7 +5,7 @@ import { redactRemoteUserinfo } from './git-remote.js'
 import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject, JsonValue } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 

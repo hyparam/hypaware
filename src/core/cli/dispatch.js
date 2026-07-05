@@ -27,7 +27,7 @@ import { registerCoreCommands } from './core_commands.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  */

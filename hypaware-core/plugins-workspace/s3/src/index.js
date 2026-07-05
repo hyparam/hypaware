@@ -24,7 +24,7 @@ import { classifyAwsError, describeS3ErrorKind } from './errors.js'
 import { keyIsWithinPrefix, renderObjectKey } from './keys.js'
 
 /**
- * @import { BlobStore, ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, ExportBatch, ExportOptions, ExportResult, PluginActivationContext, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkCreateContext, SinkEncoder } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { S3BlobStoreClientFactory, S3ClientFactory, S3ClientHandle, S3ErrorKind, S3QuerySourceConfig, S3SinkConfig } from './types.js'
  */

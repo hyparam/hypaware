@@ -21,7 +21,7 @@ import { loadLatestFileCatalogMetadata } from 'icebird'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 
 /**
- * @import { ColumnSpec } from '../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../src/core/cache/types.js'
  */
 

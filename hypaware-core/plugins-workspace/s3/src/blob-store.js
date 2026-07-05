@@ -7,7 +7,7 @@ import { normalizePrefix } from './config.js'
 import { classifyAwsError } from './errors.js'
 
 /**
- * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { S3BlobStoreClientFactory, S3CommandsHandle } from './types.js'
  * @import { S3ClientConfig } from '@aws-sdk/client-s3'
  */

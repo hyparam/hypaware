@@ -13,7 +13,7 @@ import {
 } from './jsonrpc.js'
 
 /**
- * @import { QueryRegistry, VerbRegistration, VerbRegistry } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /** Protocol version advertised when the client sends none. */

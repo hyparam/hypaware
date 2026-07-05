@@ -1,4 +1,4 @@
-import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { TableMetadata, Resolver, Lister, PartitionSpec, SortOrder } from 'icebird/src/types.js'
 import type { CachePartitioningDeclaration } from '../../../../src/core/iceberg/types.d.ts'
 

@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveInitExportChoice } from '../../src/core/cli/core_commands.js'
+import { resolveInitExportChoice } from '../../src/core/commands/init.js'
 
 /** @import { InitFlags } from '../../src/core/cli/types.js' */
 

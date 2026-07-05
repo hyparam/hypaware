@@ -8,7 +8,7 @@ import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/quer
 /**
  * @import { AsyncBuffer } from 'hyparquet'
  * @import { AsyncDataSource } from 'squirreling/src/types.js'
- * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { S3QuerySourceConfig } from './types.js'
  */
 

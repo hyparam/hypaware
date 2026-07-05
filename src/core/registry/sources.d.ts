@@ -3,6 +3,6 @@ export type {
   SourceContribution,
   StartedSource,
   SourceStatus,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'
 
 export function createSourceRegistry(): import('./types.d.ts').ExtendedSourceRegistry

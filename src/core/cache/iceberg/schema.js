@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { Field, IcebergType, Schema } from 'icebird/src/types.js'
  */
 

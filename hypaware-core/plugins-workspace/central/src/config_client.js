@@ -3,7 +3,7 @@
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter } from './backoff.js'
 
 /**
- * @import { ConfigControlFacade, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigControlFacade, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { IdentityClient } from './identity_client.js'
  */
 

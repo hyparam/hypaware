@@ -6,7 +6,7 @@ import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } 
 export const SCHEMA_VERSION = 7
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
  * @import { RegisteredProjector } from './types.js'

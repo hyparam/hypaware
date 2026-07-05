@@ -1,5 +1,5 @@
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
-import type { PluginActivationContext, PluginLogger } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { PluginActivationContext, PluginLogger } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 export interface GascityFrame {
   city: string

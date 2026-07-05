@@ -4,4 +4,4 @@ export type {
   PluginDeactivationContext,
   ActivePlugin,
   PluginLogger,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'

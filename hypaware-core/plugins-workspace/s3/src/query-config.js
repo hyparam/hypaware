@@ -14,7 +14,7 @@
 import { normalizePrefix } from './config.js'
 
 /**
- * @import { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { S3QuerySourceConfig, S3QuerySourceValidationError, S3QuerySourcesValidationResult } from './types.js'
  */
 

@@ -1,4 +1,4 @@
-import type { ColumnSpec } from '../../../../collectivus-plugin-kernel-types.d.ts'
+import type { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.d.ts'
 
 export type CredentialSourceKind =
   | 'profile'

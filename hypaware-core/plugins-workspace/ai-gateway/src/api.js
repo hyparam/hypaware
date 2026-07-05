@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewaySettlementEnricher, AiGatewayUpstreamPreset } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayExchangeProjector, AiGatewaySettlementEnricher, AiGatewayUpstreamPreset } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { GatewayState, RegisteredProjector } from './types.js'
  */
 

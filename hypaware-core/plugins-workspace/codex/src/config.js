@@ -13,7 +13,7 @@
  * straight into `ctx.configRegistry.registerSection` and is callable from
  * tests without spinning up observability.
  *
- * @import { ValidationError, ValidationResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { ValidationError, ValidationResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 /** Manifest `config_sections[].section` name this validator backs. */

@@ -12,7 +12,7 @@ import {
   buildConfiguredMenuOptions,
   legacyConfiguredActionPrompt,
   renderConfigSummary,
-} from '../../src/core/cli/core_commands.js'
+} from '../../src/core/commands/init.js'
 
 // Re-running `hypaware` on a configured install fronts the first-run
 // picker with a friendly summary + menu instead of starting fresh.

@@ -9,7 +9,7 @@ import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from '../../../src/core/cache/types.js'
  */
 

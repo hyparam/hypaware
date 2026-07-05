@@ -16,7 +16,7 @@ import {
 import { setGraphRuntime } from './runtime.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ContextGraphCapability } from './types.js'
  */
 

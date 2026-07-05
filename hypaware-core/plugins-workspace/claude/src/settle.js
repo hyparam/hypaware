@@ -11,7 +11,7 @@ import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  */
 

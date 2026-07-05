@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * @import { PluginName, PluginPaths } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginName, PluginPaths } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

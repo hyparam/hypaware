@@ -10,7 +10,7 @@ import type {
   EmbedderCapability,
   PluginActivationContext,
   PluginLogger,
-} from '../../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { ExtendedQueryStorageService } from '../../../../src/core/cache/types.d.ts'
 import type { searchVectors, writeVectors } from 'hypvector'
 import type { fileWriter } from 'hyparquet-writer'

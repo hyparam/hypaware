@@ -19,7 +19,7 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /**
- * @import { PluginManifest } from '../../collectivus-plugin-kernel-types.js'
+ * @import { PluginManifest } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /**

@@ -21,7 +21,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createBlobStoreIO, tableUrlForBlobPrefix } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { ActivePlugin, BlobStore, ColumnSpec, DatasetRegistration, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobStore, ColumnSpec, DatasetRegistration, SinkEncoder, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 const SMOKE_DIR = path.dirname(fileURLToPath(import.meta.url))

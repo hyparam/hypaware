@@ -12,7 +12,7 @@ import { createActionReconciler } from '../../src/core/config/action_reconciler.
 
 /**
  * @import { ActionContext, BackfillSpawnArgs, BackfillSpawnResult } from '../../src/core/config/types.js'
- * @import { BackfillContribution } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillContribution } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /** A quiet logger so tests don't spam stderr. */

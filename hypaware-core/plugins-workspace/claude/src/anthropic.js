@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { canonicalJson, isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { JsonObject, JsonValue } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

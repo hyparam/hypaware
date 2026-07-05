@@ -3,7 +3,7 @@
 import { computeShardStates, readShardMetas } from './shards.js'
 
 /**
- * @import { VectorIndexStatus } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { VectorIndexStatus } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { VectorSearchRuntime } from './types.js'
  */
 

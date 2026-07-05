@@ -21,7 +21,7 @@ import { executeQuerySql } from '../../../src/core/query/sql.js'
 import { rowsToColumnSources } from '../../plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobStore, ColumnSpec, SinkEncoder, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 

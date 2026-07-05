@@ -8,7 +8,7 @@ import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { parseConfigShape } from './schema.js'
 
 /**
- * @import { ConfigApplyErrorKind, ConfigControlFacade, ConfigStageResult, HypAwareV2Config, PluginConfigInstance } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ConfigApplyErrorKind, ConfigControlFacade, ConfigStageResult, HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import {
  *   ConfigApplyDeps,
  *   ConfigControl,

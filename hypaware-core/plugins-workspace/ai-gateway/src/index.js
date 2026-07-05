@@ -6,7 +6,7 @@ import { createStartSource } from './source.js'
 import { setAiGatewayRuntime } from './runtime.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  */
 

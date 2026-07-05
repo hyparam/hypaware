@@ -30,7 +30,7 @@ import { openDaemonLog } from './logs.js'
 import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
- * @import { AiGatewayCapability, JsonObject } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'

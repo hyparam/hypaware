@@ -36,7 +36,7 @@ else parallelizes. The seam is:
    exported.
 
 2. **Read API (T2).** Extend the kernel storage contract
-   (`collectivus-plugin-kernel-types.d.ts` decl; `src/core/cache/storage.js` impl;
+   (`hypaware-plugin-kernel-types.d.ts` decl; `src/core/cache/storage.js` impl;
    predicate pushed through `scanRowsFromTable` in `src/core/cache/iceberg/store.js`).
    Adds a back-compatible `opts.since` to `readRows` plus the cursor-aware
    `readRowsSince` sibling that pairs each internal-stripped row with its `after`

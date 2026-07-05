@@ -17,7 +17,7 @@ import { loadManifests } from '../../../src/core/manifest.js'
 import { createSinkDriver } from '../../../src/core/sinks/driver.js'
 
 /**
- * @import { ActivePlugin } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -426,7 +426,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 
 /**
- * @import { ActivePlugin } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 const DATASET = 'logs'

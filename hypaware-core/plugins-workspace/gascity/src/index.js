@@ -10,7 +10,7 @@ import { gascityInitPreset } from './init.js'
 import { setGascityRuntime } from './runtime.js'
 
 /**
- * @import { PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  */
 

@@ -12,7 +12,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 
 /**
- * @import { CommandRegistration, CommandRunContext } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 // `hyp ignore` / `hyp unignore` write and remove a `.hypignore` to gate folder

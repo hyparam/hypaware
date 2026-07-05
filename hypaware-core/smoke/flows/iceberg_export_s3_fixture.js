@@ -26,7 +26,7 @@ import {
 } from '../../plugins-workspace/format-iceberg/src/blob-io.js'
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PluginActivationEntry } from '../../../src/core/runtime/types.js'
  */
 
@@ -399,7 +399,7 @@ function fixturePluginSource() {
 import { discoverCachePartitions } from ${JSON.stringify(partitionModuleUrl)}
 
 /**
- * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobStore, SinkEncoder, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 const DATASET = '${DATASET}'

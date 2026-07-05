@@ -1,6 +1,7 @@
 // @ts-check
 
 import { randomUUID } from 'node:crypto'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
@@ -16,7 +17,7 @@ import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
  */
 
@@ -838,73 +839,51 @@ export function resolveRetentionDays(args) {
  * } | { error: string }}
  */
 export function parseRunArgv(argv) {
-  /** @type {string[]} */
-  const providers = []
-  /** @type {string | undefined} */
-  let since
-  /** @type {string | undefined} */
-  let until
-  /** @type {number | undefined} */
-  let retentionDays
-  let dryRun = false
-  let json = false
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]
-    if (arg === '--help' || arg === '-h') {
-      return { error: 'usage: hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]' }
-    }
-    if (arg === '--dry-run') { dryRun = true; continue }
-    if (arg === '--json') { json = true; continue }
-
-    const flagged = parseFlag(arg, argv, i)
-    if (flagged.kind === 'consumed') {
-      if (flagged.flag === 'since') since = flagged.value
-      else if (flagged.flag === 'until') until = flagged.value
-      else if (flagged.flag === 'retention-days') {
-        const days = Number(flagged.value)
-        if (!Number.isFinite(days) || days < 0) {
-          return { error: `--retention-days expects a non-negative number (got ${flagged.value})` }
-        }
-        retentionDays = days
-      }
-      if (flagged.consumed > 1) i += flagged.consumed - 1
-      continue
-    }
-    if (flagged.kind === 'error') return { error: flagged.error }
-    if (arg.startsWith('--')) {
-      return { error: `unknown flag '${arg}'` }
-    }
-    providers.push(arg)
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      providers: { type: 'array', greedy: true },
+      since: { type: 'string' },
+      until: { type: 'string' },
+      'retention-days': { type: 'number', minimum: 0 },
+      'dry-run': { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['providers'],
+  })
+  if ('help' in parsed) {
+    return { error: 'usage: hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]' }
   }
+  if (!parsed.ok) return { error: parsed.error }
+  const p = /** @type {{ providers?: string[], since?: string, until?: string, 'retention-days'?: number, 'dry-run': boolean, json: boolean }} */ (parsed.params)
 
   /** @type {number | undefined} */
   let sinceMs
-  if (since !== undefined) {
-    sinceMs = Date.parse(since)
+  if (p.since !== undefined) {
+    sinceMs = Date.parse(p.since)
     if (Number.isNaN(sinceMs)) {
-      return { error: `--since expects a parseable date (got ${since})` }
+      return { error: `--since expects a parseable date (got ${p.since})` }
     }
   }
 
   /** @type {number | undefined} */
   let untilMs
-  if (until !== undefined) {
-    untilMs = Date.parse(until)
+  if (p.until !== undefined) {
+    untilMs = Date.parse(p.until)
     if (Number.isNaN(untilMs)) {
-      return { error: `--until expects a parseable date (got ${until})` }
+      return { error: `--until expects a parseable date (got ${p.until})` }
     }
   }
 
   if (sinceMs !== undefined && untilMs !== undefined && sinceMs > untilMs) {
-    return { error: `--since must be before or equal to --until (got ${since} > ${until})` }
+    return { error: `--since must be before or equal to --until (got ${p.since} > ${p.until})` }
   }
 
   /** @type {{ providers: string[], since?: string, until?: string, retentionDays?: number, dryRun: boolean, json: boolean }} */
-  const result = { providers, dryRun, json }
-  if (since !== undefined) result.since = since
-  if (until !== undefined) result.until = until
-  if (retentionDays !== undefined) result.retentionDays = retentionDays
+  const result = { providers: p.providers ?? [], dryRun: p['dry-run'], json: p.json }
+  if (p.since !== undefined) result.since = p.since
+  if (p.until !== undefined) result.until = p.until
+  if (p['retention-days'] !== undefined) result.retentionDays = p['retention-days']
   return result
 }
 
@@ -922,70 +901,24 @@ export function parseRunArgv(argv) {
  * } | { error: string }}
  */
 export function parsePlanArgv(argv) {
-  /** @type {string[]} */
-  const providers = []
-  /** @type {number | undefined} */
-  let retentionDays
-  let json = false
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]
-    if (arg === '--help' || arg === '-h') {
-      return { error: 'usage: hyp backfill plan [provider...] [--retention-days <n>] [--json]' }
-    }
-    if (arg === '--json') { json = true; continue }
-    const flagged = parseFlag(arg, argv, i)
-    if (flagged.kind === 'consumed') {
-      if (flagged.flag === 'retention-days') {
-        const days = Number(flagged.value)
-        if (!Number.isFinite(days) || days < 0) {
-          return { error: `--retention-days expects a non-negative number (got ${flagged.value})` }
-        }
-        retentionDays = days
-      } else if (flagged.flag === 'since' || flagged.flag === 'until') {
-        return { error: `--${flagged.flag} is not valid on 'hyp backfill plan'` }
-      }
-      if (flagged.consumed > 1) i += flagged.consumed - 1
-      continue
-    }
-    if (flagged.kind === 'error') return { error: flagged.error }
-    if (arg.startsWith('--')) {
-      return { error: `unknown flag '${arg}'` }
-    }
-    providers.push(arg)
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      providers: { type: 'array', greedy: true },
+      'retention-days': { type: 'number', minimum: 0 },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['providers'],
+  })
+  if ('help' in parsed) {
+    return { error: 'usage: hyp backfill plan [provider...] [--retention-days <n>] [--json]' }
   }
-
+  if (!parsed.ok) return { error: parsed.error }
+  const p = /** @type {{ providers?: string[], 'retention-days'?: number, json: boolean }} */ (parsed.params)
   /** @type {{ providers: string[], retentionDays?: number, json: boolean }} */
-  const result = { providers, json }
-  if (retentionDays !== undefined) result.retentionDays = retentionDays
+  const result = { providers: p.providers ?? [], json: p.json }
+  if (p['retention-days'] !== undefined) result.retentionDays = p['retention-days']
   return result
-}
-
-/**
- * @param {string} arg
- * @param {string[]} argv
- * @param {number} i
- * @returns {{ kind: 'consumed', flag: 'since' | 'until' | 'retention-days', value: string, consumed: number }
- *   | { kind: 'pass' } | { kind: 'error', error: string }}
- */
-function parseFlag(arg, argv, i) {
-  const eqIdx = arg.indexOf('=')
-  const head = eqIdx >= 0 ? arg.slice(0, eqIdx) : arg
-  const inline = eqIdx >= 0 ? arg.slice(eqIdx + 1) : undefined
-  switch (head) {
-  case '--since':
-  case '--until':
-  case '--retention-days': {
-    const value = inline ?? argv[i + 1]
-    if (value === undefined || (inline === undefined && value.startsWith('--'))) {
-      return { kind: 'error', error: `flag ${head} requires a value` }
-    }
-    const flag = head === '--since' ? 'since' : head === '--until' ? 'until' : 'retention-days'
-    return { kind: 'consumed', flag, value, consumed: inline !== undefined ? 1 : 2 }
-  }
-  default:
-    return { kind: 'pass' }
-  }
 }
 
 /**

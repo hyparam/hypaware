@@ -19,7 +19,7 @@ import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
  * projector returns no rows, and backfill skips the session. A clean `cwd` is
  * unaffected (LLP 0049#requirements R1/R2).
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../collectivus-plugin-kernel-types.js'
+ * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const IGNORED_ROOT = '/work/ignored-repo'

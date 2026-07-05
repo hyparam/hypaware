@@ -7,7 +7,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 
 /**
- * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 export const BLOB_STORE_KIND = 'local-fs'

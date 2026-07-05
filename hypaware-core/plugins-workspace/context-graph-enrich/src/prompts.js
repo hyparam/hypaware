@@ -5,7 +5,7 @@
  * schema-shaped structured output (a `tool_use` block) rather than prose.
  * This uses the structured-extraction channel of `hypaware.completion`.
  *
- * @import { CompletionRequest, CompletionResult } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CompletionRequest, CompletionResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { CurateDecision } from './types.js'
  */
 

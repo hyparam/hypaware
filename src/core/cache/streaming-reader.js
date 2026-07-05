@@ -7,7 +7,7 @@ import fs from 'node:fs/promises'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 
 /**
- * @import { ColumnSpec } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
  * @import { FlushChunk, ProgressState } from '../../../src/core/cache/types.js'
  */
 

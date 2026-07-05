@@ -45,7 +45,7 @@ machinery that already exists.
   a second bucket (`"attach"`) costs nothing. A `done` marker short-circuits the
   forward gap, so an applied attach is not re-performed every pass.
 - **The gateway capability exposes the client registry.** `AiGatewayCapability`
-  ([`collectivus-plugin-kernel-types.d.ts`](../collectivus-plugin-kernel-types.d.ts))
+  ([`hypaware-plugin-kernel-types.d.ts`](../hypaware-plugin-kernel-types.d.ts))
   gives `listClients()`, `getClient(name)`, and `localEndpoint()`. The shared
   `hyp attach`/`hyp detach` router (`runClientLifecycle` in
   [`src/core/cli/core_commands.js`](../src/core/cli/core_commands.js)) already

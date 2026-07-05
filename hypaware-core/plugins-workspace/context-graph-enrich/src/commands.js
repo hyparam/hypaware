@@ -9,7 +9,7 @@ import { runSql } from './sql.js'
 import { readState } from './state.js'
 
 /**
- * @import { CommandRunContext } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { EnrichRuntime } from './types.js'
  */
 

@@ -3,7 +3,7 @@
 import { requireGascityRuntime } from './runtime.js'
 
 /**
- * @import { CommandRunContext, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

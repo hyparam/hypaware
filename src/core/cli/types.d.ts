@@ -5,7 +5,7 @@ import type {
   PluginConfigInstance,
   CommandRegistration,
   CommandRunContext,
-} from '../../../collectivus-plugin-kernel-types.d.ts'
+} from '../../../hypaware-plugin-kernel-types.d.ts'
 import type {
   ExtendedSinkRegistry,
   ExtendedSourceRegistry,

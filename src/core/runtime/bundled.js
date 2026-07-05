@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { loadManifests } from '../manifest.js'
 
 /**
- * @import { PluginName } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { FailedManifest, LoadedManifest } from '../../../src/core/types.js'
  * @import { DiscoverBundledResult } from '../../../src/core/runtime/types.js'
  */

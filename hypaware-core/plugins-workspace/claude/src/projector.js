@@ -37,7 +37,7 @@ import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/co
 import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, AiGatewayUpstreamPreset, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { TranscriptEntry } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */

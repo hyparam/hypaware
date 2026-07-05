@@ -4,7 +4,7 @@ import { createOtlpServer, listenAndResolve } from './server.js'
 import { makeReceiveHandler, stampBoundAddress } from './collector.js'
 
 /**
- * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const DEFAULT_HOST = '127.0.0.1'

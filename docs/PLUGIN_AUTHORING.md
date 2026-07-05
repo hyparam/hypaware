@@ -80,7 +80,7 @@ The entrypoint exports one function:
 // @ts-check
 
 /**
- * @import { PluginActivationContext } from '<path>/collectivus-plugin-kernel-types.d.ts'
+ * @import { PluginActivationContext } from '<path>/hypaware-plugin-kernel-types.d.ts'
  */
 
 const PLUGIN_NAME = '@yourorg/widget'
@@ -350,6 +350,6 @@ and how to fix it:
 
 ## See also
 
-- [`collectivus-plugin-kernel-types.d.ts`](../collectivus-plugin-kernel-types.d.ts) — the full plugin API surface.
+- [`hypaware-plugin-kernel-types.d.ts`](../hypaware-plugin-kernel-types.d.ts) — the full plugin API surface.
 - `hypaware-core/plugins-workspace/gascity/` — a complete worked example (source + dataset + commands + init preset + skill).
 - `hypaware-core/plugins-workspace/s3/` — a blob-store sink that provides a capability.

@@ -12,7 +12,7 @@ import {
 } from './datasets.js'
 
 /**
- * @import { HypAwareV2Config, QueryRegistry } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { Contract, GraphRow } from './types.js'
  */

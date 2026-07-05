@@ -12,7 +12,7 @@ import { loadHypvector } from './hypvector.js'
 import { computeShardStates, contentId, readShardMetas, REBUILD_STATES, shardPaths } from './shards.js'
 
 /**
- * @import { CachePartitionMeta, EmbedderCapability, HypError, PluginLogger } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { CachePartitionMeta, EmbedderCapability, HypError, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { RefreshBudget, RefreshReport, ShardMeta, ShardState, VectorIndexDeclaration } from './types.js'
  */

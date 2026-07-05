@@ -18,7 +18,7 @@ import {
 } from '../../src/core/registry/backfills.js'
 
 /**
- * @import { CommandRunContext } from '../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 /* ------------------------------ parseRunArgv ------------------------------ */
