@@ -1068,3 +1068,60 @@ test('an already-aborted signal stops the scan before any session is projected',
     await env.cleanup()
   }
 })
+
+test('transcript toolUseResult is promoted onto the backfilled row', async () => {
+  const env = await stageEnv()
+  try {
+    // The structured result Claude Code writes only to the transcript.
+    const toolUseResult = {
+      filePath: '/work/a.txt',
+      interrupted: false,
+      structuredPatch: [{ oldStart: 1, newStart: 1, lines: ['-a', '+b'] }],
+    }
+    await writeTranscript(env, 'repo-a', 'sess-tur', [
+      {
+        sessionId: 'sess-tur',
+        uuid: 'u-user-1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'edit the file' },
+        timestamp: '2026-05-20T10:00:00.000Z',
+      },
+      {
+        sessionId: 'sess-tur',
+        uuid: 'u-asst-1',
+        parentUuid: 'u-user-1',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_x', name: 'Edit', input: { file_path: '/work/a.txt' } }],
+        },
+        timestamp: '2026-05-20T10:00:05.000Z',
+      },
+      {
+        sessionId: 'sess-tur',
+        uuid: 'u-result-1',
+        parentUuid: 'u-asst-1',
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'ok' }] },
+        toolUseResult,
+        timestamp: '2026-05-20T10:00:06.000Z',
+      },
+    ])
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const [item] = await collectItems(provider.run(runContext().ctx))
+    assert.ok(item)
+
+    const rows = await materialize(item)
+    const resultRow = rows.find((r) => r.part_type === 'tool_result')
+    assert.ok(resultRow)
+    assert.deepEqual(/** @type {any} */ (resultRow.attributes).claude.tool_use_result, toolUseResult)
+    // Only the line that carried toolUseResult gets the attribute.
+    for (const row of rows) {
+      if (row === resultRow) continue
+      assert.equal(/** @type {any} */ (row.attributes)?.claude?.tool_use_result, undefined)
+    }
+  } finally {
+    await env.cleanup()
+  }
+})

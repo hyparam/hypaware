@@ -26,6 +26,7 @@ import {
   loadAgentMeta,
   loadTranscript,
   matchKey,
+  withToolUseResult,
 } from './transcripts.js'
 import {
   createSessionContextReader,
@@ -424,7 +425,7 @@ function projectAssistantMessage(args) {
       // each API message contributes its usage to exactly one row (a SUM over
       // rows isn't multiplied by the per-block fanout) and `finish_reason`
       // lands once. @ref LLP 0035#one-carrier @ref LLP 0026#consequences
-      if (messageAttrs) projected.attributes = messageAttrs
+      if (messageAttrs) projected.attributes = mergeAttrs(projected.attributes, messageAttrs)
       if (stopReason) projected.stop_reason = stopReason
     }
     out.push(projected)
@@ -474,7 +475,7 @@ function projectUserMessage(args) {
         match = findTranscriptMatch(transcriptIndex, { role: 'user', content: [block], agentId })
       }
       applyTranscriptMatch(projected, match)
-      if (messageAttrs) projected.attributes = messageAttrs
+      if (messageAttrs) projected.attributes = mergeAttrs(projected.attributes, messageAttrs)
       out.push(projected)
     }
     const rest = blocks.filter((b) => !(isPlainObject(b) && b.type === 'tool_result'))
@@ -491,7 +492,7 @@ function projectUserMessage(args) {
         ? findTranscriptMatch(transcriptIndex, { role: 'user', content: realRest, agentId })
         : undefined
       applyTranscriptMatch(projected, match)
-      if (messageAttrs) projected.attributes = messageAttrs
+      if (messageAttrs) projected.attributes = mergeAttrs(projected.attributes, messageAttrs)
       out.push(projected)
     }
     if (injectedRest.length > 0) out.push(wireOnlyMessage('user', injectedRest, messageAttrs))
@@ -510,7 +511,7 @@ function projectUserMessage(args) {
         /** @type {AiGatewayProjectedMessage} */
         const projected = { role: 'user', content: /** @type {any} */ (coreMatch.content) }
         applyTranscriptMatch(projected, coreMatch)
-        if (messageAttrs) projected.attributes = messageAttrs
+        if (messageAttrs) projected.attributes = mergeAttrs(projected.attributes, messageAttrs)
         out.push(projected)
         out.push(wireOnlyMessage('user', injected, messageAttrs))
         return out
@@ -520,7 +521,7 @@ function projectUserMessage(args) {
   /** @type {AiGatewayProjectedMessage} */
   const projected = { role: 'user', content: /** @type {any} */ (content) }
   applyTranscriptMatch(projected, match)
-  if (messageAttrs) projected.attributes = messageAttrs
+  if (messageAttrs) projected.attributes = mergeAttrs(projected.attributes, messageAttrs)
   out.push(projected)
   return out
 }
@@ -558,6 +559,7 @@ function applyTranscriptMatch(projected, match) {
   // differently from fallback rows. The native DAG parent lands in
   // `parent_uuid` via the shared identity copy.
   assignTranscriptIdentity(/** @type {any} */ (projected), match)
+  projected.attributes = /** @type {any} */ (withToolUseResult(projected.attributes, match))
 }
 
 /**

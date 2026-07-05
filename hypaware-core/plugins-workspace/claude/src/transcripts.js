@@ -368,6 +368,29 @@ export function minimizedRawFrame(entry) {
 }
 
 /**
+ * Merge the transcript line's structured tool result into
+ * `attributes.claude.tool_use_result`. Claude Code writes
+ * `toolUseResult` only to the transcript (never the wire), and
+ * transcripts are pruned after `cleanupPeriodDays`, so promoting it
+ * onto the row is what preserves structured tool metadata
+ * (structuredPatch, filePath, interrupted, subagent descriptors) past
+ * pruning. Stored verbatim: a per-tool trim list would be one more
+ * hand-maintained drift list, and the text that duplicates the block's
+ * own tool_result content compresses away in Parquet.
+ *
+ * @param {unknown} attributes  existing message/row attributes (plain object or undefined)
+ * @param {TranscriptEntry} entry
+ * @returns {unknown} the attributes with the tool result merged in;
+ *   the input untouched when the entry carries none
+ */
+export function withToolUseResult(attributes, entry) {
+  if (entry.tool_use_result === undefined) return attributes
+  const base = isPlainObject(attributes) ? attributes : {}
+  const claude = isPlainObject(base.claude) ? base.claude : {}
+  return { ...base, claude: { ...claude, tool_use_result: entry.tool_use_result } }
+}
+
+/**
  * The block type a single transcript line holds: used by the
  * splitter's order-alignment sanity check. String content is a text
  * line; array content reports the first block's type (lines are
@@ -490,6 +513,7 @@ function transcriptEntryFromRow(row) {
     // Claude Code writes the API `usage` block onto assistant transcript lines;
     // backfill surfaces it as attributes.usage to match live capture.
     usage: readKey(message, 'usage'),
+    tool_use_result: readKey(row, 'toolUseResult'),
     raw_frame: row,
   }
   if (!entry.messageId && !entry.contentKey && !entry.provider_uuid) return undefined
