@@ -12,9 +12,13 @@ export function isTty(stream) {
 export async function readAllStdin(stdin) {
   const stream = /** @type {AsyncIterable<Buffer | string> | undefined} */ (stdin)
   if (!stream || typeof (/** @type {any} */ (stream))[Symbol.asyncIterator] !== 'function') return ''
-  let out = ''
+  // Collect raw chunks and decode once at the end: a multibyte UTF-8
+  // codepoint split across a chunk boundary must not be decoded per-chunk
+  // (that yields U+FFFD replacement chars).
+  /** @type {Buffer[]} */
+  const chunks = []
   for await (const chunk of stream) {
-    out += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
   }
-  return out
+  return Buffer.concat(chunks).toString('utf8')
 }
