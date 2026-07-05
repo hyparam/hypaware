@@ -16,7 +16,8 @@ import {
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
-import { seedLoginGateway } from '../remote/gateway_seed.js'
+import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { enrollCentralSink } from './core_commands.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 
 /**
@@ -43,7 +44,9 @@ export async function runRemoteHelp(argv, ctx) {
     ctx.stdout.write('  subcommands: add, login, list, remove\n')
     ctx.stdout.write('  login: browser sign-in by default; --token-file/stdin for a static token,\n')
     ctx.stdout.write('         --org <name> to select an org, --no-browser to print the URL,\n')
-    ctx.stdout.write('         --host <label> to override the forwarding host label (default: hostname)\n')
+    ctx.stdout.write('         --host <label> to override the forwarding host label (default: hostname),\n')
+    ctx.stdout.write('         --no-forward to sign in for queries only (no fleet enrollment),\n')
+    ctx.stdout.write('         --no-daemon to provision the sink without installing the service\n')
     return 0
   }
   ctx.stderr.write(`hyp remote: unknown subcommand '${argv[0]}'\n`)
@@ -96,6 +99,10 @@ export async function runRemoteAdd(argv, ctx) {
  * `--no-browser` prints the URL instead of opening it; `--host` overrides
  * the advisory machine label sent with the token exchange (LLP 0061 D6).
  *
+ * `--no-forward` declines fleet enrollment (LLP 0063 D3): sign in for queries
+ * only — the login-minted gateway is discarded, no central sink is written.
+ * `--no-daemon` provisions the sink but skips the service install (D5).
+ *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway }} [deps] test seam for the browser flow + gateway seeding
@@ -129,6 +136,10 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   const name = positionals(argv, new Set(['--token-file', '--org', '--host']))[0] ?? effectiveDefaultRemote(ctx.config)
   const forceBrowser = argv.includes('--browser')
   const noBrowser = argv.includes('--no-browser')
+  // Enrollment opt-outs (LLP 0063): --no-forward signs in for queries only;
+  // --no-daemon provisions the sink but leaves the service install by hand.
+  const noForward = argv.includes('--no-forward')
+  const noDaemon = argv.includes('--no-daemon')
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY
@@ -152,7 +163,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, host, noBrowser }, ctx, {
+  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
   })
@@ -280,15 +291,17 @@ async function persistStaticToken(name, token, ctx) {
  * identity base from the configured target URL's origin, runs the loopback
  * flow, and stores the resulting OIDC session. When the server also mints a
  * login gateway (LLP 0061), the returned credential is seeded into the
- * matching `central` forward sinks' persisted identity.
+ * matching `central` forward sinks' persisted identity. On a fresh box with
+ * no such sink, an enrolling login *provisions* one (LLP 0063) so logs forward
+ * from one command — unless `--no-forward` declines it.
  *
  * @param {string} name
- * @param {{ org?: string, host?: string, noBrowser: boolean }} opts
+ * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway }} deps
  * @returns {Promise<number>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser }, ctx, { login, seed }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -303,6 +316,33 @@ async function runBrowserLogin(name, { org, host, noBrowser }, ctx, { login, see
   }
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
+
+  // One machine, one server (LLP 0063 D4). Already enrolled to *this* server
+  // (a central sink targets its origin) means re-login just re-seeds below, and
+  // the enrollment notice would be noise. Enrolled to a *different* server (and
+  // not this one) means reject before the browser opens so no auth is wasted:
+  // switching is 'hyp leave' then log in again, never one command.
+  // @ref LLP 0063#d4 [implements]: pre-auth exclusivity gate — reject a login to a new server while enrolled elsewhere
+  const targetOrigin = safeOrigin(entry.url)
+  const connectedOrigins = await readCentralSinkOrigins({ stateDir, configPath: localConfigPath(ctx) })
+  const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
+  if (!alreadyEnrolled && connectedOrigins.length > 0) {
+    ctx.stderr.write(`hyp remote login: this machine is connected to ${connectedOrigins[0]}\n`)
+    ctx.stderr.write("  disconnect first ('hyp leave'), then log in to the new server\n")
+    return 2
+  }
+
+  // Consent is a pre-auth warning, not a prompt (LLP 0063 D3): completing the
+  // sign-in is the accepting act. Phrased conditionally because the client
+  // can't know pre-auth whether the server will mint a gateway credential.
+  // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
+  if (!alreadyEnrolled && !noForward) {
+    ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
+    ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
+    ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
+    ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+  }
+
   /** @type {OidcSession} */
   let session
   try {
@@ -340,43 +380,99 @@ async function runBrowserLogin(name, { org, host, noBrowser }, ctx, { login, see
   }
   ctx.stdout.write(`logged in to '${name}' as org '${session.org}'\n`)
 
-  // One login, two credentials (LLP 0061 D1): the gateway credential, when the
-  // server minted one, seeds the matching central forward sinks so the user can
-  // forward without a bootstrap token. The query session above is already
-  // stored, so a seed failure is reported as exactly that - not a login failure.
+  // No gateway credential (server didn't mint one, or --no-forward): query-only
+  // login, nothing to forward. --no-forward with a minted gateway discards it
+  // unseeded (LLP 0063 D3) - declining enrollment, not just forwarding.
+  if (!session.gateway) return 0
+  if (noForward) {
+    // --no-forward declines *new* enrollment; it cannot un-enroll a machine
+    // that already forwards (that is `hyp leave`). Tell the truth for each case
+    // rather than always claiming "not enrolled".
+    if (alreadyEnrolled) {
+      ctx.stdout.write("note: --no-forward - signed in for queries only; this machine stays enrolled and keeps forwarding (run 'hyp leave' to stop)\n")
+    } else {
+      ctx.stdout.write('note: --no-forward - signed in for queries only; this machine is not enrolled and will not forward logs\n')
+    }
+    return 0
+  }
+
+  // One login, two credentials (LLP 0061 D1): the gateway credential seeds the
+  // matching central forward sinks so the user forwards without a bootstrap
+  // token. The query session above is already stored, so a seed failure is
+  // reported as exactly that - not a login failure.
   // @ref LLP 0061#d1 [implements]: gateway credential routes to the forward store; the query record is untouched by it
-  if (session.gateway) {
-    /** @type {Awaited<ReturnType<typeof seedLoginGateway>>} */
-    let seeded
+  /** @type {Awaited<ReturnType<typeof seedLoginGateway>>} */
+  let seeded
+  try {
+    seeded = await seed({ stateDir, configPath: localConfigPath(ctx), targetUrl: entry.url, gateway: session.gateway })
+  } catch (err) {
+    ctx.stderr.write(`hyp remote login: signed in, but could not seed the forwarding credential: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
+
+  // No sink targets this server yet: provision one so login forwards from one
+  // command (LLP 0063 D2/D5). enrollCentralSink writes join's sink block, seeds
+  // this identity into it, and finishes with join's daemon install.
+  // @ref LLP 0063#d2 [implements]: an enrolling login provisions the central sink the dead-end note used to only describe
+  if (seeded.length === 0) {
+    // The forward sink joins '/v1/ingest/...' onto its url, so it must be the
+    // server origin, not the '<origin>/mcp' query target we logged in against.
+    const centralUrl = targetOrigin ?? entry.url
+    /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
+    let result
     try {
-      seeded = await seed({
-        stateDir,
-        configPath: localConfigPath(ctx),
-        targetUrl: entry.url,
-        gateway: session.gateway,
-      })
+      result = await enrollCentralSink({ ctx, url: centralUrl, gateway: session.gateway, noDaemon })
     } catch (err) {
-      ctx.stderr.write(`hyp remote login: signed in, but could not seed the forwarding credential: ${err instanceof Error ? err.message : String(err)}\n`)
+      ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
-    if (seeded.length === 0) {
-      ctx.stderr.write(`note: the server issued a forwarding credential, but no '@hypaware/central' sink targets this server - configure one to forward logs\n`)
+    if (result.connectedElsewhere) {
+      ctx.stderr.write(`hyp remote login: this machine connected to ${result.connectedElsewhere} during sign-in - not enrolling\n`)
+      return 1
     }
-    for (const s of seeded) {
-      ctx.stdout.write(`seeded forwarding identity for sink '${s.sink}' (gateway ${session.gateway.gatewayId})\n`)
-      // Never silent about a displaced identity (LLP 0061 D4). A re-login over a
-      // prior login seed for the same server is idempotent (the server dedups to
-      // the same gateway), so only a different provenance is worth a note.
-      if (s.replaced && !(s.replaced.origin === 'login' && s.replaced.central_url === s.centralUrl)) {
-        const provenance = s.replaced.origin === 'login' ? 'login-minted' : 'bootstrap-minted'
-        const from = s.replaced.central_url && s.replaced.central_url !== s.centralUrl
-          ? ` for ${s.replaced.central_url}`
-          : ''
-        ctx.stderr.write(`note: this replaced a ${provenance} gateway identity${from} (was gateway ${s.replaced.gateway_id})\n`)
-      }
+    ctx.stdout.write(`provisioned '@hypaware/central' sink 'central' - forwarding logs to ${centralUrl}\n`)
+    // Never silent (LLP 0061 D4 / 0063 login-config-pull): until an org config
+    // attaches a client, a fresh enrollment forwards but captures nothing.
+    ctx.stdout.write("nothing is captured yet - run 'hyp attach <client>' to start\n")
+    if (noDaemon) {
+      ctx.stdout.write("daemon install skipped (--no-daemon); run 'hyp daemon install' to finish enrolling\n")
+    } else if (result.daemonCode !== 0) {
+      ctx.stderr.write("note: sink provisioned but the daemon install did not finish - run 'hyp daemon install'\n")
+      return result.daemonCode
+    }
+    return 0
+  }
+
+  // A matching sink already existed: this was a re-seed (already enrolled).
+  for (const s of seeded) {
+    ctx.stdout.write(`seeded forwarding identity for sink '${s.sink}' (gateway ${session.gateway.gatewayId})\n`)
+    // Never silent about a displaced identity (LLP 0061 D4). A re-login over a
+    // prior login seed for the same server is idempotent (the server dedups to
+    // the same gateway), so only a different provenance is worth a note.
+    if (s.replaced && !(s.replaced.origin === 'login' && s.replaced.central_url === s.centralUrl)) {
+      const provenance = s.replaced.origin === 'login' ? 'login-minted' : 'bootstrap-minted'
+      const from = s.replaced.central_url && s.replaced.central_url !== s.centralUrl
+        ? ` for ${s.replaced.central_url}`
+        : ''
+      ctx.stderr.write(`note: this replaced a ${provenance} gateway identity${from} (was gateway ${s.replaced.gateway_id})\n`)
     }
   }
   return 0
+}
+
+/**
+ * A URL's origin, or `null` when unparseable (an unparseable target url simply
+ * matches no connected origin).
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+function safeOrigin(url) {
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
 }
 
 /**

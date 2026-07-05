@@ -37,6 +37,42 @@ seeds its identity via the LLP 0061 path, and finishes with join's daemon instal
 credential is the server's assertion that this human's org is entitled to
 forward; the client acts on that assertion, after warning the user pre-auth (D3).
 
+## Implementation status (client half)
+
+<a id="impl-status"></a>
+**Implemented 2026-07-04.** `hyp remote login` now provisions the
+`@hypaware/central` sink and forwards from one command:
+
+- **`enrollCentralSink`** (`src/core/cli/core_commands.js`) writes join's sink
+  block — minus the bootstrap token, with `identity: {}` (the plugin validator
+  requires an identity object; the login-minted gateway seeded into
+  `identity.json` is the credential) at the server **origin**, not the
+  `<origin>/mcp` query target — to the central-seed layer, inherits join's #139
+  reset, seeds the identity via LLP 0061, and finishes with join's
+  `runDaemonInstall` (D2, D5).
+- **`runBrowserLogin`** (`src/core/cli/remote_commands.js`) runs the D4 pre-auth
+  exclusivity gate (`readCentralSinkOrigins`), prints the D3 pre-auth consent
+  notice, honors `--no-forward` (query-only) and `--no-daemon`, and replaces the
+  old dead-end note with the `provisioned … forwarding to …` line plus the
+  interim `run 'hyp attach <client>'` hint.
+
+**The D4 gate keys on the central layer, not the effective (local+central)
+config.** A hand-authored `@hypaware/central` sink in the user-owned *local*
+layer is not an enrollment — `hyp leave` refuses to touch it (#111) — so it must
+not count as "connected"; otherwise the gate would block login to a different
+server with `hyp leave` advice that cannot clear a local sink. The gate and
+`hyp leave` share one definition of "connected": the central layer.
+Provisioning is atomic against partial failure — if seeding the identity into
+the just-written sink fails, the seed is rolled back so no credential-less sink
+lingers (which would otherwise make the daemon demand a bootstrap token the
+login user never had). And `--no-forward` on an already-enrolled machine reports
+the truth ("stays enrolled") rather than a false "not enrolled".
+
+Deferred, named follow-ups: D4's seed-time recheck is not yet under the LLP 0065
+lock ([§D4](#d4)); the D2 attach cascade still needs server LLP 0043
+([§login-config-pull](#login-config-pull)); `hyp remote logout` and the README
+connection-levels table remain ([§Prerequisites](#prerequisites)).
+
 ## Motivation
 
 Two enrollment paths exist today and only one of them actually forwards:
@@ -262,12 +298,16 @@ regardless — they are the documented escape for the enrolled-consultant case,
 not a hole in the gate. LLP 0033 §credentials gains one sentence pointing here;
 no supersede.
 
-**The gate is re-checked under the credentials lock at seed time.** The pre-auth
-check is advisory (fail fast, no wasted auth); the authoritative check re-runs
-under the same cross-process lock the credential write already takes (LLP 0065),
-and "a seed appeared since the pre-auth check" is a D4 rejection at seed time.
-Two concurrent first logins against different servers therefore cannot both
-provision; the loser is told the machine connected elsewhere mid-flight.
+**The gate is re-checked at seed time.** The pre-auth check is advisory (fail
+fast, no wasted auth); an authoritative check re-runs just before the seed
+write, and "a sink for another origin appeared since the pre-auth check" is a
+D4 rejection at seed time, so two concurrent first logins against different
+servers cannot both provision — the loser is told the machine connected
+elsewhere mid-flight. *As shipped (2026-07-04): this re-check is a plain
+re-resolve of the effective config immediately before the write, not yet taken
+under the cross-process credentials lock (LLP 0065). It closes the common race;
+holding the recheck+write under that lock to close the last interleaving is a
+named follow-up.*
 
 Naming falls out: the provisioned sink is always join's instance name `central`;
 no origin-suffixed second sink exists. Idempotency: same-origin re-login finds the
