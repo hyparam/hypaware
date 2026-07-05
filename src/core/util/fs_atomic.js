@@ -13,6 +13,10 @@ import path from 'node:path'
 import { errCode } from './json_util.js'
 
 /**
+ * @import { AtomicWriteOptions } from '../../../src/core/util/types.js'
+ */
+
+/**
  * Thrown when `expectedMtimeMs` was given and the target changed (or
  * disappeared) between the caller's read and this write. Callers that
  * expose a domain error class re-wrap this; the `code` is the stable
@@ -29,16 +33,6 @@ export class ConcurrentEditError extends Error {
     this.code = 'CONCURRENT_EDIT'
   }
 }
-
-/**
- * @typedef {object} AtomicWriteOptions
- * @property {number} [mode] file mode for the temp file (carried over by rename)
- * @property {number} [dirMode] mode for parent directories created on demand
- * @property {boolean} [fsync] fsync the temp file before the rename
- * @property {number} [expectedMtimeMs] reject with {@link ConcurrentEditError}
- *   unless the target's mtime still matches (optimistic concurrency)
- * @property {typeof fsp} [fs] promises-API override, for tests
- */
 
 /** @param {string} filePath */
 function tmpPathFor(filePath) {

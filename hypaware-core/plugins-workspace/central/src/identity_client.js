@@ -1,10 +1,8 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
-import path from 'node:path'
 
-import { atomicWriteJsonSync, isPlainObject } from 'hypaware/core/util'
+import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
  * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.js'
@@ -19,7 +17,7 @@ import { atomicWriteJsonSync, isPlainObject } from 'hypaware/core/util'
  * @returns {string}
  */
 function fingerprintToken(token) {
-  return createHash('sha256').update(token).digest('hex')
+  return sha256Hex(token)
 }
 
 /**
