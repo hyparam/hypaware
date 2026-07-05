@@ -291,7 +291,7 @@ async function sendHttp({ endpoint, method, headers, body, fetchImpl, config, si
     const hasKey = 'x-api-key' in headers
     const hint =
       (response.status === 401 || response.status === 403) && !hasKey
-        ? ` (no API key sent: env var for x-api-key is unset)`
+        ? ` (no API key sent: env var ${config.api_key_env} is unset)`
         : ''
     const err = newCompletionError(
       `completion_http_${response.status}`,

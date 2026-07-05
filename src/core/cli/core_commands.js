@@ -2830,22 +2830,12 @@ async function runInit(argv, ctx) {
     return 2
   }
 
-  const presetName = argv[0]
-  const preset = ctx.initPresets.get(presetName)
-  if (!preset) {
-    const available = ctx.initPresets.list()
-    ctx.stderr.write(`hyp init: unknown preset '${presetName}'\n`)
-    if (available.length === 0) {
-      ctx.stderr.write('  no presets registered - install a plugin that contributes one\n')
-    } else {
-      ctx.stderr.write('  available:\n')
-      for (const p of available) {
-        ctx.stderr.write(`    ${p.name}  (${p.plugin})  - ${p.summary}\n`)
-      }
-    }
-    return 1
-  }
-  return preset.run(argv.slice(1), ctx)
+  // Reached only when argv[0] looks like a flag but is not a recognized
+  // init flag: preset names are dispatched above, and empty argv is the
+  // interactive path.
+  ctx.stderr.write(`hyp init: unknown flag '${argv[0]}'\n`)
+  ctx.stderr.write('  non-interactive: hyp init --yes [--client claude] [--source otel] [--force] ...\n')
+  return 2
 }
 
 /**
@@ -4448,7 +4438,14 @@ async function runSkillsInstall(argv, ctx) {
         ctx.stderr.write(`warning: skill '${skill.name}' targets unknown client '${targetClient}'\n`)
         continue
       }
-      const dest = path.join(homeDir, skillDir, skill.name)
+      const baseDir = path.join(homeDir, skillDir)
+      const dest = path.join(baseDir, skill.name)
+      // Defense in depth: registration rejects traversal names, but the
+      // skill dir comes from a plugin manifest, so re-check containment.
+      if (!isWithinDir(dest, baseDir)) {
+        ctx.stderr.write(`warning: skill '${skill.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
+        continue
+      }
       try {
         await fs.rm(dest, { recursive: true, force: true })
         await copyDir(skill.sourceDir, dest)

@@ -2,9 +2,13 @@
 
 import path from 'node:path'
 
+import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
+import { unionSources, emptySource } from 'hypaware/core/query'
+
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { AsyncDataSource } from 'squirreling'
  */
 
 export const DATASET_NAME = 'gascity_messages'
@@ -48,22 +52,41 @@ export function gascityTablePath(storage) {
 }
 
 /**
- * Discover the single `gascity_messages` partition. The kernel cache
- * is HypAware-managed; per the design `discoverPartitions` only needs
- * to surface the path so the query layer can scan it.
+ * The kernel cache flush path commits spooled rows under
+ * `source=<client>` partitions (gascity rows carry no
+ * `cachePartitioning` declaration), *not* under the `PARTITION_LABEL`
+ * directory the source spools to. So the lone hardcoded
+ * `gascity_messages/all` partition never surfaces committed data.
+ * Discovery scans the on-disk `source=` partitions the same way every
+ * other cache-backed dataset does (cf. otel, ai-gateway). The
+ * `PARTITION_LABEL` spool path is still listed so any pending rows
+ * there get flushed during query settlement before `createDataSource`
+ * reads.
  *
  * @param {DatasetDiscoveryContext} ctx
- * @returns {QueryPartition[]}
+ * @returns {Promise<QueryPartition[]>}
  */
-export function discoverParts(ctx) {
+export async function discoverParts(ctx) {
   const cacheDir = ctx.cacheDir ?? ''
   if (!cacheDir) return []
-  const tablePath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
-  return [{
-    dataset: DATASET_NAME,
-    partition: { partition: PARTITION_LABEL },
-    tablePath,
-  }]
+
+  /** @type {QueryPartition[]} */
+  const partitions = []
+  /** @type {Set<string>} */
+  const seen = new Set()
+
+  const spoolPath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
+  partitions.push({ dataset: DATASET_NAME, partition: { partition: PARTITION_LABEL }, tablePath: spoolPath })
+  seen.add(spoolPath)
+
+  const discovered = await discoverCachePartitions(cacheDir, { datasets: [DATASET_NAME] })
+  for (const p of discovered) {
+    if (seen.has(p.path)) continue
+    seen.add(p.path)
+    partitions.push({ dataset: DATASET_NAME, partition: p.partition, tablePath: p.path })
+  }
+
+  return partitions
 }
 
 /**
@@ -81,36 +104,37 @@ export async function refreshPartition(_partition) {
 }
 
 /**
- * Build a squirreling-compatible data source over the gascity
- * partition. Returns an empty source when the table has not yet been
- * materialized so `select count(*) from gascity_messages` still
- * succeeds on a cold cache.
+ * Union every discovered partition's source. Re-discovers from the live
+ * cache root so rows flushed out of the spool during settlement (after
+ * the initial `discoverParts`) are picked up. Returns an empty source
+ * when no table has been materialized so
+ * `select count(*) from gascity_messages` still succeeds on a cold cache.
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
  */
 export async function createDataSource(partitions, ctx) {
-  const partition = partitions[0]
-  if (!partition || !partition.tablePath) return emptySource()
-  const storage = /** @type {ExtendedQueryStorageService} */ (
-    ctx.storage
-  )
-  const source = await storage.dataSourceForTable(partition.tablePath)
-  return source ?? emptySource()
-}
+  const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
 
-function emptySource() {
-  return {
-    columns: GASCITY_SCHEMA_COLUMNS.map((c) => c.name),
-    numRows: 0,
-    scan() {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {},
-      }
-    },
+  const fresh = await discoverCachePartitions(storage.cacheRoot, { datasets: [DATASET_NAME] })
+
+  /** @type {Set<string>} */
+  const tablePaths = new Set()
+  for (const p of partitions) {
+    if (p.tablePath) tablePaths.add(p.tablePath)
   }
+  for (const p of fresh) tablePaths.add(p.path)
+
+  /** @type {AsyncDataSource[]} */
+  const sources = []
+  for (const tablePath of tablePaths) {
+    const source = await storage.dataSourceForTable(tablePath)
+    if (source && (source.numRows ?? 0) > 0) sources.push(source)
+  }
+
+  if (sources.length === 0) return emptySource(GASCITY_SCHEMA_COLUMNS.map((c) => c.name))
+  if (sources.length === 1) return sources[0]
+  return unionSources(sources)
 }
 
 /**

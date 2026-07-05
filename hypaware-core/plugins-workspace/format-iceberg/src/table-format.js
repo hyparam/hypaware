@@ -432,11 +432,9 @@ async function flushIfSupported(storage, tablePath, reason) {
     storage
   )
   if (typeof extended.flushTable === 'function') {
-    try {
-      await extended.flushTable(tablePath, { force: true, reason })
-    } catch {
-      // Best-effort flush; commit will still see whatever rows landed.
-    }
+    // Let flush failures fail the export: committing without the flushed
+    // rows would report success while silently dropping data.
+    await extended.flushTable(tablePath, { force: true, reason })
   }
 }
 

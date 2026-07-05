@@ -641,6 +641,8 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
   let existingSpec
   /** @type {ColumnSpec[] | null} */
   let schemaColumns = null
+  /** @type {{ column: string, direction: 'asc' | 'desc' }[] | undefined} */
+  let sortColumns
   try {
     const { resolver, lister } = await createLocalIcebergIO()
     const url = tableUrlForDir(oldEpochDir)
@@ -648,6 +650,9 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
     const schema = currentSchema(metadata)
     if (schema) schemaColumns = columnsFromIcebergSchema(schema)
     existingSpec = currentPartitionSpec(metadata)
+    // Carry the table's declared sort order into the replacement epoch,
+    // or the epoch swap would silently drop it.
+    sortColumns = sortColumnsFromMetadata(metadata)
   } catch {
     // Fall back to inference if metadata is unreadable
   }
@@ -664,7 +669,9 @@ async function compactPartition(partitionDir, cursor, cfg, settle) {
   let totalRows = 0
   const maxBatchBytes = cfg.compact_batch_bytes
   /** @type {AppendOptions | undefined} */
-  const appendOpts = existingSpec ? { partitionSpec: existingSpec } : undefined
+  const appendOpts = existingSpec || sortColumns
+    ? { partitionSpec: existingSpec, sortOrder: sortColumns }
+    : undefined
 
   /** @type {Record<string, unknown>[]} */
   const fallbackBuffer = []

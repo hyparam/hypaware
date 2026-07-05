@@ -173,3 +173,11 @@ test('interactive init: confirming the overwrite prompt backs up then writes', a
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.notDeepEqual(after.plugins ?? [], EXISTING.plugins)
 })
+
+test('init rejects an unrecognized flag as a flag, not a preset', async () => {
+  const { stderr, opts } = await makeHome()
+  const code = await dispatch(['init', '--bogus'], opts)
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /unknown flag '--bogus'/)
+  assert.doesNotMatch(stderr.text(), /unknown preset/)
+})
