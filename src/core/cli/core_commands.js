@@ -24,6 +24,7 @@ import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
@@ -382,7 +383,7 @@ function buildCoreCommands() {
     {
       name: 'remote login',
       summary: 'Store the query-scoped token for a remote target (0600)',
-      usage: 'hyp remote login <name> [--token-file <path>]',
+      usage: 'hyp remote login <name> [--token-file <path>] [--no-forward] [--no-daemon]',
       run: runRemoteLogin,
     },
     {
@@ -3362,6 +3363,87 @@ async function runJoin(argv, ctx) {
     },
     { component: 'join' }
   )
+}
+
+/**
+ * Enroll this machine from an attended `hyp remote login` (LLP 0063 D2/D5):
+ * provision the `@hypaware/central` forward sink and finish exactly the way
+ * `runJoin` finishes. This is join's enrollment minus the bootstrap token —
+ * the login-minted gateway credential (LLP 0061), seeded here into the fresh
+ * sink's `identity.json`, is the identity, so the written block carries no
+ * `identity.bootstrap_token`. Written to the same central-seed layer join uses
+ * (LLP 0031): this is server-authored config (server-minted credential,
+ * server-owned org), not something the human typed, so provenance — not who
+ * ran the command — picks the layer.
+ *
+ * @param {{ ctx: CommandRunContext, url: string, gateway: import('../remote/types.d.ts').LoginGatewayCredential, noDaemon: boolean }} args
+ * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
+ * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
+ * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
+ */
+export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const stateRoot = obsEnv.stateDir
+  const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
+  const targetOrigin = safeOrigin(url)
+
+  // D4 re-check just before the write: if a central sink targeting a different
+  // origin appeared since login's pre-auth gate (a concurrent first login to
+  // another server), abort rather than provision a second enrollment. This is
+  // the non-locked flavor of D4's seed-time check — it closes the common race;
+  // the cross-process credentials lock (LLP 0065) is a follow-up.
+  const connectedOrigins = await readCentralSinkOrigins({ stateDir: stateRoot, configPath: localPath })
+  const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
+  if (elsewhere) return { provisioned: false, connectedElsewhere: elsewhere, daemonCode: 0 }
+
+  // Only actually write the seed when no same-origin central sink exists yet
+  // (a same-origin sink present means a racing same-server login already
+  // provisioned it; fall through to identity-seeding it, which is idempotent).
+  if (targetOrigin === null || !connectedOrigins.includes(targetOrigin)) {
+    // `identity: {}` (not absent): the central plugin's own validator requires
+    // an identity object (`central.identity is required`), but bootstrap_token
+    // is optional — the login-minted gateway seeded into identity.json is the
+    // credential (LLP 0063 D2), so the block carries an empty identity, not a
+    // token.
+    /** @type {HypAwareV2Config} */
+    const seed = {
+      version: 2,
+      plugins: [{ name: '@hypaware/central' }],
+      sinks: { central: { plugin: '@hypaware/central', config: { url, identity: {} } } },
+    }
+    const seedPath = centralSeedPath(stateRoot)
+    await fs.mkdir(path.dirname(seedPath), { recursive: true })
+    const tmp = `${seedPath}.tmp.${process.pid}.${Date.now()}`
+    await fs.writeFile(tmp, JSON.stringify(seed, null, 2) + '\n', { mode: 0o600 })
+    await fs.rename(tmp, seedPath)
+    // Inherit join's #139 fix: supersede a stale applied slot so the fresh
+    // enrollment is honored rather than silently shadowed.
+    resetCentralLayerToSeed(stateRoot)
+  }
+
+  // Seed the login-minted gateway into the freshly written sink's identity
+  // (LLP 0061). `seedLoginGateway` resolves sinks from the effective config,
+  // which now includes this central seed, so it finds and seeds exactly it.
+  await seedLoginGateway({ stateDir: stateRoot, configPath: localPath, targetUrl: url, gateway })
+
+  if (noDaemon) return { provisioned: true, daemonCode: 0 }
+  const daemonCode = await runDaemonInstall([], ctx)
+  return { provisioned: true, daemonCode }
+}
+
+/**
+ * A URL's origin, or `null` when unparseable (mirrors `gateway_seed`'s helper;
+ * an unparseable url simply matches nothing).
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+function safeOrigin(url) {
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
 }
 
 /**

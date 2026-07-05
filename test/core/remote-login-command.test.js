@@ -173,14 +173,59 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
-test('a gateway credential with no matching central sink notes the skip and still succeeds', async () => {
+test('a gateway credential with no matching central sink provisions one, forwarding from one command (LLP 0063 D2)', async () => {
   const hypHome = await tmpHome()
-  const { ctx, err } = await makeCtx({ hypHome })
+  const { ctx, out } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
 
-  const code = await runRemoteLogin(['prod'], ctx, { login })
+  // --no-daemon keeps the test off the real launchd/systemd install.
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(err.join(''), /no '@hypaware\/central' sink targets this server/)
+  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central' - forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /nothing is captured yet - run 'hyp attach/)
+  assert.match(out.join(''), /daemon install skipped \(--no-daemon\)/)
+
+  // The sink was written to the central-seed layer (not the user's local config).
+  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
+  assert.equal(seed.sinks.central.plugin, '@hypaware/central')
+  assert.equal(seed.sinks.central.config.url, 'https://hyp.internal') // origin, not the /mcp target
+  assert.ok(!('bootstrap_token' in (seed.sinks.central.config.identity ?? {}))) // login-minted identity, no token
+
+  // The login-minted gateway was seeded into the new sink's identity.
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
+  assert.equal(persisted.origin, 'login')
+})
+
+test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-forward'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /signed in for queries only/)
+  assert.doesNotMatch(out.join(''), /provisioned/)
+  // No sink and no forward identity were written.
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')))
+})
+
+test('login to a different server than the one this machine is enrolled to is rejected before the browser (LLP 0063 D4)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({
+    hypHome,
+    remotes: { prod: { url: 'https://hyp.internal/mcp' }, other: { url: 'https://elsewhere.example/mcp' } },
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal' } } },
+  })
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+
+  const code = await runRemoteLogin(['other'], ctx, { login })
+  assert.equal(code, 2)
+  assert.equal(called, false) // rejected before any auth
+  assert.match(err.join(''), /this machine is connected to https:\/\/hyp\.internal/)
+  assert.match(err.join(''), /'hyp leave'/)
 })
 
 test('a session without a gateway credential seeds nothing and prints no forwarding output', async () => {
@@ -195,8 +240,9 @@ test('a session without a gateway credential seeds nothing and prints no forward
 
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
-  assert.doesNotMatch(out.join(''), /forwarding/)
-  assert.doesNotMatch(err.join(''), /forwarding/)
+  // The pre-auth notice (D3) is on stderr and conditional; the point here is
+  // that with no gateway minted, nothing is actually seeded or provisioned.
+  assert.doesNotMatch(out.join(''), /seeded|provisioned/)
   const persistedPath = path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')
   await assert.rejects(fs.access(persistedPath))
 })
