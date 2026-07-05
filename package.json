@@ -14,6 +14,7 @@
     "./core/observability": { "types": "./types/core/observability/index.d.ts", "import": "./src/core/observability/index.js" },
     "./core/sinks": { "types": "./types/core/sinks/index.d.ts", "import": "./src/core/sinks/index.js" },
     "./core/query": { "types": "./types/core/query/index.d.ts", "import": "./src/core/query/index.js" },
+    "./core/util": { "types": "./types/core/util/index.d.ts", "import": "./src/core/util/index.js" },
     "./integration": { "types": "./src/core/cli/integration.d.ts", "import": "./src/core/cli/integration.js" },
     "./tui": { "types": "./types/core/cli/tui/index.d.ts", "import": "./src/core/cli/tui/index.js" }
   },
