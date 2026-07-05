@@ -55,7 +55,8 @@ async function readNextSeq(statePath) {
  */
 async function writeNextSeq(statePath, nextSeq) {
   const payload = { v: 1, nextSeq: nextSeq.toString(), updatedAt: new Date().toISOString() }
-  await atomicWriteJson(statePath, payload)
+  // Sole caller reserveBlock() mkdirs cacheRoot first, so skip the per-write mkdir.
+  await atomicWriteJson(statePath, payload, { mkdir: false })
 }
 
 /**

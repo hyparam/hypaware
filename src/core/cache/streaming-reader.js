@@ -263,7 +263,9 @@ export async function readProgress(spoolFilePath) {
 export async function writeProgress(spoolFilePath, byteOffset) {
   /** @type {ProgressState} */
   const state = { byteOffset, updatedAt: new Date().toISOString() }
-  await atomicWriteJson(progressPath(spoolFilePath), state)
+  // Called once per batch in the flush loop; the spool file's directory
+  // already exists, so skip the per-write mkdir.
+  await atomicWriteJson(progressPath(spoolFilePath), state, { mkdir: false })
 }
 
 /**

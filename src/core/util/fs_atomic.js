@@ -42,7 +42,9 @@ function tmpPathFor(filePath) {
 /**
  * Write `data` to `filePath` atomically: temp file in the same
  * directory (same filesystem, so the rename is atomic), then rename
- * over the target. Parent directories are created on demand. The temp
+ * over the target. Parent directories are created on demand unless
+ * `mkdir: false` is passed (hot callers whose directory is already
+ * guaranteed to exist skip the per-write `mkdir` syscall). The temp
  * file is removed on failure.
  *
  * @param {string} filePath
@@ -51,7 +53,7 @@ function tmpPathFor(filePath) {
  * @returns {Promise<void>}
  */
 export async function atomicWriteFile(filePath, data, options = {}) {
-  const { mode, dirMode, fsync = false, expectedMtimeMs, fs = fsp } = options
+  const { mode, dirMode, fsync = false, expectedMtimeMs, mkdir = true, fs = fsp } = options
 
   if (expectedMtimeMs !== undefined) {
     let current
@@ -73,10 +75,12 @@ export async function atomicWriteFile(filePath, data, options = {}) {
     }
   }
 
-  await fs.mkdir(path.dirname(filePath), {
-    recursive: true,
-    ...dirMode !== undefined ? { mode: dirMode } : {},
-  })
+  if (mkdir) {
+    await fs.mkdir(path.dirname(filePath), {
+      recursive: true,
+      ...dirMode !== undefined ? { mode: dirMode } : {},
+    })
+  }
 
   const tmpPath = tmpPathFor(filePath)
   let renamed = false

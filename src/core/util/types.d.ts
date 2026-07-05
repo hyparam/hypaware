@@ -8,6 +8,12 @@ export interface AtomicWriteOptions {
   mode?: number
   /** mode for parent directories created on demand */
   dirMode?: number
+  /**
+   * create parent directories on demand (default `true`); pass `false`
+   * when the directory is already guaranteed to exist to skip the
+   * per-write `mkdir` syscall on hot paths
+   */
+  mkdir?: boolean
   /** fsync the temp file before the rename */
   fsync?: boolean
   /**
