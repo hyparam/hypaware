@@ -11,7 +11,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
-import { centralSeedPath, resetCentralLayerToSeed } from '../config/apply.js'
+import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
 import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
 import { select } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
@@ -22,7 +22,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
-import { clearClientActionMarker } from '../config/action_reconciler.js'
+import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
@@ -251,6 +251,12 @@ function buildCoreCommands() {
       summary: 'Join a centrally-managed fleet (write seed config + install daemon)',
       usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]',
       run: runJoin,
+    },
+    {
+      name: 'leave',
+      summary: 'Leave the centrally-managed fleet (stop forwarding + config pull, undo org-driven attaches)',
+      usage: 'hyp leave',
+      run: runLeave,
     },
     {
       name: 'attach',
@@ -3417,6 +3423,268 @@ async function readAllStdin(stdin) {
 /** @param {unknown} stream */
 function isTty(stream) {
   return !!stream && typeof stream === 'object' && /** @type {{ isTTY?: boolean }} */ (stream).isTTY === true
+}
+
+/**
+ * `hyp leave`: disconnect this machine from its central server — the
+ * level-3 exit verb, the single inverse of both enrollment paths
+ * (`hyp join` and an enrolling `hyp remote login`). Reverses what
+ * enrollment did to the machine, in dependency order:
+ *
+ *   1. remove the central config layer — the join/login seed and any
+ *      applied central slots (the inverse of join's seed write, reusing
+ *      the #139 reset machinery);
+ *   2. restart the installed daemon service, so the central sink — and
+ *      with it the config-pull loop — stops before markers and
+ *      credentials are torn down;
+ *   3. reverse the centrally-driven client attaches through the single
+ *      core disk undo (the LLP 0044 leave contract). Manual attaches
+ *      write no marker, so a client the user attached by hand stays
+ *      attached;
+ *   4. remove the persisted forward identity so no live credential
+ *      lingers on disk.
+ *
+ * Cascades down, never up: it does NOT log the human out (the
+ * query-session store is theirs, not the fleet's), does NOT touch the
+ * user-owned local config layer, and does NOT uninstall the daemon
+ * service — local-only capture keeps working. Teardown is local-only:
+ * the server-side gateway row is not revoked (the credential expires;
+ * revocation is the operator's server-side act).
+ *
+ * Every step is best-effort and idempotent, so a plain re-run redoes
+ * whatever did not finish - no resume bookkeeping. "Connected" is central
+ * layer present OR an org-attach marker still on disk, so a leave that
+ * failed mid-reversal still has work on re-run instead of short-circuiting
+ * to "not connected". An org attach whose plugin is gone can't be reversed;
+ * leave drops its marker (a stale `done` marker would block the next join's
+ * re-attach, #217) and tells the user how to revert by hand.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @ref LLP 0063#prerequisites [implements]: minimal hyp leave (central-layer removal, attach reversal via the one core undo, identity drop); never touches sessions, the local layer, or the service; best-effort and idempotent so a re-run finishes a partial teardown
+ * @ref LLP 0063#connection-levels [constrained-by]: leave cascades down (level 3 → org-driven level-1 attaches), never up to the session store or the daemon service
+ */
+async function runLeave(argv, ctx) {
+  for (const arg of argv) {
+    if (arg === '--help' || arg === '-h') {
+      ctx.stdout.write('usage: hyp leave\n')
+      ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
+      ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
+      ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
+      return 0
+    }
+    ctx.stderr.write(`hyp leave: unknown argument: ${arg}\n`)
+    return 2
+  }
+
+  const obsEnv = readObservabilityEnv(ctx.env)
+  const stateRoot = obsEnv.stateDir
+  const localPath = ctx.env.HYP_CONFIG
+    ? path.resolve(ctx.env.HYP_CONFIG)
+    : defaultConfigPath(obsEnv.hypHome)
+  const centralLayerPath = resolveCentralLayerPath({ stateRoot })
+  const attachMarkers = readClientActionStatus({ stateRoot }).byKind.attach ?? {}
+  const attachedNames = Object.keys(attachMarkers)
+
+  // Nothing to tear down: no central layer AND no org-attach residue. A leave
+  // that failed partway leaves its attach markers on disk, so a re-run still
+  // lands here with work to do and finishes it - the marker is its own
+  // "unfinished teardown" signal, no separate bookkeeping needed.
+  if (centralLayerPath === null && attachedNames.length === 0) {
+    ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
+    // A hand-authored central sink in the LOCAL layer is not an enrollment,
+    // and leave never edits the local layer (#111 doctrine) — but a user
+    // running `leave` to stop forwarding deserves to know where it lives.
+    writeLocalCentralSinkNote(ctx, await readCentralSinks(localPath, stateRoot), localPath)
+    return 0
+  }
+
+  const centralSinks = centralLayerPath !== null ? await readCentralSinks(centralLayerPath, stateRoot) : []
+  const urls = [...new Set(centralSinks.map((s) => s.url).filter((u) => u.length > 0))]
+
+  return withSpan(
+    'leave.run',
+    {
+      [Attr.COMPONENT]: 'leave',
+      [Attr.OPERATION]: 'leave.run',
+      central_urls: urls.join(','),
+      status: 'ok',
+    },
+    async (span) => {
+      let failures = 0
+      ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the central server'}\n`)
+
+      // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
+      // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes
+      // whatever did not finish. There is no resume state to keep.
+
+      // 1. Central layer teardown: drop the seed, then clear the applied
+      // slots / pointer / apply state. With both gone the machine has no
+      // central layer at all — the exact inverse of join's write.
+      await fs.rm(centralSeedPath(stateRoot), { force: true })
+      resetCentralLayerToSeed(stateRoot)
+      ctx.stdout.write('✓ removed the central config layer\n')
+
+      // 2. Restart the service so the running daemon reboots without the
+      // central sink: forwarding and the config-pull loop stop here. Restart,
+      // never uninstall — local-only capture keeps working.
+      const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
+      const svc = await serviceDaemonStatus({ homeDir: ctx.env.HOME })
+      if (svc.installed) {
+        try {
+          await restartServiceDaemon({ homeDir: ctx.env.HOME })
+          // Close the small race in which the old daemon's pull loop applied
+          // a config slot between step 1 and the restart.
+          await fs.rm(centralSeedPath(stateRoot), { force: true })
+          resetCentralLayerToSeed(stateRoot)
+          ctx.stdout.write('✓ restarted the daemon - forwarding and config pull are stopped\n')
+        } catch (err) {
+          failures += 1
+          const message = err instanceof Error ? err.message : String(err)
+          ctx.stderr.write(`hyp leave: daemon restart failed: ${message}\n`)
+          ctx.stderr.write("  run 'hyp daemon restart' to stop the central sink\n")
+        }
+      } else {
+        ctx.stdout.write('  no daemon service installed - nothing to restart\n')
+      }
+
+      // 3. Reverse the org-driven attaches. Only reconciler-applied attaches
+      // carry a marker, so this touches exactly what the fleet touched; the
+      // undo is the same core disk reversal `hyp detach` uses. Backfill
+      // markers are run-once by design and stay (imported data stays too).
+      if (attachedNames.length > 0) {
+        const descriptors = await buildClientDescriptorMap(ctx)
+        for (const name of attachedNames) {
+          const marker = attachMarkers[name]
+          if (!marker || marker.status === 'failed') {
+            // A failed marker never applied an effect; just drop it,
+            // mirroring the reconciler's own reverse pass.
+            try {
+              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
+            } catch { /* best-effort: a stale failed marker is a status blemish */ }
+            continue
+          }
+          const descriptor = descriptors.get(name)
+          if (!descriptor) {
+            // Plugin's gone, so we cannot replay its undo - do the best we can:
+            // drop the marker so a future join re-attaches cleanly instead of
+            // short-circuiting on a stale `done` marker (#217). The local
+            // gateway keeps running, so the client's settings still route
+            // locally; nothing is broken.
+            try {
+              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
+            } catch { /* best-effort: a stale marker is a status blemish */ }
+            ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp detach ${name}' to revert)\n`)
+            continue
+          }
+          try {
+            await detachClientViaCore({ name, descriptor, dryRun: false, json: false, ctx })
+          } catch (err) {
+            failures += 1
+            const message = err instanceof Error ? err.message : String(err)
+            ctx.stderr.write(`hyp leave: detach '${name}' failed: ${message}\n`)
+            ctx.stderr.write(`  run 'hyp detach ${name}' to finish reversing it\n`)
+          }
+        }
+      }
+
+      // 4. Drop the persisted forward identity (the login/bootstrap-minted
+      // gateway credential). Paths resolve from the sink blocks the same way
+      // seedLoginGateway resolves them, defaulting to the per-plugin state
+      // path; with no readable sink block the default path still gets swept.
+      const identityPaths = new Set(centralSinks.map((s) => s.persistedPath))
+      if (identityPaths.size === 0) {
+        identityPaths.add(path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json'))
+      }
+      let removedIdentity = false
+      for (const identityPath of identityPaths) {
+        try {
+          await fs.unlink(identityPath)
+          removedIdentity = true
+        } catch (err) {
+          if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') {
+            failures += 1
+            const message = err instanceof Error ? err.message : String(err)
+            ctx.stderr.write(`hyp leave: could not remove forward identity ${identityPath}: ${message}\n`)
+          }
+        }
+      }
+      if (removedIdentity) {
+        ctx.stdout.write('✓ removed the forward identity\n')
+      }
+
+      // Always surface a still-forwarding local sink, success or not: a machine
+      // that keeps forwarding must never be left silent.
+      writeLocalCentralSinkNote(ctx, await readCentralSinks(localPath, stateRoot), localPath)
+
+      if (failures > 0) {
+        span.setAttribute('status', 'failed')
+        span.setAttribute('error_kind', 'leave_partial')
+        ctx.stderr.write(`hyp leave: ${failures} step(s) could not finish (see above); the per-step command above, or a plain re-run of 'hyp leave', will pick up the rest\n`)
+        return 1
+      }
+
+      ctx.stdout.write(`✓ left${urls.length > 0 ? ` ${urls.join(', ')}` : ''} - this machine no longer forwards logs or pulls org config\n`)
+      ctx.stdout.write('  kept: query sessions, your local config, and the daemon service (local-only capture keeps working)\n')
+      return 0
+    },
+    { component: 'leave' }
+  )
+}
+
+/**
+ * Read a config layer file and list its `@hypaware/central` sink blocks:
+ * instance name, target url, and the resolved forward-identity path (the
+ * sink's `identity.persisted_path`, defaulting to the per-plugin state
+ * path — the same resolution `seedLoginGateway` uses). Lenient: a missing
+ * or malformed file is simply no sinks, because `leave` tears down
+ * best-effort and must not wedge on a corrupt layer.
+ *
+ * @param {string} configFilePath
+ * @param {string} stateRoot
+ * @returns {Promise<Array<{ name: string, url: string, persistedPath: string }>>}
+ */
+async function readCentralSinks(configFilePath, stateRoot) {
+  /** @type {Record<string, any>} */
+  let parsed
+  try {
+    parsed = JSON.parse(await fs.readFile(configFilePath, 'utf8'))
+  } catch {
+    return []
+  }
+  const sinks = parsed && typeof parsed === 'object' ? parsed.sinks : undefined
+  if (!sinks || typeof sinks !== 'object') return []
+  /** @type {Array<{ name: string, url: string, persistedPath: string }>} */
+  const out = []
+  for (const [name, entry] of Object.entries(sinks)) {
+    if (!entry || /** @type {any} */ (entry).plugin !== '@hypaware/central') continue
+    const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
+    const url = typeof config.url === 'string' ? config.url : ''
+    const persistedPath = typeof config.identity?.persisted_path === 'string'
+      ? config.identity.persisted_path
+      : path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+    out.push({ name, url, persistedPath })
+  }
+  return out
+}
+
+/**
+ * Tell a leaving user about central sinks in the user-owned LOCAL layer,
+ * which `hyp leave` deliberately never edits: without this note, a machine
+ * with a hand-authored sink would keep forwarding after a "successful"
+ * leave with no explanation.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {Array<{ name: string, url: string }>} sinks
+ * @param {string} localPath
+ */
+function writeLocalCentralSinkNote(ctx, sinks, localPath) {
+  for (const sink of sinks) {
+    ctx.stdout.write(
+      `note: your local config defines a '@hypaware/central' sink ('${sink.name}')${sink.url ? ` targeting ${sink.url}` : ''}\n`
+    )
+    ctx.stdout.write(`  'hyp leave' never edits the local layer; remove it from ${localPath} to stop forwarding\n`)
+  }
 }
 
 /**

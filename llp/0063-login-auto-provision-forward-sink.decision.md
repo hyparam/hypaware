@@ -352,14 +352,27 @@ Two exit verbs referenced by this design do not exist yet; the first is a hard
 prerequisite (D4's rejection message names it), the second a sibling gap made
 conspicuous by the ladder:
 
-- **Minimal `hyp leave`.** The vocabulary is already load-bearing in LLP 0041/0044/0045
-  but has no implementation. Scope needed here: (1) remove the central seed /
+- **Minimal `hyp leave`** *(implemented 2026-07-04: `runLeave`,
+  `src/core/cli/core_commands.js`)*. The vocabulary is already load-bearing in LLP 0041/0044/0045.
+  Scope: (1) remove the central seed /
   supersede the active central-config slot (inverse of join's write, reusing the
   #139 reset machinery); (2) run the action reconciler's `reverse()` pass so
   centrally-attached clients detach and prior settings restore (the LLP 0044
-  contract — its first exercise); (3) stop the central sink and drop the forward
-  identity (`identity.json`). It does **not** touch the query session store, the
-  local layer, or the daemon service (ladder rules above).
+  contract — its first exercise; the CLI routes through the same single core
+  disk undo as `hyp detach`, so manual attaches — which carry no marker — stay);
+  (3) stop the central sink (daemon service restart, never uninstall) and drop
+  the forward identity (`identity.json`). It does **not** touch the query
+  session store, the local layer, or the daemon service (ladder rules above).
+  **Best-effort and idempotent (self-healing).** Every step force-deletes what
+  it can and tolerates already-gone state, so a plain re-run of `hyp leave`
+  finishes whatever a partial failure left behind — no resume bookkeeping.
+  "Connected" is central layer present **or** an org-attach marker still on
+  disk (the marker is its own unfinished-teardown signal), so a leave that
+  died mid-reversal still has work on re-run rather than short-circuiting to
+  "not connected". One corollary: an org attach whose plugin is no longer
+  installed cannot be reversed, so leave **drops its marker** (a lingering
+  `done` marker would block the next join's re-attach, #217) and prints a
+  manual-revert hint rather than wedging.
 - **`hyp remote logout <target>`.** The level-2 exit: drop the stored credential
   for one target without removing the target entry (`remote remove` is the
   heavier target-deletion verb). Not blocking for this doc, but the ladder is
@@ -429,9 +442,13 @@ cascade claim needed the opposite correction.
 
 ## Open questions
 
-- **Does `hyp leave` best-effort revoke the server-side gateway row, or is
-  teardown local-only?** Local-only is defensible (the credential expires), but
-  worth one sentence in the leave implementation.
+- ~~Does `hyp leave` best-effort revoke the server-side gateway row, or is
+  teardown local-only?~~ **Resolved (2026-07-04, with the leave
+  implementation): teardown is local-only.** The credential expires on its own,
+  revocation is the operator's server-side act (server LLP 0020 D5), and a
+  best-effort revoke would make `leave` depend on the very connection — and
+  possibly the very credential — it is severing. Stated in `runLeave`'s doc
+  comment so the next agent doesn't "helpfully" add the call.
 
 Everything else — consent default, config layer, enablement scope, daemon
 install, exclusivity, rejection scope (total gate, at most one server per
