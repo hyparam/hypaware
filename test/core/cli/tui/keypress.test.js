@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { reduce } from '../../../../src/core/cli/tui/keypress.js'
 
 /**
- * @import { MultiselectState, SelectState, TextState, ConfirmState } from '../../../../src/core/cli/tui/types.js'
+ * @import { MultiselectState, SelectState, TextState } from '../../../../src/core/cli/tui/types.js'
  */
 
 /** @returns {MultiselectState} */
@@ -53,26 +53,16 @@ function textState(overrides = {}) {
   }
 }
 
-/** @returns {ConfirmState} */
-function confirmState(overrides = {}) {
-  return {
-    kind: 'confirm',
-    title: 'go?',
-    default: true,
-    status: 'active',
-    ...overrides,
-  }
-}
 
 test('reduce: ctrl+c cancels any active state', () => {
-  for (const s of [multiselectState(), selectState(), textState(), confirmState()]) {
+  for (const s of [multiselectState(), selectState(), textState()]) {
     const next = reduce(s, { name: 'c', ctrl: true })
     assert.equal(next.status, 'cancelled')
   }
 })
 
 test('reduce: escape cancels any active state', () => {
-  for (const s of [multiselectState(), selectState(), textState(), confirmState()]) {
+  for (const s of [multiselectState(), selectState(), textState()]) {
     const next = reduce(s, { name: 'escape' })
     assert.equal(next.status, 'cancelled')
   }
@@ -272,35 +262,6 @@ test('text: mask flag does not change the value field; only render relies on it'
   assert.equal(s.mask, true)
 })
 
-test('confirm: y and Y resolve to true', () => {
-  for (const ch of ['y', 'Y']) {
-    const s = confirmState({ default: false })
-    const next = /** @type {any} */ (reduce(s, { sequence: ch }))
-    assert.equal(next.status, 'resolved')
-    assert.equal(next.value, true)
-  }
-})
 
-test('confirm: n and N resolve to false', () => {
-  for (const ch of ['n', 'N']) {
-    const s = confirmState({ default: true })
-    const next = /** @type {any} */ (reduce(s, { sequence: ch }))
-    assert.equal(next.status, 'resolved')
-    assert.equal(next.value, false)
-  }
-})
 
-test('confirm: enter resolves with default', () => {
-  for (const def of [true, false]) {
-    const s = confirmState({ default: def })
-    const next = /** @type {any} */ (reduce(s, { name: 'return' }))
-    assert.equal(next.status, 'resolved')
-    assert.equal(next.value, def)
-  }
-})
 
-test('confirm: other letters are no-ops', () => {
-  const s = confirmState()
-  const next = reduce(s, { sequence: 'a' })
-  assert.strictEqual(next, s)
-})

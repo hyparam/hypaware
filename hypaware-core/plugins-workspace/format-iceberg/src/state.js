@@ -115,10 +115,7 @@ export async function writeMarker(blobStore, key, marker) {
  * actually committed.
  *
  * @param {ExportMarker | null} marker
- * @param {ProbeStateLike | string | undefined} state
- *   The current probe state. A bare snapshot id string is accepted for
- *   backward compatibility, without metadata ancestry can only be
- *   proven via equality.
+ * @param {ProbeStateLike | undefined} state
  * @returns {boolean}
  */
 export function markerSubsumedBySnapshot(marker, state) {
@@ -131,11 +128,10 @@ export function markerSubsumedBySnapshot(marker, state) {
 }
 
 /**
- * @param {ProbeStateLike | string | undefined} state
+ * @param {ProbeStateLike | undefined} state
  * @returns {{ currentSnapshotId: string | undefined, metadata: TableMetadata | null }}
  */
 function normalizeProbeState(state) {
-  if (typeof state === 'string') return { currentSnapshotId: state, metadata: null }
   if (!state) return { currentSnapshotId: undefined, metadata: null }
   return {
     currentSnapshotId: state.currentSnapshotId,

@@ -24,7 +24,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * Claude settings file lives under it. Asserts the §Phase 8.4 contract
  * from the implementation plan:
  *
- * - `hyp attach --client claude --yes` patches `~/.claude/settings.json`
+ * - `hyp attach --client claude` patches `~/.claude/settings.json`
  *   with the HypAware marker, `env.ANTHROPIC_BASE_URL`, and the
  *   managed session-context hook entries (golden compare).
  * - A `client.attach` span exists with `hyp_plugin=@hypaware/claude`,
@@ -127,11 +127,11 @@ export async function run({ harness, expect }) {
     await kernel.sources.start('ai-gateway', runtime.ctx)
     runtime.started = true
 
-    // Drive `hyp attach --client claude --yes` through the dispatcher.
+    // Drive `hyp attach --client claude` through the dispatcher.
     const attachStdout = makeBuf()
     const attachStderr = makeBuf()
     const attachCode = await dispatch(
-      ['attach', '--client', 'claude', '--yes'],
+      ['attach', '--client', 'claude'],
       {
         stdout: attachStdout,
         stderr: attachStderr,
@@ -140,7 +140,7 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp attach --client claude --yes exited 0', attachCode, (v) => v === 0)
+    expect.that('dispatch: hyp attach --client claude exited 0', attachCode, (v) => v === 0)
     expect.that(
       'stderr: hyp attach had no errors',
       attachStderr.text(),

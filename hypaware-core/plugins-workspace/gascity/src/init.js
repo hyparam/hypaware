@@ -7,9 +7,9 @@
 /**
  * `hyp init gascity`
  *
- * Drives a tmp config that enables the gascity plugin. The Phase 9
- * walkthrough will own the disk-write behavior; here we print the
- * preset payload so callers can pipe it into a fresh config.
+ * Prints the preset config payload that enables the gascity plugin
+ * so callers can pipe it into a fresh config; it does not write to
+ * disk itself.
  *
  * @param {string[]} _argv
  * @param {CommandRunContext} ctx

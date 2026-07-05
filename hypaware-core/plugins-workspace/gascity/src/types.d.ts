@@ -35,8 +35,6 @@ export interface CityConfig {
 }
 
 export interface GascityRuntime {
-  /** Attached city names (in attach order). */
-  cities: string[]
   /** Activation context shared across attach/reload. */
   ctx: PluginActivationContext
   /** Kernel source registry. */

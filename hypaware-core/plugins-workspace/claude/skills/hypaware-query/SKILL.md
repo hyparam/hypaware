@@ -27,11 +27,9 @@ hyp query sql "<sql>" --format json
 hyp query sql "<sql>" --format jsonl --output <file>   # full result, lossless
 hyp query refresh <file.jsonl>
 hyp query refresh --all logs
-hyp collect list
-hyp collect remove <name>
 ```
 
-These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain; `hyp collect`: list, remove). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
+These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
 
 ## Remote queries (other HypAware hosts)
 

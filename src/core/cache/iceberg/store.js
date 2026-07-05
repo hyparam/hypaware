@@ -54,14 +54,6 @@ function getLocalIO() {
 }
 
 /**
- * Tests reset the IO cache so `installObservability` resets are
- * matched by a fresh resolver - keeps smoke-flow isolation honest.
- */
-export function resetLocalIO() {
-  cachedIO = null
-}
-
-/**
  * @param {string} tablePath
  * @returns {string}
  */

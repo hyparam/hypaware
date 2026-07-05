@@ -10,7 +10,7 @@
  */
 
 /**
- * @import { Key, MultiselectState, SelectState, TextState, ConfirmState, State } from '../../../../src/core/cli/tui/types.js'
+ * @import { Key, MultiselectState, SelectState, TextState, State } from '../../../../src/core/cli/tui/types.js'
  */
 
 /**
@@ -33,7 +33,6 @@ export function reduce(state, key) {
     case 'multiselect': return reduceMultiselect(state, key)
     case 'select':      return reduceSelect(state, key)
     case 'text':        return reduceText(state, key)
-    case 'confirm':     return reduceConfirm(state, key)
   }
 }
 
@@ -139,24 +138,6 @@ function reduceText(state, key) {
     if (code >= 32 && code !== 127) {
       return { ...state, value: state.value + key.sequence, error: undefined }
     }
-  }
-  return state
-}
-
-/**
- * @param {ConfirmState} state
- * @param {Key} key
- * @returns {ConfirmState}
- */
-function reduceConfirm(state, key) {
-  if (key.sequence === 'y' || key.sequence === 'Y') {
-    return { ...state, status: 'resolved', value: true }
-  }
-  if (key.sequence === 'n' || key.sequence === 'N') {
-    return { ...state, status: 'resolved', value: false }
-  }
-  if (key.name === 'return') {
-    return { ...state, status: 'resolved', value: state.default }
   }
   return state
 }

@@ -11,8 +11,8 @@ import { getActiveTransport } from './transport.js'
 /**
  * `startGascitySource(ctx)` is the `SourceContribution.start` callback
  * registered against the kernel `SourceRegistry`. It returns a
- * `StartedSource` whose `reload(ctx)` mirrors the donor's local SIGHUP
- * behavior: diff the configured city set against the running set, open
+ * `StartedSource` whose `reload(ctx)` diffs like a SIGHUP handler
+ * would: diff the configured city set against the running set, open
  * subscriptions for added cities, close subscriptions for removed
  * cities. The kernel emits `source.start` / `source.reload` spans
  * around each call.

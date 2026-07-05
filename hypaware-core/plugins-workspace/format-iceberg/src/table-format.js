@@ -3,7 +3,7 @@
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 import { createBlobStoreIO, pathToKey, tableUrlForBlobPrefix } from './blob-io.js'
-import { commitBatch, commitRowStream, probeTable } from './commit.js'
+import { commitRowStream, probeTable } from './commit.js'
 import { expireExportSnapshots, normalizeExportRetentionConfig } from './maintenance.js'
 import { derivePartitioning } from './partitioning.js'
 import { loadMarker, markerKey, markerSubsumedBySnapshot, writeMarker } from './state.js'

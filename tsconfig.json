@@ -13,8 +13,10 @@
     "types": ["node"]
   },
   "include": [
+    "bin",
     "collectivus-plugin-kernel-types.d.ts",
     "hypaware-core",
+    "scripts",
     "src",
     "test"
   ]

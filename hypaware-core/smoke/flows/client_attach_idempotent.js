@@ -166,12 +166,12 @@ export async function run({ harness, expect }) {
     // ----------------------------------------------------------------
     // Claude: attach -> attach -> assert idempotent + preserved keys
     // ----------------------------------------------------------------
-    let code = await runAttach(['--client', 'claude', '--yes'], { registry, kernel, env })
+    let code = await runAttach(['--client', 'claude'], { registry, kernel, env })
     expect.that('claude attach #1 exited 0', code, (v) => v === 0)
 
     const afterFirstClaude = await fs.readFile(claudeSettingsPath, 'utf8')
 
-    code = await runAttach(['--client', 'claude', '--yes'], { registry, kernel, env })
+    code = await runAttach(['--client', 'claude'], { registry, kernel, env })
     expect.that('claude attach #2 (idempotent) exited 0', code, (v) => v === 0)
 
     const afterSecondClaude = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
@@ -225,7 +225,7 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && v.includes('No HypAware marker found')
     )
 
-    code = await runAttach(['--client', 'claude', '--yes'], { registry, kernel, env })
+    code = await runAttach(['--client', 'claude'], { registry, kernel, env })
     expect.that('claude attach after detach exited 0', code, (v) => v === 0)
     const reattachedClaude = await fs.readFile(claudeSettingsPath, 'utf8')
     // Byte-for-byte comparison ignoring the `_hypaware.attached_at`
@@ -271,13 +271,13 @@ export async function run({ harness, expect }) {
 
     // Restore claude marker for one more attach cycle below (so the
     // codex tests run against a kernel where Claude is also attached).
-    code = await runAttach(['--client', 'claude', '--yes'], { registry, kernel, env })
+    code = await runAttach(['--client', 'claude'], { registry, kernel, env })
     expect.that('claude re-attach for codex phase exited 0', code, (v) => v === 0)
 
     // ----------------------------------------------------------------
     // Codex: attach -> attach -> assert idempotent + preserved keys
     // ----------------------------------------------------------------
-    code = await runAttach(['--client', 'codex', '--yes'], { registry, kernel, env })
+    code = await runAttach(['--client', 'codex'], { registry, kernel, env })
     expect.that('codex attach #1 exited 0', code, (v) => v === 0)
 
     const afterFirstCodex = await fs.readFile(codexConfigPath, 'utf8')
@@ -317,7 +317,7 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && /\[history\][\s\S]*?max_bytes\s*=\s*1024/.test(v)
     )
 
-    code = await runAttach(['--client', 'codex', '--yes'], { registry, kernel, env })
+    code = await runAttach(['--client', 'codex'], { registry, kernel, env })
     expect.that('codex attach #2 (idempotent) exited 0', code, (v) => v === 0)
     const afterSecondCodex = await fs.readFile(codexConfigPath, 'utf8')
     expect.that(
@@ -364,7 +364,7 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && v.includes('No HypAware marker found')
     )
 
-    code = await runAttach(['--client', 'codex', '--yes'], { registry, kernel, env })
+    code = await runAttach(['--client', 'codex'], { registry, kernel, env })
     expect.that('codex attach after detach exited 0', code, (v) => v === 0)
     const reattachedCodex = await fs.readFile(codexConfigPath, 'utf8')
     expect.that(
@@ -376,7 +376,7 @@ export async function run({ harness, expect }) {
     // JSON output: codex attach with --json should emit a parseable
     // JSON object with the gateway base_url echoed back.
     const codexAttachJsonStdout = makeBuf()
-    code = await runAttach(['--client', 'codex', '--yes', '--json'], {
+    code = await runAttach(['--client', 'codex', '--json'], {
       registry,
       kernel,
       env,
@@ -416,7 +416,7 @@ export async function run({ harness, expect }) {
     const capMissingStdout = makeBuf()
     const capMissingStderr = makeBuf()
     const capMissingCode = await dispatch(
-      ['attach', '--client', 'claude', '--yes'],
+      ['attach', '--client', 'claude'],
       {
         stdout: capMissingStdout,
         stderr: capMissingStderr,

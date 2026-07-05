@@ -3,10 +3,8 @@
 import { CodexSettingsError } from './errors.js'
 
 /**
- * TOML editor for Codex's `config.toml`. Ported from the Collectivus
- * donor; renames the managed provider id from `collectivus` →
- * `hypaware` and replaces the `# BEGIN collectivus codex …` markers
- * with `# BEGIN hypaware codex …`.
+ * TOML editor for Codex's `config.toml`. Owns the `hypaware` managed
+ * provider block delimited by `# BEGIN hypaware codex …` markers.
  *
  * Public API:
  *  - `prepareAttach(content, port, version, opts?)` → `{ content, prevValue? }`

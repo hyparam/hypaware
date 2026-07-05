@@ -11,9 +11,8 @@ export const DATASET_NAME = 'gascity_messages'
 export const PARTITION_LABEL = 'all'
 
 /**
- * Stable column order for the `gascity_messages` dataset. A trimmed
- * projection of the donor schema (Collectivus `gascity_messages.schema`)
- * sufficient for V1: `city` and `provider_session_id` carry session
+ * Stable column order for the `gascity_messages` dataset, trimmed to
+ * what V1 needs: `city` and `provider_session_id` carry session
  * identity, `event_time` is the primary timestamp, and `metadata`
  * carries everything the normalizer doesn't hoist (including
  * `dev_run_id` from the harness so smoke flows can filter by run).

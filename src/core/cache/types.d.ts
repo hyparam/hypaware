@@ -34,8 +34,6 @@ export interface CachePartitionMeta {
 export interface RetentionConfig {
   default_days: number
   datasets?: Record<string, number>
-  /** Reserved feature flag (see "open question" in plan §Phase 4); not implemented at V1. */
-  wait_for_sink_ack?: boolean
 }
 
 export interface FlushChunk {

@@ -16,7 +16,7 @@ You run `hyp query` commands. These rules are non-negotiable.
 - **Use `--format json`** for anything you will parse. `--format markdown` only when you literally need a table for the lead.
 - **Inline output is context-budgeted, not row-capped.** String cells truncate to ~200 chars (`…(+N)` markers) and rows are dropped past a ~32KB row-data budget, with a `notice: showing X of Y rows …` line on stderr. Prefer aggregates that fit the budget; when your slice genuinely needs a large result, spill it with `--output <file>` and post-process the file with Read/Grep instead of parsing stdout.
 - **Narrow aggressively in SQL.** Add `WHERE` clauses on `date`, `gateway_id`, `session_id`, `user_id`, `message_created_at`, etc., until the slice matches what you are assigned (use `session_id` to scope to one session — `conversation_id` is null for Claude). Filtering inside the SELECT is the only narrowing mechanism — `hyp query sql` does not take dataset-shaped flags like `--date` or `--gateway-id`.
-- **Unfamiliar table?** Run `hyp query schema <table> --format json` once, then query. Works for built-ins and `hyp collect`-registered tables.
+- **Unfamiliar table?** Run `hyp query schema <table> --format json` once, then query. Works for every dataset listed by `hyp query status`.
 - **`--config <path>`** only when told the service uses a non-default config. Otherwise rely on what `hyp status` would discover.
 - **Read-only SQL only.** SQL must be a single `SELECT`. The available `hyp query` subcommands are `schema`, `status`, `sql`, `refresh`, `maintain` — you are restricted to `schema`, `status`, and `sql`. Never run `refresh` or `maintain`, and never shell out to side effects.
 
@@ -26,7 +26,6 @@ You run `hyp query` commands. These rules are non-negotiable.
 - `traces` — OTLP spans.
 - `metrics` — OTLP metric points.
 - `ai_gateway_messages` — one row per AI-gateway content part. Key columns: `session_id` (the always-present session container — the grouping/natural key), `conversation_id` (nullable thread within a session: a Codex thread; **null for Claude**), `message_id`, `message_index`, `part_id`, `part_index`, `role`, `part_type` (`text` | `reasoning` | `tool_call` | `tool_result` | passthrough), `tool_name`, `tool_call_id`, `tool_args`, `content_text`, `is_error`, `is_compact_summary`, `is_sidechain`, `cwd`, `git_branch`, `user_id`, `client_name`, `client_version`, `entrypoint`, `user_type`, `permission_mode`, `provider`, `model`, `hook_event`, `caller_type`, `attributes` (JSON: `gateway`, `client`, `request`, `timing`, sometimes `usage`), `status` (JSON: `tool_status`, sometimes `finish_reason`), `message_created_at`, `conversation_started_at`. Partition columns: `gateway_id`, `date`.
-- Collection tables registered via `hyp collect` — see `hyp collect list` for what's available in the lead's setup.
 
 For exact columns in the installed version: `hyp query schema <table> --format json`. For the full reference on `hyp query`, read `~/.claude/skills/hypaware-query/SKILL.md`.
 

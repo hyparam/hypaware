@@ -35,9 +35,7 @@ const PLUGIN_VERSION = '1.0.0'
 /**
  * Activate `@hypaware/s3`. Provides `hypaware.blob-store@1` as a full
  * `BlobStore` (put/get/list/delete; put supports `ifNoneMatch` via
- * S3's `If-None-Match` header) AND contributes a single `s3` sink. The
- * sink contribution is untouched by the BlobStore migration. Existing
- * encoder-writer + s3 sinks keep working unchanged.
+ * S3's `If-None-Match` header) AND contributes a single `s3` sink.
  *
  * BlobStore resolution:
  *  - If `plugins[].config` for `@hypaware/s3` carries a `bucket`, the

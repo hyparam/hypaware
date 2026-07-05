@@ -280,7 +280,7 @@ export function parseOpenAiChatResponse(payload, ctx) {
  * @param {AsyncIterable<Uint8Array | string>} body
  * @returns {AsyncGenerator<CompletionDelta>}
  */
-export async function* parseOpenAiStream(body) {
+async function* parseOpenAiStream(body) {
   const decoder = new TextDecoder()
   let buffer = ''
   let inputTokens = 0

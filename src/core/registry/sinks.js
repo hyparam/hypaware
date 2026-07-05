@@ -197,7 +197,7 @@ export function createSinkRegistry() {
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: args.kind,
           hyp_sink_writer: args.kind === 'blob' ? args.writerPlugin : '',
-          hyp_sink_destination: args.kind === 'blob' ? contribution.plugin : contribution.plugin,
+          hyp_sink_destination: contribution.plugin,
           hyp_sink_supports: supports.join(','),
         })
         return handle
@@ -378,18 +378,15 @@ function resolveSupports(contribution, encoder) {
   /** @type {Set<SinkSupportTag>} */
   const set = new Set()
   for (const tag of contribution.supports ?? []) set.add(tag)
-  if (encoder) {
-    if (!Array.isArray(encoder.supports)) {
-      // Encoders without an opinion neither add nor remove tags; missing
-      // tags only block on the destination-side declaration.
-    } else {
-      // Intersect: a tag survives only when both sides claim it. This
-      // mirrors the design's "Parquet+local-fs queryable, JSONL+local-fs
-      // not" rule without a tag-by-tag table in the kernel.
-      const encoderTags = new Set(encoder.supports)
-      for (const tag of Array.from(set)) {
-        if (!encoderTags.has(tag)) set.delete(tag)
-      }
+  // Intersect: a tag survives only when both sides claim it. This
+  // mirrors the design's "Parquet+local-fs queryable, JSONL+local-fs
+  // not" rule without a tag-by-tag table in the kernel. Encoders
+  // without a `supports` array have no opinion and neither add nor
+  // remove tags.
+  if (encoder && Array.isArray(encoder.supports)) {
+    const encoderTags = new Set(encoder.supports)
+    for (const tag of Array.from(set)) {
+      if (!encoderTags.has(tag)) set.delete(tag)
     }
   }
   return Array.from(set).sort()

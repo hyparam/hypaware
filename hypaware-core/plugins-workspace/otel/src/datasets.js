@@ -15,10 +15,9 @@ export const PARTITION_LABEL = 'all'
 export const PLUGIN_NAME = '@hypaware/otel'
 
 /**
- * `logs` columns. Mirrors the donor `LOGS_COLUMNS` in
- * `collectivus/src/upload/schema.js`, but with `scope` already flattened
- * to `scope_name` / `scope_version` / `scope_attributes` so rows feed
- * `appendRows` without an intermediate extractor.
+ * `logs` columns, with `scope` already flattened to `scope_name` /
+ * `scope_version` / `scope_attributes` so rows feed `appendRows`
+ * without an intermediate extractor.
  *
  * @type {ReadonlyArray<ColumnSpec>}
  */

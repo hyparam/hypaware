@@ -10,7 +10,6 @@ test('package export "hypaware/tui" resolves to the same module', () => {
   assert.equal(typeof viaPackage.multiselect, 'function')
   assert.equal(typeof viaPackage.select, 'function')
   assert.equal(typeof viaPackage.text, 'function')
-  assert.equal(typeof viaPackage.confirm, 'function')
   assert.equal(typeof viaPackage.PromptCancelledError, 'function')
   // The identical function references prove the exports point at the
   // very same module instance, a sibling package importing

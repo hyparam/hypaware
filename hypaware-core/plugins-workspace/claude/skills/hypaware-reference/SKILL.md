@@ -83,7 +83,6 @@ The CLI is bound to both `hyp` and `hypaware`. Core commands:
   on Linux).
 - `hyp join` - enroll the host in a centrally-managed fleet.
 - `hyp remote` - manage remote HypAware query targets (`add`, `login`, `list`).
-- `hyp collect` - manage collected JSONL tables (`list`, `remove`).
 - `hyp backfill` - import client history from registered backfill providers.
 - `hyp sink` - manage sink instances (`force`, `maintain`).
 - `hyp config` - inspect or validate the config.

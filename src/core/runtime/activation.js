@@ -74,7 +74,7 @@ export function createKernelRuntime(opts = {}) {
     verbs,
     storage,
     cacheRoot: storage.cacheRoot,
-    skills: createPhase2SkillRegistry(),
+    skills: createSkillRegistry(),
     agents: createAgentRegistry(),
     initPresets: createInitPresetRegistry(),
     backfills: opts.backfillRegistry ?? createBackfillRegistry(),
@@ -186,7 +186,7 @@ function createPluginLogger(pluginName) {
 
 /**
  * Build a per-plugin permission context backed by the manifest's
- * declared permissions. Phase 2 has no interactive grant flow, so
+ * declared permissions. There is no interactive grant flow, so
  * `request(p)` resolves true only if the permission was pre-granted in
  * the manifest.
  *
@@ -234,22 +234,15 @@ function createCapabilitiesFacade(pluginName, registry) {
   }
 }
 
-/* ----- Phase 2 placeholder registries ----- */
-/* Each registry below is a no-op shell that conforms to the kernel
- * type contract. Later phases swap in real implementations without
- * touching the activation surface. The config registry was promoted to
- * a real implementation in Phase 6 (`src/core/config/schema.js`). */
-
 /**
  * Skill registry. Stores contributions from client-adapter plugins so
- * `hyp skills install` (and the Phase 9 walkthrough) can enumerate
+ * `hyp skills install` (and the walkthrough finale) can enumerate
  * what each plugin wants materialized into the per-client skill
- * directories. Promoted to a real registry in Phase 8.4 alongside the
- * client-adapter plugins.
+ * directories.
  *
  * @returns {SkillRegistry}
  */
-function createPhase2SkillRegistry() {
+function createSkillRegistry() {
   /** @type {SkillContribution[]} */
   const items = []
   return {
@@ -331,8 +324,7 @@ function createAgentRegistry() {
  * activation. `hyp init <preset>` looks up the preset by name and
  * invokes its `run(argv, ctx)` with the command run context.
  *
- * Promoted from a Phase 2 placeholder in Phase 9 (hy-imw). The
- * registry is intentionally non-validating beyond the basic shape
+ * The registry is intentionally non-validating beyond the basic shape
  * checks. Preset authors own their argv parsing and config writing
  * in `run()`.
  *

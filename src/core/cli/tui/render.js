@@ -13,7 +13,7 @@
  */
 
 /**
- * @import { State, MultiselectState, SelectState, TextState, ConfirmState, RenderOpts } from '../../../../src/core/cli/tui/types.js'
+ * @import { State, MultiselectState, SelectState, TextState, RenderOpts } from '../../../../src/core/cli/tui/types.js'
  */
 
 const ANSI = {
@@ -44,7 +44,6 @@ export function render(state, opts) {
     case 'multiselect': return renderMultiselect(state, opts)
     case 'select':      return renderSelect(state, opts)
     case 'text':        return renderText(state, opts)
-    case 'confirm':     return renderConfirm(state, opts)
   }
 }
 
@@ -52,7 +51,6 @@ const DEFAULT_HINT = {
   multiselect: 'space toggle · a all · enter confirm · esc cancel',
   select:      'up/down · enter pick · esc cancel',
   text:        'enter confirm · esc cancel',
-  confirm:     'y/n · enter accepts default · esc cancel',
 }
 
 /**
@@ -125,19 +123,5 @@ function renderText(state, opts) {
   if (state.error) {
     lines.push(paint(state.error, ANSI.red, opts.color))
   }
-  return lines.join('\n') + '\n'
-}
-
-/**
- * @param {ConfirmState} state
- * @param {RenderOpts} opts
- */
-function renderConfirm(state, opts) {
-  const lines = []
-  lines.push(paint(state.title, ANSI.bold, opts.color))
-  lines.push(paint(state.hint ?? DEFAULT_HINT.confirm, ANSI.dim, opts.color))
-  lines.push('')
-  const yn = state.default ? '[Y/n]' : '[y/N]'
-  lines.push(`> ${yn}`)
   return lines.join('\n') + '\n'
 }

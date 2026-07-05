@@ -8,7 +8,6 @@ import {
   multiselect,
   select,
   text,
-  confirm,
 } from '../../../../src/core/cli/tui/index.js'
 
 const ERROR_RE = /TUI prompt requires a TTY; got non-TTY stdin\/stdout/
@@ -68,17 +67,6 @@ test('non-TTY stdin rejects text with the documented error', async () => {
   )
 })
 
-test('non-TTY stdin rejects confirm with the documented error', async () => {
-  const io = makeNonTty()
-  await assert.rejects(
-    confirm({
-      title: 'go?',
-      stdin: io.stdin,
-      stdout: io.stdout,
-    }),
-    (err) => err instanceof Error && ERROR_RE.test(err.message),
-  )
-})
 
 test('HYP_NO_TUI=1 forces the same TTY error even for fake-TTY streams', async () => {
   const io = makeFakeTty()

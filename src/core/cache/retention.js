@@ -13,7 +13,7 @@ import { deleteFileAppliesToDataEntry } from 'icebird/src/delete.js'
 import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
-import { Attr, getKernelInstruments, getMeter, withSpan } from '../observability/index.js'
+import { Attr, getMeter, withSpan } from '../observability/index.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
@@ -75,7 +75,6 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
         }
       }
 
-      getKernelInstruments()
       return { evicted, sourceTableResults }
     },
     config: cfg,
@@ -507,8 +506,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
 
 /**
  * @param {RetentionConfig | undefined} config
- * @returns {Required<Pick<RetentionConfig, 'default_days'>> & { datasets: Record<string, number>, wait_for_sink_ack: boolean }}
- * @ref LLP 0013#open-question [explains]: wait_for_sink_ack is the parsed-but-unwired evict-on-ack vs evict-on-retention knob
+ * @returns {Required<Pick<RetentionConfig, 'default_days'>> & { datasets: Record<string, number> }}
  */
 function normalizeConfig(config) {
   const default_days =
@@ -516,8 +514,7 @@ function normalizeConfig(config) {
       ? config.default_days
       : DEFAULT_RETENTION_DAYS
   const datasets = config?.datasets && typeof config.datasets === 'object' ? config.datasets : {}
-  const wait_for_sink_ack = Boolean(config?.wait_for_sink_ack)
-  return { default_days, datasets, wait_for_sink_ack }
+  return { default_days, datasets }
 }
 
 /**

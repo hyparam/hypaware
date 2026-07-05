@@ -1,15 +1,4 @@
-import type { AiGatewayExchangeInput, JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
-
-export interface CodexLogReader {
-  /** Identifier used in telemetry and de-dup. */
-  name: string
-  /**
-   * Pure function that may augment the projection with locally-collected
-   * Codex state (e.g. parsed SQLite turn rows). Returning `undefined`
-   * means "no augmentation"; the projector still proceeds.
-   */
-  read(input: AiGatewayExchangeInput): Record<string, unknown> | undefined
-}
+import type { JsonObject } from '../../../../collectivus-plugin-kernel-types.d.ts'
 
 /**
  * One Codex rollout session recovered from a `~/.codex/sessions/**` file.

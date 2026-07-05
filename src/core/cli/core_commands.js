@@ -12,11 +12,11 @@ import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
 import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
-import { runWalkthrough, runPickerWalkthrough } from './walkthrough.js'
+import { runPickerWalkthrough } from './walkthrough.js'
 import { select } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
-import { mergeInstalledManifestsIntoKnown, validateConfig } from '../config/validate.js'
+import { validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
@@ -43,14 +43,6 @@ import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
 import { createUsagePolicyResolver, findRepoRoot } from '../usage-policy/index.js'
 import { executeQuerySql } from '../query/sql.js'
-
-// `query sql` migrated to a verb (LLP 0034 §verbs): it is registered by
-// `registerCoreVerbs` and projected into both a CLI command and an MCP
-// tool, so its parsing/output no longer lives in this command set. The
-// output builder and the render-control defaults moved to their canonical
-// homes; re-export them here for the tests that import them by this path.
-export { buildQuerySqlOutput } from '../query/format.js'
-export { DEFAULT_QUERY_MAX_CELL, DEFAULT_QUERY_MAX_BYTES } from './verb_codec.js'
 import {
   installPlugin,
   listInstalledPlugins,
@@ -165,24 +157,6 @@ function buildCoreCommands() {
       run: runBackfillPlan,
     },
     {
-      name: 'collect',
-      summary: 'Collect rows from a registered source (see subcommands: list, remove)',
-      usage: 'hyp collect <subcommand> [args...]',
-      run: runCollect,
-    },
-    {
-      name: 'collect list',
-      summary: 'List configured collectors',
-      usage: 'hyp collect list',
-      run: runCollectList,
-    },
-    {
-      name: 'collect remove',
-      summary: 'Remove a configured collector',
-      usage: 'hyp collect remove <name>',
-      run: runCollectRemove,
-    },
-    {
       name: 'plugin install',
       summary: 'Install a plugin from name, git URL, or local directory',
       usage: 'hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]',
@@ -263,7 +237,7 @@ function buildCoreCommands() {
     {
       name: 'attach',
       summary: 'Attach an AI client to the local gateway',
-      usage: 'hyp attach [client] [--client <name>] [--dry-run] [--json] [--yes]',
+      usage: 'hyp attach [client] [--client <name>] [--dry-run] [--json]',
       run: runAttach,
     },
     {
@@ -1111,44 +1085,6 @@ function parseQueryMaintainArgv(argv) {
     return { error: '--compact-only and --expire-only are mutually exclusive' }
   }
   return { dataset, dryRun, force, compactOnly, expireOnly }
-}
-
-/* ---------- collect ---------- */
-
-/**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-async function runCollect(argv, ctx) {
-  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-    ctx.stdout.write('usage: hyp collect <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: list, remove\n')
-    return 0
-  }
-  ctx.stderr.write(`hyp collect: unknown subcommand '${argv[0]}'\n`)
-  return 2
-}
-
-/**
- * @param {string[]} _argv
- * @param {CommandRunContext} ctx
- */
-async function runCollectList(_argv, ctx) {
-  ctx.stdout.write('No collectors configured.\n')
-  return 0
-}
-
-/**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-async function runCollectRemove(argv, ctx) {
-  if (argv.length === 0) {
-    ctx.stderr.write('usage: hyp collect remove <name>\n')
-    return 2
-  }
-  ctx.stdout.write(`(collect remove lands in Phase 5; would remove '${argv[0]}')\n`)
-  return 0
 }
 
 /* ---------- plugin ---------- */
@@ -2265,18 +2201,16 @@ async function runMcp(argv, ctx) {
 }
 
 /**
- * Parse `hyp mcp` flags: `--remote <target>` (stdio proxy), `--http` /
- * `--port <n>` (reserved follow-up).
+ * Parse `hyp mcp` flags: `--remote <target>` (stdio proxy), `--http`
+ * (reserved follow-up).
  *
  * @param {string[]} argv
- * @returns {{ ok: true, remote: string | undefined, http: boolean, port: number | undefined } | { ok: false, error: string }}
+ * @returns {{ ok: true, remote: string | undefined, http: boolean } | { ok: false, error: string }}
  */
 export function parseMcpArgv(argv) {
   /** @type {string | undefined} */
   let remote
   let http = false
-  /** @type {number | undefined} */
-  let port
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
     if (token === '--remote') {
@@ -2286,19 +2220,13 @@ export function parseMcpArgv(argv) {
       i += 1
     } else if (token === '--http') {
       http = true
-    } else if (token === '--port') {
-      const value = argv[i + 1]
-      const n = Number(value)
-      if (value === undefined || !Number.isInteger(n) || n <= 0) return { ok: false, error: `--port expects a positive integer (got ${value ?? '<missing>'})` }
-      port = n
-      i += 1
     } else if (token === '--help' || token === '-h') {
       return { ok: false, error: 'usage: hyp mcp [--remote <target>]' }
     } else {
       return { ok: false, error: `unexpected argument '${token}'` }
     }
   }
-  return { ok: true, remote, http, port }
+  return { ok: true, remote, http }
 }
 
 /* ---------- version ---------- */
@@ -4146,12 +4074,12 @@ function writeCoreDetachOutput({ ctx, name, json, result }) {
 
 /**
  * Parse an optional positional client name plus `--client <name>`,
- * `--yes` / `-y`, `--dry-run`, and `--json` from argv.
+ * `--dry-run`, and `--json` from argv.
  * @param {string[]} argv
  */
 function parseClientArgs(argv) {
-  /** @type {{ client: string, yes: boolean, dryRun: boolean, json: boolean, error?: string }} */
-  const r = { client: 'claude', yes: false, dryRun: false, json: false }
+  /** @type {{ client: string, dryRun: boolean, json: boolean, error?: string }} */
+  const r = { client: 'claude', dryRun: false, json: false }
   /** @type {string | undefined} */
   let requestedClient
   /**
@@ -4176,10 +4104,6 @@ function parseClientArgs(argv) {
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--yes' || arg === '-y') {
-      r.yes = true
-      continue
-    }
     if (arg === '--dry-run') {
       r.dryRun = true
       continue
@@ -4351,6 +4275,10 @@ async function runUnignore(argv, ctx) {
   }
   if (parsed.check) {
     ctx.stderr.write('error: --check is only valid for `hyp ignore`\n')
+    return 2
+  }
+  if (parsed.json) {
+    ctx.stderr.write('error: --json is only valid for `hyp ignore --check`\n')
     return 2
   }
 
