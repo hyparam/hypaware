@@ -363,6 +363,16 @@ conspicuous by the ladder:
   (3) stop the central sink (daemon service restart, never uninstall) and drop
   the forward identity (`identity.json`). It does **not** touch the query
   session store, the local layer, or the daemon service (ladder rules above).
+  **Best-effort and idempotent (self-healing).** Every step force-deletes what
+  it can and tolerates already-gone state, so a plain re-run of `hyp leave`
+  finishes whatever a partial failure left behind — no resume bookkeeping.
+  "Connected" is central layer present **or** an org-attach marker still on
+  disk (the marker is its own unfinished-teardown signal), so a leave that
+  died mid-reversal still has work on re-run rather than short-circuiting to
+  "not connected". One corollary: an org attach whose plugin is no longer
+  installed cannot be reversed, so leave **drops its marker** (a lingering
+  `done` marker would block the next join's re-attach, #217) and prints a
+  manual-revert hint rather than wedging.
 - **`hyp remote logout <target>`.** The level-2 exit: drop the stored credential
   for one target without removing the target entry (`remote remove` is the
   heavier target-deletion verb). Not blocking for this doc, but the ladder is

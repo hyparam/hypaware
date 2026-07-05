@@ -3451,9 +3451,17 @@ function isTty(stream) {
  * the server-side gateway row is not revoked (the credential expires;
  * revocation is the operator's server-side act).
  *
+ * Every step is best-effort and idempotent, so a plain re-run redoes
+ * whatever did not finish - no resume bookkeeping. "Connected" is central
+ * layer present OR an org-attach marker still on disk, so a leave that
+ * failed mid-reversal still has work on re-run instead of short-circuiting
+ * to "not connected". An org attach whose plugin is gone can't be reversed;
+ * leave drops its marker (a stale `done` marker would block the next join's
+ * re-attach, #217) and tells the user how to revert by hand.
+ *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0063#prerequisites [implements]: minimal hyp leave — central-layer removal, attach reversal via the one core undo, identity drop; never touches sessions, the local layer, or the service
+ * @ref LLP 0063#prerequisites [implements]: minimal hyp leave (central-layer removal, attach reversal via the one core undo, identity drop); never touches sessions, the local layer, or the service; best-effort and idempotent so a re-run finishes a partial teardown
  * @ref LLP 0063#connection-levels [constrained-by]: leave cascades down (level 3 → org-driven level-1 attaches), never up to the session store or the daemon service
  */
 async function runLeave(argv, ctx) {
@@ -3475,8 +3483,14 @@ async function runLeave(argv, ctx) {
     ? path.resolve(ctx.env.HYP_CONFIG)
     : defaultConfigPath(obsEnv.hypHome)
   const centralLayerPath = resolveCentralLayerPath({ stateRoot })
+  const attachMarkers = readClientActionStatus({ stateRoot }).byKind.attach ?? {}
+  const attachedNames = Object.keys(attachMarkers)
 
-  if (centralLayerPath === null) {
+  // Nothing to tear down: no central layer AND no org-attach residue. A leave
+  // that failed partway leaves its attach markers on disk, so a re-run still
+  // lands here with work to do and finishes it - the marker is its own
+  // "unfinished teardown" signal, no separate bookkeeping needed.
+  if (centralLayerPath === null && attachedNames.length === 0) {
     ctx.stdout.write('hyp leave: this machine is not connected to a central server - nothing to do\n')
     // A hand-authored central sink in the LOCAL layer is not an enrollment,
     // and leave never edits the local layer (#111 doctrine) — but a user
@@ -3485,7 +3499,7 @@ async function runLeave(argv, ctx) {
     return 0
   }
 
-  const centralSinks = await readCentralSinks(centralLayerPath, stateRoot)
+  const centralSinks = centralLayerPath !== null ? await readCentralSinks(centralLayerPath, stateRoot) : []
   const urls = [...new Set(centralSinks.map((s) => s.url).filter((u) => u.length > 0))]
 
   return withSpan(
@@ -3499,6 +3513,10 @@ async function runLeave(argv, ctx) {
     async (span) => {
       let failures = 0
       ctx.stdout.write(`leaving ${urls.length > 0 ? urls.join(', ') : 'the central server'}\n`)
+
+      // Every step below is best-effort and idempotent (force-rm, ENOENT-tolerant
+      // unlink, idempotent detach), so a plain re-run of `hyp leave` redoes
+      // whatever did not finish. There is no resume state to keep.
 
       // 1. Central layer teardown: drop the seed, then clear the applied
       // slots / pointer / apply state. With both gone the machine has no
@@ -3534,8 +3552,6 @@ async function runLeave(argv, ctx) {
       // carry a marker, so this touches exactly what the fleet touched; the
       // undo is the same core disk reversal `hyp detach` uses. Backfill
       // markers are run-once by design and stay (imported data stays too).
-      const attachMarkers = readClientActionStatus({ stateRoot }).byKind.attach ?? {}
-      const attachedNames = Object.keys(attachMarkers)
       if (attachedNames.length > 0) {
         const descriptors = await buildClientDescriptorMap(ctx)
         for (const name of attachedNames) {
@@ -3548,19 +3564,26 @@ async function runLeave(argv, ctx) {
             } catch { /* best-effort: a stale failed marker is a status blemish */ }
             continue
           }
+          const descriptor = descriptors.get(name)
+          if (!descriptor) {
+            // Plugin's gone, so we cannot replay its undo - do the best we can:
+            // drop the marker so a future join re-attaches cleanly instead of
+            // short-circuiting on a stale `done` marker (#217). The local
+            // gateway keeps running, so the client's settings still route
+            // locally; nothing is broken.
+            try {
+              clearClientActionMarker({ stateRoot, kind: 'attach', requestKey: name })
+            } catch { /* best-effort: a stale marker is a status blemish */ }
+            ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp detach ${name}' to revert)\n`)
+            continue
+          }
           try {
-            await detachClientViaCore({
-              name,
-              descriptor: descriptors.get(name),
-              dryRun: false,
-              json: false,
-              ctx,
-            })
+            await detachClientViaCore({ name, descriptor, dryRun: false, json: false, ctx })
           } catch (err) {
             failures += 1
             const message = err instanceof Error ? err.message : String(err)
             ctx.stderr.write(`hyp leave: detach '${name}' failed: ${message}\n`)
-            ctx.stderr.write(`  run 'hyp detach ${name}' to retry\n`)
+            ctx.stderr.write(`  run 'hyp detach ${name}' to finish reversing it\n`)
           }
         }
       }
@@ -3590,16 +3613,19 @@ async function runLeave(argv, ctx) {
         ctx.stdout.write('✓ removed the forward identity\n')
       }
 
+      // Always surface a still-forwarding local sink, success or not: a machine
+      // that keeps forwarding must never be left silent.
+      writeLocalCentralSinkNote(ctx, await readCentralSinks(localPath, stateRoot), localPath)
+
       if (failures > 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'leave_partial')
-        ctx.stderr.write(`hyp leave: finished with ${failures} step(s) failed (see above); re-run 'hyp leave' to retry\n`)
+        ctx.stderr.write(`hyp leave: ${failures} step(s) could not finish (see above); the per-step command above, or a plain re-run of 'hyp leave', will pick up the rest\n`)
         return 1
       }
 
       ctx.stdout.write(`✓ left${urls.length > 0 ? ` ${urls.join(', ')}` : ''} - this machine no longer forwards logs or pulls org config\n`)
       ctx.stdout.write('  kept: query sessions, your local config, and the daemon service (local-only capture keeps working)\n')
-      writeLocalCentralSinkNote(ctx, await readCentralSinks(localPath, stateRoot), localPath)
       return 0
     },
     { component: 'leave' }

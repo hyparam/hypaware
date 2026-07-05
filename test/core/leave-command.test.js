@@ -250,6 +250,65 @@ test('leave is idempotent: a second leave is the not-connected no-op', async () 
   assert.match(stdout.text(), /not connected to a central server/)
 })
 
+test('leave still tears down when only a stale attach marker survives a prior partial leave', async () => {
+  // A prior leave removed the central layer (step 1) but died before reversing
+  // an attach. The leftover `done` marker is the only "still connected" signal;
+  // a re-run must NOT read this as "not connected" - it must finish the job.
+  const { home, stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(resolveCentralLayerPath({ stateRoot }), null)
+
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify({ attach: { claude: { status: 'done', request_key: 'claude' } } }, null, 2) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.doesNotMatch(stdout.text(), /not connected to a central server/)
+  // The stranded attach is reversed on the re-run, marker and all.
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  assert.equal('_hypaware' in settings, false)
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
+test('leave self-heals an org attach whose plugin is gone: drops the marker, warns, stays clean', async () => {
+  const { stateRoot, stdout, opts } = await makeDispatchOpts()
+  assert.equal(
+    await dispatch(['join', 'https://central.example', 'policy-token-1', '--no-daemon'], opts),
+    0
+  )
+  // A `done` attach marker for a client no installed/bundled plugin provides:
+  // it cannot be reversed, so leave does the best it can and drops the marker.
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify({ attach: { ghost: { status: 'done', request_key: 'ghost' } } }, null, 2) + '\n'
+  )
+
+  const code = await dispatch(['leave'], opts)
+  assert.equal(code, 0, stdout.text())
+  assert.match(stdout.text(), /'ghost' plugin not installed - dropped its attach marker/)
+  // Marker dropped so a future join's forward gap re-attaches cleanly (#217).
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
 test('leave help exits 0 and rejects unknown arguments', async () => {
   {
     const { stdout, opts } = await makeDispatchOpts()
