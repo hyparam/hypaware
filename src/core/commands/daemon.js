@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from 'node:path'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { readObservabilityEnv } from '../observability/env.js'
@@ -307,41 +308,21 @@ export async function runDaemonStart(argv, ctx) {
  * @returns {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }}
  */
 function parseDaemonInstallArgs(argv) {
-  /** @type {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }} */
-  const r = {}
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (token === '--help' || token === '-h') { r.help = true; return r }
-    if (token === '--dry-run') { r.dryRun = true; continue }
-    if (token === '--json') { r.json = true; continue }
-    if (token === '--config' || token.startsWith('--config=')) {
-      const value = token === '--config' ? argv[++i] : token.slice('--config='.length)
-      if (!value) { r.error = '--config requires a path'; return r }
-      r.configPath = value
-      continue
-    }
-    if (token === '--bin' || token.startsWith('--bin=')) {
-      const value = token === '--bin' ? argv[++i] : token.slice('--bin='.length)
-      if (!value) { r.error = '--bin requires a path'; return r }
-      r.binPath = value
-      continue
-    }
-    if (token === '--platform' || token.startsWith('--platform=')) {
-      const value = token === '--platform' ? argv[++i] : token.slice('--platform='.length)
-      if (value !== 'darwin' && value !== 'linux') {
-        r.error = `--platform must be 'darwin' or 'linux' (got '${value}')`
-        return r
-      }
-      r.platform = value
-      continue
-    }
-    r.error = `unexpected argument '${token}'`
-    return r
-  }
-  if (r.json && !r.dryRun) {
-    r.error = '--json requires --dry-run'
-  }
-  return r
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      'dry-run': { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
+      config: { type: 'string' },
+      bin: { type: 'string' },
+      platform: { type: 'string', enum: ['darwin', 'linux'] },
+    },
+  })
+  if ('help' in parsed) return { help: true }
+  if (!parsed.ok) return { error: parsed.error }
+  const p = /** @type {{ 'dry-run': boolean, json: boolean, config?: string, bin?: string, platform?: NodeJS.Platform }} */ (parsed.params)
+  if (p.json && !p['dry-run']) return { error: '--json requires --dry-run' }
+  return { dryRun: p['dry-run'], json: p.json, configPath: p.config, binPath: p.bin, platform: p.platform }
 }
 
 /**
@@ -349,29 +330,15 @@ function parseDaemonInstallArgs(argv) {
  * @returns {{ foreground: boolean, configPath?: string, error?: string }}
  */
 function parseDaemonRunArgs(argv) {
-  /** @type {{ foreground: boolean, configPath?: string, error?: string }} */
-  const r = { foreground: false }
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (token === '--foreground' || token === '-f') {
-      r.foreground = true
-      continue
-    }
-    if (token === '--config' || token.startsWith('--config=')) {
-      const value = token === '--config' ? argv[++i] : token.slice('--config='.length)
-      if (!value) {
-        r.error = '--config requires a path'
-        return r
-      }
-      r.configPath = value
-      continue
-    }
-    if (token === '--help' || token === '-h') {
-      r.error = 'usage: hyp daemon run --foreground [--config <path>]'
-      return r
-    }
-    r.error = `unexpected argument '${token}'`
-    return r
-  }
-  return r
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      foreground: { type: 'boolean', default: false },
+      config: { type: 'string' },
+    },
+  }, { aliases: { '-f': '--foreground' } })
+  if ('help' in parsed) return { foreground: false, error: 'usage: hyp daemon run --foreground [--config <path>]' }
+  if (!parsed.ok) return { foreground: false, error: parsed.error }
+  const p = /** @type {{ foreground: boolean, config?: string }} */ (parsed.params)
+  return { foreground: p.foreground, configPath: p.config }
 }

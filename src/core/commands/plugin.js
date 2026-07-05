@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from 'node:path'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
@@ -178,62 +179,36 @@ function buildPluginInstallConfirm({ yes, ctx, headerKind }) {
  *   | { ok: false, code: number, message: string }
  * )}
  */
+const PLUGIN_INSTALL_USAGE = 'usage: hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]'
+
+/**
+ * @param {string[]} argv
+ * @returns {{ ok: false, code: number, message: string } | { ok: true, rawSource: string, ref?: string, subdir?: string, yes: boolean }}
+ */
 function parsePluginInstallArgs(argv) {
-  /** @type {string | undefined} */
-  let rawSource
-  /** @type {string | undefined} */
-  let ref
-  /** @type {string | undefined} */
-  let subdir
-  let yes = false
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]
-    if (arg === '--yes' || arg === '-y') {
-      yes = true
-      continue
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      source: { type: 'string' },
+      ref: { type: 'string' },
+      path: { type: 'string' },
+      yes: { type: 'boolean', default: false },
+    },
+    positional: ['source'],
+  }, { aliases: { '-y': '--yes' } })
+  if ('help' in parsed) return { ok: false, code: 2, message: PLUGIN_INSTALL_USAGE }
+  if (!parsed.ok) return { ok: false, code: 2, message: parsed.error }
+  const p = /** @type {{ source?: string, ref?: string, path?: string, yes: boolean }} */ (parsed.params)
+  // Block `-X` style values: `applyGitSourceFlags` enforces the same rule
+  // but rejecting at the CLI layer gives a friendlier error before the
+  // install span opens.
+  for (const [flag, value] of [['--ref', p.ref], ['--path', p.path]]) {
+    if (value !== undefined && value.startsWith('-')) {
+      return { ok: false, code: 2, message: `flag ${flag} value must not start with '-'` }
     }
-    if (arg === '--ref' || arg === '--path') {
-      const value = argv[i + 1]
-      if (value === undefined || value.startsWith('--')) {
-        return { ok: false, code: 2, message: `flag ${arg} requires a value` }
-      }
-      // Block `-X` style values too: `applyGitSourceFlags` enforces
-      // the same rule but rejecting at the CLI layer gives a friendlier
-      // error before the install span opens.
-      if (value.startsWith('-')) {
-        return { ok: false, code: 2, message: `flag ${arg} value must not start with '-'` }
-      }
-      if (arg === '--ref') ref = value
-      else subdir = value
-      i += 1
-      continue
-    }
-    if (arg.startsWith('--ref=')) {
-      const value = arg.slice('--ref='.length)
-      if (value.startsWith('-')) {
-        return { ok: false, code: 2, message: `flag --ref value must not start with '-'` }
-      }
-      ref = value
-      continue
-    }
-    if (arg.startsWith('--path=')) {
-      const value = arg.slice('--path='.length)
-      if (value.startsWith('-')) {
-        return { ok: false, code: 2, message: `flag --path value must not start with '-'` }
-      }
-      subdir = value
-      continue
-    }
-    if (rawSource === undefined) {
-      rawSource = arg
-      continue
-    }
-    return { ok: false, code: 2, message: `unexpected argument '${arg}'` }
   }
-  if (!rawSource) {
-    return { ok: false, code: 2, message: 'usage: hyp plugin install <source> [--ref <ref>] [--path <subdir>] [--yes]' }
-  }
-  return { ok: true, rawSource, ref, subdir, yes }
+  if (!p.source) return { ok: false, code: 2, message: PLUGIN_INSTALL_USAGE }
+  return { ok: true, rawSource: p.source, ref: p.ref, subdir: p.path, yes: p.yes }
 }
 
 /**
@@ -426,25 +401,23 @@ export async function runPluginUpdate(argv, ctx) {
  *   | { ok: false, code: number, message: string }
  * )}
  */
+/**
+ * @param {string[]} argv
+ * @returns {{ ok: false, code: number, message: string } | { ok: true, target?: string, yes: boolean }}
+ */
 function parsePluginUpdateArgs(argv) {
-  /** @type {string | undefined} */
-  let target
-  let yes = false
-  for (const arg of argv) {
-    if (arg === '--yes' || arg === '-y') {
-      yes = true
-      continue
-    }
-    if (arg.startsWith('--')) {
-      return { ok: false, code: 2, message: `unknown flag '${arg}'` }
-    }
-    if (target === undefined) {
-      target = arg
-      continue
-    }
-    return { ok: false, code: 2, message: `unexpected argument '${arg}'` }
-  }
-  return target ? { ok: true, target, yes } : { ok: true, yes }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      plugin: { type: 'string' },
+      yes: { type: 'boolean', default: false },
+    },
+    positional: ['plugin'],
+  }, { aliases: { '-y': '--yes' } })
+  if ('help' in parsed) return { ok: false, code: 2, message: 'usage: hyp plugin update [plugin] [--yes]' }
+  if (!parsed.ok) return { ok: false, code: 2, message: parsed.error }
+  const p = /** @type {{ plugin?: string, yes: boolean }} */ (parsed.params)
+  return { ok: true, target: p.plugin, yes: p.yes }
 }
 
 /**

@@ -1222,7 +1222,7 @@ export interface VerbInputProperty {
   enum?: string[]
   default?: string | number | boolean
   minimum?: number
-  items?: { type: 'string' | 'integer' | 'number' }
+  items?: { type: 'string' | 'integer' | 'number', enum?: string[] }
   /** CLI-only: the final string positional absorbs all remaining tokens (e.g. a SQL string). */
   greedy?: boolean
 }

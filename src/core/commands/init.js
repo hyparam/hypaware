@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 import path from 'node:path'
 import process from 'node:process'
 import readline from 'node:readline/promises'
@@ -388,62 +389,36 @@ function parseInitFlags(argv) {
     retentionDays: 30,
     force: false,
   }
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]
-    if (arg === '--yes' || arg === '-y') { flags.yes = true; continue }
-    if (arg === '--no-daemon') { flags.noDaemon = true; continue }
-    if (arg === '--dry-run') { flags.dryRun = true; continue }
-    if (arg === '--force') { flags.force = true; continue }
-    if (arg === '--client' || arg.startsWith('--client=')) {
-      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
-      if (value !== 'claude' && value !== 'codex') {
-        return { flags, error: `--client: expected claude or codex (got "${value ?? ''}")` }
-      }
-      if (!flags.clients.includes(value)) flags.clients.push(value)
-      continue
-    }
-    if (arg === '--source' || arg.startsWith('--source=')) {
-      const value = arg === '--source' ? argv[++i] : arg.slice('--source='.length)
-      const allowed = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
-      if (!allowed.includes(value ?? '')) {
-        return { flags, error: `--source: expected one of ${allowed.join(', ')} (got "${value ?? ''}")` }
-      }
-      const typed = /** @type {'claude'|'codex'|'raw-anthropic'|'raw-openai'|'otel'} */ (value)
-      if (!flags.sources.includes(typed)) flags.sources.push(typed)
-      continue
-    }
-    if (arg === '--export' || arg.startsWith('--export=')) {
-      const value = arg === '--export' ? argv[++i] : arg.slice('--export='.length)
-      const allowed = ['keep-local', 'local-parquet', 'configure-later']
-      if (!allowed.includes(value ?? '')) {
-        return { flags, error: `--export: expected one of ${allowed.join(', ')} (got "${value ?? ''}")` }
-      }
-      flags.exportChoice = /** @type {'keep-local'|'local-parquet'|'configure-later'} */ (value)
-      continue
-    }
-    if (arg === '--retention-days' || arg.startsWith('--retention-days=')) {
-      const value = arg === '--retention-days' ? argv[++i] : arg.slice('--retention-days='.length)
-      const parsed = Number.parseInt(value ?? '', 10)
-      if (!Number.isInteger(parsed) || parsed < 0) {
-        return { flags, error: `--retention-days: expected non-negative integer (got "${value ?? ''}")` }
-      }
-      flags.retentionDays = parsed
-      continue
-    }
-    if (arg === '--from-file' || arg.startsWith('--from-file=')) {
-      const value = arg === '--from-file' ? argv[++i] : arg.slice('--from-file='.length)
-      if (!value) return { flags, error: '--from-file: requires a path' }
-      flags.fromFile = value
-      continue
-    }
-    if (arg === '--bin' || arg.startsWith('--bin=')) {
-      const value = arg === '--bin' ? argv[++i] : arg.slice('--bin='.length)
-      if (!value) return { flags, error: '--bin: requires a path' }
-      flags.binPath = value
-      continue
-    }
-    return { flags, error: `unknown argument: ${arg}` }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      yes: { type: 'boolean', default: false },
+      'no-daemon': { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
+      client: { type: 'array', items: { type: 'string', enum: ['claude', 'codex'] } },
+      source: { type: 'array', items: { type: 'string', enum: ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel'] } },
+      export: { type: 'string', enum: ['keep-local', 'local-parquet', 'configure-later'] },
+      'retention-days': { type: 'integer', minimum: 0, default: 30 },
+      'from-file': { type: 'string' },
+      bin: { type: 'string' },
+    },
+  }, { aliases: { '-y': '--yes' } })
+  if ('help' in parsed) {
+    return { flags, error: 'usage: hyp init [--yes] [--client <name>] [--source <name>] [--export <choice>] [--retention-days <n>] [--from-file <path>] [--no-daemon] [--dry-run] [--force] [--bin <path>]' }
   }
+  if (!parsed.ok) return { flags, error: parsed.error }
+  const p = /** @type {{ yes: boolean, 'no-daemon': boolean, 'dry-run': boolean, force: boolean, client?: string[], source?: string[], export?: InitFlags['exportChoice'], 'retention-days': number, 'from-file'?: string, bin?: string }} */ (parsed.params)
+  flags.yes = p.yes
+  flags.noDaemon = p['no-daemon']
+  flags.dryRun = p['dry-run']
+  flags.force = p.force
+  flags.clients = /** @type {InitFlags['clients']} */ ([...new Set(p.client ?? [])])
+  flags.sources = /** @type {InitFlags['sources']} */ ([...new Set(p.source ?? [])])
+  flags.exportChoice = p.export
+  flags.retentionDays = p['retention-days']
+  if (p['from-file'] !== undefined) flags.fromFile = p['from-file']
+  if (p.bin !== undefined) flags.binPath = p.bin
   return { flags }
 }
 

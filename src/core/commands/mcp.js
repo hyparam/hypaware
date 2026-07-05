@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createRequire } from 'node:module'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
@@ -90,23 +91,15 @@ export async function runMcp(argv, ctx) {
  * @returns {{ ok: true, remote: string | undefined, http: boolean } | { ok: false, error: string }}
  */
 function parseMcpArgv(argv) {
-  /** @type {string | undefined} */
-  let remote
-  let http = false
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (token === '--remote') {
-      const value = argv[i + 1]
-      if (value === undefined || value.startsWith('--')) return { ok: false, error: '--remote expects a target name' }
-      remote = value
-      i += 1
-    } else if (token === '--http') {
-      http = true
-    } else if (token === '--help' || token === '-h') {
-      return { ok: false, error: 'usage: hyp mcp [--remote <target>]' }
-    } else {
-      return { ok: false, error: `unexpected argument '${token}'` }
-    }
-  }
-  return { ok: true, remote, http }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      remote: { type: 'string' },
+      http: { type: 'boolean', default: false },
+    },
+  })
+  if ('help' in parsed) return { ok: false, error: 'usage: hyp mcp [--remote <target>]' }
+  if (!parsed.ok) return parsed
+  const p = /** @type {{ remote?: string, http: boolean }} */ (parsed.params)
+  return { ok: true, remote: p.remote, http: p.http }
 }

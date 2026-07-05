@@ -1,6 +1,7 @@
 // @ts-check
 
 import { readObservabilityEnv } from '../observability/env.js'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 
 /**
  * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
@@ -85,24 +86,24 @@ export async function runSinkForce(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runSinkMaintain(argv, ctx) {
-  let instance = /** @type {string | undefined} */ (undefined)
-  let dryRun = false
-  let compact = false
-  for (const arg of argv) {
-    if (arg === '--dry-run') { dryRun = true; continue }
-    if (arg === '--compact') { compact = true; continue }
-    if (arg === '--help' || arg === '-h') {
-      ctx.stdout.write('usage: hyp sink maintain [instance] [--compact] [--dry-run]\n')
-      return 0
-    }
-    if (arg.startsWith('--')) {
-      ctx.stderr.write(`hyp sink maintain: unknown flag '${arg}'\n`)
-      return 2
-    }
-    if (instance === undefined) { instance = arg; continue }
-    ctx.stderr.write(`hyp sink maintain: unexpected argument '${arg}'\n`)
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      instance: { type: 'string' },
+      compact: { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false },
+    },
+    positional: ['instance'],
+  })
+  if ('help' in parsed) {
+    ctx.stdout.write('usage: hyp sink maintain [instance] [--compact] [--dry-run]\n')
+    return 0
+  }
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp sink maintain: ${parsed.error}\n`)
     return 2
   }
+  const { instance, compact, 'dry-run': dryRun } = /** @type {{ instance?: string, compact: boolean, 'dry-run': boolean }} */ (parsed.params)
 
   // Indirect the specifier so the declaration build (rootDir=src) does not
   // pull this hypaware-core runtime module under src's emit root (TS6059).

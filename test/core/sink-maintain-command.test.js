@@ -246,5 +246,5 @@ test('sink maintain --compact exits 1 when the rewrite fails', async () => {
 test('sink maintain rejects unknown flags with exit 2', async () => {
   const { code, stderr } = await runMaintain(['--frobnicate'], [])
   assert.equal(code, 2)
-  assert.match(stderr, /unknown flag '--frobnicate'/)
+  assert.match(stderr, /unknown flag --frobnicate/)
 })

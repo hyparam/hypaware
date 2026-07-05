@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -463,16 +464,19 @@ function expandDetachClientNames(requested, descriptors) {
  * @returns {{ check: boolean, json: boolean, path?: string, error?: string }}
  */
 function parseIgnoreArgs(argv) {
-  /** @type {{ check: boolean, json: boolean, path?: string, error?: string }} */
-  const r = { check: false, json: false }
-  for (const arg of argv) {
-    if (arg === '--check') { r.check = true; continue }
-    if (arg === '--json') { r.json = true; continue }
-    if (arg.startsWith('-')) { r.error = `unknown argument: ${arg}`; return r }
-    if (r.path !== undefined) { r.error = `unexpected extra argument: ${arg}`; return r }
-    r.path = arg
-  }
-  return r
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      check: { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
+    },
+    positional: ['path'],
+  })
+  if ('help' in parsed) return { check: false, json: false, error: 'usage: hyp ignore [path] [--check] [--json]' }
+  if (!parsed.ok) return { check: false, json: false, error: parsed.error }
+  const p = /** @type {{ path?: string, check: boolean, json: boolean }} */ (parsed.params)
+  return { check: p.check, json: p.json, path: p.path }
 }
 
 /**
@@ -855,20 +859,14 @@ export async function buildClientDescriptorMap(ctx) {
 
 /** @param {string[]} argv */
 function parseSkillsArgs(argv) {
-  /** @type {{ client: string, error?: string }} */
-  const r = { client: 'all' }
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]
-    if (arg === '--client' || arg.startsWith('--client=')) {
-      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
-      if (!value) { r.error = '--client requires a name'; return r }
-      r.client = value
-      continue
-    }
-    r.error = `unknown argument: ${arg}`
-    return r
-  }
-  return r
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: { client: { type: 'string', default: 'all' } },
+  })
+  if ('help' in parsed) return { client: 'all', error: 'usage: hyp skills install [--client <name>|all]' }
+  if (!parsed.ok) return { client: 'all', error: parsed.error }
+  const p = /** @type {{ client: string }} */ (parsed.params)
+  return { client: p.client }
 }
 
 /**

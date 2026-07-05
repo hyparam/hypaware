@@ -3,9 +3,10 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 
 /**
- * @import { CommandRunContext } from '../../../collectivus-plugin-kernel-types.js'
+ * @import { CommandRunContext, VerbInputSchema } from '../../../collectivus-plugin-kernel-types.js'
  */
 
 // `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into
@@ -142,11 +143,11 @@ export async function runQueryRefresh(argv, ctx) {
 export async function runQueryMaintain(argv, ctx) {
   const { maintainCache } = await import('../cache/maintenance.js')
   const parsed = parseQueryMaintainArgv(argv)
-  if (parsed.error) {
+  if ('error' in parsed) {
     ctx.stderr.write(`hyp query maintain: ${parsed.error}\n`)
     return 2
   }
-  const { dataset, force, dryRun, compactOnly, expireOnly } = /** @type {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }} */ (parsed)
+  const { dataset, force, dryRun, compactOnly, expireOnly } = parsed
   if (!compactOnly && !expireOnly && !dryRun) {
     const migrationResult = await migrateLegacyPartitions({
       cacheRoot: ctx.storage.cacheRoot,
@@ -187,33 +188,32 @@ export async function runQueryMaintain(argv, ctx) {
   return 0
 }
 
+const QUERY_MAINTAIN_USAGE = 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]'
+
+/** @type {VerbInputSchema} */
+const QUERY_MAINTAIN_SCHEMA = {
+  type: 'object',
+  properties: {
+    dataset: { type: 'string' },
+    'dry-run': { type: 'boolean', default: false },
+    force: { type: 'boolean', default: false },
+    'compact-only': { type: 'boolean', default: false },
+    'expire-only': { type: 'boolean', default: false },
+  },
+  positional: ['dataset'],
+}
+
 /**
  * @param {string[]} argv
- * @returns {{ dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean, error?: undefined } | { error: string }}
+ * @returns {{ error: string } | { dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }}
  */
 function parseQueryMaintainArgv(argv) {
-  /** @type {string | undefined} */
-  let dataset
-  let dryRun = false
-  let force = false
-  let compactOnly = false
-  let expireOnly = false
-  for (const arg of argv) {
-    if (arg === '--dry-run') { dryRun = true; continue }
-    if (arg === '--force') { force = true; continue }
-    if (arg === '--compact-only') { compactOnly = true; continue }
-    if (arg === '--expire-only') { expireOnly = true; continue }
-    if (arg === '--help' || arg === '-h') {
-      return { error: 'usage: hyp query maintain [dataset] [--dry-run] [--force] [--compact-only] [--expire-only]' }
-    }
-    if (arg.startsWith('--')) {
-      return { error: `unknown flag '${arg}'` }
-    }
-    if (dataset === undefined) { dataset = arg; continue }
-    return { error: `unexpected argument '${arg}'` }
-  }
-  if (compactOnly && expireOnly) {
+  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA)
+  if ('help' in parsed) return { error: QUERY_MAINTAIN_USAGE }
+  if (!parsed.ok) return { error: parsed.error }
+  const p = /** @type {{ dataset?: string, 'dry-run': boolean, force: boolean, 'compact-only': boolean, 'expire-only': boolean }} */ (parsed.params)
+  if (p['compact-only'] && p['expire-only']) {
     return { error: '--compact-only and --expire-only are mutually exclusive' }
   }
-  return { dataset, dryRun, force, compactOnly, expireOnly }
+  return { dataset: p.dataset, dryRun: p['dry-run'], force: p.force, compactOnly: p['compact-only'], expireOnly: p['expire-only'] }
 }

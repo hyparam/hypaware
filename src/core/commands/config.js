@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from 'node:path'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { validateConfig } from '../config/validate.js'
@@ -79,21 +80,14 @@ export async function runConfigValidate(argv, ctx) {
  * @returns {{ configPath: string, error?: undefined } | { error: string, configPath?: undefined }}
  */
 function parseConfigValidateArgv(argv, env) {
-  /** @type {string|undefined} */
-  let pathFlag
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (token === '--path') {
-      pathFlag = argv[i + 1]
-      if (!pathFlag) return { error: 'hyp config validate: --path expects a file path' }
-      i += 1
-    } else if (token === '--help' || token === '-h') {
-      return { error: 'usage: hyp config validate [--path <file>]' }
-    } else {
-      return { error: `hyp config validate: unexpected argument '${token}'` }
-    }
-  }
-  if (pathFlag) return { configPath: path.resolve(pathFlag) }
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: { path: { type: 'string' } },
+  })
+  if ('help' in parsed) return { error: 'usage: hyp config validate [--path <file>]' }
+  if (!parsed.ok) return { error: `hyp config validate: ${parsed.error}` }
+  const p = /** @type {{ path?: string }} */ (parsed.params)
+  if (p.path) return { configPath: path.resolve(p.path) }
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
   const hypHome = env.HYP_HOME || path.join(env.HOME || '', '.hyp')
   return { configPath: defaultConfigPath(hypHome) }

@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import { parseCommandArgv } from '../cli/verb_codec.js'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../observability/index.js'
@@ -279,41 +280,28 @@ async function rollbackCentralSeed(stateRoot) {
  * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }}
  */
 function parseJoinArgs(argv) {
-  /** @type {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }} */
-  const r = {}
-  /** @type {string[]} */
-  const positional = []
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (token === '--help' || token === '-h') { r.help = true; return r }
-    if (token === '--no-daemon') { r.noDaemon = true; continue }
-    if (token === '--token-file' || token.startsWith('--token-file=')) {
-      const value = token === '--token-file' ? argv[++i] : token.slice('--token-file='.length)
-      if (!value) return { error: '--token-file: requires a path' }
-      r.tokenFile = value
-      continue
-    }
-    if (token === '--bin' || token.startsWith('--bin=')) {
-      const value = token === '--bin' ? argv[++i] : token.slice('--bin='.length)
-      if (!value) return { error: '--bin: requires a path' }
-      r.binPath = value
-      continue
-    }
-    if (token.startsWith('-') && token !== '-') {
-      return { error: `unknown argument: ${token}` }
-    }
-    positional.push(token)
-  }
-  if (positional.length === 0) return { error: 'missing <url> (see hyp join --help)' }
-  if (positional.length > 2) return { error: `unexpected argument: ${positional[2]}` }
-  r.url = positional[0]
+  const parsed = parseCommandArgv(argv, {
+    type: 'object',
+    properties: {
+      url: { type: 'string' },
+      token: { type: 'string' },
+      'token-file': { type: 'string' },
+      bin: { type: 'string' },
+      'no-daemon': { type: 'boolean', default: false },
+    },
+    positional: ['url', 'token'],
+  })
+  if ('help' in parsed) return { help: true }
+  if (!parsed.ok) return { error: parsed.error }
+  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean }} */ (parsed.params)
+  if (p.url === undefined) return { error: 'missing <url> (see hyp join --help)' }
   // '-' as the token positional means "read from stdin", same as
   // omitting it on a piped invocation.
-  if (positional.length === 2 && positional[1] !== '-') r.token = positional[1]
-  if (r.token !== undefined && r.tokenFile !== undefined) {
+  const token = p.token === '-' ? undefined : p.token
+  if (token !== undefined && p['token-file'] !== undefined) {
     return { error: 'pass the token either as an argument or via --token-file, not both' }
   }
-  return r
+  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'] }
 }
 
 /**
@@ -356,15 +344,16 @@ function parseJoinArgs(argv) {
  * @ref LLP 0063#connection-levels [constrained-by]: leave cascades down (level 3 → org-driven level-1 attaches), never up to the session store or the daemon service
  */
 export async function runLeave(argv, ctx) {
-  for (const arg of argv) {
-    if (arg === '--help' || arg === '-h') {
-      ctx.stdout.write('usage: hyp leave\n')
-      ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
-      ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
-      ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
-      return 0
-    }
-    ctx.stderr.write(`hyp leave: unknown argument: ${arg}\n`)
+  const parsedArgv = parseCommandArgv(argv, { type: 'object', properties: {} })
+  if ('help' in parsedArgv) {
+    ctx.stdout.write('usage: hyp leave\n')
+    ctx.stdout.write('  disconnect this machine from its central server: stop forwarding and\n')
+    ctx.stdout.write('  config pull, undo org-driven client attaches, and remove the forward\n')
+    ctx.stdout.write('  credential. Keeps query sessions, the local config, and the daemon service.\n')
+    return 0
+  }
+  if (!parsedArgv.ok) {
+    ctx.stderr.write(`hyp leave: ${parsedArgv.error}\n`)
     return 2
   }
 
