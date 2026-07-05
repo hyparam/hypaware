@@ -7,6 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
+import { atomicWriteJson } from 'hypaware/core/util'
 import { loadHypvector } from './hypvector.js'
 import { computeShardStates, contentId, readShardMetas, REBUILD_STATES, shardPaths } from './shards.js'
 
@@ -258,9 +259,7 @@ async function buildShardLocked({ decl, partition, state, embedder, storage, ind
         source_row_count: partition.rowCount,
         built_at: new Date().toISOString(),
       }
-      const tmpMeta = `${meta}.tmp-${process.pid}-${randomUUID()}`
-      await fsPromises.writeFile(tmpMeta, JSON.stringify(shardMeta, null, 2) + '\n', 'utf8')
-      await fsPromises.rename(tmpMeta, meta)
+      await atomicWriteJson(meta, shardMeta)
 
       span.setAttribute('row_count', rowsEmbedded)
       span.setAttribute('dimension', dimension)

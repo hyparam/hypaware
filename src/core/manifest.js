@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from './observability/index.js'
+import { isPlainObject } from './util/json_util.js'
 
 /**
  * @import { PluginManifest, PluginRequirements, PluginProvides, PluginPermission, PluginContributionManifest } from '../../collectivus-plugin-kernel-types.js'
@@ -178,14 +179,6 @@ function newManifestError(errorKind, message) {
 /** @param {string} message */
 function invalid(message) {
   return /** @type {const} */ ({ ok: false, errorKind: 'manifest_invalid', message })
-}
-
-/**
- * @param {unknown} v
- * @returns {v is Record<string, unknown>}
- */
-function isPlainObject(v) {
-  return !!v && typeof v === 'object' && !Array.isArray(v)
 }
 
 /**

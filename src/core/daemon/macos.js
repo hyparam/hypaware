@@ -11,6 +11,7 @@ import {
   defaultPlistDir,
   plistFileName,
 } from './platform.js'
+import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
  * @import {
@@ -298,7 +299,7 @@ export async function installLaunchAgent(options) {
     await waitUntilUnloaded(launchctl, target, sleep)
   }
 
-  atomicWrite(plan.targetPath, plan.content)
+  atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 })
 
   let bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
   for (
@@ -458,17 +459,3 @@ function parsePrintedPid(stdout) {
   return Number.isInteger(n) && n > 0 ? n : undefined
 }
 
-/**
- * @param {string} targetPath
- * @param {string} content
- */
-function atomicWrite(targetPath, content) {
-  const tmpPath = `${targetPath}.tmp.${process.pid}.${Date.now()}`
-  fs.writeFileSync(tmpPath, content, { mode: 0o644 })
-  try {
-    fs.renameSync(tmpPath, targetPath)
-  } catch (err) {
-    try { fs.unlinkSync(tmpPath) } catch { /* ignore */ }
-    throw err
-  }
-}

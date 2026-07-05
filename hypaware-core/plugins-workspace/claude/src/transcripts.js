@@ -1,9 +1,9 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
+import { canonicalJson, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
  * Claude Code JSONL transcript reader. The Claude CLI writes one
@@ -502,23 +502,6 @@ function normalizeContent(content) {
   return []
 }
 
-/** @param {unknown} value */
-function canonicalJson(value) {
-  return JSON.stringify(sortKeys(value))
-}
-
-/** @param {unknown} value */
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys)
-  if (isPlainObject(value)) {
-    /** @type {Record<string, unknown>} */
-    const out = {}
-    for (const key of Object.keys(value).sort()) out[key] = sortKeys(value[key])
-    return out
-  }
-  return value
-}
-
 /** @param {unknown} obj @param {string} key */
 function readKey(obj, key) {
   if (!isPlainObject(obj)) return undefined
@@ -542,19 +525,6 @@ function transcriptModel(message) {
   return model === '<synthetic>' ? undefined : model
 }
 
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
 /** @param {unknown} value */
 function timestampMs(value) {
   if (value instanceof Date) return value.getTime()
@@ -566,7 +536,3 @@ function timestampMs(value) {
   return undefined
 }
 
-/** @param {string} input */
-function sha256Hex(input) {
-  return createHash('sha256').update(input).digest('hex')
-}

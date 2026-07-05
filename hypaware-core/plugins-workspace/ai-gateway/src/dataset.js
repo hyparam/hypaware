@@ -6,6 +6,7 @@ import path from 'node:path'
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { unionSources, emptySource } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
+import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../collectivus-plugin-kernel-types.js'
@@ -379,16 +380,6 @@ function isFallbackRow(row) {
 /** @param {string} value */
 function safeParseJson(value) {
   try { return JSON.parse(value) } catch { return undefined }
-}
-
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /**

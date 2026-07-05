@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createHash } from 'node:crypto'
+import { canonicalJson, isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.js'
@@ -462,12 +463,6 @@ function extractSystemText(system) {
   return texts.length === 0 ? undefined : texts.join('\n\n')
 }
 
-/** @param {unknown} value */
-function parseMaybeJson(value) {
-  if (typeof value !== 'string') return value
-  try { return JSON.parse(value) } catch { return value }
-}
-
 /**
  * @param {string | null | undefined} raw
  * @returns {Record<string, string | string[]> | undefined}
@@ -508,19 +503,6 @@ function readKey(obj, key) {
   return obj[key]
 }
 
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
 /** @param {unknown} value */
 function numberValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -542,24 +524,6 @@ function copyIfPresent(src, dst, key) {
   if (!isPlainObject(src)) return
   const value = src[key]
   if (value !== undefined && value !== null) dst[key] = /** @type {JsonValue} */ (value)
-}
-
-/** @param {unknown} value */
-function canonicalJson(value) {
-  return JSON.stringify(sortKeys(value))
-}
-
-/** @param {unknown} value */
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys)
-  if (isPlainObject(value)) {
-    const obj = /** @type {Record<string, unknown>} */ (value)
-    /** @type {Record<string, unknown>} */
-    const out = {}
-    for (const key of Object.keys(obj).sort()) out[key] = sortKeys(obj[key])
-    return out
-  }
-  return value
 }
 
 /** @param {string} input */

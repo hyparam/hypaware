@@ -7,6 +7,7 @@ import path from 'node:path'
 import { loadManifest } from '../manifest.js'
 import { fetchGitSource } from './git_fetch.js'
 import { pluginInstallDir } from './paths.js'
+import { sha256Hex } from '../util/json_util.js'
 
 /**
  * @import { PluginManifest, PluginSourceSpec } from '../../../collectivus-plugin-kernel-types.js'
@@ -128,7 +129,7 @@ async function fetchLocalDir({ source, stateDir }) {
 
   const contentHash = await hashArtifactTree(installDir)
   const manifestRaw = await fs.readFile(path.join(installDir, 'hypaware.plugin.json'), 'utf8')
-  const manifestHash = hashString(manifestRaw)
+  const manifestHash = sha256Hex(manifestRaw)
 
   return {
     ok: true,
@@ -209,7 +210,3 @@ async function walk(root, dir, records) {
   }
 }
 
-/** @param {string} s */
-function hashString(s) {
-  return crypto.createHash('sha256').update(s).digest('hex')
-}

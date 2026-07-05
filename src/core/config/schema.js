@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
+import { isPlainObject } from '../util/json_util.js'
 
 /**
  * @import { BlobSinkConfigInstance, ConfigRegistry, ConfigSectionRegistration, HypAwareV2Config, JsonObject, PluginConfigInstance, PluginName, QueryCacheConfig, QueryCacheMaintenanceConfig, QueryConfig, RequestSinkConfigInstance, SinkConfigInstance, SinkInstanceConfig, ValidationError, ValidationResult } from '../../../collectivus-plugin-kernel-types.js'
@@ -649,11 +650,6 @@ function parseQueryCacheConfig(cache, pointer, errors) {
     }
   }
   return out
-}
-
-/** @param {unknown} v */
-function isPlainObject(v) {
-  return !!v && typeof v === 'object' && !Array.isArray(v)
 }
 
 /**

@@ -10,6 +10,7 @@ import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { attach, defaultConfigPath } from './settings.js'
+import { errCode } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, PluginActivationContext } from '../../../../collectivus-plugin-kernel-types.js'
@@ -261,13 +262,6 @@ async function readCodexAuthMode(authPath) {
 function skillsRootDir() {
   const here = fileURLToPath(import.meta.url)
   return path.resolve(path.dirname(here), '..')
-}
-
-/** @param {unknown} err */
-function errCode(err) {
-  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
-  const code = Reflect.get(err, 'code')
-  return typeof code === 'string' ? code : undefined
 }
 
 /**

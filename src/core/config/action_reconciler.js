@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { Attr, getLogger } from '../observability/index.js'
+import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 
 /**
  * @import {
@@ -64,10 +65,7 @@ export function createActionReconciler(opts) {
 
   /** @param {ActionMarkerStore} store */
   function writeStore(store) {
-    fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
-    const tmp = `${markerPath}.tmp.${process.pid}.${now()}`
-    fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
-    fs.renameSync(tmp, markerPath)
+    atomicWriteJsonSync(markerPath, store, { mode: 0o600, dirMode: 0o700 })
   }
 
   /**
@@ -366,9 +364,6 @@ export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Dat
   } else {
     delete store[kind]
   }
-  fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 })
-  const tmp = `${markerPath}.tmp.${process.pid}.${now()}`
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
-  fs.renameSync(tmp, markerPath)
+  atomicWriteJsonSync(markerPath, store, { mode: 0o600, dirMode: 0o700 })
   return true
 }

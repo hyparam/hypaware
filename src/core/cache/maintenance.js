@@ -17,6 +17,7 @@ import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
+import { isPlainObject } from '../util/json_util.js'
 
 /**
  * @import { QueryCacheMaintenanceConfig } from '../../../collectivus-plugin-kernel-types.js'
@@ -931,11 +932,6 @@ function resettleBaselineFiles(cursor) {
 /** @param {string} value */
 function safeParseJson(value) {
   try { return JSON.parse(value) } catch { return undefined }
-}
-
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
 /**

@@ -1,12 +1,11 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
-
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
+ * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject, JsonValue } from '../../../../collectivus-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -291,7 +290,7 @@ function openAiChatMessageToProjected(message) {
         type: 'tool_use',
         id,
         name,
-        input: parseMaybeJson(fn.arguments) ?? null,
+        input: /** @type {JsonValue} */ (parseMaybeJson(fn.arguments) ?? null),
       })
     }
   }
@@ -1044,12 +1043,6 @@ function parseEventData(data) {
   try { return JSON.parse(data) } catch { return undefined }
 }
 
-/** @param {unknown} value */
-function parseMaybeJson(value) {
-  if (typeof value !== 'string') return value
-  try { return JSON.parse(value) } catch { return value }
-}
-
 /**
  * @param {JsonObject | undefined} a
  * @param {JsonObject | undefined} b
@@ -1068,19 +1061,6 @@ function mergeJsonObjects(a, b) {
     }
   }
   return out
-}
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /** @param {unknown} value */
@@ -1113,28 +1093,6 @@ function setIfString(target, key, value) {
 /** @param {...(string | undefined)} values */
 function firstString(...values) {
   return values.find((value) => typeof value === 'string' && value.length > 0)
-}
-
-/** @param {string} input */
-function sha256Hex(input) {
-  return createHash('sha256').update(input).digest('hex')
-}
-
-/** @param {unknown} value */
-function canonicalJson(value) {
-  return JSON.stringify(sortKeys(value))
-}
-
-/** @param {unknown} value */
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys)
-  if (isPlainObject(value)) {
-    /** @type {Record<string, unknown>} */
-    const out = {}
-    for (const key of Object.keys(value).sort()) out[key] = sortKeys(value[key])
-    return out
-  }
-  return value
 }
 
 /**

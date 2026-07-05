@@ -1,9 +1,10 @@
 // @ts-check
 
-import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+
+import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hypaware/core/util'
 
 /**
  * Claude Code settings.json attach writer, keyed on the `_hypaware`
@@ -26,7 +27,6 @@ import path from 'node:path'
 
 /**
  * @import { ClaudeAttachOptions, ClaudeAttachResult } from './types.js'
- * @import { FileHandle } from 'node:fs/promises'
  */
 
 const MARKER_KEY = '_hypaware'
@@ -180,46 +180,13 @@ async function readSettings(settingsPath) {
  * @returns {Promise<void>}
  */
 async function writeAtomic(filePath, value, expectedMtimeMs) {
-  if (expectedMtimeMs !== undefined) {
-    let current
-    try {
-      current = await fs.stat(filePath)
-    } catch (err) {
-      if (errCode(err) === 'ENOENT') {
-        throw new ClaudeSettingsError(
-          `${filePath} disappeared between read and write; retry`,
-          { code: 'CONCURRENT_EDIT', cause: err }
-        )
-      }
-      throw err
-    }
-    if (current.mtimeMs !== expectedMtimeMs) {
-      throw new ClaudeSettingsError(
-        `${filePath} changed on disk between read and write; retry`,
-        { code: 'CONCURRENT_EDIT' }
-      )
-    }
-  }
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-
   const body = JSON.stringify(value, null, 2) + '\n'
-  const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
-
-  /** @type {FileHandle | undefined} */
-  let handle
   try {
-    handle = await fs.open(tmpPath, 'w', 0o600)
-    await handle.writeFile(body, 'utf8')
-    await handle.sync()
-  } finally {
-    if (handle) await handle.close()
-  }
-
-  try {
-    await fs.rename(tmpPath, filePath)
+    await atomicWriteFile(filePath, body, { mode: 0o600, fsync: true, expectedMtimeMs })
   } catch (err) {
-    await fs.rm(tmpPath, { force: true })
+    if (err instanceof ConcurrentEditError) {
+      throw new ClaudeSettingsError(err.message, { code: 'CONCURRENT_EDIT', cause: err.cause ?? err })
+    }
     throw err
   }
 }
@@ -318,14 +285,6 @@ function shellQuote(value) {
   return quote + value.split(quote).join(quote + '\\' + quote + quote) + quote
 }
 
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 /** @param {string} content */
 function looksLikeJsonc(content) {
   let inString = false
@@ -380,13 +339,6 @@ function validateStateFile(stateFile) {
       { code: 'INVALID_STATE_FILE' }
     )
   }
-}
-
-/** @param {unknown} err */
-function errCode(err) {
-  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
-  const code = Reflect.get(err, 'code')
-  return typeof code === 'string' ? code : undefined
 }
 
 /** @param {unknown} err */

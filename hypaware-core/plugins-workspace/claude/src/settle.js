@@ -8,6 +8,7 @@ import {
   loadTranscript,
 } from './transcripts.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
+import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewaySettlementEnricher, DatasetSettleContext } from '../../../../collectivus-plugin-kernel-types.js'
@@ -175,12 +176,3 @@ function safeParseJson(value) {
   try { return JSON.parse(value) } catch { return undefined }
 }
 
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/** @param {unknown} value */
-function stringValue(value) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}

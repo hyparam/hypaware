@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
+import { atomicWriteJson } from '../util/fs_atomic.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot } from './paths.js'
 
@@ -77,10 +78,7 @@ export function tryReadCursorSync(partitionDir) {
  * @param {PartitionCursor} cursor
  */
 export async function writeCursor(partitionDir, cursor) {
-  await fsPromises.mkdir(partitionDir, { recursive: true })
-  const tmp = path.join(partitionDir, `${CURSOR_FILE}.tmp.${process.pid}.${Date.now()}`)
-  await fsPromises.writeFile(tmp, JSON.stringify(cursor, null, 2), 'utf8')
-  await fsPromises.rename(tmp, path.join(partitionDir, CURSOR_FILE))
+  await atomicWriteJson(path.join(partitionDir, CURSOR_FILE), cursor)
 }
 
 /**

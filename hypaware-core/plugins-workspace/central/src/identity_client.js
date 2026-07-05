@@ -1,8 +1,8 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
-import path from 'node:path'
+
+import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
  * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.js'
@@ -17,7 +17,7 @@ import path from 'node:path'
  * @returns {string}
  */
 function fingerprintToken(token) {
-  return createHash('sha256').update(token).digest('hex')
+  return sha256Hex(token)
 }
 
 /**
@@ -310,12 +310,9 @@ function mintChanged(persisted, centralUrl, bootstrapToken) {
  * @param {PersistedIdentity} identity
  */
 function writePersistedFile(filePath, identity) {
-  const dir = path.dirname(filePath)
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`
-  fs.writeFileSync(tmp, JSON.stringify(identity, null, 2), { mode: 0o600 })
-  fs.renameSync(tmp, filePath)
+  atomicWriteJsonSync(filePath, identity, { mode: 0o600, dirMode: 0o700 })
   try {
+    // Re-assert in case the write mode was masked by a permissive umask.
     fs.chmodSync(filePath, 0o600)
   } catch {
     // best effort: rename already replaced the file
@@ -419,14 +416,6 @@ async function readErrorDetail(response) {
     return `${response.status} ${body.trim().slice(0, 200)}`
   }
   return `${response.status} ${response.statusText || ''}`.trim()
-}
-
-/**
- * @param {unknown} v
- * @returns {v is Record<string, unknown>}
- */
-function isPlainObject(v) {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
 }
 
 /** @param {unknown} err */

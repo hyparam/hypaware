@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { datasetsRoot } from '../cache/paths.js'
+import { atomicWriteJson } from '../util/fs_atomic.js'
 
 /**
  * @import { SinkContinuation } from '../../../collectivus-plugin-kernel-types.js'
@@ -204,11 +205,7 @@ export function createSinkWatermarkStore({ stateDir }) {
             : 0,
         updatedAt: new Date().toISOString(),
       }
-      const dest = filePath(key)
-      await fs.mkdir(path.dirname(dest), { recursive: true })
-      const tmp = `${dest}.tmp.${process.pid}.${Date.now()}`
-      await fs.writeFile(tmp, JSON.stringify(record, null, 2), 'utf8')
-      await fs.rename(tmp, dest)
+      await atomicWriteJson(filePath(key), record)
       return record
     },
   }
