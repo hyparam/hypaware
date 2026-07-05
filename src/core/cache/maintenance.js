@@ -22,7 +22,6 @@ import { isPlainObject } from '../util/json_util.js'
 /**
  * @import { QueryCacheMaintenanceConfig } from '../../../hypaware-plugin-kernel-types.js'
  * @import {
- *   CachePartitionMeta,
  *   CacheStatusPartition,
  *   CacheStatusReport,
  *   DatasetSettleHook,
@@ -140,11 +139,7 @@ export async function maintainCache(opts) {
         const cursor = readCursorSync(part.path)
         const settle = resolveSettleContext(opts, part.dataset)
 
-        if (cursor.layout === 'source-table') {
-          return await maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
-        }
-
-        return await maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
+        return await maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter)
       },
       { component: 'cache' }
     )
@@ -167,8 +162,71 @@ export async function maintainCache(opts) {
 }
 
 /**
- * Maintain a source-table layout partition: expire snapshots and
- * compact inside the `table/` directory without advancing epochs.
+ * The five spots where the source-table and legacy epoch layouts differ.
+ * Everything else in maintenance, compaction, and status is
+ * layout-agnostic and shares one code path.
+ *
+ * @typedef {object} GenerationLayout
+ * @property {'source-table' | 'epoch'} kind
+ * @property {string} liveDir  name of the generation dir the cursor points at
+ * @property {() => string} nextDirName  fresh name for the replacement generation
+ * @property {boolean} commitEmpty  commit a rewrite that found no columns (source-table) or abort it (legacy)
+ * @property {number} [newEpoch]  epoch the legacy layout advances to, reported after compaction
+ * @property {(nextDir: string, rowCount: number, resettleBaselineFiles: number) => PartitionCursor} cursorAfter  cursor to write once the generation swap commits
+ */
+
+/**
+ * @param {PartitionCursor} cursor
+ * @returns {GenerationLayout}
+ */
+function generationLayout(cursor) {
+  if (cursor.layout === 'source-table') {
+    const liveDir = cursor.tableDir ?? 'table'
+    return {
+      kind: 'source-table',
+      liveDir,
+      // Iceberg metadata stores absolute `file://` URLs, so a rewrite
+      // cannot rename directories after writing: pick a fresh name and
+      // point the cursor at it.
+      nextDirName: () => `table-${Date.now()}`,
+      commitEmpty: true,
+      cursorAfter: (nextDir, rowCount, resettleBaselineFiles) => ({
+        epoch: cursor.epoch,
+        rowCount,
+        compaction: {
+          previousTableDir: liveDir,
+          compactedAt: new Date().toISOString(),
+          resettleBaselineFiles,
+        },
+        layout: 'source-table',
+        tableDir: nextDir,
+        retention: cursor.retention,
+      }),
+    }
+  }
+  const newEpoch = cursor.epoch + 1
+  return {
+    kind: 'epoch',
+    liveDir: `epoch=${cursor.epoch}`,
+    nextDirName: () => `epoch=${newEpoch}`,
+    commitEmpty: false,
+    newEpoch,
+    cursorAfter: (_nextDir, rowCount, resettleBaselineFiles) => ({
+      epoch: newEpoch,
+      rowCount,
+      compaction: {
+        previousEpoch: cursor.epoch,
+        compactedAt: new Date().toISOString(),
+        resettleBaselineFiles,
+      },
+    }),
+  }
+}
+
+/**
+ * Maintain one partition generation: expire snapshots and compact into
+ * a fresh generation directory when due. Layout differences live in
+ * {@link generationLayout}.
  *
  * @param {MaintenancePartitionReport} r
  * @param {PartitionCursor} cursor
@@ -179,16 +237,17 @@ export async function maintainCache(opts) {
  * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} compactionsCounter
  * @returns {Promise<MaintenancePartitionReport>}
  */
-async function maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
-  const tableDir = path.join(r.path, cursor.tableDir ?? 'table')
-  if (!tableExists(tableDir)) return r
+async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
+  const layout = generationLayout(cursor)
+  const liveDir = path.join(r.path, layout.liveDir)
+  if (!tableExists(liveDir)) return r
 
-  const dataFilesBefore = countDataFiles(tableDir)
+  const dataFilesBefore = countDataFiles(liveDir)
   r.dataFilesBefore = dataFilesBefore
   r.dataFilesAfter = dataFilesBefore
 
   if (!opts.compactOnly) {
-    const expired = await expireSnapshots(tableDir, cfg, opts)
+    const expired = await expireSnapshots(liveDir, cfg, opts)
     r.snapshotsExpired = expired
     if (expired > 0) {
       snapshotsExpiredCounter.add(expired, { [Attr.DATASET]: r.dataset })
@@ -207,67 +266,14 @@ async function maintainSourceTable(r, cursor, cfg, opts, settle, snapshotsExpire
     // tick forever. The cheap baseline check also lets us skip the
     // attributes scan entirely when nothing new has flushed.
     const hasResettle = settle
-      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(tableDir)
+      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(liveDir)
       : false
-    const shouldCompact = opts.force || hasResettle || needsCompaction(tableDir, cfg)
+    const shouldCompact = opts.force || hasResettle || needsCompaction(liveDir, cfg)
     if (shouldCompact && !opts.dryRun) {
-      const result = await compactSourceTable(r.path, cursor, cfg, settle)
+      const result = await compactGeneration(r.path, layout, cfg, settle)
       if (result) {
         r.compacted = true
-        r.rowCount = result.rowCount
-        r.dataFilesAfter = result.dataFiles
-        compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
-      }
-    } else if (shouldCompact && opts.dryRun) {
-      r.compacted = true
-    }
-  }
-
-  return r
-}
-
-/**
- * Maintain a legacy epoch-layout partition.
- *
- * @param {MaintenancePartitionReport} r
- * @param {CachePartitionMeta} part
- * @param {PartitionCursor} cursor
- * @param {MaintenanceConfig} cfg
- * @param {MaintenanceOptions} opts
- * @param {SettleContext | null} settle
- * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} snapshotsExpiredCounter
- * @param {{ add(value: number, attributes?: Record<string, unknown>): void }} compactionsCounter
- * @returns {Promise<MaintenancePartitionReport>}
- */
-async function maintainLegacyPartition(r, part, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter) {
-  const epochDir = path.join(part.path, `epoch=${cursor.epoch}`)
-  if (!tableExists(epochDir)) return r
-
-  const dataFilesBefore = countDataFiles(epochDir)
-  r.dataFilesBefore = dataFilesBefore
-  r.dataFilesAfter = dataFilesBefore
-
-  if (!opts.compactOnly) {
-    const expired = await expireSnapshots(epochDir, cfg, opts)
-    r.snapshotsExpired = expired
-    if (expired > 0) {
-      snapshotsExpiredCounter.add(expired, { [Attr.DATASET]: r.dataset })
-    }
-  }
-
-  if (!opts.expireOnly) {
-    // @ref LLP 0027#re-settle-sweep: same backstop on the legacy layout,
-    // with the same new-data gate so an unmatchable fallback does not force
-    // a rewrite every tick.
-    const hasResettle = settle
-      ? dataFilesBefore !== resettleBaselineFiles(cursor) && await hasResettleCandidate(epochDir)
-      : false
-    const shouldCompact = opts.force || hasResettle || needsCompaction(epochDir, cfg)
-    if (shouldCompact && !opts.dryRun) {
-      const result = await compactPartition(part.path, cursor, cfg, settle)
-      if (result) {
-        r.compacted = true
-        r.newEpoch = result.newEpoch
+        if (result.newEpoch !== undefined) r.newEpoch = result.newEpoch
         r.rowCount = result.rowCount
         r.dataFilesAfter = result.dataFiles
         compactionsCounter.add(1, { [Attr.DATASET]: r.dataset })
@@ -297,43 +303,28 @@ export async function cacheStatus({ cacheRoot }) {
     const spoolDir = path.join(part.path, '_hypaware_spool')
     pendingSpoolBytes += measureDir(spoolDir)
 
-    if (cursor.layout === 'source-table') {
-      const tableDir = path.join(part.path, cursor.tableDir ?? 'table')
-      const dataFileCount = countDataFiles(tableDir)
-      const metadataBytes = measureMetadataDir(tableDir)
-      const snapshotCount = countSnapshots(tableDir)
-      const deleteFileCount = countDeleteFiles(tableDir)
+    const layout = generationLayout(cursor)
+    const liveDir = path.join(part.path, layout.liveDir)
 
-      statusPartitions.push({
-        dataset: part.dataset,
-        partition: part.partition,
-        epoch: cursor.epoch,
-        rowCount: part.rowCount,
-        dataFileCount,
-        metadataBytes,
-        snapshotCount,
-        source: part.partition.source,
-        deleteFileCount,
-        lastRetentionCutoffDate: cursor.retention?.lastCutoffDate,
-        layout: 'source-table',
-      })
-    } else {
-      const epochDir = path.join(part.path, `epoch=${cursor.epoch}`)
-      const dataFileCount = countDataFiles(epochDir)
-      const metadataBytes = measureMetadataDir(epochDir)
-      const snapshotCount = countSnapshots(epochDir)
-
-      statusPartitions.push({
-        dataset: part.dataset,
-        partition: part.partition,
-        epoch: cursor.epoch,
-        rowCount: part.rowCount,
-        dataFileCount,
-        metadataBytes,
-        snapshotCount,
-        layout: cursor.epoch > 0 || cursor.rowCount > 0 ? 'epoch' : undefined,
-      })
+    /** @type {CacheStatusPartition} */
+    const status = {
+      dataset: part.dataset,
+      partition: part.partition,
+      epoch: cursor.epoch,
+      rowCount: part.rowCount,
+      dataFileCount: countDataFiles(liveDir),
+      metadataBytes: measureMetadataDir(liveDir),
+      snapshotCount: countSnapshots(liveDir),
     }
+    if (layout.kind === 'source-table') {
+      status.source = part.partition.source
+      status.deleteFileCount = countDeleteFiles(liveDir)
+      status.lastRetentionCutoffDate = cursor.retention?.lastCutoffDate
+      status.layout = 'source-table'
+    } else {
+      status.layout = cursor.epoch > 0 || cursor.rowCount > 0 ? 'epoch' : undefined
+    }
+    statusPartitions.push(status)
   }
 
   return { cacheRoot, pendingSpoolBytes, partitions: statusPartitions }
@@ -459,10 +450,8 @@ function estimateRowBytes(row) {
 }
 
 /**
- * Compact a source-table partition by rewriting into a fresh table
- * directory. Iceberg metadata stores absolute `file://` URLs, so we
- * cannot rename directories after writing: we write to a new dir
- * name and update the cursor to point to it.
+ * Compact a partition by rewriting the live generation into a fresh
+ * directory named by the layout, then swap the cursor to point at it.
  *
  * Rows are flushed to a data file whenever the batch reaches either
  * `COMPACT_BATCH_SIZE` rows or `cfg.compact_batch_bytes` estimated
@@ -472,15 +461,14 @@ function estimateRowBytes(row) {
  * 10k-row batch into the gigabytes and OOMs the daemon mid-compaction.
  *
  * @param {string} partitionDir
- * @param {PartitionCursor} cursor
+ * @param {GenerationLayout} layout
  * @param {MaintenanceConfig} cfg
  * @param {SettleContext | null} [settle]
- * @returns {Promise<{ rowCount: number, dataFiles: number } | null>}
+ * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFiles: number } | null>}
  */
-async function compactSourceTable(partitionDir, cursor, cfg, settle) {
-  const oldTableDirName = cursor.tableDir ?? 'table'
-  const oldTableDir = path.join(partitionDir, oldTableDirName)
-  if (!tableExists(oldTableDir)) return null
+async function compactGeneration(partitionDir, layout, cfg, settle) {
+  const oldDir = path.join(partitionDir, layout.liveDir)
+  if (!tableExists(oldDir)) return null
 
   /** @type {PartitionSpec | undefined} */
   let existingSpec
@@ -490,21 +478,20 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
   let sortColumns
   try {
     const { resolver, lister } = await createLocalIcebergIO()
-    const url = tableUrlForDir(oldTableDir)
+    const url = tableUrlForDir(oldDir)
     const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
     const schema = currentSchema(metadata)
     if (schema) schemaColumns = columnsFromIcebergSchema(schema)
     existingSpec = currentPartitionSpec(metadata)
-    // Carry the table's declared sort order into the replacement table,
-    // or the generation swap would silently drop it.
+    // Carry the table's declared sort order into the replacement
+    // generation, or the swap would silently drop it.
     sortColumns = sortColumnsFromMetadata(metadata)
   } catch {
     // Fall back to inference if metadata is unreadable
   }
 
-  const seq = Date.now()
-  const newTableDirName = `table-${seq}`
-  const newTableDir = path.join(partitionDir, newTableDirName)
+  const newDirName = layout.nextDirName()
+  const newDir = path.join(partitionDir, newDirName)
 
   const seen = new Set()
   /** @type {ColumnSpec[] | null} */
@@ -537,14 +524,14 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
     batch.push(row)
     batchBytes += estimateRowBytes(row)
     if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
-      await appendRowsToTable(newTableDir, columns, batch, appendOpts)
+      await appendRowsToTable(newDir, columns, batch, appendOpts)
       totalRows += batch.length
       batch = []
       batchBytes = 0
     }
   }
 
-  for await (const row of scanRowsFromTable(oldTableDir)) {
+  for await (const row of scanRowsFromTable(oldDir)) {
     if (!columns) {
       columns = Object.keys(row).map((name) => ({
         name,
@@ -568,26 +555,16 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
   }
 
   if (batch.length > 0 && columns) {
-    await appendRowsToTable(newTableDir, columns, batch, appendOpts)
+    await appendRowsToTable(newDir, columns, batch, appendOpts)
     totalRows += batch.length
     batch = []
     batchBytes = 0
   }
 
   if (!columns) {
-    await writeCursor(partitionDir, {
-      epoch: cursor.epoch,
-      rowCount: 0,
-      compaction: {
-        previousTableDir: oldTableDirName,
-        compactedAt: new Date().toISOString(),
-        resettleBaselineFiles: 0,
-      },
-      layout: 'source-table',
-      tableDir: newTableDirName,
-      retention: cursor.retention,
-    })
-    const retiredMarker = path.join(oldTableDir, '.retired')
+    if (!layout.commitEmpty) return null
+    await writeCursor(partitionDir, layout.cursorAfter(newDirName, 0, 0))
+    const retiredMarker = path.join(oldDir, '.retired')
     await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
     return {
       rowCount: 0,
@@ -595,155 +572,21 @@ async function compactSourceTable(partitionDir, cursor, cfg, settle) {
     }
   }
   if (totalRows === 0) {
-    // Keep table directory progression deterministic even when dedup filters out all rows.
-    await appendRowsToTable(newTableDir, columns, [], appendOpts)
+    // Keep generation progression deterministic even when dedup filters out all rows.
+    await appendRowsToTable(newDir, columns, [], appendOpts)
   }
 
   // Record the post-rewrite data-file count as the re-settle baseline: the
   // next tick only forces another re-settle sweep once new data flushes past
   // this count, so an unmatchable fallback does not loop (LLP 0027).
-  const newDataFiles = countDataFiles(newTableDir)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: totalRows,
-    compaction: {
-      previousTableDir: oldTableDirName,
-      compactedAt: new Date().toISOString(),
-      resettleBaselineFiles: newDataFiles,
-    },
-    layout: 'source-table',
-    tableDir: newTableDirName,
-    retention: cursor.retention,
-  })
+  const newDataFiles = countDataFiles(newDir)
+  await writeCursor(partitionDir, layout.cursorAfter(newDirName, totalRows, newDataFiles))
 
-  const retiredMarker = path.join(oldTableDir, '.retired')
+  const retiredMarker = path.join(oldDir, '.retired')
   await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
 
   return {
-    rowCount: totalRows,
-    dataFiles: newDataFiles,
-  }
-}
-
-/**
- * Legacy epoch-based compaction.
- *
- * @param {string} partitionDir
- * @param {PartitionCursor} cursor
- * @param {MaintenanceConfig} cfg
- * @param {SettleContext | null} [settle]
- * @returns {Promise<{ newEpoch: number, rowCount: number, dataFiles: number } | null>}
- */
-async function compactPartition(partitionDir, cursor, cfg, settle) {
-  const oldEpochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-  if (!tableExists(oldEpochDir)) return null
-
-  /** @type {PartitionSpec | undefined} */
-  let existingSpec
-  /** @type {ColumnSpec[] | null} */
-  let schemaColumns = null
-  /** @type {{ column: string, direction: 'asc' | 'desc' }[] | undefined} */
-  let sortColumns
-  try {
-    const { resolver, lister } = await createLocalIcebergIO()
-    const url = tableUrlForDir(oldEpochDir)
-    const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
-    const schema = currentSchema(metadata)
-    if (schema) schemaColumns = columnsFromIcebergSchema(schema)
-    existingSpec = currentPartitionSpec(metadata)
-    // Carry the table's declared sort order into the replacement epoch,
-    // or the epoch swap would silently drop it.
-    sortColumns = sortColumnsFromMetadata(metadata)
-  } catch {
-    // Fall back to inference if metadata is unreadable
-  }
-
-  const newEpoch = cursor.epoch + 1
-  const newEpochDir = path.join(partitionDir, `epoch=${newEpoch}`)
-
-  const seen = new Set()
-  /** @type {ColumnSpec[] | null} */
-  let columns = schemaColumns
-  /** @type {Record<string, unknown>[]} */
-  let batch = []
-  let batchBytes = 0
-  let totalRows = 0
-  const maxBatchBytes = cfg.compact_batch_bytes
-  /** @type {AppendOptions | undefined} */
-  const appendOpts = existingSpec || sortColumns
-    ? { partitionSpec: existingSpec, sortOrder: sortColumns }
-    : undefined
-
-  /** @type {Record<string, unknown>[]} */
-  const fallbackBuffer = []
-  const emittedPartIds = settle ? new Set() : null
-  const emit = async (/** @type {Record<string, unknown>} */ row) => {
-    const rowId = row._hyp_cache_row_id
-    if (typeof rowId === 'string' && seen.has(rowId)) return
-    if (typeof rowId === 'string') seen.add(rowId)
-    if (emittedPartIds) {
-      const key = rowPartId(row)
-      if (key !== undefined) emittedPartIds.add(key)
-    }
-    batch.push(row)
-    batchBytes += estimateRowBytes(row)
-    if (columns && (batch.length >= COMPACT_BATCH_SIZE || batchBytes >= maxBatchBytes)) {
-      await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
-      totalRows += batch.length
-      batch = []
-      batchBytes = 0
-    }
-  }
-
-  for await (const row of scanRowsFromTable(oldEpochDir)) {
-    if (!columns) {
-      columns = Object.keys(row).map((name) => ({
-        name,
-        type: inferColumnType(row[name]),
-        nullable: true,
-      }))
-    }
-    // @ref LLP 0027#re-settle-sweep: same backstop on the legacy layout.
-    if (settle && isGatewayFallbackRow(row)) {
-      fallbackBuffer.push(row)
-      continue
-    }
-    await emit(row)
-  }
-
-  if (settle && emittedPartIds && fallbackBuffer.length > 0) {
-    for (const row of await resettleFallbackRows(fallbackBuffer, settle, emittedPartIds)) {
-      await emit(row)
-    }
-  }
-
-  if (batch.length > 0 && columns) {
-    await appendRowsToTable(newEpochDir, columns, batch, appendOpts)
-    totalRows += batch.length
-  }
-
-  if (!columns) return null
-  if (totalRows === 0) {
-    // Keep epoch progression deterministic even when dedup filters out all rows.
-    await appendRowsToTable(newEpochDir, columns, [], appendOpts)
-  }
-
-  const newDataFiles = countDataFiles(newEpochDir)
-  await writeCursor(partitionDir, {
-    epoch: newEpoch,
-    rowCount: totalRows,
-    compaction: {
-      previousEpoch: cursor.epoch,
-      compactedAt: new Date().toISOString(),
-      resettleBaselineFiles: newDataFiles,
-    },
-  })
-
-  const retiredMarker = path.join(oldEpochDir, '.retired')
-  await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
-
-  return {
-    newEpoch,
+    newEpoch: layout.newEpoch,
     rowCount: totalRows,
     dataFiles: newDataFiles,
   }
