@@ -11,10 +11,10 @@ import { runDaemon } from '../../src/core/daemon/runtime.js'
 import {
   probeClientAttachFromDescriptor,
   readStatusFile,
-  resolveClientSettingsPath,
   statusFilePath,
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
+import { resolveClientSettingsPath } from '../../src/core/daemon/client_settings_path.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'

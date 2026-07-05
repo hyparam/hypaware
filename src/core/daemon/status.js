@@ -823,12 +823,6 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
   }
 }
 
-// `resolveClientSettingsPath` moved to ./client_settings_path.js so the
-// first-run source detector can share it without importing this module's
-// heavier graph. Imported above for internal use; re-exported here to keep
-// existing import sites (`from './status.js'`) stable.
-export { resolveClientSettingsPath }
-
 /**
  * Walk the recent telemetry directory and count log entries whose
  * `severityText` is `ERROR`. Returns 0 when the directory does not

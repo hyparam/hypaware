@@ -6,10 +6,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * Claude Code settings.json attach writer. Ported from the
- * Collectivus donor `src/claude-code/settings.js`, with the managed
- * marker key renamed `_collectivus` → `_hypaware` and the embedded
- * hook command pointed at `hyp` instead of `ctvs`.
+ * Claude Code settings.json attach writer, keyed on the `_hypaware`
+ * managed marker.
  *
  * Writes are atomic (temp file + rename) and gated on mtime so a
  * concurrent edit is detected instead of silently overwritten. The

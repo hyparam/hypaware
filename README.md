@@ -267,7 +267,6 @@ Run before tagging a new HypAware release:
 
 ```sh
 npm test                  # if a test script is present
-npm run lint              # if a lint script is present
 npm run typecheck         # if a typecheck script is present
 npm pack --dry-run        # verify the published file set
 ```

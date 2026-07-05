@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { State, MultiselectState, SelectState, TextState, ConfirmState, MultiSelectOption, MultiSelectSpec, SelectSpecOption, SelectSpec, TextSpec, ConfirmSpec } from '../../../../src/core/cli/tui/types.js'
+ * @import { State, MultiselectState, SelectState, TextState, MultiSelectOption, MultiSelectSpec, SelectSpecOption, SelectSpec, TextSpec } from '../../../../src/core/cli/tui/types.js'
  */
 
 import process from 'node:process'
@@ -93,26 +93,6 @@ export async function text(spec) {
   const io = resolveIo(spec)
   const final = /** @type {TextState} */ (await run(initial, io))
   return final.value
-}
-
-/**
- * Render a yes/no confirmation prompt and resolve to a boolean.
- *
- * @param {ConfirmSpec} spec
- * @returns {Promise<boolean>}
- */
-export async function confirm(spec) {
-  /** @type {ConfirmState} */
-  const initial = {
-    kind: 'confirm',
-    title: spec.title,
-    default: spec.default === true,
-    status: 'active',
-    ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
-  }
-  const io = resolveIo(spec)
-  const final = /** @type {ConfirmState} */ (await run(initial, io))
-  return final.value === true
 }
 
 /**

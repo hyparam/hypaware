@@ -22,8 +22,8 @@ function fingerprintToken(token) {
 
 /**
  * Eagerly refresh when the remaining lifetime falls inside this window
- * (24h). Matches the donor `collectivus/src/gateway/identity.js`
- * contract: see proto.md "Refresh window".
+ * (24h). Must match the central server's refresh-window contract: see
+ * proto.md "Refresh window".
  */
 export const REFRESH_WINDOW_SECONDS = 24 * 60 * 60
 

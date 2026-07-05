@@ -49,3 +49,6 @@ historical queries reaching into the sink, transparently
 partition until all configured sinks have acked their export, or evict purely on
 retention? Retention-only is simpler; ack-coupled protects against data loss
 when a sink is slow. Unresolved; see [LLP 0000](./0000-hypaware.explainer.md).
+A reserved `wait_for_sink_ack` retention knob was once parsed (but never wired);
+it has been removed from the config surface until this question is decided, so
+the option will reappear only alongside a real implementation.

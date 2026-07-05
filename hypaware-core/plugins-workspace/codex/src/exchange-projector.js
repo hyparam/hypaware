@@ -7,7 +7,6 @@ import { redactRemoteUserinfo } from './git-remote.js'
 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../collectivus-plugin-kernel-types.js'
- * @import { CodexLogReader } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
@@ -26,19 +25,10 @@ import { redactRemoteUserinfo } from './git-remote.js'
  * ChatGPT subscription mode) through one projector without exposing
  * provider semantics to the gateway core.
  *
- * @param {{
- *   logReaders?: CodexLogReader[],
- *   env?: Record<string, string | undefined>,
- *   resolver?: UsagePolicyResolver,
- * }} [opts]
+ * @param {{ resolver?: UsagePolicyResolver }} [opts]
  * @returns {AiGatewayExchangeProjector}
  */
 export function createCodexExchangeProjector(opts = {}) {
-  const env = opts.env ?? process.env
-  const sqliteReadsEnabled = env.HYPAWARE_CODEX_SQLITE_READS === '1'
-  const logReaders = sqliteReadsEnabled && Array.isArray(opts.logReaders)
-    ? opts.logReaders
-    : []
   // One `.hypignore` resolver per projector instance (one per started
   // listener): the per-cwd cache then spans the listener's lifetime so the
   // capture hot path adds no unbounded fs work (LLP 0049 R6).
@@ -108,8 +98,6 @@ export function createCodexExchangeProjector(opts = {}) {
       const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
       if (messages.length === 0) return undefined
 
-      const augmented = augmentFromLogReaders(logReaders, input)
-
       const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
       // @ref LLP 0030#decision: session_id is the partition key (always
       // non-null): Codex's `metadata.session_id`, falling back to the
@@ -125,8 +113,8 @@ export function createCodexExchangeProjector(opts = {}) {
       // signal for symmetry with the @hypaware/claude adapter.
       codexAttributes.identity_source = 'gateway_fallback'
       const projectionAttributes = Object.keys(codexAttributes).length > 0
-        ? { codex: codexAttributes, ...(augmented ?? {}) }
-        : augmented
+        ? { codex: codexAttributes }
+        : undefined
 
       /** @type {AiGatewayProjectedExchange} */
       const projection = {
@@ -953,36 +941,6 @@ function extractSystemText(system) {
     if (parts.length > 0) return parts.join('\n')
   }
   return undefined
-}
-
-// ---------------------------------------------------------------------
-// Log-reader stub
-// ---------------------------------------------------------------------
-
-/**
- * Apply registered log readers and merge any returned attributes.
- * Today no readers are shipped. This is a no-op stub kept behind
- * the `HYPAWARE_CODEX_SQLITE_READS` env flag so a future bead can
- * register the Codex SQLite-turn reader without churning the
- * projector interface.
- *
- * @param {CodexLogReader[]} readers
- * @param {AiGatewayExchangeInput} input
- * @returns {JsonObject | undefined}
- */
-function augmentFromLogReaders(readers, input) {
-  if (readers.length === 0) return undefined
-  /** @type {JsonObject} */
-  const merged = {}
-  for (const reader of readers) {
-    try {
-      const out = reader.read(input)
-      if (isPlainObject(out)) Object.assign(merged, out)
-    } catch {
-      // Log readers are best-effort; failures must not break projection.
-    }
-  }
-  return Object.keys(merged).length === 0 ? undefined : merged
 }
 
 // ---------------------------------------------------------------------

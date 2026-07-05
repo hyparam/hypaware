@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildQuerySqlOutput } from '../../src/core/cli/core_commands.js'
+import { buildQuerySqlOutput } from '../../src/core/query/format.js'
 
 /** @type {Parameters<typeof buildQuerySqlOutput>[1]} */
 const baseOpts = { format: 'json', output: undefined, maxCell: 200, maxBytes: 32_768 }

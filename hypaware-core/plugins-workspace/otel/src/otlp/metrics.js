@@ -15,8 +15,7 @@ import {
  * Flatten an `ExportMetricsServiceRequest` JSON envelope into one row per
  * data point. Row keys line up with `METRICS_COLUMNS` in `../datasets.js`.
  * Covers gauge, sum, histogram, exponential histogram, and summary metric
- * shapes: matching the donor's collector.js logic but written fresh
- * against the camelCase JSON wire form.
+ * shapes, written against the camelCase JSON wire form.
  *
  * @param {unknown} payload
  * @returns {Record<string, unknown>[]}

@@ -13,9 +13,8 @@
  * `BasicType` supertype, so the encoder leaves the type strings
  * unchanged and only normalizes the values.
  *
- * Behavior mirrors `collectivus/src/upload/schema.js` (the Phase 8.3
- * donor): missing values surface as `undefined` (OPTIONAL parquet
- * null), required columns reject null values, and numeric strings are
+ * Missing values surface as `undefined` (OPTIONAL parquet null),
+ * required columns reject null values, and numeric strings are
  * accepted because OTLP often hands large counts back as strings.
  *
  * @param {readonly ColumnSpec[]} columns

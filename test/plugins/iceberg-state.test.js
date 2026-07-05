@@ -128,10 +128,10 @@ function markerWithSnapshot(snapshotId) {
 }
 
 test('markerSubsumedBySnapshot returns true when current snapshot matches the marker exactly', () => {
-  assert.equal(markerSubsumedBySnapshot(null, '100'), false)
-  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot(''), '100'), false)
-  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), '100'), true)
-  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), '200'), false)
+  assert.equal(markerSubsumedBySnapshot(null, { currentSnapshotId: '100', metadata: null }), false)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot(''), { currentSnapshotId: '100', metadata: null }), false)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '100', metadata: null }), true)
+  assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), { currentSnapshotId: '200', metadata: null }), false)
   assert.equal(markerSubsumedBySnapshot(markerWithSnapshot('100'), undefined), false)
 })
 

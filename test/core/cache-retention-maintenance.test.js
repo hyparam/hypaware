@@ -58,7 +58,6 @@ test('retention normalizeConfig applies defaults', () => {
   const enforcer = createRetentionEnforcer({ cacheRoot: '/tmp/fake', config: undefined })
   assert.equal(enforcer.config.default_days, 30)
   assert.deepEqual(enforcer.config.datasets, {})
-  assert.equal(enforcer.config.wait_for_sink_ack, false)
 })
 
 test('retention tick on empty cache returns empty results', async () => {

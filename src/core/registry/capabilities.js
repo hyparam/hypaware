@@ -109,17 +109,12 @@ export function createCapabilityRegistry() {
     }))
   }
 
-  function _registrations() {
-    return registrations.slice()
-  }
-
   return {
     provide,
     require: requireCapability,
     has,
     list,
     fromProvider,
-    _registrations,
   }
 }
 

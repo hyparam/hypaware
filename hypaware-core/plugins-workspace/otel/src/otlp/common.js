@@ -2,14 +2,11 @@
 
 /**
  * Shared helpers for flattening OTLP/JSON payloads into row records that
- * line up with the column schemas in `../datasets.js`. The functions here
- * mirror the contract of Collectivus's donor flatten code: lenient about
- * shape (missing fields land as `null` so nullable columns absorb the
- * default), strict about types (numbers stay numbers, attribute bags get
- * normalized to plain objects). Behavior is referenced from
- * `collectivus/src/collector.js` and `collectivus/src/otlp/common.js`;
- * the code here is a fresh re-implementation against the OTLP/JSON wire
- * shape only.
+ * line up with the column schemas in `../datasets.js`. The contract:
+ * lenient about shape (missing fields land as `null` so nullable
+ * columns absorb the default), strict about types (numbers stay
+ * numbers, attribute bags get normalized to plain objects). Written
+ * against the OTLP/JSON wire shape only.
  */
 
 const OTLP_NS_PER_MS = 1_000_000n

@@ -10,11 +10,6 @@ import { hrTimeToIso } from './runtime.js'
  * @import { Span } from './runtime.js'
  */
 
-const ExportResultCode = Object.freeze({
-  SUCCESS: 0,
-  FAILED: 1,
-})
-
 /**
  * Append-only JSONL writer. One file per signal per pid; the file is
  * opened lazily on first write so a no-op shutdown doesn't create
@@ -138,25 +133,12 @@ export class JsonlSpanExporter {
     this.writer = new JsonlWriter(dir, `traces-${pid}.jsonl`)
   }
 
-  /**
-   * @param {Span[]} spans
-   * @param {(result: { code: number, error?: Error }) => void} resultCallback
-   */
-  export(spans, resultCallback) {
-    try {
-      this.writer.writeBatch(spans.map(spanToJsonl))
-      resultCallback({ code: ExportResultCode.SUCCESS })
-    } catch (error) {
-      resultCallback({
-        code: ExportResultCode.FAILED,
-        error: error instanceof Error ? error : new Error(String(error)),
-      })
-    }
-  }
-
   /** @param {Span[]} spans */
   exportBatch(spans) {
-    this.export(spans, () => {})
+    // Telemetry export must never throw into the caller's path.
+    try {
+      this.writer.writeBatch(spans.map(spanToJsonl))
+    } catch {}
   }
 
   async shutdown() {
@@ -211,25 +193,12 @@ export class JsonlLogRecordExporter {
     this.writer = new JsonlWriter(dir, `logs-${pid}.jsonl`)
   }
 
-  /**
-   * @param {LogRecord[]} records
-   * @param {(result: { code: number, error?: Error }) => void} resultCallback
-   */
-  export(records, resultCallback) {
-    try {
-      this.writer.writeBatch(records.map(logRecordToJsonl))
-      resultCallback({ code: ExportResultCode.SUCCESS })
-    } catch (error) {
-      resultCallback({
-        code: ExportResultCode.FAILED,
-        error: error instanceof Error ? error : new Error(String(error)),
-      })
-    }
-  }
-
   /** @param {LogRecord[]} records */
   exportBatch(records) {
-    this.export(records, () => {})
+    // Telemetry export must never throw into the caller's path.
+    try {
+      this.writer.writeBatch(records.map(logRecordToJsonl))
+    } catch {}
   }
 
   async shutdown() {
@@ -257,25 +226,12 @@ export class JsonlMetricExporter {
     this.writer = new JsonlWriter(dir, `metrics-${pid}.jsonl`)
   }
 
-  /**
-   * @param {MetricRecord[]} records
-   * @param {(result: { code: number, error?: Error }) => void} resultCallback
-   */
-  export(records, resultCallback) {
-    try {
-      this.writer.writeBatch(records.map(metricRecordToJsonl))
-      resultCallback({ code: ExportResultCode.SUCCESS })
-    } catch (error) {
-      resultCallback({
-        code: ExportResultCode.FAILED,
-        error: error instanceof Error ? error : new Error(String(error)),
-      })
-    }
-  }
-
   /** @param {MetricRecord[]} records */
   exportBatch(records) {
-    this.export(records, () => {})
+    // Telemetry export must never throw into the caller's path.
+    try {
+      this.writer.writeBatch(records.map(metricRecordToJsonl))
+    } catch {}
   }
 
   async shutdown() {

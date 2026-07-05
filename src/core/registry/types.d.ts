@@ -20,8 +20,6 @@ import type {
 } from '../../../collectivus-plugin-kernel-types.d.ts'
 
 export interface CapabilityRegistryHandle extends CapabilityRegistry {
-  /** Internal-only inspector used by dep_graph and tests. */
-  _registrations(): Array<CapabilityRegistration & { value: unknown }>
   /**
    * Resolve a capability from a specific provider plugin. Returns the
    * value if the named provider registered the capability within the

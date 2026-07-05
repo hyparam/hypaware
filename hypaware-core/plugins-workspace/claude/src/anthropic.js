@@ -52,7 +52,7 @@ export function anthropicMessages(reqBody, responseBody, streamEvents) {
  * @param {Array<{ data: string, event?: string }>} streamEvents
  * @returns {Record<string, unknown> | null}
  */
-export function reconstructAnthropicAssistantMessage(streamEvents) {
+function reconstructAnthropicAssistantMessage(streamEvents) {
   /** @type {Record<string, unknown> | null} */
   let message = null
   /** @type {Map<number, Record<string, unknown>>} */
@@ -177,8 +177,8 @@ export function hasAnthropicHeaderSignature(headers) {
 /**
  * Pull the Claude Code session id off either the request body's
  * `metadata.user_id` (Anthropic stuffs it there as a JSON-encoded
- * blob) or the `x-claude-code-session-id` header: same priority as
- * the donor `resolveSessionId`.
+ * blob) or the `x-claude-code-session-id` header, in that priority
+ * order.
  *
  * @param {Record<string, unknown> | undefined} reqBody
  * @param {Record<string, string | string[] | undefined> | undefined} headers
@@ -214,10 +214,9 @@ export function resolveAnthropicConversationId(reqBody, exchangeId, sessionId) {
 }
 
 /**
- * Extract the Claude CLI version from the captured user-agent. The
- * donor used the same `claude-cli/<version>` shape; we surface it as
- * `client_version` on the projection so downstream queries can group
- * by client version.
+ * Extract the Claude CLI version from the captured user-agent
+ * (`claude-cli/<version>`). Surfaced as `client_version` on the
+ * projection so downstream queries can group by client version.
  *
  * @param {Record<string, string | string[] | undefined> | undefined} headers
  */
@@ -231,8 +230,8 @@ export function claudeClientVersion(headers) {
 /**
  * Conversation source label: `claude_code` when the User-Agent
  * identifies the CLI, otherwise `api` (generic Anthropic SDK
- * traffic). The donor used this to distinguish first-party Claude
- * Code from third-party Anthropic SDK callers.
+ * traffic). Distinguishes first-party Claude Code from third-party
+ * Anthropic SDK callers.
  *
  * @param {Record<string, string | string[] | undefined> | undefined} headers
  */
@@ -300,9 +299,9 @@ export function anthropicExchangeAttributes(reqBody, responseBody, durationMs) {
 
 /**
  * Build the per-message `attributes.usage` block from an Anthropic
- * message's `usage` field. The donor normalised
- * `cache_read_input_tokens` → `cache_read_tokens` and
- * `cache_creation_input_tokens` → `cache_write_tokens`; we keep that.
+ * message's `usage` field. Normalizes `cache_read_input_tokens` →
+ * `cache_read_tokens` and `cache_creation_input_tokens` →
+ * `cache_write_tokens`.
  *
  * @param {unknown} message
  * @returns {JsonObject | undefined}
@@ -565,8 +564,7 @@ function sortKeys(value) {
 
 /** @param {string} input */
 function hashShort(input) {
-  // 16-char hex prefix of SHA-256; matches the donor's
-  // `sha256Hex(...).slice(0, 16)` so conversation ids stay stable
-  // across the move from gateway core to this plugin.
+  // 16-char hex prefix of SHA-256. Recorded rows carry ids derived
+  // from this shape, so changing it would re-key old conversations.
   return createHash('sha256').update(input).digest('hex').slice(0, 16)
 }

@@ -46,7 +46,6 @@ function clampingResolver(ignoredDir) {
 // the gateway write guard persists nothing; a clean cwd is unaffected (R1/R2).
 test('project() returns no projection when the exchange cwd is .hypignore-ignored', () => {
   const projector = createCodexExchangeProjector({
-    env: {},
     resolver: ignoringResolver('/work/ignored'),
   })
   const projection = projector.project(exchange({
@@ -65,7 +64,6 @@ test('project() returns no projection when the exchange cwd is .hypignore-ignore
 
 test('project() is unaffected when the exchange cwd is not ignored', () => {
   const projector = createCodexExchangeProjector({
-    env: {},
     resolver: ignoringResolver('/work/ignored'),
   })
   const projection = /** @type {any} */ (projector.project(exchange({
@@ -84,7 +82,6 @@ test('project() emits a usage_policy_drop log on an ignored cwd', () => {
   /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
   const infos = []
   const projector = createCodexExchangeProjector({
-    env: {},
     resolver: ignoringResolver('/work/ignored'),
   })
   const log = {
@@ -114,7 +111,6 @@ test('project() escalates a fail-safe clamp to a warn-level drop with the declar
   /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
   const warns = []
   const projector = createCodexExchangeProjector({
-    env: {},
     resolver: clampingResolver('/work/ignored'),
   })
   const log = {
@@ -144,7 +140,7 @@ test('project() escalates a fail-safe clamp to a warn-level drop with the declar
 })
 
 test('match() accepts the three transports it owns and rejects others', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   assert.equal(projector.match(exchange({ path: '/v1/chat/completions' })), true)
   assert.equal(projector.match(exchange({ path: '/v1/responses' })), true)
   assert.equal(projector.match(exchange({ path: '/backend-api/codex/responses' })), true)
@@ -154,7 +150,7 @@ test('match() accepts the three transports it owns and rejects others', () => {
 })
 
 test('match() also accepts non-codex paths tagged with x-codex-turn-metadata', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   assert.equal(
     projector.match(exchange({
       path: '/v1/foo',
@@ -165,7 +161,7 @@ test('match() also accepts non-codex paths tagged with x-codex-turn-metadata', (
 })
 
 test('OpenAI Chat projection: request+response messages roll up into user+assistant', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/chat/completions',
     provider: 'openai',
@@ -193,7 +189,7 @@ test('OpenAI Chat projection: request+response messages roll up into user+assist
 })
 
 test('OpenAI Chat projection normalizes usage onto the assistant response', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/chat/completions',
     provider: 'openai',
@@ -235,7 +231,7 @@ test('OpenAI Chat projection normalizes usage onto the assistant response', () =
 })
 
 test('OpenAI Chat tool messages map to tool_result blocks', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/chat/completions',
     request_body: JSON.stringify({
@@ -267,7 +263,7 @@ test('OpenAI Chat tool messages map to tool_result blocks', () => {
 })
 
 test('OpenAI Responses with output_text in the body produces an assistant message', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     provider: 'openai',
@@ -283,7 +279,7 @@ test('OpenAI Responses with output_text in the body produces an assistant messag
 })
 
 test('OpenAI Responses body usage is normalized onto one assistant response item', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     provider: 'openai',
@@ -325,7 +321,7 @@ test('OpenAI Responses body usage is normalized onto one assistant response item
 })
 
 test('OpenAI Responses captures top-level instructions into system_text', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
@@ -341,7 +337,7 @@ test('OpenAI Responses captures top-level instructions into system_text', () => 
 })
 
 test('OpenAI Chat system field still wins over instructions', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/chat/completions',
     provider: 'openai',
@@ -358,7 +354,7 @@ test('OpenAI Chat system field still wins over instructions', () => {
 })
 
 test('OpenAI Responses SSE deltas reconstruct the assistant body', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     is_sse: true,
@@ -382,7 +378,7 @@ test('OpenAI Responses SSE deltas reconstruct the assistant body', () => {
 })
 
 test('OpenAI Responses SSE completed usage is normalized onto the assistant response', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     is_sse: true,
@@ -429,7 +425,7 @@ test('OpenAI Responses SSE completed usage is normalized onto the assistant resp
 })
 
 test('OpenAI Responses function_call in input becomes an assistant tool_use message', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     provider: 'openai',
@@ -469,7 +465,7 @@ test('OpenAI Responses function_call in input becomes an assistant tool_use mess
 })
 
 test('OpenAI Responses custom_tool_call uses payload.input when arguments is missing', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     provider: 'openai',
@@ -495,7 +491,7 @@ test('OpenAI Responses custom_tool_call uses payload.input when arguments is mis
 })
 
 test('OpenAI Responses fans out response.output items into per-item assistant messages', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     provider: 'openai',
@@ -532,7 +528,7 @@ test('OpenAI Responses fans out response.output items into per-item assistant me
 })
 
 test('OpenAI Responses turn-1 response shape matches turn-2 input replay shape (dedupe)', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   // Turn 1: assistant emits text + a function_call as response output.
   const turn1 = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
@@ -573,7 +569,7 @@ test('OpenAI Responses turn-1 response shape matches turn-2 input replay shape (
 })
 
 test('OpenAI Responses SSE captures tool_use from response.output_item.done', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     is_sse: true,
@@ -609,7 +605,7 @@ test('OpenAI Responses SSE captures tool_use from response.output_item.done', ()
 })
 
 test('OpenAI Responses SSE prefers full response.completed body when present', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     is_sse: true,
@@ -649,7 +645,7 @@ test('OpenAI Responses SSE prefers full response.completed body when present', (
 })
 
 test('OpenAI Responses SSE merges streamed text into a tool-only completed body', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/responses',
     is_sse: true,
@@ -685,7 +681,7 @@ test('OpenAI Responses SSE merges streamed text into a tool-only completed body'
 })
 
 test('Codex turn metadata + headers project into first-class columns and codex.* attributes', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const workspace = '/home/me/workspace'
   const turnMetadata = {
     session_id: 'session-x',
@@ -762,7 +758,7 @@ test('Codex turn metadata + headers project into first-class columns and codex.*
 })
 
 test('live projector redacts credential userinfo from the turn-metadata remote (LLP 0032)', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const workspace = '/home/me/workspace'
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
@@ -791,7 +787,7 @@ test('live projector redacts credential userinfo from the turn-metadata remote (
 })
 
 test('thread_source=subagent flips is_sidechain to true', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
@@ -810,7 +806,7 @@ test('thread_source=subagent flips is_sidechain to true', () => {
 })
 
 test('subagent turn metadata captures parent_thread_id (lineage)', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
@@ -833,7 +829,7 @@ test('subagent turn metadata captures parent_thread_id (lineage)', () => {
 })
 
 test('Codex workspace selection prefers recorded cwd over first metadata key', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const actualWorkspace = '/home/me/actual'
   const turnMetadata = {
     thread_id: 'thread-x',
@@ -867,7 +863,7 @@ test('Codex workspace selection prefers recorded cwd over first metadata key', (
 })
 
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/chat/completions',
     provider: 'openai',
@@ -886,14 +882,14 @@ test('non-codex provider has no codex turn metadata but still stamps identity_so
 })
 
 test('project() returns undefined when the request body is missing or malformed', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   assert.equal(projector.project(exchange({ request_body: null }), context()), undefined)
   assert.equal(projector.project(exchange({ request_body: 'not-json' }), context()), undefined)
   assert.equal(projector.project(exchange({ request_body: '[]' }), context()), undefined)
 })
 
 test('project() returns undefined when no messages can be extracted', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   // request body parses but has no messages / input
   assert.equal(
     projector.project(exchange({
@@ -904,40 +900,10 @@ test('project() returns undefined when no messages can be extracted', () => {
   )
 })
 
-test('log readers stay no-op without HYPAWARE_CODEX_SQLITE_READS=1', () => {
-  let called = false
-  const projector = createCodexExchangeProjector({
-    env: {},
-    logReaders: [{ name: 'fake', read: () => { called = true; return { codex_sqlite: { ok: true } } } }],
-  })
-  const projection = /** @type {any} */ (projector.project(exchange({
-    path: '/v1/chat/completions',
-    request_body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
-    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
-  }), context()))
-  assert.equal(called, false)
-  // identity_source still stamped, but no codex_sqlite augmentation arrives.
-  assert.equal(projection.attributes.codex_sqlite, undefined)
-})
 
-test('log readers activate when HYPAWARE_CODEX_SQLITE_READS=1 and merge alongside codex.*', () => {
-  const projector = createCodexExchangeProjector({
-    env: { HYPAWARE_CODEX_SQLITE_READS: '1' },
-    logReaders: [{ name: 'fake', read: () => ({ codex_sqlite: { ok: true } }) }],
-  })
-  const projection = /** @type {any} */ (projector.project(exchange({
-    path: '/v1/chat/completions',
-    request_body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
-    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
-  }), context()))
-  assert.deepEqual(projection.attributes, {
-    codex: { identity_source: 'gateway_fallback' },
-    codex_sqlite: { ok: true },
-  })
-})
 
 test('conversation_id falls back to a stable hash when no codex metadata or session id is present', () => {
-  const projector = createCodexExchangeProjector({ env: {} })
+  const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/v1/chat/completions',
     request_body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),

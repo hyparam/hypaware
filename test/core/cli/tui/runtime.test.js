@@ -8,7 +8,6 @@ import {
   multiselect,
   select,
   text,
-  confirm,
   PromptCancelledError,
 } from '../../../../src/core/cli/tui/index.js'
 import { isPromptCancelledError, countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
@@ -196,40 +195,27 @@ test('runtime: text validate-rejected enter stays active until valid', async () 
   assert.match(io.output(), /too short/)
 })
 
-test('runtime: confirm resolves true on y and false on n', async () => {
-  {
-    const io = makeTty()
-    const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
-    await feed(io.stdin, ['y'])
-    assert.equal(await promise, true)
-  }
-  {
-    const io = makeTty()
-    const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
-    await feed(io.stdin, ['n'])
-    assert.equal(await promise, false)
-  }
-})
-
-test('runtime: confirm enter resolves with the default value', async () => {
-  {
-    const io = makeTty()
-    const promise = confirm({ title: 'go?', default: true, stdin: io.stdin, stdout: io.stdout })
-    await feed(io.stdin, ['\r'])
-    assert.equal(await promise, true)
-  }
-  {
-    const io = makeTty()
-    const promise = confirm({ title: 'go?', default: false, stdin: io.stdin, stdout: io.stdout })
-    await feed(io.stdin, ['\r'])
-    assert.equal(await promise, false)
-  }
-})
+/**
+ * Spawn the simplest prompt (single-option select) for tests that
+ * exercise runtime plumbing rather than any reducer's semantics.
+ *
+ * @param {{ stdin: PassThrough, stdout: PassThrough }} io
+ * @param {{ clearOnResolve?: boolean }} [opts]
+ */
+function simplePrompt(io, opts = {}) {
+  return select({
+    title: 'go?',
+    options: [{ value: 'a', label: 'A' }],
+    stdin: io.stdin,
+    stdout: io.stdout,
+    ...opts,
+  })
+}
 
 test('runtime: cursor-hide is written on entry and cursor-show on resolve', async () => {
   const io = makeTty()
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
-  await feed(io.stdin, ['y'])
+  const promise = simplePrompt(io)
+  await feed(io.stdin, ['\r'])
   await promise
   const out = io.output()
   assert.ok(out.includes('\x1b[?25l'), 'cursor-hide escape not emitted')
@@ -238,7 +224,7 @@ test('runtime: cursor-hide is written on entry and cursor-show on resolve', asyn
 
 test('runtime: cursor-show is written even on cancel', async () => {
   const io = makeTty()
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
+  const promise = simplePrompt(io)
   const rejection = assert.rejects(promise)
   await feed(io.stdin, ['\x03'])
   await rejection
@@ -250,9 +236,9 @@ test('runtime: cleanup restores paused stdin after prompt completion', async () 
   io.stdin.pause()
   assert.equal(io.stdin.readableFlowing, false)
 
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
-  await feed(io.stdin, ['y'])
-  assert.equal(await promise, true)
+  const promise = simplePrompt(io)
+  await feed(io.stdin, ['\r'])
+  assert.equal(await promise, 'a')
 
   assert.equal(io.stdin.readableFlowing, false)
   assert.equal(io.stdin.isPaused(), true)
@@ -264,9 +250,9 @@ test('runtime: cleanup preserves previously flowing stdin after prompt completio
   io.stdin.resume()
   assert.equal(io.stdin.readableFlowing, true)
 
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
-  await feed(io.stdin, ['y'])
-  assert.equal(await promise, true)
+  const promise = simplePrompt(io)
+  await feed(io.stdin, ['\r'])
+  assert.equal(await promise, 'a')
 
   assert.equal(io.stdin.readableFlowing, true)
   assert.equal(/** @type {any} */ (io.stdin).isRaw, false)
@@ -282,9 +268,9 @@ test('runtime: render failures during keypress reject and clean up', async () =>
     return originalWrite(chunk, ...args)
   })
 
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
+  const promise = simplePrompt(io)
   const rejection = assert.rejects(promise, /render failed/)
-  await feed(io.stdin, ['y'])
+  await feed(io.stdin, ['j'])
   await rejection
 
   assert.equal(io.stdin.readableFlowing, false)
@@ -397,9 +383,9 @@ function makeChunkCapture() {
 
 test('runtime: clearOnResolve erases the settled frame on resolve', async () => {
   const io = makeChunkCapture()
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout, clearOnResolve: true })
-  await feed(io.stdin, ['y'])
-  assert.equal(await promise, true)
+  const promise = simplePrompt(io, { clearOnResolve: true })
+  await feed(io.stdin, ['\r'])
+  assert.equal(await promise, 'a')
 
   const erases = settleErases(io.chunks)
   assert.equal(erases.length, 1, 'expected exactly one settle-erase on resolve')
@@ -415,7 +401,7 @@ test('runtime: clearOnResolve erases the settled frame on resolve', async () => 
 
 test('runtime: clearOnResolve erases the settled frame on cancel', async () => {
   const io = makeChunkCapture()
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout, clearOnResolve: true })
+  const promise = simplePrompt(io, { clearOnResolve: true })
   const rejection = assert.rejects(promise, (err) => err instanceof PromptCancelledError)
   await feed(io.stdin, ['\x03'])
   await rejection
@@ -425,9 +411,9 @@ test('runtime: clearOnResolve erases the settled frame on cancel', async () => {
 
 test('runtime: without clearOnResolve the settled frame is left in place', async () => {
   const io = makeChunkCapture()
-  const promise = confirm({ title: 'go?', stdin: io.stdin, stdout: io.stdout })
-  await feed(io.stdin, ['y'])
-  assert.equal(await promise, true)
+  const promise = simplePrompt(io)
+  await feed(io.stdin, ['\r'])
+  assert.equal(await promise, 'a')
 
   assert.equal(settleErases(io.chunks).length, 0, 'no settle-erase when clearOnResolve is off')
 })
@@ -435,13 +421,10 @@ test('runtime: without clearOnResolve the settled frame is left in place', async
 test('runtime: overlapping prompts are rejected', async () => {
   const first = makeTty()
   const second = makeTty()
-  const promise = confirm({ title: 'first?', stdin: first.stdin, stdout: first.stdout })
+  const promise = simplePrompt(first)
 
-  await assert.rejects(
-    confirm({ title: 'second?', stdin: second.stdin, stdout: second.stdout }),
-    /TUI prompt already active/,
-  )
+  await assert.rejects(simplePrompt(second), /TUI prompt already active/)
 
-  await feed(first.stdin, ['y'])
-  assert.equal(await promise, true)
+  await feed(first.stdin, ['\r'])
+  assert.equal(await promise, 'a')
 })

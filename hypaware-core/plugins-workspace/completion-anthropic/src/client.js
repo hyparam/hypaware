@@ -554,7 +554,7 @@ function numOrUndef(v) {
  * @param {{ model: string }} _ctx
  * @returns {AsyncGenerator<CompletionDelta>}
  */
-export async function* parseAnthropicStream(body, _ctx) {
+async function* parseAnthropicStream(body, _ctx) {
   const decoder = new TextDecoder()
   let buffer = ''
   let inputTokens = 0

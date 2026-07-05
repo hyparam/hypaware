@@ -27,9 +27,7 @@ const PLUGIN_VERSION = '1.0.0'
  * Activate `@hypaware/local-fs`. Provides the `hypaware.blob-store@1`
  * capability as a full `BlobStore` (put/get/list/delete) AND contributes
  * a `local-fs` sink that writes encoded partition bytes under
- * `<config.dir>/<dataset>/<partition>/`. The sink contribution is
- * untouched by the BlobStore migration: existing
- * encoder-writer + local-fs sinks keep working unchanged.
+ * `<config.dir>/<dataset>/<partition>/`.
  *
  * BlobStore base directory resolution:
  *  1. `ctx.config.exports_dir` (plugin section pin)

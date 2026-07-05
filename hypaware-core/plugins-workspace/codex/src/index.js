@@ -78,7 +78,7 @@ export async function activate(ctx) {
     provider: 'chatgpt',
   })
 
-  gateway.registerExchangeProjector(createCodexExchangeProjector({ env: ctx.env }))
+  gateway.registerExchangeProjector(createCodexExchangeProjector())
 
   // Backfill provider: imports the local Codex session rollouts the
   // gateway never saw (history written before HypAware attached, or

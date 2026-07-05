@@ -28,10 +28,9 @@ const EMPTY_PARTIAL_SUCCESS = {
  * `start`) is responsible for wrapping that path in an `otel.receive`
  * span and translating exception types to `error_kind` attributes.
  *
- * Only OTLP/JSON is accepted in this pass: the OTLP/protobuf decoder
- * chain from the donor (`collectivus/src/protobuf.js`,
- * `collectivus/src/otlp/*`) is left out of V1 and can be added later
- * without changing the request handler shape.
+ * Only OTLP/JSON is accepted in this pass: an OTLP/protobuf decoder
+ * chain was left out of V1 and can be added later without changing
+ * the request handler shape.
  *
  * @param {OtlpReceiveHandler} handler
  * @returns {http.Server}

@@ -186,29 +186,7 @@ test('text: default hint disappears once value is typed', () => {
   assert.doesNotMatch(out, /\(default: fallback\)/)
 })
 
-test('confirm: render shows [Y/n] when default is true', () => {
-  /** @type {any} */
-  const state = {
-    kind: 'confirm',
-    title: 'go?',
-    default: true,
-    status: 'active',
-  }
-  const out = render(state, { color: false })
-  assert.match(out, /\[Y\/n\]/)
-})
 
-test('confirm: render shows [y/N] when default is false', () => {
-  /** @type {any} */
-  const state = {
-    kind: 'confirm',
-    title: 'go?',
-    default: false,
-    status: 'active',
-  }
-  const out = render(state, { color: false })
-  assert.match(out, /\[y\/N\]/)
-})
 
 test('render: hint override replaces default hint line', () => {
   /** @type {any} */

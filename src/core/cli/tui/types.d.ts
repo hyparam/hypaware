@@ -4,10 +4,7 @@ export interface Key {
    * or a single character ('a', '1', ...).
    */
   name?: string
-  /**
-   * Raw character(s): used for printable text input in `text` mode and the
-   * y/n chars in `confirm` mode.
-   */
+  /** Raw character(s): used for printable text input in `text` mode. */
   sequence?: string
   ctrl?: boolean
   shift?: boolean
@@ -59,17 +56,7 @@ export interface TextState {
   error?: string
 }
 
-export interface ConfirmState {
-  kind: 'confirm'
-  title: string
-  hint?: string
-  default: boolean
-  /** Set when resolved. */
-  value?: boolean
-  status: 'active' | 'resolved' | 'cancelled'
-}
-
-export type State = MultiselectState | SelectState | TextState | ConfirmState
+export type State = MultiselectState | SelectState | TextState
 
 export interface MultiSelectOption {
   value: string | number
@@ -112,16 +99,6 @@ export interface TextSpec {
   default?: string
   validate?: (v: string) => string | null
   mask?: boolean
-  stdin?: NodeJS.ReadableStream
-  stdout?: NodeJS.WritableStream
-  env?: NodeJS.ProcessEnv
-  clearOnResolve?: boolean
-}
-
-export interface ConfirmSpec {
-  title: string
-  hint?: string
-  default?: boolean
   stdin?: NodeJS.ReadableStream
   stdout?: NodeJS.WritableStream
   env?: NodeJS.ProcessEnv

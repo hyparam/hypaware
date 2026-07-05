@@ -251,16 +251,10 @@ export async function runDaemon(opts = {}) {
           env,
           configControl,
         })
-        /** @type {Map<string, string>} */
-        const sourcePluginByName = new Map()
-        for (const contribution of booted.runtime.sources.list()) {
-          sourcePluginByName.set(contribution.name, contribution.plugin)
-        }
         const snapshots = await startConfiguredSources({
           runtime: booted.runtime,
           log,
           fileLog,
-          sourcePluginByName,
         })
         return { booted, snapshots }
       },
@@ -441,7 +435,7 @@ export async function runDaemon(opts = {}) {
     config: boot.config ?? undefined,
   })
 
-  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, sinkPluginByInstance: new Map() })
+  status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
   persist()
   // Derive the boot health event from the SAME aggregate written to
   // status.json: a degraded boot (any source failed to start) must not log
@@ -500,7 +494,7 @@ export async function runDaemon(opts = {}) {
       const message = err instanceof Error ? err.message : String(err)
       fileLog.error('daemon.tick_failed', { message })
     })
-    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots, sinkPluginByInstance: new Map() })
+    status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
     persist()
   }
 
@@ -896,14 +890,14 @@ function describeSourceStartError(err, source) {
  * already-started ones) so the status file lists everything the
  * operator expects to see.
  *
- * @param {{ runtime: KernelRuntime, log: ReturnType<typeof getLogger>, fileLog: ReturnType<typeof openDaemonLog>, sourcePluginByName: Map<string,string> }} args
+ * @param {{ runtime: KernelRuntime, log: ReturnType<typeof getLogger>, fileLog: ReturnType<typeof openDaemonLog> }} args
  * @returns {Promise<SourceSnapshot[]>}
  */
-async function startConfiguredSources({ runtime, log, fileLog, sourcePluginByName }) {
+async function startConfiguredSources({ runtime, log, fileLog }) {
   /** @type {SourceSnapshot[]} */
   const snapshots = []
   for (const contribution of runtime.sources.list()) {
-    const plugin = sourcePluginByName.get(contribution.name) ?? contribution.plugin
+    const plugin = contribution.plugin
     const existing = runtime.sources.started(contribution.name)
     if (existing) {
       const details = await safeStatus(runtime, contribution.name)
@@ -1019,10 +1013,10 @@ async function safeStatus(runtime, name) {
 
 /**
  * Build a snapshot row per registered sink instance. The kernel sink
- * driver doesn't yet surface failure / next-tick fields, so those
- * stay `undefined` until Phase 5 closes the loop.
+ * driver doesn't surface failure / next-tick fields, so those stay
+ * `undefined`.
  *
- * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot>, sinkPluginByInstance: Map<string,string> }} args
+ * @param {{ runtime: KernelRuntime, sinkSnapshots: Map<string, SinkSnapshot> }} args
  * @returns {SinkSnapshot[]}
  */
 function collectSinkSnapshots({ runtime, sinkSnapshots }) {

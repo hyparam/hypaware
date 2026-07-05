@@ -31,7 +31,6 @@
     "node": ">=20"
   },
   "scripts": {
-    "lint": "node scripts/check-syntax.js",
     "test": "node scripts/run-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:types": "tsc -p tsconfig.build.json",
