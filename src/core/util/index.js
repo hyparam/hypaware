@@ -14,6 +14,7 @@ export {
   readJsonIfExists,
   readJsonIfExistsSync,
 } from './fs_atomic.js'
+export { copyDir } from './fs_copy.js'
 export {
   canonicalJson,
   errCode,

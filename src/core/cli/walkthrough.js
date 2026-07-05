@@ -16,6 +16,7 @@ import { detectClientSources } from './detect.js'
 import { multiselect, select, text } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
+import { copyDir } from '../util/fs_copy.js'
 
 /**
  * Exit code returned when the user cancels the picker walkthrough
@@ -1245,24 +1246,5 @@ function writeCancelledNotice(stderr) {
     stderr.write('hyp init: cancelled\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
-  }
-}
-
-/**
- * @param {string} src
- * @param {string} dest
- * @returns {Promise<void>}
- */
-async function copyDir(src, dest) {
-  await fs.mkdir(dest, { recursive: true })
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  for (const entry of entries) {
-    const from = path.join(src, entry.name)
-    const to = path.join(dest, entry.name)
-    if (entry.isDirectory()) {
-      await copyDir(from, to)
-    } else if (entry.isFile()) {
-      await fs.copyFile(from, to)
-    }
   }
 }

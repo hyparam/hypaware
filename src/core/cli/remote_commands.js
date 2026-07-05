@@ -18,6 +18,9 @@ import {
 } from '../remote/credentials.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
+import { originOf } from '../remote/gateway_seed.js'
+import { readAllStdin } from './stdio.js'
+import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 
@@ -76,8 +79,8 @@ export async function runRemoteAdd(argv, ctx) {
   const configPath = localConfigPath(ctx)
   try {
     await mutateLocalConfig(configPath, (config) => {
-      const query = (config.query = isObject(config.query) ? config.query : {})
-      const remotes = (query.remotes = isObject(query.remotes) ? query.remotes : {})
+      const query = (config.query = isPlainObject(config.query) ? config.query : {})
+      const remotes = (query.remotes = isPlainObject(query.remotes) ? query.remotes : {})
       remotes[name] = { url }
     })
   } catch (err) {
@@ -324,7 +327,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // not this one) means reject before the browser opens so no auth is wasted:
   // switching is 'hyp leave' then log in again, never one command.
   // @ref LLP 0063#d4 [implements]: pre-auth exclusivity gate — reject a login to a new server while enrolled elsewhere
-  const targetOrigin = safeOrigin(entry.url)
+  const targetOrigin = originOf(entry.url)
   const connectedOrigins = await readCentralSinkOrigins({ stateDir, configPath: localConfigPath(ctx) })
   const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
   if (!alreadyEnrolled && connectedOrigins.length > 0) {
@@ -462,21 +465,6 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
 }
 
 /**
- * A URL's origin, or `null` when unparseable (an unparseable target url simply
- * matches no connected origin).
- *
- * @param {string} url
- * @returns {string | null}
- */
-function safeOrigin(url) {
-  try {
-    return new URL(url).origin
-  } catch {
-    return null
-  }
-}
-
-/**
  * Translate a server-surfaced callback `error` (D7) into a clear message. The
  * client never sees the user's org list, so `org_selection_required` instructs
  * a re-run with `--org` rather than enumerating.
@@ -555,7 +543,7 @@ export async function runRemoteRemove(argv, ctx) {
   const configPath = localConfigPath(ctx)
   try {
     await mutateLocalConfig(configPath, (config) => {
-      if (isObject(config.query) && isObject(config.query.remotes) && config.query.remotes[name] !== undefined) {
+      if (isPlainObject(config.query) && isPlainObject(config.query.remotes) && config.query.remotes[name] !== undefined) {
         delete config.query.remotes[name]
         removedConfig = true
         if (config.query.default_remote === name) delete config.query.default_remote
@@ -612,9 +600,9 @@ async function readConfiguredRemotes(ctx) {
   /** @type {Record<string, { url: string }>} */
   const out = { ...BUILTIN_REMOTES }
   const config = await readLocalConfigRaw(localConfigPath(ctx))
-  if (isObject(config.query) && isObject(config.query.remotes)) {
+  if (isPlainObject(config.query) && isPlainObject(config.query.remotes)) {
     for (const [name, entry] of Object.entries(config.query.remotes)) {
-      if (isObject(entry) && typeof entry.url === 'string') out[name] = { url: entry.url }
+      if (isPlainObject(entry) && typeof entry.url === 'string') out[name] = { url: entry.url }
     }
   }
   return out
@@ -649,27 +637,10 @@ async function readLocalConfigRaw(configPath) {
   }
   try {
     const parsed = JSON.parse(raw)
-    return isObject(parsed) ? parsed : { version: 2 }
+    return isPlainObject(parsed) ? parsed : { version: 2 }
   } catch {
     throw new Error(`local config is not valid JSON: ${configPath}`)
   }
 }
 
-/**
- * @param {any} stdin
- * @returns {Promise<string>}
- */
-async function readAllStdin(stdin) {
-  if (!stdin) return ''
-  /** @type {Buffer[]} */
-  const chunks = []
-  for await (const chunk of stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
 
-/** @param {unknown} v @returns {v is Record<string, any>} */
-function isObject(v) {
-  return !!v && typeof v === 'object' && !Array.isArray(v)
-}

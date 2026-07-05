@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises'
 import { parseCommandArgv } from '../cli/verb_codec.js'
+import { copyDir } from '../util/fs_copy.js'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -867,25 +868,6 @@ function parseSkillsArgs(argv) {
   if (!parsed.ok) return { client: 'all', error: parsed.error }
   const p = /** @type {{ client: string }} */ (parsed.params)
   return { client: p.client }
-}
-
-/**
- * @param {string} src
- * @param {string} dest
- * @returns {Promise<void>}
- */
-async function copyDir(src, dest) {
-  await fs.mkdir(dest, { recursive: true })
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  for (const entry of entries) {
-    const from = path.join(src, entry.name)
-    const to = path.join(dest, entry.name)
-    if (entry.isDirectory()) {
-      await copyDir(from, to)
-    } else if (entry.isFile()) {
-      await fs.copyFile(from, to)
-    }
-  }
 }
 
 // The body written by `hyp ignore`: a self-documenting `.hypignore` whose

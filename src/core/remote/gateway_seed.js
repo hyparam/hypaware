@@ -223,7 +223,7 @@ function writePersistedIdentity(filePath, identity) {
  * @param {string} url
  * @returns {string | null}
  */
-function originOf(url) {
+export function originOf(url) {
   try {
     return new URL(url).origin
   } catch {

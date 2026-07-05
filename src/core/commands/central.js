@@ -11,7 +11,7 @@ import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } fro
 import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
-import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { originOf, readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
@@ -188,7 +188,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const stateRoot = obsEnv.stateDir
   const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
-  const targetOrigin = safeOrigin(url)
+  const targetOrigin = originOf(url)
 
   // D4 re-check just before the write: if a central sink targeting a different
   // origin appeared since login's pre-auth gate (a concurrent first login to
@@ -245,21 +245,6 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
   const daemonCode = await runDaemonInstall([], ctx)
   return { provisioned: true, daemonCode }
-}
-
-/**
- * A URL's origin, or `null` when unparseable (mirrors `gateway_seed`'s helper;
- * an unparseable url simply matches nothing).
- *
- * @param {string} url
- * @returns {string | null}
- */
-function safeOrigin(url) {
-  try {
-    return new URL(url).origin
-  } catch {
-    return null
-  }
 }
 
 /**
