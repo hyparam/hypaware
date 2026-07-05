@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
-import { canonicalJson, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
+import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBlockFields } from 'hypaware/core/util'
 
 /**
  * Claude Code JSONL transcript reader. The Claude CLI writes one
@@ -502,22 +502,16 @@ function transcriptEntryFromRow(row) {
  * byte-identical: the wire side carries `cache_control` (prompt-cache
  * breakpoints, absent from transcripts and moving between exchanges)
  * and the transcript side annotates tool_use blocks with `caller`
- * (absent on the wire). Both are stripped before hashing so the key
- * compares what the block says, not which channel it came from.
+ * (absent on the wire). The canonical strip list
+ * (`VOLATILE_BLOCK_FIELDS` in core util) is shared with the
+ * ai-gateway's fallback message id, so the key compares what the block
+ * says, not which channel it came from.
  *
  * @param {string} role
  * @param {unknown} content
  */
 function contentKey(role, content) {
-  const blocks = Array.isArray(content)
-    ? content.map((block) => {
-      if (!isPlainObject(block)) return block
-      if (!('cache_control' in block) && !('caller' in block)) return block
-      const { cache_control: _cache_control, caller: _caller, ...rest } = block
-      return rest
-    })
-    : content
-  return sha256Hex(`${role}:${canonicalJson(blocks)}`)
+  return sha256Hex(`${role}:${canonicalJson(stripVolatileBlockFields(content))}`)
 }
 
 /** @param {unknown} content */

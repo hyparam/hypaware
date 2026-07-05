@@ -89,3 +89,36 @@ export function errCode(err) {
   const code = Reflect.get(err, 'code')
   return typeof code === 'string' ? code : undefined
 }
+
+/**
+ * Content-block fields that vary between the channels a logical message
+ * can arrive on (wire request, wire response, client transcript)
+ * without changing its meaning: `cache_control` is a wire-only
+ * prompt-cache breakpoint that moves between exchanges; `caller` is a
+ * tool_use annotation present on the response stream and transcript but
+ * absent from the request-input echo of the same turn.
+ *
+ * One canonical list: the ai-gateway fallback message id and the claude
+ * plugin's transcript match key must strip the exact same set, or the
+ * same block hashes to different identities depending on which channel
+ * delivered it.
+ */
+export const VOLATILE_BLOCK_FIELDS = Object.freeze(['cache_control', 'caller'])
+
+/**
+ * Drop {@link VOLATILE_BLOCK_FIELDS} from each block of a content
+ * array before canonical-JSON hashing. Only block-level keys are
+ * stripped; block payloads and non-array content are untouched.
+ *
+ * @param {unknown} content
+ * @returns {unknown}
+ */
+export function stripVolatileBlockFields(content) {
+  if (!Array.isArray(content)) return content
+  return content.map((block) => {
+    if (!isPlainObject(block) || !VOLATILE_BLOCK_FIELDS.some((field) => field in block)) return block
+    const rest = { ...block }
+    for (const field of VOLATILE_BLOCK_FIELDS) delete rest[field]
+    return rest
+  })
+}
