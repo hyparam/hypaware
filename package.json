@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "type": "module",
   "description": "HypAware: modular logs and telemetry collector with a plugin kernel. Captures Claude Code, Codex, OTEL, and raw AI gateway traffic locally, queryable from a single CLI.",
   "bin": {
