@@ -41,6 +41,10 @@ const COLUMNS = /** @type {const} */ ([
   { name: 'tool_name', type: 'STRING', nullable: true },
   { name: 'tool_args', type: 'STRING', nullable: true },
   { name: 'part_type', type: 'STRING', nullable: true },
+  // Read by the Claude Skill rules' strict filters (LLP 0074): only
+  // role='user' text parts with a leading anchor can mint a Skill/ran pair.
+  { name: 'role', type: 'STRING', nullable: true },
+  { name: 'content_text', type: 'STRING', nullable: true },
   { name: 'message_created_at', type: 'STRING', nullable: true },
   // `attributes` is a real (always-present) column the contract's shared aux
   // filter reads to exclude Claude harness aux rows (LLP 0026). JSON arrives
@@ -52,12 +56,14 @@ const ROWS = [
   {
     session_id: 'sess-1', conversation_id: null, cwd: '/repo', git_branch: 'main', client_name: 'claude-code',
     user_id: 'u1', model: 'sonnet', tool_name: null, tool_args: null, part_type: 'text',
+    role: 'user', content_text: 'hello',
     message_created_at: '2026-06-01T00:00:00.000Z', attributes: '{"dev_run_id":"run-1"}',
   },
   {
     session_id: 'sess-1', conversation_id: null, cwd: null, git_branch: null, client_name: 'claude-code',
     user_id: null, model: 'sonnet', tool_name: 'Read', tool_args: '{"file_path":"/repo/auth.py"}',
-    part_type: 'tool_call', message_created_at: '2026-06-01T00:01:00.000Z', attributes: null,
+    part_type: 'tool_call', role: 'assistant', content_text: null,
+    message_created_at: '2026-06-01T00:01:00.000Z', attributes: null,
   },
 ]
 
@@ -69,7 +75,8 @@ const ROWS = [
 const AUX_ROW = {
   session_id: 'sess-aux', conversation_id: null, cwd: '/repo', git_branch: 'main', client_name: 'aux-app',
   user_id: 'u1', model: 'aux-model', tool_name: 'Read', tool_args: '{"file_path":"/repo/secret.py"}',
-  part_type: 'tool_call', message_created_at: '2026-06-01T00:02:00.000Z',
+  part_type: 'tool_call', role: 'assistant', content_text: null,
+  message_created_at: '2026-06-01T00:02:00.000Z',
   attributes: '{"claude":{"aux_kind":"security_monitor"}}',
 }
 

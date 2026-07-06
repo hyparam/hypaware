@@ -4,9 +4,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  CLAUDE_BUILTIN_COMMANDS,
   commandStringFrom,
   PROGRAM_RE,
   programFrom,
+  SKILL_NAME_RE,
+  skillFromMarker,
+  skillFromSlash,
+  skillFromToolArgs,
 } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/tool_facets.js'
 
 // --- commandStringFrom: which arg holds the command string ---
@@ -130,6 +135,93 @@ test('the depth cap stops shell -c recursion at 2 levels (keeps the innermost sh
   // unwrapped again, so the third `bash` is argv[0].
   const triple = 'bash -lc "bash -lc \'bash -lc \\"git push\\"\'"'
   assert.equal(programFrom(triple), 'bash')
+})
+
+// --- skillFromToolArgs: LLP 0074 surface 1 (Skill tool call) ---
+
+test('skillFromToolArgs reads tool_args.skill, parsed or as a JSON string', () => {
+  assert.equal(skillFromToolArgs({ skill: 'hypaware-query' }), 'hypaware-query')
+  assert.equal(skillFromToolArgs('{"skill":"deep-research"}'), 'deep-research')
+  assert.equal(skillFromToolArgs({ skill: 'plugin:skill' }), 'plugin:skill', 'namespaced name kept verbatim')
+})
+
+test('skillFromToolArgs is null for missing/bad args or an un-gateable name', () => {
+  assert.equal(skillFromToolArgs({}), null, 'skill absent')
+  assert.equal(skillFromToolArgs({ skill: '' }), null, 'empty name')
+  assert.equal(skillFromToolArgs({ skill: 42 }), null, 'non-string name')
+  assert.equal(skillFromToolArgs({ skill: 'has space' }), null, 'fails SKILL_NAME_RE')
+  assert.equal(skillFromToolArgs('{not json'), null, 'malformed JSON')
+  assert.equal(skillFromToolArgs('"just a string"'), null, 'non-object JSON')
+  assert.equal(skillFromToolArgs(null), null)
+})
+
+// --- skillFromMarker: LLP 0074 surface 2 (SKILL.md injection marker) ---
+
+test('skillFromMarker takes the basename of the offset-0 base directory', () => {
+  assert.equal(skillFromMarker('Base directory for this skill: /home/u/.claude/skills/hypaware-query'), 'hypaware-query')
+  assert.equal(skillFromMarker('Base directory for this skill: /x/skills/report\n\nRest of the injected prose'), 'report', 'only the first line matters')
+})
+
+test('skillFromMarker trims a trailing slash and unwraps a SKILL.md file path', () => {
+  assert.equal(skillFromMarker('Base directory for this skill: /x/skills/deep-research/'), 'deep-research')
+  assert.equal(skillFromMarker('Base directory for this skill: /x/skills/deep-research/SKILL.md'), 'deep-research', 'a SKILL.md path names the skill by its parent dir')
+})
+
+// @ref LLP 0074#strict-filters [tests]: the offset-0 anchor is the whole
+// false-positive defense; markers quoted mid-message mint nothing.
+test('skillFromMarker rejects anything not anchored at offset 0', () => {
+  assert.equal(skillFromMarker('I saw "Base directory for this skill: /x/skills/report" in the log'), null, 'mid-text marker (assistant quoting / echo)')
+  assert.equal(skillFromMarker(' Base directory for this skill: /x/skills/report'), null, 'leading whitespace breaks the anchor')
+  assert.equal(skillFromMarker('base directory for this skill: /x/skills/report'), null, 'case-sensitive prefix')
+  assert.equal(skillFromMarker('Base directory for this skill:'), null, 'no path captured')
+  assert.equal(skillFromMarker(null), null)
+  assert.equal(skillFromMarker(42), null)
+})
+
+test('skillFromMarker fails closed on an un-gateable basename', () => {
+  assert.equal(skillFromMarker('Base directory for this skill: /'), null, 'root path has no basename')
+  assert.equal(skillFromMarker(`Base directory for this skill: /x/skills/${'a'.repeat(80)}`), null, 'over-long name fails SKILL_NAME_RE')
+})
+
+// --- skillFromSlash: LLP 0074 surface 3 (<command-name> tag) ---
+
+test('skillFromSlash reads an offset-0 command tag, stripping a leading /', () => {
+  assert.equal(skillFromSlash('<command-name>/hypaware-query</command-name>'), 'hypaware-query')
+  assert.equal(skillFromSlash('<command-name>deep-research</command-name>'), 'deep-research', 'bare name (no slash) accepted')
+  assert.equal(skillFromSlash('<command-name>/code-review:code-review</command-name>'), 'code-review:code-review', 'namespaced name kept')
+  assert.equal(skillFromSlash('<command-name>/loop</command-name><command-args>5m</command-args>'), 'loop', 'trailing tags ignored')
+})
+
+// @ref LLP 0074#builtin-exclusion [tests]: a built-in slash is not a skill run.
+test('skillFromSlash drops Claude Code built-in commands', () => {
+  assert.equal(skillFromSlash('<command-name>/compact</command-name>'), null)
+  assert.equal(skillFromSlash('<command-name>/model</command-name>'), null)
+  assert.equal(skillFromSlash('<command-name>review</command-name>'), null, 'built-in without the leading slash is still excluded')
+  for (const builtin of CLAUDE_BUILTIN_COMMANDS) {
+    assert.equal(skillFromSlash(`<command-name>/${builtin}</command-name>`), null, `built-in /${builtin} mints nothing`)
+  }
+})
+
+test('skillFromSlash rejects tags not anchored at offset 0 and malformed tags', () => {
+  assert.equal(skillFromSlash('The user typed <command-name>/foo</command-name>'), null, 'mid-text tag')
+  assert.equal(skillFromSlash(' <command-name>/foo</command-name>'), null, 'leading whitespace breaks the anchor')
+  assert.equal(skillFromSlash('<command-name>/foo'), null, 'unterminated tag')
+  assert.equal(skillFromSlash('<command-name></command-name>'), null, 'empty name')
+  assert.equal(skillFromSlash('<command-name>/has space</command-name>'), null, 'name outside the tag charset')
+  assert.equal(skillFromSlash(null), null)
+})
+
+test('SKILL_NAME_RE gates to a bounded verbatim-name domain', () => {
+  assert.ok(SKILL_NAME_RE.test('hypaware-query'))
+  assert.ok(SKILL_NAME_RE.test('plugin:skill'))
+  assert.ok(SKILL_NAME_RE.test('llp_todo'))
+  assert.ok(SKILL_NAME_RE.test('Skill'), 'case preserved (verbatim identity), so uppercase is legal')
+  assert.ok(!SKILL_NAME_RE.test(''), 'empty rejected')
+  assert.ok(!SKILL_NAME_RE.test('-leading-dash'), 'must start alphanumeric')
+  assert.ok(!SKILL_NAME_RE.test('a b'), 'spaces rejected')
+  assert.ok(!SKILL_NAME_RE.test('a/b'), 'path separator rejected')
+  assert.ok(!SKILL_NAME_RE.test('a'.repeat(65)), 'over-long rejected')
+  assert.ok(SKILL_NAME_RE.test('a'.repeat(64)), 'at the cap accepted')
 })
 
 test('PROGRAM_RE gates to a bounded, lowercased basename domain', () => {

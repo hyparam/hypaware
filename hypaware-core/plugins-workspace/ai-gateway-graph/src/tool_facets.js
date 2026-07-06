@@ -26,6 +26,48 @@ import path from 'node:path'
  */
 export const PROGRAM_RE = /^[a-z0-9][a-z0-9._+-]{0,63}$/
 
+/**
+ * The `Skill` validity gate: the bare skill name, preserved verbatim (no
+ * lowercasing: skill directory names are the identity and are conventionally
+ * already lowercase; plugin-namespaced `plugin:skill` names keep the
+ * namespace). @ref LLP 0073#boundedness-contract [constrained-by]: skill names
+ * are bounded by installed skill directories; anything else mints nothing.
+ */
+export const SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$/
+
+/**
+ * Claude Code built-in slash commands that must not mint `Skill` nodes.
+ * @ref LLP 0074#builtin-exclusion [constrained-by]: `<command-name>` conflates
+ * built-ins with skills; a live catalog of installed skills would break the
+ * pure-function-of-the-row rule, so the gate is this static, trivially
+ * editable list. Drift is an accepted residual until the capture-side
+ * `skill_activated` signal (LLP 0076): a new built-in mints a spurious Skill
+ * until the list is updated, but every real skill slash invocation also
+ * injects the surface-2 marker, so no real skill is ever missed.
+ */
+export const CLAUDE_BUILTIN_COMMANDS = new Set([
+  'model', 'compact', 'clear', 'help', 'config', 'cost', 'doctor', 'init',
+  'login', 'logout', 'memory', 'status', 'review', 'resume', 'agents', 'bug',
+  'mcp', 'permissions', 'hooks', 'ide', 'vim', 'terminal-setup', 'add-dir',
+  'bashes', 'context', 'export', 'exit', 'quit', 'rewind', 'statusline',
+  'todos', 'upgrade', 'output-style', 'plugins', 'privacy-settings',
+  'release-notes', 'pr-comments', 'install-github-app', 'migrate-installer',
+])
+
+/**
+ * The SKILL.md injection marker, anchored at offset 0. The leading anchor is
+ * the entire false-positive defense (LLP 0074 §strict-filters: loose matching
+ * pulls ~23% false positives), so it is enforced twice: the rule's SQL
+ * prefix-LIKE and this regex.
+ */
+const SKILL_MARKER_RE = /^Base directory for this skill: (\S+)/
+
+/**
+ * The slash-command tag, anchored at offset 0. The captured name may carry a
+ * leading `/` (stripped by the optional group before the capture).
+ */
+const SLASH_COMMAND_RE = /^<command-name>\s*\/?([A-Za-z0-9:_-]+)\s*<\/command-name>/
+
 /** Command wrappers whose own args precede the real `argv[0]`. */
 const WRAPPERS = new Set(['sudo', 'env', 'nohup', 'nice', 'time', 'command', 'stdbuf', 'timeout'])
 
@@ -62,6 +104,76 @@ export function commandStringFrom(toolName, toolArgs) {
   if (name === 'Bash') return asString(obj.command)
   if (name === 'exec_command') return asString(obj.cmd) ?? asString(obj.command)
   return null
+}
+
+/**
+ * Extract the `Skill` node key from a Claude `Skill` tool call's `tool_args`
+ * (LLP 0074 surface 1, model-chosen activation). The name lives in
+ * `tool_args.skill` (the issue-confirmed identifier); `tool_args` may arrive
+ * parsed or as a JSON string, like everywhere else in the contract.
+ *
+ * @param {unknown} toolArgs
+ * @returns {string | null}
+ */
+export function skillFromToolArgs(toolArgs) {
+  const parsed = parseMaybeJson(toolArgs)
+  if (!parsed || typeof parsed !== 'object') return null
+  const obj = /** @type {Record<string, unknown>} */ (parsed)
+  return gateSkill(asString(obj.skill))
+}
+
+/**
+ * Extract the `Skill` node key from the SKILL.md injection marker (LLP 0074
+ * surface 2). The marker must sit at offset 0 of the user text: a marker that
+ * appears mid-message (assistant quoting, query output echoes, pasted
+ * transcripts) mints nothing. The name is the basename of the captured base
+ * directory after trimming a trailing slash; when the basename is `SKILL.md`
+ * (a file rather than a base directory), the parent directory names the skill.
+ *
+ * @param {unknown} contentText
+ * @returns {string | null}
+ */
+export function skillFromMarker(contentText) {
+  if (typeof contentText !== 'string') return null
+  const match = SKILL_MARKER_RE.exec(contentText)
+  if (!match) return null
+  const dir = match[1].replace(/\/+$/, '')
+  let name = path.basename(dir)
+  if (name === 'SKILL.md') name = path.basename(path.dirname(dir))
+  return gateSkill(name)
+}
+
+/**
+ * Extract the `Skill` node key from a `<command-name>` slash-command tag
+ * (LLP 0074 surface 3, user-typed activation), offset-0 anchored. Strips an
+ * optional leading `/` and drops Claude Code built-ins
+ * (`CLAUDE_BUILTIN_COMMANDS`): a built-in slash is not a skill run.
+ *
+ * @param {unknown} contentText
+ * @returns {string | null}
+ */
+export function skillFromSlash(contentText) {
+  if (typeof contentText !== 'string') return null
+  const match = SLASH_COMMAND_RE.exec(contentText)
+  if (!match) return null
+  const name = match[1]
+  if (CLAUDE_BUILTIN_COMMANDS.has(name)) return null
+  return gateSkill(name)
+}
+
+/**
+ * Apply the `Skill` validity gate. @ref LLP 0073#skill-key [constrained-by]:
+ * the key is the verbatim bare name so the node converges across clients
+ * (`~/.claude/skills/` and `~/.codex/skills/` land on one node); names
+ * outside `SKILL_NAME_RE` mint nothing (fail closed).
+ *
+ * @param {string | null} name
+ * @returns {string | null}
+ */
+function gateSkill(name) {
+  if (!name) return null
+  if (!SKILL_NAME_RE.test(name)) return null
+  return name
 }
 
 /**
