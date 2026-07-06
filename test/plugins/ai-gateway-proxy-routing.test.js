@@ -225,6 +225,101 @@ test('a /_hypaware/* control request is handled locally: not forwarded to a catc
   }
 })
 
+test('R2 proxy edge cases: query string and trailing slash stay local; a look-alike path is proxied', async () => {
+  // @ref LLP 0066#control-path [tests] — R2 edge cases end-to-end through
+  // startProxy with a catch-all (`/`) upstream registered, asserting via
+  // which side actually served the request (the control router vs the
+  // upstream stub), not just status codes.
+  let upstreamHit = false
+  /** @type {string | undefined} */
+  let upstreamHitPath
+  const upstream = http.createServer((req, res) => {
+    upstreamHit = true
+    upstreamHitPath = req.url
+    req.resume()
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end('upstream')
+  })
+  await new Promise((resolve, reject) => {
+    upstream.once('error', reject)
+    upstream.listen(0, '127.0.0.1', () => resolve(undefined))
+  })
+  const upstreamAddr = upstream.address()
+  assert.ok(upstreamAddr && typeof upstreamAddr === 'object')
+  const upstreamUrl = `http://127.0.0.1:${upstreamAddr.port}`
+
+  const ignoredSessions = /** @type {Set<string>} */ (new Set())
+  let startExchangeCalls = 0
+  const proxy = await startProxy({
+    listen: '127.0.0.1:0',
+    upstreams: [{ name: 'catch-all', base_url: upstreamUrl, path_prefix: '/' }],
+    startExchange: () => {
+      startExchangeCalls++
+      return /** @type {any} */ ({
+        isSse: false,
+        response: undefined,
+        setResponseStart() {},
+        appendResponseChunk() {},
+        appendRequestChunk() {},
+        consumeStreamChunk() {},
+        setError() {},
+      })
+    },
+    onExchangeFinished: () => {},
+    onControlRequest: createControlHandler({ ignoredSessions }),
+  })
+
+  try {
+    // A query string on the exact control path is still handled locally as
+    // a control request: the query string lives in URL.search, not
+    // .pathname, so it does not change the control-path match.
+    upstreamHit = false
+    startExchangeCalls = 0
+    const withQuery = await fetch(`http://${proxy.host}:${proxy.port}/_hypaware/ignore/session?x=1`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'sess-query' }),
+    })
+    const withQueryBody = await withQuery.json()
+    assert.equal(withQuery.status, 200)
+    assert.deepEqual(withQueryBody, { session_id: 'sess-query', ignored: true, total: 1 })
+    assert.ok(ignoredSessions.has('sess-query'), 'the control request with a query string updated the set locally')
+    assert.equal(upstreamHit, false, 'a control request with a query string is never proxied upstream')
+    assert.equal(startExchangeCalls, 0, 'a control request with a query string starts no exchange')
+
+    // A trailing slash no longer matches IGNORE_SESSION_PATH exactly, so the
+    // control router itself 404s it — but it is still handled LOCALLY, never
+    // forwarded to the catch-all upstream.
+    upstreamHit = false
+    startExchangeCalls = 0
+    const trailingSlash = await fetch(`http://${proxy.host}:${proxy.port}/_hypaware/ignore/session/`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'sess-trailing' }),
+    })
+    assert.equal(trailingSlash.status, 404, 'the control router itself 404s an unrecognized exact path')
+    assert.equal(ignoredSessions.has('sess-trailing'), false, 'nothing is recorded for the 404 path')
+    assert.equal(upstreamHit, false, 'a trailing-slash control-look-alike path is never proxied upstream')
+    assert.equal(startExchangeCalls, 0, 'a trailing-slash control-look-alike path starts no exchange')
+
+    // A look-alike path that is NOT a `/_hypaware/` segment (no separating
+    // slash) is not a control path at all, so it reaches the catch-all
+    // upstream like any other request.
+    upstreamHit = false
+    startExchangeCalls = 0
+    const lookAlike = await fetch(`http://${proxy.host}:${proxy.port}/_hypawarefoo`)
+    assert.equal(await lookAlike.text(), 'upstream')
+    assert.equal(upstreamHit, true, 'a look-alike path that is not a /_hypaware/ segment is proxied upstream')
+    assert.equal(upstreamHitPath, '/_hypawarefoo')
+    assert.equal(startExchangeCalls, 1, 'a proxied look-alike path records exactly one exchange')
+  } finally {
+    await proxy.stop()
+    await new Promise((resolve, reject) => {
+      upstream.close((err) => (err ? reject(err) : resolve(undefined)))
+    })
+  }
+})
+
 test('an unknown /_hypaware/* path with no control handler is 404ed locally, not proxied', async () => {
   // With no onControlRequest wired, the proxy still short-circuits the reserved
   // prefix to a local 404 rather than forwarding it to the catch-all upstream.

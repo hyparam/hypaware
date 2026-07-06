@@ -107,15 +107,26 @@ export function createControlHandler(opts) {
  * The gateway never interprets the value; it only requires a non-empty
  * string (missing / empty / non-string → the caller returns 400).
  *
+ * The returned value is the RAW string verbatim — NOT trimmed. Trimming is
+ * used only to validate non-emptiness; the token itself must stay
+ * byte-identical to what the caller posted, because the adapters key the
+ * drop on the RAW resolved session id (Claude's `resolveClaudeSessionId`,
+ * Codex's metadata/header readers) and none of them trim. Trimming here
+ * would desync the stored token from the adapter's lookup key: a
+ * whitespace-padded `session_id` would be stored trimmed but looked up raw,
+ * so `ignoredSessions.has()` would miss and the exchange would be RECORDED
+ * despite the opt-out — the privacy-relevant failure direction.
+ * @ref LLP 0066#requirements — R5: the match key MUST be the session_id the
+ * adapter resolves and stamps, verbatim.
+ *
  * @param {unknown} body
  * @returns {string | undefined}
  */
 function extractSessionId(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
   const value = /** @type {Record<string, unknown>} */ (body).session_id
-  if (typeof value !== 'string') return undefined
-  const trimmed = value.trim()
-  return trimmed.length > 0 ? trimmed : undefined
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined
+  return value
 }
 
 /**

@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   createCodexExchangeProjector,
 } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -229,6 +230,39 @@ test('project() emits a usage_policy_drop log with policy_source: session_opt_ou
   assert.ok(drop, 'expected a usage_policy_drop log entry')
   assert.equal(drop.fields?.policy_source, 'session_opt_out')
   assert.equal(drop.fields?.session_id, ignoredSessionId)
+})
+
+test('the session opt-out drop is also visible through the gateway message-projector dispatcher (parity with Claude)', async () => {
+  // @ref LLP 0066#requirements [tests] — R8/parity: the Claude adapter proves
+  // its ignored-session drop through createAiGatewayMessageProjector /
+  // projectViaGateway returning `[]` (claude-usage-policy-drop.test.js). This
+  // proves the same shape for Codex: the drop must be visible at the seam
+  // callers actually use in production — the gateway dispatcher's
+  // `projectExchange` — not just the adapter-level `USAGE_POLICY_DROP`
+  // sentinel a direct `projector.project()` call returns.
+  const ignoredSessionId = 'session-optout-gateway'
+  const projector = createCodexExchangeProjector()
+  const dispatcher = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [{ ...projector, _seq: 0 }],
+    isSessionIgnored: (/** @type {string} */ id) => id === ignoredSessionId,
+  })
+
+  const rows = await dispatcher.projectExchange(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ignoredSessionId, thread_id: 'thread-gw' }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }))
+
+  assert.deepEqual(
+    rows,
+    [],
+    'the dispatcher must project nothing for an ignored Codex session, not just return USAGE_POLICY_DROP at the adapter seam'
+  )
 })
 
 test('match() accepts the three transports it owns and rejects others', () => {

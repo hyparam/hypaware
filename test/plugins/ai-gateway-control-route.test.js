@@ -53,13 +53,42 @@ test('both verbs are idempotent and .total tracks the set across a sequence', as
   })
 })
 
-test('session_id is trimmed and the trimmed token is what is stored', async () => {
+test('session_id whitespace only gates non-emptiness; the STORED token is the raw value verbatim (R5)', async () => {
+  // @ref LLP 0066#requirements — R5: the match key MUST be the session_id the
+  // adapter resolves and stamps. The adapters (Claude's resolveClaudeSessionId,
+  // Codex's metadata/header readers) never trim, so this route must not either:
+  // trimming is used ONLY to validate non-emptiness, never to transform the
+  // stored/returned token. Trimming the stored value would desync it from a
+  // raw, whitespace-padded id an adapter actually resolves and stamps, which
+  // is the privacy-relevant failure direction (the exchange would be
+  // recorded despite the opt-out).
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
     const out = await postSession(base, '  sess-pad  ')
     assert.equal(out.status, 200)
-    assert.equal(out.body.session_id, 'sess-pad')
-    assert.ok(set.has('sess-pad'))
+    assert.equal(out.body.session_id, '  sess-pad  ', 'the response echoes the raw, untrimmed token')
+    assert.ok(set.has('  sess-pad  '), 'the set stores the raw, untrimmed token')
+    assert.equal(set.has('sess-pad'), false, 'a trimmed lookup key must NOT hit — the token is opaque, not normalized')
+  })
+})
+
+test('a whitespace-padded session_id round-trips byte-identical to what an adapter would resolve and look up (R5)', async () => {
+  // Simulates the real failure mode: the skill posts a session_id exactly as
+  // an adapter would resolve it from a header/metadata field (which may carry
+  // incidental surrounding whitespace, e.g. a header value). The control
+  // route must store that EXACT raw string, so a later `ignoredSessions.has()`
+  // lookup keyed on the same raw adapter-resolved value hits.
+  const set = /** @type {Set<string>} */ (new Set())
+  const rawResolvedByAdapter = ' sess-with-leading-and-trailing-space '
+  await withControlServer(set, async (base) => {
+    const out = await postSession(base, rawResolvedByAdapter)
+    assert.equal(out.status, 200)
+    assert.equal(out.body.session_id, rawResolvedByAdapter)
+    // The lookup an adapter performs uses the raw resolved id directly.
+    assert.ok(
+      set.has(rawResolvedByAdapter),
+      'a lookup with the exact raw adapter-resolved value must hit'
+    )
   })
 })
 
