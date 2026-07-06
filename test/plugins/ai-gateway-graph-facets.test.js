@@ -9,6 +9,7 @@ import {
   PROGRAM_RE,
   programFrom,
   SKILL_NAME_RE,
+  skillFromCodexRead,
   skillFromMarker,
   skillFromSlash,
   skillFromToolArgs,
@@ -209,6 +210,52 @@ test('skillFromSlash rejects tags not anchored at offset 0 and malformed tags', 
   assert.equal(skillFromSlash('<command-name></command-name>'), null, 'empty name')
   assert.equal(skillFromSlash('<command-name>/has space</command-name>'), null, 'name outside the tag charset')
   assert.equal(skillFromSlash(null), null)
+})
+
+// --- skillFromCodexRead: LLP 0075 (Codex exec_command SKILL.md read) ---
+
+/** @type {Array<[string, string, string | null]>} */
+const CODEX_SKILL_CASES = [
+  // the recorded example (LLP 0075)
+  ["sed of a user's home path (LLP 0075 example)", "sed -n '1,240p' /Users/alice/.codex/skills/hypaware-query/SKILL.md", 'hypaware-query'],
+  ['bare read', 'cat /repo/.codex/skills/deep-research/SKILL.md', 'deep-research'],
+  ['~-prefixed path', 'cat ~/.codex/skills/deep-research/SKILL.md', 'deep-research'],
+  ['double-quoted path', 'cat "/Users/alice/.codex/skills/foo/SKILL.md"', 'foo'],
+  ['single-quoted path', "sed -n '1,5p' '/Users/alice/.codex/skills/foo/SKILL.md'", 'foo'],
+  ['namespaced skill name kept', 'cat /repo/.codex/skills/plugin:skill/SKILL.md', 'plugin:skill'],
+
+  // reject: not the `.codex/skills/…/SKILL.md` shape
+  ['Claude path (.claude, not .codex) mints nothing', 'cat /repo/.claude/skills/foo/SKILL.md', null],
+  ['not reading SKILL.md itself mints nothing', 'cat /repo/.codex/skills/foo/README.md', null],
+  ['a bare directory listing (no SKILL.md) mints nothing', 'ls /repo/.codex/skills/foo', null],
+  ['no .codex/skills path at all mints nothing', 'git status', null],
+  ['name containing a space fails to close the match', 'cat /repo/.codex/skills/foo bar/SKILL.md', null],
+  ['empty string mints nothing', '', null],
+]
+
+for (const [name, command, expected] of CODEX_SKILL_CASES) {
+  test(`skillFromCodexRead: ${name}`, () => {
+    assert.equal(skillFromCodexRead(command), expected)
+  })
+}
+
+test('skillFromCodexRead composes with commandStringFrom (the exec_command wire shape)', () => {
+  const command = commandStringFrom('exec_command', { cmd: 'cat /repo/.codex/skills/hypaware-query/SKILL.md' })
+  assert.equal(skillFromCodexRead(command), 'hypaware-query')
+  // fallback `command` arg
+  const fallback = commandStringFrom('exec_command', { command: 'cat /repo/.codex/skills/hypaware-query/SKILL.md' })
+  assert.equal(skillFromCodexRead(fallback), 'hypaware-query')
+  // a non-shell tool never resolves a command string, so this mints nothing
+  // (restricting the surface to `exec_command` is the contract rule's SQL
+  // filter's job, tested in ai-gateway-graph-contract.test.js).
+  assert.equal(skillFromCodexRead(commandStringFrom('Read', { command: 'cat /repo/.codex/skills/x/SKILL.md' })), null, 'Read is not a shell tool')
+})
+
+test('skillFromCodexRead fails closed on an un-gateable captured name and non-string input', () => {
+  assert.equal(skillFromCodexRead(`cat /repo/.codex/skills/${'a'.repeat(80)}/SKILL.md`), null, 'over-long name fails SKILL_NAME_RE')
+  assert.equal(skillFromCodexRead(null), null)
+  assert.equal(skillFromCodexRead(undefined), null)
+  assert.equal(skillFromCodexRead(42), null)
 })
 
 test('SKILL_NAME_RE gates to a bounded verbatim-name domain', () => {

@@ -3,7 +3,7 @@
 import path from 'node:path'
 
 import { keys } from './graph-keys.js'
-import { commandStringFrom, programFrom, skillFromMarker, skillFromSlash, skillFromToolArgs } from './tool_facets.js'
+import { commandStringFrom, programFrom, skillFromCodexRead, skillFromMarker, skillFromSlash, skillFromToolArgs } from './tool_facets.js'
 
 /**
  * @import { ContractRule, GraphKit, GraphKeys } from './types.js'
@@ -176,14 +176,16 @@ export function createAiGatewayGraphContract(kit) {
       },
     },
 
-    // Skill nodes from the three Claude activation surfaces. Each surface is
-    // its own rule pair (node + ran edge from the same match, so an edge never
-    // dangles), each under a strict filter: only role='user'/part_type='text'
-    // with a leading anchor is clean (loose matching pulls ~23% false
-    // positives, LLP 0074 §strict-filters). The offset-0 anchor is enforced
-    // twice, in the SQL prefix-LIKE and again in the extraction helper.
-    // Assistant text mentioning skills, grep/cat/Read of a SKILL.md, and
-    // mid-text markers deliberately mint nothing.
+    // Skill nodes from the four activation surfaces: three Claude surfaces
+    // (1-3, below) plus Codex's own (4, LLP 0075 — Codex shares zero signal
+    // with Claude). Each surface is its own rule pair (node + ran edge from
+    // the same match, so an edge never dangles). Surfaces 1-3 each sit under
+    // a strict filter: only role='user'/part_type='text' with a leading
+    // anchor is clean (loose matching pulls ~23% false positives, LLP 0074
+    // §strict-filters); the offset-0 anchor is enforced twice, in the SQL
+    // prefix-LIKE and again in the extraction helper. Assistant text
+    // mentioning skills, grep/cat/Read of a SKILL.md, and mid-text markers
+    // deliberately mint nothing.
     // @ref LLP 0073#claude-skill-derivation [implements]: three-surface union;
     // strict role/part_type/offset-0 filters (LLP 0074).
 
@@ -220,6 +222,23 @@ export function createAiGatewayGraphContract(kit) {
         const key = skillFromSlash(r.content_text)
         if (!key) return null
         return buildNode({ type: 'Skill', key, label: key, firstSeen: r.message_created_at, sourceKeys: { skill: key } })
+      },
+    },
+
+    // Surface 4: Codex shares none of the Claude signals (no marker, no
+    // `Skill` tool, no `<command-name>` tag), so its activation trace is a
+    // plain shell read of the SKILL.md — an `exec_command` whose command
+    // string matches `.codex/skills/<name>/SKILL.md`.
+    // @ref LLP 0073#codex-skill-derivation [implements] — path-pattern on the
+    // exec_command SKILL.md read; Codex shares no Claude signal (LLP 0075).
+    {
+      kind: 'node',
+      type: 'Skill',
+      sql: `SELECT session_id, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name = 'exec_command'`,
+      toRow(r) {
+        const key = skillFromCodexRead(commandStringFrom('exec_command', r.tool_args))
+        if (!key) return null
+        return buildNode({ type: 'Skill', key, label: key, firstSeen: r.message_created_at, sourceKeys: { tool_name: 'exec_command', skill: key } })
       },
     },
 
@@ -339,13 +358,14 @@ export function createAiGatewayGraphContract(kit) {
       },
     },
 
-    // Session -ran-> Skill, one rule per Claude activation surface (the Skill
-    // endpoint is keyed identically to the surface's node rule, so the edge
-    // always lands on a node that rule mints). Each rule stamps only its own
-    // dispatch flag: edge ids hash (src, type, dst) only, so all surfaces'
-    // sightings of one (session, skill) pair collapse onto one edge and
-    // mergeRow's props-key union combines the flags order-independently
-    // (a single enum would resolve earliest-wins and drop "both" truth).
+    // Session -ran-> Skill, one rule per activation surface, Claude's three
+    // (1-3) plus Codex's own (4) (the Skill endpoint is keyed identically to
+    // the surface's node rule, so the edge always lands on a node that rule
+    // mints). Each rule stamps only its own dispatch flag: edge ids hash
+    // (src, type, dst) only, so all surfaces' sightings of one (session,
+    // skill) pair collapse onto one edge and mergeRow's props-key union
+    // combines the flags order-independently (a single enum would resolve
+    // earliest-wins and drop "both" truth).
     // @ref LLP 0078#decision [implements]: dispatch_source as per-surface
     // boolean edge props, unioned by mergeRow.
 
@@ -387,6 +407,22 @@ export function createAiGatewayGraphContract(kit) {
         const skill = skillFromSlash(r.content_text)
         if (!session || !skill) return null
         return buildEdge({ type: 'ran', srcType: 'Session', srcKey: session, dstType: 'Skill', dstKey: skill, props: { dispatch_slash: true }, firstSeen: r.message_created_at, sourceKeys: { session_id: session, skill } })
+      },
+    },
+
+    // Surface 4: Codex exec_command read of the SKILL.md (dispatch_shell_read,
+    // the weaker inferred signal LLP 0075 keeps distinct from Claude's richer
+    // ones). The Skill endpoint is keyed identically to the surface's node
+    // rule, so the edge always lands on a node that rule mints.
+    {
+      kind: 'edge',
+      type: 'ran',
+      sql: `SELECT session_id, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name = 'exec_command'`,
+      toRow(r) {
+        const session = str(r.session_id)
+        const skill = skillFromCodexRead(commandStringFrom('exec_command', r.tool_args))
+        if (!session || !skill) return null
+        return buildEdge({ type: 'ran', srcType: 'Session', srcKey: session, dstType: 'Skill', dstKey: skill, props: { dispatch_shell_read: true }, firstSeen: r.message_created_at, sourceKeys: { session_id: session, tool_name: 'exec_command', skill } })
       },
     },
   ]

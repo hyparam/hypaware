@@ -68,6 +68,18 @@ const SKILL_MARKER_RE = /^Base directory for this skill: (\S+)/
  */
 const SLASH_COMMAND_RE = /^<command-name>\s*\/?([A-Za-z0-9:_-]+)\s*<\/command-name>/
 
+/**
+ * The Codex skill-activation path pattern (LLP 0075 surface 4,
+ * `dispatch_shell_read`): an `exec_command` shell read of
+ * `.codex/skills/<name>/SKILL.md`. Unanchored (the path may sit anywhere in
+ * the command string, e.g. after `sed -n '1,240p'`); the `.codex/skills/`
+ * literal plus the `SKILL.md` suffix is the whole false-positive defense, so
+ * a Codex session reading some other repo's `.claude/skills/...` tree (no
+ * shared signal, LLP 0075 §no-shared-rule) or a bare `.codex/skills/` listing
+ * (no `SKILL.md`) matches nothing.
+ */
+const CODEX_SKILL_READ_RE = /[/~]\.codex\/skills\/([^/\s'"]+)\/SKILL\.md/
+
 /** Command wrappers whose own args precede the real `argv[0]`. */
 const WRAPPERS = new Set(['sudo', 'env', 'nohup', 'nice', 'time', 'command', 'stdbuf', 'timeout'])
 
@@ -159,6 +171,31 @@ export function skillFromSlash(contentText) {
   const name = match[1]
   if (CLAUDE_BUILTIN_COMMANDS.has(name)) return null
   return gateSkill(name)
+}
+
+/**
+ * Extract the `Skill` node key from a Codex `exec_command` shell read of
+ * `.codex/skills/<name>/SKILL.md` (LLP 0075 surface 4, Codex's only
+ * activation trace: no marker, no `Skill` tool, no `<command-name>` tag).
+ * Takes the already-resolved command string (`commandStringFrom('exec_command',
+ * tool_args)` — the wire shape this repo's Codex fixtures pin is
+ * `{"cmd": …}`, `command` as fallback), not raw `tool_args`, so the caller
+ * shares the one command-string recipe with `programFrom`.
+ *
+ * @ref LLP 0075#decision [implements] — path-pattern match on the
+ * `exec_command` SKILL.md read; read ≡ activation is an accepted ambiguity
+ * (LLP 0075 §read-is-activation), which is why the caller stamps the
+ * distinct `dispatch_shell_read` flag rather than one of Claude's richer
+ * dispatch flags.
+ *
+ * @param {unknown} command
+ * @returns {string | null}
+ */
+export function skillFromCodexRead(command) {
+  if (typeof command !== 'string') return null
+  const match = CODEX_SKILL_READ_RE.exec(command)
+  if (!match) return null
+  return gateSkill(match[1])
 }
 
 /**

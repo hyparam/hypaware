@@ -419,13 +419,16 @@ test('invoked edge skips rows missing the session or an un-gateable program', ()
 // --- LLP 0073/0074 (issue #229): Claude Skill nodes + ran edges ---
 
 // Rule order within each kind: surface 1 (Skill tool), surface 2 (marker),
-// surface 3 (slash). The nth argument of rule() indexes that order.
+// surface 3 (slash), surface 4 (Codex exec_command read). The nth argument
+// of rule() indexes that order.
 const SKILL_TOOL = 0
 const SKILL_MARKER = 1
 const SKILL_SLASH = 2
+const SKILL_CODEX = 3
 
 const MARKER_TEXT = 'Base directory for this skill: /home/u/.claude/skills/hypaware-query'
 const SLASH_TEXT = '<command-name>/hypaware-query</command-name>'
+const CODEX_READ_ARGS = { cmd: 'cat /home/u/.codex/skills/hypaware-query/SKILL.md' }
 
 // @ref LLP 0074#strict-filters [tests]: the SQL filters are the decision, not
 // tuning parameters; only role='user' text with a leading anchor is clean.
@@ -442,6 +445,9 @@ test('Skill/ran rules declare the strict per-surface SQL filters', () => {
     const slash = rule(kind, type, SKILL_SLASH)
     assert.match(slash.sql, /role = 'user' AND part_type = 'text'/, `${kind} surface 3 filters user text parts`)
     assert.match(slash.sql, /content_text LIKE '<command-name>%'/, `${kind} surface 3 anchors the tag in SQL`)
+
+    const codex = rule(kind, type, SKILL_CODEX)
+    assert.match(codex.sql, /part_type = 'tool_call' AND tool_name = 'exec_command'/, `${kind} surface 4 filters exec_command tool calls`)
   }
 })
 
@@ -472,13 +478,34 @@ test('Skill node from a slash command keys on the de-slashed name', () => {
   assert.equal(row.natural_key, 'hypaware-query')
 })
 
-test('all three surfaces converge on one Skill node id (cross-surface identity)', () => {
+// @ref LLP 0075#decision [tests]: Codex's own surface — a path-pattern match
+// on the exec_command SKILL.md read, not any Claude signal.
+test('Skill node from a Codex exec_command read keys on the .codex/skills/<name>/SKILL.md path', () => {
+  const row = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: CODEX_READ_ARGS, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Skill', 'hypaware-query'))
+  assert.equal(row.node_type, 'Skill')
+  assert.equal(row.natural_key, 'hypaware-query')
+  assert.equal(row.label, 'hypaware-query')
+  assert.equal(row.props, null, 'Skill carries no node props')
+  assert.deepEqual(row.source_keys, { tool_name: 'exec_command', skill: 'hypaware-query' })
+  assert.equal(row.projector_version, PROJECTOR_VERSION)
+
+  // fallback `command` arg, and a non-`.codex` path mints nothing.
+  const fallback = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: { command: 'cat /home/u/.codex/skills/hypaware-query/SKILL.md' }, message_created_at: TS })
+  assert.ok(fallback)
+  assert.equal(fallback.natural_key, 'hypaware-query')
+})
+
+test('all four surfaces converge on one Skill node id (cross-surface identity)', () => {
   const tool = rule('node', 'Skill', SKILL_TOOL).toRow({ session_id: 's', tool_args: { skill: 'hypaware-query' }, message_created_at: TS })
   const marker = rule('node', 'Skill', SKILL_MARKER).toRow({ session_id: 's', content_text: MARKER_TEXT, message_created_at: TS })
   const slash = rule('node', 'Skill', SKILL_SLASH).toRow({ session_id: 's', content_text: SLASH_TEXT, message_created_at: TS })
-  assert.ok(tool && marker && slash)
+  const codex = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS })
+  assert.ok(tool && marker && slash && codex)
   assert.equal(tool.node_id, marker.node_id)
   assert.equal(marker.node_id, slash.node_id)
+  assert.equal(slash.node_id, codex.node_id)
 })
 
 // @ref LLP 0078#decision [tests]: each surface stamps ONLY its own dispatch
@@ -507,10 +534,16 @@ test('ran edges wire Session -> Skill with exactly their own dispatch flag', () 
   assert.ok(slash)
   assert.deepEqual(slash.props, { dispatch_slash: true })
 
+  const codex = rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: CODEX_READ_ARGS, message_created_at: TS })
+  assert.ok(codex)
+  assert.deepEqual(codex.props, { dispatch_shell_read: true })
+  assert.deepEqual(codex.source_keys, { session_id: 'sess-1', tool_name: 'exec_command', skill: 'hypaware-query' })
+
   // Same (session, skill) pair from every surface -> the SAME edge id, so the
-  // dispatch flags merge onto one edge instead of minting three.
+  // dispatch flags merge onto one edge instead of minting four.
   assert.equal(marker.edge_id, tool.edge_id)
   assert.equal(slash.edge_id, tool.edge_id)
+  assert.equal(codex.edge_id, tool.edge_id)
 })
 
 test('ran edges skip rows missing the session or an un-gateable skill', () => {
@@ -518,6 +551,8 @@ test('ran edges skip rows missing the session or an un-gateable skill', () => {
   assert.equal(rule('edge', 'ran', SKILL_TOOL).toRow({ session_id: 'sess-1', tool_args: {}, message_created_at: TS }), null)
   assert.equal(rule('edge', 'ran', SKILL_MARKER).toRow({ session_id: null, content_text: MARKER_TEXT, message_created_at: TS }), null)
   assert.equal(rule('edge', 'ran', SKILL_SLASH).toRow({ session_id: 'sess-1', content_text: '<command-name></command-name>', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: null, tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: { cmd: 'ls /repo' }, message_created_at: TS }), null)
 })
 
 // @ref LLP 0074#strict-filters [tests]: the false-positive matrix. Signals
@@ -547,6 +582,14 @@ test('false-positive matrix: near-miss signals mint nothing', () => {
 
   // Un-gateable names fail closed at every surface.
   assert.equal(toolNode.toRow({ session_id: 's', tool_args: { skill: 'not a skill name' }, message_created_at: TS }), null)
+
+  // Codex surface 4: a Claude-shaped `.claude/skills/...` path shares no
+  // signal (LLP 0075 §no-shared-rule) and a read of some other file in the
+  // skill's own directory is not an activation.
+  const codexNode = rule('node', 'Skill', SKILL_CODEX)
+  assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'cat ~/.claude/skills/hypaware-query/SKILL.md' }, message_created_at: TS }), null, 'Claude-shaped path on the Codex surface')
+  assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'ls ~/.codex/skills/hypaware-query' }, message_created_at: TS }), null, 'directory listing, no SKILL.md read')
+  assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'cat ~/.codex/skills/hypaware-query/reference.md' }, message_created_at: TS }), null, 'reads a different file in the skill dir')
 })
 
 test('aux-tagged rows are excluded from the Skill and ran rules', () => {
@@ -554,7 +597,9 @@ test('aux-tagged rows are excluded from the Skill and ran rules', () => {
   assert.equal(rule('node', 'Skill', SKILL_TOOL).toRow({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), null)
   assert.equal(rule('node', 'Skill', SKILL_MARKER).toRow({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), null)
   assert.equal(rule('node', 'Skill', SKILL_SLASH).toRow({ ...aux, session_id: 's', content_text: SLASH_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Skill', SKILL_CODEX).toRow({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
   assert.equal(rule('edge', 'ran', SKILL_TOOL).toRow({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), null)
   assert.equal(rule('edge', 'ran', SKILL_MARKER).toRow({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), null)
   assert.equal(rule('edge', 'ran', SKILL_SLASH).toRow({ ...aux, session_id: 's', content_text: SLASH_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
 })
