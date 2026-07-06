@@ -43,17 +43,12 @@
     "@aws-sdk/credential-provider-ini": "3.972.60",
     "hyparquet": "1.26.2",
     "hyparquet-compressors": "1.1.1",
-    "icebird": "0.8.12",
-    "squirreling": "0.12.27"
+    "icebird": "0.8.13",
+    "squirreling": "0.13.0"
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.16.1",
     "hypvector": "0.2.2"
-  },
-  "overrides": {
-    "hyparquet": "1.26.2",
-    "hyparquet-writer": "0.16.1",
-    "squirreling": "0.12.27"
   },
   "devDependencies": {
     "@types/node": "26.1.0",

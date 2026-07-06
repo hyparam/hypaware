@@ -654,6 +654,48 @@ test('parallel tool_results split one message per result, joined by tool_use_id'
   }
 })
 
+test('transcript toolUseResult is promoted onto the matched live row', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    // The structured result Claude Code writes only to the transcript.
+    const toolUseResult = {
+      filePath: '/work/a.txt',
+      interrupted: false,
+      structuredPatch: [{ oldStart: 1, newStart: 1, lines: ['-a', '+b'] }],
+    }
+    await writeTranscript(env, 'sess-tur', [
+      jsonlRow({
+        sessionId: 'sess-tur',
+        uuid: 'u-t-r1',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'ok' }] },
+        toolUseResult,
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-tur' }) },
+        messages: [{
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'ok' }],
+        }],
+      },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].message_id, 'u-t-r1')
+    const claude = readAttrPath(rows[0], ['attributes', 'claude'])
+    assert.deepEqual(claude?.tool_use_result, toolUseResult)
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('reminder-wrapped prompt canonicalizes to transcript content + wire_only extra', async () => {
   const env = await stageClaudeEnv()
   try {

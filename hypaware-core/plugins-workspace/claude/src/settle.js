@@ -6,6 +6,7 @@ import {
   defaultClaudeProjectsDir,
   indexTranscriptEntries,
   loadTranscript,
+  withToolUseResult,
 } from './transcripts.js'
 import { pickLatestMatching, readSessionContext } from './session_context.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
@@ -119,7 +120,13 @@ function upgradeRow(row, match) {
       (typeof partIndex === 'number' || typeof partIndex === 'bigint')) {
     upgraded.part_id = `${upgraded.message_id}#${partIndex}`
   }
-  upgraded.attributes = cleanAttributes(upgraded.attributes)
+  const cleaned = cleanAttributes(upgraded.attributes)
+  // Stamp the transcript's structured tool result like the live match
+  // path does, but never at the cost of an attributes column we could
+  // not parse into an object.
+  upgraded.attributes = isPlainObject(cleaned) || cleaned === undefined
+    ? withToolUseResult(cleaned, match)
+    : cleaned
   return upgraded
 }
 

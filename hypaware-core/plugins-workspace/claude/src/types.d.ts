@@ -61,6 +61,14 @@ export interface TranscriptEntry {
    * same column the live projector stamps from the wire response.
    */
   usage: unknown
+  /**
+   * Claude Code's structured tool result (`toolUseResult`), written only to
+   * the transcript, never the wire: structuredPatch / filePath on edits,
+   * interrupted / stdout metadata on commands, subagent descriptors on Task
+   * results. Promoted verbatim into `attributes.claude.tool_use_result` on
+   * both the live and backfill paths so it survives transcript pruning.
+   */
+  tool_use_result: unknown
   raw_frame: unknown
   timestampMs: number | undefined
 }
