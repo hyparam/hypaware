@@ -26,13 +26,14 @@ export interface NodeSpec {
   sourceKeys: Record<string, unknown>
 }
 
-/** The per-edge spec a contract's `toRow` hands `buildEdge` (endpoints + relation type + provenance keys). */
+/** The per-edge spec a contract's `toRow` hands `buildEdge` (endpoints + relation type + optional display props + provenance keys). */
 export interface EdgeSpec {
   type: string
   srcType: string
   srcKey: string
   dstType: string
   dstKey: string
+  props?: Record<string, unknown>
   firstSeen: unknown
   sourceKeys: Record<string, unknown>
 }

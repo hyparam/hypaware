@@ -40,7 +40,8 @@ export interface NodeSpec {
 
 /**
  * The per-edge spec a contract's `toRow` hands the kit's `buildEdge`: the two
- * endpoints (by type + natural key), the relation `type`, and provenance keys.
+ * endpoints (by type + natural key), the relation `type`, optional display
+ * `props`, and provenance keys.
  */
 export interface EdgeSpec {
   type: string
@@ -48,6 +49,7 @@ export interface EdgeSpec {
   srcKey: string
   dstType: string
   dstKey: string
+  props?: Record<string, unknown>
   firstSeen: unknown
   sourceKeys: Record<string, unknown>
 }
