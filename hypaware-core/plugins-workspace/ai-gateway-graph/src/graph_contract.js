@@ -3,6 +3,7 @@
 import path from 'node:path'
 
 import { keys } from './graph-keys.js'
+import { commandStringFrom, programFrom } from './tool_facets.js'
 
 /**
  * @import { ContractRule, GraphKit, GraphKeys } from './types.js'
@@ -15,8 +16,14 @@ export const PLUGIN_NAME = '@hypaware/ai-gateway-graph'
 export const SOURCE_DATASET = 'ai_gateway_messages'
 /** Projector id stamped into every row's provenance. */
 export const PROJECTOR = 'ai-gateway.t0'
-/** Projector version, stamped into provenance to mark which projector generation minted a row (not a re-projection trigger: ids are content-addressed; see LLP 0023 §inline-provenance). */
-export const PROJECTOR_VERSION = 1
+/**
+ * Projector version, stamped into provenance to mark which projector generation
+ * minted a row (not a re-projection trigger: ids are content-addressed; see
+ * LLP 0023 §inline-provenance). Bumped `1 → 2` with the additive `Program` /
+ * `invoked` rules (LLP 0073 §additive-no-migration): provenance only — existing
+ * rows and ids are untouched, there is no re-key and therefore no migration.
+ */
+export const PROJECTOR_VERSION = 2
 
 /** Tools whose args name a concrete file. */
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
@@ -151,6 +158,24 @@ export function createAiGatewayGraphContract(kit) {
       },
     },
 
+    // Program per validity-gated basename(argv[0]) of the first command, from
+    // the two busy shell tools. The raw command string is unbounded (~1,433
+    // distinct for 1,568 Codex calls) and stays in ai_gateway_messages; only the
+    // bounded program facet (~29 distinct) becomes a node.
+    // @ref LLP 0077#decision [implements] — Program = validity-gated
+    // basename(argv[0]) of the first command; fail-closed (mint nothing rather
+    // than mis-key). Extraction lives in `tool_facets.js`.
+    {
+      kind: 'node',
+      type: 'Program',
+      sql: `SELECT tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name IN ('Bash', 'exec_command')`,
+      toRow(r) {
+        const key = programFrom(commandStringFrom(r.tool_name, r.tool_args))
+        if (!key) return null
+        return buildNode({ type: 'Program', key, label: key, firstSeen: r.message_created_at, sourceKeys: { tool_name: str(r.tool_name), program: key } })
+      },
+    },
+
     // --- edges ---
 
     // Session -via-> App. @ref LLP 0030#decision: Session keyed on
@@ -246,6 +271,24 @@ export function createAiGatewayGraphContract(kit) {
         const repo = keys.repoKeyFromRemote(r.git_remote)
         if (!commit || !repo) return null
         return buildEdge({ type: 'in', srcType: 'Commit', srcKey: commit, dstType: 'Repo', dstKey: repo, firstSeen: r.message_created_at, sourceKeys: { head_sha: commit, git_remote: str(r.git_remote) } })
+      },
+    },
+
+    // Session -invoked-> Program. Distinct edge type from `used` (Tool) so
+    // programs never collide with tool names under one edge_type filter, and
+    // distinct from the skills' `ran` (issue #230 vs #229). The Program endpoint
+    // is keyed identically to the Program node rule, so the edge always lands on
+    // a node that rule mints. No props (unlike `ran`).
+    // @ref LLP 0077#decision [implements] — validity-gated basename(argv[0]); fail-closed.
+    {
+      kind: 'edge',
+      type: 'invoked',
+      sql: `SELECT session_id, tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name IN ('Bash', 'exec_command')`,
+      toRow(r) {
+        const session = str(r.session_id)
+        const program = programFrom(commandStringFrom(r.tool_name, r.tool_args))
+        if (!session || !program) return null
+        return buildEdge({ type: 'invoked', srcType: 'Session', srcKey: session, dstType: 'Program', dstKey: program, firstSeen: r.message_created_at, sourceKeys: { session_id: session, tool_name: str(r.tool_name), program } })
       },
     },
   ]
