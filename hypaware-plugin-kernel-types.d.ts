@@ -1483,6 +1483,16 @@ export interface AiGatewayExchangeProjector {
 
 export interface AiGatewayExchangeProjectorContext {
   log: PluginLogger
+  /**
+   * Read-only membership test against the gateway's in-memory
+   * ignored-session set (LLP 0066). The gateway holds only opaque
+   * session-id tokens and answers this set-membership question; the
+   * adapter — which alone knows which wire/body field is the canonical
+   * `session_id` — resolves that id and, when it is ignored, returns the
+   * terminal `USAGE_POLICY_DROP` sentinel. Absent (backfill materialization,
+   * unit-test stubs) → treat as `() => false`. @ref LLP 0066#enforcement
+   */
+  isSessionIgnored?(sessionId: string): boolean
 }
 
 /**

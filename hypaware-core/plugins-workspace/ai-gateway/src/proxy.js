@@ -108,6 +108,24 @@ export async function startProxy(opts) {
 function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
+
+  // @ref LLP 0066#control-path [implements] — the reserved `/_hypaware/`
+  // prefix is a LOCAL control surface: handled in-process, never matched
+  // against upstreams, never proxied, and it starts NO exchange (no
+  // `startExchange`, no row). Checked BEFORE matchUpstream so a catch-all
+  // upstream (`path_prefix: "/"`) cannot leak a control request to a
+  // provider. The handler owns the request lifecycle (body + response); an
+  // unregistered handler drains the body and 404s locally.
+  if (isControlPath(parsedUrl.pathname)) {
+    if (typeof opts.onControlRequest === 'function') {
+      opts.onControlRequest(req, res, parsedUrl)
+      return
+    }
+    req.resume()
+    sendJson(res, 404, { error: 'no control handler registered', path: parsedUrl.pathname })
+    return
+  }
+
   const upstream = matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
   if (!upstream) {
     req.resume()
@@ -253,6 +271,19 @@ function buildRouteInput(method, pathname, headers) {
     }
   }
   return { method, path: pathname, headers: flatHeaders }
+}
+
+/**
+ * Recognize the reserved `/_hypaware/` local control prefix. Uses the same
+ * segment-boundary discipline as `pathMatchesPrefix`: `/_hypaware` itself
+ * and any `/_hypaware/...` sub-path match, but `/_hypawarefoo` does not, so
+ * a look-alike upstream path is never mistaken for a control request.
+ *
+ * @ref LLP 0066#control-path [implements]
+ * @param {string} pathname
+ */
+export function isControlPath(pathname) {
+  return pathname === '/_hypaware' || pathname.startsWith('/_hypaware/')
 }
 
 /**

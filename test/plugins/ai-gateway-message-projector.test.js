@@ -497,6 +497,49 @@ test('session_id is the partition key; conversation_id is null for Claude, the t
   assert.equal(codexRows[0].conversation_id, 'thread-codex')
 })
 
+test('dispatcher threads a working isSessionIgnored predicate into the projector ctx', async () => {
+  // @ref LLP 0066#enforcement [tests] — the gateway hands the adapter a
+  // read-only membership test against its ignored-session set; the adapter
+  // (not the gateway) does the drop. Here we only assert the predicate reaches
+  // the projector ctx and answers correctly.
+  /** @type {((sessionId: string) => boolean) | undefined} */
+  let received
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    isSessionIgnored: (id) => id === 'ignored-sess',
+    projectors: [registered('capture', {
+      project: (_input, ctx) => {
+        received = ctx.isSessionIgnored
+        return projection('capture')
+      },
+    })],
+  })
+  await projector.projectExchange(exchange())
+  assert.ok(received, 'ctx.isSessionIgnored is provided to the projector')
+  assert.equal(received('ignored-sess'), true)
+  assert.equal(received('other-sess'), false)
+})
+
+test('projector ctx defaults isSessionIgnored to a false predicate when none is supplied', async () => {
+  // Absent an isSessionIgnored (backfill materialization, unit-test stubs) the
+  // ctx still carries a predicate, and it always answers false — so existing
+  // behavior is unchanged.
+  /** @type {((sessionId: string) => boolean) | undefined} */
+  let received
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('capture', {
+      project: (_input, ctx) => {
+        received = ctx.isSessionIgnored
+        return projection('capture')
+      },
+    })],
+  })
+  await projector.projectExchange(exchange())
+  assert.ok(received, 'ctx still carries a predicate when none was supplied')
+  assert.equal(received('anything'), false)
+})
+
 test('a projection without session_id is rejected as an invalid shape', async () => {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
   const logs = []

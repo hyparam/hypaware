@@ -10,7 +10,7 @@ import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-wor
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
-import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 
 /**
  * @ref LLP 0050 [tests]: the `.hypignore` capture-seam drop lives in the
@@ -18,6 +18,13 @@ import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
  * resolver and suppress an ignored `cwd` BEFORE any row is written: the live
  * projector returns no rows, and backfill skips the session. A clean `cwd` is
  * unaffected (LLP 0049#requirements R1/R2).
+ *
+ * @ref LLP 0066 [tests]: the session opt-out drop is a SECOND, independent
+ * match key at the same seam, keyed on the resolved `session_id` rather than
+ * `cwd`. For Claude session_id == the conversation (LLP 0066#scope), so the
+ * drop is exact: a session in the gateway's ignored set drops the exchange
+ * and logs `policy_source: 'session_opt_out'`; a session not in the set is
+ * unaffected (R8).
  *
  * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -91,6 +98,173 @@ test('live projector with no resolved cwd records normally (no folder to match)'
     })
 
     assert.equal(rows.length, 2, 'with no cwd there is nothing to match, so capture proceeds')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Session opt-out (LLP 0066): second independent match key, keyed on the
+// resolved session_id rather than cwd.
+// ---------------------------------------------------------------------------
+
+test('live projector returns no rows when the resolved session_id is in the gateway ignored-session set', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-optout', transcriptPair('sess-optout'))
+    const { entries, log } = captureLog()
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-optout',
+      isSessionIgnored: (id) => id === 'sess-optout',
+      log,
+    })
+
+    assert.equal(rows.length, 0, 'a session in the ignored set must drop every row at the capture seam')
+    const dropLog = entries.find((e) => e.message === 'aigw.usage_policy_drop')
+    assert.ok(dropLog, 'the gateway logs the drop as an intentional usage-policy drop')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('live projector records normally when the resolved session_id is not in the ignored set', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-optout-clean', transcriptPair('sess-optout-clean'))
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-optout-clean',
+      // Some OTHER session is ignored; this exchange's session is not.
+      isSessionIgnored: (id) => id === 'some-other-session',
+    })
+
+    assert.equal(rows.length, 2, 'a session_id not in the ignored set is unaffected: user + assistant rows land')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('the session opt-out drop logs policy_source: session_opt_out with the matched session_id', async () => {
+  const env = await stageEnv()
+  try {
+    const { entries, log } = captureLog()
+    const projector = createClaudeExchangeProjector({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+    })
+    const result = await projector.project(
+      claudeExchange({ sessionId: 'sess-optout-log' }),
+      { log, isSessionIgnored: (id) => id === 'sess-optout-log' }
+    )
+
+    assert.equal(result, USAGE_POLICY_DROP)
+    const dropLog = entries.find((e) => e.message === 'plugin.claude.usage_policy_drop')
+    assert.ok(dropLog, 'the adapter logs its own usage_policy_drop event')
+    assert.equal(dropLog.fields?.policy_source, 'session_opt_out')
+    assert.equal(dropLog.fields?.session_id, 'sess-optout-log')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// @ref LLP 0066#requirements [tests]: R7 independence matrix. `.hypignore`
+// (keyed on cwd) and the session opt-out (keyed on session_id) are two
+// separate match keys feeding the same USAGE_POLICY_DROP sentinel. Either
+// alone drops; together still drop (no merging/interaction); neither leaves
+// the exchange to record normally.
+// ---------------------------------------------------------------------------
+
+test('independence matrix: .hypignore-governed cwd + session NOT in the ignored set still drops', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-a', transcriptPair('sess-matrix-a'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-a',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-a',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'some-other-session',
+    })
+
+    assert.equal(rows.length, 0, 'the .hypignore match alone is sufficient to drop')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('independence matrix: clean cwd + session IN the ignored set still drops', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-b', transcriptPair('sess-matrix-b'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-b',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-b',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'sess-matrix-b',
+    })
+
+    assert.equal(rows.length, 0, 'the session opt-out match alone is sufficient to drop')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('independence matrix: .hypignore-governed cwd AND session in the ignored set both drop (no double-count, no interaction)', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-c', transcriptPair('sess-matrix-c'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-c',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-c',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'sess-matrix-c',
+    })
+
+    assert.equal(rows.length, 0, 'both mechanisms matching still drops exactly once (terminal sentinel)')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('independence matrix: clean cwd + session NOT in the ignored set records normally', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-d', transcriptPair('sess-matrix-d'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-d',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-d',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'some-other-session',
+    })
+
+    assert.equal(rows.length, 2, 'neither mechanism matches, so the exchange records as usual')
   } finally {
     await env.cleanup()
   }
@@ -227,7 +401,12 @@ async function writeTranscript(env, sessionId, rows) {
  * dispatcher (the production path), and project one synthetic exchange.
  *
  * @param {{ homeDir: string, stateFile: string }} env
- * @param {{ sessionId: string, resolver: import('../../src/core/usage-policy/types.js').UsagePolicyResolver }} call
+ * @param {{
+ *   sessionId: string,
+ *   resolver?: import('../../src/core/usage-policy/types.js').UsagePolicyResolver,
+ *   isSessionIgnored?: (sessionId: string) => boolean,
+ *   log?: { warn(m: string, f?: Record<string, unknown>): void, info?: (m: string, f?: Record<string, unknown>) => void },
+ * }} call
  * @returns {Promise<Record<string, unknown>[]>}
  */
 async function projectViaGateway(env, call) {
@@ -239,8 +418,21 @@ async function projectViaGateway(env, call) {
   const dispatcher = createAiGatewayMessageProjector({
     gatewayId: 'gw-test',
     projectors: [{ ...projector, _seq: 0 }],
+    log: call.log,
+    isSessionIgnored: call.isSessionIgnored,
   })
-  return dispatcher.projectExchange({
+  return dispatcher.projectExchange(claudeExchange({ sessionId: call.sessionId }))
+}
+
+/**
+ * One synthetic Anthropic `/v1/messages` exchange input, stamped with the
+ * given session id via the same `metadata.user_id.session_id` field
+ * `resolveClaudeSessionId` reads.
+ *
+ * @param {{ sessionId: string }} opts
+ */
+function claudeExchange(opts) {
+  return {
     exchange_id: 'ex-1',
     ts_start: '2026-05-22T10:00:05.000Z',
     ts_end: '2026-05-22T10:00:05.250Z',
@@ -257,7 +449,7 @@ async function projectViaGateway(env, call) {
     request_headers: JSON.stringify({ 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/1.0' }),
     request_body: JSON.stringify({
       model: 'claude-3-opus',
-      metadata: { user_id: JSON.stringify({ session_id: call.sessionId }) },
+      metadata: { user_id: JSON.stringify({ session_id: opts.sessionId }) },
       messages: [{ role: 'user', content: 'hello' }],
     }),
     response_headers: JSON.stringify({ 'content-type': 'application/json' }),
@@ -265,7 +457,7 @@ async function projectViaGateway(env, call) {
     error: null,
     metadata: JSON.stringify({ dev_run_id: 'run-1' }),
     stream_events: [],
-  })
+  }
 }
 
 function captureLog() {

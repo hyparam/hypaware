@@ -65,7 +65,10 @@ export function createCodexExchangeProjector(opts = {}) {
 
     /**
      * @param {AiGatewayExchangeInput} input
-     * @param {{ log?: { info?: (m: string, f?: Record<string, unknown>) => void } }} [ctx]
+     * @param {{
+     *   log?: { info?: (m: string, f?: Record<string, unknown>) => void },
+     *   isSessionIgnored?: (sessionId: string) => boolean,
+     * }} [ctx]
      */
     project(input, ctx) {
       const reqBody = parseMaybeJson(input.request_body)
@@ -105,17 +108,41 @@ export function createCodexExchangeProjector(opts = {}) {
         }
       }
 
-      const responseBody = parseMaybeJson(input.response_body)
-      const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
-      const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
-      if (messages.length === 0) return undefined
-
+      // `resolveConversationId` needs nothing from the built messages, so it
+      // (and the session id derived from it) is resolved here, ABOVE
+      // `messagesForTransport`, next to the cwd check above: both drop checks
+      // now run before any message-shaping work.
       const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
       // @ref LLP 0030#decision: session_id is the partition key (always
       // non-null): Codex's `metadata.session_id`, falling back to the
       // thread (conversation_id) when no session id was captured. Keep
       // conversation_id = the thread; both can be set for Codex.
       const sessionId = stringValue(codexContext?.session_id) ?? conversationId
+
+      // @ref LLP 0066#enforcement [implements]: session opt-out drop. Keyed on
+      // the stamped session_id (metadata.session_id ?? thread id), the exact
+      // value the row would be stamped with (R5). NOTE the documented
+      // over-drop (LLP 0066#scope): one Codex session_id contains multiple
+      // conversation_id threads, so an ignored session suppresses ALL of
+      // them; per-thread grain is a spec non-goal.
+      // @ref LLP 0050: second match key, same adapter seam as the .hypignore
+      // drop above; either match suppresses (R7), they do not interact.
+      if (ctx?.isSessionIgnored?.(sessionId)) {
+        ctx?.log?.info?.('plugin.codex.usage_policy_drop', {
+          component: 'codex',
+          operation: 'usage_policy_drop',
+          policy_source: 'session_opt_out',
+          session_id: sessionId,
+          exchange_id: input.exchange_id,
+        })
+        return USAGE_POLICY_DROP
+      }
+
+      const responseBody = parseMaybeJson(input.response_body)
+      const streamEvents = Array.isArray(input.stream_events) ? input.stream_events : []
+      const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
+      if (messages.length === 0) return undefined
+
       const recordedContext = resolveRecordedContext(reqBody, codexContext)
 
       /** @type {JsonObject} */

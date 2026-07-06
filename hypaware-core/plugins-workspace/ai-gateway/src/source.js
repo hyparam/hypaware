@@ -8,6 +8,7 @@ import {
 } from '../../../../src/core/observability/index.js'
 
 import { compileConfig } from './config.js'
+import { createControlHandler } from './control.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createAiGatewayMessageProjector } from './message_projector.js'
 import { startProxy } from './proxy.js'
@@ -52,6 +53,9 @@ export function createStartSource(state) {
             upstreams: readConfiguredUpstreamNames(ctx),
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
+            // @ref LLP 0066#ephemeral — surface the live opt-out count so an
+            // operator can see an active session drop without grepping logs.
+            ignored_sessions: state.ignoredSessions.size,
           },
         }
         if (liveState.lastError) status.lastError = liveState.lastError
@@ -98,6 +102,11 @@ async function launchListener(ctx, state, liveState) {
     // rebuilds an empty set and replays re-emit duplicate-part_id rows).
     storage: ctx.storage,
     log: ctx.log,
+    // Hand adapters a read-only membership test against the gateway's
+    // in-memory ignored-session set. The set lives on `state` (survives a
+    // reload; dies with the process), so the predicate closes over the live
+    // set, not a snapshot. @ref LLP 0066#enforcement
+    isSessionIgnored: (id) => state.ignoredSessions.has(id),
   })
   const sourcesLog = getLogger('sources')
   const meter = getMeter('plugin.ai-gateway')
@@ -155,6 +164,11 @@ async function launchListener(ctx, state, liveState) {
     upstreams: mergeUpstreams(config.upstreams, state),
     startExchange: (init) => recorder.startExchange(init),
     onExchangeFinished,
+    // Serve `/_hypaware/*` control requests locally over the gateway's
+    // ignored-session set (POST/DELETE /_hypaware/ignore/session). Handled
+    // before upstream matching, never proxied, no exchange recorded.
+    // @ref LLP 0066#control-path
+    onControlRequest: createControlHandler({ ignoredSessions: state.ignoredSessions, log: ctx.log }),
   })
 
   state.listen = { host: proxy.host, port: proxy.port }
