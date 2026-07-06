@@ -1,4 +1,4 @@
-import type { IncomingHttpHeaders } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import type {
   AiGatewayClientRegistration,
   AiGatewayExchangeProjector,
@@ -112,6 +112,14 @@ export interface ProxyOptions {
     path: string | undefined
     requestHeaders: IncomingHttpHeaders
   }): Exchange
+  /**
+   * Handle a request under the reserved `/_hypaware/` control prefix. The
+   * proxy short-circuits control requests BEFORE upstream matching (they
+   * are never proxied and start no exchange) and delegates the full
+   * request lifecycle — body read and response — to this callback. Absent,
+   * the proxy 404s the control request locally. @ref LLP 0066#control-path
+   */
+  onControlRequest?(req: IncomingMessage, res: ServerResponse, url: URL): void
 }
 
 export interface StartedProxy {
@@ -137,6 +145,15 @@ export interface GatewayState {
   projectors: RegisteredProjector[]
   enrichers: Map<string, AiGatewaySettlementEnricher>
   listen: { host: string; port: number } | undefined
+  /**
+   * In-memory set of opaque session-id tokens the local control route has
+   * been asked to ignore. Lives on `GatewayState` (created once per plugin
+   * activation, NOT per listener) so a config `reload()` — which tears down
+   * and relaunches the listener — does not silently re-enable recording
+   * mid-session. No file, no cache column: dies with the daemon process.
+   * @ref LLP 0066#ephemeral
+   */
+  ignoredSessions: Set<string>
 }
 
 export interface AiGatewayRuntime {

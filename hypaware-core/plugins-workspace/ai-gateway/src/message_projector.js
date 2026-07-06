@@ -135,6 +135,7 @@ const SCHEMA_COLUMN_NAMES = new Set(AI_GATEWAY_MESSAGE_COLUMNS.map((column) => c
  *   projectors: RegisteredProjector[],
  *   storage?: ExtendedQueryStorageService | QueryStorageService,
  *   log?: PluginLogger | { warn(message: string, fields?: Record<string, unknown>): void, info?: (m: string, f?: Record<string, unknown>) => void },
+ *   isSessionIgnored?: (sessionId: string) => boolean,
  * }} opts
  */
 export function createAiGatewayMessageProjector(opts) {
@@ -142,6 +143,14 @@ export function createAiGatewayMessageProjector(opts) {
   const projectors = Array.isArray(opts.projectors) ? opts.projectors : []
   const storage = opts.storage
   const log = opts.log
+  // The gateway hands adapters a read-only membership test against its
+  // in-memory ignored-session set; the adapter (which knows the canonical
+  // session_id) does the actual drop. Absent (backfill materialization,
+  // unit-test stubs) → nothing is ignored, so existing behavior is intact.
+  // @ref LLP 0066#enforcement
+  const isSessionIgnored = typeof opts.isSessionIgnored === 'function'
+    ? opts.isSessionIgnored
+    : () => false
 
   // One persistent conversation state per listener: identity history
   // and dedup span the whole session, matching pre-extraction behavior.
@@ -166,7 +175,7 @@ export function createAiGatewayMessageProjector(opts) {
      */
     async projectExchange(exchange) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
-      const projection = await dispatchProjector(projectors, input, log)
+      const projection = await dispatchProjector(projectors, input, log, isSessionIgnored)
       // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
       // a projection miss: the adapter already logged the rich
       // `plugin.<adapter>.usage_policy_drop` event at the seam, so the gateway
@@ -506,17 +515,22 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
  * @param {RegisteredProjector[]} projectors
  * @param {AiGatewayExchangeInput} input
  * @param {{ warn?: (m: string, f?: Record<string, unknown>) => void } | undefined} log
+ * @param {(sessionId: string) => boolean} isSessionIgnored
  * @returns {Promise<AiGatewayProjectedExchange | UsagePolicyDrop | undefined>}
  */
-async function dispatchProjector(projectors, input, log) {
+async function dispatchProjector(projectors, input, log, isSessionIgnored) {
   if (projectors.length === 0) return undefined
   const matching = projectors
     .filter((p) => safeMatch(p, input, log))
     .sort(byPriorityThenSeq)
+  // The projector ctx already carries the logger; fold in the read-only
+  // ignored-session membership test so an adapter can key its own resolved
+  // session_id against the gateway's opt-out set. @ref LLP 0066#enforcement
+  const ctx = { log: { ...noopLogger(), ...(log ?? {}) }, isSessionIgnored }
   for (const projector of matching) {
     let result
     try {
-      result = await Promise.resolve(projector.project(input, { log: { ...noopLogger(), ...(log ?? {}) } }))
+      result = await Promise.resolve(projector.project(input, ctx))
     } catch (err) {
       log?.warn?.('aigw.projector_error', {
         projector: projector.name,

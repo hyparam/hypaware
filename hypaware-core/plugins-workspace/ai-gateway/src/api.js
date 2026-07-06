@@ -15,6 +15,11 @@ export function createGatewayState() {
     projectors: [],
     enrichers: new Map(),
     listen: undefined,
+    // @ref LLP 0066#ephemeral — in-memory only: no file, no cache column;
+    // dies with the daemon process. Lives on GatewayState (created once in
+    // activate(), NOT per-listener) so a config reload() that relaunches the
+    // listener does not silently re-enable recording mid-session.
+    ignoredSessions: /** @type {Set<string>} */ (new Set()),
   }
 }
 
