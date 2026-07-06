@@ -167,6 +167,110 @@ test('the session opt-out drop logs policy_source: session_opt_out with the matc
 })
 
 // ---------------------------------------------------------------------------
+// @ref LLP 0066#requirements [tests]: R7 independence matrix. `.hypignore`
+// (keyed on cwd) and the session opt-out (keyed on session_id) are two
+// separate match keys feeding the same USAGE_POLICY_DROP sentinel. Either
+// alone drops; together still drop (no merging/interaction); neither leaves
+// the exchange to record normally.
+// ---------------------------------------------------------------------------
+
+test('independence matrix: .hypignore-governed cwd + session NOT in the ignored set still drops', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-a', transcriptPair('sess-matrix-a'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-a',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-a',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'some-other-session',
+    })
+
+    assert.equal(rows.length, 0, 'the .hypignore match alone is sufficient to drop')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('independence matrix: clean cwd + session IN the ignored set still drops', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-b', transcriptPair('sess-matrix-b'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-b',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-b',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'sess-matrix-b',
+    })
+
+    assert.equal(rows.length, 0, 'the session opt-out match alone is sufficient to drop')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('independence matrix: .hypignore-governed cwd AND session in the ignored set both drop (no double-count, no interaction)', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-c', transcriptPair('sess-matrix-c'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-c',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-c',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'sess-matrix-c',
+    })
+
+    assert.equal(rows.length, 0, 'both mechanisms matching still drops exactly once (terminal sentinel)')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('independence matrix: clean cwd + session NOT in the ignored set records normally', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'sess-matrix-d', transcriptPair('sess-matrix-d'))
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-matrix-d',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      ts: '2026-05-22T09:59:00.000Z',
+    })
+
+    const rows = await projectViaGateway(env, {
+      sessionId: 'sess-matrix-d',
+      resolver: resolverIgnoring(IGNORED_ROOT),
+      isSessionIgnored: (id) => id === 'some-other-session',
+    })
+
+    assert.equal(rows.length, 2, 'neither mechanism matches, so the exchange records as usual')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Backfill
 // ---------------------------------------------------------------------------
 
