@@ -41,6 +41,14 @@ test('contract carries its source/projector metadata', () => {
   assert.equal(contract.projectorVersion, PROJECTOR_VERSION)
 })
 
+// @ref LLP 0073#additive-no-migration: the Program/invoked rules bump the
+// projector version 1 → 2 as provenance only (ids are content-addressed; no
+// re-key, no migration).
+test('PROJECTOR_VERSION is 2 after the additive Program/invoked rules', () => {
+  assert.equal(PROJECTOR_VERSION, 2)
+  assert.equal(contract.projectorVersion, 2)
+})
+
 // @ref LLP 0030#decision: the Session node keys on session_id (the
 // session container, always present); conversation_id is null for Claude.
 test('Session rule builds a node keyed on session_id with pruned props', () => {
@@ -185,6 +193,8 @@ test('aux-tagged rows are excluded from every node and edge rule', () => {
   assert.equal(rule('edge', 'used_model').toRow({ ...aux, conversation_id: 'c', model: 'm', message_created_at: TS }), null)
   assert.equal(rule('edge', 'used').toRow({ ...aux, conversation_id: 'c', tool_name: 'Read', message_created_at: TS }), null)
   assert.equal(rule('edge', 'touched').toRow({ ...aux, conversation_id: 'c', tool_name: 'Write', tool_args: { file_path: '/a.js' }, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Program').toRow({ ...aux, tool_name: 'Bash', tool_args: { command: 'git status' }, part_type: 'tool_call', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'invoked').toRow({ ...aux, session_id: 's', tool_name: 'Bash', tool_args: { command: 'git status' }, part_type: 'tool_call', message_created_at: TS }), null)
 })
 
 test('aux filter handles attributes arriving as a JSON string', () => {
@@ -340,4 +350,68 @@ test('Commit -in-> Repo is the second `in` edge and converges with the GitHub ed
   assert.equal(commitInRepo.src_id, commit)
   assert.equal(commitInRepo.dst_id, repo)
   assert.equal(commitInRepo.edge_id, edgeId(commit, 'in', repo))
+})
+
+// --- LLP 0073/0077 (issue #230): Program nodes + invoked edges ---
+
+test('Program/invoked rules select only tool_call rows from the two shell tools', () => {
+  for (const r of [rule('node', 'Program'), rule('edge', 'invoked')]) {
+    assert.match(r.sql, /part_type = 'tool_call'/, `${r.kind}/${r.type} filters tool_call parts`)
+    assert.match(r.sql, /tool_name IN \('Bash', 'exec_command'\)/, `${r.kind}/${r.type} filters the shell tools`)
+  }
+})
+
+test('Program node keys on the validity-gated basename(argv[0]) of the first command', () => {
+  const r = rule('node', 'Program')
+  const row = r.toRow({ tool_name: 'Bash', tool_args: { command: '/opt/homebrew/bin/duckdb foo.db' }, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Program', 'duckdb'))
+  assert.equal(row.node_type, 'Program')
+  assert.equal(row.natural_key, 'duckdb', 'path basenamed + lowercased')
+  assert.equal(row.label, 'duckdb', 'label is the key')
+  assert.equal(row.props, null, 'Program carries no props')
+  assert.deepEqual(row.source_keys, { tool_name: 'Bash', program: 'duckdb' })
+  assert.equal(row.projector_version, PROJECTOR_VERSION)
+
+  // Codex exec_command reads the `cmd` arg (and bash -lc is unwrapped).
+  const codex = r.toRow({ tool_name: 'exec_command', tool_args: { cmd: 'bash -lc "git commit -m x"' }, message_created_at: TS })
+  assert.ok(codex)
+  assert.equal(codex.natural_key, 'git')
+})
+
+test('Program node mints nothing when the facet cannot be cleanly bounded (fail-closed)', () => {
+  const r = rule('node', 'Program')
+  assert.equal(r.toRow({ tool_name: 'Read', tool_args: { command: 'git status' }, message_created_at: TS }), null, 'non-shell tool')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: {}, message_created_at: TS }), null, 'no command')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: '{bad json', message_created_at: TS }), null, 'malformed args')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: { command: '12345' }, message_created_at: TS }), null, 'all-numeric argv[0]')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: { command: '"has space" x' }, message_created_at: TS }), null, 'un-gateable token')
+})
+
+test('Program node parses tool_args arriving as a JSON string', () => {
+  const row = rule('node', 'Program').toRow({ tool_name: 'exec_command', tool_args: '{"cmd":"npm run build"}', message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, 'npm')
+})
+
+test('invoked edge wires Session -> Program ids and carries no props', () => {
+  const r = rule('edge', 'invoked')
+  const row = r.toRow({ session_id: 'sess-1', tool_name: 'Bash', tool_args: { command: 'git push origin main' }, message_created_at: TS })
+  assert.ok(row)
+  const src = nodeId('Session', 'sess-1')
+  const dst = nodeId('Program', 'git')
+  assert.equal(row.src_id, src)
+  assert.equal(row.dst_id, dst)
+  assert.equal(row.edge_id, edgeId(src, 'invoked', dst), 'edge points at the Program node the node rule mints')
+  assert.equal(row.src_type, 'Session')
+  assert.equal(row.dst_type, 'Program')
+  assert.equal(row.props, null)
+  assert.deepEqual(row.source_keys, { session_id: 'sess-1', tool_name: 'Bash', program: 'git' })
+})
+
+test('invoked edge skips rows missing the session or an un-gateable program', () => {
+  const r = rule('edge', 'invoked')
+  assert.equal(r.toRow({ session_id: null, tool_name: 'Bash', tool_args: { command: 'git status' }, message_created_at: TS }), null)
+  assert.equal(r.toRow({ session_id: 'sess-1', tool_name: 'Bash', tool_args: { command: '   ' }, message_created_at: TS }), null)
+  assert.equal(r.toRow({ session_id: 'sess-1', tool_name: 'Read', tool_args: { command: 'git status' }, message_created_at: TS }), null)
 })
