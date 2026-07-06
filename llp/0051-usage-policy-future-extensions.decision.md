@@ -16,7 +16,12 @@
 > **Update (2026-07-03):** the ephemeral per-session opt-out has since been
 > promoted to its own spec, [LLP 0066](./0066-session-opt-out.spec.md); this
 > document retains it only as historical context ([§session-opt-out](#session-opt-out)).
-> `local-only` remains deferred.
+>
+> **Update (2026-07-06):** `local-only` has since been promoted to
+> [LLP 0070](./0070-local-only-export-seam.decision.md) (shipped, export-seam,
+> derived from `cwd`) and is driven by an interactive login picker
+> ([LLP 0069](./0069-local-only-dir-selection.spec.md)); this document retains it
+> as historical context ([§local-only](#local-only)).
 
 ## Why this is written now
 
@@ -27,6 +32,13 @@ require a repaint — chiefly the file-format
 shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)).
 
 ## Deferred 1: the `local-only` class {#local-only}
+
+**Promoted to [LLP 0070](./0070-local-only-export-seam.decision.md) on
+2026-07-06**, driven by the interactive login picker
+([LLP 0069](./0069-local-only-dir-selection.spec.md)). The notes below are the
+original deferred sketch, kept for provenance. LLP 0070 supersedes cost (1): no
+additive cache column is needed — the `local-only` verdict is derived from the
+partition's existing `cwd` at export time, not stamped at capture.
 
 **Intent.** A scope marked `local-only` is recorded into the local cache (so it
 is queryable locally) but is **never exported or forwarded** — sinks, central
@@ -84,7 +96,9 @@ intact rather than moving provider awareness into the gateway.
 
 ## Status
 
-`local-only` ([§local-only](#local-only)) is **Draft / not scheduled**. The
+`local-only` ([§local-only](#local-only)) has been **promoted to
+[LLP 0070](./0070-local-only-export-seam.decision.md)** (shipped) and is driven by
+[LLP 0069](./0069-local-only-dir-selection.spec.md). The
 ephemeral per-session opt-out ([§session-opt-out](#session-opt-out)) has been
 **promoted to [LLP 0066](./0066-session-opt-out.spec.md)**. This document exists
 today so V1's reviewers can confirm the V1 design does not foreclose either.
