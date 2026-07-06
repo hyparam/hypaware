@@ -227,6 +227,7 @@ export async function activate(ctx) {
     'hypaware-ai-improvement-report',
     'hypaware-ai-security-report',
     'hypaware-ai-spend-report',
+    'hypaware-report-to-html',
   ]) {
     ctx.skills.register({
       name: skillName,

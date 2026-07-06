@@ -1,0 +1,570 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  --fg: #12110f;
+  --muted: #6b6a66;
+  --faint: #94938d;
+  --bg: #f7f7f4;
+  --surface: #ffffff;
+  --soft: #f1f1ec;
+  --border: #e4e3db;
+  --border-soft: rgba(18,17,15,0.09);
+  --accent: #2a63c9;
+  --accent-ink: #1c4aa0;
+  --accent-soft: #eaf0fb;
+  --code-bg: #f2f3f6;
+  --good: #0a7d47;
+  --good-soft: #e6f4ec;
+  --warn: #b26a00;
+  --warn-soft: #fbf0dc;
+  --crit: #c0392b;
+  --crit-soft: #fbeae7;
+  --track: #ecece6;
+  --max: 940px;
+  --shadow: 0 1px 2px rgba(18,17,15,0.05), 0 8px 24px rgba(18,17,15,0.06);
+  --shadow-sm: 0 1px 2px rgba(18,17,15,0.05);
+  --display: "Space Grotesk", system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #f4f3ee;
+    --muted: #a8a79d;
+    --faint: #7f7e76;
+    --bg: #100f0e;
+    --surface: #1a1917;
+    --soft: #201f1c;
+    --border: #2e2d2a;
+    --border-soft: rgba(255,255,255,0.10);
+    --accent: #6a9cf0;
+    --accent-ink: #9dbdf6;
+    --accent-soft: #172538;
+    --code-bg: #171614;
+    --good: #46c489;
+    --good-soft: #12271d;
+    --warn: #e5a94e;
+    --warn-soft: #2a2110;
+    --crit: #ec7a6e;
+    --crit-soft: #2c1613;
+    --track: #2a2926;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 10px 30px rgba(0,0,0,0.35);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0 auto;
+  max-width: var(--max);
+  padding: clamp(1.6rem, 4vw, 3.4rem) clamp(1rem, 4vw, 1.8rem) 6rem;
+  color: var(--fg);
+  background: var(--bg);
+  font: 16px/1.62 var(--body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---- Headings ---------------------------------------------------------- */
+h1, h2, h3, h4 {
+  font-family: var(--display);
+  line-height: 1.16;
+  font-weight: 600;
+  margin: 2.4rem 0 0.8rem;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+h1 { font-size: clamp(2rem, 5vw, 2.8rem); font-weight: 700; margin-top: 0.2rem; letter-spacing: -0.03em; }
+h2 { font-size: 1.5rem; margin-top: 2.8rem; padding-bottom: 0.45rem; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.2rem; }
+h4 { font-size: 0.95rem; color: var(--muted); font-family: var(--body); text-transform: uppercase; letter-spacing: 0.06em; }
+
+p, ul, ol { margin: 0.75rem 0; }
+li { margin: 0.3rem 0; }
+p { text-wrap: pretty; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+strong { font-weight: 640; color: var(--fg); }
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 2.4rem 0;
+}
+
+/* ---- Lead paragraph: the bold thesis right under an h1 ----------------- */
+h1 + p > strong:only-child,
+h1 + p strong:only-child {
+  font-weight: 600;
+}
+h1 + p {
+  font-family: var(--display);
+  font-size: clamp(1.12rem, 2.4vw, 1.4rem);
+  line-height: 1.4;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  color: var(--fg);
+  margin: 0.4rem 0 1.6rem;
+  padding: 1.15rem 1.35rem 1.15rem 1.5rem;
+  background: linear-gradient(180deg, var(--accent-soft), color-mix(in srgb, var(--accent-soft) 45%, var(--surface)));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+  text-wrap: pretty;
+}
+h1 + p strong { font-weight: 600; color: var(--fg); }
+
+/* ---- Tables ------------------------------------------------------------ */
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 1.3rem 0;
+  font-size: 0.92rem;
+  display: block;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+th, td {
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0.62rem 0.9rem;
+  text-align: left;
+  vertical-align: top;
+}
+tbody tr:last-child td { border-bottom: 0; }
+thead th {
+  background: var(--soft);
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+tbody tr:nth-child(even) { background: color-mix(in srgb, var(--soft) 45%, transparent); }
+td:not(:first-child), th:not(:first-child) { font-variant-numeric: tabular-nums; }
+
+/* ---- Code -------------------------------------------------------------- */
+code {
+  background: var(--code-bg);
+  padding: 0.12em 0.38em;
+  border-radius: 5px;
+  font-size: 0.86em;
+  font-family: var(--mono);
+  border: 1px solid var(--border-soft);
+}
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  line-height: 1.5;
+  box-shadow: var(--shadow-sm);
+}
+pre code { background: none; padding: 0; font-size: 0.83rem; border: 0; }
+
+@media (prefers-color-scheme: dark) {
+  pre code.sourceCode span,
+  pre code span { color: var(--fg) !important; font-weight: inherit !important; }
+  pre code.sourceCode span.co,
+  pre code.sourceCode span.do,
+  pre code.sourceCode span.cv,
+  pre code.sourceCode span.an { color: var(--muted) !important; font-style: italic; }
+  pre code.sourceCode span.in,
+  pre code.sourceCode span.fu { color: var(--accent-ink) !important; }
+}
+
+/* ---- Blockquote -------------------------------------------------------- */
+blockquote {
+  margin: 1.1rem 0;
+  padding: 0.6rem 1.15rem;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 10px 10px 0;
+  color: var(--fg);
+}
+blockquote p { margin: 0.35rem 0; }
+
+/* ---- Top nav ----------------------------------------------------------- */
+.topnav {
+  margin: 0 0 1.9rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.01em;
+}
+.topnav a { color: var(--muted); font-weight: 500; }
+.topnav a:hover { color: var(--accent); }
+
+/* ---- Subtitle h2 right under the title reads as a kicker --------------- */
+h1 + h2 {
+  border: 0;
+  margin-top: 0.1rem;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  text-transform: none;
+}
+
+/* ====================================================================== */
+/*  DATA-REPORT COMPONENTS (added via class in the HTML)                    */
+/* ====================================================================== */
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 0.4rem;
+}
+
+/* ---- Metric card grid -------------------------------------------------- */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem;
+  margin: 1.6rem 0;
+}
+.metric {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.05rem 1.15rem 1.1rem;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  overflow: hidden;
+}
+.metric::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+.metric.is-crit::before { background: var(--crit); }
+.metric.is-good::before { background: var(--good); }
+.metric.is-warn::before { background: var(--warn); }
+.metric .label {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+  line-height: 1.35;
+}
+.metric .value {
+  font-family: var(--display);
+  font-size: clamp(1.9rem, 4vw, 2.5rem);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.metric.is-crit .value { color: var(--crit); }
+.metric.is-good .value { color: var(--good); }
+.metric.is-warn .value { color: var(--warn); }
+.metric .value small { font-size: 0.5em; font-weight: 600; letter-spacing: 0; color: var(--muted); margin-left: 0.15em; }
+.metric .note {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* ---- Callouts ---------------------------------------------------------- */
+.callout {
+  display: flex;
+  gap: 0.85rem;
+  margin: 1.4rem 0;
+  padding: 0.95rem 1.15rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.callout.crit { border-left-color: var(--crit); background: color-mix(in srgb, var(--crit-soft) 60%, var(--surface)); }
+.callout.good { border-left-color: var(--good); background: color-mix(in srgb, var(--good-soft) 60%, var(--surface)); }
+.callout.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn-soft) 60%, var(--surface)); }
+.callout .tag {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.18rem 0.5rem;
+  border-radius: 6px;
+  height: fit-content;
+  background: var(--accent);
+  color: #fff;
+  white-space: nowrap;
+}
+.callout.crit .tag { background: var(--crit); }
+.callout.good .tag { background: var(--good); }
+.callout.warn .tag { background: var(--warn); }
+.callout .body { margin: 0; font-size: 0.92rem; line-height: 1.5; }
+.callout .body :first-child { margin-top: 0; }
+.callout .body :last-child { margin-bottom: 0; }
+
+/* ---- Bar chart (horizontal, div-based) --------------------------------- */
+.barchart {
+  margin: 1.5rem 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.2rem 1.3rem;
+  box-shadow: var(--shadow-sm);
+}
+.barchart .chart-title {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 1.1rem;
+}
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 26%) 1fr auto;
+  align-items: center;
+  gap: 0.85rem;
+  margin: 0.6rem 0;
+}
+.bar-row .bar-label {
+  font-size: 0.86rem;
+  color: var(--fg);
+  line-height: 1.25;
+  text-align: right;
+}
+.bar-row .bar-label small { display: block; color: var(--muted); font-size: 0.78rem; }
+.bar-track {
+  position: relative;
+  height: 26px;
+  background: var(--track);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.bar-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: var(--w, 0%);
+  background: var(--accent);
+  border-radius: 7px;
+  min-width: 3px;
+}
+.bar-fill.crit { background: var(--crit); }
+.bar-fill.good { background: var(--good); }
+.bar-fill.warn { background: var(--warn); }
+.bar-fill.muted { background: color-mix(in srgb, var(--muted) 45%, var(--track)); }
+.bar-row .bar-value {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.chart-foot {
+  margin: 1rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+/* ---- Stacked single bar (share breakdown) ------------------------------ */
+.stackbar {
+  display: flex;
+  height: 34px;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1rem 0 0.7rem;
+  border: 1px solid var(--border-soft);
+}
+.stackbar span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 0.8rem;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.stack-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.stack-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+.stack-legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+/* ---- Gauge / donut (conic-gradient) ------------------------------------ */
+.gauge {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  margin: 1.5rem 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.3rem 1.4rem;
+  box-shadow: var(--shadow-sm);
+}
+.gauge .ring {
+  flex: none;
+  position: relative;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: conic-gradient(var(--gc, var(--crit)) calc(var(--p, 0) * 1%), var(--track) 0);
+  display: grid;
+  place-items: center;
+}
+.gauge .ring::after {
+  content: "";
+  position: absolute;
+  inset: 19px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+.gauge .ring b {
+  position: relative;
+  z-index: 1;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+  color: var(--gc, var(--crit));
+  font-variant-numeric: tabular-nums;
+}
+.gauge .g-body { margin: 0; }
+.gauge .g-body p { margin: 0.3rem 0; }
+.gauge .g-body .g-head {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+/* ---- Recommendation cards (index) -------------------------------------- */
+.rec-list { display: grid; gap: 1rem; margin: 1.6rem 0; }
+.rec {
+  display: block;
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.3rem 1.4rem 1.3rem 4.3rem;
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+a.rec:hover { text-decoration: none; box-shadow: var(--shadow); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); transform: translateY(-1px); }
+.rec .num {
+  position: absolute;
+  left: 1.3rem; top: 1.35rem;
+  width: 2.1rem; height: 2.1rem;
+  display: grid; place-items: center;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+.rec h3 { margin: 0 0 0.35rem; font-size: 1.16rem; }
+.rec .rec-kind {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 0.55rem;
+}
+.rec p { margin: 0.4rem 0 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
+.rec p strong { color: var(--fg); }
+.rec .rec-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.4rem;
+  margin: 0.9rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border-soft);
+}
+.rec .rec-stat { line-height: 1.15; }
+.rec .rec-stat b {
+  display: block;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.35rem;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.rec .rec-stat.crit b { color: var(--crit); }
+.rec .rec-stat.good b { color: var(--good); }
+.rec .rec-stat.warn b { color: var(--warn); }
+.rec .rec-stat span {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rec .rec-go {
+  margin-top: 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--accent);
+}
+a.rec:hover .rec-go { text-decoration: underline; }
+
+/* ---- Footer index links ------------------------------------------------ */
+.pagelinks {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 2;
+}
+
+/* ---- Responsive -------------------------------------------------------- */
+@media (max-width: 560px) {
+  .bar-row { grid-template-columns: 1fr; gap: 0.25rem; }
+  .bar-row .bar-label { text-align: left; }
+  .gauge { flex-direction: column; align-items: flex-start; }
+  .rec { padding-left: 1.4rem; padding-top: 3.6rem; }
+  .rec .num { top: 1.3rem; }
+}
+
+/* ---- Print ------------------------------------------------------------- */
+@media print {
+  body { max-width: none; color: #000; background: #fff; }
+  .metric, .callout, .barchart, .gauge, .rec, table, pre, blockquote { break-inside: avoid; box-shadow: none; }
+  .rec { border-color: #ccc; }
+  a { color: #000; }
+}
