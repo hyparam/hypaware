@@ -139,6 +139,98 @@ test('project() escalates a fail-safe clamp to a warn-level drop with the declar
   assert.match(String(drop.fields?.warn), /local-only/)
 })
 
+// ---------------------------------------------------------------------
+// Session opt-out (LLP 0066): a second, independent match key at the same
+// USAGE_POLICY_DROP seam, keyed on the STAMPED session_id
+// (metadata.session_id ?? thread id) rather than cwd.
+// ---------------------------------------------------------------------
+
+test('project() drops every conversation_id thread under one ignored session_id (documents the over-drop, R8)', () => {
+  const projector = createCodexExchangeProjector()
+  const ignoredSessionId = 'session-optout'
+  const ctx = {
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    isSessionIgnored: (/** @type {string} */ id) => id === ignoredSessionId,
+  }
+
+  // Two DIFFERENT conversation_id threads (thread-a, thread-b) share ONE
+  // session_id. A Codex session_id is a container of many threads
+  // (LLP 0066#scope), so an ignored session suppresses ALL of them: per-
+  // thread granularity is a spec non-goal.
+  const threadA = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ignoredSessionId, thread_id: 'thread-a' }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), ctx)
+  const threadB = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ignoredSessionId, thread_id: 'thread-b' }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go again' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), ctx)
+
+  assert.equal(threadA, USAGE_POLICY_DROP)
+  assert.equal(threadB, USAGE_POLICY_DROP)
+})
+
+test('project() leaves a different session in the same run unaffected', () => {
+  const projector = createCodexExchangeProjector()
+  const ignoredSessionId = 'session-optout-2'
+  const ctx = {
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    isSessionIgnored: (/** @type {string} */ id) => id === ignoredSessionId,
+  }
+
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: 'session-clean', thread_id: 'thread-c' }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), ctx))
+
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'an unignored session is projected normally')
+  assert.equal(projection.session_id, 'session-clean')
+})
+
+test('project() emits a usage_policy_drop log with policy_source: session_opt_out and the matched session_id', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const infos = []
+  const projector = createCodexExchangeProjector()
+  const log = {
+    debug() {},
+    warn() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    info: (message, fields) => { infos.push({ message, fields }) },
+  }
+  const ignoredSessionId = 'session-optout-log'
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ignoredSessionId, thread_id: 'thread-x' }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), { log, isSessionIgnored: (/** @type {string} */ id) => id === ignoredSessionId })
+
+  assert.equal(projection, USAGE_POLICY_DROP)
+  const drop = infos.find((e) => e.message === 'plugin.codex.usage_policy_drop')
+  assert.ok(drop, 'expected a usage_policy_drop log entry')
+  assert.equal(drop.fields?.policy_source, 'session_opt_out')
+  assert.equal(drop.fields?.session_id, ignoredSessionId)
+})
+
 test('match() accepts the three transports it owns and rejects others', () => {
   const projector = createCodexExchangeProjector()
   assert.equal(projector.match(exchange({ path: '/v1/chat/completions' })), true)
