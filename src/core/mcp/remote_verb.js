@@ -26,7 +26,7 @@ import { createHttpMcpClient, isAuthStatus } from './client.js'
  */
 export async function runRemoteVerb({ verb, params, target, ctx }) {
   // Built-in targets (the shipped central server) layered under the user's
-  // own `query.remotes`, so `--remote hyparam` works with no `remote add`.
+  // own `query.remotes`, so `--remote hyperparam` works with no `remote add`.
   const remotes = effectiveRemotes(ctx.config)
   const entry = remotes[target]
   if (!entry) {

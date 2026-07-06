@@ -6,7 +6,7 @@
 
 /**
  * Targets shipped preconfigured with the client, so an operator can attach to
- * the Hyparam-hosted central server with just `hyp remote login` +
+ * the Hyperparam-hosted central server with just `hyp remote login` +
  * `hyp <verb> --remote`, no `hyp remote add` first. A user's own
  * `query.remotes` entry of the same name wins (see effectiveRemotes), so this
  * is a default, not a lock. The URL is non-secret and committable, exactly as
@@ -16,14 +16,14 @@
  * @type {Record<string, QueryRemoteTarget>}
  */
 export const BUILTIN_REMOTES = {
-  hyparam: { url: 'https://hypaware.hyperparam.app' },
+  hyperparam: { url: 'https://hypaware.hyperparam.app' },
 }
 
 /**
  * Name of the shipped default target, used by bare `--remote` (and bare
  * `hyp remote login`) when the local config sets no `query.default_remote`.
  */
-export const BUILTIN_DEFAULT_REMOTE = 'hyparam'
+export const BUILTIN_DEFAULT_REMOTE = 'hyperparam'
 
 /**
  * The effective target registry: shipped built-ins with the user's

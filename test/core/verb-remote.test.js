@@ -95,9 +95,9 @@ test('bare --remote routes to the shipped default target (central server)', asyn
     if (req.method === 'tools/call') return json({ jsonrpc: '2.0', id: req.id, result: { structuredContent: { columns: ['n'], rows: [{ n: 1 }] }, isError: false } })
     return json({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'no' } })
   })
-  // No default_remote and no 'hyparam' entry in config: bare --remote falls to
-  // the shipped built-in, whose per-target token env is HYP_REMOTE_TOKEN_HYPARAM.
-  const { ctx, out } = ctxWith({ HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_HYPARAM: 'tok' })
+  // No default_remote and no 'hyperparam' entry in config: bare --remote falls to
+  // the shipped built-in, whose per-target token env is HYP_REMOTE_TOKEN_HYPERPARAM.
+  const { ctx, out } = ctxWith({ HYP_HOME: '/tmp/none', HYP_REMOTE_TOKEN_HYPERPARAM: 'tok' })
   const code = await cmd.run(['SELECT 1', '--remote', '--format', 'json'], ctx)
   assert.equal(code, 0)
   assert.ok(urls.length > 0)

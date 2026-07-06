@@ -20,8 +20,8 @@
 ### D1 — A built-in target, shipped in the client
 
 <a id="builtin"></a>The client ships a constant registry of built-in targets
-(`BUILTIN_REMOTES`), currently the single entry `hyparam →
-https://hypaware.hyperparam.app`, plus `BUILTIN_DEFAULT_REMOTE = 'hyparam'`.
+(`BUILTIN_REMOTES`), currently the single entry `hyperparam →
+https://hypaware.hyperparam.app`, plus `BUILTIN_DEFAULT_REMOTE = 'hyperparam'`.
 Target resolution reads the **effective** registry: built-ins with the user's
 `query.remotes` layered on top, so a user entry of the same name repoints or
 shadows a built-in (`effectiveRemotes`). The URL is non-secret and committable,
@@ -56,7 +56,7 @@ default to the central server without restating its URL.
 
 - Onboarding drops to `hyp remote login` then `hyp <verb> --remote`; no
   `remote add`, no URL to copy.
-- Credentials are still per-target (`HYP_REMOTE_TOKEN_HYPARAM`, or the stored
-  `0600` session under the `hyparam` key), unchanged from LLP 0033 §credentials.
+- Credentials are still per-target (`HYP_REMOTE_TOKEN_HYPERPARAM`, or the stored
+  `0600` session under the `hyperparam` key), unchanged from LLP 0033 §credentials.
 - Changing the central URL is a client release (it is compiled in). A user who
-  must override it before then adds a `query.remotes.hyparam` entry, which wins.
+  must override it before then adds a `query.remotes.hyperparam` entry, which wins.
