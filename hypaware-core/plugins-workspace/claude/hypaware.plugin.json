@@ -39,7 +39,8 @@
       { "name": "hypaware-ai-adoption-report", "clients": ["claude"] },
       { "name": "hypaware-ai-improvement-report", "clients": ["claude"] },
       { "name": "hypaware-ai-security-report", "clients": ["claude"] },
-      { "name": "hypaware-ai-spend-report", "clients": ["claude"] }
+      { "name": "hypaware-ai-spend-report", "clients": ["claude"] },
+      { "name": "hypaware-report-to-html", "clients": ["claude"] }
     ],
     "agents": [
       { "name": "hypaware-analyst", "clients": ["claude"] }
