@@ -145,6 +145,25 @@ export function createClaudeExchangeProjector(opts) {
       // match a main-session or other-agent entry. @ref LLP 0026#decision
       const agentId = headerValue(headers, 'x-claude-code-agent-id')
       const sessionId = resolveClaudeSessionId(reqBody, headers)
+      // @ref LLP 0066#enforcement [implements]: session opt-out drop, keyed on
+      // the SAME resolved session_id the row is stamped with (R5): when
+      // present, resolveAnthropicConversationId returns exactly this value as
+      // the session_id column, and the hash fallback it uses otherwise can
+      // never be in the set (the skill only ever submits a real
+      // CLAUDE_CODE_SESSION_ID). Checked before any session-context or
+      // transcript fs work so an ignored exchange does none of it.
+      // @ref LLP 0050: second match key, same adapter seam as the .hypignore
+      // drop below; either match suppresses (R7), they do not interact.
+      if (sessionId && ctx.isSessionIgnored?.(sessionId)) {
+        ctx.log.info('plugin.claude.usage_policy_drop', {
+          component: 'claude',
+          operation: 'usage_policy_drop',
+          policy_source: 'session_opt_out',
+          session_id: sessionId,
+          exchange_id: input.exchange_id,
+        })
+        return USAGE_POLICY_DROP
+      }
       const messages = anthropicMessages(
         reqBody,
         responseBody,
