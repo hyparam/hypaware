@@ -79,6 +79,44 @@ export function deriveIdentityBase(url) {
   }
 }
 
+/** The path hypaware-server mounts its MCP Streamable-HTTP route at. */
+const MCP_PATH = '/v1/mcp'
+
+/**
+ * Derive the MCP endpoint a target's remote tool calls POST to, from the one
+ * registered target URL (LLP 0084 D1). A target is registered with the server's
+ * **base** URL - the built-in `hyperparam` ships exactly that - and the server
+ * serves MCP only at `<base>/v1/mcp`, so a base URL POSTed verbatim 404s on
+ * every remote verb. Back-compat (LLP 0084 D2): a URL whose path already ends in
+ * `/v1/mcp` (the form LLP 0033 originally documented) is honored verbatim;
+ * anything else is treated as a base and `/v1/mcp` is appended after its path,
+ * preserving any path prefix. A trailing slash on either form is normalized away
+ * so the endpoint never double-slashes. An unparseable URL is returned unchanged
+ * so this never masks a bad URL - fetch fails the same way it did before.
+ *
+ * The sibling of {@link deriveIdentityBase}: both derive a server endpoint from
+ * the single registered target URL, so no second URL is ever configured.
+ *
+ * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
+ * @returns {string}
+ * @ref LLP 0084#derive [implements]: MCP endpoint derives from the registered base; a path already ending /v1/mcp is honored verbatim
+ */
+export function deriveMcpEndpoint(url) {
+  /** @type {URL} */
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return url
+  }
+  const trimmedPath = parsed.pathname.replace(/\/+$/, '')
+  // Already a full endpoint (the originally-documented form): honor it verbatim,
+  // only normalizing a trailing slash. Otherwise treat the URL as a base and
+  // append the MCP path after any existing path prefix.
+  parsed.pathname = trimmedPath.endsWith(MCP_PATH) ? trimmedPath : `${trimmedPath}${MCP_PATH}`
+  return parsed.toString()
+}
+
 /**
  * @param {string} stateDir
  * @returns {string}

@@ -152,6 +152,14 @@ MVP. If that case arises, an optional explicit `identityUrl` on the target is th
 additive fix, defaulting to origin-derive. We do not build server-advertised discovery
 in this chunk.
 
+> **Related: [LLP 0084](./0084-mcp-endpoint-from-base.decision.md).** The MCP
+> endpoint is now derived from the same registered `url` too (`<base>/v1/mcp`),
+> the sibling of this origin-derivation, so a target stays a single URL. Unlike
+> D6's origin-root identity derive, the MCP derive *preserves* a path prefix
+> (`host/hypaware` -> `host/hypaware/v1/mcp`), covering the path-prefix open
+> question for the MCP side; identity under a prefix is still the `identityUrl`
+> follow-up above.
+
 ### D7: Org selection is a `--org` selector; surfaced errors are explained
 
 <a id="d7"></a> 
