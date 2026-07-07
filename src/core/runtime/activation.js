@@ -14,6 +14,8 @@ import { createBackfillMaterializerRegistry, createBackfillRegistry } from '../r
 import { createSinkRegistry } from '../registry/sinks.js'
 import { createSourceRegistry } from '../registry/sources.js'
 import { createQueryStorageService } from '../cache/storage.js'
+import { createUsagePolicyResolver } from '../usage-policy/matcher.js'
+import { localOnlyListPath } from '../usage-policy/local_only.js'
 import { isSafeContributionName } from './contribution_names.js'
 
 /**
@@ -56,6 +58,11 @@ export function createKernelRuntime(opts = {}) {
     cacheRoot,
     getDeclaration: (dataset) => query.getDataset(dataset)?.cachePartitioning,
     getSettleHook: (dataset) => query.getDataset(dataset)?.settleBatch,
+    // @ref LLP 0070#enforce [implements]: every kernel boot enforces `local-only`
+    // at the shared export read. The resolver's second source is the
+    // machine-local list under `<stateDir>/usage-policy/` — and `cacheRoot` is
+    // `<stateDir>/cache`, so its parent is the state dir the list lives beside.
+    usagePolicyResolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(path.dirname(cacheRoot)) }),
   })
   const commands = opts.commandRegistry ?? createCommandRegistry()
   // The verb registry projects each verb into a CLI command on the shared

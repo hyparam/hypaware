@@ -51,6 +51,43 @@ function makeStorage(rowsByTable = {}) {
   }
 }
 
+/**
+ * Storage stub yielding a described entry sequence for one table: a payload
+ * `{ seq, id }` or a drop `{ seq, drop: true }` — a `local-only` row the export
+ * seam withheld (LLP 0070), carrying only the advancing `after`.
+ *
+ * @param {string} tablePath
+ * @param {Array<{ seq: number, id?: string, drop?: boolean }>} entries
+ */
+function makeDropStorage(tablePath, entries) {
+  return {
+    cacheRoot: CACHE_ROOT,
+    /** @param {string} tp */
+    tableExists: (tp) => tp === tablePath,
+    /** @param {string} tp @param {{ since?: { seq: string } }} [opts] */
+    readRowsSince(tp, opts) {
+      const list = tp === tablePath ? entries : []
+      const sinceSeq = opts?.since ? BigInt(opts.since.seq) : 0n
+      return {
+        async *[Symbol.asyncIterator]() {
+          let high = sinceSeq
+          for (const e of list) {
+            const seq = BigInt(e.seq)
+            if (seq <= sinceSeq) continue
+            if (seq > high) high = seq
+            const after = { v: 1, seq: high.toString() }
+            if (e.drop) yield { after, dropped: true }
+            else yield { row: { id: e.id }, after }
+          }
+        },
+      }
+    },
+    readRows() {
+      return { async *[Symbol.asyncIterator]() {} }
+    },
+  }
+}
+
 /** A fake encoder that drains `ctx.rows` (as every real encoder must). */
 function makeEncoder(format = 'jsonl') {
   return {
@@ -355,5 +392,34 @@ test('exportBatch re-PUTs the same object key when the watermark is lost (idempo
 
   assert.equal(keys.length, 2, 'the row is re-PUT after a lost watermark')
   assert.equal(keys[0], keys[1], 'the re-PUT targets the same object key (idempotent overwrite)')
+  await sink.close()
+})
+
+test('drop-only tick: no object is PUT, but the watermark advances past the withheld rows (LLP 0070)', async (t) => {
+  const stateDir = await tmpStateDir()
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
+  const tablePath = `${CACHE_ROOT}/datasets/d/source=x`
+  const storage = makeDropStorage(tablePath, [{ seq: 1, drop: true }, { seq: 2, drop: true }])
+  const registration = await activatePlugin(/** @type {any} */ (storage))
+  let puts = 0
+  const fakeClient = {
+    async putObject() { puts += 1; throw new Error('putObject must not be called for an all-dropped partition') },
+    destroy() {},
+  }
+  const sink = await registration.create(
+    makeSinkCtx({ clientFactory: async () => ({ client: fakeClient, credential_source_kind: 'injected' }), stateDir })
+  )
+
+  const result = await sink.exportBatch({ batchId: 'b1', partitions: [partitionFor('d')] }, {})
+  assert.equal(result.status, 'exported')
+  assert.equal(result.partitionsExported, 0, 'a withheld-only partition PUTs nothing')
+  assert.equal(puts, 0, 'the S3 client is never called')
+
+  const wm = JSON.parse(
+    await fs.readFile(path.join(stateDir, 'sink-instances', 'test', 'watermarks', 'd', 'source=x.json'), 'utf8')
+  )
+  assert.equal(wm.continuation.seq, '2', 'the watermark advanced past the withheld tail')
+  assert.equal(wm.exportedRowCount, 0, 'a withheld row is never counted as exported')
+
   await sink.close()
 })

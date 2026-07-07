@@ -1168,11 +1168,24 @@ export interface QueryStorageService {
    * derive `after`, then stripped. `after` is a monotonic high-water mark, so a
    * null-seq legacy row carries the prior watermark forward unchanged. See
    * LLP 0040 §2.
+   *
+   * The element type is a discriminated union so the shared export read can
+   * withhold `local-only` rows (LLP 0070 #enforce) without wedging the
+   * watermark: a `{ dropped: true }` entry carries the running high-water
+   * `after` but **no** row payload — the row was recorded locally and stays
+   * locally queryable, but no sink can forward it because the payload never
+   * leaves the cache read. Every consumer still advances its cursor across the
+   * drop, so a partition tail of withheld rows checkpoints once and is durably
+   * passed — not re-scanned each tick, not re-sent if the directory is later
+   * un-excluded (LLP 0070 #incremental: drop-but-advance).
    */
   readRowsSince(
     tablePath: string,
     opts: { since?: SinkContinuation; columns?: string[]; includeLegacy?: boolean },
-  ): AsyncIterable<{ row: Record<string, unknown>; after: SinkContinuation }>
+  ): AsyncIterable<
+    | { row: Record<string, unknown>; after: SinkContinuation; dropped?: undefined }
+    | { row?: undefined; after: SinkContinuation; dropped: true }
+  >
 }
 
 export interface CachePartitionMeta {

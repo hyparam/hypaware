@@ -303,10 +303,23 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // once a watermark exists they are already shipped, so exclude them and the
   // legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
   const includeLegacy = since === undefined
-  for await (const { row, after } of storage.readRowsSince(tablePath, { since, includeLegacy })) {
-    const line = JSON.stringify(serializeRow(row))
+  // Rows the export seam withheld as `local-only` (LLP 0070): never buffered,
+  // never shipped, but each still advances `lastAfter` so the watermark moves
+  // across them.
+  let droppedRowCount = 0
+  for await (const entry of storage.readRowsSince(tablePath, { since, includeLegacy })) {
+    // @ref LLP 0070#incremental [constrained-by] — advance the cursor across every
+    // entry, including a dropped (withheld) row, so a partition tail of
+    // local-only rows checkpoints once and is durably passed (not re-scanned, not
+    // re-sent on un-exclusion). Ship-first/advance-second is unchanged: a dropped
+    // row is never shipped, so moving past it needs no ack.
+    lastAfter = entry.after
+    if (entry.dropped) {
+      droppedRowCount += 1
+      continue
+    }
+    const line = JSON.stringify(serializeRow(entry.row))
     lines.push(line)
-    lastAfter = after
     // Count UTF-8 bytes (not UTF-16 code units) so the budget bounds the
     // actual wire size for multibyte payloads, e.g. CJK `content_text`.
     pendingBytes += Buffer.byteLength(line, 'utf8') + 1
@@ -325,10 +338,22 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // server ledger dedupes the already-acked prefix. Advancing per chunk to the
   // running-max `after` would skip lower-seq rows in a later un-acked chunk
   // whenever the scan is not seq-ordered (LLP 0040 §4 risk #3).
-  if (watermarkKey && lastAfter && shippedRowCount > 0) {
+  // @ref LLP 0070#incremental [constrained-by] — widen the gate so a tick that
+  // only dropped rows (shipped nothing) still checkpoints: otherwise a partition
+  // ending in a run of local-only rows would never advance past them and every
+  // tick would re-scan-and-re-drop the same tail forever. `exportedRowCount`
+  // still counts only rows actually shipped — a dropped row was never exported.
+  if (watermarkKey && lastAfter && (shippedRowCount > 0 || droppedRowCount > 0)) {
     await watermarks.write(watermarkKey, {
       continuation: lastAfter,
       exportedRowCount: exportedRowCount + shippedRowCount,
+    })
+  }
+  if (droppedRowCount > 0) {
+    log.debug('central.forward.dropped', {
+      hyp_sink_signal: signal,
+      hyp_dataset: partition.dataset,
+      dropped_row_count: droppedRowCount,
     })
   }
   return bytesWritten

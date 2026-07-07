@@ -199,6 +199,12 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       oldest_partition_date: report.cache.oldestDate,
     },
     recent_error_count: report.recentErrorCount,
+    // Machine-local local-only directory withholding (LLP 0069 R9). Null
+    // only when the exclusion list itself could not be read (see the
+    // `local_only_list_unreadable` diagnostic).
+    usage_policy: report.usagePolicy
+      ? { local_only_dir_count: report.usagePolicy.localOnlyDirCount }
+      : null,
     // Two-layer provenance (LLP 0031). Null on a host that never joined,
     // so the V1 JSON shape is unchanged for ordinary installs.
     config_layers: report.layered
@@ -337,6 +343,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   stdout.write(`  cache size:      ${report.cache.totalBytes} bytes\n`)
   stdout.write(`  datasets:        ${datasets.length}\n`)
   stdout.write(`  recent errors:   ${report.recentErrorCount}\n`)
+
+  // Never-silent withholding (LLP 0069 R9): only rendered when a directory
+  // is actually excluded, so an ordinary host's text output is unchanged.
+  if (report.usagePolicy && report.usagePolicy.localOnlyDirCount > 0) {
+    stdout.write(
+      `  local-only:      withholding ${report.usagePolicy.localOnlyDirCount} directories from forwarding (recorded locally)\n`
+    )
+  }
 
   // Local entries the central layer overrides (LLP 0031): dropped at
   // merge, listed here with their reason. Loud, but not an outage signal.

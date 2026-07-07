@@ -79,7 +79,10 @@ test('readRowsSince pairs each row with a monotonic after token and strips the s
 
   /** @type {{ row: Record<string, unknown>, after: { v: 1, seq: string } }[]} */
   const seen = []
-  for await (const pair of svc.readRowsSince(tablePath, {})) seen.push(pair)
+  for await (const pair of svc.readRowsSince(tablePath, {})) {
+    assert.ok(!pair.dropped && pair.row, 'no usage-policy resolver ⇒ every entry carries a row')
+    seen.push({ row: pair.row, after: pair.after })
+  }
   assert.equal(seen.length, 3)
 
   let prev = -1n
@@ -114,6 +117,7 @@ test('readRowsSince pairs each row with a monotonic after token and strips the s
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for await (const { row, after } of svc.readRowsSince(tablePath, { since: watermark })) {
+    assert.ok(row, 'no usage-policy resolver ⇒ no drops')
     fresh.push(row)
     assert.ok(BigInt(after.seq) > BigInt(watermark.seq))
   }
@@ -158,6 +162,7 @@ test('null-seq (legacy) rows are always treated as new and never skipped', async
   /** @type {{ id: number, after: string }[]} */
   const pairs = []
   for await (const { row, after } of svc.readRowsSince(dir, { since: { v: 1, seq: '5' } })) {
+    assert.ok(row, 'no usage-policy resolver ⇒ no drops')
     assert.ok(!(INGEST_SEQ_COLUMN.name in row))
     pairs.push({ id: Number(row.id), after: after.seq })
   }
@@ -184,6 +189,7 @@ test('a table with no seq column at all yields everything (pure legacy)', async 
   /** @type {{ id: number, after: string }[]} */
   const pairs = []
   for await (const { row, after } of svc.readRowsSince(dir, { since: { v: 1, seq: '999' } })) {
+    assert.ok(row, 'no usage-policy resolver ⇒ no drops')
     pairs.push({ id: Number(row.id), after: after.seq })
   }
   assert.deepEqual(pairs, [

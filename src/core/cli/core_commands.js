@@ -228,14 +228,15 @@ function buildCoreCommands() {
     },
     {
       name: 'ignore',
-      summary: 'Write a .hypignore so HypAware never records this folder subtree (--check reports status)',
-      usage: 'hyp ignore [path] [--check] [--json]',
+      summary:
+        'Write a .hypignore so HypAware never records this folder subtree, or --local-only to withhold from forwarding only (--check reports status)',
+      usage: 'hyp ignore [path] [--check] [--json] [--local-only]',
       run: runIgnore,
     },
     {
       name: 'unignore',
-      summary: 'Remove the governing .hypignore so HypAware records this folder subtree again',
-      usage: 'hyp unignore [path]',
+      summary: 'Remove the governing .hypignore (or --local-only list entry) so recording/forwarding resumes',
+      usage: 'hyp unignore [path] [--local-only]',
       run: runUnignore,
     },
     {

@@ -118,12 +118,22 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
           const prev = wmKey ? await watermarks.read(wmKey) : null
           const reader = await openIncrementalRows(storage, partition, prev?.continuation)
           if (reader.empty) {
-            // No new rows since the watermark ⇒ write no blob (0 bytes).
+            // @ref LLP 0070#incremental [constrained-by] — a drop-only tick writes no
+            // blob but MUST advance the watermark past the withheld rows, or the
+            // local-only tail re-scans forever (and would re-send on un-exclusion).
+            if (wmKey && reader.droppedRowCount > 0) {
+              await watermarks.write(wmKey, {
+                continuation: reader.lastAfter,
+                exportedRowCount: prev?.exportedRowCount ?? 0,
+              })
+            }
+            // No new payload rows since the watermark ⇒ write no blob (0 bytes).
             sinkCtx.log.debug('local-fs.export_partition.skip_empty', {
               hyp_plugin: PLUGIN_NAME,
               hyp_dataset: partition.dataset,
               hyp_sink_instance: sinkCtx.name,
               since_seq: reader.sinceSeq,
+              dropped_row_count: reader.droppedRowCount,
             })
             continue
           }
