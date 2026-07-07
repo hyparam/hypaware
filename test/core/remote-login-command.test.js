@@ -776,6 +776,10 @@ test('the local-only picker runs after enrollCentralSink provisions the sink on 
 test('on a fresh enroll the picker runs after attach+backfill and sees the now-populated cache, not the empty pre-enroll one (issue #281)', async () => {
   const hypHome = await tmpHome()
   const { ctx, out } = await makeCtx({ hypHome })
+  // Interactive login: the backfill wait exists only to fill an interactive
+  // picker's list, so it is gated on the picker's own TTY check. stdin defaults
+  // to a TTY; mark stderr one too so the wait runs and feeds the picker.
+  ctx.stderr.isTTY = true
   const login = /** @type {any} */ (async () => gatewaySession())
 
   /** @type {string[]} */
@@ -809,6 +813,37 @@ test('on a fresh enroll the picker runs after attach+backfill and sees the now-p
   // against the empty pre-enroll cache: the silent-skip bug of issue #281.
   assert.deepEqual(order, ['enroll', 'attach', 'picker'])
   assert.equal(pickerSawCount, 1, 'the picker must see the backfilled candidate, not an empty pre-enroll cache')
+  assert.match(out.join(''), /capturing @hypaware\/claude/)
+})
+
+test('a non-interactive fresh enroll skips the backfill wait even with clients attached (no dead 30s stall, issue #281)', async () => {
+  const hypHome = await tmpHome()
+  // The picker prompts on stderr, so a redirected stderr ('hyp remote login
+  // 2>file') makes it no-op even with a TTY stdin. stdin stays a TTY (a piped
+  // stdin would divert to the static-token path, never reaching the picker);
+  // stderr carries no isTTY. The backfill wait only feeds that picker, so it
+  // must be skipped rather than stall up to 30s for a list it will never show.
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // A client DOES attach - the only reason the interactive path would wait.
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+  let capturedCalled = false
+  const waitForCaptured = /** @type {any} */ (async () => { capturedCalled = true; return [{ cwd: '/work/proj' }] })
+  /** @type {any} */
+  let pickerArgs = null
+  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
+    pickerArgs = args
+    return { outcome: 'non_tty', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker })
+  assert.equal(code, 0)
+  assert.equal(capturedCalled, false, 'the backfill wait must be skipped on a non-TTY login (the picker will not prompt)')
+  // The picker still runs, enumerating the cache as-is (no injected list), and
+  // takes its own non-TTY durable-hint path.
+  assert.ok(pickerArgs, 'the picker still runs on a non-TTY login')
+  assert.equal(pickerArgs.listCandidates, undefined)
   assert.match(out.join(''), /capturing @hypaware\/claude/)
 })
 

@@ -20,7 +20,7 @@ import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed
 import { enrollCentralSink } from '../commands/central.js'
 import { listCapturedDirectories, runLocalOnlyPicker } from '../commands/local_only.js'
 import { originOf } from '../remote/gateway_seed.js'
-import { readAllStdin } from './stdio.js'
+import { isTty, readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
@@ -671,7 +671,16 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // would only burn its whole budget in silence. When nothing attached, skip
     // straight to the picker: it enumerates the cache as-is (empty on a fresh
     // box) and takes its durable-hint path immediately, no dead 30s wait.
-    if (attached.length > 0) {
+    //
+    // The wait is equally pointless on a non-interactive login: it exists only
+    // to fill the picker's candidate list, and the picker no-ops on a non-TTY
+    // stream (LLP 0072 #tty, local_only.js). So mirror the picker's exact TTY
+    // decision (`ctx.stdin ?? process.stdin`, `ctx.stderr`) here and skip the
+    // poll when it cannot prompt, so a scripted enroll never stalls up to
+    // CAPTURE_WAIT_DEFAULT_MS for a list it will never show; the picker still
+    // runs and takes its own durable-hint path immediately.
+    const canPromptPicker = isTty(ctx.stdin ?? process.stdin) && isTty(ctx.stderr)
+    if (attached.length > 0 && canPromptPicker) {
       const captured = await waitForCaptured({ ctx })
       await refineLocalOnly({ ctx, stateDir, picker, listCandidates: () => Promise.resolve(captured) })
     } else {
