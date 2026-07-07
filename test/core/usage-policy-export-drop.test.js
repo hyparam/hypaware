@@ -100,6 +100,45 @@ test('readRowsSince: local-only cwd rows are dropped from the payload but the cu
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
 
+// A `columns` projection that omits `cwd` must not be able to blind the export
+// filter: the filter reads each row's own `cwd`, so `readRowsSince` forces `cwd`
+// into the scan whenever a resolver is configured and strips it back out of any
+// yielded row the caller didn't request it in (LLP 0070 #enforce).
+test('readRowsSince: a `columns` projection omitting cwd still withholds local-only rows, and full rows come back without a cwd field', async () => {
+  const cacheRoot = await makeTmpDir()
+  const svc = createQueryStorageService({
+    cacheRoot,
+    usagePolicyResolver: makeResolver({ localOnly: ['/work/secret'] }),
+  })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 1, cwd: '/work/public' }, // full -> shipped, but projected without cwd
+    { id: 2, cwd: '/work/secret' }, // local-only -> dropped even though the caller omitted cwd
+  ])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  /** @type {Record<string, unknown>[]} */
+  const shipped = []
+  let droppedCount = 0
+  for (const part of await svc.discoverCachePartitions()) {
+    // Caller asks for `id` only — NO `cwd`. Withholding must not depend on it.
+    for await (const entry of svc.readRowsSince(part.path, { columns: ['id'] })) {
+      if (entry.dropped) {
+        droppedCount += 1
+        assert.equal(entry.row, undefined, 'a drop-only entry carries no row payload')
+      } else {
+        shipped.push(entry.row)
+      }
+    }
+  }
+
+  assert.equal(droppedCount, 1, 'the local-only row is still withheld despite the cwd-less projection')
+  assert.deepEqual(shipped, [{ id: 1n }], 'the full row is shipped as the projected columns only (INT64 reads back as a bigint)')
+  assert.ok(!('cwd' in shipped[0]), "cwd is stripped back off — the caller's projection contract is honored")
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
 test('readRowsSince: a corrupt list (resolver throws) fails the partition read rather than silently skipping', async () => {
   const cacheRoot = await makeTmpDir()
   const svc = createQueryStorageService({ cacheRoot, usagePolicyResolver: makeResolver({ corrupt: true }) })

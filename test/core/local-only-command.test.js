@@ -148,7 +148,7 @@ function makeTty() {
 }
 
 /**
- * @param {import('node:stream').PassThrough} stdin
+ * @param {PassThrough} stdin
  * @param {string[]} chunks
  */
 async function feed(stdin, chunks) {

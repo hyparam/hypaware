@@ -243,6 +243,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async *readRowsSince(tablePath, opts = {}) {
       const since = continuationToSeq(opts.since)
       const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      // @ref LLP 0070#enforce [constrained-by]: withholding must not depend on
+      // the caller's projection. The filter reads each row's own `cwd`; a
+      // `columns` projection that omits `cwd` would leave the projected row
+      // cwd-less, the filter would treat it as cwd-less, and a local-only row
+      // would be FORWARDED. So when a resolver is configured, force `cwd` into
+      // the scan regardless of `columns`, then strip it back off the yielded row
+      // if the caller didn't ask for it — the projection contract is honored,
+      // but the guarantee never rides on callers remembering to include `cwd`.
+      // (`projected === undefined` means "all columns", which already carries
+      // `cwd`; no forcing and no stripping needed.)
+      const forceCwd = usagePolicyResolver !== undefined && projected !== undefined && !projected.includes('cwd')
+      const scanColumns = forceCwd ? [...projected, 'cwd'] : projected
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -251,13 +263,13 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       let droppedRowCount = 0
       /** @type {Set<string>} */
       const droppedCwdHashes = new Set()
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { since, includeLegacy: opts.includeLegacy })) {
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
         for (const f of INTERNAL_FIELDS) delete row[f]
         /** @type {SinkContinuation} */
         const after = { v: 1, seq: high.toString() }
-        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time — no cache-schema marker, retroactive over already-cached rows
+        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time — no cache-schema marker, retroactive over already-cached rows; `cwd` is forced into the scan above so a caller's `columns` projection can't bypass this filter
         // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
         // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
         // A corrupt/unreadable list makes `resolve` throw; we let it propagate
@@ -270,6 +282,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           yield { after, dropped: true }
           continue
         }
+        // We forced `cwd` in for the filter only; don't leak it into a payload
+        // the caller's projection didn't ask for.
+        if (forceCwd) delete row.cwd
         yield { row, after }
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw
