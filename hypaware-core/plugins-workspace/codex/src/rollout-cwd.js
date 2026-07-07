@@ -7,7 +7,7 @@ import { sessionIdFromPath } from './backfill.js'
 import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { RolloutCwdResolver } from './types.js'
+ * @import { RolloutCwdResolver, RolloutCwdResolverOptions, RolloutDirent } from './types.js'
  */
 
 // Only the first `session_meta` line is read, so a bounded prefix is enough:
@@ -15,6 +15,15 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 // a prefix (never the whole session) keeps the capture hot path cheap even for
 // a long, large rollout.
 const FIRST_LINE_MAX_BYTES = 64 * 1024
+
+// A negative resolution (no cwd found — the rollout is not yet written on the
+// session's first exchange, or a momentary read error) is trusted only briefly
+// before it is re-checked, mirroring the usage-policy resolver's 5s TTL. A
+// positive cwd is cached for the session's life. Bounding the miss cache this
+// way stops a session-start race or a transient EMFILE/EIO from recording
+// `cwd = NULL` for a session's whole life — which would silently fail
+// `.hypignore` open for that session once the rollout became readable.
+const NEGATIVE_CACHE_TTL_MS = 5_000
 
 /**
  * Resolve a Codex session's `cwd` from its rollout file's `session_meta` line.
@@ -30,22 +39,34 @@ const FIRST_LINE_MAX_BYTES = 64 * 1024
  * client-independent and live rows carry the cwd backfill already sees.
  * @ref LLP 0083 [implements] — rollout is the live cwd fallback for Codex
  *
- * Results (including misses) are cached per session id, so resolution adds no
- * unbounded filesystem work to the capture hot path. @ref LLP 0049#requirements R6
+ * A resolved cwd is cached per session id for the session's life; a miss is
+ * cached only briefly (`NEGATIVE_CACHE_TTL_MS`) so a not-yet-written or
+ * momentarily-unreadable rollout is re-checked on a later exchange rather than
+ * fixed at NULL. The scan itself is newest-first and returns on first match, so
+ * a resolution touches the filesystem at most once per session per TTL window —
+ * bounded, not one walk per exchange. @ref LLP 0049#requirements R6
  *
- * @param {{ sessionsDir: string }} opts
+ * @param {RolloutCwdResolverOptions} opts
  * @returns {RolloutCwdResolver}
  */
 export function createRolloutCwdResolver(opts) {
   const sessionsDir = opts.sessionsDir
-  /** @type {Map<string, string | undefined>} */
+  const now = opts.now ?? Date.now
+  const ttlMs = opts.ttlMs ?? NEGATIVE_CACHE_TTL_MS
+  const readdirSync = opts.readdirSync ?? defaultReaddir
+  /** @type {Map<string, { cwd: string | undefined, expiresAt: number }>} */
   const cache = new Map()
   return {
     resolve(sessionId) {
       if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
-      if (cache.has(sessionId)) return cache.get(sessionId)
-      const cwd = readRolloutCwd(sessionsDir, sessionId)
-      cache.set(sessionId, cwd)
+      const cached = cache.get(sessionId)
+      if (cached !== undefined && cached.expiresAt > now()) return cached.cwd
+      const cwd = readRolloutCwd(sessionsDir, sessionId, readdirSync)
+      // A resolved cwd is trusted for the session's life (Infinity); a miss is
+      // trusted only for the TTL, so a transient miss is re-resolved instead of
+      // becoming a permanent NULL cwd (which fails `.hypignore` open).
+      // @ref LLP 0083 [constrained-by] — a transient miss must not fix the cwd at NULL for the session's life
+      cache.set(sessionId, { cwd, expiresAt: cwd === undefined ? now() + ttlMs : Infinity })
       return cwd
     },
   }
@@ -60,10 +81,11 @@ export function createRolloutCwdResolver(opts) {
  *
  * @param {string} sessionsDir
  * @param {string} sessionId
+ * @param {(dirPath: string, options: { withFileTypes: true }) => RolloutDirent[]} readdirSync
  * @returns {string | undefined}
  */
-function readRolloutCwd(sessionsDir, sessionId) {
-  const rolloutPath = findRolloutFile(sessionsDir, sessionId)
+function readRolloutCwd(sessionsDir, sessionId, readdirSync) {
+  const rolloutPath = findRolloutFile(sessionsDir, sessionId, readdirSync)
   if (!rolloutPath) return undefined
   const firstLine = readFirstLine(rolloutPath)
   if (!firstLine) return undefined
@@ -74,42 +96,64 @@ function readRolloutCwd(sessionsDir, sessionId) {
 }
 
 /**
- * Recursively scan the sessions root for the rollout whose filename embeds
- * `sessionId`. Returns the first match in a deterministic (sorted) walk. A
- * missing or unreadable directory contributes nothing rather than throwing.
+ * Scan the sessions root for the rollout whose filename embeds `sessionId`,
+ * newest-first: entries are visited in *descending* name order, so the
+ * most-recent date dirs (`…/YYYY/MM/DD`) and rollout files come first. The
+ * active session — the common lookup on the capture hot path — lives in the
+ * newest date dir, so a typical resolution returns after touching only the
+ * newest branch instead of walking the whole history oldest-first. Returns the
+ * first match. A missing or unreadable directory contributes nothing rather
+ * than throwing, and a genuinely absent rollout still yields `undefined`.
+ *
+ * The directory reader is injected (defaulting to `node:fs`) so tests can count
+ * scans and prove the walk stays bounded. @ref LLP 0049#requirements R6
  *
  * @param {string} sessionsDir
  * @param {string} sessionId
+ * @param {(dirPath: string, options: { withFileTypes: true }) => RolloutDirent[]} readdirSync
  * @returns {string | undefined}
  */
-function findRolloutFile(sessionsDir, sessionId) {
+function findRolloutFile(sessionsDir, sessionId, readdirSync) {
   /** @type {string[]} */
   const dirs = [sessionsDir]
   while (dirs.length > 0) {
     const dir = dirs.shift()
     if (dir === undefined) break
-    /** @type {import('node:fs').Dirent[]} */
+    /** @type {RolloutDirent[]} */
     let entries
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true })
+      entries = readdirSync(dir, { withFileTypes: true })
     } catch {
       continue
     }
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    // Descending sort => newest date dirs / rollout files first.
+    entries.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
     /** @type {string[]} */
     const subdirs = []
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
-        subdirs.push(entryPath)
-      } else if (entry.isFile() && isRolloutFileName(entry.name) && sessionIdFromPath(entry.name) === sessionId) {
+      if (entry.isFile() && isRolloutFileName(entry.name) && sessionIdFromPath(entry.name) === sessionId) {
         return entryPath
       }
+      if (entry.isDirectory()) subdirs.push(entryPath)
     }
-    // Depth-first over sorted subdirs keeps the walk deterministic.
+    // Depth-first, newest subdir first: `subdirs` is already newest→oldest, so
+    // unshifting it whole keeps that order at the front of the queue.
     dirs.unshift(...subdirs)
   }
   return undefined
+}
+
+/**
+ * Default `withFileTypes` directory reader, delegating to `node:fs`. Isolated
+ * so the injectable-reader type stays narrow (a `Dirent[]` is a `RolloutDirent[]`).
+ *
+ * @param {string} dirPath
+ * @param {{ withFileTypes: true }} options
+ * @returns {RolloutDirent[]}
+ */
+function defaultReaddir(dirPath, options) {
+  return fs.readdirSync(dirPath, options)
 }
 
 /** @param {string} name */
