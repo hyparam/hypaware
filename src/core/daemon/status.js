@@ -17,6 +17,7 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
+import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -485,6 +486,30 @@ export async function collectHypAwareStatus(opts = {}) {
     clientActions = buildClientActionsReport({ status: actionStatus, config, hasCentral, clientDescriptors })
   } catch { /* best-effort probe */ }
 
+  // ----- local-only directory withholding (LLP 0069 R9 / LLP 0071) -----
+  // Best-effort, read-only probe of the machine-local exclusion list: never
+  // blocks `hyp status`. A corrupt list is the same uninterpretable-privacy-
+  // signal case the export seam treats as fail-safe (LLP 0080 #fail-safe), so
+  // it surfaces as a loud diagnostic and a null count rather than a silent 0
+  // ("enrolled but withholding" must never be a silent state, R9).
+  // @ref LLP 0069#requirements [implements]: R9 - hyp status surfaces the local-only list's presence and size
+  /** @type {{ localOnlyDirCount: number } | null} */
+  let usagePolicy = null
+  try {
+    const localOnlyDirs = await readLocalOnlyDirs({ stateDir: stateRoot })
+    usagePolicy = { localOnlyDirCount: localOnlyDirs.length }
+  } catch (err) {
+    const filePath = err instanceof LocalOnlyListUnreadableError
+      ? err.filePath
+      : localOnlyListPath(stateRoot)
+    diagnostics.push({
+      severity: 'error',
+      kind: 'local_only_list_unreadable',
+      message: `local-only exclusion list at '${filePath}' is unreadable or malformed - directory withholding count is unknown`,
+      repair: ['inspect and fix or remove the file, then rerun hyp status'],
+    })
+  }
+
   // ----- recent errors -----
   const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
   if (recentErrorCount > 0) {
@@ -529,6 +554,7 @@ export async function collectHypAwareStatus(opts = {}) {
     overall,
     remoteConfig,
     clientActions,
+    usagePolicy,
   }
 }
 

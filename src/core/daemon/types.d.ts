@@ -74,6 +74,7 @@ export type StatusDiagnosticKind =
   | 'client_attach_missing'
   | 'recent_errors'
   | 'remote_config_rolled_back'
+  | 'local_only_list_unreadable'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -220,6 +221,14 @@ export interface HypAwareStatusReport {
    * `overall === 'degraded'`.
    */
   clientActions: ClientActionsReport | null
+  /**
+   * Machine-local `local-only` directory-withholding state (LLP 0069 R9 /
+   * LLP 0071): a best-effort count of directories the export seam withholds
+   * from forwarding, read from the machine-local exclusion list. Null only
+   * when the list itself could not be read or parsed (see the
+   * `local_only_list_unreadable` diagnostic) - never a silent zero.
+   */
+  usagePolicy: { localOnlyDirCount: number } | null
 }
 
 export interface CollectStatusOptions {
