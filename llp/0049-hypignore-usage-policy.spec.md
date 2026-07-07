@@ -5,7 +5,7 @@
 **Systems:** Sources, Gateway, CLI
 **Author:** Phil / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0000, LLP 0009, LLP 0012, LLP 0016, LLP 0050, LLP 0051
+**Related:** LLP 0000, LLP 0009, LLP 0012, LLP 0016, LLP 0050, LLP 0051, LLP 0083
 
 > A folder-scoped data-usage policy for HypAware capture. A `.hypignore` file
 > (gitignore-style, ancestor-walked) maps a directory subtree to a usage
@@ -140,6 +140,11 @@ dotfile should not be the only path:
    none, so a folder rule is a no-op for them. This is structural, not a policy
    choice — see [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md). A
    future caller-supplied scope (e.g. an `X-Hyp-Cwd` header) is not precluded.
+   **Extended-by: [LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)** —
+   the ChatGPT-subscription Codex route (`provider='chatgpt'`) is *not* in this
+   folder-blind set: it is a first-class adapter pathway whose `cwd` is recoverable
+   from the local session rollout, so the Codex live projector now enriches it and
+   R1 coverage is client-independent for Codex.
 2. **Prospective-only; no purge.** {#prospective-only} `.hypignore` gates *future*
    live recording and *future* backfills. Rows already in the cache from before
    the file existed are left untouched; retroactive deletion is a separate,

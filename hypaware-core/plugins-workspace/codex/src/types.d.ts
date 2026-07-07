@@ -57,6 +57,17 @@ export interface CodexRolloutItem {
   usageAttributes?: JsonObject
 }
 
+/**
+ * Resolves a Codex session's `cwd` from its rollout `session_meta` line, the
+ * live projector's fallback when the request carries no in-band cwd (the
+ * ChatGPT-subscription route). Injectable so the projector can be tested
+ * without a real sessions tree.
+ */
+export interface RolloutCwdResolver {
+  /** The rollout-recorded cwd for `sessionId`, or `undefined` when unknown. */
+  resolve(sessionId: string): string | undefined
+}
+
 export interface CodexAttachOptions {
   port: number
   version: string
