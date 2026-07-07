@@ -137,6 +137,20 @@ test('attach without endpoint: not-attached client fails with actionable message
   })
 })
 
+test('attach without endpoint: not-attached --json reports failed/no_endpoint', async () => {
+  await withTempHome(async (home) => {
+    const { ctx, stdout } = makeCtx({ home, attachCalls: [] })
+    const code = await runAttach(['claude', '--json'], ctx)
+    assert.equal(code, 1)
+    const payload = JSON.parse(stdout.text())
+    assert.equal(payload.status, 'failed')
+    assert.equal(payload.action, 'attach')
+    assert.equal(payload.client, 'claude')
+    assert.equal(payload.error_kind, 'no_endpoint')
+    assert.match(payload.error, /cannot resolve the gateway endpoint/)
+  })
+})
+
 test('attach with configured listen still uses the config fallback', async () => {
   await withTempHome(async (home) => {
     /** @type {string[]} */

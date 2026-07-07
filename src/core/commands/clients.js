@@ -205,6 +205,14 @@ async function runClientLifecycle(action, argv, ctx) {
               ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env: ctx.env })
               : { attached: false, settingsPath: undefined }
             if (probe.attached) {
+              getLogger('cmd-attach').info('client.attach.daemon_managed', {
+                [Attr.COMPONENT]: 'cmd-attach',
+                [Attr.OPERATION]: 'client.attach',
+                hyp_client: name,
+                status: 'ok',
+                changed: false,
+                attached: true,
+              })
               if (parsed.json) {
                 ctx.stdout.write(
                   JSON.stringify({
@@ -225,11 +233,32 @@ async function runClientLifecycle(action, argv, ctx) {
               }
               continue
             }
-            throw new Error(
+            const message =
               `cannot resolve the gateway endpoint: the gateway is not running in this ` +
               `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
               `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
-            )
+            getLogger('cmd-attach').warn('client.attach.no_endpoint', {
+              [Attr.COMPONENT]: 'cmd-attach',
+              [Attr.OPERATION]: 'client.attach',
+              hyp_client: name,
+              status: 'failed',
+              error_kind: 'no_endpoint',
+            })
+            if (parsed.json) {
+              ctx.stdout.write(
+                JSON.stringify({
+                  status: 'failed',
+                  action: 'attach',
+                  client: name,
+                  dry_run: false,
+                  error_kind: 'no_endpoint',
+                  error: message,
+                }) + '\n'
+              )
+              exitCode = 1
+              continue
+            }
+            throw new Error(message)
           }
           endpoint = configured
         }
