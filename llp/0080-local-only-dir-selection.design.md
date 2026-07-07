@@ -318,9 +318,12 @@ enrollment it refines.
 > The fix moves the picker on the auto-daemon fresh-enroll path to *after* the
 > `waitForClientAttach` step, gated on a bounded, best-effort
 > `waitForCapturedDirectories` poll (`src/core/cli/remote_commands.js`) so it runs
-> against the populated cache; `--no-daemon` and the already-enrolled re-login fork
-> keep the pre-provision / already-populated ordering. Everything else in this
-> design (store, resolver, export seam, CLI, status) is unchanged.
+> against the populated cache. The `--no-daemon` fresh-enroll fork likewise now
+> runs the picker after `enrollCentralSink` writes the sink config rather than
+> strictly before it, but installs no forwarding daemon this run, so the list
+> still lands before any export (R6 holds); the already-enrolled re-login fork
+> runs against the already-populated cache. Everything else in this design
+> (store, resolver, export seam, CLI, status) is unchanged.
 
 ## CLI: the durable authoring path {#cli}
 

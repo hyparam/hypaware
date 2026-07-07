@@ -655,8 +655,18 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // issue #281 for the follow-up that would close the one-time backfill window.
     // @ref LLP 0069#trigger [constrained-by]: still gated to an enrolling login, but deferred until the cache the picker enumerates is populated (issue #281)
     // @ref LLP 0072 [implements]: TTY-gated, defaults to excluding nothing, never blocks enrollment
-    const captured = await waitForCaptured({ ctx })
-    await refineLocalOnly({ ctx, stateDir, picker, listCandidates: () => Promise.resolve(captured) })
+    // The bounded backfill wait only helps when a client actually attached this
+    // run: attach is what triggers the post-attach backfill (LLP 0044), so with
+    // nothing attached there is no source to populate the cache and the poll
+    // would only burn its whole budget in silence. When nothing attached, skip
+    // straight to the picker: it enumerates the cache as-is (empty on a fresh
+    // box) and takes its durable-hint path immediately, no dead 30s wait.
+    if (attached.length > 0) {
+      const captured = await waitForCaptured({ ctx })
+      await refineLocalOnly({ ctx, stateDir, picker, listCandidates: () => Promise.resolve(captured) })
+    } else {
+      await refineLocalOnly({ ctx, stateDir, picker })
+    }
     return 0
   }
 
