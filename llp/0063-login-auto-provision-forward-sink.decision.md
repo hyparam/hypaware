@@ -479,6 +479,20 @@ cascade claim needed the opposite correction.
   hint: `nothing is captured yet — run 'hyp attach <client>' to start`. Never
   silent (LLP 0061 D4), and `hyp status` shows "enrolled; no org config
   published" for the 404 steady state.
+  - **Note (2026-07-06): the server follow-up shipped, so the interim hint was
+    replaced by waiting on the real reconcile.** Org default config (server LLP
+    0043) is live and deployed, which makes auto-attach (LLP 0044) the primary
+    path for orgs that publish a config. The old hint printed unconditionally
+    and synchronously, *before* the daemon's first config pull, so it asserted a
+    stale "nothing captured" as terminal and pushed a manual `hyp attach` the
+    daemon was about to make unnecessary. `runRemoteLogin` now installs the
+    daemon, then **waits for its first reconcile** (polling the on-disk attach
+    markers, a cross-process read) and reports the
+    ground truth: `capturing <clients>` when a client attaches, or, on timeout
+    (no org config, or a slow pull), `no clients attached yet - check 'hyp
+    status', ...`. Still never silent (LLP 0061 D4); the manual `hyp attach`
+    stays the escape hatch, not the headline. The interim text above stands as
+    the record of what shipped before the follow-up; the code is current.
 
 ## Open questions
 

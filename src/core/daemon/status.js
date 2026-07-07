@@ -124,23 +124,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // validates local additions against the same plugin set the daemon
   // runs. A local plugin that invalidates the merge (capability tie,
   // unknown plugin) is dropped here, not surfaced as a config error.
-  /** @type {PluginCatalog | undefined} */
-  let catalog
-  try {
-    /** @type {LoadedManifest[]} */
-    let bundledLoaded = []
-    /** @type {LoadedManifest[]} */
-    let installedLoaded = []
-    try {
-      const bundled = await discoverBundledPlugins()
-      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
-    } catch { /* bundled discovery failure is non-fatal */ }
-    try {
-      const installed = await discoverInstalledPlugins({ stateDir: stateRoot })
-      installedLoaded = installed.loaded
-    } catch { /* installed discovery failure is non-fatal */ }
-    catalog = buildPluginCatalog(bundledLoaded, installedLoaded)
-  } catch { /* catalog build failure is non-fatal */ }
+  const catalog = await buildStatusCatalog({ stateDir: stateRoot })
 
   // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
@@ -449,7 +433,15 @@ export async function collectHypAwareStatus(opts = {}) {
   // ----- retention + cache stats -----
   const retention = readRetention(config)
   const cacheRoot = opts.runtime?.storage?.cacheRoot ?? path.join(stateRoot, 'cache')
-  const cache = await measureCacheStats(cacheRoot)
+  // Best-effort like every other probe here (see this function's docstring): a
+  // transient fs error mid-walk (EACCES/EMFILE/EIO — walkForStats re-throws
+  // anything but ENOENT) must degrade to zeroed cache stats, never throw out of
+  // the whole report.
+  /** @type {{ totalBytes: number, oldestDate: string | null }} */
+  let cache = { totalBytes: 0, oldestDate: null }
+  try {
+    cache = await measureCacheStats(cacheRoot)
+  } catch { /* best-effort cache probe */ }
 
   // ----- remote config apply state (LLP 0025) -----
   /** @type {ConfigControlStatus | null} */
@@ -812,6 +804,71 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       error: err instanceof Error ? err.message : String(err),
     }
   }
+}
+
+/**
+ * Build the plugin catalog the status surfaces read from — bundled ⊕ installed.
+ * Best-effort, exactly as the top-level collector was: each discovery failure
+ * degrades to empty and any residual throw degrades the whole thing to
+ * `undefined`, so a probe can always render a report rather than crash.
+ *
+ * @param {{ stateDir: string }} args
+ * @returns {Promise<PluginCatalog | undefined>}
+ */
+async function buildStatusCatalog({ stateDir }) {
+  try {
+    /** @type {LoadedManifest[]} */
+    let bundledLoaded = []
+    /** @type {LoadedManifest[]} */
+    let installedLoaded = []
+    try {
+      const bundled = await discoverBundledPlugins()
+      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
+    } catch { /* bundled discovery failure is non-fatal */ }
+    try {
+      const installed = await discoverInstalledPlugins({ stateDir })
+      installedLoaded = installed.loaded
+    } catch { /* installed discovery failure is non-fatal */ }
+    return buildPluginCatalog(bundledLoaded, installedLoaded)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Load just the client descriptors (claude/codex attach probes) from the plugin
+ * catalog — the poll-invariant subset the login attach-wait needs. Best-effort
+ * like the collector: discovery failure degrades to an empty map, never throws.
+ *
+ * @param {{ stateDir: string }} args
+ * @returns {Promise<Map<string, ClientDescriptor>>}
+ */
+export async function loadClientDescriptors({ stateDir }) {
+  const catalog = await buildStatusCatalog({ stateDir })
+  return catalog?.clientDescriptors ?? new Map()
+}
+
+/**
+ * The marker-only slice of `collectHypAwareStatus`: which of the given client
+ * descriptors show a HypAware attach marker on disk right now. Does only
+ * per-client settings reads via `probeClientAttachFromDescriptor` — which maps
+ * ENOENT *and* any other fs error to "not attached" — so it never walks the
+ * cache and never re-throws the way the full collector's `walkForStats` can.
+ * That is exactly what makes it safe to poll on a tight loop (the login
+ * attach-wait) without either the collector's cost or its throw path.
+ *
+ * @param {{ descriptors: Map<string, ClientDescriptor>, homeDir: string, env?: NodeJS.ProcessEnv }} args
+ * @returns {Promise<string[]>} attached client names (unsorted; the caller orders them)
+ */
+export async function probeAttachedClients({ descriptors, homeDir, env }) {
+  /** @type {string[]} */
+  const attached = []
+  for (const [clientName, descriptor] of descriptors) {
+    if (!descriptor.attachProbe) continue
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
+    if (probe.attached) attached.push(clientName)
+  }
+  return attached
 }
 
 /**
