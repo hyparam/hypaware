@@ -163,7 +163,14 @@ dotfile should not be the only path:
 
 - **R1.** An exchange whose resolved `cwd` has any ancestor `.hypignore`
   resolving to `ignore` MUST NOT be written to the cache, for both live capture
-  and backfill.
+  and backfill. (**Extended-by:
+  [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)** — when `cwd`
+  was *unknown at capture* (the Claude session-start race projected the row with
+  `cwd = null`), the guarantee is honored at the capture seam **or** by a
+  flush-time settlement-drop, before partition write and before export. The
+  literal "never written to the cache" relaxes to "never persisted past flush or
+  forwarded" for that race case; a fail-closed hold is rejected because it would
+  drop legitimate SDK/headless traffic that never gets a hook record.)
 - **R2.** `ignore` MUST NOT alter the live LLM call — the gateway is pass-through;
   only persistence is suppressed.
 - **R3.** A `.hypignore` naming an unimplemented class MUST resolve to `ignore`

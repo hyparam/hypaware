@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
+import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
 import { unionSources, emptySource } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
@@ -239,14 +240,16 @@ export function aiGatewayDatasetRegistration(state) {
 /**
  * Build the flush-time settlement pass (LLP 0024). On each flush batch:
  *
- *  1. Short-circuit when the batch carries no fallback rows
- *     (`attributes.gateway.identity_source === 'gateway_fallback'`) - the
- *     common case, so the hot path does zero transcript or storage I/O.
- *  2. Group fallback rows by `client_name` and hand each group to the
- *     enricher registered for that client; the enricher upgrades the
- *     rows it can match against its native log (re-stamping
- *     `message_id`/`part_id`/native identity, clearing `identity_source`)
- *     and returns the rest unchanged.
+ *  1. Short-circuit when the batch carries no fallback rows AND no null-cwd
+ *     rows - the common case, so the hot path does zero transcript or storage
+ *     I/O. (A null-cwd row is the #258 session-start race, handled by 2/LLP 0085.)
+ *  2. Group selected rows by `client_name` and hand each group to the
+ *     enricher registered for that client; the enricher upgrades the rows it
+ *     can match against its native log (re-stamping
+ *     `message_id`/`part_id`/native identity, clearing `identity_source`),
+ *     re-resolves a null-cwd row's `cwd` from the now-present session context
+ *     (filling it, or marking the row for removal when it resolves to a
+ *     `.hypignore` `ignore`, LLP 0085), and returns the rest unchanged.
  *  3. Dedupe the whole batch by `part_id` against already-committed
  *     partitions and within-batch, so an upgraded row collapses onto the
  *     uuid twin a later replay already wrote. The committed row wins (the
@@ -259,10 +262,43 @@ export function aiGatewayDatasetRegistration(state) {
 function createSettleBatch(state) {
   return async function settleBatch(rows, ctx) {
     if (!Array.isArray(rows) || rows.length === 0) return rows
-    if (!rows.some(isFallbackRow)) return rows
-    const settled = await upgradeFallbackRows(rows, state, ctx)
-    return dedupeByPartId(settled, ctx)
+    const hasFallback = rows.some(isFallbackRow)
+    // @ref LLP 0085 [implements]: a null-cwd row (the #258 session-start race)
+    // gets a second look at flush even when it is NOT a gateway fallback (its
+    // transcript identity landed but the session-context record raced), so the
+    // settle pass must select it too.
+    const hasNullCwd = rows.some(rowHasNullCwd)
+    if (!hasFallback && !hasNullCwd) return rows
+    // @ref LLP 0085 [implements]: the settle pass may now REMOVE a row (a
+    // late-resolved `.hypignore` ignore), not only upgrade its identity - the
+    // filtered batch is what gets committed, so the dropped row never reaches a
+    // durable partition or a sink.
+    const settled = await upgradeFallbackRows(rows, state, ctx, {
+      select: settleSelect,
+      allowDrop: true,
+    })
+    // Dedupe only matters for a fallback->native upgrade that can twin a
+    // committed uuid row; a pure cwd-enrich/drop pass creates no new twins, so
+    // preserve the original dedupe trigger and leave non-fallback batches
+    // byte-for-byte as before.
+    return hasFallback ? dedupeByPartId(settled, ctx) : settled
   }
+}
+
+/** @param {Record<string, unknown>} row */
+function settleSelect(row) {
+  return isFallbackRow(row) || rowHasNullCwd(row)
+}
+
+/**
+ * True when a row carries no usable `cwd` - the session-start race shape the
+ * settlement backstop re-resolves at flush (issue #258 / LLP 0085).
+ *
+ * @param {Record<string, unknown>} row
+ */
+function rowHasNullCwd(row) {
+  const cwd = row?.cwd
+  return cwd === undefined || cwd === null || cwd === ''
 }
 
 /**
@@ -288,25 +324,34 @@ function createResettleBatch(state) {
 }
 
 /**
- * Dispatch fallback rows to the registered settlement enricher for their
+ * Dispatch selected rows to the registered settlement enricher for their
  * `client_name` and return the batch with matched rows upgraded to native
- * identity. Unmatched rows (no transcript line, enricher failure) and
- * non-fallback rows are returned unchanged. Pure with respect to dedupe:
- * it never drops a row.
+ * identity (and, when `allowDrop` is set, with rows the enricher marks for
+ * removal filtered out). Rows the enricher cannot settle, and unselected rows,
+ * are returned unchanged. An enricher failure never drops a row.
+ *
+ * `select` chooses which rows reach the enricher (default: `gateway_fallback`
+ * rows only, the identity-upgrade case). `allowDrop` governs whether a
+ * `USAGE_POLICY_DROP` sentinel in the enricher's output removes the row: the
+ * flush-time `settleBatch` sets it (LLP 0085); the maintenance `resettleBatch`
+ * does NOT, so a compaction re-settle never purges an already-committed row.
  *
  * @param {Record<string, unknown>[]} rows
  * @param {GatewayState | undefined} state
  * @param {DatasetSettleContext} ctx
+ * @param {{ select?: (row: Record<string, unknown>) => boolean, allowDrop?: boolean }} [opts]
  * @returns {Promise<Record<string, unknown>[]>}
  */
-async function upgradeFallbackRows(rows, state, ctx) {
+async function upgradeFallbackRows(rows, state, ctx, opts = {}) {
+  const select = opts.select ?? isFallbackRow
+  const allowDrop = opts.allowDrop === true
   const enrichers = state?.enrichers
   if (!enrichers || enrichers.size === 0) return rows
 
   /** @type {Map<string, Record<string, unknown>[]>} */
   const byClient = new Map()
   for (const row of rows) {
-    if (!isFallbackRow(row)) continue
+    if (!select(row)) continue
     const client = stringValue(row.client_name)
     const enricher = client ? enrichers.get(client) : undefined
     if (!enricher) continue
@@ -318,13 +363,24 @@ async function upgradeFallbackRows(rows, state, ctx) {
 
   /** @type {Map<Record<string, unknown>, Record<string, unknown>>} */
   const upgrades = new Map()
+  /** @type {Set<Record<string, unknown>>} */
+  const drops = new Set()
   for (const [client, group] of byClient) {
     const enricher = enrichers.get(client)
     if (!enricher) continue
     try {
       const out = await enricher.settle(group, ctx)
       for (let i = 0; i < group.length && i < out.length; i++) {
-        if (out[i] && out[i] !== group[i]) upgrades.set(group[i], out[i])
+        const result = out[i]
+        // @ref LLP 0085 [implements]: the enricher marks a late-resolved
+        // `ignore` row for removal with the USAGE_POLICY_DROP sentinel at its
+        // position; the flush path honors it, the compaction re-settle ignores
+        // it (allowDrop=false) so a committed row is never purged.
+        if (isUsagePolicyDrop(result)) {
+          if (allowDrop) drops.add(group[i])
+          continue
+        }
+        if (result && result !== group[i]) upgrades.set(group[i], result)
       }
     } catch {
       // An enricher failure must never drop rows: leave the group as
@@ -332,8 +388,14 @@ async function upgradeFallbackRows(rows, state, ctx) {
       continue
     }
   }
-  if (upgrades.size === 0) return rows
-  return rows.map((row) => upgrades.get(row) ?? row)
+  if (upgrades.size === 0 && drops.size === 0) return rows
+  /** @type {Record<string, unknown>[]} */
+  const next = []
+  for (const row of rows) {
+    if (drops.has(row)) continue
+    next.push(upgrades.get(row) ?? row)
+  }
+  return next
 }
 
 /**

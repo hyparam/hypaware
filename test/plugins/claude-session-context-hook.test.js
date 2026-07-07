@@ -112,6 +112,82 @@ test('hook → state file → projector roundtrip writes cwd onto the row', asyn
 // @ref LLP 0032#capture: the Claude hook captures repo identity (remote, full
 // HEAD sha, repo root) for the graph bridge, and the projector stamps it on
 // every row, the same way it already does cwd/git_branch.
+// @ref LLP 0085 [tests]: part (a) - the hook appends the minimal
+// `{session_id, cwd, ts}` record BEFORE the two git subprocesses run, so the
+// projector reading the channel for a session's opening exchange sees `cwd`
+// (and can apply the .hypignore check) even while git is still executing. This
+// shrinks the session-start race window that left cwd=NULL (issue #258).
+test('hook appends the minimal cwd record before the git subprocesses run', async () => {
+  const env = await stageEnv()
+  try {
+    let recordsAtGitTime = /** @type {any[] | null} */ (null)
+    // A slow/observing git branch lookup: when it runs, it snapshots what is
+    // already on disk. If the minimal record landed first, we will see it here.
+    const gitBranch = async (/** @type {string} */ _cwd) => {
+      recordsAtGitTime = await readSessionContext(env.stateFile)
+      return 'main'
+    }
+    const gitRepoFacts = async () => ({ repoRoot: '/work/repo' })
+
+    const code = await runClaudeSessionContextHook(
+      ['session-context', '--state-file', env.stateFile],
+      /** @type {any} */ ({
+        stdout: makeBuf(),
+        stderr: makeBuf(),
+        stdin: stdinFor({ session_id: 'sess-order', cwd: '/work/repo/src', hook_event_name: 'SessionStart' }),
+        env: { ...process.env, HYP_HOME: env.hypHome },
+      }),
+      { gitBranch, gitRepoFacts }
+    )
+    assert.equal(code, 0)
+
+    // At the moment git ran, the minimal record was already durable, carrying
+    // cwd but not yet the git-derived branch.
+    assert.ok(recordsAtGitTime, 'git ran')
+    assert.equal(recordsAtGitTime.length, 1, 'the minimal record is on disk before git runs')
+    assert.equal(recordsAtGitTime[0].cwd, '/work/repo/src')
+    assert.equal(recordsAtGitTime[0].git_branch, undefined, 'branch is not yet resolved when the minimal record lands')
+
+    // After the hook completes, the enriched record has landed and wins.
+    const finalRecords = await readSessionContext(env.stateFile)
+    const latest = pickLatestMatching(finalRecords, { sessionId: 'sess-order' })
+    assert.equal(latest?.cwd, '/work/repo/src')
+    assert.equal(latest?.git_branch, 'main', 'the enriched record wins once git resolves')
+    assert.equal(latest?.repo_root, '/work/repo')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0085 [tests]: a failing/hanging git must never lose the minimal
+// cwd record - the hook degrades to cwd-only, exit 0.
+test('hook still lands the minimal cwd record when git throws', async () => {
+  const env = await stageEnv()
+  try {
+    const gitBranch = async () => { throw new Error('git exploded') }
+    const gitRepoFacts = async () => { throw new Error('git exploded') }
+
+    const code = await runClaudeSessionContextHook(
+      ['session-context', '--state-file', env.stateFile],
+      /** @type {any} */ ({
+        stdout: makeBuf(),
+        stderr: makeBuf(),
+        stdin: stdinFor({ session_id: 'sess-gitfail', cwd: '/work/other/src', hook_event_name: 'SessionStart' }),
+        env: { ...process.env, HYP_HOME: env.hypHome },
+      }),
+      { gitBranch, gitRepoFacts }
+    )
+    assert.equal(code, 0, 'a git failure never interrupts Claude')
+
+    const records = await readSessionContext(env.stateFile)
+    const latest = pickLatestMatching(records, { sessionId: 'sess-gitfail' })
+    assert.equal(latest?.cwd, '/work/other/src', 'cwd is recorded despite the git failure')
+    assert.equal(latest?.git_branch, undefined, 'no branch (git failed) - but the row is not lost')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('hook captures repo identity for a real git repo and the projector stamps it', async () => {
   const env = await stageEnv()
   try {

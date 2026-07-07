@@ -1026,9 +1026,10 @@ export interface DatasetRegistration {
   /**
    * Optional flush-time settlement pass. The kernel calls this once per
    * flush batch (before partition write) with the batch's rows; the
-   * dataset may upgrade provisional row identity and/or drop duplicates,
-   * returning the rows to commit. Must be cheap when there is nothing to
-   * settle. See LLP 0024.
+   * dataset may upgrade provisional row identity, drop duplicates, and/or
+   * REMOVE a row whose usage policy (a late-resolved `.hypignore` `ignore`)
+   * forbids persisting it (LLP 0085), returning the filtered rows to commit.
+   * Must be cheap when there is nothing to settle. See LLP 0024.
    */
   settleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
   /**
@@ -1370,16 +1371,25 @@ export interface AiGatewayCapability {
 }
 
 /**
- * Adapter-contributed flush-time enricher. Given the fallback rows of a
+ * Adapter-contributed flush-time enricher. Given the selected rows of a
  * flush batch (already filtered to this enricher's `clientName`), it
- * returns those rows with native identity applied where the adapter's
- * log now supplies it. Rows it cannot match are returned unchanged. The
- * gateway, not the enricher, performs the subsequent `part_id` dedupe.
+ * returns them with native identity applied where the adapter's log now
+ * supplies it. Rows it cannot match are returned unchanged. The gateway,
+ * not the enricher, performs the subsequent `part_id` dedupe.
+ *
+ * The returned array is positionally parallel to the input. An enricher MAY
+ * mark a row for REMOVAL by returning the `UsagePolicyDrop` sentinel
+ * (`src/core/usage-policy`) at that row's position - used by the Claude
+ * enricher to drop a row whose `cwd`, unknown at capture (the session-start
+ * race), resolves late to a `.hypignore` `ignore` (LLP 0085). The removal is
+ * honored only by the flush-time `settleBatch`, before partition write; the
+ * maintenance `resettleBatch` ignores it, so an already-committed row is never
+ * purged.
  */
 export interface AiGatewaySettlementEnricher {
   name: string
   clientName: string
-  settle(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
+  settle(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Array<Record<string, unknown> | UsagePolicyDrop>>
 }
 
 /**

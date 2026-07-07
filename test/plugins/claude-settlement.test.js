@@ -38,7 +38,7 @@ test('enricher upgrades a fallback row to native transcript identity', async () 
       match_key: matchKey('assistant', [{ type: 'text', text: 'the answer is 42' }]),
     })
 
-    const [out] = await enricher.settle([row], settleCtx())
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
 
     assert.notEqual(out, row, 'upgraded row must be a new object so the dispatcher detects the change')
     assert.equal(out.message_id, 'u-assist')

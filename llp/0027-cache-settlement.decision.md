@@ -63,7 +63,13 @@ the match key is fragile.
 
 2. **Generic `settleBatch(rows, ctx)` hook** on `DatasetRegistration`, optional.
    Invoked once per flush batch before partition grouping. Datasets without it are
-   unaffected; the kernel flush path stays plugin-agnostic.
+   unaffected; the kernel flush path stays plugin-agnostic. (**Extended-by:
+   [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)** — `settleBatch`
+   may now also **REMOVE** a row, not only upgrade its identity: a Claude row whose
+   `cwd` was unknown at capture (the session-start race) is re-resolved at flush and
+   **dropped** when it resolves to a `.hypignore` `ignore`, via a `USAGE_POLICY_DROP`
+   sentinel the enricher returns at the row's position. The maintenance re-settle
+   sweep still never drops.)
 
 3. **Gateway owns dispatch, adapters contribute enrichers.** The gateway registers
    `settleBatch`; Claude contributes a settlement enricher via
