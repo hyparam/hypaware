@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin, runRemoteRemove } from '../../src/core/cli/remote_commands.js'
+import { runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 
 async function tmpHome() {
@@ -197,9 +197,12 @@ test('a gateway credential with no matching central sink provisions one, forward
   // --no-daemon keeps the test off the real launchd/systemd install.
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central' - forwarding logs to https:\/\/hyp\.internal/)
-  assert.match(out.join(''), /nothing is captured yet - run 'hyp attach/)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  // --no-daemon: there is no reconcile to wait on, so no capture line, just the
+  // finish-enrolling note. The stale "nothing is captured yet" hint is gone.
   assert.match(out.join(''), /daemon install skipped \(--no-daemon\)/)
+  assert.doesNotMatch(out.join(''), /nothing is captured yet/)
+  assert.doesNotMatch(out.join(''), /capturing /)
 
   // The sink was written to the central-seed layer (not the user's local config).
   const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
@@ -211,6 +214,87 @@ test('a gateway credential with no matching central sink provisions one, forward
   const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
   assert.equal(persisted.jwt, 'gw-jwt')
   assert.equal(persisted.origin, 'login')
+})
+
+test('an enrolling login waits for the reconcile and reports the clients that actually attached', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  // Skip the real daemon install; the reconcile is what we simulate below.
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // The daemon's first reconcile attaches both clients: the wait observes it.
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude', '@hypaware/codex'])
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  // Ground truth, not a guess: name the clients that captured.
+  assert.match(out.join(''), /capturing @hypaware\/claude, @hypaware\/codex/)
+  assert.doesNotMatch(out.join(''), /nothing is captured yet/)
+  assert.doesNotMatch(out.join(''), /no clients attached yet/)
+})
+
+test('an enrolling login into an org with no config times out the wait and points at hyp status', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // No client ever attaches (no org config, or a slow pull): the wait times out.
+  const waitForAttach = /** @type {any} */ (async () => [])
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
+})
+
+test('a failed daemon install reports it and does not wait for attach', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 3 }))
+  let waited = false
+  const waitForAttach = /** @type {any} */ (async () => { waited = true; return [] })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 3)
+  assert.equal(waited, false)
+  assert.match(err.join(''), /the daemon install did not finish - run 'hyp daemon install'/)
+  assert.doesNotMatch(out.join(''), /capturing /)
+})
+
+test('waitForClientAttach returns attached client names as soon as the reconcile lands', async () => {
+  let calls = 0
+  const collect = /** @type {any} */ (async () => {
+    calls += 1
+    // Not attached on the first two polls, then both clients attach.
+    const attached = calls >= 3
+    return { clients: [
+      { name: '@hypaware/codex', attached },
+      { name: '@hypaware/claude', attached },
+    ] }
+  })
+  let slept = 0
+  const sleep = /** @type {any} */ (async () => { slept += 1 })
+
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 10_000, intervalMs: 1, collect, sleep })
+  // Sorted, deduped by the caller's join; both clients reported.
+  assert.deepEqual(names, ['@hypaware/claude', '@hypaware/codex'])
+  assert.equal(calls, 3)
+  assert.equal(slept, 2) // slept between the three polls
+})
+
+test('waitForClientAttach returns empty on timeout without hanging', async () => {
+  let calls = 0
+  const collect = /** @type {any} */ (async () => {
+    calls += 1
+    return { clients: [{ name: '@hypaware/claude', attached: false }] }
+  })
+  const sleep = /** @type {any} */ (async () => {})
+
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, collect, sleep })
+  assert.deepEqual(names, [])
+  assert.ok(calls >= 1)
 })
 
 test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3)', async () => {

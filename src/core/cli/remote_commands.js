@@ -23,11 +23,53 @@ import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { collectHypAwareStatus } from '../daemon/status.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { OidcSession } from '../../../src/core/remote/types.js'
  */
+
+/**
+ * Wait for the daemon's first reconcile to attach a client after enrollment,
+ * so `hyp remote login` can report the real capture state instead of a guess.
+ * The daemon pulls the org config and runs the LLP 0044 attach pass
+ * asynchronously once installed; the marker it writes into each client's
+ * settings file is readable cross-process, so we poll `collectHypAwareStatus`
+ * (a pure on-disk read, no runtime needed) until a client attaches or the
+ * budget runs out. Timing out is not an error: it just means no client has
+ * attached yet (an org with no published config, or a slow first pull), and the
+ * caller falls back to pointing at `hyp status`.
+ *
+ * @param {{
+ *   env: NodeJS.ProcessEnv,
+ *   timeoutMs?: number,
+ *   intervalMs?: number,
+ *   collect?: typeof collectHypAwareStatus,
+ *   sleep?: (ms: number) => Promise<void>,
+ * }} opts
+ * @returns {Promise<string[]>} attached client names, empty on timeout
+ * @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile the follow-up made auto, not printing a pre-pull guess
+ */
+export async function waitForClientAttach({ env, timeoutMs = 30000, intervalMs = 1000, collect = collectHypAwareStatus, sleep = defaultSleep }) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const report = await collect({ env })
+    const attached = report.clients.filter((c) => c.attached).map((c) => c.name).sort()
+    if (attached.length > 0) return attached
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return []
+    await sleep(Math.min(intervalMs, remaining))
+  }
+}
+
+/**
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 /**
  * Core `remote` commands manage named MCP targets + their query-scoped
@@ -109,7 +151,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway }} [deps] test seam for the browser flow + gateway seeding
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
@@ -170,6 +212,8 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
+    enroll: deps.enroll ?? enrollCentralSink,
+    waitForAttach: deps.waitForAttach ?? waitForClientAttach,
   })
 }
 
@@ -302,10 +346,10 @@ async function persistStaticToken(name, token, ctx) {
  * @param {string} name
  * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
  * @param {CommandRunContext} ctx
- * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway }} deps
+ * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
  * @returns {Promise<number>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, enroll, waitForAttach }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -425,7 +469,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
     let result
     try {
-      result = await enrollCentralSink({ ctx, url: centralUrl, gateway: session.gateway, noDaemon })
+      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon })
     } catch (err) {
       ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
@@ -434,15 +478,30 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       ctx.stderr.write(`hyp remote login: this machine connected to ${result.connectedElsewhere} during sign-in - not enrolling\n`)
       return 1
     }
-    ctx.stdout.write(`provisioned '@hypaware/central' sink 'central' - forwarding logs to ${centralUrl}\n`)
-    // Never silent (LLP 0061 D4 / 0063 login-config-pull): until an org config
-    // attaches a client, a fresh enrollment forwards but captures nothing.
-    ctx.stdout.write("nothing is captured yet - run 'hyp attach <client>' to start\n")
+    ctx.stdout.write(`forwarding logs to ${centralUrl}\n`)
+    // Without the daemon there is nothing to wait on: it is what pulls the org
+    // config and runs the attach reconcile. Say what is left to do and stop.
     if (noDaemon) {
       ctx.stdout.write("daemon install skipped (--no-daemon); run 'hyp daemon install' to finish enrolling\n")
-    } else if (result.daemonCode !== 0) {
-      ctx.stderr.write("note: sink provisioned but the daemon install did not finish - run 'hyp daemon install'\n")
+      return 0
+    }
+    if (result.daemonCode !== 0) {
+      ctx.stderr.write("note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n")
       return result.daemonCode
+    }
+    // The daemon is installed; it now pulls the org config and auto-attaches any
+    // clients it enables (LLP 0044). Wait for that first reconcile so we report
+    // the real capture state instead of guessing - the follow-up (server LLP
+    // 0043) made auto-attach the primary path, so the old unconditional
+    // "nothing is captured yet" was stale on every login. Timing out just means
+    // nothing attached (no org config, or a slow pull): fall back to `hyp
+    // status`, never silent (LLP 0061 D4).
+    // @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile, replacing the interim pre-pull hint
+    const attached = await waitForAttach({ env: ctx.env })
+    if (attached.length > 0) {
+      ctx.stdout.write(`capturing ${attached.join(', ')}\n`)
+    } else {
+      ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture\n")
     }
     return 0
   }
