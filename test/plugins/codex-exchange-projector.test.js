@@ -28,10 +28,11 @@ function ignoringResolver(ignoredDir) {
 }
 
 /**
- * Like `ignoringResolver`, but the governing `.hypignore` declares an
- * unimplemented class (`local-only`), so the matcher fail-safe clamps it to
- * `ignore` and carries a `warn` (R3). Used to assert the drop escalates to
- * warn level with the declared token.
+ * Like `ignoringResolver`, but the governing `.hypignore` declares a class
+ * the running version does not implement, so the matcher fail-safe clamps it
+ * to `ignore` and carries a `warn` (R3). Used to assert the drop escalates to
+ * warn level with the declared token. `local-only` is no longer a fixture for
+ * this — it is implemented (LLP 0070/0080) and no longer clamps.
  *
  * @param {string} ignoredDir
  */
@@ -39,7 +40,7 @@ function clampingResolver(ignoredDir) {
   const hypignore = path.join(ignoredDir, '.hypignore')
   return createUsagePolicyResolver({
     existsSync: (p) => p === hypignore,
-    readFileSync: () => 'local-only\n',
+    readFileSync: () => 'some-future-class\n',
   })
 }
 
@@ -136,8 +137,8 @@ test('project() escalates a fail-safe clamp to a warn-level drop with the declar
   assert.equal(infos.length, 0, 'a fail-safe clamp does not log at info level')
   const drop = warns.find((e) => e.message === 'plugin.codex.usage_policy_drop')
   assert.ok(drop, 'a fail-safe clamp emits a warn-level usage_policy_drop')
-  assert.equal(drop.fields?.declared, 'local-only', 'the declared token is carried for diagnosis')
-  assert.match(String(drop.fields?.warn), /local-only/)
+  assert.equal(drop.fields?.declared, 'some-future-class', 'the declared token is carried for diagnosis')
+  assert.match(String(drop.fields?.warn), /some-future-class/)
 })
 
 // ---------------------------------------------------------------------

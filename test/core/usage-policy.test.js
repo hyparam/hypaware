@@ -3,7 +3,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseHypignore, createUsagePolicyResolver, findRepoRoot } from '../../src/core/usage-policy/index.js'
+import {
+  parseHypignore,
+  createUsagePolicyResolver,
+  findRepoRoot,
+  LocalOnlyListUnreadableError,
+} from '../../src/core/usage-policy/index.js'
 
 // --- format.js: parseHypignore -------------------------------------------
 
@@ -36,11 +41,19 @@ test('parseHypignore: unknown token => ignore + warn (fail-safe)', () => {
   assert.match(String(result.warn), /ignore/)
 })
 
-test('parseHypignore: reserved `local-only` => ignore + warn in V1 (fail-safe)', () => {
+test('parseHypignore: implemented `local-only` token resolves to local-only, no warn (LLP 0070)', () => {
   const result = parseHypignore('local-only\n')
-  assert.equal(result.class, 'ignore')
+  assert.equal(result.class, 'local-only')
   assert.equal(result.declared, 'local-only')
-  assert.match(String(result.warn), /local-only/)
+  assert.equal(result.warn, undefined)
+})
+
+test('parseHypignore: a still-unimplemented token => ignore + warn (fail-safe)', () => {
+  const result = parseHypignore('some-future-class\n')
+  assert.equal(result.class, 'ignore')
+  assert.equal(result.declared, 'some-future-class')
+  assert.match(String(result.warn), /some-future-class/)
+  assert.match(String(result.warn), /ignore/)
 })
 
 test('parseHypignore: first token wins; trailing path patterns are parsed-but-ignored', () => {
@@ -105,13 +118,24 @@ test('resolve: walks all the way to the filesystem root', () => {
   assert.equal(result.governedBy, '/.hypignore')
 })
 
-test('resolve: unimplemented class in a governing file fails safe to ignore', () => {
+test('resolve: dotfile `local-only` token is honored (implemented, LLP 0070), not clamped to ignore', () => {
   const fs = fakeFs({ '/work/repo/.hypignore': 'local-only\n' })
   const resolver = createUsagePolicyResolver(fs)
   const result = resolver.resolve('/work/repo/sub')
-  assert.equal(result.class, 'ignore')
+  assert.equal(result.class, 'local-only')
   assert.equal(result.declared, 'local-only')
   assert.equal(result.governedBy, '/work/repo/.hypignore')
+  assert.equal(result.warn, undefined)
+})
+
+test('resolve: a still-unimplemented class in a governing file fails safe to ignore', () => {
+  const fs = fakeFs({ '/work/repo/.hypignore': 'some-future-class\n' })
+  const resolver = createUsagePolicyResolver(fs)
+  const result = resolver.resolve('/work/repo/sub')
+  assert.equal(result.class, 'ignore')
+  assert.equal(result.declared, 'some-future-class')
+  assert.equal(result.governedBy, '/work/repo/.hypignore')
+  assert.match(String(result.warn), /some-future-class/)
 })
 
 test('resolve: a present-but-unreadable .hypignore fails closed to ignore (privacy-protecting)', () => {
@@ -196,6 +220,135 @@ test('resolve: removing a .hypignore is honored once the TTL elapses (unignore)'
   delete files['/work/repo/.hypignore']
   clock += 5_001
   assert.equal(resolver.resolve('/work/repo/sub').class, 'full')
+})
+
+// --- matcher.js: local-only list as a second source (LLP 0070/0071) ------
+
+const LIST_PATH = '/state/usage-policy/local-only.json'
+
+/** @param {string[]} dirs */
+function listFile(dirs) {
+  return JSON.stringify({ version: 1, dirs })
+}
+
+test('resolve: no localOnlyListPath configured => resolver behaves exactly as before', () => {
+  const fs = fakeFs({ '/work/repo/.hypignore': 'ignore\n' })
+  const resolver = createUsagePolicyResolver(fs)
+  assert.deepEqual(resolver.resolve('/work/repo/sub'), {
+    class: 'ignore',
+    governedBy: '/work/repo/.hypignore',
+    declared: 'ignore',
+  })
+  assert.equal(resolver.resolve('/private/side-project').class, 'full')
+})
+
+test('resolve: cwd equal to a listed dir is local-only, governed by the list path', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFile(['/private/side-project']) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.deepEqual(resolver.resolve('/private/side-project'), {
+    class: 'local-only',
+    governedBy: LIST_PATH,
+    declared: 'local-only',
+  })
+})
+
+test('resolve: cwd descendant of a listed dir is local-only', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFile(['/private/side-project']) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  const result = resolver.resolve('/private/side-project/nested/deep')
+  assert.equal(result.class, 'local-only')
+  assert.equal(result.governedBy, LIST_PATH)
+})
+
+test('resolve: sibling-prefix directory is NOT matched (segment-aware: /a/bc vs /a/b)', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFile(['/a/b']) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.equal(resolver.resolve('/a/bc').class, 'full', '/a/bc merely shares a string prefix with /a/b')
+  assert.equal(resolver.resolve('/a/b').class, 'local-only')
+  assert.equal(resolver.resolve('/a/b/c').class, 'local-only')
+})
+
+test('resolve: dotfile `ignore` beats a list `local-only` match (most-restrictive wins)', () => {
+  const fs = fakeFs({
+    '/work/repo/.hypignore': 'ignore\n',
+    [LIST_PATH]: listFile(['/work/repo']),
+  })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  const result = resolver.resolve('/work/repo/sub')
+  assert.equal(result.class, 'ignore')
+  assert.equal(result.governedBy, '/work/repo/.hypignore', 'the stronger dotfile source names the governor')
+})
+
+test('resolve: list `local-only` beats an unlisted `full` dotfile default (most-restrictive wins)', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFile(['/private/proj']) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  const result = resolver.resolve('/private/proj')
+  assert.equal(result.class, 'local-only')
+  assert.equal(result.governedBy, LIST_PATH)
+})
+
+test('resolve: cwd not in the list and no governing dotfile => full', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFile(['/private/other']) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.equal(resolver.resolve('/somewhere/else').class, 'full')
+})
+
+test('resolve: a missing local-only list file is "no exclusions" ([])', () => {
+  const fs = fakeFs({})
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.equal(resolver.resolve('/anywhere').class, 'full')
+})
+
+test('resolve: list parse is memoized (TTL) independent of per-cwd caching, and re-read picks up an edited list', () => {
+  const files = /** @type {Record<string, string>} */ ({ [LIST_PATH]: listFile([]) })
+  let clock = 1_000
+  let listReads = 0
+  const resolver = createUsagePolicyResolver({
+    existsSync: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    readFileSync: (p) => {
+      if (p === LIST_PATH) listReads += 1
+      return files[p] ?? ''
+    },
+    now: () => clock,
+    ttlMs: 5_000,
+    localOnlyListPath: LIST_PATH,
+  })
+
+  // First resolve of a fresh cwd against the (empty) list: does the first read.
+  assert.equal(resolver.resolve('/private/proj-a').class, 'full')
+  assert.equal(listReads, 1)
+
+  // A second, distinct, never-before-seen cwd resolved in the same window
+  // reuses the cached list parse rather than re-reading the file.
+  assert.equal(resolver.resolve('/private/proj-b').class, 'full')
+  assert.equal(listReads, 1)
+
+  // The user edits the list mid-window (e.g. `hyp ignore --local-only`). A
+  // third, still-unseen cwd resolved before the TTL elapses still sees the
+  // stale, cached list.
+  files[LIST_PATH] = listFile(['/private/proj-c'])
+  clock += 1_000
+  assert.equal(resolver.resolve('/private/proj-c').class, 'full')
+  assert.equal(listReads, 1)
+
+  // Once the TTL elapses the list is re-read and the edit is honored.
+  clock += 5_000
+  assert.equal(resolver.resolve('/private/proj-c').class, 'local-only')
+  assert.equal(listReads, 2)
+})
+
+test('resolve: a corrupt local-only list throws, not silently "no exclusions" (fail-safe)', () => {
+  const fs = fakeFs({ [LIST_PATH]: '{ not valid json' })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.throws(
+    () => resolver.resolve('/anything'),
+    (err) => {
+      assert.ok(err instanceof LocalOnlyListUnreadableError)
+      assert.equal(err.error_kind, 'local_only_list_unreadable')
+      assert.equal(err.filePath, LIST_PATH)
+      return true
+    }
+  )
 })
 
 test('createUsagePolicyResolver defaults fs to node:fs when none injected', () => {

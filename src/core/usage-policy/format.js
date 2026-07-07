@@ -4,9 +4,13 @@
  * @import { UsageClass, ParseResult } from '../../../src/core/usage-policy/types.js'
  */
 
-// V1 implements exactly the `ignore` class. The set grows additively when
-// `local-only` ships (LLP 0051); until then any other token hits the fail-safe.
-const IMPLEMENTED = new Set(['ignore'])
+// `ignore` shipped in V1 (LLP 0049); `local-only` was reserved (LLP 0051)
+// and is now implemented (LLP 0070/0080) — a committable `.hypignore`
+// declaring `local-only` resolves to that class instead of clamping to
+// `ignore`. The set still grows additively; any other/future token still
+// hits the fail-safe below.
+// @ref LLP 0070#resolver [implements]: `local-only` is a first-class token now, not just a reserved one
+const IMPLEMENTED = new Set(['ignore', 'local-only'])
 
 /**
  * Parse a `.hypignore` body into a usage class.
