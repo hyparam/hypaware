@@ -17,6 +17,7 @@ import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clearClientActionMarker } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
+import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { createUsagePolicyResolver, findRepoRoot } from '../usage-policy/index.js'
 import { executeQuerySql } from '../query/sql.js'
 import { pluginStateDir } from './plugin.js'
@@ -164,6 +165,8 @@ async function runClientLifecycle(action, argv, ctx) {
   }
 
   let exitCode = 0
+  /** @type {Map<string, ClientDescriptor> | undefined} */
+  let descriptorMap
   for (const name of clientNames) {
     try {
       const client = gateway.getClient(name)
@@ -186,9 +189,77 @@ async function runClientLifecycle(action, argv, ctx) {
       } else {
         try {
           endpoint = gateway.localEndpoint()
-        } catch (err) {
+        } catch {
           const configured = configuredGatewayEndpoint(ctx.config)
-          if (!configured) throw err
+          if (!configured) {
+            // No gateway bound in this process and no configured `listen`
+            // to fall back on: the daemon-managed case (an unpinned
+            // gateway binds an ephemeral port only the daemon knows, and
+            // its reconciler performs attach itself). Report the on-disk
+            // attach state instead of the internal endpoint error.
+            // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context: manual attach without a configured listen defers to the daemon; probe disk, don't guess a port
+            descriptorMap ??= await buildClientDescriptorMap(ctx)
+            const descriptor = descriptorMap.get(name)
+            const homeDir = ctx.env.HOME ?? os.homedir()
+            const probe = descriptor
+              ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env: ctx.env })
+              : { attached: false, settingsPath: undefined }
+            if (probe.attached) {
+              getLogger('cmd-attach').info('client.attach.daemon_managed', {
+                [Attr.COMPONENT]: 'cmd-attach',
+                [Attr.OPERATION]: 'client.attach',
+                hyp_client: name,
+                status: 'ok',
+                changed: false,
+                attached: true,
+              })
+              if (parsed.json) {
+                ctx.stdout.write(
+                  JSON.stringify({
+                    status: 'ok',
+                    action: 'attach',
+                    client: name,
+                    dry_run: false,
+                    changed: false,
+                    attached: true,
+                    ...(probe.settingsPath !== undefined ? { settings_path: probe.settingsPath } : {}),
+                  }) + '\n'
+                )
+              } else {
+                ctx.stdout.write(
+                  `${name} is already attached${probe.settingsPath !== undefined ? ` (${probe.settingsPath})` : ''}; ` +
+                  `the daemon manages attach for this install, nothing to do.\n`
+                )
+              }
+              continue
+            }
+            const message =
+              `cannot resolve the gateway endpoint: the gateway is not running in this ` +
+              `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
+              `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
+            getLogger('cmd-attach').warn('client.attach.no_endpoint', {
+              [Attr.COMPONENT]: 'cmd-attach',
+              [Attr.OPERATION]: 'client.attach',
+              hyp_client: name,
+              status: 'failed',
+              error_kind: 'no_endpoint',
+            })
+            if (parsed.json) {
+              ctx.stdout.write(
+                JSON.stringify({
+                  status: 'failed',
+                  action: 'attach',
+                  client: name,
+                  dry_run: false,
+                  error_kind: 'no_endpoint',
+                  error: message,
+                }) + '\n'
+              )
+              exitCode = 1
+              continue
+            }
+            throw new Error(message)
+          }
           endpoint = configured
         }
       }
