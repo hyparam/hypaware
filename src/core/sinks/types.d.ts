@@ -14,7 +14,12 @@ import type { ExtendedSinkHandle, ExtendedSinkRegistry } from '../registry/types
  * the encoder has drained `rows`.
  */
 export interface IncrementalRowReader {
-  /** True when there are no new rows since the watermark — the sink writes no blob. */
+  /**
+   * True when there is no PAYLOAD row to encode since the watermark — the sink
+   * writes no blob. A partition of only `local-only` (dropped) rows is `empty`
+   * yet still exposes `droppedRowCount > 0` and an advanced `lastAfter`, so the
+   * caller checkpoints past the withheld tail instead of re-scanning it.
+   */
   empty: boolean
   /** Incoming watermark seq (decimal string; `'0'` when none) — the range lower bound. */
   sinceSeq: string
@@ -22,6 +27,13 @@ export interface IncrementalRowReader {
   rows: AsyncIterable<Record<string, unknown>>
   /** Rows yielded so far; final once `rows` is fully drained. */
   readonly rowCount: number
+  /**
+   * Rows the export seam withheld as `local-only` (LLP 0070): never encoded, but
+   * each advanced `lastAfter`. Final once `rows` is drained (or, when `empty`,
+   * after the leading-drop peek). A drop-only tick (`empty && droppedRowCount > 0`)
+   * still checkpoints so the withheld tail is durably passed.
+   */
+  readonly droppedRowCount: number
   /**
    * Monotonic high-water continuation; final once `rows` is drained. Advance the
    * watermark to this only after the blob is durably PUT.
