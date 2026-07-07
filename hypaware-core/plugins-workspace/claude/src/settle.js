@@ -41,9 +41,13 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  * hook record landed carries `cwd = null`, so the projector's
  * `.hypignore` check was skipped (fail-open). At flush the record is
  * present, so this re-reads it, fills `cwd`/`git_branch`/`repo_root`,
- * and applies the usage-policy resolver late. A now-known cwd that
- * resolves to `ignore` marks the row for removal (the `USAGE_POLICY_DROP`
- * sentinel at its position); otherwise the row is enriched.
+ * and applies the usage-policy resolver late. Because a session can hold
+ * several context records with different cwds (a mid-session dir change),
+ * the record is chosen PER ROW by the row's own time (`pickRecordForRow`),
+ * not the session's latest: these are opening exchanges, so the newest cwd
+ * is the wrong one. A now-known cwd that resolves to `ignore` marks the row
+ * for removal (the `USAGE_POLICY_DROP` sentinel at its position); otherwise
+ * the row is enriched.
  * @ref LLP 0085 [implements]: flush-time settlement may DROP a late-resolved
  * `ignore` row, not only upgrade identity - the capture-seam-or-settlement
  * enforcement of the `.hypignore` guarantee when cwd was unknown at capture.
@@ -101,7 +105,12 @@ export function createClaudeSettlementEnricher(opts) {
       /** @type {Array<Record<string, unknown> | typeof USAGE_POLICY_DROP>} */
       const out = rows.slice()
       for (const [sessionId, indices] of bySession) {
-        const record = pickLatestMatching(sessionRecords, { sessionId })
+        // Transcript path is session-level (stable across a session's context
+        // records), so the session-latest record is fine for the transcript
+        // load. The cwd record, in contrast, is chosen PER ROW below: a session
+        // can carry records with different cwds, and the null-cwd rows are its
+        // opening exchanges (see pickRecordForRow).
+        const sessionRecord = pickLatestMatching(sessionRecords, { sessionId })
         // Transcript load feeds the identity upgrade; it is best-effort and
         // INDEPENDENT of the cwd late-resolution below (they read different
         // files), so an empty/unreadable transcript must NOT skip cwd
@@ -112,7 +121,7 @@ export function createClaudeSettlementEnricher(opts) {
           entries = await loadTranscript({
             projectsDir,
             sessionId,
-            transcriptPath: record?.transcript_path,
+            transcriptPath: sessionRecord?.transcript_path,
           })
         } catch {
           entries = []
@@ -135,7 +144,12 @@ export function createClaudeSettlementEnricher(opts) {
           }
 
           // 2. cwd late-resolution (issue #258). Independent of the transcript.
-          const settled = lateResolveCwd(row, record, resolver)
+          // Select the context record by the row's OWN time, not the session's
+          // latest: a session can change dirs, and these null-cwd rows are the
+          // opening exchanges, so the newest record can carry a different cwd
+          // that would leak an ignored opening row or drop a clean one.
+          const rowRecord = pickRecordForRow(sessionRecords, sessionId, row.message_created_at, row.message_index)
+          const settled = lateResolveCwd(row, rowRecord, resolver)
           if (settled.drop) {
             // @ref LLP 0085#telemetry [implements]: observable as a drop with a
             // hashed cwd, never a raw local path (mirrors the capture-seam drop
@@ -188,6 +202,132 @@ function lateResolveCwd(row, record, resolver) {
   fillIfEmpty(enriched, 'git_remote', record?.git_remote)
   fillIfEmpty(enriched, 'head_sha', record?.head_sha)
   return { row: enriched }
+}
+
+/**
+ * Choose the session-context record to late-resolve ONE row's cwd against.
+ *
+ * A session can carry several context records with different cwds: the hook
+ * fires on SessionStart / UserPromptSubmit / PostToolUse, and part (a) of
+ * LLP 0085 appends TWO records per fire (a minimal `{session_id, cwd, ts}` then
+ * an enriched one with git identity). The rows this settles are a session's
+ * OPENING exchanges (they raced past the capture seam with `cwd = null`), so
+ * resolving every one against the session's NEWEST record (`pickLatestMatching`)
+ * is wrong once the session changed dirs: an opening row projected in an ignored
+ * dir would survive (leak), or a clean opening row would be dropped against a
+ * later ignored cwd (data loss). Because settlement now DROPS, that
+ * mis-selection is destructive, so pick the record live at the row's OWN time.
+ *
+ * Rule: the latest record for the session whose `ts` is at or before the row's
+ * `message_created_at`. Tie-break on equal `ts`: the ENRICHED record wins over
+ * the minimal one from the same fire, so git identity still lands on a tie.
+ *
+ * Fallbacks (never crash, never silently mis-resolve): a row with no usable
+ * timestamp resolves against the session-start (earliest) record when it is the
+ * opening row (`message_index === 0`), else the session's latest (the prior
+ * behavior); a row that predates every record (clock skew) resolves against the
+ * earliest record, the one closest to the opening exchange.
+ *
+ * @ref LLP 0085 [implements]: the settlement backstop's "second look" selects
+ * the context record by the row's own time, so a mid-session dir change cannot
+ * leak an ignored opening row or drop a clean one.
+ *
+ * @param {SessionContextRecord[]} records all records (any session)
+ * @param {string} sessionId
+ * @param {unknown} rowTs the row's `message_created_at`
+ * @param {unknown} messageIndex the row's `message_index`
+ * @returns {SessionContextRecord | undefined}
+ */
+function pickRecordForRow(records, sessionId, rowTs, messageIndex) {
+  const forSession = records.filter((r) => r.session_id === sessionId)
+  if (forSession.length === 0) return undefined
+  const rowMs = toEpochMs(rowTs)
+  if (rowMs === undefined) {
+    // No comparable row time: an opening row's safest signal is the earliest
+    // (session-start) record; otherwise keep the newest-wins prior behavior.
+    return isOpeningIndex(messageIndex)
+      ? earliestRecord(forSession)
+      : pickLatestMatching(records, { sessionId }) ?? earliestRecord(forSession)
+  }
+  /** @type {SessionContextRecord | undefined} */
+  let best
+  let bestMs = -Infinity
+  for (const r of forSession) {
+    const ms = toEpochMs(r.ts)
+    if (ms === undefined || ms > rowMs) continue
+    if (ms > bestMs || (best !== undefined && ms === bestMs && isEnrichedRecord(r) && !isEnrichedRecord(best))) {
+      best = r
+      bestMs = ms
+    }
+  }
+  // Every record is newer than the row (the row predates all recorded context):
+  // fall back to the earliest, the record closest to the opening exchange.
+  return best ?? earliestRecord(forSession)
+}
+
+/**
+ * A record is "enriched" when part (a)'s second write added git identity beyond
+ * the minimal `{session_id, cwd, ts}` (any of git_branch / git_remote /
+ * head_sha / repo_root). Used to break a same-fire `ts` tie toward the richer
+ * record.
+ *
+ * @param {SessionContextRecord} record
+ */
+function isEnrichedRecord(record) {
+  return Boolean(record.git_branch || record.git_remote || record.head_sha || record.repo_root)
+}
+
+/**
+ * The earliest record in a session's (append-ordered) list by `ts`, i.e. its
+ * session-start fire. Prefers a record with a parseable `ts`; falls back to
+ * append order when none parse.
+ *
+ * @param {SessionContextRecord[]} records non-empty, single-session
+ * @returns {SessionContextRecord}
+ */
+function earliestRecord(records) {
+  let best = records[0]
+  let bestMs = toEpochMs(best.ts)
+  for (let i = 1; i < records.length; i++) {
+    const ms = toEpochMs(records[i].ts)
+    if (ms !== undefined && (bestMs === undefined || ms < bestMs)) {
+      best = records[i]
+      bestMs = ms
+    }
+  }
+  return best
+}
+
+/** @param {unknown} messageIndex */
+function isOpeningIndex(messageIndex) {
+  return messageIndex === 0 || messageIndex === 0n
+}
+
+/**
+ * Normalize a timestamp (a row's `message_created_at` or a record's `ts`) to
+ * epoch milliseconds for ordering. Handles the ISO-8601 string both sides use
+ * on the live path (`new Date().toISOString()`), plus the epoch-ms number,
+ * bigint, or all-digit string a row's TIMESTAMP can take once it has
+ * round-tripped through the spool or a committed partition. Returns `undefined`
+ * when absent or unparseable, so the caller falls back rather than compare
+ * against NaN.
+ *
+ * @param {unknown} value
+ * @returns {number | undefined}
+ */
+function toEpochMs(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'bigint') return Number(value)
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return undefined
+    // A pure-integer string is an epoch-ms TIMESTAMP (a bigint serialized to
+    // string on the spool path); anything else is an ISO-8601 instant.
+    if (/^\d+$/.test(trimmed)) return Number(trimmed)
+    const ms = Date.parse(trimmed)
+    return Number.isNaN(ms) ? undefined : ms
+  }
+  return undefined
 }
 
 /**

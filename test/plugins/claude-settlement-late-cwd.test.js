@@ -122,6 +122,166 @@ test('enricher leaves a null-cwd row unchanged when its session context never ar
 })
 
 // ---------------------------------------------------------------------------
+// Per-row-time context selection (LLP 0085): a session can hold several records
+// with DIFFERENT cwds (a mid-session dir change). The null-cwd opening rows must
+// resolve against the record live at each row's OWN time, not the session's
+// latest. Selecting the latest would leak an ignored opening row or drop a clean
+// one - and because settlement DROPS, that mis-selection is destructive.
+// ---------------------------------------------------------------------------
+
+test('ignore-then-clean: the opening row resolves against the EARLIER ignored record and is DROPPED', async () => {
+  const env = await stageEnv()
+  try {
+    // Session starts in an ignored dir; a later fire records a clean dir.
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-ord-ic',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-ord-ic',
+      transcript_path: undefined,
+      git_branch: 'main',
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      repo_root: CLEAN_ROOT,
+      ts: '2026-05-22T10:05:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      resolver: resolverIgnoring(IGNORED_ROOT),
+    })
+
+    // Opening row created just after session start (before the dir change).
+    const row = nullCwdRow({ session_id: 'sess-ord-ic', message_index: 0, message_created_at: '2026-05-22T10:00:01.000Z' })
+    const [out] = await enricher.settle([row], settleCtx())
+
+    assert.equal(out, USAGE_POLICY_DROP, 'resolved against the ignored session-start cwd, not the later clean one')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('clean-then-ignore: the opening row resolves against the EARLIER clean record and is KEPT (not dropped)', async () => {
+  const env = await stageEnv()
+  try {
+    // Session starts clean; a later fire moves into an ignored dir. The OLD
+    // session-latest selection would resolve the opening row against the ignored
+    // record and DROP it - a data loss the per-row selection prevents.
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-ord-ci',
+      transcript_path: undefined,
+      git_branch: 'feature/x',
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      repo_root: CLEAN_ROOT,
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-ord-ci',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T10:05:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      resolver: resolverIgnoring(IGNORED_ROOT),
+    })
+
+    const row = nullCwdRow({ session_id: 'sess-ord-ci', message_index: 0, message_created_at: '2026-05-22T10:00:01.000Z' })
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.notEqual(out, USAGE_POLICY_DROP, 'the clean opening row is not dropped against the later ignored cwd')
+    assert.equal(out.cwd, path.join(CLEAN_ROOT, 'src'), 'enriched with the session-start clean cwd')
+    assert.equal(out.git_branch, 'feature/x')
+    assert.equal(out.repo_root, CLEAN_ROOT)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('per-row selection within one batch: a later row takes the later record, an opening row the earlier one', async () => {
+  const env = await stageEnv()
+  try {
+    // Clean at start, ignored after the dir change.
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-mixed',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-mixed',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-05-22T10:05:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      resolver: resolverIgnoring(IGNORED_ROOT),
+    })
+
+    const opening = nullCwdRow({ session_id: 'sess-mixed', message_index: 0, message_created_at: '2026-05-22T10:00:30.000Z' })
+    // A row whose ts is AFTER the later record resolves against that (correct,
+    // at-or-before) record - the ignored one - and is dropped.
+    const later = nullCwdRow({ session_id: 'sess-mixed', message_index: 6, message_created_at: '2026-05-22T10:06:00.000Z' })
+    const out = /** @type {any[]} */ (await enricher.settle([opening, later], settleCtx()))
+
+    assert.notEqual(out[0], USAGE_POLICY_DROP, 'the opening row resolves against the earlier clean record and is kept')
+    assert.equal(out[0].cwd, path.join(CLEAN_ROOT, 'src'))
+    assert.equal(out[1], USAGE_POLICY_DROP, 'the later row resolves against the later ignored record and is dropped')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('ts tie-break: the enriched record wins over the minimal one from the same fire', async () => {
+  const env = await stageEnv()
+  try {
+    // Part (a) writes a minimal {session_id, cwd, ts} record, then an enriched
+    // one; on a millisecond tie the enriched (git identity) record must win so
+    // the git columns still land.
+    const tie = '2026-05-22T10:00:00.000Z'
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-tie',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      ts: tie,
+    })
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-tie',
+      transcript_path: undefined,
+      git_branch: 'main',
+      cwd: path.join(CLEAN_ROOT, 'src'),
+      repo_root: CLEAN_ROOT,
+      ts: tie,
+    })
+    const enricher = createClaudeSettlementEnricher({
+      homeDir: env.homeDir,
+      stateFile: env.stateFile,
+      resolver: resolverIgnoring(IGNORED_ROOT),
+    })
+
+    const row = nullCwdRow({ session_id: 'sess-tie', message_index: 0, message_created_at: '2026-05-22T10:00:01.000Z' })
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.notEqual(out, USAGE_POLICY_DROP)
+    assert.equal(out.cwd, path.join(CLEAN_ROOT, 'src'))
+    assert.equal(out.git_branch, 'main', 'the enriched record wins the tie so git_branch lands')
+    assert.equal(out.repo_root, CLEAN_ROOT)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // settleBatch (the production flush dispatch): removal must be honored
 // ---------------------------------------------------------------------------
 
@@ -254,8 +414,10 @@ test('resettleBatch never drops a late-resolved ignore row (compaction is not a 
  * A projected `ai_gateway_messages` row with `cwd` unset - the session-start
  * race shape. `native: true` gives it real transcript identity (no
  * `gateway_fallback` marker) to exercise the broadened settle selection.
+ * `message_created_at` / `message_index` drive the per-row context selection
+ * (LLP 0085); omit them for the single-record cases that predate the fix.
  *
- * @param {{ session_id: string, native?: boolean }} f
+ * @param {{ session_id: string, native?: boolean, message_created_at?: string, message_index?: number }} f
  */
 function nullCwdRow(f) {
   /** @type {Record<string, unknown>} */
@@ -270,6 +432,8 @@ function nullCwdRow(f) {
     content_text: 'the opening prompt',
     cwd: undefined,
   }
+  if (f.message_created_at !== undefined) row.message_created_at = f.message_created_at
+  if (f.message_index !== undefined) row.message_index = f.message_index
   row.attributes = f.native
     ? { gateway: { exchange_id: 'ex' } }
     : { gateway: { identity_source: 'gateway_fallback' }, claude: { match_key: 'user the opening prompt' } }
