@@ -266,7 +266,7 @@ async function* readSpooledRows(tablePath) {
  * `streamFlushFile`'s envelope-validity contract exactly: a parseable envelope
  * missing `columns` is malformed, and the flush reader drops it (its rows never
  * reach a committed partition). Backfill dedupe must skip the same rows,
- * otherwise it would dedupe against — and so refuse to materialize — rows flush
+ * otherwise it would dedupe against (and so refuse to materialize) rows flush
  * will never commit. An empty line or a JSON parse failure yields nothing.
  *
  * @param {string} line

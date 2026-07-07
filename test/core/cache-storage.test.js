@@ -367,7 +367,7 @@ test('readSpooledRows streams a large spool file rather than reading it whole (b
   // content-heavy `ai_gateway_messages` envelopes before it flushes. The old
   // reader did `fs.readFile(name, 'utf8')` + `split('\n')`, holding ~2x the file
   // (the whole file as one V8 string plus the split-line array) resident BEFORE
-  // yielding a single row — a giant async UTF-8 decode that OOM'd a large-backfill
+  // yielding a single row: a giant async UTF-8 decode that OOM'd a large-backfill
   // dedupe scan (issue #280). The streaming reader holds only a bounded 64 KB
   // chunk, so heap growth up to the first row must stay far below the file size.
   const cacheRoot = await makeTmpDir('spool-read-bounded')
