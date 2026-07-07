@@ -248,11 +248,13 @@ graph **node key** only if it is
 1. a **pure deterministic function of the single source row** — no
    data-window-dependent thresholds, no cross-row state — so projection stays
    content-addressed and idempotent (LLP 0023 §content-addressed-ids); and
-2. a projection into a **provably bounded domain**, enforced by an explicit
-   validity gate (`SKILL_NAME_RE`, `PROGRAM_RE`): skill names are bounded by
-   installed skill directories, program basenames by installed binaries
-   (~29 observed for Codex), and the gates cap pathological tokens from
-   mis-parses.
+2. a projection into a domain **bounded by syntax and observed usage**,
+   enforced by an explicit validity gate (`SKILL_NAME_RE`, `PROGRAM_RE`): the
+   gates cap pathological tokens from mis-parses and, in the fleet observed so
+   far, skill names track installed skill directories and program basenames
+   track installed binaries (~29 observed for Codex) — not a syntactic
+   guarantee, since a hashed or generated basename (`foo.test`,
+   `tool-4f8e2a1b9c0d`) still passes the gate and mints its own node.
 
 Anything unbounded — raw command strings, arbitrary path fragments — stays
 queryable in `ai_gateway_messages`, or at most rides as an **edge prop** for

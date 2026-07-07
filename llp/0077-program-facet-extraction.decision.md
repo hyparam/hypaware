@@ -31,14 +31,18 @@ discipline applied to a new facet).
 
 The issue's own measurement is the argument: 1,568 Codex `exec_command` calls
 → **1,433 distinct raw command strings** (essentially unique, unbounded — not
-a node) but only **29 distinct programs** by `argv[0]` — bounded by installed
-binaries, and exactly the "was it a VCS action / a file read / a `hyp` query"
-signal the reports want. Normalization (basename + lowercase) is what makes
-`/opt/homebrew/bin/duckdb` and `duckdb` converge on one content-addressed
-node; the validity gate is what keeps mis-parses (quoted fragments, paths,
-substitutions) from minting unbounded garbage — the gate, not a threshold, is
-the cardinality bound, so extraction stays a pure per-row function
-(LLP 0073 §boundedness-contract).
+a node) but only **29 distinct programs** by `argv[0]` — bounded by syntax and,
+in the fleet observed so far, by installed binaries — and exactly the "was it
+a VCS action / a file read / a `hyp` query" signal the reports want.
+Normalization (basename + lowercase) is what makes `/opt/homebrew/bin/duckdb`
+and `duckdb` converge on one content-addressed node; the validity gate is what
+keeps mis-parses (quoted fragments, paths, substitutions) from minting
+unbounded garbage — the gate, not a threshold, is the cardinality bound, so
+extraction stays a pure per-row function (LLP 0073 §boundedness-contract).
+The gate is syntactic, not semantic: a hashed or generated basename
+(`foo.test`, `tool-4f8e2a1b9c0d`) still passes it and mints its own node, so
+"bounded" here means bounded cardinality growth under the gate's shape, not a
+provable ceiling on distinct programs.
 
 ## Rejected alternatives {#rejected}
 

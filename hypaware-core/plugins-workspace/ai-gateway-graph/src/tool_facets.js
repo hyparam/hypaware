@@ -58,9 +58,17 @@ export const CLAUDE_BUILTIN_COMMANDS = new Set([
  * The SKILL.md injection marker, anchored at offset 0. The leading anchor is
  * the entire false-positive defense (LLP 0074 §strict-filters: loose matching
  * pulls ~23% false positives), so it is enforced twice: the rule's SQL
- * prefix-LIKE and this regex.
+ * prefix-LIKE and this regex — deliberately without the `m` flag: `^` must
+ * only match true string offset 0, never "start of any line", or a marker
+ * embedded after a newline (assistant quoting, pasted transcripts) would
+ * start minting nodes. The capture takes the rest of the line (not `\S+`): a
+ * base directory containing a space (e.g. `/Users/John Smith/.claude/skills/
+ * hypaware-query`) would otherwise truncate at the first space and mis-key
+ * the node on `John` instead of the trailing skill-directory basename. `.`
+ * already excludes line terminators (no `s` flag), so the capture naturally
+ * stops at the first newline without needing a multiline-aware `$`.
  */
-const SKILL_MARKER_RE = /^Base directory for this skill: (\S+)/
+const SKILL_MARKER_RE = /^Base directory for this skill: (.+)/
 
 /**
  * The slash-command tag, anchored at offset 0. The captured name may carry a
@@ -73,12 +81,25 @@ const SLASH_COMMAND_RE = /^<command-name>\s*\/?([A-Za-z0-9:_-]+)\s*<\/command-na
  * `dispatch_shell_read`): an `exec_command` shell read of
  * `.codex/skills/<name>/SKILL.md`. Unanchored (the path may sit anywhere in
  * the command string, e.g. after `sed -n '1,240p'`); the `.codex/skills/`
- * literal plus the `SKILL.md` suffix is the whole false-positive defense, so
- * a Codex session reading some other repo's `.claude/skills/...` tree (no
- * shared signal, LLP 0075 §no-shared-rule) or a bare `.codex/skills/` listing
- * (no `SKILL.md`) matches nothing.
+ * literal plus the `SKILL.md` suffix, combined with the `CODEX_READ_PROGRAMS`
+ * gate below (MINOR 1), is the whole false-positive defense, so a Codex
+ * session reading some other repo's `.claude/skills/...` tree (no shared
+ * signal, LLP 0075 §no-shared-rule), a bare `.codex/skills/` listing (no
+ * `SKILL.md`), or a non-read command merely naming the path (`echo`, `rm`,
+ * `mv`, …) matches nothing.
  */
 const CODEX_SKILL_READ_RE = /[/~]\.codex\/skills\/([^/\s'"]+)\/SKILL\.md/
+
+/**
+ * Read-like `argv[0]` programs whose `exec_command` naming a `.codex/skills/
+ * <name>/SKILL.md` path counts as the "activation ≡ read" signal (LLP 0075
+ * §read-is-activation). @ref LLP 0075#decision [constrained-by] — MINOR 1
+ * fix: the path pattern alone is command-agnostic, so `echo` or `rm` naming
+ * the same path minted a spurious activation; gating on a read tool's argv[0]
+ * (reusing `programFrom`, the one command-string recipe) keeps non-read
+ * commands from minting anything.
+ */
+const CODEX_READ_PROGRAMS = new Set(['cat', 'sed', 'head', 'tail', 'less', 'more', 'bat', 'rg', 'grep', 'nl', 'cut', 'awk'])
 
 /** Command wrappers whose own args precede the real `argv[0]`. */
 const WRAPPERS = new Set(['sudo', 'env', 'nohup', 'nice', 'time', 'command', 'stdbuf', 'timeout'])
@@ -94,6 +115,76 @@ const SHORT_FLAG_RE = /^-[A-Za-z]+$/
 
 /** A bare numeric / duration token (`5`, `5s`, `1.5`, `10m`) — a wrapper arg, not a program. */
 const NUMERICISH_RE = /^\d+(\.\d+)?[A-Za-z]?$/
+
+/**
+ * Per-wrapper flags known to take a SEPARATE argument token (`-u root`, not
+ * `-uroot`). @ref LLP 0073#program-derivation [constrained-by] — MAJOR 2 fix:
+ * the wrapper skip previously treated every flag as no-arg, so an
+ * option-with-arg's *value* (`root` in `sudo -u root git status`) was mis-read
+ * as argv[0]. Enumerating each wrapper's common option-with-arg forms lets the
+ * skip consume the flag *and* its value as a pair; an attached form
+ * (`-uroot`, `--chdir=/tmp`) is already one token and is classified
+ * separately (see `classifyWrapperFlag`).
+ */
+const WRAPPER_ARG_FLAGS = {
+  sudo: new Set(['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-r', '--role', '-t', '--type', '-C', '--close-from', '-D', '--chdir']),
+  env: new Set(['-C', '--chdir', '-u', '--unset', '-S', '--split-string']),
+  timeout: new Set(['-s', '--signal', '-k', '--kill-after']),
+  stdbuf: new Set(['-i', '--input', '-o', '--output', '-e', '--error']),
+  nice: new Set(['-n', '--adjustment']),
+  time: new Set(['-o', '--output']),
+  nohup: new Set(),
+  command: new Set(),
+}
+
+/**
+ * Per-wrapper flags known to take NO argument — safe to skip alone. A flag
+ * that is neither here nor in `WRAPPER_ARG_FLAGS` (and not an attached form of
+ * one) is an unrecognized shape for that wrapper: `classifyWrapperFlag` fails
+ * closed rather than risk treating an unknown flag's value as argv[0].
+ */
+const WRAPPER_NOARG_FLAGS = {
+  sudo: new Set(['-n', '--non-interactive', '-i', '--login', '-E', '--preserve-env', '-H', '--set-home', '-S', '--stdin', '-k', '--reset-timestamp', '-v', '--validate', '-l', '--list', '-b', '--background', '-A', '--askpass']),
+  env: new Set(['-i', '--ignore-environment', '-0', '--null', '-v', '--verbose']),
+  timeout: new Set(['-v', '--verbose', '--preserve-status', '-f', '--foreground']),
+  stdbuf: new Set(),
+  nice: new Set(),
+  time: new Set(['-p', '--portability', '-v', '--verbose', '-q', '--quiet']),
+  nohup: new Set(),
+  command: new Set(['-p', '-v', '-V']),
+}
+
+/** Shared empty set for a wrapper name absent from one of the option maps. */
+const NO_FLAGS = new Set()
+
+/**
+ * Classify a flag token seen while skipping a known wrapper's own args:
+ * - `'pair'` — an option-with-arg in its separate-token form (`-u`, then the
+ *   next token is its value): consume both.
+ * - `'attached'` — either a no-arg flag, or an option-with-arg whose value is
+ *   already attached to this token (`-uroot`, `--chdir=/tmp`): consume just
+ *   this one token.
+ * - `'unrecognized'` — not a known shape for this wrapper: fail closed
+ *   (MAJOR 2) rather than risk misreading a flag's value as argv[0].
+ *
+ * @param {string} wrapperName
+ * @param {string} tok
+ * @returns {'pair' | 'attached' | 'unrecognized'}
+ */
+function classifyWrapperFlag(wrapperName, tok) {
+  const argFlags = WRAPPER_ARG_FLAGS[wrapperName] ?? NO_FLAGS
+  for (const flag of argFlags) {
+    if (tok === flag) return 'pair'
+    if (flag.startsWith('--')) {
+      if (tok.startsWith(flag + '=')) return 'attached'
+    } else if (flag.length === 2 && tok.startsWith(flag) && tok.length > flag.length) {
+      return 'attached'
+    }
+  }
+  const noArgFlags = WRAPPER_NOARG_FLAGS[wrapperName] ?? NO_FLAGS
+  if (noArgFlags.has(tok)) return 'attached'
+  return 'unrecognized'
+}
 
 /**
  * Resolve the raw command string a shell tool ran. `Bash` names it `command`;
@@ -149,7 +240,7 @@ export function skillFromMarker(contentText) {
   if (typeof contentText !== 'string') return null
   const match = SKILL_MARKER_RE.exec(contentText)
   if (!match) return null
-  const dir = match[1].replace(/\/+$/, '')
+  const dir = match[1].trim().replace(/\/+$/, '')
   let name = path.basename(dir)
   if (name === 'SKILL.md') name = path.basename(path.dirname(dir))
   return gateSkill(name)
@@ -186,7 +277,11 @@ export function skillFromSlash(contentText) {
  * `exec_command` SKILL.md read; read ≡ activation is an accepted ambiguity
  * (LLP 0075 §read-is-activation), which is why the caller stamps the
  * distinct `dispatch_shell_read` flag rather than one of Claude's richer
- * dispatch flags.
+ * dispatch flags. MINOR 1 fix: the path match alone is command-agnostic
+ * (`echo`/`rm`/`mv` naming the path would otherwise mint an activation too),
+ * so this also gates on `programFrom` resolving a read-like `argv[0]`
+ * (`CODEX_READ_PROGRAMS`); a non-read command naming the same path mints
+ * nothing.
  *
  * @param {unknown} command
  * @returns {string | null}
@@ -195,6 +290,8 @@ export function skillFromCodexRead(command) {
   if (typeof command !== 'string') return null
   const match = CODEX_SKILL_READ_RE.exec(command)
   if (!match) return null
+  const program = programFrom(command)
+  if (!program || !CODEX_READ_PROGRAMS.has(program)) return null
   return gateSkill(match[1])
 }
 
@@ -253,12 +350,31 @@ export function programFrom(command, depth = 0) {
 
     const norm = basenameLower(tok)
 
-    // 4. Unwrap a known wrapper: drop it, then skip its own flags, further
-    //    env assignments, and bare numeric/duration args (e.g. `timeout 5 …`).
+    // 4. Unwrap a known wrapper: drop it, then skip its own flags (consuming
+    //    a known option-with-arg's separate value too, e.g. `sudo -u root` —
+    //    MAJOR 2 fix), further env assignments, and bare numeric/duration
+    //    args (e.g. `timeout 5 …`). A flag shape this wrapper's map doesn't
+    //    recognize fails closed (mints nothing) rather than risk misreading
+    //    its value as argv[0].
     if (WRAPPERS.has(norm)) {
       i++
-      while (i < tokens.length && (isFlag(tokens[i]) || ENV_RE.test(tokens[i]) || NUMERICISH_RE.test(tokens[i]))) {
-        i++
+      while (i < tokens.length) {
+        const wtok = tokens[i]
+        if (ENV_RE.test(wtok) || NUMERICISH_RE.test(wtok)) {
+          i++
+          continue
+        }
+        if (!isFlag(wtok)) break
+        const kind = classifyWrapperFlag(norm, wtok)
+        if (kind === 'pair') {
+          i += 2
+          continue
+        }
+        if (kind === 'attached') {
+          i++
+          continue
+        }
+        return null
       }
       continue
     }
