@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin, runRemoteRemove } from '../../src/core/cli/remote_commands.js'
+import { runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 
 async function tmpHome() {
@@ -197,9 +197,12 @@ test('a gateway credential with no matching central sink provisions one, forward
   // --no-daemon keeps the test off the real launchd/systemd install.
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central' - forwarding logs to https:\/\/hyp\.internal/)
-  assert.match(out.join(''), /nothing is captured yet - run 'hyp attach/)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  // --no-daemon: there is no reconcile to wait on, so no capture line, just the
+  // finish-enrolling note. The stale "nothing is captured yet" hint is gone.
   assert.match(out.join(''), /daemon install skipped \(--no-daemon\)/)
+  assert.doesNotMatch(out.join(''), /nothing is captured yet/)
+  assert.doesNotMatch(out.join(''), /capturing /)
 
   // The sink was written to the central-seed layer (not the user's local config).
   const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
@@ -211,6 +214,130 @@ test('a gateway credential with no matching central sink provisions one, forward
   const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
   assert.equal(persisted.jwt, 'gw-jwt')
   assert.equal(persisted.origin, 'login')
+})
+
+test('an enrolling login waits for the reconcile and reports the clients that actually attached', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  // Skip the real daemon install; the reconcile is what we simulate below.
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // The daemon's first reconcile attaches both clients: the wait observes it.
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude', '@hypaware/codex'])
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  // Ground truth, not a guess: name the clients that captured.
+  assert.match(out.join(''), /capturing @hypaware\/claude, @hypaware\/codex/)
+  assert.doesNotMatch(out.join(''), /nothing is captured yet/)
+  assert.doesNotMatch(out.join(''), /no clients attached yet/)
+})
+
+test('an enrolling login into an org with no config times out the wait and points at hyp status', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // No client ever attaches (no org config, or a slow pull): the wait times out.
+  const waitForAttach = /** @type {any} */ (async () => [])
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
+})
+
+test('a failed daemon install reports it and does not wait for attach', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 3 }))
+  let waited = false
+  const waitForAttach = /** @type {any} */ (async () => { waited = true; return [] })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 3)
+  assert.equal(waited, false)
+  assert.match(err.join(''), /the daemon install did not finish - run 'hyp daemon install'/)
+  assert.doesNotMatch(out.join(''), /capturing /)
+})
+
+test('an enrolling login whose attach poll throws still reports the timeout fallback, not a failure (Major 1)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // Drive the REAL waitForClientAttach, but make its per-poll probe throw a
+  // transient fs error every tick (an EIO the collector's cache walk could raise
+  // after the daemon is already installed). The successful enrollment must stand.
+  const probe = /** @type {any} */ (async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) })
+  const waitForAttach = /** @type {any} */ (
+    (/** @type {any} */ opts) => waitForClientAttach({ ...opts, probe, timeoutMs: 0, intervalMs: 1, sleep: async () => {} })
+  )
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0) // the throw did not discard the enrollment
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
+})
+
+test('the enrolling login announces the attach wait on stderr before polling (Major 2)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // Capture stderr at the instant the wait begins: the progress line must
+  // already be there, proving it was emitted before any polling.
+  let errAtWait = ''
+  const waitForAttach = /** @type {any} */ (async () => { errAtWait = err.join(''); return [] })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+  assert.match(errAtWait, /waiting for the daemon to attach clients/)
+})
+
+test('waitForClientAttach returns attached client names as soon as the reconcile lands', async () => {
+  let calls = 0
+  // Not attached on the first two polls, then both clients attach. Returned
+  // unsorted so the assertion also proves waitForClientAttach orders them.
+  const probe = /** @type {any} */ (async () => {
+    calls += 1
+    return calls >= 3 ? ['@hypaware/codex', '@hypaware/claude'] : []
+  })
+  let slept = 0
+  const sleep = /** @type {any} */ (async () => { slept += 1 })
+
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 10_000, intervalMs: 1, probe, sleep })
+  // Sorted by waitForClientAttach; both clients reported (Map keys, no dedup needed).
+  assert.deepEqual(names, ['@hypaware/claude', '@hypaware/codex'])
+  assert.equal(calls, 3)
+  assert.equal(slept, 2) // slept between the three polls
+})
+
+test('waitForClientAttach returns empty on timeout without hanging', async () => {
+  let calls = 0
+  const probe = /** @type {any} */ (async () => { calls += 1; return [] })
+  const sleep = /** @type {any} */ (async () => {})
+
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, probe, sleep })
+  assert.deepEqual(names, [])
+  assert.ok(calls >= 1)
+})
+
+test('waitForClientAttach swallows a probe that throws mid-poll and still times out to empty (Major 1)', async () => {
+  let calls = 0
+  // A transient fs error (EMFILE/EACCES/EIO) during a poll — the exact throw the
+  // full-collector cache walk could surface — must not escape as a login failure.
+  const probe = /** @type {any} */ (async () => {
+    calls += 1
+    throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' })
+  })
+  const sleep = /** @type {any} */ (async () => {})
+
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, probe, sleep })
+  assert.deepEqual(names, []) // the throw was swallowed; timed out to the fallback
+  assert.ok(calls >= 1)
 })
 
 test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3)', async () => {
@@ -639,7 +766,7 @@ test('the local-only picker runs before enrollCentralSink provisions the sink (o
   assert.equal(seenArgs.stateDir, path.join(hypHome, 'hypaware'))
   // The seed was in fact written afterwards, so this is a real ordering check.
   await fs.access(seedPath)
-  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central'/)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
 })
 
 test('--no-forward never invokes the local-only picker', async () => {
@@ -686,9 +813,12 @@ test('a real (non-injected) picker on a non-TTY login completes the browser flow
   // did before this wiring existed.
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central' - forwarding logs to https:\/\/hyp\.internal/)
-  assert.match(out.join(''), /nothing is captured yet - run 'hyp attach/)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  // --no-daemon: no reconcile to wait on, so no capture line; the stale
+  // "nothing is captured yet" hint is gone under #259's attach-wait rework.
   assert.match(out.join(''), /daemon install skipped \(--no-daemon\)/)
+  assert.doesNotMatch(out.join(''), /nothing is captured yet/)
+  assert.doesNotMatch(out.join(''), /capturing /)
 })
 
 test('a re-login (already-enrolled, re-seed path) still shows the local-only picker', async () => {
@@ -719,5 +849,5 @@ test('a non-cancellation picker error is warned and never breaks enrollment', as
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, picker })
   assert.equal(code, 0)
   assert.match(err.join(''), /could not run the local-only directory picker.*corrupt local-only list/)
-  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central'/)
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
 })
