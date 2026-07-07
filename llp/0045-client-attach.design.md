@@ -131,7 +131,14 @@ throws — the gateway never bound — the daemon leaves `endpoint` undefined an
 attach handler stays inert this pass rather than recording a base URL for a port
 nothing bound; it attaches once a later boot observes a bound gateway. The
 configured-`listen` fallback (`configuredGatewayEndpoint`) is kept only for the
-**manual** `hyp attach`/`init` paths, where the user asked explicitly.) A client
+**manual** `hyp attach`/`init` paths, where the user asked explicitly.) When the
+manual path has *neither* (no gateway bound in the CLI process, no configured
+`listen`, the normal shape of a central-managed install whose gateway binds an
+ephemeral port only the daemon knows), `hyp attach` does not guess a port and
+does not leak the internal `localEndpoint()` error: it probes the client's
+on-disk attach state via `attachProbe` and reports "already attached, the
+daemon manages attach" as a no-op success, or fails with a message that points
+at starting the daemon or pinning `listen`. A client
 adapter plugin
 *requires* the gateway capability ([LLP 0016](./0016-ai-gateway.decision.md)), so
 whenever a client plugin is enabled the gateway is too and the client is

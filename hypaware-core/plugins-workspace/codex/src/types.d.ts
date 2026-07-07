@@ -57,6 +57,44 @@ export interface CodexRolloutItem {
   usageAttributes?: JsonObject
 }
 
+/**
+ * Resolves a Codex session's `cwd` from its rollout `session_meta` line, the
+ * live projector's fallback when the request carries no in-band cwd (the
+ * ChatGPT-subscription route). Injectable so the projector can be tested
+ * without a real sessions tree.
+ */
+export interface RolloutCwdResolver {
+  /** The rollout-recorded cwd for `sessionId`, or `undefined` when unknown. */
+  resolve(sessionId: string): string | undefined
+}
+
+/**
+ * A directory entry as far as the rollout scan needs it — the structural subset
+ * of `node:fs`'s `Dirent` the walk touches. Declared so the reader can be
+ * injected (and its calls counted) in tests without pulling the whole fs type.
+ */
+export interface RolloutDirent {
+  name: string
+  isDirectory(): boolean
+  isFile(): boolean
+}
+
+/**
+ * Construction options for {@link RolloutCwdResolver}. The clock, TTL, and
+ * directory reader are injectable so the negative-cache staleness bound and the
+ * newest-first bounded walk are both deterministically testable.
+ */
+export interface RolloutCwdResolverOptions {
+  /** Root of the Codex sessions tree (`~/.codex/sessions`). */
+  sessionsDir: string
+  /** Injectable clock in ms for the negative-cache TTL; defaults to `Date.now`. */
+  now?: () => number
+  /** Negative-cache (miss) entry lifetime in ms; defaults to the resolver's TTL. */
+  ttlMs?: number
+  /** Injectable `withFileTypes` directory reader; defaults to `node:fs.readdirSync`. */
+  readdirSync?: (dirPath: string, options: { withFileTypes: true }) => RolloutDirent[]
+}
+
 export interface CodexAttachOptions {
   port: number
   version: string

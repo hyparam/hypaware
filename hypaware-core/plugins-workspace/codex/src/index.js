@@ -9,6 +9,7 @@ import { Attr, getLogger, withSpan } from '../../../../src/core/observability/in
 import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
+import { createRolloutCwdResolver } from './rollout-cwd.js'
 import { attach, defaultConfigPath } from './settings.js'
 import { errCode } from 'hypaware/core/util'
 
@@ -79,16 +80,25 @@ export async function activate(ctx) {
     provider: 'chatgpt',
   })
 
-  gateway.registerExchangeProjector(createCodexExchangeProjector())
+  const homeDir = ctx.env.HOME ?? os.homedir()
+  const codexHome = resolveCodexHome(ctx)
+
+  // @ref LLP 0083 [implements]: give the live projector a rollout-based cwd
+  // fallback for the ChatGPT-subscription route (which carries no in-band cwd),
+  // reading the SAME session rollouts the backfill scans. Without it,
+  // `.hypignore` fails open for that whole traffic class and its rows record
+  // cwd = NULL.
+  gateway.registerExchangeProjector(createCodexExchangeProjector({
+    rolloutCwd: createRolloutCwdResolver({ sessionsDir: path.join(codexHome, 'sessions') }),
+  }))
 
   // Backfill provider: imports the local Codex session rollouts the
   // gateway never saw (history written before HypAware attached, or
   // outside the proxy) into `ai_gateway_messages` via `hyp backfill codex`.
-  const homeDir = ctx.env.HOME ?? os.homedir()
   ctx.backfills.register(
     createCodexBackfillProvider({
       homeDir,
-      codexHome: resolveCodexHome(ctx),
+      codexHome,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
     })

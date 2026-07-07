@@ -41,6 +41,14 @@ test('contract carries its source/projector metadata', () => {
   assert.equal(contract.projectorVersion, PROJECTOR_VERSION)
 })
 
+// @ref LLP 0073#additive-no-migration: the Program/invoked rules bump the
+// projector version 1 → 2 as provenance only (ids are content-addressed; no
+// re-key, no migration).
+test('PROJECTOR_VERSION is 2 after the additive Program/invoked rules', () => {
+  assert.equal(PROJECTOR_VERSION, 2)
+  assert.equal(contract.projectorVersion, 2)
+})
+
 // @ref LLP 0030#decision: the Session node keys on session_id (the
 // session container, always present); conversation_id is null for Claude.
 test('Session rule builds a node keyed on session_id with pruned props', () => {
@@ -185,6 +193,8 @@ test('aux-tagged rows are excluded from every node and edge rule', () => {
   assert.equal(rule('edge', 'used_model').toRow({ ...aux, conversation_id: 'c', model: 'm', message_created_at: TS }), null)
   assert.equal(rule('edge', 'used').toRow({ ...aux, conversation_id: 'c', tool_name: 'Read', message_created_at: TS }), null)
   assert.equal(rule('edge', 'touched').toRow({ ...aux, conversation_id: 'c', tool_name: 'Write', tool_args: { file_path: '/a.js' }, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Program').toRow({ ...aux, tool_name: 'Bash', tool_args: { command: 'git status' }, part_type: 'tool_call', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'invoked').toRow({ ...aux, session_id: 's', tool_name: 'Bash', tool_args: { command: 'git status' }, part_type: 'tool_call', message_created_at: TS }), null)
 })
 
 test('aux filter handles attributes arriving as a JSON string', () => {
@@ -340,4 +350,256 @@ test('Commit -in-> Repo is the second `in` edge and converges with the GitHub ed
   assert.equal(commitInRepo.src_id, commit)
   assert.equal(commitInRepo.dst_id, repo)
   assert.equal(commitInRepo.edge_id, edgeId(commit, 'in', repo))
+})
+
+// --- LLP 0073/0077 (issue #230): Program nodes + invoked edges ---
+
+test('Program/invoked rules select only tool_call rows from the two shell tools', () => {
+  for (const r of [rule('node', 'Program'), rule('edge', 'invoked')]) {
+    assert.match(r.sql, /part_type = 'tool_call'/, `${r.kind}/${r.type} filters tool_call parts`)
+    assert.match(r.sql, /tool_name IN \('Bash', 'exec_command'\)/, `${r.kind}/${r.type} filters the shell tools`)
+  }
+})
+
+test('Program node keys on the validity-gated basename(argv[0]) of the first command', () => {
+  const r = rule('node', 'Program')
+  const row = r.toRow({ tool_name: 'Bash', tool_args: { command: '/opt/homebrew/bin/duckdb foo.db' }, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Program', 'duckdb'))
+  assert.equal(row.node_type, 'Program')
+  assert.equal(row.natural_key, 'duckdb', 'path basenamed + lowercased')
+  assert.equal(row.label, 'duckdb', 'label is the key')
+  assert.equal(row.props, null, 'Program carries no props')
+  assert.deepEqual(row.source_keys, { tool_name: 'Bash', program: 'duckdb' })
+  assert.equal(row.projector_version, PROJECTOR_VERSION)
+
+  // Codex exec_command reads the `cmd` arg (and bash -lc is unwrapped).
+  const codex = r.toRow({ tool_name: 'exec_command', tool_args: { cmd: 'bash -lc "git commit -m x"' }, message_created_at: TS })
+  assert.ok(codex)
+  assert.equal(codex.natural_key, 'git')
+})
+
+test('Program node mints nothing when the facet cannot be cleanly bounded (fail-closed)', () => {
+  const r = rule('node', 'Program')
+  assert.equal(r.toRow({ tool_name: 'Read', tool_args: { command: 'git status' }, message_created_at: TS }), null, 'non-shell tool')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: {}, message_created_at: TS }), null, 'no command')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: '{bad json', message_created_at: TS }), null, 'malformed args')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: { command: '12345' }, message_created_at: TS }), null, 'all-numeric argv[0]')
+  assert.equal(r.toRow({ tool_name: 'Bash', tool_args: { command: '"has space" x' }, message_created_at: TS }), null, 'un-gateable token')
+})
+
+test('Program node parses tool_args arriving as a JSON string', () => {
+  const row = rule('node', 'Program').toRow({ tool_name: 'exec_command', tool_args: '{"cmd":"npm run build"}', message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.natural_key, 'npm')
+})
+
+test('invoked edge wires Session -> Program ids and carries no props', () => {
+  const r = rule('edge', 'invoked')
+  const row = r.toRow({ session_id: 'sess-1', tool_name: 'Bash', tool_args: { command: 'git push origin main' }, message_created_at: TS })
+  assert.ok(row)
+  const src = nodeId('Session', 'sess-1')
+  const dst = nodeId('Program', 'git')
+  assert.equal(row.src_id, src)
+  assert.equal(row.dst_id, dst)
+  assert.equal(row.edge_id, edgeId(src, 'invoked', dst), 'edge points at the Program node the node rule mints')
+  assert.equal(row.src_type, 'Session')
+  assert.equal(row.dst_type, 'Program')
+  assert.equal(row.props, null)
+  assert.deepEqual(row.source_keys, { session_id: 'sess-1', tool_name: 'Bash', program: 'git' })
+})
+
+test('invoked edge skips rows missing the session or an un-gateable program', () => {
+  const r = rule('edge', 'invoked')
+  assert.equal(r.toRow({ session_id: null, tool_name: 'Bash', tool_args: { command: 'git status' }, message_created_at: TS }), null)
+  assert.equal(r.toRow({ session_id: 'sess-1', tool_name: 'Bash', tool_args: { command: '   ' }, message_created_at: TS }), null)
+  assert.equal(r.toRow({ session_id: 'sess-1', tool_name: 'Read', tool_args: { command: 'git status' }, message_created_at: TS }), null)
+})
+
+// --- LLP 0073/0074 (issue #229): Claude Skill nodes + ran edges ---
+
+// Rule order within each kind: surface 1 (Skill tool), surface 2 (marker),
+// surface 3 (slash), surface 4 (Codex exec_command read). The nth argument
+// of rule() indexes that order.
+const SKILL_TOOL = 0
+const SKILL_MARKER = 1
+const SKILL_SLASH = 2
+const SKILL_CODEX = 3
+
+const MARKER_TEXT = 'Base directory for this skill: /home/u/.claude/skills/hypaware-query'
+const SLASH_TEXT = '<command-name>/hypaware-query</command-name>'
+const CODEX_READ_ARGS = { cmd: 'cat /home/u/.codex/skills/hypaware-query/SKILL.md' }
+
+// @ref LLP 0074#strict-filters [tests]: the SQL filters are the decision, not
+// tuning parameters; only role='user' text with a leading anchor is clean.
+test('Skill/ran rules declare the strict per-surface SQL filters', () => {
+  for (const kind of /** @type {const} */ (['node', 'edge'])) {
+    const type = kind === 'node' ? 'Skill' : 'ran'
+    const tool = rule(kind, type, SKILL_TOOL)
+    assert.match(tool.sql, /part_type = 'tool_call' AND tool_name = 'Skill'/, `${kind} surface 1 filters Skill tool calls`)
+
+    const marker = rule(kind, type, SKILL_MARKER)
+    assert.match(marker.sql, /role = 'user' AND part_type = 'text'/, `${kind} surface 2 filters user text parts (assistant-role markers never reach toRow)`)
+    assert.match(marker.sql, /content_text LIKE 'Base directory for this skill: %'/, `${kind} surface 2 anchors the marker in SQL`)
+
+    const slash = rule(kind, type, SKILL_SLASH)
+    assert.match(slash.sql, /role = 'user' AND part_type = 'text'/, `${kind} surface 3 filters user text parts`)
+    assert.match(slash.sql, /content_text LIKE '<command-name>%'/, `${kind} surface 3 anchors the tag in SQL`)
+
+    const codex = rule(kind, type, SKILL_CODEX)
+    assert.match(codex.sql, /part_type = 'tool_call' AND tool_name = 'exec_command'/, `${kind} surface 4 filters exec_command tool calls`)
+  }
+})
+
+test('Skill node from the Skill tool call keys on tool_args.skill', () => {
+  const row = rule('node', 'Skill', SKILL_TOOL).toRow({ session_id: 'sess-1', tool_args: '{"skill":"hypaware-query"}', message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Skill', 'hypaware-query'))
+  assert.equal(row.node_type, 'Skill')
+  assert.equal(row.natural_key, 'hypaware-query', 'verbatim bare name')
+  assert.equal(row.label, 'hypaware-query')
+  assert.equal(row.props, null, 'Skill carries no node props')
+  assert.deepEqual(row.source_keys, { tool_name: 'Skill', skill: 'hypaware-query' })
+  assert.equal(row.projector_version, PROJECTOR_VERSION)
+})
+
+test('Skill node from the marker keys on the base-directory basename', () => {
+  const row = rule('node', 'Skill', SKILL_MARKER).toRow({ session_id: 'sess-1', content_text: MARKER_TEXT, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Skill', 'hypaware-query'))
+  assert.equal(row.natural_key, 'hypaware-query')
+  assert.deepEqual(row.source_keys, { skill: 'hypaware-query' })
+})
+
+test('Skill node from a slash command keys on the de-slashed name', () => {
+  const row = rule('node', 'Skill', SKILL_SLASH).toRow({ session_id: 'sess-1', content_text: SLASH_TEXT, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Skill', 'hypaware-query'))
+  assert.equal(row.natural_key, 'hypaware-query')
+})
+
+// @ref LLP 0075#decision [tests]: Codex's own surface — a path-pattern match
+// on the exec_command SKILL.md read, not any Claude signal.
+test('Skill node from a Codex exec_command read keys on the .codex/skills/<name>/SKILL.md path', () => {
+  const row = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: CODEX_READ_ARGS, message_created_at: TS })
+  assert.ok(row)
+  assert.equal(row.node_id, nodeId('Skill', 'hypaware-query'))
+  assert.equal(row.node_type, 'Skill')
+  assert.equal(row.natural_key, 'hypaware-query')
+  assert.equal(row.label, 'hypaware-query')
+  assert.equal(row.props, null, 'Skill carries no node props')
+  assert.deepEqual(row.source_keys, { tool_name: 'exec_command', skill: 'hypaware-query' })
+  assert.equal(row.projector_version, PROJECTOR_VERSION)
+
+  // fallback `command` arg, and a non-`.codex` path mints nothing.
+  const fallback = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: { command: 'cat /home/u/.codex/skills/hypaware-query/SKILL.md' }, message_created_at: TS })
+  assert.ok(fallback)
+  assert.equal(fallback.natural_key, 'hypaware-query')
+})
+
+test('all four surfaces converge on one Skill node id (cross-surface identity)', () => {
+  const tool = rule('node', 'Skill', SKILL_TOOL).toRow({ session_id: 's', tool_args: { skill: 'hypaware-query' }, message_created_at: TS })
+  const marker = rule('node', 'Skill', SKILL_MARKER).toRow({ session_id: 's', content_text: MARKER_TEXT, message_created_at: TS })
+  const slash = rule('node', 'Skill', SKILL_SLASH).toRow({ session_id: 's', content_text: SLASH_TEXT, message_created_at: TS })
+  const codex = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS })
+  assert.ok(tool && marker && slash && codex)
+  assert.equal(tool.node_id, marker.node_id)
+  assert.equal(marker.node_id, slash.node_id)
+  assert.equal(slash.node_id, codex.node_id)
+})
+
+// @ref LLP 0078#decision [tests]: each surface stamps ONLY its own dispatch
+// flag; the edge id hashes (src, type, dst) only, so all surfaces collapse
+// onto one edge and mergeRow unions the flags.
+test('ran edges wire Session -> Skill with exactly their own dispatch flag', () => {
+  const src = nodeId('Session', 'sess-1')
+  const dst = nodeId('Skill', 'hypaware-query')
+
+  const tool = rule('edge', 'ran', SKILL_TOOL).toRow({ session_id: 'sess-1', tool_args: { skill: 'hypaware-query' }, message_created_at: TS })
+  assert.ok(tool)
+  assert.equal(tool.src_id, src)
+  assert.equal(tool.dst_id, dst)
+  assert.equal(tool.edge_id, edgeId(src, 'ran', dst))
+  assert.equal(tool.src_type, 'Session')
+  assert.equal(tool.dst_type, 'Skill')
+  assert.deepEqual(tool.props, { dispatch_tool: true })
+  assert.deepEqual(tool.source_keys, { session_id: 'sess-1', tool_name: 'Skill', skill: 'hypaware-query' })
+
+  const marker = rule('edge', 'ran', SKILL_MARKER).toRow({ session_id: 'sess-1', content_text: MARKER_TEXT, message_created_at: TS })
+  assert.ok(marker)
+  assert.deepEqual(marker.props, { dispatch_marker: true })
+  assert.deepEqual(marker.source_keys, { session_id: 'sess-1', skill: 'hypaware-query' })
+
+  const slash = rule('edge', 'ran', SKILL_SLASH).toRow({ session_id: 'sess-1', content_text: SLASH_TEXT, message_created_at: TS })
+  assert.ok(slash)
+  assert.deepEqual(slash.props, { dispatch_slash: true })
+
+  const codex = rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: CODEX_READ_ARGS, message_created_at: TS })
+  assert.ok(codex)
+  assert.deepEqual(codex.props, { dispatch_shell_read: true })
+  assert.deepEqual(codex.source_keys, { session_id: 'sess-1', tool_name: 'exec_command', skill: 'hypaware-query' })
+
+  // Same (session, skill) pair from every surface -> the SAME edge id, so the
+  // dispatch flags merge onto one edge instead of minting four.
+  assert.equal(marker.edge_id, tool.edge_id)
+  assert.equal(slash.edge_id, tool.edge_id)
+  assert.equal(codex.edge_id, tool.edge_id)
+})
+
+test('ran edges skip rows missing the session or an un-gateable skill', () => {
+  assert.equal(rule('edge', 'ran', SKILL_TOOL).toRow({ session_id: null, tool_args: { skill: 'x' }, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_TOOL).toRow({ session_id: 'sess-1', tool_args: {}, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_MARKER).toRow({ session_id: null, content_text: MARKER_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_SLASH).toRow({ session_id: 'sess-1', content_text: '<command-name></command-name>', message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: null, tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: { cmd: 'ls /repo' }, message_created_at: TS }), null)
+})
+
+// @ref LLP 0074#strict-filters [tests]: the false-positive matrix. Signals
+// that LOOK like activations but are not (the ~23% the issue measured) mint
+// nothing through any surface.
+test('false-positive matrix: near-miss signals mint nothing', () => {
+  const markerNode = rule('node', 'Skill', SKILL_MARKER)
+  const slashNode = rule('node', 'Skill', SKILL_SLASH)
+  const toolNode = rule('node', 'Skill', SKILL_TOOL)
+
+  // A marker quoted mid-message (assistant echo, pasted transcript, query
+  // output) fails the offset-0 anchor even if it slipped past the LIKE.
+  assert.equal(markerNode.toRow({ session_id: 's', content_text: `look at this: ${MARKER_TEXT}`, message_created_at: TS }), null, 'mid-text marker')
+  assert.equal(markerNode.toRow({ session_id: 's', content_text: ` ${MARKER_TEXT}`, message_created_at: TS }), null, 'offset-1 marker')
+
+  // A built-in slash command is not a skill run.
+  assert.equal(slashNode.toRow({ session_id: 's', content_text: '<command-name>/compact</command-name>', message_created_at: TS }), null, 'built-in slash')
+  assert.equal(rule('edge', 'ran', SKILL_SLASH).toRow({ session_id: 's', content_text: '<command-name>/compact</command-name>', message_created_at: TS }), null, 'built-in slash edge')
+
+  // A mid-text slash tag (someone discussing the tag shape) fails the anchor.
+  assert.equal(slashNode.toRow({ session_id: 's', content_text: 'the tag is <command-name>/x</command-name>', message_created_at: TS }), null, 'mid-text tag')
+
+  // grep/cat/Read of a SKILL.md is inspection, not activation: a Bash grep row
+  // carries no tool_args.skill, so the tool surface mints nothing (and the SQL
+  // filter would not even select it: tool_name = 'Skill' only).
+  assert.equal(toolNode.toRow({ session_id: 's', tool_args: { command: 'grep -r "name:" ~/.claude/skills/hypaware-query/SKILL.md' }, message_created_at: TS }), null, 'grep of SKILL.md')
+
+  // Un-gateable names fail closed at every surface.
+  assert.equal(toolNode.toRow({ session_id: 's', tool_args: { skill: 'not a skill name' }, message_created_at: TS }), null)
+
+  // Codex surface 4: a Claude-shaped `.claude/skills/...` path shares no
+  // signal (LLP 0075 §no-shared-rule) and a read of some other file in the
+  // skill's own directory is not an activation.
+  const codexNode = rule('node', 'Skill', SKILL_CODEX)
+  assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'cat ~/.claude/skills/hypaware-query/SKILL.md' }, message_created_at: TS }), null, 'Claude-shaped path on the Codex surface')
+  assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'ls ~/.codex/skills/hypaware-query' }, message_created_at: TS }), null, 'directory listing, no SKILL.md read')
+  assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'cat ~/.codex/skills/hypaware-query/reference.md' }, message_created_at: TS }), null, 'reads a different file in the skill dir')
+})
+
+test('aux-tagged rows are excluded from the Skill and ran rules', () => {
+  const aux = { attributes: { claude: { aux_kind: 'security_monitor' } } }
+  assert.equal(rule('node', 'Skill', SKILL_TOOL).toRow({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Skill', SKILL_MARKER).toRow({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Skill', SKILL_SLASH).toRow({ ...aux, session_id: 's', content_text: SLASH_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('node', 'Skill', SKILL_CODEX).toRow({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_TOOL).toRow({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_MARKER).toRow({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_SLASH).toRow({ ...aux, session_id: 's', content_text: SLASH_TEXT, message_created_at: TS }), null)
+  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
 })

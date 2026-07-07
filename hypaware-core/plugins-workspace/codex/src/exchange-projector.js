@@ -20,6 +20,7 @@ import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } 
 /**
  * @import { AiGatewayExchangeInput, AiGatewayExchangeProjector, AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject, JsonValue } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
+ * @import { RolloutCwdResolver } from './types.js'
  */
 
 /**
@@ -37,7 +38,7 @@ import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } 
  * ChatGPT subscription mode) through one projector without exposing
  * provider semantics to the gateway core.
  *
- * @param {{ resolver?: UsagePolicyResolver }} [opts]
+ * @param {{ resolver?: UsagePolicyResolver, rolloutCwd?: RolloutCwdResolver }} [opts]
  * @returns {AiGatewayExchangeProjector}
  */
 export function createCodexExchangeProjector(opts = {}) {
@@ -45,6 +46,11 @@ export function createCodexExchangeProjector(opts = {}) {
   // listener): the per-cwd cache then spans the listener's lifetime so the
   // capture hot path adds no unbounded fs work (LLP 0049 R6).
   const resolver = opts.resolver ?? createUsagePolicyResolver()
+  // @ref LLP 0083 [implements]: the ChatGPT-subscription route carries no
+  // in-band cwd, so fall back to the session rollout's session_meta.cwd. Left
+  // undefined (no fallback) when the caller does not wire it, e.g. unit tests
+  // that don't exercise the rollout path; the plugin wires it in index.js.
+  const rolloutCwd = opts.rolloutCwd
 
   return {
     name: 'codex-exchange',
@@ -78,6 +84,17 @@ export function createCodexExchangeProjector(opts = {}) {
       const provider = resolveProvider(input, reqBody, path)
       const codexContext = resolveCodexContext(input, provider, path, reqBody)
 
+      // `resolveConversationId` needs nothing from the built messages, so it
+      // (and the session id derived from it) is resolved here, ABOVE the cwd
+      // check: the session id keys BOTH the rollout cwd fallback below and the
+      // session opt-out drop, and both drop checks run before message-shaping.
+      const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
+      // @ref LLP 0030#decision: session_id is the partition key (always
+      // non-null): Codex's `metadata.session_id`, falling back to the
+      // thread (conversation_id) when no session id was captured. Keep
+      // conversation_id = the thread; both can be set for Codex.
+      const sessionId = stringValue(codexContext?.session_id) ?? conversationId
+
       // @ref LLP 0050 [implements]: capture-seam drop, symmetric to the
       // @hypaware/claude projector. Once this exchange's cwd is resolved, an
       // ancestor `.hypignore` of class `ignore` drops the exchange by returning
@@ -88,8 +105,18 @@ export function createCodexExchangeProjector(opts = {}) {
       // and is logged as a drop rather than a `no_projector_match` miss. The
       // response has already streamed, so the live call is untouched: only
       // persistence is suppressed (LLP 0049 R1/R2). This is the same cwd
-      // `resolveRecordedContext` would stamp on the row.
+      // `resolveRecordedContext` stamps on the row.
+      //
+      // @ref LLP 0083 [implements]: the in-band cwd (Responses `metadata`, the
+      // API-key route) is the fast path; only when it is absent (the
+      // ChatGPT-subscription route) fall back to the session rollout's
+      // session_meta.cwd so `.hypignore` coverage is client-independent and live
+      // rows carry the same cwd the codex backfill reads. The `??` keeps the
+      // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
+      // the codex session id — only a real Codex session has a rollout — so
+      // non-codex traffic never scans.
       const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
+        ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
       if (cwd) {
         const policy = resolver.resolve(cwd)
         if (policy.class === 'ignore') {
@@ -107,17 +134,6 @@ export function createCodexExchangeProjector(opts = {}) {
           return USAGE_POLICY_DROP
         }
       }
-
-      // `resolveConversationId` needs nothing from the built messages, so it
-      // (and the session id derived from it) is resolved here, ABOVE
-      // `messagesForTransport`, next to the cwd check above: both drop checks
-      // now run before any message-shaping work.
-      const conversationId = resolveConversationId(reqBody, input, provider, path, codexContext)
-      // @ref LLP 0030#decision: session_id is the partition key (always
-      // non-null): Codex's `metadata.session_id`, falling back to the
-      // thread (conversation_id) when no session id was captured. Keep
-      // conversation_id = the thread; both can be set for Codex.
-      const sessionId = stringValue(codexContext?.session_id) ?? conversationId
 
       // @ref LLP 0066#enforcement [implements]: session opt-out drop. Keyed on
       // the stamped session_id (metadata.session_id ?? thread id), the exact
@@ -143,7 +159,7 @@ export function createCodexExchangeProjector(opts = {}) {
       const messages = messagesForTransport({ provider, path, reqBody, responseBody, streamEvents })
       if (messages.length === 0) return undefined
 
-      const recordedContext = resolveRecordedContext(reqBody, codexContext)
+      const recordedContext = resolveRecordedContext(reqBody, codexContext, cwd)
 
       /** @type {JsonObject} */
       const codexAttributes = codexContext?.attributes ? { ...codexContext.attributes } : {}
@@ -830,12 +846,13 @@ function resolveConversationSource(provider) {
 /**
  * @param {Record<string, unknown>} reqBody
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
+ * @param {string | undefined} cwd The cwd the caller already resolved (in-band
+ *   fast path, else the rollout fallback). Passed in — not recomputed — so the
+ *   row's stamped cwd is exactly the value the `.hypignore` check used, and so
+ *   the subscription route records the rollout cwd instead of NULL.
+ *   @ref LLP 0083 [implements]
  */
-function resolveRecordedContext(reqBody, codexContext) {
-  const cwd = firstString(
-    codexContext?.cwd,
-    readRecordedCwd(reqBody),
-  )
+function resolveRecordedContext(reqBody, codexContext, cwd) {
   const meta = readKey(reqBody, 'metadata')
   const userIdMeta = isPlainObject(meta) ? parseMaybeJson(meta.user_id) : undefined
   const git_branch = firstString(

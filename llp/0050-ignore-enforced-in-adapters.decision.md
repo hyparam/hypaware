@@ -5,7 +5,7 @@
 **Systems:** Gateway, Plugins, Core
 **Author:** Phil / Claude
 **Date:** 2026-06-29
-**Related:** LLP 0012, LLP 0016, LLP 0049, LLP 0066
+**Related:** LLP 0012, LLP 0016, LLP 0049, LLP 0066, LLP 0083
 
 > The `.hypignore` capture-seam drop ([LLP 0049](./0049-hypignore-usage-policy.spec.md))
 > lives in the `@hypaware/claude` and `@hypaware/codex` adapters — the only
@@ -37,7 +37,11 @@ already resolve `cwd` at four call sites:
 
 The live exchange projector already reads `session-context.jsonl` and stamps
 `cwd`/`git_branch`/`git_remote`/`repo_root` onto each projected row
-(`claude/src/projector.js`). It runs **before** the cache write: the gateway
+(`claude/src/projector.js`). (**Extended-by:
+[LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)** — the Codex live
+projector had no equivalent `cwd` source on the ChatGPT-subscription route, so it
+now enriches `cwd` from the session rollout the same way; the drop mechanics here
+are unchanged.) It runs **before** the cache write: the gateway
 source does `projectExchange(row)` → `if (messageRows.length > 0) appendRows(...)`
 (`ai-gateway/src/source.js`). So an ignored exchange is dropped by having the
 projector **return `[]`** — the existing write guard then persists nothing. **No

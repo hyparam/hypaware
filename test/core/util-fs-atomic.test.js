@@ -79,7 +79,12 @@ test('atomicWriteFile enforces expectedMtimeMs (CONCURRENT_EDIT)', async () => {
     await atomicWriteFile(target, 'v2', { expectedMtimeMs: mtimeMs })
     assert.equal(await fs.readFile(target, 'utf8'), 'v2')
 
-    // Stale mtime: rejected, file untouched.
+    // Stale mtime: rejected, file untouched. Force a guaranteed-distinct
+    // on-disk mtime instead of relying on the write above having landed in
+    // a later filesystem mtime tick — on a fast runner both writes can share
+    // one tick, leaving the mtime unchanged so the guard never fires (#272).
+    const bumped = new Date(mtimeMs + 1000)
+    await fs.utimes(target, bumped, bumped)
     await assert.rejects(
       atomicWriteFile(target, 'v3', { expectedMtimeMs: mtimeMs }),
       (err) => err instanceof ConcurrentEditError && err.code === 'CONCURRENT_EDIT'
