@@ -606,3 +606,118 @@ test('--org= (equals form, empty value) is a usage error', async () => {
   assert.equal(code, 2)
   assert.match(err.join(''), /--org expects an org name/)
 })
+
+/* --------------------------------------------------------------------------
+ * Login-time local-only directory picker wiring (LLP 0081 T7): the picker
+ * runs once the login-minted gateway is seeded, strictly before
+ * `enrollCentralSink` provisions or re-seeds a central sink (LLP 0069
+ * #trigger, LLP 0072). These tests inject a `picker` test double (the same
+ * pattern as `login`/`seed`) rather than exercising the real interactive
+ * prompt, which `test/core/local-only-command.test.js` already covers.
+ * ------------------------------------------------------------------------ */
+
+test('the local-only picker runs before enrollCentralSink provisions the sink (ordering, LLP 0069 #trigger)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
+
+  /** @type {boolean | null} */
+  let seedExistedWhenPickerRan = null
+  /** @type {any} */
+  let seenArgs = null
+  const picker = /** @type {any} */ (async (args) => {
+    seenArgs = args
+    seedExistedWhenPickerRan = await fs.access(seedPath).then(() => true, () => false)
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  // --no-daemon keeps the test off the real launchd/systemd install.
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, picker })
+  assert.equal(code, 0)
+  assert.equal(seedExistedWhenPickerRan, false, 'the picker must observe the seed as not-yet-written')
+  assert.equal(seenArgs.stateDir, path.join(hypHome, 'hypaware'))
+  // The seed was in fact written afterwards, so this is a real ordering check.
+  await fs.access(seedPath)
+  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central'/)
+})
+
+test('--no-forward never invokes the local-only picker', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod', '--no-forward'], ctx, { login, picker })
+  assert.equal(code, 0)
+  assert.equal(pickerCalled, false)
+})
+
+test('a query-only login (no gateway credential minted) never invokes the local-only picker', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => ({
+    refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2999-01-01T00:00:00Z', org: 'acme',
+  }))
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, picker })
+  assert.equal(code, 0)
+  assert.equal(pickerCalled, false)
+})
+
+test('a real (non-injected) picker on a non-TTY login completes the browser flow unchanged (LLP 0072 #tty)', async () => {
+  const hypHome = await tmpHome()
+  // makeCtx's stderr has no `isTTY`, so the default-wired real picker cannot
+  // reach an interactive prompt here; it must resolve to a no-op.
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  // No `picker` dep supplied: exercises the real `runLocalOnlyPicker` wired
+  // by `runRemoteLogin`'s defaults. The login must complete exactly as it
+  // did before this wiring existed.
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central' - forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /nothing is captured yet - run 'hyp attach/)
+  assert.match(out.join(''), /daemon install skipped \(--no-daemon\)/)
+})
+
+test('a re-login (already-enrolled, re-seed path) still shows the local-only picker', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, picker })
+  assert.equal(code, 0)
+  assert.equal(pickerCalled, true)
+  assert.match(out.join(''), /seeded forwarding identity for sink 'fwd'/)
+})
+
+test('a non-cancellation picker error is warned and never breaks enrollment', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const picker = /** @type {any} */ (async () => { throw new Error('corrupt local-only list') })
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, picker })
+  assert.equal(code, 0)
+  assert.match(err.join(''), /could not run the local-only directory picker.*corrupt local-only list/)
+  assert.match(out.join(''), /provisioned '@hypaware\/central' sink 'central'/)
+})
