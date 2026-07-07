@@ -134,6 +134,16 @@ have to define preference/cleanup rules across `(source_dataset, projector)`.
 
 ## On-demand projection
 
+> **Superseded (default only) by [LLP 0087](./0087-automatic-projection-default.decision.md).**
+> Automatic projection is now the default: the daemon projects on a bounded
+> scheduled tick, opt-out via config ([LLP 0086](./0086-automatic-derivation.spec.md)).
+> The section below stands as the record of why on-demand was originally chosen,
+> and the manual `hyp graph project` / `hyp graph compact` commands remain. The
+> two premises here were reversed by a scheduled tick that needs no commit hook
+> ([LLP 0088](./0088-scheduled-daemon-tick.decision.md)) and by the daemon's
+> existing bounded-background-work guards
+> ([LLP 0089](./0089-bounded-isolated-derivation.decision.md)).
+
 The projection runs only via `hyp graph project` (and compaction via
 `hyp graph compact`). There is no snapshot/commit hook in the kernel to chain
 from, and **eventual freshness is acceptable** for an activity graph — the
