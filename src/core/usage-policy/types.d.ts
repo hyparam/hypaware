@@ -32,6 +32,15 @@ export interface UsagePolicyResolver {
   isIgnored(cwd: string): boolean
 }
 
+// On-disk shape of the machine-local `local-only` directory list
+// (`<stateDir>/usage-policy/local-only.json`, LLP 0071). `dirs` is a
+// normalized (absolute, deduplicated, sorted) set of directory paths; a
+// listed path need not exist on disk or be a git repo (LLP 0069 R4).
+export interface LocalOnlyListFile {
+  version: 1
+  dirs: string[]
+}
+
 // Terminal sentinel an adapter's exchange projector returns to express an
 // intentional `.hypignore` usage-policy drop (the exchange must never be
 // recorded). Distinct from a bare `undefined` "this projector declined" return

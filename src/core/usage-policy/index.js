@@ -12,3 +12,14 @@ export { USAGE_POLICY_DROP, isUsagePolicyDrop } from './drop.js'
 // Repo-root resolution for the `hyp ignore` CLI (LLP 0049 #cli): place a
 // single repo-wide `.hypignore` at the git toplevel.
 export { findRepoRoot } from './repo_root.js'
+// The machine-local `local-only` directory list (LLP 0071): a single
+// `HYP_HOME`-state JSON file, distinct from the committable `.hypignore`
+// dotfile. Read by the export-seam resolver and `hyp status`, written by the
+// login picker and the `hyp ignore --local-only` durable authoring command.
+export {
+  localOnlyListPath,
+  readLocalOnlyDirs,
+  writeLocalOnlyDirs,
+  LocalOnlyListUnreadableError,
+  LOCAL_ONLY_LIST_UNREADABLE_ERROR_KIND,
+} from './local_only.js'
