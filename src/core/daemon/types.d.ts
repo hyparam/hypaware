@@ -72,6 +72,7 @@ export type StatusDiagnosticKind =
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
+  | 'client_attach_stale'
   | 'recent_errors'
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'

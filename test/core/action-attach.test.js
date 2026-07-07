@@ -281,7 +281,7 @@ test('perform() attaches via the registry (endpoint + json mode) and records set
   )
   assert.deepEqual(outcome, {
     status: 'done',
-    detail: { settings_path: '/home/u/.claude/settings.json', prev_value: 'https://foreign.example/api' },
+    detail: { endpoint: ENDPOINT, settings_path: '/home/u/.claude/settings.json', prev_value: 'https://foreign.example/api' },
   })
   // The adapter was invoked with the gateway endpoint, an empty config, and
   // the machine-readable json flag.
@@ -302,10 +302,10 @@ test('perform() records done with only settings_path when the attach had no prio
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { settings_path: '/home/u/.claude/settings.json' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, settings_path: '/home/u/.claude/settings.json' } })
 })
 
-test('perform() records done (no detail) on an idempotent re-attach (changed:false)', async () => {
+test('perform() records done (endpoint only) on an idempotent re-attach (changed:false)', async () => {
   const registration = attachRegistration('claude', {
     payload: { status: 'noop', action: 'attach', client: 'claude', dry_run: false, changed: false },
   })
@@ -314,17 +314,17 @@ test('perform() records done (no detail) on an idempotent re-attach (changed:fal
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done' })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT } })
 })
 
-test('perform() records done (no detail) when the adapter emits an unparseable payload', async () => {
+test('perform() records done (endpoint only) when the adapter emits an unparseable payload', async () => {
   const registration = attachRegistration('claude', { prose: 'attached claude (human prose)\n' })
   const handler = createAttachHandler()
   const outcome = await handler.perform(
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done' })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT } })
 })
 
 test('perform() parses the last non-empty line when prose precedes the JSON', async () => {
@@ -340,7 +340,7 @@ test('perform() parses the last non-empty line when prose precedes the JSON', as
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { settings_path: '/p' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, settings_path: '/p' } })
 })
 
 test('perform() returns failed when the adapter throws (file not writable)', async () => {

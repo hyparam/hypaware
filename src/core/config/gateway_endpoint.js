@@ -54,3 +54,23 @@ export function endpointFromListen(listen) {
   const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
   return `http://${formattedHost}:${port}`
 }
+
+/**
+ * Extract the port (as a string) from an `http://host:port` endpoint URL, or
+ * `undefined` when it is unparseable or carries no explicit port. The string
+ * form matches `probeClientAttachFromDescriptor`'s recorded `port`, so the two
+ * can be compared directly when validating a client's attach against the live
+ * gateway (issue #277 / LLP 0086).
+ *
+ * @param {string | undefined} endpoint
+ * @returns {string | undefined}
+ */
+export function portFromEndpoint(endpoint) {
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return undefined
+  try {
+    const port = new URL(endpoint).port
+    return port.length > 0 ? port : undefined
+  } catch {
+    return undefined
+  }
+}

@@ -7,6 +7,7 @@
 **Date:** 2026-06-26
 **Related:** LLP 0011, LLP 0016, LLP 0025, LLP 0031, LLP 0036, LLP 0037, LLP 0041
 **Designed-by:** LLP 0045 — client attach implementation design
+**Extended-by:** LLP 0086 — attach tracks the gateway's ephemeral port (the "attach once, done forever" model becomes endpoint-aware: re-attach on a daemon rebind, and manual `hyp attach` discovers the live port)
 
 > When a machine joins a fleet the central config pulls and the gateway binds —
 > but nothing is captured until someone runs `hyp attach claude` / `hyp attach
