@@ -18,9 +18,9 @@ import {
 } from '../remote/credentials.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
-import { runLocalOnlyPicker } from '../commands/local_only.js'
+import { listCapturedDirectories, runLocalOnlyPicker } from '../commands/local_only.js'
 import { originOf } from '../remote/gateway_seed.js'
-import { readAllStdin } from './stdio.js'
+import { isTty, readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
@@ -118,6 +118,77 @@ function defaultSleep(ms) {
 }
 
 /**
+ * The default budget for the post-attach "wait for captured directories" poll.
+ * Sized like the attach wait: long enough for the daemon's first backfill to
+ * start landing rows, short enough to never read as a hang.
+ */
+export const CAPTURE_WAIT_DEFAULT_MS = 30000
+
+/**
+ * Bounded, best-effort wait for this machine's local cache to hold at least one
+ * captured working directory, so the local-only picker has candidates to show
+ * on a first-time enroll (issue #281). The daemon attaches clients and *then*
+ * backfills existing history (LLP 0037 / LLP 0044 "ordering vs first ingest")
+ * into `ai_gateway_messages` asynchronously after it installs; `waitForClientAttach`
+ * returns at attach, before backfill has landed any rows, so the picker must
+ * wait for the cache it reads to populate. Polls the same local enumeration the
+ * picker uses (`listCapturedDirectories`, R2 - local cache only, never the remote).
+ *
+ * A `null` result means enumeration cannot run at all (no query engine, or an
+ * engine error): stop immediately and let the picker take its skip path. Only a
+ * valid-but-empty list means "backfill may still be landing", so keep polling
+ * until the budget expires. Timing out returns the last (empty) result, and the
+ * picker then shows the durable-command hint. Never throws and never blocks past
+ * the budget (LLP 0072: the refinement must not break the login it refines).
+ *
+ * @param {{
+ *   ctx: Pick<CommandRunContext, 'query' | 'storage' | 'config'>,
+ *   timeoutMs?: number,
+ *   intervalMs?: number,
+ *   sleep?: (ms: number) => Promise<void>,
+ *   enumerate?: () => Promise<any[] | null>,
+ * }} opts
+ * @returns {Promise<any[] | null>} the captured directories (possibly empty), or null when enumeration cannot run
+ */
+export async function waitForCapturedDirectories({ ctx, timeoutMs = CAPTURE_WAIT_DEFAULT_MS, intervalMs = 1000, sleep = defaultSleep, enumerate }) {
+  const list = enumerate ?? (() => listCapturedDirectories({ query: ctx.query, storage: ctx.storage, config: ctx.config }))
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    /** @type {any[] | null} */
+    let candidates
+    try {
+      candidates = await list()
+    } catch {
+      candidates = null
+    }
+    if (candidates === null || (Array.isArray(candidates) && candidates.length > 0)) return candidates
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return candidates
+    await sleep(Math.max(1, Math.min(intervalMs, remaining)))
+  }
+}
+
+/**
+ * Run the local-only directory picker as a best-effort refinement of an
+ * enrolling login. A non-cancellation failure (e.g. a corrupt existing list) is
+ * warned and treated as zero exclusions rather than allowed to break the
+ * enrollment it refines. When `listCandidates` is supplied (the fresh-enroll
+ * path, which already waited for and fetched the populated candidate set) it is
+ * handed to the picker so the cache is not re-scanned; otherwise the picker
+ * enumerates the cache itself.
+ *
+ * @param {{ ctx: CommandRunContext, stateDir: string, picker: typeof runLocalOnlyPicker, listCandidates?: () => Promise<any[] | null> }} args
+ * @ref LLP 0072 [implements]: never blocks login/enrollment on picker failure
+ */
+async function refineLocalOnly({ ctx, stateDir, picker, listCandidates }) {
+  try {
+    await picker(listCandidates ? { ctx, stateDir, listCandidates } : { ctx, stateDir })
+  } catch (err) {
+    ctx.stderr.write(`note: could not run the local-only directory picker (nothing withheld): ${err instanceof Error ? err.message : String(err)}\n`)
+  }
+}
+
+/**
  * Core `remote` commands manage named MCP targets + their query-scoped
  * tokens (LLP 0033 §commands). `hyp` is the MCP client on the human-CLI
  * path, so these are **core**, not a plugin. `remote add` is a local-layer
@@ -197,7 +268,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, picker?: typeof runLocalOnlyPicker, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach }} [deps] test seam for the browser flow, gateway seeding, the local-only picker, central-sink enrollment, and the post-enroll attach wait
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, picker?: typeof runLocalOnlyPicker, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, waitForCaptured?: typeof waitForCapturedDirectories }} [deps] test seam for the browser flow, gateway seeding, the local-only picker, central-sink enrollment, the post-enroll attach wait, and the post-backfill captured-directory wait
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
@@ -261,6 +332,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
     picker: deps.picker ?? runLocalOnlyPicker,
     enroll: deps.enroll ?? enrollCentralSink,
     waitForAttach: deps.waitForAttach ?? waitForClientAttach,
+    waitForCaptured: deps.waitForCaptured ?? waitForCapturedDirectories,
   })
 }
 
@@ -393,10 +465,10 @@ async function persistStaticToken(name, token, ctx) {
  * @param {string} name
  * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
  * @param {CommandRunContext} ctx
- * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, picker: typeof runLocalOnlyPicker, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
+ * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, picker: typeof runLocalOnlyPicker, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach, waitForCaptured: typeof waitForCapturedDirectories }} deps
  * @returns {Promise<number>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, picker, enroll, waitForAttach }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, picker, enroll, waitForAttach, waitForCaptured }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -505,19 +577,16 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return 1
   }
 
-  // Offer the local-only directory picker once enrollment is imminent -
-  // strictly before enrollCentralSink (R6), covering both the fresh-enroll and
-  // re-login/re-seed forks below (LLP 0069 #trigger). A non-cancellation
-  // failure here (e.g. a corrupt existing list) is a picker problem, not a
-  // login/enrollment one: warn and proceed with zero exclusions rather than
-  // let the privacy refinement break the enrollment it refines.
-  // @ref LLP 0069#trigger [implements]: post-enrollment picker trigger point
-  // @ref LLP 0072 [implements]: never blocks login/enrollment on picker failure
-  try {
-    await picker({ ctx, stateDir })
-  } catch (err) {
-    ctx.stderr.write(`note: could not run the local-only directory picker (nothing withheld): ${err instanceof Error ? err.message : String(err)}\n`)
-  }
+  // The local-only directory picker is deferred to *after* provisioning, not run
+  // here (issue #281). Its candidate list is the distinct captured cwds in the
+  // local cache (LLP 0069 #enumerate), and on a first-time enroll the cache is
+  // empty until the daemon attaches and backfills - which only happens once
+  // enrollCentralSink installs the daemon. Running it pre-enroll (as LLP 0069
+  // #trigger / R6 first specified) enumerated an empty cache and silently skipped
+  // on every fresh enroll, exactly the case the picker exists for. So each fork
+  // below runs the picker at the point its cache is populated: the fresh-enroll
+  // fork after the attach + backfill wait; the re-login fork against the cache a
+  // prior daemon already filled.
 
   // No sink targets this server yet: provision one so login forwards from one
   // command (LLP 0063 D2/D5). enrollCentralSink writes join's sink block, seeds
@@ -544,10 +613,27 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // config and runs the attach reconcile. Say what is left to do and stop.
     if (noDaemon) {
       ctx.stdout.write("daemon install skipped (--no-daemon); run 'hyp daemon install' to finish enrolling\n")
+      // No daemon this run means no attach/backfill, so enumerate the cache
+      // as-is: a re-run over an already-populated cache still gets the editor; a
+      // fresh box shows the durable-command hint. Because no forwarding daemon
+      // exists yet, this still lands the list before any export (R6 holds here).
+      // @ref LLP 0069#trigger [implements]: enrolling-login picker; --no-daemon keeps the pre-forwarding ordering
+      // @ref LLP 0072 [implements]: TTY-gated, defaults to nothing, never blocks
+      await refineLocalOnly({ ctx, stateDir, picker })
       return 0
     }
     if (result.daemonCode !== 0) {
       ctx.stderr.write("note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n")
+      // The install failed, so no forwarding daemon is running this run: like the
+      // --no-daemon fork, run the picker against the cache as-is before returning.
+      // A prior daemon may have populated it (edit the list); a true fresh enroll
+      // shows the durable hint. Either way the list lands before any forwarding can
+      // start once the user finishes 'hyp daemon install', so R6 holds on this fork
+      // too. Without this the pre-281 pre-provision picker's coverage of the
+      // daemon-fail path would be silently dropped.
+      // @ref LLP 0069#trigger [implements]: enrolling-login picker; daemon-fail keeps the pre-forwarding ordering
+      // @ref LLP 0072 [implements]: TTY-gated, defaults to nothing, never blocks
+      await refineLocalOnly({ ctx, stateDir, picker })
       return result.daemonCode
     }
     // The daemon is installed; it now pulls the org config and auto-attaches any
@@ -568,6 +654,38 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     } else {
       ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture\n")
     }
+    // Now the picker (issue #281). The candidates are the captured cwds the
+    // daemon just backfilled; attach lands before backfill (LLP 0044 "ordering
+    // vs first ingest"), so wait (bounded, best-effort) for the cache to
+    // populate, then run the picker against it. This defers the picker past
+    // enrollCentralSink, relaxing LLP 0069 R6's "before provisioning" ordering
+    // for the auto-daemon fresh-enroll case only: the daemon may forward some
+    // backfilled rows before the user picks, so the "not forwarded even once"
+    // guarantee narrows to "withheld from every tick after the pick" here. See
+    // issue #281 for the follow-up that would close the one-time backfill window.
+    // @ref LLP 0069#trigger [constrained-by]: still gated to an enrolling login, but deferred until the cache the picker enumerates is populated (issue #281)
+    // @ref LLP 0072 [implements]: TTY-gated, defaults to excluding nothing, never blocks enrollment
+    // The bounded backfill wait only helps when a client actually attached this
+    // run: attach is what triggers the post-attach backfill (LLP 0044), so with
+    // nothing attached there is no source to populate the cache and the poll
+    // would only burn its whole budget in silence. When nothing attached, skip
+    // straight to the picker: it enumerates the cache as-is (empty on a fresh
+    // box) and takes its durable-hint path immediately, no dead 30s wait.
+    //
+    // The wait is equally pointless on a non-interactive login: it exists only
+    // to fill the picker's candidate list, and the picker no-ops on a non-TTY
+    // stream (LLP 0072 #tty, local_only.js). So mirror the picker's exact TTY
+    // decision (`ctx.stdin ?? process.stdin`, `ctx.stderr`) here and skip the
+    // poll when it cannot prompt, so a scripted enroll never stalls up to
+    // CAPTURE_WAIT_DEFAULT_MS for a list it will never show; the picker still
+    // runs and takes its own durable-hint path immediately.
+    const canPromptPicker = isTty(ctx.stdin ?? process.stdin) && isTty(ctx.stderr)
+    if (attached.length > 0 && canPromptPicker) {
+      const captured = await waitForCaptured({ ctx })
+      await refineLocalOnly({ ctx, stateDir, picker, listCandidates: () => Promise.resolve(captured) })
+    } else {
+      await refineLocalOnly({ ctx, stateDir, picker })
+    }
     return 0
   }
 
@@ -585,6 +703,13 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       ctx.stderr.write(`note: this replaced a ${provenance} gateway identity${from} (was gateway ${s.replaced.gateway_id})\n`)
     }
   }
+
+  // Already-enrolled machine (re-login / re-seed): a prior daemon has run, so
+  // the local cache is populated - run the picker as a list editor against it
+  // (LLP 0080 editor semantics), no attach/backfill wait needed. Best-effort.
+  // @ref LLP 0069#trigger [implements]: enrolling-login picker for the already-enrolled fork
+  // @ref LLP 0072 [implements]: TTY-gated, defaults to nothing, never blocks
+  await refineLocalOnly({ ctx, stateDir, picker })
   return 0
 }
 

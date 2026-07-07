@@ -112,6 +112,27 @@ on its very first pass. Running the picker before provisioning has a second
 benefit: if it is dismissed or abandoned, nothing has been provisioned yet — there
 is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./0072-enrollment-dir-picker.decision.md#default)).
 
+> **Revisited-by [issue #281] (fresh-enroll ordering).** As shipped, running the
+> picker *before* provisioning had a self-defeating consequence this spec did not
+> foresee: the candidate list ([enumerate](#enumerate)) is the distinct captured
+> `cwd`s in the **local cache**, but on a first-time enroll that cache is empty
+> until the daemon (installed *by* `enrollCentralSink`) attaches and backfills. So
+> the pre-provision picker enumerated nothing and silently skipped on every fresh
+> enroll, precisely its primary trigger. The bugfix defers the picker past
+> `enrollCentralSink` on the auto-daemon fresh-enroll path so it runs against the
+> now-populated cache. The `--no-daemon` fresh-enroll fork also now runs the
+> picker after `enrollCentralSink` writes the sink config (it is no longer
+> literally *pre-provision*), but since `--no-daemon` installs no forwarding
+> daemon this run, the list still lands before *any* export, so R6's substantive
+> "not forwarded, even once" guarantee holds there unchanged; the re-login fork
+> runs against the cache a prior daemon already filled. This narrows R6's "not
+> forwarded, even once" to "withheld from every export tick after the pick" only
+> on the auto-daemon fresh-enroll path (a one-time backfill window may forward
+> before the user picks). Closing that window fully (hold forwarding until
+> the pick, or backfill locally before the forward daemon starts) is deferred to
+> the follow-up tracked in [issue #281]; this record's decision is otherwise
+> unchanged.
+
 The picker only makes sense on an **enrolling** login (one that provisions or
 already has a central sink). A `--no-forward` / query-only login
 ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md)) forwards
