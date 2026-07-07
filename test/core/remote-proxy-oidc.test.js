@@ -10,7 +10,10 @@ import { Readable } from 'node:stream'
 import { runMcpProxy } from '../../src/core/mcp/proxy.js'
 import { writeSession, readCredentials, remoteCredentialsPath } from '../../src/core/remote/credentials.js'
 
-const MCP_URL = 'https://hyp.internal/mcp'
+// A full /v1/mcp endpoint: deriveMcpEndpoint honors it verbatim (LLP 0084 D2),
+// so these refresh/retry tests forward to exactly this URL and can match it
+// directly. The base-URL derivation itself is covered in remote-mcp-endpoint.test.js.
+const MCP_URL = 'https://hyp.internal/v1/mcp'
 const TOKEN_URL = 'https://hyp.internal/v1/identity/token'
 const FUTURE = '2999-01-01T00:00:00Z'
 

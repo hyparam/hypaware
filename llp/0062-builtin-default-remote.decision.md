@@ -5,7 +5,7 @@
 **Systems:** CLI, Query, MCP
 **Author:** Kenny / Claude
 **Date:** 2026-07-02
-**Related:** LLP 0033, LLP 0031
+**Related:** LLP 0033, LLP 0031, LLP 0084
 
 > LLP 0033 gave every install a target registry (`query.remotes`) and a
 > `default_remote`, but reaching the Hyparam-hosted central server still took a
@@ -31,6 +31,12 @@ public client is therefore consistent with that section, not a secrets leak.
 This keeps the local-first default intact: a bare `hyp <verb>` still runs
 locally. The built-in only changes what a target *name* resolves to, never
 whether a plain command goes remote.
+
+> **Extended-by: [LLP 0084](./0084-mcp-endpoint-from-base.decision.md).** This
+> base URL is not the MCP endpoint; the client derives `<base>/v1/mcp` for the
+> actual tool calls (LLP 0033 originally documented the url as the full endpoint,
+> so a url already ending in `/v1/mcp` is still honored verbatim). Issue #274 was
+> this base 404ing before that derivation existed.
 
 ### D2 — Bare `--remote` and bare `remote login` resolve the default
 

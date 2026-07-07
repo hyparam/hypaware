@@ -4,7 +4,7 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
+import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { isAuthStatus, mcpRequestHeaders, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
@@ -39,6 +39,10 @@ export async function runMcpProxy({ target, ctx }) {
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const identityBase = deriveIdentityBase(entry.url) ?? undefined
+  // The registered URL is the server **base**; MCP is served at <base>/v1/mcp,
+  // so forward each message to the derived endpoint, not the base verbatim.
+  // @ref LLP 0084#derive [implements]: derive the MCP endpoint from the registered base
+  const mcpUrl = deriveMcpEndpoint(entry.url)
   // Fail fast (exit 2) if there is no usable credential at all. This is a
   // presence check only - resolveToken never refreshes - so a near-expiry OIDC
   // JWT does not trigger a network refresh here that the first handleMessage
@@ -64,14 +68,14 @@ export async function runMcpProxy({ target, ctx }) {
   /** @type {string | undefined} */
   let sessionId
   const log = getLogger('mcp')
-  log.info('mcp.proxy_start', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.proxy', target, url: entry.url })
+  log.info('mcp.proxy_start', { [Attr.COMPONENT]: 'mcp', [Attr.OPERATION]: 'mcp.proxy', target, url: mcpUrl })
   // Lifecycle line to stderr: stdout is the protocol channel.
-  ctx.stderr.write(`hyp mcp: proxying stdio → ${entry.url} (target '${target}')\n`)
+  ctx.stderr.write(`hyp mcp: proxying stdio → ${mcpUrl} (target '${target}')\n`)
 
   /** Forward one message to the remote with the given bearer token. */
   const forward = (/** @type {any} */ message, /** @type {string} */ token) => {
     const headers = mcpRequestHeaders({ token, sessionId })
-    return fetchImpl(entry.url, { method: 'POST', headers, body: JSON.stringify(message) })
+    return fetchImpl(mcpUrl, { method: 'POST', headers, body: JSON.stringify(message) })
   }
 
   const server = {

@@ -88,6 +88,13 @@ a free invariant. The URL is non-secret and committable; the token is not config
 > bare `hyp <verb> --remote` and bare `hyp remote login` resolve the central
 > server with no `remote add`. User `query.remotes` still layers on top.
 
+> **Extended-by: [LLP 0084](./0084-mcp-endpoint-from-base.decision.md).** A
+> target's `url` is treated as the server **base**: the MCP endpoint is derived
+> as `<base>/v1/mcp` (a url whose path already ends in `/v1/mcp` is honored
+> verbatim). The example above (`.../mcp`) is a base; the real MCP call lands on
+> `.../mcp/v1/mcp`. This reconciles this section's "url is the MCP endpoint" with
+> the base URL LLP 0062 ships.
+
 ## Credentials
 
 <a id="credentials"></a>The query-scoped token is **never in config**

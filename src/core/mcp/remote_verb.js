@@ -2,7 +2,7 @@
 
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveRemotes } from '../remote/builtin_remotes.js'
-import { attachWithRefresh, deriveIdentityBase, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
+import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { createHttpMcpClient, isAuthStatus } from './client.js'
 
@@ -47,6 +47,10 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const identityBase = deriveIdentityBase(entry.url) ?? undefined
+  // The registered URL is the server **base**; MCP is served at <base>/v1/mcp,
+  // so POST the derived endpoint, not the base verbatim (which 404s).
+  // @ref LLP 0084#derive [implements]: derive the MCP endpoint from the registered base
+  const mcpUrl = deriveMcpEndpoint(entry.url)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {
@@ -69,7 +73,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
   let lastAuthStatus = 401
   const op = async (/** @type {string} */ token) => {
     try {
-      return { authFailed: false, value: await callRemoteTool({ url: entry.url, token, verb, params }) }
+      return { authFailed: false, value: await callRemoteTool({ url: mcpUrl, token, verb, params }) }
     } catch (err) {
       const authFailed = isAuthError(err)
       if (authFailed) lastAuthStatus = Number(/** @type {any} */ (err).status) || lastAuthStatus
