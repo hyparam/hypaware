@@ -223,37 +223,73 @@ async function* readSpooledRows(tablePath) {
     return
   }
   for (const name of names) {
-    let raw
+    // Stream the spool file line-by-line instead of `fs.readFile(name,'utf8') +
+    // split('\n')`. A provisional spool file (LLP 0013) can reach
+    // DEFAULT_SPOOL_BYTES_THRESHOLD (512 MB) of content-heavy envelopes before it
+    // flushes; reading it whole held ~2x that (the file as one V8 string plus the
+    // split-line array) resident before yielding a single row, OOMing a
+    // large-backfill dedupe scan on an async utf8 decode (issue #280). The bounded
+    // 64 KB read mirrors streamFlushFile's line loop.
+    let stream
     try {
-      raw = await fs.readFile(path.join(dir, name), 'utf8')
+      stream = fsSync.createReadStream(path.join(dir, name), { encoding: 'utf8', highWaterMark: 64 * 1024 })
     } catch {
       continue
     }
-    for (const line of raw.split('\n')) {
-      if (line.length === 0) continue
-      /** @type {{ version?: number, columns?: unknown, rows?: unknown } | null} */
-      let envelope = null
-      try {
-        envelope = JSON.parse(line)
-      } catch {
-        continue
-      }
-      // Mirror streamFlushFile's envelope-validity contract exactly: a
-      // parseable envelope missing `columns` is malformed, and the flush
-      // reader drops it (its rows never reach a committed partition).
-      // Backfill dedupe must skip the same rows: otherwise it would dedupe
-      // against, and so refuse to materialize, rows flush will never commit.
-      if (
-        !envelope ||
-        envelope.version !== 1 ||
-        !Array.isArray(envelope.columns) ||
-        !Array.isArray(envelope.rows)
-      ) continue
-      for (const row of envelope.rows) {
-        if (row && typeof row === 'object' && !Array.isArray(row)) {
-          yield /** @type {Record<string, unknown>} */ (row)
+    let tail = ''
+    try {
+      for await (const chunk of stream) {
+        tail += chunk
+        let newlineIdx
+        while ((newlineIdx = tail.indexOf('\n')) !== -1) {
+          const line = tail.slice(0, newlineIdx)
+          tail = tail.slice(newlineIdx + 1)
+          yield* rowsFromSpoolLine(line)
         }
       }
+      // The spool writer always terminates lines with `\n`, so a non-empty tail
+      // is a truncated/half-written final line. The whole-file reader parsed it
+      // best-effort (its `split('\n')` kept a trailing no-newline segment), so
+      // keep that parity: a malformed remnant simply fails JSON.parse and drops.
+      yield* rowsFromSpoolLine(tail)
+    } catch {
+      // A mid-read error (file vanished/unreadable) degrades to skipping the
+      // rest of this file, matching the whole-file reader's per-file try/catch:
+      // a partial read of a provisional spool beats aborting the caller.
+      continue
+    }
+  }
+}
+
+/**
+ * Parse one spool NDJSON line and yield its valid rows. Mirrors
+ * `streamFlushFile`'s envelope-validity contract exactly: a parseable envelope
+ * missing `columns` is malformed, and the flush reader drops it (its rows never
+ * reach a committed partition). Backfill dedupe must skip the same rows,
+ * otherwise it would dedupe against (and so refuse to materialize) rows flush
+ * will never commit. An empty line or a JSON parse failure yields nothing.
+ *
+ * @param {string} line
+ * @returns {Generator<Record<string, unknown>>}
+ */
+function* rowsFromSpoolLine(line) {
+  if (line.length === 0) return
+  /** @type {{ version?: number, columns?: unknown, rows?: unknown } | null} */
+  let envelope = null
+  try {
+    envelope = JSON.parse(line)
+  } catch {
+    return
+  }
+  if (
+    !envelope ||
+    envelope.version !== 1 ||
+    !Array.isArray(envelope.columns) ||
+    !Array.isArray(envelope.rows)
+  ) return
+  for (const row of envelope.rows) {
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      yield /** @type {Record<string, unknown>} */ (row)
     }
   }
 }

@@ -361,3 +361,61 @@ test('readSpooledRows on an unknown dataset is an empty stream', async () => {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('readSpooledRows streams a large spool file rather than reading it whole (bounded memory, issue #280)', async () => {
+  // A spool file can reach DEFAULT_SPOOL_BYTES_THRESHOLD (512 MB) of
+  // content-heavy `ai_gateway_messages` envelopes before it flushes. The old
+  // reader did `fs.readFile(name, 'utf8')` + `split('\n')`, holding ~2x the file
+  // (the whole file as one V8 string plus the split-line array) resident BEFORE
+  // yielding a single row: a giant async UTF-8 decode that OOM'd a large-backfill
+  // dedupe scan (issue #280). The streaming reader holds only a bounded 64 KB
+  // chunk, so heap growth up to the first row must stay far below the file size.
+  const cacheRoot = await makeTmpDir('spool-read-bounded')
+  try {
+    const storage = createQueryStorageService({ cacheRoot })
+    const tablePath = storage.cacheTablePath('big_ds', ['proxy_messages_v4'])
+    const dir = path.join(tablePath, SPOOL_DIR)
+    await fs.mkdir(dir, { recursive: true })
+
+    // ~48 MB of spool: 1024 envelopes, each a ~48 KB content_text row. Written
+    // incrementally so the test itself never materializes the whole file.
+    const big = 'x'.repeat(48 * 1024)
+    const active = path.join(dir, 'active.jsonl')
+    const handle = await fs.open(active, 'w')
+    try {
+      for (let i = 0; i < 1024; i += 1) {
+        const line = JSON.stringify({
+          version: 1,
+          columns: [{ name: 'id' }, { name: 'content_text' }],
+          rows: [{ id: i, content_text: big }],
+        }) + '\n'
+        await handle.write(line)
+      }
+    } finally {
+      await handle.close()
+    }
+    const fileBytes = (await fs.stat(active)).size
+
+    // Heap growth measured at the moment the FIRST row is yielded. The whole-file
+    // reader must have the entire file (as a string) resident by then; the
+    // streaming reader holds only one ~64 KB chunk + the current envelope. The gap
+    // (~48 MB+ vs < 1 MB) is decisive, so a generous fraction-of-file threshold
+    // tolerates GC noise while still failing the whole-file read.
+    const before = process.memoryUsage().heapUsed
+    let firstRowHeapDelta = Number.POSITIVE_INFINITY
+    let count = 0
+    for await (const row of storage.readSpooledRows('big_ds')) {
+      if (count === 0) firstRowHeapDelta = process.memoryUsage().heapUsed - before
+      assert.equal(typeof row.id, 'number')
+      count += 1
+    }
+    assert.equal(count, 1024, 'every spooled row is still yielded')
+    assert.ok(
+      firstRowHeapDelta < fileBytes / 2,
+      `first-row heap delta ${firstRowHeapDelta}B must be far below the ${fileBytes}B file `
+        + '(streamed, not read whole)',
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
