@@ -8,6 +8,7 @@ import process from 'node:process'
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
+import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { resolveLayeredConfig } from '../config/merge.js'
@@ -82,6 +83,75 @@ export function readStatusFile(stateRoot) {
     throw new Error(`readStatusFile: malformed entry at ${statusFilePath(stateRoot)}`)
   }
   return /** @type {DaemonStatus} */ (parsed)
+}
+
+/** The AI gateway plugin name — the source whose bound port drives attach. */
+const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
+
+/**
+ * Pull the AI gateway source's bound `{ host, port }` out of a status-file
+ * source-snapshot list. The daemon captures the gateway source's `status()`
+ * `details: { host, port, ... }` into each `SourceSnapshot.details`
+ * (`startConfiguredSources`), so the port a rebinding daemon actually chose is
+ * always readable here — no in-process gateway needed. Returns `undefined`
+ * when the gateway source is absent or recorded no usable host/port (e.g. it
+ * failed to bind).
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {{ host: string, port: number } | undefined}
+ * @ref LLP 0086#endpoint-discovery [implements]: the daemon's live bound port is read from status.json sources[].details, not guessed
+ */
+export function gatewaySourceDetails(sources) {
+  const list = Array.isArray(sources) ? sources : []
+  const source =
+    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
+    list.find((s) => s && s.name === 'ai-gateway')
+  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
+  if (!rawDetails) return undefined
+  const details = /** @type {Record<string, unknown>} */ (rawDetails)
+  const port = details.port
+  if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
+  const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
+  return { host, port }
+}
+
+/**
+ * Resolve the AI gateway's live bound base URL from the on-disk daemon status
+ * snapshot, **guarded by a daemon-liveness check** so a stale snapshot from a
+ * dead daemon is never handed back. Returns `undefined` when no daemon is
+ * running for this state root, no status file exists, or the gateway source
+ * recorded no bound port.
+ *
+ * This is the discovery mechanism manual `hyp attach` uses on the default
+ * ephemeral-port install: the gateway binds a port only the running daemon
+ * knows, and the daemon persists it here (issue #277 / LLP 0086). It never
+ * fabricates a port for a daemon that is not running.
+ *
+ * @param {{ stateRoot: string }} args
+ * @returns {string | undefined}
+ * @ref LLP 0086#manual-attach-reads-the-live-port [implements]: resolve the live gateway URL from status.json, gated on a live pid
+ */
+export function resolveLiveGatewayEndpointFromStatus({ stateRoot }) {
+  // Liveness gate first: a status.json outlives its daemon, so a bound port in
+  // it proves nothing without a living process behind the pid file.
+  let pidEntry
+  try {
+    pidEntry = readPidFile(stateRoot)
+  } catch {
+    return undefined
+  }
+  if (!pidEntry || !processIsAlive(pidEntry.pid)) return undefined
+
+  /** @type {DaemonStatus | null} */
+  let status
+  try {
+    status = readStatusFile(stateRoot)
+  } catch {
+    return undefined
+  }
+  const details = status ? gatewaySourceDetails(status.sources) : undefined
+  if (!details) return undefined
+  return endpointFromListen(`${details.host}:${details.port}`)
 }
 
 /* ---------- Phase 8: top-level status collector ---------- */
@@ -403,6 +473,13 @@ export async function collectHypAwareStatus(opts = {}) {
   }
 
   // ----- client attach -----
+  // The live gateway port the running daemon bound to, read from its own
+  // status snapshot. A client whose recorded attach port differs from this has
+  // drifted (the daemon rebound its ephemeral port and nothing re-attached);
+  // surface it so the data already on disk becomes an actionable signal
+  // instead of silent capture loss (issue #277 / LLP 0086).
+  const liveGateway = daemon.running ? gatewaySourceDetails(daemonStatusFile?.sources) : undefined
+  const liveGatewayPort = liveGateway ? String(liveGateway.port) : undefined
   /** @type {ClientAttachReport[]} */
   const clients = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
@@ -426,6 +503,25 @@ export async function collectHypAwareStatus(opts = {}) {
         severity: 'warning',
         kind: 'client_attach_missing',
         message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker - run 'hyp attach --client ${clientName}'`,
+        repair: [`hyp attach --client ${clientName}`],
+      })
+    } else if (
+      configured &&
+      probe.attached &&
+      liveGatewayPort !== undefined &&
+      probe.port !== undefined &&
+      probe.port !== liveGatewayPort
+    ) {
+      // Attached, but at a stale port: the daemon rebound and this client still
+      // points at the old one. Non-degrading like `client_attach_missing` - a
+      // healthy install can still drift after a restart (LLP 0041
+      // §failure-is-surfaced-not-fatal); the data for the comparison is already
+      // on disk (probe port vs live status.json port).
+      // @ref LLP 0086#status-drift-diagnostic [implements]: hyp status warns on a client attach port that no longer matches the live gateway
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'client_attach_stale',
+        message: `${clientName} is attached at port ${probe.port} but the gateway is now bound to port ${liveGatewayPort} - run 'hyp attach --client ${clientName}' to re-point it`,
         repair: [`hyp attach --client ${clientName}`],
       })
     }

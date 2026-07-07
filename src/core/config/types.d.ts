@@ -321,6 +321,15 @@ export interface ActionMarker {
   last_attempt?: string
   /** Attempts so far; bumped each `failed` pass (recorded on `failed`). */
   attempts?: number
+  /**
+   * The gateway base URL an attach was applied at (recorded on a `done` attach
+   * marker via `ActionOutcome.detail`). A later pass compares it against the
+   * live endpoint through {@link ActionHandler.isCurrent} so a rebind to a new
+   * ephemeral port re-attaches instead of short-circuiting on `done`
+   * (issue #277 / LLP 0086). Absent on non-attach markers and on pre-LLP-0086
+   * attach markers (treated as stale → re-attach once).
+   */
+  endpoint?: string
   /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
   [extra: string]: unknown
 }
@@ -426,6 +435,16 @@ export interface ActionHandler {
    * implement it.
    */
   reverse?(requestKey: string, ctx: ActionContext): Promise<ActionOutcome>
+  /**
+   * Optional freshness predicate for a still-desired action whose marker is
+   * already `done`. Return `false` to treat the `done` marker as a forward gap
+   * (re-`perform()` this pass), `true` (or omit the hook) to keep the
+   * level-triggered short-circuit. Handlers with no moving input (backfill:
+   * imported data never goes stale) omit it, so a `done` marker is permanently
+   * done. The attach handler implements it to re-attach after the gateway
+   * rebinds to a new ephemeral port (issue #277 / LLP 0086). Pure — no effects.
+   */
+  isCurrent?(marker: ActionMarker, action: DesiredAction, ctx: ActionContext): boolean
 }
 
 /** Arguments to one {@link ActionReconciler.reconcile} pass. */

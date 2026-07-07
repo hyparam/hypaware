@@ -124,10 +124,17 @@ export function createActionReconciler(opts) {
 
       const desiredKeys = new Set(desired.map((d) => d.requestKey))
 
-      // Forward gap: run-once / retry the desired units not yet `done`.
+      // Forward gap: run-once / retry the desired units not yet `done`. A
+      // `done` marker short-circuits, UNLESS the handler's optional freshness
+      // predicate reports it stale — then the still-desired unit is a forward
+      // gap and re-`perform()`s this pass. That is how an attach re-fires after
+      // the gateway rebinds to a new ephemeral port: the marker is `done` but no
+      // longer current (issue #277 / LLP 0086). Handlers without `isCurrent`
+      // (backfill) keep the pure level-triggered short-circuit.
+      // @ref LLP 0086#re-attach-on-drift [implements] — a done marker the handler reports stale is a forward gap, not a permanent skip
       for (const action of desired) {
         const existing = markers[action.requestKey]
-        if (existing && existing.status === 'done') {
+        if (existing && existing.status === 'done' && markerIsCurrent(handler, existing, action, ctx)) {
           results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
           continue
         }
@@ -253,6 +260,29 @@ export function createActionReconciler(opts) {
   }
 
   return { reconcile, readStatus }
+}
+
+/**
+ * Decide whether a `done` marker still short-circuits its still-desired action,
+ * by consulting the handler's optional `isCurrent` freshness predicate. A
+ * handler without one (backfill) is always current — a `done` marker is
+ * permanently done. A predicate that throws is treated as *current* (skip): an
+ * unexpected error must never spuriously re-perform a `done` effect on a loop,
+ * so it degrades to the pre-LLP-0086 level-triggered behavior.
+ *
+ * @param {ActionHandler} handler
+ * @param {ActionMarker} marker
+ * @param {DesiredAction} action
+ * @param {ActionContext} ctx
+ * @returns {boolean}
+ */
+function markerIsCurrent(handler, marker, action, ctx) {
+  if (typeof handler.isCurrent !== 'function') return true
+  try {
+    return handler.isCurrent(marker, action, ctx) !== false
+  } catch {
+    return true
+  }
 }
 
 /**

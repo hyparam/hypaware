@@ -15,9 +15,9 @@ import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clearClientActionMarker } from '../config/action_reconciler.js'
-import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
-import { probeClientAttachFromDescriptor } from '../daemon/status.js'
+import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import {
   createUsagePolicyResolver,
   findRepoRoot,
@@ -198,21 +198,37 @@ async function runClientLifecycle(action, argv, ctx) {
         try {
           endpoint = gateway.localEndpoint()
         } catch {
-          const configured = configuredGatewayEndpoint(ctx.config)
-          if (!configured) {
-            // No gateway bound in this process and no configured `listen`
-            // to fall back on: the daemon-managed case (an unpinned
-            // gateway binds an ephemeral port only the daemon knows, and
-            // its reconciler performs attach itself). Report the on-disk
-            // attach state instead of the internal endpoint error.
+          endpoint = configuredGatewayEndpoint(ctx.config)
+          if (!endpoint) {
+            // No gateway bound in this process and no configured `listen` to
+            // fall back on: the default ephemeral-port, daemon-managed install
+            // (an unpinned gateway binds a port only the running daemon knows).
+            // The daemon persists that bound port to status.json, so discover
+            // it - guarded by a daemon-liveness check - instead of guessing or
+            // reporting the internal endpoint error.
             // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context: manual attach without a configured listen defers to the daemon; probe disk, don't guess a port
+            // @ref LLP 0086#manual-attach-reads-the-live-port [implements] — hyp attach falls back to status.json sources[].details.port before giving up
+            const stateRoot = readObservabilityEnv(ctx.env).stateDir
+            const liveEndpoint = resolveLiveGatewayEndpointFromStatus({ stateRoot })
             descriptorMap ??= await buildClientDescriptorMap(ctx)
             const descriptor = descriptorMap.get(name)
             const homeDir = ctx.env.HOME ?? os.homedir()
             const probe = descriptor
               ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env: ctx.env })
-              : { attached: false, settingsPath: undefined }
-            if (probe.attached) {
+              : { attached: false, settingsPath: undefined, port: undefined }
+
+            // "Already attached" now means attached AT THE LIVE PORT: validate
+            // the recorded port against the live one rather than trusting marker
+            // existence (#277). When no live endpoint is discoverable (daemon
+            // not running) keep the pre-#277 behavior - a present marker is a
+            // no-op success, an absent one the actionable error.
+            // @ref LLP 0086#already-attached-validates-the-live-port [implements] — the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
+            const livePort = portFromEndpoint(liveEndpoint)
+            const alreadyCurrent =
+              probe.attached === true &&
+              (liveEndpoint === undefined ||
+                (probe.port !== undefined && probe.port === livePort))
+            if (alreadyCurrent) {
               getLogger('cmd-attach').info('client.attach.daemon_managed', {
                 [Attr.COMPONENT]: 'cmd-attach',
                 [Attr.OPERATION]: 'client.attach',
@@ -241,34 +257,40 @@ async function runClientLifecycle(action, argv, ctx) {
               }
               continue
             }
-            const message =
-              `cannot resolve the gateway endpoint: the gateway is not running in this ` +
-              `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
-              `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
-            getLogger('cmd-attach').warn('client.attach.no_endpoint', {
-              [Attr.COMPONENT]: 'cmd-attach',
-              [Attr.OPERATION]: 'client.attach',
-              hyp_client: name,
-              status: 'failed',
-              error_kind: 'no_endpoint',
-            })
-            if (parsed.json) {
-              ctx.stdout.write(
-                JSON.stringify({
-                  status: 'failed',
-                  action: 'attach',
-                  client: name,
-                  dry_run: false,
-                  error_kind: 'no_endpoint',
-                  error: message,
-                }) + '\n'
-              )
-              exitCode = 1
-              continue
+            if (liveEndpoint) {
+              // A live daemon endpoint we can (re)attach at: either not attached,
+              // or attached at a now-stale port. Fall through to client.attach,
+              // which is idempotent and re-points the client at the live port.
+              endpoint = liveEndpoint
+            } else {
+              const message =
+                `cannot resolve the gateway endpoint: the gateway is not running in this ` +
+                `process and no ai-gateway 'listen' address is configured. Start the daemon ` +
+                `(hyp start) so it can attach clients, or set 'listen' in the ai-gateway config.`
+              getLogger('cmd-attach').warn('client.attach.no_endpoint', {
+                [Attr.COMPONENT]: 'cmd-attach',
+                [Attr.OPERATION]: 'client.attach',
+                hyp_client: name,
+                status: 'failed',
+                error_kind: 'no_endpoint',
+              })
+              if (parsed.json) {
+                ctx.stdout.write(
+                  JSON.stringify({
+                    status: 'failed',
+                    action: 'attach',
+                    client: name,
+                    dry_run: false,
+                    error_kind: 'no_endpoint',
+                    error: message,
+                  }) + '\n'
+                )
+                exitCode = 1
+                continue
+              }
+              throw new Error(message)
             }
-            throw new Error(message)
           }
-          endpoint = configured
         }
       }
       await client.attach({

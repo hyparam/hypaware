@@ -8,6 +8,7 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  * @import {
  *   ActionContext,
  *   ActionHandler,
+ *   ActionMarker,
  *   ActionOutcome,
  *   ClientDetachFromDisk,
  *   CreateAttachHandlerOptions,
@@ -163,17 +164,49 @@ export function createAttachHandler(opts = {}) {
       }
 
       const parsed = parseAttachOutput(stdout.text())
-      // No throw = the attach applied. An unparseable / detail-less payload
-      // still records `done` (mirroring backfill's "exit 0 is authoritative")
-      // rather than re-running a successful attach — we just can't attach the
-      // marker detail.
-      if (!parsed) return { status: 'done' }
-
+      // No throw = the attach applied. Record the endpoint we attached at on the
+      // marker regardless of whether the adapter payload parsed: it is the
+      // freshness key `isCurrent` compares against a later boot's live endpoint,
+      // so a rebind to a new ephemeral port is a forward gap (re-attach) rather
+      // than a permanent `done` (issue #277 / LLP 0086). settings_path /
+      // prev_value / port are best-effort detail from the adapter's payload.
+      // @ref LLP 0086#endpoint-aware-markers [implements] — perform() records the endpoint on the done marker so drift is representable
       /** @type {JsonObject} */
-      const detail = {}
-      if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
-      if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
-      return Object.keys(detail).length > 0 ? { status: 'done', detail } : { status: 'done' }
+      const detail = { endpoint }
+      if (parsed) {
+        if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
+        if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
+      }
+      return { status: 'done', detail }
+    },
+
+    /**
+     * Freshness predicate for a `done` attach marker (LLP 0086). Returns
+     * `false` when the recorded endpoint no longer matches the live gateway
+     * endpoint — the daemon rebound to a new ephemeral port and this attach must
+     * re-fire. Two guards keep it from over-firing:
+     *
+     *  - No live `ctx.endpoint` this pass (the gateway never bound): return
+     *    `true` (leave the existing attach in place). Re-performing would only
+     *    fail `perform()`'s missing-endpoint guard and churn the marker to
+     *    `failed`; a later proven-bound pass re-evaluates. This mirrors the seam
+     *    invariant that auto-attach never records a URL for a port nothing bound
+     *    (LLP 0045 §Part 1).
+     *  - A pre-LLP-0086 marker recorded no endpoint (`marker.endpoint`
+     *    undefined): `undefined !== live` → stale → re-attach exactly once,
+     *    which records the endpoint and makes every later pass current. Backward
+     *    compatible: an old marker never crashes and self-heals.
+     *
+     * @param {ActionMarker} marker
+     * @param {DesiredAction} action
+     * @param {ActionContext} ctx
+     * @returns {boolean}
+     * @ref LLP 0086#re-attach-on-drift [implements] — a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
+     */
+    isCurrent(marker, action, ctx) {
+      const live = ctx.endpoint
+      if (typeof live !== 'string' || live.length === 0) return true
+      return marker.endpoint === live
     },
 
     /**
