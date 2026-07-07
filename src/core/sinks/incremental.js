@@ -99,7 +99,16 @@ export function watermarkKeyFor(watermarks, storage, partition) {
  * reported `empty` (yield nothing) rather than throwing — the caller writes no
  * blob, exactly as for a partition with no new rows.
  *
+ * `readRowsSince` may yield `local-only` rows as drop-only entries (no payload,
+ * LLP 0070): those are never encoded, but they still advance `lastAfter` — even
+ * a partition that is *entirely* drops reports `empty` yet exposes a
+ * `droppedRowCount > 0` and an advanced `lastAfter`, so the caller checkpoints
+ * past the withheld tail rather than re-scanning it every tick. `empty`
+ * therefore means "no PAYLOAD row to encode": it is decided by peeking past any
+ * leading drops to the first real row.
+ *
  * @ref LLP 0040#storage-api-extension [implements] — feed readRowsSince into the unchanged encoder; empty new-row set ⇒ no blob
+ * @ref LLP 0070#incremental [constrained-by] — skip drop-only rows in the encoded stream, advance the cursor across them, and expose `droppedRowCount` so an empty-but-dropped tick still checkpoints
  * @param {QueryStorageService} storage
  * @param {QueryPartition} partition
  * @param {SinkContinuation | undefined} since
@@ -109,6 +118,7 @@ export async function openIncrementalRows(storage, partition, since) {
   const sinceSeq = since?.seq ?? '0'
   const state = {
     rowCount: 0,
+    droppedRowCount: 0,
     /** @type {SinkContinuation} */
     lastAfter: since ?? { v: 1, seq: sinceSeq },
   }
@@ -123,25 +133,47 @@ export async function openIncrementalRows(storage, partition, since) {
     ? storage.readRowsSince(tablePath, { since, includeLegacy })[Symbol.asyncIterator]()
     : null
 
-  /** @type {IteratorResult<{ row: Record<string, unknown>, after: SinkContinuation }> | null} */
+  /**
+   * Peek to the first PAYLOAD entry, consuming (and checkpointing past) any
+   * leading drop-only entries so `empty` reflects encodable rows, not scan
+   * length. A leading run of local-only rows advances `lastAfter`/`droppedRowCount`
+   * here even when nothing is ever encoded.
+   * @type {IteratorResult<
+   *   | { row: Record<string, unknown>, after: SinkContinuation, dropped?: undefined }
+   *   | { row?: undefined, after: SinkContinuation, dropped: true }
+   * > | null}
+   */
   let first = null
   if (iterator) {
-    first = await iterator.next()
-    if (first.done) {
-      // Release the underlying scan immediately — nothing new to export.
+    let entry = await iterator.next()
+    while (!entry.done && entry.value.dropped) {
+      state.droppedRowCount += 1
+      state.lastAfter = entry.value.after
+      entry = await iterator.next()
+    }
+    if (entry.done) {
+      // Release the underlying scan immediately — no payload row to export.
       await iterator.return?.()
+    } else {
+      first = entry
     }
   }
-  const empty = iterator === null || first === null || first.done === true
+  const empty = iterator === null || first === null
 
   async function* rows() {
     if (empty || iterator === null || first === null) return
     try {
       let entry = first
       while (!entry.done) {
-        state.rowCount += 1
         state.lastAfter = entry.value.after
-        yield entry.value.row
+        if (entry.value.dropped) {
+          // A trailing/interleaved local-only row: skip the payload, keep the
+          // cursor moving so the watermark passes it.
+          state.droppedRowCount += 1
+        } else {
+          state.rowCount += 1
+          yield entry.value.row
+        }
         entry = await iterator.next()
       }
     } finally {
@@ -156,6 +188,9 @@ export async function openIncrementalRows(storage, partition, since) {
     rows: empty ? emptyAsyncIterable() : { [Symbol.asyncIterator]: rows },
     get rowCount() {
       return state.rowCount
+    },
+    get droppedRowCount() {
+      return state.droppedRowCount
     },
     get lastAfter() {
       return state.lastAfter

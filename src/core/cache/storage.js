@@ -22,13 +22,27 @@ import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
 
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
  * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncCells } from 'squirreling'
  */
+
+/**
+ * Short, one-way digest of a `cwd` for the `usage_policy.export_drop`
+ * aggregate: dev telemetry must never carry a raw local path, only a stable
+ * token to count distinct withheld directories (LLP 0080 #telemetry).
+ *
+ * @param {string} cwd
+ * @returns {string}
+ */
+function hashCwd(cwd) {
+  return createHash('sha256').update(cwd).digest('hex').slice(0, 16)
+}
 
 /**
  * Decode a persisted `SinkContinuation` into its int64 `_hyp_ingest_seq`
@@ -83,11 +97,12 @@ export function resolveIcebergDir(tablePath) {
  *   cacheRoot: string,
  *   getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined,
  *   getSettleHook?: (dataset: string) => ((rows: Record<string, unknown>[], ctx: { storage: ExtendedQueryStorageService }) => Promise<Record<string, unknown>[]>) | undefined,
+ *   usagePolicyResolver?: UsagePolicyResolver,
  * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const meter = getMeter('cache')
@@ -233,13 +248,40 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // row never advances the watermark and progress never regresses even when
       // the scan visits seqs out of order (interleaved sources; LLP 0040 risk #3).
       let high = since
+      let droppedRowCount = 0
+      /** @type {Set<string>} */
+      const droppedCwdHashes = new Set()
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { since, includeLegacy: opts.includeLegacy })) {
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
         for (const f of INTERNAL_FIELDS) delete row[f]
         /** @type {SinkContinuation} */
         const after = { v: 1, seq: high.toString() }
+        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time — no cache-schema marker, retroactive over already-cached rows
+        // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
+        // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
+        // A corrupt/unreadable list makes `resolve` throw; we let it propagate
+        // so the partition read fails and the sink's per-partition retry leaves
+        // the watermark untouched (LLP 0080 #fail-safe) — never a silent skip.
+        const cwd = row.cwd
+        if (usagePolicyResolver && typeof cwd === 'string' && cwd !== '' && usagePolicyResolver.resolve(cwd).class !== 'full') {
+          droppedRowCount += 1
+          droppedCwdHashes.add(hashCwd(cwd))
+          yield { after, dropped: true }
+          continue
+        }
         yield { row, after }
+      }
+      // Per-partition aggregate on the export read; cwds are hashed, never raw
+      // paths in dev telemetry (LLP 0080 #telemetry). Emitted only when the scan
+      // completes normally, so a corrupt-list throw reports no partial drop.
+      if (droppedRowCount > 0) {
+        logger.debug('usage_policy.export_drop', {
+          [Attr.COMPONENT]: 'cache',
+          [Attr.DATASET]: datasetForTablePath(cacheRoot, tablePath) ?? 'unknown',
+          dropped_row_count: droppedRowCount,
+          distinct_cwd_count: droppedCwdHashes.size,
+        })
       }
     },
 

@@ -94,6 +94,67 @@ async function buildSink({ rows, exportsDir, stateDir }) {
   })
 }
 
+/**
+ * Storage stub yielding a described entry sequence: a payload `{ seq, id }` or a
+ * drop `{ seq, drop: true }` — a `local-only` row the export seam withheld
+ * (LLP 0070), carrying only the advancing `after`, no row.
+ *
+ * @param {Array<{ seq: number, id?: string, drop?: boolean }>} entries
+ */
+function makeDropStorage(entries) {
+  return {
+    cacheRoot: CACHE_ROOT,
+    /** @param {string} tp */
+    tableExists: (tp) => tp === TABLE,
+    /** @param {string} tablePath @param {{ since?: { seq: string } }} [opts] */
+    readRowsSince(tablePath, opts) {
+      const list = tablePath === TABLE ? entries : []
+      const sinceSeq = opts?.since ? BigInt(opts.since.seq) : 0n
+      return {
+        async *[Symbol.asyncIterator]() {
+          let high = sinceSeq
+          for (const e of list) {
+            const seq = BigInt(e.seq)
+            if (seq <= sinceSeq) continue
+            if (seq > high) high = seq
+            const after = { v: 1, seq: high.toString() }
+            if (e.drop) yield { after, dropped: true }
+            else yield { row: { id: e.id }, after }
+          }
+        },
+      }
+    },
+    readRows() {
+      return { async *[Symbol.asyncIterator]() {} }
+    },
+  }
+}
+
+/** @param {{ storage: any, exportsDir: string, stateDir: string }} args */
+async function buildSinkWith({ storage, exportsDir, stateDir }) {
+  /** @type {any} */
+  let registered
+  /** @type {any} */
+  const ctx = {
+    config: { exports_dir: exportsDir },
+    env: {},
+    provideCapability() {},
+    sinks: { register(/** @type {any} */ d) { registered = d } },
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    query: { getDataset: () => undefined, listDatasets: () => [] },
+    storage,
+  }
+  await activate(ctx)
+  const dir = path.join(exportsDir, 'out')
+  return registered.create({
+    name: 'local',
+    config: { dir },
+    encoder: makeEncoder(),
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    paths: { tempDir: exportsDir, stateDir },
+  })
+}
+
 function partition() {
   return { dataset: DATASET, partition: {}, tablePath: TABLE }
 }
@@ -149,6 +210,30 @@ test('local-fs incremental export: ranged filename, watermark advance, skip-empt
   // The third blob contains exactly the one new row.
   const newBlob = await fs.readFile(path.join(dir, DATASET, 'all', 'all.2-5.jsonl'), 'utf8')
   assert.equal(newBlob.trim(), JSON.stringify({ id: 'c' }))
+
+  await sink.close()
+})
+
+test('local-fs drop-only tick: no blob is written, but the watermark advances past the withheld rows (LLP 0070)', async (t) => {
+  const exportsDir = await tmpDir()
+  const stateDir = await tmpDir()
+  t.after(() => fs.rm(exportsDir, { recursive: true, force: true }))
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
+
+  // A partition of only `local-only` rows: nothing to encode, but the tail must
+  // still checkpoint or it re-scans (and would re-send on un-exclusion) forever.
+  const storage = makeDropStorage([{ seq: 1, drop: true }, { seq: 2, drop: true }])
+  const sink = await buildSinkWith({ storage, exportsDir, stateDir })
+  const dir = path.join(exportsDir, 'out')
+
+  const r = await sink.exportBatch({ batchId: 'b1', partitions: [partition()] }, {})
+  assert.equal(r.partitionsExported, 0, 'an all-dropped partition writes no blob')
+  assert.deepEqual(await listBlobs(dir), [], 'no blob on disk')
+
+  const wmFile = path.join(stateDir, 'sink-instances', 'local', 'watermarks', DATASET, 'source=x.json')
+  const wm = JSON.parse(await fs.readFile(wmFile, 'utf8'))
+  assert.equal(wm.continuation.seq, '2', 'the watermark advanced past the withheld tail')
+  assert.equal(wm.exportedRowCount, 0, 'a withheld row is never counted as exported')
 
   await sink.close()
 })
