@@ -263,22 +263,53 @@ test('a failed daemon install reports it and does not wait for attach', async ()
   assert.doesNotMatch(out.join(''), /capturing /)
 })
 
+test('an enrolling login whose attach poll throws still reports the timeout fallback, not a failure (Major 1)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // Drive the REAL waitForClientAttach, but make its per-poll probe throw a
+  // transient fs error every tick (an EIO the collector's cache walk could raise
+  // after the daemon is already installed). The successful enrollment must stand.
+  const probe = /** @type {any} */ (async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }) })
+  const waitForAttach = /** @type {any} */ (
+    (/** @type {any} */ opts) => waitForClientAttach({ ...opts, probe, timeoutMs: 0, intervalMs: 1, sleep: async () => {} })
+  )
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0) // the throw did not discard the enrollment
+  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
+})
+
+test('the enrolling login announces the attach wait on stderr before polling (Major 2)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // Capture stderr at the instant the wait begins: the progress line must
+  // already be there, proving it was emitted before any polling.
+  let errAtWait = ''
+  const waitForAttach = /** @type {any} */ (async () => { errAtWait = err.join(''); return [] })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+  assert.match(errAtWait, /waiting for the daemon to attach clients/)
+})
+
 test('waitForClientAttach returns attached client names as soon as the reconcile lands', async () => {
   let calls = 0
-  const collect = /** @type {any} */ (async () => {
+  // Not attached on the first two polls, then both clients attach. Returned
+  // unsorted so the assertion also proves waitForClientAttach orders them.
+  const probe = /** @type {any} */ (async () => {
     calls += 1
-    // Not attached on the first two polls, then both clients attach.
-    const attached = calls >= 3
-    return { clients: [
-      { name: '@hypaware/codex', attached },
-      { name: '@hypaware/claude', attached },
-    ] }
+    return calls >= 3 ? ['@hypaware/codex', '@hypaware/claude'] : []
   })
   let slept = 0
   const sleep = /** @type {any} */ (async () => { slept += 1 })
 
-  const names = await waitForClientAttach({ env: {}, timeoutMs: 10_000, intervalMs: 1, collect, sleep })
-  // Sorted, deduped by the caller's join; both clients reported.
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 10_000, intervalMs: 1, probe, sleep })
+  // Sorted by waitForClientAttach; both clients reported (Map keys, no dedup needed).
   assert.deepEqual(names, ['@hypaware/claude', '@hypaware/codex'])
   assert.equal(calls, 3)
   assert.equal(slept, 2) // slept between the three polls
@@ -286,14 +317,26 @@ test('waitForClientAttach returns attached client names as soon as the reconcile
 
 test('waitForClientAttach returns empty on timeout without hanging', async () => {
   let calls = 0
-  const collect = /** @type {any} */ (async () => {
+  const probe = /** @type {any} */ (async () => { calls += 1; return [] })
+  const sleep = /** @type {any} */ (async () => {})
+
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, probe, sleep })
+  assert.deepEqual(names, [])
+  assert.ok(calls >= 1)
+})
+
+test('waitForClientAttach swallows a probe that throws mid-poll and still times out to empty (Major 1)', async () => {
+  let calls = 0
+  // A transient fs error (EMFILE/EACCES/EIO) during a poll — the exact throw the
+  // full-collector cache walk could surface — must not escape as a login failure.
+  const probe = /** @type {any} */ (async () => {
     calls += 1
-    return { clients: [{ name: '@hypaware/claude', attached: false }] }
+    throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' })
   })
   const sleep = /** @type {any} */ (async () => {})
 
-  const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, collect, sleep })
-  assert.deepEqual(names, [])
+  const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, probe, sleep })
+  assert.deepEqual(names, []) // the throw was swallowed; timed out to the fallback
   assert.ok(calls >= 1)
 })
 

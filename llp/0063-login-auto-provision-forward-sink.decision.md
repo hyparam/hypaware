@@ -487,7 +487,7 @@ cascade claim needed the opposite correction.
     stale "nothing captured" as terminal and pushed a manual `hyp attach` the
     daemon was about to make unnecessary. `runRemoteLogin` now installs the
     daemon, then **waits for its first reconcile** (polling the on-disk attach
-    markers via `collectHypAwareStatus`, a cross-process read) and reports the
+    markers, a cross-process read) and reports the
     ground truth: `capturing <clients>` when a client attaches, or, on timeout
     (no org config, or a slow pull), `no clients attached yet - check 'hyp
     status', ...`. Still never silent (LLP 0061 D4); the manual `hyp attach`

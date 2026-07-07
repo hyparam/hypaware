@@ -23,7 +23,7 @@ import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { collectHypAwareStatus } from '../daemon/status.js'
+import { loadClientDescriptors, probeAttachedClients } from '../daemon/status.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -31,36 +31,81 @@ import { collectHypAwareStatus } from '../daemon/status.js'
  */
 
 /**
+ * The default attach-wait budget. Named so the `runBrowserLogin` progress line
+ * and the poll loop below quote the same number.
+ */
+export const ATTACH_WAIT_DEFAULT_MS = 30000
+
+/**
  * Wait for the daemon's first reconcile to attach a client after enrollment,
  * so `hyp remote login` can report the real capture state instead of a guess.
  * The daemon pulls the org config and runs the LLP 0044 attach pass
  * asynchronously once installed; the marker it writes into each client's
- * settings file is readable cross-process, so we poll `collectHypAwareStatus`
- * (a pure on-disk read, no runtime needed) until a client attaches or the
- * budget runs out. Timing out is not an error: it just means no client has
- * attached yet (an org with no published config, or a slow first pull), and the
- * caller falls back to pointing at `hyp status`.
+ * settings file is readable cross-process, so we poll the on-disk attach markers
+ * (a pure read, no runtime needed) until a client attaches or the budget runs
+ * out.
+ *
+ * We probe *only* those markers (`probeAttachedClients`), not the full
+ * `collectHypAwareStatus`: the descriptors are loaded once and each poll just
+ * re-reads the client settings files, so a poll is cheap and — the point — never
+ * walks the cache, whose fs errors the full collector's `walkForStats` re-throws
+ * (EACCES/EMFILE/EIO). As belt-and-suspenders the poll is still guarded, so even
+ * a probe that somehow throws is swallowed as "not attached this tick" and the
+ * successful enrollment is never reported as a failure.
+ *
+ * Timing out is not an error: it just means no client has attached yet (an org
+ * with no published config, or a slow first pull), and the caller falls back to
+ * pointing at `hyp status`.
  *
  * @param {{
  *   env: NodeJS.ProcessEnv,
+ *   homeDir?: string,
  *   timeoutMs?: number,
  *   intervalMs?: number,
- *   collect?: typeof collectHypAwareStatus,
+ *   probe?: () => Promise<string[]>,
  *   sleep?: (ms: number) => Promise<void>,
  * }} opts
- * @returns {Promise<string[]>} attached client names, empty on timeout
+ * @returns {Promise<string[]>} attached client names (sorted), empty on timeout
  * @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile the follow-up made auto, not printing a pre-pull guess
  */
-export async function waitForClientAttach({ env, timeoutMs = 30000, intervalMs = 1000, collect = collectHypAwareStatus, sleep = defaultSleep }) {
+export async function waitForClientAttach({ env, homeDir, timeoutMs = ATTACH_WAIT_DEFAULT_MS, intervalMs = 1000, probe, sleep = defaultSleep }) {
+  const attachProbe = probe ?? (await buildDefaultAttachProbe(env, homeDir))
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    const report = await collect({ env })
-    const attached = report.clients.filter((c) => c.attached).map((c) => c.name).sort()
-    if (attached.length > 0) return attached
+    /** @type {string[]} */
+    let attached = []
+    try {
+      attached = await attachProbe()
+    } catch {
+      // A transient fs error mid-poll is not "attached": treat it as
+      // not-attached this tick and keep polling to the timeout fallback, so a
+      // login that actually enrolled is never reported as a failure.
+      attached = []
+    }
+    if (attached.length > 0) return [...attached].sort()
     const remaining = deadline - Date.now()
     if (remaining <= 0) return []
-    await sleep(Math.min(intervalMs, remaining))
+    // Floor at 1ms so a non-positive intervalMs (exported seam only) cannot
+    // busy-spin; cap at the remaining budget so we never oversleep it.
+    await sleep(Math.max(1, Math.min(intervalMs, remaining)))
   }
+}
+
+/**
+ * Build the production attach probe: discover the (poll-invariant) client
+ * descriptors once, then hand back a closure that re-reads their on-disk attach
+ * markers on each call. Keeps plugin discovery / catalog build out of the poll
+ * loop while the per-poll read stays a marker-only, throw-proof probe.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} [homeDir]
+ * @returns {Promise<() => Promise<string[]>>}
+ */
+async function buildDefaultAttachProbe(env, homeDir) {
+  const stateDir = readObservabilityEnv(env).stateDir
+  const resolvedHome = homeDir ?? env.HOME ?? process.env.HOME ?? ''
+  const descriptors = await loadClientDescriptors({ stateDir })
+  return () => probeAttachedClients({ descriptors, homeDir: resolvedHome, env })
 }
 
 /**
@@ -497,6 +542,10 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // nothing attached (no org config, or a slow pull): fall back to `hyp
     // status`, never silent (LLP 0061 D4).
     // @ref LLP 0063#login-config-pull [implements]: report attach ground truth by waiting on the reconcile, replacing the interim pre-pull hint
+    // Announce the wait: the reconcile is async and can take the full budget on a
+    // no-config / slow-pull org, and blocking silently for up to 30s reads as a
+    // hang. One line on stderr before we start polling, then the result below.
+    ctx.stderr.write(`waiting for the daemon to attach clients (up to ${Math.round(ATTACH_WAIT_DEFAULT_MS / 1000)}s)...\n`)
     const attached = await waitForAttach({ env: ctx.env })
     if (attached.length > 0) {
       ctx.stdout.write(`capturing ${attached.join(', ')}\n`)
