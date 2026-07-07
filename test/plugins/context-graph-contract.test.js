@@ -43,6 +43,37 @@ test('makeRowBuilders normalizes first_seen and prunes empty props to null', () 
   assert.equal(buildNode({ type: 'A', key: 'k', props: {}, firstSeen: TS, sourceKeys: {} }).props, null)
 })
 
+// @ref LLP 0078#decision [tests]: buildEdge mirrors buildNode's props handling
+// byte-for-byte (present passthrough, empty -> null, absent -> null), and
+// edge ids hash (src, type, dst) only, so props never perturb the id.
+test('buildEdge passes props through, prunes empty to null, and leaves absent props null', () => {
+  const { buildEdge } = makeRowBuilders({ sourceDataset: 's', projector: 'p', projectorVersion: 1 })
+
+  const withProps = buildEdge({ type: 'ran', srcType: 'Session', srcKey: 'k', dstType: 'Skill', dstKey: 'x', props: { dispatch_tool: true }, firstSeen: TS, sourceKeys: {} })
+  assert.deepEqual(withProps.props, { dispatch_tool: true })
+
+  const emptyProps = buildEdge({ type: 'ran', srcType: 'Session', srcKey: 'k', dstType: 'Skill', dstKey: 'x', props: {}, firstSeen: TS, sourceKeys: {} })
+  assert.equal(emptyProps.props, null)
+
+  const absentProps = buildEdge({ type: 'ran', srcType: 'Session', srcKey: 'k', dstType: 'Skill', dstKey: 'x', firstSeen: TS, sourceKeys: {} })
+  assert.equal(absentProps.props, null)
+})
+
+test('edge ids are stable across presence/absence of props (ids hash src/type/dst only)', () => {
+  const { buildEdge } = makeRowBuilders({ sourceDataset: 's', projector: 'p', projectorVersion: 1 })
+  const base = { type: 'ran', srcType: 'Session', srcKey: 'k', dstType: 'Skill', dstKey: 'x', firstSeen: TS, sourceKeys: {} }
+
+  const noProps = buildEdge(base)
+  const withProps = buildEdge({ ...base, props: { dispatch_tool: true } })
+  const withDifferentProps = buildEdge({ ...base, props: { dispatch_slash: true, dispatch_marker: true } })
+  const withEmptyProps = buildEdge({ ...base, props: {} })
+
+  assert.equal(noProps.edge_id, edgeId(nodeId('Session', 'k'), 'ran', nodeId('Skill', 'x')))
+  assert.equal(withProps.edge_id, noProps.edge_id, 'props do not perturb the id')
+  assert.equal(withDifferentProps.edge_id, noProps.edge_id, 'different prop keys still same id')
+  assert.equal(withEmptyProps.edge_id, noProps.edge_id, 'empty props object still same id')
+})
+
 test('the id recipe is source-agnostic - same (type, key) converges across sources', () => {
   const imsg = makeRowBuilders({ sourceDataset: 'imessage', projector: 'imsg.t0', projectorVersion: 1 })
   const aigw = makeRowBuilders({ sourceDataset: 'ai_gateway_messages', projector: 'ai-gateway.t0', projectorVersion: 1 })
