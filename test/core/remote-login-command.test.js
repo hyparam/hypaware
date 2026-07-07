@@ -735,15 +735,17 @@ test('--org= (equals form, empty value) is a usage error', async () => {
 })
 
 /* --------------------------------------------------------------------------
- * Login-time local-only directory picker wiring (LLP 0081 T7): the picker
- * runs once the login-minted gateway is seeded, strictly before
- * `enrollCentralSink` provisions or re-seeds a central sink (LLP 0069
- * #trigger, LLP 0072). These tests inject a `picker` test double (the same
- * pattern as `login`/`seed`) rather than exercising the real interactive
- * prompt, which `test/core/local-only-command.test.js` already covers.
+ * Login-time local-only directory picker wiring (LLP 0081 T7, issue #281):
+ * the picker runs once the login-minted gateway is seeded, and (after the
+ * issue #281 reordering) at the point each fork's local cache is populated:
+ * the fresh-enroll fork after the daemon attaches and backfills, the
+ * re-login/re-seed fork against the cache a prior daemon already filled.
+ * These tests inject a `picker` test double (the same pattern as
+ * `login`/`seed`) rather than exercising the real interactive prompt, which
+ * `test/core/local-only-command.test.js` already covers.
  * ------------------------------------------------------------------------ */
 
-test('the local-only picker runs before enrollCentralSink provisions the sink (ordering, LLP 0069 #trigger)', async () => {
+test('the local-only picker runs after enrollCentralSink provisions the sink on --no-daemon (ordering, issue #281)', async () => {
   const hypHome = await tmpHome()
   const { ctx, out } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
@@ -759,14 +761,55 @@ test('the local-only picker runs before enrollCentralSink provisions the sink (o
     return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
   })
 
-  // --no-daemon keeps the test off the real launchd/systemd install.
+  // --no-daemon keeps the test off the real launchd/systemd install; the sink
+  // is still provisioned (the seed is written) before the picker runs. Because
+  // no forwarding daemon exists yet on this path, the list still lands before
+  // any export (R6 holds for --no-daemon).
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, picker })
   assert.equal(code, 0)
-  assert.equal(seedExistedWhenPickerRan, false, 'the picker must observe the seed as not-yet-written')
+  assert.equal(seedExistedWhenPickerRan, true, 'the picker now runs after the sink is provisioned (issue #281 reordering)')
   assert.equal(seenArgs.stateDir, path.join(hypHome, 'hypaware'))
-  // The seed was in fact written afterwards, so this is a real ordering check.
   await fs.access(seedPath)
   assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+})
+
+test('on a fresh enroll the picker runs after attach+backfill and sees the now-populated cache, not the empty pre-enroll one (issue #281)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  /** @type {string[]} */
+  const order = []
+  // The local cache is empty until the daemon attaches and its post-attach
+  // backfill (LLP 0037/0044) lands rows. Model that: the attach wait flips the
+  // captured set from empty to populated, and the captured-directory wait
+  // returns whatever is captured at the instant it runs.
+  /** @type {any[]} */
+  let captured = []
+  const enroll = /** @type {any} */ (async () => { order.push('enroll'); return { provisioned: true, daemonCode: 0 } })
+  const waitForAttach = /** @type {any} */ (async () => {
+    order.push('attach')
+    captured = [{ cwd: '/work/proj', repoRoot: '/work/proj', rows: 42, lastSeen: '2026-07-07' }]
+    return ['@hypaware/claude']
+  })
+  const waitForCaptured = /** @type {any} */ (async () => captured)
+
+  let pickerSawCount = -1
+  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
+    order.push('picker')
+    const list = args.listCandidates ? await args.listCandidates() : null
+    pickerSawCount = Array.isArray(list) ? list.length : 0
+    return { outcome: 'none', candidateCount: pickerSawCount, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker })
+  assert.equal(code, 0)
+  // The fix: the picker runs only after enrollment and the attach/backfill
+  // wait, so it enumerates the populated cache. Before the fix it ran first,
+  // against the empty pre-enroll cache: the silent-skip bug of issue #281.
+  assert.deepEqual(order, ['enroll', 'attach', 'picker'])
+  assert.equal(pickerSawCount, 1, 'the picker must see the backfilled candidate, not an empty pre-enroll cache')
+  assert.match(out.join(''), /capturing @hypaware\/claude/)
 })
 
 test('--no-forward never invokes the local-only picker', async () => {

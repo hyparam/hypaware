@@ -112,6 +112,22 @@ on its very first pass. Running the picker before provisioning has a second
 benefit: if it is dismissed or abandoned, nothing has been provisioned yet — there
 is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./0072-enrollment-dir-picker.decision.md#default)).
 
+> **Revisited-by [issue #281] (fresh-enroll ordering).** As shipped, running the
+> picker *before* provisioning had a self-defeating consequence this spec did not
+> foresee: the candidate list ([enumerate](#enumerate)) is the distinct captured
+> `cwd`s in the **local cache**, but on a first-time enroll that cache is empty
+> until the daemon (installed *by* `enrollCentralSink`) attaches and backfills. So
+> the pre-provision picker enumerated nothing and silently skipped on every fresh
+> enroll, precisely its primary trigger. The bugfix defers the picker past
+> `enrollCentralSink` on the auto-daemon fresh-enroll path so it runs against the
+> now-populated cache; the `--no-daemon` and re-login forks keep the original
+> ordering. This narrows R6's "not forwarded, even once" to "withheld from every
+> export tick after the pick" for that one path (a one-time backfill window may
+> forward before the user picks). Closing that window fully (hold forwarding until
+> the pick, or backfill locally before the forward daemon starts) is deferred to
+> the follow-up tracked in [issue #281]; this record's decision is otherwise
+> unchanged.
+
 The picker only makes sense on an **enrolling** login (one that provisions or
 already has a central sink). A `--no-forward` / query-only login
 ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md)) forwards

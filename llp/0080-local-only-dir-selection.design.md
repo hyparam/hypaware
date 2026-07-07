@@ -310,6 +310,18 @@ A picker *failure* (thrown error other than cancellation) is caught, warned,
 and treated as zero exclusions: the privacy refinement must never break the
 enrollment it refines.
 
+> **Superseded placement, [issue #281].** The "strictly before
+> `enrollCentralSink`" wiring above enumerated the local cache *before* the daemon
+> it installs had backfilled anything, so the picker showed no candidates and
+> silently skipped on every first-time enroll (see
+> [LLP 0069 §trigger, Revisited-by #281](./0069-local-only-dir-selection.spec.md#trigger)).
+> The fix moves the picker on the auto-daemon fresh-enroll path to *after* the
+> `waitForClientAttach` step, gated on a bounded, best-effort
+> `waitForCapturedDirectories` poll (`src/core/cli/remote_commands.js`) so it runs
+> against the populated cache; `--no-daemon` and the already-enrolled re-login fork
+> keep the pre-provision / already-populated ordering. Everything else in this
+> design (store, resolver, export seam, CLI, status) is unchanged.
+
 ## CLI: the durable authoring path {#cli}
 
 `hyp ignore` / `hyp unignore` / `hyp ignore --check`
