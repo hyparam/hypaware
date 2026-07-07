@@ -812,6 +812,61 @@ test('on a fresh enroll the picker runs after attach+backfill and sees the now-p
   assert.match(out.join(''), /capturing @hypaware\/claude/)
 })
 
+test('a fresh enroll with nothing attached skips the backfill wait and runs the picker against the cache as-is (issue #281)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  // Nothing attaches (no org config / slow pull): there is no post-attach
+  // backfill source, so the bounded captured-directory poll must be skipped
+  // rather than burning its whole 30s budget in silence.
+  const waitForAttach = /** @type {any} */ (async () => [])
+  let capturedCalled = false
+  const waitForCaptured = /** @type {any} */ (async () => { capturedCalled = true; return [] })
+  /** @type {any} */
+  let pickerArgs = null
+  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
+    pickerArgs = args
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker })
+  assert.equal(code, 0)
+  assert.equal(capturedCalled, false, 'waitForCaptured must be skipped when nothing attached (no dead 30s wait)')
+  // The picker still runs, enumerating the cache as-is (no injected candidate
+  // list), so a re-run over a populated cache gets the editor and a fresh box
+  // gets the durable hint.
+  assert.ok(pickerArgs, 'the picker still runs when nothing attached')
+  assert.equal(pickerArgs.listCandidates, undefined)
+  assert.match(out.join(''), /no clients attached yet/)
+})
+
+test('a failed daemon install still runs the local-only picker before returning (issue #281 / R6)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  // Sink provisioned, but the daemon install fails: the machine is enrolled and
+  // told to finish with 'hyp daemon install'. No daemon runs yet, so - like the
+  // --no-daemon fork - the picker must still run before we return (the pre-281
+  // pre-provision picker covered this path; the reordering must not drop it).
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 3 }))
+  let waited = false
+  const waitForAttach = /** @type {any} */ (async () => { waited = true; return [] })
+  /** @type {any} */
+  let pickerArgs = null
+  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
+    pickerArgs = args
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, picker })
+  assert.equal(code, 3)
+  assert.equal(waited, false) // still does not wait for attach on a failed install
+  assert.ok(pickerArgs, 'the picker must run on the daemon-install-failure path')
+  assert.equal(pickerArgs.listCandidates, undefined) // cache as-is, no injected list
+  assert.match(err.join(''), /the daemon install did not finish/)
+})
+
 test('--no-forward never invokes the local-only picker', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })

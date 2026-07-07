@@ -624,6 +624,16 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     }
     if (result.daemonCode !== 0) {
       ctx.stderr.write("note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n")
+      // The install failed, so no forwarding daemon is running this run: like the
+      // --no-daemon fork, run the picker against the cache as-is before returning.
+      // A prior daemon may have populated it (edit the list); a true fresh enroll
+      // shows the durable hint. Either way the list lands before any forwarding can
+      // start once the user finishes 'hyp daemon install', so R6 holds on this fork
+      // too. Without this the pre-281 pre-provision picker's coverage of the
+      // daemon-fail path would be silently dropped.
+      // @ref LLP 0069#trigger [implements]: enrolling-login picker; daemon-fail keeps the pre-forwarding ordering
+      // @ref LLP 0072 [implements]: TTY-gated, defaults to nothing, never blocks
+      await refineLocalOnly({ ctx, stateDir, picker })
       return result.daemonCode
     }
     // The daemon is installed; it now pulls the org config and auto-attaches any
