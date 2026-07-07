@@ -242,11 +242,17 @@ export function createUsagePolicyResolver({
  * the string prefix `/a/b` (the LLP 0049 #scope ancestor rule, per LLP 0071's
  * "Match semantics").
  *
+ * Exported for reuse by the `hyp ignore --local-only` / `hyp unignore
+ * --local-only` CLI (R8: the single shared matcher, never a second copy of
+ * path logic) — it needs the same equal-or-ancestor test to find which
+ * machine-local list entries govern a target directory.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, shared equal-or-descendant path logic
  * @param {string} cwd absolute, already `path.resolve`d
  * @param {string} dir absolute, already `path.resolve`d
  * @returns {boolean}
  */
-function isEqualOrDescendant(cwd, dir) {
+export function isEqualOrDescendant(cwd, dir) {
   if (cwd === dir) return true
   const prefix = dir.endsWith(path.sep) ? dir : dir + path.sep
   return cwd.startsWith(prefix)

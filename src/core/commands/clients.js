@@ -17,7 +17,14 @@ import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clearClientActionMarker } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
-import { createUsagePolicyResolver, findRepoRoot } from '../usage-policy/index.js'
+import {
+  createUsagePolicyResolver,
+  findRepoRoot,
+  isEqualOrDescendant,
+  localOnlyListPath,
+  readLocalOnlyDirs,
+  writeLocalOnlyDirs,
+} from '../usage-policy/index.js'
 import { executeQuerySql } from '../query/sql.js'
 import { pluginStateDir } from './plugin.js'
 
@@ -25,6 +32,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
+ * @import { ResolveResult } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -459,10 +467,13 @@ function expandDetachClientNames(requested, descriptors) {
 
 /**
  * Parse `hyp ignore` / `hyp unignore` argv: an optional positional path and
- * the `--check` / `--json` flags (`--check` is meaningful for `ignore` only).
+ * the `--check` / `--json` / `--local-only` flags (`--check` is meaningful
+ * for `ignore` only; `--local-only` retargets both verbs at the
+ * machine-local list instead of the `.hypignore` dotfile, LLP 0072 #cli).
  *
+ * @ref LLP 0072#cli [implements]: `--local-only` flag parsing for both verbs
  * @param {string[]} argv
- * @returns {{ check: boolean, json: boolean, path?: string, error?: string }}
+ * @returns {{ check: boolean, json: boolean, localOnly: boolean, path?: string, error?: string }}
  */
 function parseIgnoreArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -471,17 +482,20 @@ function parseIgnoreArgs(argv) {
       path: { type: 'string' },
       check: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
+      'local-only': { type: 'boolean', default: false },
     },
     positional: ['path'],
   })
-  if ('help' in parsed) return { check: false, json: false, error: 'usage: hyp ignore [path] [--check] [--json]' }
-  if (!parsed.ok) return { check: false, json: false, error: parsed.error }
-  const p = /** @type {{ path?: string, check: boolean, json: boolean }} */ (parsed.params)
-  return { check: p.check, json: p.json, path: p.path }
+  if ('help' in parsed) {
+    return { check: false, json: false, localOnly: false, error: 'usage: hyp ignore [path] [--check] [--json] [--local-only]' }
+  }
+  if (!parsed.ok) return { check: false, json: false, localOnly: false, error: parsed.error }
+  const p = /** @type {{ path?: string, check: boolean, json: boolean, 'local-only': boolean }} */ (parsed.params)
+  return { check: p.check, json: p.json, localOnly: p['local-only'], path: p.path }
 }
 
 /**
- * `hyp ignore [path] [--check]`
+ * `hyp ignore [path] [--check] [--local-only]`
  *
  * Without `--check`, writes a self-documenting `.hypignore` (comment header +
  * `ignore` token) so HypAware stops recording the folder subtree. The file
@@ -489,6 +503,8 @@ function parseIgnoreArgs(argv) {
  * target directory; an explicit `path` overrides the default (cwd) target. The
  * write is idempotent (LLP 0049 R5): a path already governed by an ancestor
  * `.hypignore` is left as-is. With `--check`, reports status without writing.
+ * With `--local-only`, adds the target to the machine-local list instead of
+ * writing a dotfile (LLP 0072 #cli) — see {@link runIgnoreLocalOnly}.
  *
  * @ref LLP 0049#cli [implements]: the `hyp ignore` verb: write the dotfile at the repo root, idempotent, with a prospective-only `--check`
  * @param {string[]} argv
@@ -501,6 +517,7 @@ export async function runIgnore(argv, ctx) {
     return 2
   }
   if (parsed.check) return runIgnoreCheck(parsed, ctx)
+  if (parsed.localOnly) return runIgnoreLocalOnly(parsed, ctx)
 
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
@@ -541,11 +558,67 @@ export async function runIgnore(argv, ctx) {
 }
 
 /**
- * `hyp unignore [path]`
+ * `hyp ignore --local-only [path]`
+ *
+ * Adds the resolved target to the machine-local `local-only` list
+ * (LLP 0071) instead of writing a `.hypignore`: rows from the scope stay
+ * recorded to the local cache (queryable) but are dropped at the export
+ * seam (LLP 0070), rather than never being recorded at all. Resolves the
+ * target the same way plain `hyp ignore` does — the git repo root when
+ * `base` is inside one, else `base`; an explicit `path` overrides — and
+ * never writes into a repo (R4): the only write is to the `HYP_HOME`-state
+ * list file, so the target need not exist on disk or be a git repo.
+ *
+ * Idempotent (R8: reuses the shared resolver, not a second copy of path
+ * logic): a target already governed — by an existing list entry (exact or
+ * ancestor) or an even-more-restrictive `.hypignore` — is a no-op success
+ * naming the governor, never a duplicate entry.
+ *
+ * @ref LLP 0072#cli [implements]: `hyp ignore --local-only`, the add half of durable local-only authoring
+ * @param {{ path?: string }} parsed
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runIgnoreLocalOnly(parsed, ctx) {
+  // Resolve a relative `path` arg against the command-context cwd (matching the
+  // sibling verbs above), not the Node process cwd, so injected/remote/test
+  // dispatch adds/removes/checks the tree the caller actually pointed at.
+  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
+  // Default target: the repo root when `base` is in a git repo, else `base`.
+  // An explicit `path` overrides: record exactly the directory the caller
+  // pointed at, mirroring the dotfile verb's placement rule.
+  const targetDir = parsed.path ? base : (findRepoRoot(base) ?? base)
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const listPath = localOnlyListPath(stateDir)
+
+  const existing = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(targetDir)
+  if (existing.class !== 'full') {
+    ctx.stdout.write(`already ${existing.class} (governed by ${existing.governedBy})\n`)
+    return 0
+  }
+
+  const dirs = await readLocalOnlyDirs({ stateDir })
+  const resolvedTarget = path.resolve(targetDir)
+  await writeLocalOnlyDirs({ stateDir, dirs: [...dirs, resolvedTarget] })
+  getLogger('usage-policy').info('usage_policy.local_only_add', {
+    [Attr.COMPONENT]: 'cmd-ignore',
+    [Attr.OPERATION]: 'usage_policy.local_only_add',
+    status: 'ok',
+  })
+  // Same latency caveat as the dotfile write: a running daemon's resolver
+  // picks this up within the matcher's cache TTL, not instantly.
+  ctx.stdout.write(`added ${resolvedTarget} to the local-only list (${listPath})\n`)
+  return 0
+}
+
+/**
+ * `hyp unignore [path] [--local-only]`
  *
  * Removes the nearest governing `.hypignore`, re-enabling recording for the
  * subtree. Idempotent (LLP 0049 R5): unignoring a path that no `.hypignore`
- * governs succeeds as a no-op.
+ * governs succeeds as a no-op. With `--local-only`, removes every
+ * machine-local list entry that governs the target instead (LLP 0072 #cli) —
+ * see {@link runUnignoreLocalOnly}.
  *
  * @ref LLP 0049#cli [implements]: the `hyp unignore` verb: remove the governing dotfile, idempotent
  * @param {string[]} argv
@@ -565,6 +638,7 @@ export async function runUnignore(argv, ctx) {
     ctx.stderr.write('error: --json is only valid for `hyp ignore --check`\n')
     return 2
   }
+  if (parsed.localOnly) return runUnignoreLocalOnly(parsed, ctx)
 
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
@@ -592,14 +666,62 @@ export async function runUnignore(argv, ctx) {
 }
 
 /**
+ * `hyp unignore --local-only [path]`
+ *
+ * Removes every machine-local `local-only` list entry that governs the
+ * target — equal to it, or an ancestor of it (the same segment-aware rule
+ * the shared resolver applies, reused here via {@link isEqualOrDescendant}
+ * rather than re-derived, R8) — mirroring dotfile `unignore`'s "remove the
+ * governing thing" semantics. Idempotent: no governing entry is a no-op
+ * success.
+ *
+ * @ref LLP 0072#cli [implements]: `hyp unignore --local-only`, the remove half of durable local-only authoring
+ * @param {{ path?: string }} parsed
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+async function runUnignoreLocalOnly(parsed, ctx) {
+  // Resolve a relative `path` arg against the command-context cwd (matching the
+  // sibling verbs above), not the Node process cwd, so injected/remote/test
+  // dispatch adds/removes/checks the tree the caller actually pointed at.
+  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const dirs = await readLocalOnlyDirs({ stateDir })
+  const governing = dirs.filter((dir) => isEqualOrDescendant(base, dir))
+  if (governing.length === 0) {
+    ctx.stdout.write(`not local-only (no local-only entry governs ${base})\n`)
+    return 0
+  }
+
+  const governingSet = new Set(governing)
+  const remaining = dirs.filter((dir) => !governingSet.has(dir))
+  await writeLocalOnlyDirs({ stateDir, dirs: remaining })
+  getLogger('usage-policy').info('usage_policy.local_only_remove', {
+    [Attr.COMPONENT]: 'cmd-unignore',
+    [Attr.OPERATION]: 'usage_policy.local_only_remove',
+    status: 'ok',
+  })
+  ctx.stdout.write(
+    `removed ${governing.length} local-only entr${governing.length === 1 ? 'y' : 'ies'}: ${governing.join(', ')}\n`
+  )
+  return 0
+}
+
+/**
  * `hyp ignore --check [path]`
  *
- * Reports whether `path` (default cwd) is currently ignored, which
- * `.hypignore` governs, and the residual count of already-cached rows from the
- * scope. This is prospective-only: `--check` never purges; it just surfaces
- * the residue so the rule stays debuggable (LLP 0049 #prospective-only).
+ * Reports whether `path` (default cwd) is currently ignored, the resolved
+ * usage class and its governing source — a `.hypignore` dotfile, or the
+ * machine-local `local-only` list file (LLP 0072 §cli: the extended
+ * resolver reports both sources through the same `resolve()` call) — and the
+ * residual count of already-cached rows from the scope. This is
+ * prospective-only: `--check` never purges; it just surfaces the residue so
+ * the rule stays debuggable (LLP 0049 #prospective-only). For a
+ * `local-only`-governed scope, the residual count reads as "recorded
+ * locally, withheld from forwarding" rather than "never recorded".
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
+ * @ref LLP 0072#cli [implements]: `--check` reports the extended resolver's class + governing source (dotfile or list)
  * @param {{ json: boolean, path?: string }} parsed
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -609,10 +731,13 @@ async function runIgnoreCheck(parsed, ctx) {
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  const result = createUsagePolicyResolver().resolve(base)
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const listPath = localOnlyListPath(stateDir)
+  const result = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(base)
   const ignored = result.class === 'ignore'
-  const scopeDir = result.governedBy ? path.dirname(result.governedBy) : base
-  const residual = ignored ? await countResidualCachedRows(scopeDir, ctx) : 0
+  const governed = result.class !== 'full'
+  const scopeDir = governed ? await resolveCheckScopeDir({ result, base, stateDir, listPath }) : base
+  const residual = governed ? await countResidualCachedRows(scopeDir, ctx) : 0
 
   if (parsed.json) {
     ctx.stdout.write(
@@ -630,9 +755,33 @@ async function runIgnoreCheck(parsed, ctx) {
 
   ctx.stdout.write(`path: ${base}\n`)
   ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
+  ctx.stdout.write(`class: ${result.class}\n`)
   ctx.stdout.write(`governed-by: ${result.governedBy ?? '(none)'}\n`)
   ctx.stdout.write(`residual-cached-rows: ${residual === null ? 'unknown' : residual}\n`)
   return 0
+}
+
+/**
+ * Resolve the directory whose residual cached rows `hyp ignore --check`
+ * should count: the directory containing the governing `.hypignore` when
+ * governed by a dotfile (unchanged from before `local-only` existed), or —
+ * when governed by the machine-local list (`result.governedBy === listPath`)
+ * — the most specific (longest) list entry that actually matches `base`,
+ * found via the shared {@link isEqualOrDescendant} predicate rather than a
+ * second copy of path logic (R8). The `resolve()` call already decided
+ * *whether* something governs; this only identifies *which* listed directory
+ * did, for display and scoping the residual count.
+ *
+ * @param {{ result: ResolveResult, base: string, stateDir: string, listPath: string }} args
+ * @returns {Promise<string>}
+ */
+async function resolveCheckScopeDir({ result, base, stateDir, listPath }) {
+  if (!result.governedBy) return base
+  if (result.governedBy !== listPath) return path.dirname(result.governedBy)
+  const dirs = await readLocalOnlyDirs({ stateDir })
+  const matches = dirs.filter((dir) => isEqualOrDescendant(base, dir))
+  if (matches.length === 0) return base
+  return matches.reduce((best, dir) => (dir.length > best.length ? dir : best))
 }
 
 /**
