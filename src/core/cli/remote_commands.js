@@ -18,6 +18,7 @@ import {
 } from '../remote/credentials.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
+import { runLocalOnlyPicker } from '../commands/local_only.js'
 import { originOf } from '../remote/gateway_seed.js'
 import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
@@ -109,7 +110,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway }} [deps] test seam for the browser flow + gateway seeding
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, picker?: typeof runLocalOnlyPicker }} [deps] test seam for the browser flow + gateway seeding + local-only picker
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
@@ -170,6 +171,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
   return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
+    picker: deps.picker ?? runLocalOnlyPicker,
   })
 }
 
@@ -302,10 +304,10 @@ async function persistStaticToken(name, token, ctx) {
  * @param {string} name
  * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
  * @param {CommandRunContext} ctx
- * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway }} deps
+ * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, picker: typeof runLocalOnlyPicker }} deps
  * @returns {Promise<number>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, picker }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -412,6 +414,20 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   } catch (err) {
     ctx.stderr.write(`hyp remote login: signed in, but could not seed the forwarding credential: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
+  }
+
+  // Offer the local-only directory picker once enrollment is imminent -
+  // strictly before enrollCentralSink (R6), covering both the fresh-enroll and
+  // re-login/re-seed forks below (LLP 0069 #trigger). A non-cancellation
+  // failure here (e.g. a corrupt existing list) is a picker problem, not a
+  // login/enrollment one: warn and proceed with zero exclusions rather than
+  // let the privacy refinement break the enrollment it refines.
+  // @ref LLP 0069#trigger [implements]: post-enrollment picker trigger point
+  // @ref LLP 0072 [implements]: never blocks login/enrollment on picker failure
+  try {
+    await picker({ ctx, stateDir })
+  } catch (err) {
+    ctx.stderr.write(`note: could not run the local-only directory picker (nothing withheld): ${err instanceof Error ? err.message : String(err)}\n`)
   }
 
   // No sink targets this server yet: provision one so login forwards from one
