@@ -364,6 +364,13 @@ export function programFrom(command, depth = 0) {
           i++
           continue
         }
+        // `--` ends option parsing: the next token is argv[0]. Without this,
+        // the fail-closed classifier below treats `--` as an unrecognized flag
+        // and drops `sudo -- git status` to nothing (round-2 regression fix).
+        if (wtok === '--') {
+          i++
+          break
+        }
         if (!isFlag(wtok)) break
         const kind = classifyWrapperFlag(norm, wtok)
         if (kind === 'pair') {

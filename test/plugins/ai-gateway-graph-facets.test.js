@@ -109,6 +109,12 @@ const CASES = [
   ['sudo with an unrecognized flag+value shape mints nothing', 'sudo -z VALUE git status', null],
   ['env with an unrecognized flag+value shape mints nothing', 'env -z VALUE git status', null],
 
+  // `--` ends option parsing: the next token is argv[0], not an unrecognized
+  // flag (round-2 regression fix — the fail-closed classifier would otherwise
+  // drop these to nothing).
+  ['sudo -- ends options, next token is argv[0]', 'sudo -- git status', 'git'],
+  ['env -- ends options', 'env -- duckdb query.sql', 'duckdb'],
+
   // shell -c unwrap (Codex bash -lc "...")
   ['bash -lc unwraps the inner command', 'bash -lc "git commit -m x"', 'git'],
   ['sh -c unwraps', 'sh -c "npm run build"', 'npm'],
