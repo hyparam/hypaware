@@ -26,10 +26,25 @@ const execFileAsync = promisify(execFile)
  * `--state-file`, a git lookup failure, or a write error all degrade
  * to "no context recorded" with exit 0.
  *
+ * Ordering (issue #258 / LLP 0085): `session_id` and `cwd` are in hand
+ * instantly from stdin, but `cwd` is the ONLY field the `.hypignore`
+ * usage-policy check needs, and the projector reads this channel the
+ * moment the first exchange is captured. So a MINIMAL `{session_id, cwd,
+ * ts}` record is appended FIRST - before the two git subprocesses run -
+ * and a second enriched record (with `git_branch` / repo identity) is
+ * appended only after. `pickLatestMatching` prefers the latest record,
+ * so the enriched one wins once it lands; until then the projector at
+ * least has `cwd`, collapsing the session-start race window from "hook
+ * latency + 2 git execs" to ~one file append.
+ *
+ * @ref LLP 0085 [implements]: part (a) - shrink the null-cwd window at the
+ * source by writing cwd before the git lookups.
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts }} [deps]
+ *   injectable git lookups (tests); default to the real subprocess helpers.
  */
-export async function runClaudeSessionContextHook(argv, ctx) {
+export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
   if (argv.includes('--help') || argv.includes('-h')) {
     ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
     return 0
@@ -54,27 +69,47 @@ export async function runClaudeSessionContextHook(argv, ctx) {
   const cwd = str(event.new_cwd) ?? str(event.cwd)
   if (!sessionId || !cwd) return 0
   const transcriptPath = str(event.transcript_path)
-  const gitBranch = await currentGitBranch(cwd)
-  // @ref LLP 0032#capture: the hook already runs git in the live cwd for the
-  // branch; the remote/HEAD/root for the graph bridge come from the same place.
-  const repo = await gitRepoFacts(cwd)
 
+  // Minimal record FIRST: cwd is what the .hypignore policy check needs and it
+  // is available instantly from stdin. This closes the window in which the
+  // projector reads a cwd-less record for the session's opening exchange.
   /** @type {Record<string, unknown>} */
-  const record = {
-    session_id: sessionId,
-    cwd,
-    ts: new Date().toISOString(),
-  }
-  if (transcriptPath) record.transcript_path = transcriptPath
-  if (gitBranch) record.git_branch = gitBranch
-  if (repo.remote) record.git_remote = repo.remote
-  if (repo.headSha) record.head_sha = repo.headSha
-  if (repo.repoRoot) record.repo_root = repo.repoRoot
-
+  const minimal = { session_id: sessionId, cwd, ts: new Date().toISOString() }
+  if (transcriptPath) minimal.transcript_path = transcriptPath
   try {
-    await appendSessionContext(stateFile, /** @type {any} */ (record))
+    await appendSessionContext(stateFile, /** @type {any} */ (minimal))
   } catch {
     /* hook MUST never throw back into Claude: exit 0 even on write failure */
+  }
+
+  // Enriched record SECOND: run the (slower) git subprocesses, then append the
+  // branch / repo-graph identity. Wrapped so a git hang-or-throw or write error
+  // still leaves the minimal record safely on disk (degrade to cwd-only).
+  try {
+    const branchOf = deps.gitBranch ?? currentGitBranch
+    // @ref LLP 0032#capture: the hook already runs git in the live cwd for the
+    // branch; the remote/HEAD/root for the graph bridge come from the same place.
+    const repoFactsOf = deps.gitRepoFacts ?? gitRepoFacts
+    const gitBranch = await branchOf(cwd)
+    const repo = await repoFactsOf(cwd)
+
+    /** @type {Record<string, unknown>} */
+    const enriched = {}
+    if (gitBranch) enriched.git_branch = gitBranch
+    if (repo.remote) enriched.git_remote = repo.remote
+    if (repo.headSha) enriched.head_sha = repo.headSha
+    if (repo.repoRoot) enriched.repo_root = repo.repoRoot
+
+    // Only append a second record when git actually added something; otherwise
+    // the minimal record already fully represents the context (non-repo cwd).
+    if (Object.keys(enriched).length > 0) {
+      /** @type {Record<string, unknown>} */
+      const record = { session_id: sessionId, cwd, ts: new Date().toISOString(), ...enriched }
+      if (transcriptPath) record.transcript_path = transcriptPath
+      await appendSessionContext(stateFile, /** @type {any} */ (record))
+    }
+  } catch {
+    /* git or write failure: the minimal record already landed; exit 0 */
   }
   return 0
 }

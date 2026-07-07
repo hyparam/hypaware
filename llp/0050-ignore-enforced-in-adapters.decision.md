@@ -51,7 +51,16 @@ client by this point, so the live call is untouched
 
 This is purely a projection-time decision; settlement (`claude/src/settle.js`,
 [LLP 0027](./0027-cache-settlement.decision.md)) only upgrades the identity of
-already-written rows and is irrelevant to ignore.
+already-written rows and is irrelevant to ignore. (**Extended-by:
+[LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)** — this holds for
+the *common* case, where the projector resolved `cwd` and applied the drop. But
+when `cwd` was *unknown at projection* (the Claude session-start race: the
+`session-context.jsonl` record had not landed, so the row was written with
+`cwd = null` and the check was skipped, failing **open**), settlement is **no
+longer** irrelevant: it re-resolves the now-known `cwd` at flush and **drops** the
+row when it resolves to `ignore`. The `ignore` guarantee is thus the capture seam
+**or** a flush-time settlement-drop when cwd was unknown at capture; the drop
+still happens before partition write and before export.)
 
 ### Backfill: skip ignored sessions
 
