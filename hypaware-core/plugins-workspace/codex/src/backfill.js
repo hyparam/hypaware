@@ -731,7 +731,7 @@ function timestampToMs(value) {
  * @param {string} filePath
  * @returns {string}
  */
-function sessionIdFromPath(filePath) {
+export function sessionIdFromPath(filePath) {
   const base = path.basename(filePath).replace(/\.jsonl?$/, '')
   const uuid = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/.exec(base)
   return uuid ? uuid[1] : base
