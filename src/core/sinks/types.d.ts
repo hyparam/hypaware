@@ -104,6 +104,12 @@ export interface TickReport {
     bytesWritten: number
     error?: string
   }>
+  /**
+   * Present when the whole tick was skipped: an enrolling login's local-only
+   * pick was pending (fresh `usage-policy/pick-pending.json` marker), so no
+   * sink exported this tick (LLP 0093).
+   */
+  held?: 'pick_pending'
 }
 
 export interface MaterializeResult {

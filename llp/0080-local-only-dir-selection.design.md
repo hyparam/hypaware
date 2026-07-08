@@ -338,6 +338,14 @@ enrollment it refines.
 > of this design is unchanged. See
 > [LLP 0069 §trigger, the follow-up note](./0069-local-only-dir-selection.spec.md#trigger).
 
+> **Extended-by [LLP 0093](./0093-pick-pending-export-hold.decision.md)
+> (export hold during the pick).** The one-time backfill forwarding window
+> both notes above describe is now closed: a bounded pick-pending marker
+> (`usage-policy/pick-pending.json`, written by the enrolling login before
+> `enrollCentralSink`, cleared on every exit from that fork) holds sink
+> driver ticks while fresh, restoring R6's "not forwarded, even once" on the
+> auto-daemon fresh-enroll path.
+
 ## CLI: the durable authoring path {#cli}
 
 `hyp ignore` / `hyp unignore` / `hyp ignore --check`

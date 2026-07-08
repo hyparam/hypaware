@@ -9,6 +9,7 @@ import path from 'node:path'
 import { freshenCaptureEnumeration, runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { CAPTURE_DATASET } from '../../src/core/commands/local_only.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
+import { pickPendingMarkerPath } from '../../src/core/usage-policy/pick_pending.js'
 
 async function tmpHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))
@@ -1125,6 +1126,95 @@ test('freshenCaptureEnumeration with the REAL bootKernel enumerates through a da
   } finally {
     await handle.dispose()
   }
+})
+
+/* --------------------------------------------------------------------------
+ * Pick-pending export hold (LLP 0093): the fresh-enroll fork writes the
+ * marker before enrollCentralSink, holds it through the pick, and clears it
+ * on every exit path, so the daemon's first backfill cannot forward rows the
+ * user is about to withhold.
+ * ------------------------------------------------------------------------ */
+
+/** @param {string} hypHome */
+function markerPathFor(hypHome) {
+  return pickPendingMarkerPath(path.join(hypHome, 'hypaware'))
+}
+
+/** @param {string} hypHome */
+async function markerExists(hypHome) {
+  return fs.access(markerPathFor(hypHome)).then(() => true, () => false)
+}
+
+test('a fresh enroll writes the pick-pending marker before enroll, holds it through the pick, and clears it on return (LLP 0093)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  ctx.stderr.isTTY = true
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  let markerAtEnroll = /** @type {boolean | null} */ (null)
+  const enroll = /** @type {any} */ (async () => {
+    markerAtEnroll = await markerExists(hypHome)
+    return { provisioned: true, daemonCode: 0 }
+  })
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+  const waitForCaptured = /** @type {any} */ (async () => [{ cwd: '/work/proj' }])
+  const freshen = /** @type {any} */ (async () => null)
+
+  let markerAtPick = /** @type {boolean | null} */ (null)
+  const picker = /** @type {any} */ (async () => {
+    markerAtPick = await markerExists(hypHome)
+    return { outcome: 'selected', candidateCount: 1, selectedCount: 1, excludedDirs: ['/work/proj'] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker, freshen })
+  assert.equal(code, 0)
+  assert.equal(markerAtEnroll, true, 'the marker must land BEFORE enrollCentralSink, so no daemon tick can beat it onto disk')
+  assert.equal(markerAtPick, true, 'the hold must persist through the pick itself')
+  assert.equal(await markerExists(hypHome), false, 'the hold is released once the login returns')
+})
+
+test('a fresh enroll whose enrollment throws still clears the pick-pending marker (LLP 0093)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => { throw new Error('server unreachable') })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll })
+  assert.equal(code, 1)
+  assert.equal(await markerExists(hypHome), false, 'an error exit must not leave the export hold to its TTL')
+})
+
+test('a non-TTY fresh enroll clears the marker as soon as the picker no-ops (LLP 0093)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => [])
+  const picker = /** @type {any} */ (async () => ({ outcome: 'non_tty', candidateCount: 0, selectedCount: 0, excludedDirs: [] }))
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, picker })
+  assert.equal(code, 0)
+  assert.equal(await markerExists(hypHome), false)
+})
+
+test('a re-login (already-enrolled, re-seed path) never writes the pick-pending marker (LLP 0093)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  let markerAtPick = /** @type {boolean | null} */ (null)
+  const picker = /** @type {any} */ (async () => {
+    markerAtPick = await markerExists(hypHome)
+    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, picker })
+  assert.equal(code, 0)
+  assert.equal(markerAtPick, false, 'a re-login edits a list whose daemon already forwards; no hold is written')
+  assert.equal(await markerExists(hypHome), false)
 })
 
 test('a non-cancellation picker error is warned and never breaks enrollment', async () => {

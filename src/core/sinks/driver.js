@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
+import { isPickPending } from '../usage-policy/pick_pending.js'
 
 /**
  * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../hypaware-plugin-kernel-types.js'
@@ -44,6 +45,25 @@ export function createSinkDriver(opts) {
     const now = tickOpts.now ?? new Date()
     const source = tickOpts.source ?? 'manual'
     instruments.sinkTicksTotal.add(1, { source })
+    // An enrolling login's local-only pick is pending: hold the whole tick so
+    // the daemon's first backfill cannot forward rows from a directory the
+    // user is about to withhold (the one-time window LLP 0069's #281 note
+    // deferred). Held rows stay in the cache and export on the first tick
+    // after the pick lands; the marker is TTL-bounded, so an abandoned login
+    // can never stall exports indefinitely. The hold is driver-wide (every
+    // sink, not just off-machine ones): the driver cannot know which sinks
+    // leave the machine without a new registration concept, and briefly
+    // deferring a local sink is harmless where a missed forward hold is not.
+    // @ref LLP 0093 [implements]: pick-pending marker holds sink ticks, bounded by TTL
+    if (await isPickPending({ stateDir: stateRoot, now: now.getTime() })) {
+      log.info('sink.tick_held_pick_pending', {
+        [Attr.COMPONENT]: 'sinks',
+        [Attr.OPERATION]: 'sink.tick',
+        hyp_reason: 'local_only_pick_pending',
+        source,
+      })
+      return { sinks: [], held: 'pick_pending' }
+    }
     const handles = sinkRegistry.listHandles()
     /** @type {TickReport['sinks']} */
     const sinks = []
