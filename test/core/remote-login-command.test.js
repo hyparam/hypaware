@@ -6,7 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { freshenCaptureEnumeration, runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { CAPTURE_DATASET } from '../../src/core/commands/local_only.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 
 async function tmpHome() {
@@ -971,6 +972,159 @@ test('a re-login (already-enrolled, re-seed path) still shows the local-only pic
   assert.equal(code, 0)
   assert.equal(pickerCalled, true)
   assert.match(out.join(''), /seeded forwarding identity for sink 'fwd'/)
+})
+
+/* --------------------------------------------------------------------------
+ * Fresh-enroll registry refresh (issue #281 follow-up): the login kernel
+ * boots before enrollment, so on a first-run box its query-registry snapshot
+ * never registers `ai_gateway_messages` (the org config pull that enables
+ * @hypaware/ai-gateway happens after enrollCentralSink installs the daemon).
+ * The capture wait must poll through a refreshed registry, not the stale
+ * snapshot whose enumeration can only ever fail to null.
+ * ------------------------------------------------------------------------ */
+
+/** A minimal query-registry stub: knows exactly the given dataset names. */
+function registryStub(/** @type {string[]} */ names) {
+  return { getDataset: (/** @type {string} */ n) => (names.includes(n) ? { name: n } : undefined) }
+}
+
+test('a fresh enroll refreshes the capture registry and polls through its enumeration (issue #281 follow-up)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({ hypHome })
+  ctx.stderr.isTTY = true
+  // The pre-enroll boot snapshot: no plugins, no dataset.
+  ctx.query = registryStub([])
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+
+  let disposed = false
+  const freshEnumerate = async () => [{ cwd: '/work/proj', repoRoot: '/work/proj', rows: 42, lastSeen: '2026-07-08' }]
+  const freshen = /** @type {any} */ (async () => ({ enumerate: freshEnumerate, dispose: async () => { disposed = true } }))
+
+  /** @type {any} */ let waitOpts = null
+  const waitForCaptured = /** @type {any} */ (async (/** @type {any} */ opts) => {
+    waitOpts = opts
+    return opts.enumerate ? opts.enumerate() : null
+  })
+
+  let pickerSawCount = -1
+  let disposedWhenPickerRan = /** @type {boolean | null} */ (null)
+  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
+    disposedWhenPickerRan = disposed
+    const list = args.listCandidates ? await args.listCandidates() : null
+    pickerSawCount = Array.isArray(list) ? list.length : -1
+    return { outcome: 'none', candidateCount: pickerSawCount, selectedCount: 0, excludedDirs: [] }
+  })
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker, freshen })
+  assert.equal(code, 0)
+  assert.equal(waitOpts.enumerate, freshEnumerate, 'the capture wait must poll the refreshed enumeration, not the stale snapshot')
+  assert.equal(pickerSawCount, 1, 'the picker must see the candidates the refreshed registry enumerated')
+  assert.equal(disposedWhenPickerRan, false, 'the fresh kernel must stay alive while the picker uses its candidates')
+  assert.equal(disposed, true, 'the fresh kernel must be disposed before the login returns')
+})
+
+test('a failed registry refresh (null) falls back to the boot snapshot and never breaks the login', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  ctx.stderr.isTTY = true
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+  const freshen = /** @type {any} */ (async () => null)
+  /** @type {any} */ let waitOpts = null
+  const waitForCaptured = /** @type {any} */ (async (/** @type {any} */ opts) => { waitOpts = opts; return null })
+  const picker = /** @type {any} */ (async () => ({ outcome: 'enumeration_failed', candidateCount: 0, selectedCount: 0, excludedDirs: [] }))
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker, freshen })
+  assert.equal(code, 0)
+  assert.equal(waitOpts.enumerate, undefined, 'a null refresh keeps the wait on its default (snapshot) enumeration')
+  assert.match(out.join(''), /capturing @hypaware\/claude/)
+})
+
+test('freshenCaptureEnumeration is a no-op when the boot snapshot already has the dataset (re-login on a populated box)', async () => {
+  let booted = false
+  const boot = /** @type {any} */ (async () => { booted = true; throw new Error('must not boot') })
+  const ctx = /** @type {any} */ ({ env: {}, query: registryStub([CAPTURE_DATASET]) })
+  const result = await freshenCaptureEnumeration({ ctx, boot })
+  assert.equal(result, null)
+  assert.equal(booted, false, 'no second kernel boot is paid when the snapshot can already enumerate')
+})
+
+test('freshenCaptureEnumeration returns the fresh kernel enumeration when the re-boot registers the dataset', async () => {
+  let stopped = false
+  const runtime = {
+    query: registryStub([CAPTURE_DATASET]),
+    storage: { cacheRoot: '/tmp/cache' },
+    sources: { stopAll: async () => { stopped = true } },
+  }
+  /** @type {any} */ let bootArgs = null
+  const boot = /** @type {any} */ (async (/** @type {any} */ args) => { bootArgs = args; return { runtime, config: { version: 2 } } })
+  const ctx = /** @type {any} */ ({ env: { HYP_HOME: '/tmp/hyp-home' }, query: registryStub([]) })
+
+  const result = await freshenCaptureEnumeration({ ctx, boot })
+  assert.ok(result, 'a successful re-boot with the dataset registered yields an enumeration handle')
+  assert.equal(bootArgs.bootProfile, 'config', 'the re-boot uses the config profile (same layered resolution as any later hyp command)')
+  assert.equal(bootArgs.hypHome, '/tmp/hyp-home')
+  assert.equal(typeof result.enumerate, 'function')
+  assert.equal(stopped, false)
+  await result.dispose()
+  assert.equal(stopped, true, 'dispose stops the fresh kernel boot-started sources')
+})
+
+test('freshenCaptureEnumeration resolves null (sources stopped) when the merged config still lacks the dataset', async () => {
+  let stopped = false
+  const runtime = {
+    query: registryStub([]),
+    storage: {},
+    sources: { stopAll: async () => { stopped = true } },
+  }
+  const boot = /** @type {any} */ (async () => ({ runtime, config: { version: 2 } }))
+  const ctx = /** @type {any} */ ({ env: {}, query: registryStub([]) })
+  const result = await freshenCaptureEnumeration({ ctx, boot })
+  assert.equal(result, null)
+  assert.equal(stopped, true, 'a useless fresh kernel must not leak live sources')
+})
+
+test('freshenCaptureEnumeration resolves null when the re-boot throws (best-effort, never breaks the login)', async () => {
+  const boot = /** @type {any} */ (async () => { throw new Error('boot exploded') })
+  const ctx = /** @type {any} */ ({ env: {}, query: registryStub([]) })
+  const result = await freshenCaptureEnumeration({ ctx, boot })
+  assert.equal(result, null)
+})
+
+test('freshenCaptureEnumeration with the REAL bootKernel enumerates through a daemon-pulled central layer (issue #281 follow-up)', async () => {
+  // The #283 tests stubbed the enumeration, so the registry gap was never
+  // exercised; this one is deliberately unstubbed. Model the post-attach
+  // fresh-enroll moment on disk: the local config names no plugins (the
+  // pre-enroll snapshot registry below is empty), and the central layer the
+  // daemon's config-control pull wrote names @hypaware/ai-gateway.
+  const hypHome = await tmpHome()
+  const configPath = path.join(hypHome, 'config.json')
+  await fs.writeFile(configPath, JSON.stringify({ version: 2 }))
+  const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/ai-gateway' }] }))
+
+  const ctx = /** @type {any} */ ({
+    env: { HYP_HOME: hypHome, HYP_CONFIG: configPath },
+    config: { version: 2 },
+    query: registryStub([]), // the stale pre-enroll boot snapshot
+  })
+
+  const handle = await freshenCaptureEnumeration({ ctx })
+  assert.ok(handle, 'the re-booted kernel must register the dataset from the pulled central layer')
+  try {
+    const rows = await handle.enumerate()
+    // The crux of the bug: through the stale snapshot this was null ("cannot
+    // run, stop now"); through the fresh registry it is a real (empty) list,
+    // so the capture wait keeps polling while the backfill lands.
+    assert.ok(Array.isArray(rows), 'enumeration must RUN (empty list) on a fresh box, not fail to null')
+    assert.equal(rows.length, 0)
+  } finally {
+    await handle.dispose()
+  }
 })
 
 test('a non-cancellation picker error is warned and never breaks enrollment', async () => {

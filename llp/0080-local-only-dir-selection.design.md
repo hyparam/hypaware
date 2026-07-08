@@ -325,6 +325,19 @@ enrollment it refines.
 > runs against the already-populated cache. Everything else in this design
 > (store, resolver, export seam, CLI, status) is unchanged.
 
+> **Revisited-by [issue #281] follow-up (fresh-enroll registry staleness).** The
+> reordered wiring above still enumerated through the login process's boot-time
+> query-registry snapshot, which on a genuinely fresh box predates the org
+> config pull that enables `@hypaware/ai-gateway` — so `ai_gateway_messages` was
+> unregistered, the enumeration failed to null, and the picker still silently
+> skipped. The fix adds `freshenCaptureEnumeration`
+> (`src/core/cli/remote_commands.js`): after a client attaches (which
+> guarantees the pulled central layer is on disk), the login re-boots one fresh
+> kernel and hands its registry's enumeration to the
+> `waitForCapturedDirectories` poll. Best-effort and one-shot; every other part
+> of this design is unchanged. See
+> [LLP 0069 §trigger, the follow-up note](./0069-local-only-dir-selection.spec.md#trigger).
+
 ## CLI: the durable authoring path {#cli}
 
 `hyp ignore` / `hyp unignore` / `hyp ignore --check`

@@ -133,6 +133,23 @@ is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./00
 > the follow-up tracked in [issue #281]; this record's decision is otherwise
 > unchanged.
 
+> **Revisited-by [issue #281] follow-up (fresh-enroll registry staleness).** The
+> #281 reordering above fixed *when* the picker runs but left *what it queries
+> with* stale: `hyp remote login` boots its kernel before enrollment, and on a
+> first-run box the local config names no plugins, so the login process's
+> query-registry snapshot never registers `ai_gateway_messages` — that
+> registration arrives with `@hypaware/ai-gateway`, which the org config-control
+> pull enables only after `enrollCentralSink` installs the daemon. The
+> [enumeration](#enumerate) then failed as "unknown dataset" (best-effort null),
+> the capture wait read null as "cannot run, stop", and the picker still
+> silently skipped on every genuinely fresh enroll. The fix
+> (`freshenCaptureEnumeration`, `src/core/cli/remote_commands.js`) re-boots one
+> fresh kernel after a client attaches — attach markers land only after the
+> confirmed config apply, so the pulled central layer is on disk by then and the
+> re-boot's merged config registers the dataset — and hands its enumeration to
+> the capture wait. Best-effort: a failed re-boot falls back to the durable
+> hint, never an error. Requirements and R6 semantics are unchanged.
+
 The picker only makes sense on an **enrolling** login (one that provisions or
 already has a central sink). A `--no-forward` / query-only login
 ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md)) forwards

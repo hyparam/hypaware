@@ -16,9 +16,11 @@ import {
   writeSession,
   writeToken,
 } from '../remote/credentials.js'
+import { Attr, getLogger } from '../observability/index.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
+import { bootKernel } from '../runtime/boot.js'
 import { enrollCentralSink } from '../commands/central.js'
-import { listCapturedDirectories, runLocalOnlyPicker } from '../commands/local_only.js'
+import { CAPTURE_DATASET, listCapturedDirectories, runLocalOnlyPicker } from '../commands/local_only.js'
 import { originOf } from '../remote/gateway_seed.js'
 import { isTty, readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
@@ -135,7 +137,11 @@ export const CAPTURE_WAIT_DEFAULT_MS = 30000
  * picker uses (`listCapturedDirectories`, R2 - local cache only, never the remote).
  *
  * A `null` result means enumeration cannot run at all (no query engine, or an
- * engine error): stop immediately and let the picker take its skip path. Only a
+ * engine error): stop immediately and let the picker take its skip path. On a
+ * genuinely fresh enroll the boot-snapshot registry is such an engine (the
+ * dataset registers only after the org config pull), so the caller first
+ * refreshes it via `freshenCaptureEnumeration` and passes the fresh
+ * `enumerate` in here rather than polling a query that can never run. Only a
  * valid-but-empty list means "backfill may still be landing", so keep polling
  * until the budget expires. Timing out returns the last (empty) result, and the
  * picker then shows the durable-command hint. Never throws and never blocks past
@@ -165,6 +171,94 @@ export async function waitForCapturedDirectories({ ctx, timeoutMs = CAPTURE_WAIT
     const remaining = deadline - Date.now()
     if (remaining <= 0) return candidates
     await sleep(Math.max(1, Math.min(intervalMs, remaining)))
+  }
+}
+
+/**
+ * Rebuild a query context that can actually run the picker's candidate
+ * enumeration on a genuinely fresh enroll (issue #281 follow-up).
+ *
+ * `hyp remote login` boots its kernel at dispatch time, before enrollment. On
+ * a first-run box the local config names no plugins, so the boot snapshot in
+ * `ctx.query` never registers the dataset the enumeration reads - that
+ * registration arrives with `@hypaware/ai-gateway`, which the org
+ * config-control pull enables only after `enrollCentralSink` installs the
+ * daemon. Enumerating through the stale snapshot fails ("unknown dataset" -
+ * null), which `waitForCapturedDirectories` correctly reads as "enumeration
+ * cannot run, stop now": the picker silently skipped on exactly the fresh
+ * enroll it exists for, even after the #281 reordering.
+ *
+ * The attach that gates the capture wait is also what makes one re-boot
+ * sufficient: attach markers are written by the reconciler that runs only
+ * after a confirmed config apply, so a successful `waitForClientAttach` means
+ * the pulled central layer is on disk - and the attach handler requires the
+ * gateway capability, so that layer enables the plugin. Booting one fresh
+ * kernel here (config profile, the same layered resolution any subsequent
+ * `hyp` command runs) yields a registry with the dataset; re-resolving per
+ * poll tick would re-pay plugin discovery every second for nothing.
+ *
+ * Resolves to null whenever the caller should keep polling through its boot
+ * snapshot: the snapshot already has the dataset (the populated-box re-login
+ * case - no second boot is paid), the re-boot fails, or the merged config
+ * still lacks the plugin. Best-effort throughout: never throws, so a broken
+ * refresh can never break the login it refines (LLP 0072). Callers must
+ * `dispose()` a non-null handle - plugins may start sources during
+ * activation, and a live source handle would keep the login process alive
+ * after it prints its result.
+ *
+ * @param {{
+ *   ctx: Pick<CommandRunContext, 'query' | 'storage' | 'config' | 'env'>,
+ *   boot?: typeof bootKernel,
+ * }} args
+ * @returns {Promise<{ enumerate: () => Promise<any[] | null>, dispose: () => Promise<void> } | null>}
+ * @ref LLP 0069#enumerate [constrained-by]: the enumeration needs a registry that knows the dataset; on a fresh enroll only a post-attach re-boot has one
+ */
+export async function freshenCaptureEnumeration({ ctx, boot = bootKernel }) {
+  try {
+    if (ctx.query && ctx.query.getDataset(CAPTURE_DATASET)) return null
+    const fresh = await boot({
+      hypHome: readObservabilityEnv(ctx.env).hypHome,
+      mode: 'cli',
+      bootProfile: 'config',
+      env: ctx.env,
+    })
+    const runtime = fresh.runtime
+    const dispose = async () => {
+      try {
+        await runtime.sources.stopAll()
+      } catch {
+        // Best-effort, mirroring dispatch's own boot-source cleanup: a stop
+        // failure is not actionable from the login path.
+      }
+    }
+    const registered = !!runtime.query.getDataset(CAPTURE_DATASET)
+    getLogger('remote-login').info('local_only.capture_registry_refresh', {
+      [Attr.COMPONENT]: 'cmd-remote-login',
+      [Attr.OPERATION]: 'local_only.capture_registry_refresh',
+      status: registered ? 'ok' : 'failed',
+      ...(registered ? {} : { [Attr.ERROR_KIND]: 'dataset_still_unregistered' }),
+    })
+    if (!registered) {
+      await dispose()
+      return null
+    }
+    return {
+      enumerate: () => listCapturedDirectories({
+        query: runtime.query,
+        storage: runtime.storage,
+        config: fresh.config ?? ctx.config,
+      }),
+      dispose,
+    }
+  } catch (err) {
+    getLogger('remote-login').info('local_only.capture_registry_refresh', {
+      [Attr.COMPONENT]: 'cmd-remote-login',
+      [Attr.OPERATION]: 'local_only.capture_registry_refresh',
+      status: 'failed',
+      [Attr.ERROR_KIND]: 'boot_failed',
+      error_message: err instanceof Error ? err.message : String(err),
+    })
+    return null
   }
 }
 
@@ -248,7 +342,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, picker?: typeof runLocalOnlyPicker, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, waitForCaptured?: typeof waitForCapturedDirectories }} [deps] test seam for the browser flow, gateway seeding, the local-only picker, central-sink enrollment, the post-enroll attach wait, and the post-backfill captured-directory wait
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, picker?: typeof runLocalOnlyPicker, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, waitForCaptured?: typeof waitForCapturedDirectories, freshen?: typeof freshenCaptureEnumeration }} [deps] test seam for the browser flow, gateway seeding, the local-only picker, central-sink enrollment, the post-enroll attach wait, the post-backfill captured-directory wait, and the fresh-enroll registry refresh
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
 export async function runRemoteLogin(argv, ctx, deps = {}) {
@@ -313,6 +407,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
     enroll: deps.enroll ?? enrollCentralSink,
     waitForAttach: deps.waitForAttach ?? waitForClientAttach,
     waitForCaptured: deps.waitForCaptured ?? waitForCapturedDirectories,
+    freshen: deps.freshen ?? freshenCaptureEnumeration,
   })
 }
 
@@ -445,10 +540,10 @@ async function persistStaticToken(name, token, ctx) {
  * @param {string} name
  * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
  * @param {CommandRunContext} ctx
- * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, picker: typeof runLocalOnlyPicker, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach, waitForCaptured: typeof waitForCapturedDirectories }} deps
+ * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, picker: typeof runLocalOnlyPicker, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach, waitForCaptured: typeof waitForCapturedDirectories, freshen: typeof freshenCaptureEnumeration }} deps
  * @returns {Promise<number>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, picker, enroll, waitForAttach, waitForCaptured }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, picker, enroll, waitForAttach, waitForCaptured, freshen }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -661,8 +756,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // runs and takes its own durable-hint path immediately.
     const canPromptPicker = isTty(ctx.stdin ?? process.stdin) && isTty(ctx.stderr)
     if (attached.length > 0 && canPromptPicker) {
-      const captured = await waitForCaptured({ ctx })
-      await refineLocalOnly({ ctx, stateDir, picker, listCandidates: () => Promise.resolve(captured) })
+      // On a first-run box the boot snapshot in ctx.query predates the org
+      // config pull that registers the dataset the enumeration reads, so the
+      // capture wait would stop on its first "unknown dataset" failure and
+      // the picker would silently skip (issue #281 follow-up). Refresh the
+      // registry once (best-effort; null keeps the snapshot) so the poll can
+      // actually see the backfill land, then poll and pick as before.
+      const freshened = await freshen({ ctx })
+      try {
+        const captured = await waitForCaptured(freshened ? { ctx, enumerate: freshened.enumerate } : { ctx })
+        await refineLocalOnly({ ctx, stateDir, picker, listCandidates: () => Promise.resolve(captured) })
+      } finally {
+        if (freshened) await freshened.dispose()
+      }
     } else {
       await refineLocalOnly({ ctx, stateDir, picker })
     }
