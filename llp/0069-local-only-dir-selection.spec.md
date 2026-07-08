@@ -150,6 +150,13 @@ is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./00
 > the capture wait. Best-effort: a failed re-boot falls back to the durable
 > hint, never an error. Requirements and R6 semantics are unchanged.
 
+> **Window closed by [LLP 0093](./0093-pick-pending-export-hold.decision.md).**
+> The one-time backfill forwarding window the first #281 note deferred is now
+> held shut: the enrolling login writes a bounded pick-pending marker before
+> `enrollCentralSink`, and the sink driver skips export ticks while it is
+> fresh, so R6's "not forwarded, even once" holds again on the auto-daemon
+> fresh-enroll path (bounded by the marker's TTL).
+
 The picker only makes sense on an **enrolling** login (one that provisions or
 already has a central sink). A `--no-forward` / query-only login
 ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md)) forwards
