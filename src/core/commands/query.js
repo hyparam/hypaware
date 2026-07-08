@@ -18,21 +18,6 @@ import { parseCommandArgv } from '../cli/verb_codec.js'
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runQuery(argv, ctx) {
-  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-    ctx.stdout.write('usage: hyp query <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: schema, status, sql, refresh, maintain\n')
-    return 0
-  }
-  ctx.stderr.write(`hyp query: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: schema, status, sql, refresh, maintain\n')
-  return 2
-}
-
-/**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
 export async function runQuerySchema(argv, ctx) {
   const dataset = argv[0]
   if (!dataset) {

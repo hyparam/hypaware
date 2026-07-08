@@ -54,6 +54,44 @@ help by being omitted from the manifest (it is still registered imperatively in
 `activate`). Discovery is best-effort: if it fails, help degrades to core
 commands rather than failing.
 
+### Layered help
+
+`hyp --help` renders **one row per top-level command token**, sorted; a
+command with subcommands appears only as its group (`query`, `daemon`,
+`plugin`, ...), never as individual `query sql` / `daemon install` rows. The
+per-subcommand summaries move down a level into group help (`hyp query
+--help`), which lists each direct child with its registered summary. Both
+levels read the same registry, so they cannot drift.
+
+Where a group row's summary comes from:
+
+- A registered **bare command** (`query`, `daemon`, `backfill`, or a plugin's
+  bare `vector`) speaks for its group; its summary should name the headline
+  subcommands (`Manage the HypAware daemon (install, start, stop, status,
+  ...)`).
+- A group with **no bare command** (plugin namespaces like `graph`) gets a
+  synthesized `Subcommands: a, b, c` summary, so the row still says where to
+  go next.
+
+Core groups whose bare command exists only for help (`query`, `daemon`,
+`sink`, `remote`, `config`, `plugin`, `agents`, `skills`) are built by one
+registry-backed factory (`makeGroupCommand`): no args or `--help` renders the
+group's subcommand table; any other token is an unknown-subcommand error
+listing the registered children. Command bodies do not hand-maintain
+subcommand lists.
+
+### Central help interception
+
+Dispatch owns `--help` for every registered command: when the argv right
+after a matched command name is `--help`/`-h`, core renders registry-backed
+help instead of running the command (the group table when the command has
+visible children, otherwise `summary` + `usage` + the optional long `help`
+text on the registration). Commands therefore stay help-free; a command
+needing more than one line of explanation sets `CommandRegistration.help`
+(multi-line allowed) rather than printing its own. The interception still
+runs inside the `command.run` span, so help usage stays visible in command
+analytics under the real command name.
+
 ## No cross-plugin option injection
 
 Plugins may **not** inject options into commands they do not own. This keeps

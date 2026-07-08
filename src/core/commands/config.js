@@ -12,21 +12,6 @@ import { buildKnownPluginsForCtx } from './plugin.js'
  */
 
 /**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runConfig(argv, ctx) {
-  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-    ctx.stdout.write('usage: hyp config <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: validate\n')
-    return 0
-  }
-  ctx.stderr.write(`hyp config: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: validate\n')
-  return 2
-}
-
-/**
  * Load and cross-validate the active config file. Emits `config.load`
  * and `config.validate` spans with `config_path`, `plugin_count`,
  * `sink_count`, and `error_kind` per the Phase 6 contract; per-error
