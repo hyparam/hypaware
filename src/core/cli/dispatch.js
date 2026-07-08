@@ -24,6 +24,7 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
+import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
@@ -224,10 +225,9 @@ export async function dispatch(argv, opts = {}) {
     if (group) {
       if (group.unknownSub !== undefined) {
         stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
-        stderr.write(`  expected one of: ${group.subcommands.join(', ')}\n`)
+        stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
       } else {
-        stdout.write(`usage: hyp ${group.prefix} <subcommand> [args...]\n`)
-        stdout.write(`  subcommands: ${group.subcommands.join(', ')}\n`)
+        renderGroupHelp({ stdout, group: group.prefix, children: group.children })
       }
       if (ownsKernel) {
         await stopBootStartedSources(kernel)
@@ -284,7 +284,22 @@ export async function dispatch(argv, opts = {}) {
         const start = performance.now()
         let exitCode = 1
         try {
-          exitCode = await matched.command.run(matched.rest, cmdCtx)
+          // Core owns `--help` for every registered command: a leading
+          // help flag renders registry-backed help (group table when the
+          // command has subcommands, usage otherwise) instead of running
+          // the command, so each command body stays help-free.
+          // @ref LLP 0009#central-help-interception [implements]: help renders inside command.run so it stays in command analytics
+          if (isHelpFlag(matched.rest[0])) {
+            const children = listGroupChildren(registry, matched.command.name)
+            if (children.length > 0) {
+              renderGroupHelp({ stdout, group: matched.command.name, groupCommand: matched.command, children })
+            } else {
+              renderCommandHelp({ stdout, command: matched.command })
+            }
+            exitCode = 0
+          } else {
+            exitCode = await matched.command.run(matched.rest, cmdCtx)
+          }
           if (typeof exitCode !== 'number' || !Number.isFinite(exitCode)) {
             exitCode = 0
           }
@@ -371,7 +386,7 @@ async function runCommandByName(name, rest, ctx) {
  *
  * @param {ReturnType<typeof createCommandRegistry>} registry
  * @param {string[]} argv
- * @returns {{ prefix: string, subcommands: string[], unknownSub: string | undefined } | undefined}
+ * @returns {{ prefix: string, children: { name: string, summary: string }[], unknownSub: string | undefined } | undefined}
  * @ref LLP 0009#core-owns-dispatch: core renders group help; plugins only register the leaf subcommands
  */
 function resolveGroupHelp(registry, argv) {
@@ -382,21 +397,13 @@ function resolveGroupHelp(registry, argv) {
     lead.push(token)
   }
   if (lead.length === 0) return undefined
-  const names = registry
-    .list()
-    .filter((c) => !c.hidden)
-    .map((c) => c.name)
   for (let depth = lead.length; depth >= 1; depth -= 1) {
     const prefix = lead.slice(0, depth).join(' ')
-    const childPrefix = `${prefix} `
-    const direct = new Set()
-    for (const name of names) {
-      if (name.startsWith(childPrefix)) direct.add(name.slice(childPrefix.length).split(' ')[0])
-    }
-    if (direct.size > 0) {
+    const children = listGroupChildren(registry, prefix)
+    if (children.length > 0) {
       return {
         prefix,
-        subcommands: [...direct].sort(),
+        children,
         unknownSub: depth < lead.length ? lead[depth] : undefined,
       }
     }
@@ -526,12 +533,18 @@ async function runHelp({ stdout, registry, devRunId, argvCount, discovery }) {
 }
 
 /**
- * Render the help text. Lists visible commands (sorted) with their
- * summary; hidden commands are dropped. Plugin-contributed commands
- * (gathered from manifests by {@link collectPluginHelpCommands}) are
- * merged in alongside core commands; a core command always wins a name
- * collision so its registered summary is authoritative.
+ * Render the top-level help text: one row per top-level command token,
+ * sorted, with subcommands collapsed into their group ('hyp <group>
+ * --help' lists them). Hidden commands are dropped. Plugin-contributed
+ * commands (gathered from manifests by {@link collectPluginHelpCommands})
+ * are merged in alongside core commands; a core command always wins a
+ * name collision so its registered summary is authoritative.
  *
+ * A group row's summary is its bare command's summary (`query`,
+ * `daemon`, ...). A group with no bare command (plugin namespaces like
+ * `graph`) gets a synthesized subcommand listing instead.
+ *
+ * @ref LLP 0009#layered-help [implements]: one row per top-level token; subcommand summaries live in group help
  * @param {{
  *   stdout: { write(chunk: string): unknown },
  *   registry: ReturnType<typeof createCommandRegistry>,
@@ -544,21 +557,38 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
     .filter((c) => !c.hidden)
     .map((c) => ({ name: c.name, summary: c.summary }))
   const coreNames = new Set(core.map((c) => c.name))
-  const merged = [...core, ...pluginCommands.filter((c) => !coreNames.has(c.name))].sort((a, b) =>
-    a.name < b.name ? -1 : a.name > b.name ? 1 : 0
-  )
+  const merged = [...core, ...pluginCommands.filter((c) => !coreNames.has(c.name))]
+
+  /** @type {Map<string, string>} */
+  const rows = new Map()
+  /** @type {Map<string, Set<string>>} */
+  const groupChildren = new Map()
+  for (const cmd of merged) {
+    const [head, ...restTokens] = cmd.name.split(' ')
+    if (restTokens.length === 0) {
+      rows.set(head, cmd.summary)
+    } else {
+      let children = groupChildren.get(head)
+      if (!children) groupChildren.set(head, (children = new Set()))
+      children.add(restTokens[0])
+    }
+  }
+  for (const [head, children] of groupChildren) {
+    if (!rows.has(head)) rows.set(head, synthesizeGroupSummary([...children].sort()))
+  }
+  const names = [...rows.keys()].sort()
 
   stdout.write('hyp - HypAware kernel CLI\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
   stdout.write('Commands:\n')
-  const nameWidth = Math.max(...merged.map((c) => c.name.length), 8)
-  for (const cmd of merged) {
-    stdout.write(`  ${cmd.name.padEnd(nameWidth)}  ${cmd.summary}\n`)
+  const nameWidth = Math.max(...names.map((n) => n.length), 8)
+  for (const name of names) {
+    stdout.write(`  ${name.padEnd(nameWidth)}  ${rows.get(name)}\n`)
   }
   stdout.write('\n')
-  stdout.write(`Run 'hyp <command> --help' for command-specific help.\n`)
+  stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)
 }
 
 /**

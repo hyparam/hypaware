@@ -626,6 +626,12 @@ export interface CommandRegistration {
   plugin?: PluginName
   summary: string
   usage: string
+  /**
+   * Optional longer help text (may be multi-line). Rendered by the core
+   * help renderer after the usage line for `hyp <name> --help`; the
+   * summary stays one line for command listings.
+   */
+  help?: string
   aliases?: string[]
   hidden?: boolean
   run(argv: string[], ctx: CommandRunContext): Promise<number>

@@ -11,20 +11,6 @@ import { parseCommandArgv } from '../cli/verb_codec.js'
  */
 
 /**
- * `hyp sink` group landing: no default behavior, just usage.
- *
- * @param {string[]} _argv
- * @param {CommandRunContext} ctx
- */
-export async function runSinkHelp(_argv, ctx) {
-  ctx.stdout.write('usage: hyp sink <subcommand> [args...]\n')
-  ctx.stdout.write('  subcommands:\n')
-  ctx.stdout.write('    force [instance]        Run a sink tick now, ignoring schedules\n')
-  ctx.stdout.write('    maintain [instance]      Run export maintenance (snapshot expiration)\n')
-  return 0
-}
-
-/**
  * `hyp sink force [instance]`
  *
  * Drives one tick of the sink driver immediately, bypassing each

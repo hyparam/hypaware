@@ -186,11 +186,15 @@ test('top-level help lists commands declared by config-active plugins', async ()
   assert.equal(stderr.text(), '')
   const out = stdout.text()
   // context-graph is in the default surface; vector-search is excluded
-  // from default but config-enabled here: both must appear, with the
-  // summary pulled from the manifest's `contributes.commands`.
-  assert.match(out, /graph project\s+Project every registered source contract/)
-  assert.match(out, /graph neighbors\s+Walk the activity graph/)
-  assert.match(out, /vector search\s+Similarity search across configured vector indexes/)
+  // from default but config-enabled here: both must appear as collapsed
+  // group rows. vector-search declares a bare `vector` command, so its
+  // manifest summary speaks for the group; context-graph has no bare
+  // `graph`, so the row synthesizes its subcommand listing.
+  assert.match(out, /graph\s+Subcommands: compact, neighbors, project/)
+  assert.match(out, /vector\s+Vector similarity search/)
+  // Leaf subcommands are collapsed out of top-level help.
+  assert.equal(out.includes('graph project'), false)
+  assert.equal(out.includes('vector search'), false)
   // A plugin whose name is not in the config must stay out of help.
   assert.equal(out.includes('enrich'), false)
 })
@@ -221,7 +225,7 @@ test('top-level help lists a local plugin addition on a fleet-joined host', asyn
   const code = await dispatch(['--help'], { stdout, stderr, env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' } })
 
   assert.equal(code, 0)
-  assert.match(stdout.text(), /graph project\s+Project every registered source contract/)
+  assert.match(stdout.text(), /graph\s+Subcommands: compact, neighbors, project/)
 })
 
 test('top-level help omits plugin commands when the plugin is disabled', async () => {
@@ -237,7 +241,7 @@ test('top-level help omits plugin commands when the plugin is disabled', async (
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
-  assert.equal(stdout.text().includes('graph project'), false)
+  assert.equal(stdout.text().includes('graph'), false)
 })
 
 /**
@@ -346,12 +350,12 @@ test('top-level help lists the installed plugin that replaces an excluded bundle
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   const out = stdout.text()
-  // The installed plugin is the boot winner: its commands (incl. the
-  // colliding `gascity attach` summary) are what dispatch would run.
-  assert.match(out, /gascity attach\s+attach \(installed winner\)/)
-  assert.match(out, /gascity real\s+only the installed plugin declares this/)
+  // The installed plugin is the boot winner: the collapsed `gascity`
+  // group row lists ITS subcommands (attach, real), which is what
+  // dispatch would run.
+  assert.match(out, /gascity\s+Subcommands: attach, real/)
   // The replaced skeleton's commands never dispatch: they must not appear.
-  assert.equal(out.includes('gascity phantom'), false)
+  assert.equal(out.includes('phantom'), false)
   assert.equal(out.includes('bundled skeleton'), false)
 })
 
@@ -426,8 +430,22 @@ test('bare group with no command of its own renders synthesized group help', asy
 
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
-  // Direct children, sorted; the hidden `secret` subcommand is omitted.
-  assert.equal(stdout.text(), 'usage: hyp graph <subcommand> [args...]\n  subcommands: compact, neighbors, project\n')
+  // Direct children, sorted, with summaries; the hidden `secret`
+  // subcommand is omitted.
+  assert.equal(
+    stdout.text(),
+    [
+      'usage: hyp graph <subcommand> [args...]',
+      '',
+      'Subcommands:',
+      '  compact    test graph compact',
+      '  neighbors  test graph neighbors',
+      '  project    test graph project',
+      '',
+      "Run 'hyp graph <subcommand> --help' for subcommand-specific help.",
+      '',
+    ].join('\n')
+  )
 })
 
 test('group --help renders synthesized group help', async () => {
@@ -452,6 +470,91 @@ test('group with an unknown subcommand reports it and exits 2', async () => {
   assert.equal(stdout.text(), '')
   assert.match(stderr.text(), /hyp graph: unknown subcommand 'bogus'/)
   assert.match(stderr.text(), /expected one of: compact, neighbors, project/)
+})
+
+test('top-level help collapses subcommands into one row per group', async () => {
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['--help'], { stdout, stderr })
+
+  assert.equal(code, 0)
+  const out = stdout.text()
+  // Group rows carry the bare command's summary.
+  assert.match(out, /^ {2}query\s+Query the local cache/m)
+  assert.match(out, /^ {2}daemon\s+Manage the HypAware daemon/m)
+  assert.match(out, /^ {2}plugin\s+Manage plugins/m)
+  assert.match(out, /^ {2}agents\s+Manage subagents for AI clients/m)
+  // Subcommands live in group help, not at the top level.
+  assert.equal(out.includes('query sql'), false)
+  assert.equal(out.includes('daemon install'), false)
+  assert.equal(out.includes('plugin install'), false)
+  assert.equal(out.includes('backfill plan'), false)
+})
+
+function coreKernelAndRegistry() {
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  return { kernel, registry }
+}
+
+test('group --help lists subcommands with their registry summaries', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['query', '--help'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  const out = stdout.text()
+  assert.match(out, /^hyp query - Query the local cache/)
+  assert.match(out, /usage: hyp query <subcommand> \[args\.\.\.\]/)
+  assert.match(out, /^ {2}schema\s+Print the schema for a dataset/m)
+  assert.match(out, /^ {2}sql\s+Run a SQL query against registered datasets/m)
+  assert.match(out, /^ {2}maintain\s+Run cache maintenance/m)
+})
+
+test('an action command with subcommands gets group help on --help', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['backfill', '--help'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  const out = stdout.text()
+  // The bare command's own usage (it runs the import itself)...
+  assert.match(out, /usage: hyp backfill \[provider\.\.\.\]/)
+  // ...plus its subcommands.
+  assert.match(out, /^ {2}list\s+List registered backfill providers/m)
+  assert.match(out, /^ {2}plan\s+Show what each backfill provider would scan/m)
+})
+
+test('leaf command --help renders summary, usage, and long help', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['ignore', '--help'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  const out = stdout.text()
+  assert.match(out, /^hyp ignore - Exclude a folder subtree/)
+  assert.match(out, /usage: hyp ignore \[path\] \[--check\] \[--json\] \[--local-only\]/)
+  assert.match(out, /Writes a \.hypignore/)
+})
+
+test('bare group command with an unknown subcommand reports the registry children', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['query', 'bogus'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /hyp query: unknown subcommand 'bogus'/)
+  assert.match(stderr.text(), /expected one of: maintain, refresh, schema, sql, status/)
 })
 
 test('a token that is neither a command nor a group prefix still errors', async () => {

@@ -198,26 +198,6 @@ async function refineLocalOnly({ ctx, stateDir, picker, listCandidates }) {
  */
 
 /**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runRemoteHelp(argv, ctx) {
-  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-    ctx.stdout.write('usage: hyp remote <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: add, login, list, remove\n')
-    ctx.stdout.write('  login: browser sign-in by default; --token-file/stdin for a static token,\n')
-    ctx.stdout.write('         --org <name> to select an org, --no-browser to print the URL,\n')
-    ctx.stdout.write('         --host <label> to override the forwarding host label (default: hostname),\n')
-    ctx.stdout.write('         --no-forward to sign in for queries only (no fleet enrollment),\n')
-    ctx.stdout.write('         --no-daemon to provision the sink without installing the service\n')
-    return 0
-  }
-  ctx.stderr.write(`hyp remote: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: add, login, list, remove\n')
-  return 2
-}
-
-/**
  * `hyp remote add <name> <url>`: register (or update) a target in the
  * local config's `query.remotes`. The URL is non-secret and committable.
  *

@@ -1,12 +1,12 @@
 // @ts-check
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
-import { runRemoteAdd, runRemoteHelp, runRemoteList, runRemoteLogin, runRemoteRemove } from './remote_commands.js'
+import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteRemove } from './remote_commands.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
+import { makeGroupCommand } from './group_help.js'
 import { runStatus } from '../commands/status.js'
 import {
-  runQuery,
   runQueryMaintain,
   runQueryRefresh,
   runQuerySchema,
@@ -22,9 +22,8 @@ import {
   runPluginRemove,
   runPluginUpdate,
 } from '../commands/plugin.js'
-import { runConfig, runConfigValidate } from '../commands/config.js'
+import { runConfigValidate } from '../commands/config.js'
 import {
-  runDaemonHelp,
   runDaemonInstall,
   runDaemonRestart,
   runDaemonRun,
@@ -35,7 +34,7 @@ import {
 } from '../commands/daemon.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
-import { runSinkForce, runSinkHelp, runSinkMaintain } from '../commands/sink.js'
+import { runSinkForce, runSinkMaintain } from '../commands/sink.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
 import {
@@ -66,7 +65,7 @@ import {
  * @param {CommandRegistryExtended} registry
  */
 export function registerCoreCommands(registry) {
-  for (const cmd of buildCoreCommands()) {
+  for (const cmd of buildCoreCommands(registry)) {
     registry.register(cmd)
   }
   // Project the intrinsic core verbs (query_sql) as CLI commands here too,
@@ -78,8 +77,11 @@ export function registerCoreCommands(registry) {
   }
 }
 
-/** @returns {CommandRegistration[]} */
-function buildCoreCommands() {
+/**
+ * @param {CommandRegistryExtended} registry
+ * @returns {CommandRegistration[]}
+ */
+function buildCoreCommands(registry) {
   return [
     {
       name: 'status',
@@ -87,12 +89,11 @@ function buildCoreCommands() {
       usage: 'hyp status [--json]',
       run: runStatus,
     },
-    {
+    makeGroupCommand({
+      registry,
       name: 'query',
-      summary: 'Query the local cache (see subcommands: schema, status, sql, refresh, maintain)',
-      usage: 'hyp query <subcommand> [args...]',
-      run: runQuery,
-    },
+      summary: 'Query the local cache (sql, schema, status, ...)',
+    }),
     {
       name: 'query schema',
       summary: 'Print the schema for a dataset',
@@ -119,7 +120,7 @@ function buildCoreCommands() {
     },
     {
       name: 'backfill',
-      summary: 'Import client history from registered backfill providers',
+      summary: 'Import client history from backfill providers',
       usage: 'hyp backfill [provider...] [--since <iso>] [--until <iso>] [--retention-days <n>] [--dry-run] [--json]',
       run: runBackfill,
     },
@@ -135,6 +136,11 @@ function buildCoreCommands() {
       usage: 'hyp backfill plan [provider...] [--retention-days <n>] [--json]',
       run: runBackfillPlan,
     },
+    makeGroupCommand({
+      registry,
+      name: 'plugin',
+      summary: 'Manage plugins (install, list, update, remove, ...)',
+    }),
     {
       name: 'plugin install',
       summary: 'Install a plugin from name, git URL, or local directory',
@@ -183,12 +189,11 @@ function buildCoreCommands() {
       usage: 'hyp plugin new <name> [--kind source|sink|dataset] [--dir <path>]',
       run: runPluginNew,
     },
-    {
+    makeGroupCommand({
+      registry,
       name: 'config',
-      summary: 'Inspect or operate on the HypAware config (subcommand: validate)',
-      usage: 'hyp config <subcommand> [args...]',
-      run: runConfig,
-    },
+      summary: 'Inspect or validate the HypAware config',
+    }),
     {
       name: 'config validate',
       summary: 'Load and cross-validate the active config file',
@@ -205,12 +210,14 @@ function buildCoreCommands() {
       name: 'join',
       summary: 'Join a centrally-managed fleet (write seed config + install daemon)',
       usage: 'hyp join <url> [token] [--token-file <path>] [--bin <path>] [--no-daemon]',
+      help: 'Token sources (pick one): positional argument, --token-file, or stdin.\nA bare argv token lands in shell history; scripts should prefer\n--token-file or stdin.',
       run: runJoin,
     },
     {
       name: 'leave',
       summary: 'Leave the centrally-managed fleet (stop forwarding + config pull, undo org-driven attaches)',
       usage: 'hyp leave',
+      help: 'Disconnects this machine from its central server: stops forwarding and\nconfig pull, undoes org-driven client attaches, and removes the forward\ncredential. Keeps query sessions, the local config, and the daemon service.',
       run: runLeave,
     },
     {
@@ -228,35 +235,50 @@ function buildCoreCommands() {
     },
     {
       name: 'ignore',
-      summary:
-        'Write a .hypignore so HypAware never records this folder subtree, or --local-only to withhold from forwarding only (--check reports status)',
+      summary: 'Exclude a folder subtree from recording or forwarding',
       usage: 'hyp ignore [path] [--check] [--json] [--local-only]',
+      help: [
+        'Writes a .hypignore so HypAware never records this folder subtree.',
+        'With --local-only, keeps recording locally but withholds the subtree',
+        'from forwarding. With --check, reports the current ignore status',
+        'without writing anything.',
+      ].join('\n'),
       run: runIgnore,
     },
     {
       name: 'unignore',
-      summary: 'Remove the governing .hypignore (or --local-only list entry) so recording/forwarding resumes',
+      summary: 'Resume recording for a previously ignored folder',
       usage: 'hyp unignore [path] [--local-only]',
+      help: 'Removes the governing .hypignore (or the --local-only list entry)\nso recording/forwarding resumes.',
       run: runUnignore,
     },
+    makeGroupCommand({
+      registry,
+      name: 'skills',
+      summary: 'Manage skills for AI clients',
+    }),
     {
       name: 'skills install',
       summary: 'Install registered skills into AI client directories',
       usage: 'hyp skills install [--client <name>]',
       run: runSkillsInstall,
     },
+    makeGroupCommand({
+      registry,
+      name: 'agents',
+      summary: 'Manage subagents for AI clients',
+    }),
     {
       name: 'agents install',
       summary: 'Install registered subagents into AI client directories',
       usage: 'hyp agents install [--client <name>]',
       run: runAgentsInstall,
     },
-    {
+    makeGroupCommand({
+      registry,
       name: 'daemon',
-      summary: 'Manage the HypAware daemon (subcommands: install, uninstall, run, start, stop, restart, status)',
-      usage: 'hyp daemon <subcommand> [args...]',
-      run: runDaemonHelp,
-    },
+      summary: 'Manage the HypAware daemon (install, start, stop, status, ...)',
+    }),
     {
       name: 'daemon install',
       summary: 'Install the persistent user service (launchd / systemd)',
@@ -299,12 +321,11 @@ function buildCoreCommands() {
       usage: 'hyp daemon restart',
       run: runDaemonRestart,
     },
-    {
+    makeGroupCommand({
+      registry,
       name: 'sink',
-      summary: 'Manage sink instances (subcommands: force, maintain)',
-      usage: 'hyp sink <subcommand> [args...]',
-      run: runSinkHelp,
-    },
+      summary: 'Manage sink instances (force, maintain)',
+    }),
     {
       name: 'sink force',
       summary: 'Force the sink driver to fire a tick now (optionally for one instance)',
@@ -319,16 +340,15 @@ function buildCoreCommands() {
     },
     {
       name: 'mcp',
-      summary: 'Serve this host\'s verbs as an MCP server over stdio (for AI clients)',
+      summary: 'Serve this host\'s verbs as an MCP server for AI clients',
       usage: 'hyp mcp [--remote <target>]',
       run: runMcp,
     },
-    {
+    makeGroupCommand({
+      registry,
       name: 'remote',
-      summary: 'Manage remote MCP query targets and their tokens (subcommands: add, login, list, remove)',
-      usage: 'hyp remote <subcommand> [args...]',
-      run: runRemoteHelp,
-    },
+      summary: 'Manage remote MCP query targets and tokens',
+    }),
     {
       name: 'remote add',
       summary: 'Register a remote MCP query target in local config',
@@ -339,6 +359,13 @@ function buildCoreCommands() {
       name: 'remote login',
       summary: 'Store the query-scoped token for a remote target (0600)',
       usage: 'hyp remote login <name> [--token-file <path>] [--no-forward] [--no-daemon]',
+      help: [
+        'Browser sign-in by default; --token-file/stdin for a static token,',
+        '--org <name> to select an org, --no-browser to print the URL,',
+        '--host <label> to override the forwarding host label (default: hostname),',
+        '--no-forward to sign in for queries only (no fleet enrollment),',
+        '--no-daemon to provision the sink without installing the service.',
+      ].join('\n'),
       run: runRemoteLogin,
     },
     {

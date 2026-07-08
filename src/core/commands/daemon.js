@@ -12,21 +12,6 @@ import { readObservabilityEnv } from '../observability/env.js'
  */
 
 /**
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runDaemonHelp(argv, ctx) {
-  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-    ctx.stdout.write('usage: hyp daemon <subcommand> [args...]\n')
-    ctx.stdout.write('  subcommands: install, uninstall, run, start, stop, restart, status\n')
-    return 0
-  }
-  ctx.stderr.write(`hyp daemon: unknown subcommand '${argv[0]}'\n`)
-  ctx.stderr.write('  expected one of: install, uninstall, run, start, stop, restart, status\n')
-  return 2
-}
-
-/**
  * `hyp daemon run --foreground [--config <path>]`: boot the kernel as a daemon and
  * tend it in the current process until SIGTERM/SIGINT. Phase 3
  * intentionally only supports `--foreground`; the detached run path
