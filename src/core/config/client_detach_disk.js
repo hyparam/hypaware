@@ -154,13 +154,17 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
     for (const [key, ourVal] of Object.entries(managedEnv)) {
       const current = envObj[key]
       if (current === ourVal) {
-        // The value we wrote is still live: restore the recorded prior, or
-        // remove the key when the attach had no pre-existing value to back up.
-        if (prevBaseUrl !== undefined) {
+        // The value we wrote is still live. `prev_base_url` is the restore
+        // target for ANTHROPIC_BASE_URL only - it is the one managed key that
+        // backs up a pre-existing value. Every other managed key (e.g.
+        // ENABLE_TOOL_SEARCH) is one attach only ever added when it was absent,
+        // so it is removed, never restored. Applying prev_base_url to every key
+        // would wrongly stamp the base URL onto them.
+        if (key === 'ANTHROPIC_BASE_URL' && prevBaseUrl !== undefined) {
           envObj[key] = prevBaseUrl
           restoredValue = prevBaseUrl
         } else {
-          removed = typeof current === 'string' ? current : String(current)
+          if (key === 'ANTHROPIC_BASE_URL') removed = typeof current === 'string' ? current : String(current)
           delete envObj[key]
         }
       } else if (typeof current === 'string') {

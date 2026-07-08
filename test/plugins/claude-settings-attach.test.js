@@ -42,10 +42,20 @@ test('attach records the managed env + hook entries into the marker undo record'
     const result = await attach({ ...ATTACH, settingsPath })
     assert.equal(result.changed, true)
 
+    // The gateway base URL is written live, and ENABLE_TOOL_SEARCH=true is set
+    // so the non-first-party base URL doesn't make Claude Code eager-load every
+    // tool schema.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4123')
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'true')
+
     const marker = await readMarker(settingsPath)
-    // Managed env value is the gateway URL we wrote — the core undo
-    // matches the live value against it before removing.
-    assert.deepEqual(marker.managed.env, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' })
+    // Managed env values are what we wrote — the core undo matches the live
+    // value against them before removing.
+    assert.deepEqual(marker.managed.env, {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+      ENABLE_TOOL_SEARCH: 'true',
+    })
 
     // Every managed hook spec is recorded with its command, and the
     // PostToolUse entry carries its matcher so the undo strips exactly
@@ -92,8 +102,52 @@ test('attach omits prev_base_url when there was no pre-existing base URL', async
     const marker = await readMarker(settingsPath)
     assert.equal('prev_base_url' in marker, false)
     // The managed undo record is still present so the core undo can
-    // remove (not restore) the gateway URL.
+    // remove (not restore) the gateway URL and ENABLE_TOOL_SEARCH.
+    assert.deepEqual(marker.managed.env, {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+      ENABLE_TOOL_SEARCH: 'true',
+    })
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('attach leaves a user-owned ENABLE_TOOL_SEARCH untouched and unmanaged', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ env: { ENABLE_TOOL_SEARCH: 'false' } }, null, 2)
+    )
+
+    await attach({ ...ATTACH, settingsPath })
+
+    // The user's own value is respected, not overwritten, and it is not
+    // recorded as ours — so detach will never remove it.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'false')
+
+    const marker = await readMarker(settingsPath)
     assert.deepEqual(marker.managed.env, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' })
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('re-attach keeps managing an ENABLE_TOOL_SEARCH it owns', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    // Our own 'true' is now live; the second attach must recognize it as ours
+    // (recorded in the prior marker) and keep managing it, not mistake it for a
+    // user value to leave alone.
+    await attach({ ...ATTACH, settingsPath })
+
+    const marker = await readMarker(settingsPath)
+    assert.deepEqual(marker.managed.env, {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+      ENABLE_TOOL_SEARCH: 'true',
+    })
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
