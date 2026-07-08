@@ -545,6 +545,21 @@ test('leaf command --help renders summary, usage, and long help', async () => {
   assert.match(out, /Writes a \.hypignore/)
 })
 
+test('a leaf subcommand --help documents every flag the command accepts', async () => {
+  const { kernel, registry } = coreKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['daemon', 'install', '--help'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  const out = stdout.text()
+  // Central `--help` interception renders the registration usage, so the
+  // registration must list --bin (the command still accepts it).
+  assert.match(out, /usage: hyp daemon install/)
+  assert.match(out, /--bin <path>/)
+})
+
 test('bare group command with an unknown subcommand reports the registry children', async () => {
   const { kernel, registry } = coreKernelAndRegistry()
   const stdout = makeBuf()

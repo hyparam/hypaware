@@ -282,7 +282,7 @@ function buildCoreCommands(registry) {
     {
       name: 'daemon install',
       summary: 'Install the persistent user service (launchd / systemd)',
-      usage: 'hyp daemon install [--config <path>] [--dry-run [--json]]',
+      usage: 'hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]',
       run: runDaemonInstall,
     },
     {
