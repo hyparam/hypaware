@@ -96,12 +96,30 @@ export async function attach(opts) {
   const baseUrl = `http://127.0.0.1:${port}`
   const command = managedHookCommand(binPath, stateFile)
 
+  // Keep deferred tool loading on through the gateway. Claude Code turns it off
+  // whenever ANTHROPIC_BASE_URL is a non-first-party host - it assumes the proxy
+  // cannot forward `tool_reference` blocks and so sends every tool schema up
+  // front, tens of thousands of tokens of per-session context bloat. Our gateway
+  // is a pure pass-through that does forward them, so re-enable deferred loading
+  // with ENABLE_TOOL_SEARCH=true. Only manage the key when it is ours to manage:
+  // a value the user set themselves (and that a prior marker did not record as
+  // ours) is left untouched so detach never clobbers it, mirroring the
+  // back-up/restore rule for the base URL.
+  // @ref LLP 0045#enable_tool_search-keep-deferred-tool-loading-on-through-the-gateway [implements]: attach sets ENABLE_TOOL_SEARCH=true so the non-first-party base URL doesn't force eager tool-schema loading
+  const priorManagedEnv = priorMarker && isPlainObject(priorMarker.managed) && isPlainObject(priorMarker.managed.env)
+    ? /** @type {Record<string, unknown>} */ (priorMarker.managed.env)
+    : undefined
+  const weOwnToolSearch = priorManagedEnv ? 'ENABLE_TOOL_SEARCH' in priorManagedEnv : false
+  const manageToolSearch = weOwnToolSearch || typeof env.ENABLE_TOOL_SEARCH !== 'string'
+
   env.ANTHROPIC_BASE_URL = baseUrl
+  if (manageToolSearch) env.ENABLE_TOOL_SEARCH = 'true'
   installSessionContextHooks(value, command)
   // Self-describing undo record: enough for the format-aware core undo
-  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, strip the managed
-  // hook entries, and delete the marker without loading this plugin —
-  // leaving no orphaned `hyp claude-hook` entries.
+  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed
+  // ENABLE_TOOL_SEARCH we added, strip the managed hook entries, and delete
+  // the marker without loading this plugin — leaving no orphaned
+  // `hyp claude-hook` entries.
   // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
@@ -109,7 +127,10 @@ export async function attach(opts) {
     port,
     state_file: stateFile,
     managed: {
-      env: { ANTHROPIC_BASE_URL: baseUrl },
+      env: {
+        ANTHROPIC_BASE_URL: baseUrl,
+        ...(manageToolSearch ? { ENABLE_TOOL_SEARCH: 'true' } : {}),
+      },
       hooks: managedHookEntries(command),
     },
     ...(prevBaseUrl !== undefined ? { prev_base_url: prevBaseUrl } : {}),

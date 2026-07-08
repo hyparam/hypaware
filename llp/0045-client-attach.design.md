@@ -222,9 +222,10 @@ a self-describing undo record into its marker** — enough for a format-aware bu
 plugin-agnostic core routine to fully reverse:
 
 - **Claude (`json`):** the `_hypaware` marker records `prev_base_url` (the restore
-  target) plus the managed keys/hooks it added, so core can restore-or-remove
-  `env.ANTHROPIC_BASE_URL`, strip the managed `SessionStart`/… hook entries, and
-  delete the marker — leaving **no orphaned hooks** still pointing at
+  target) plus the managed env keys and hooks it added, so core can
+  restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed
+  `ENABLE_TOOL_SEARCH` (see below), strip the managed `SessionStart`/… hook
+  entries, and delete the marker — leaving **no orphaned hooks** still pointing at
   `hyp claude-hook`. The backup is preserved idempotently across a re-attach:
   once we own the URL the current value is *our* gateway URL, so a re-attach keeps
   the marker's recorded original rather than overwriting it.
@@ -236,6 +237,32 @@ Core stays **format-generic, never plugin-specific** — it knows `json` vs `tom
 and how to replay an undo record, not "Claude" vs "Codex". The split is clean: a
 rich *write* (attach) needs the adapter (`ctx.clients`, Part 2); the *undo* is a
 marker-guided removal core does from disk.
+
+#### ENABLE_TOOL_SEARCH: keep deferred tool loading on through the gateway
+
+Pointing Claude Code at the gateway has a hidden cost. When `ANTHROPIC_BASE_URL`
+is a **non-first-party host**, Claude Code disables deferred (on-demand) tool
+loading by default — it assumes an arbitrary proxy cannot forward the
+`tool_reference` blocks that on-demand loading depends on, and instead sends
+**every tool schema up front**. With the full tool set that is tens of thousands
+of tokens of per-session context bloat, present on every request. The gateway
+itself is innocent: it is a pure pass-through that forwards `tool_reference`
+untouched; the switch is Claude Code's, keyed only on the base URL not being
+Anthropic's.
+
+So attach also writes `env.ENABLE_TOOL_SEARCH = "true"`, the documented override
+that re-enables deferred loading for proxies that do forward everything (ours
+does). Two rules keep this honest against the undo contract above:
+
+- **Only manage the key when it is ours.** If the user already set
+  `ENABLE_TOOL_SEARCH` themselves and no prior marker recorded it as ours, attach
+  leaves their value untouched and does **not** record it in `managed.env`. This
+  is the same never-clobber-a-user-value stance the base URL takes, minus a
+  backup: we only ever *add* the key when it was absent.
+- **`prev_base_url` restores the base URL only.** It is the sole managed key with
+  a backed-up prior. The undo therefore restores `ANTHROPIC_BASE_URL` to
+  `prev_base_url` but *removes* any other managed key (like `ENABLE_TOOL_SEARCH`)
+  rather than stamping the base URL onto it.
 
 **There is exactly one undo implementation, and it lives in core.** Both call
 sites use it — the reconciler's `reverse()` *and* the manual `hyp detach` command

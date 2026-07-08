@@ -112,6 +112,48 @@ test('claude undo of a no-pre-existing-URL attach round-trips to empty', async (
   }
 })
 
+test('claude undo removes managed ENABLE_TOOL_SEARCH without stamping the restored base URL onto it', async () => {
+  const home = await stageHome()
+  try {
+    // A pre-existing foreign base URL means prev_base_url is set. Detach must
+    // restore ANTHROPIC_BASE_URL to it *and* drop ENABLE_TOOL_SEARCH - never
+    // apply prev_base_url to the tool-search key.
+    const original = { env: { ANTHROPIC_BASE_URL: 'https://foreign.example/api' } }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(original, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    // Sanity: the fixture the adapter wrote actually set the tool-search key.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'true')
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://foreign.example/api')
+    assert.equal('ENABLE_TOOL_SEARCH' in parsed.env, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo leaves a user-owned ENABLE_TOOL_SEARCH in place', async () => {
+  const home = await stageHome()
+  try {
+    // The user set ENABLE_TOOL_SEARCH themselves, so attach never managed it;
+    // detach must not remove it.
+    const original = { env: { ENABLE_TOOL_SEARCH: 'false' } }
+    const originalText = JSON.stringify(original, null, 2) + '\n'
+    const settingsPath = await writeClaudeSettings(home, originalText)
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), originalText)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('claude undo strips marker + managed keys/hooks from a hand-written fixture (no plugin loaded)', async () => {
   const home = await stageHome()
   try {
