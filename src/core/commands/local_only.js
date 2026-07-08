@@ -27,8 +27,13 @@ const MAX_SHOWN_CANDIDATES = 50
 // discoverable even when the interactive step is skipped (LLP 0072 #tty).
 const DURABLE_HINT = "tip: mark a directory local-only anytime with 'hyp ignore --local-only [path]'\n"
 
+// The dataset the candidate enumeration reads. Exported so the login flow
+// can ask "can this kernel snapshot run the enumeration at all?" against the
+// query registry (remote_commands.js) without the name drifting from the SQL.
+export const CAPTURE_DATASET = 'ai_gateway_messages'
+
 const ENUMERATE_SQL = `SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS last_seen ` +
-  `FROM ai_gateway_messages WHERE cwd IS NOT NULL GROUP BY cwd, repo_root ORDER BY last_seen DESC`
+  `FROM ${CAPTURE_DATASET} WHERE cwd IS NOT NULL GROUP BY cwd, repo_root ORDER BY last_seen DESC`
 
 /**
  * Enumerate the distinct working directories the user has captured
