@@ -20,7 +20,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { bootKernel } from '../runtime/boot.js'
 import { enrollCentralSink } from '../commands/central.js'
-import { CAPTURE_DATASET, listCapturedDirectories, runLocalOnlyPicker } from '../commands/local_only.js'
+import { CAPTURE_DATASET, DURABLE_HINT, listCapturedDirectories, runLocalOnlyPicker } from '../commands/local_only.js'
 import { clearPickPendingMarker, writePickPendingMarker } from '../usage-policy/pick_pending.js'
 import { originOf } from '../remote/gateway_seed.js'
 import { isTty, readAllStdin } from './stdio.js'
@@ -308,6 +308,18 @@ async function clearPickPendingBestEffort(stateDir) {
   }
 }
 
+// The login-time local-only picker is disabled pending a redesign: its
+// fresh-enroll candidate wait returns at the FIRST non-empty enumeration,
+// racing the daemon's still-running backfill, so on any machine with real
+// history it offers a small early slice of the captured directories as if
+// it were the full set. Until the enumeration source and presentation are
+// rethought, the trigger is off: every fork prints the durable hint
+// instead. The picker module, its editor semantics, the durable
+// `hyp ignore --local-only` command, and the export-seam withholding all
+// remain; flipping this constant restores the wiring below unchanged.
+// @ref LLP 0094 [implements]: enrollment picker trigger disabled pending redesign
+const ENROLLMENT_PICKER_ENABLED = false
+
 /**
  * Run the local-only directory picker as a best-effort refinement of an
  * enrolling login. A non-cancellation failure (e.g. a corrupt existing list) is
@@ -317,10 +329,18 @@ async function clearPickPendingBestEffort(stateDir) {
  * handed to the picker so the cache is not re-scanned; otherwise the picker
  * enumerates the cache itself.
  *
+ * While the enrollment trigger is disabled (LLP 0094) this prints the same
+ * durable-command hint the picker's own skip paths print, keeping the
+ * capability discoverable (LLP 0072 #tty) without prompting.
+ *
  * @param {{ ctx: CommandRunContext, stateDir: string, picker: typeof runLocalOnlyPicker, listCandidates?: () => Promise<any[] | null> }} args
  * @ref LLP 0072 [implements]: never blocks login/enrollment on picker failure
  */
 async function refineLocalOnly({ ctx, stateDir, picker, listCandidates }) {
+  if (!ENROLLMENT_PICKER_ENABLED) {
+    ctx.stderr.write(DURABLE_HINT)
+    return
+  }
   try {
     await picker(listCandidates ? { ctx, stateDir, listCandidates } : { ctx, stateDir })
   } catch (err) {
@@ -698,6 +718,10 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return 1
   }
 
+  // NOTE: the picker trigger is currently disabled (ENROLLMENT_PICKER_ENABLED,
+  // LLP 0094); the forks below keep their ordering and print the durable hint
+  // where they would have prompted. The ordering rationale stands for when it
+  // is re-enabled:
   // The local-only directory picker is deferred to *after* provisioning, not run
   // here (issue #281). Its candidate list is the distinct captured cwds in the
   // local cache (LLP 0069 #enumerate), and on a first-time enroll the cache is
@@ -727,8 +751,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // and the marker's TTL bounds a crashed login that never reaches it.
     // Best-effort: a failed marker write degrades to today's behavior (no
     // hold) rather than failing the login.
+    // With the picker trigger disabled (LLP 0094) there is no pending pick
+    // for the marker to guard, so it is not written: exports proceed as they
+    // would after a non-TTY skip.
     // @ref LLP 0093 [implements]: login-owned marker lifecycle - write pre-enroll, clear on every exit
-    const holdingExports = await markPickPendingBestEffort(stateDir)
+    const holdingExports = ENROLLMENT_PICKER_ENABLED ? await markPickPendingBestEffort(stateDir) : false
     try {
       /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
       let result
@@ -814,7 +841,10 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       // poll when it cannot prompt, so a scripted enroll never stalls up to
       // CAPTURE_WAIT_DEFAULT_MS for a list it will never show; the picker still
       // runs and takes its own durable-hint path immediately.
-      const canPromptPicker = isTty(ctx.stdin ?? process.stdin) && isTty(ctx.stderr)
+      // While the picker trigger is disabled (LLP 0094) the wait and the
+      // registry refresh are pure overhead - they exist only to fill an
+      // interactive candidate list - so both are skipped with the prompt.
+      const canPromptPicker = ENROLLMENT_PICKER_ENABLED && isTty(ctx.stdin ?? process.stdin) && isTty(ctx.stderr)
       if (attached.length > 0 && canPromptPicker) {
         // On a first-run box the boot snapshot in ctx.query predates the org
         // config pull that registers the dataset the enumeration reads, so the

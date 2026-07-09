@@ -17,6 +17,11 @@
 >
 > @ref LLP 0069 [implements] — the picker/consent half of the spec.
 > @ref LLP 0063 [constrained-by] — must not reintroduce the enrollment prompt D3 (§Decisions) rejected.
+>
+> **Suspended-by [LLP 0094](./0094-enrollment-picker-suspended.decision.md):**
+> the login-time trigger is currently disabled pending redesign; the doctrine
+> this decision settles (skippable refinement, never a consent gate) is
+> unchanged and is what makes the outright suspension safe.
 
 ## Context
 

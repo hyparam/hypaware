@@ -20,6 +20,12 @@
 > `@ref LLP 0072 [constrained-by]` — the picker is a skippable, TTY-gated,
 > post-enrollment refinement that defaults to excluding nothing; never a consent
 > gate.
+>
+> **Suspended-by [LLP 0094](./0094-enrollment-picker-suspended.decision.md):**
+> the enrollment picker trigger this design wires into `hyp remote login` is
+> currently disabled pending redesign (the fresh-enroll candidate wait raced
+> the first backfill; the bounded 50-item presentation is also being
+> rethought). The machine-local list and export-seam withholding remain live.
 
 ## Overview
 

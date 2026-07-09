@@ -157,6 +157,13 @@ is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./00
 > fresh, so R6's "not forwarded, even once" holds again on the auto-daemon
 > fresh-enroll path (bounded by the marker's TTL).
 
+> **Suspended-by [LLP 0094](./0094-enrollment-picker-suspended.decision.md).**
+> The login-time trigger this section specifies is currently disabled behind
+> `ENROLLMENT_PICKER_ENABLED = false` pending a redesign of the enumeration
+> (which raced the first backfill and showed a partial candidate list) and
+> presentation. Enumeration, persistence, and enforcement below are unchanged;
+> the enrolling forks print the durable-command hint instead of prompting.
+
 The picker only makes sense on an **enrolling** login (one that provisions or
 already has a central sink). A `--no-forward` / query-only login
 ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md)) forwards
