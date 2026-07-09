@@ -16,11 +16,37 @@ export interface SkippedPartition {
   reason: 'unreadable-cursor' | 'unexpected-layout' | 'concurrent-write'
 }
 
-/** One T0 contract rule: a read-only SELECT plus a row mapper. */
+/**
+ * A declarative rule filter: the conjunction of the three predicate shapes
+ * contract rules actually use, evaluated in JS against the contract's one
+ * shared scan with SQL semantics (a null or absent column never matches).
+ * No general SQL parsing, no expression language (LLP 0096 §1).
+ */
+export interface RulePredicate {
+  /** column = value */
+  eq?: Record<string, string>
+  /** column IN (values) */
+  in?: Record<string, string[]>
+  /** column LIKE 'prefix%' */
+  likePrefix?: Record<string, string>
+}
+
+/**
+ * One T0 contract rule: a source read plus a row mapper. Exactly one read
+ * form: declarative `columns` (+ optional `where`) joins the contract's one
+ * shared scan; raw `sql` runs standalone, for contracts that migrate on
+ * their own schedule or predicates that must prune a heavy column
+ * server-side (LLP 0096 §2-3).
+ */
 export interface ContractRule {
   kind: 'node' | 'edge'
   type: string
-  sql: string
+  /** Raw SELECT escape hatch; mutually exclusive with `columns`. Must select the contract rowFilter's columns itself. */
+  sql?: string
+  /** Columns `toRow` reads; the shared scan selects the union across rules. Mutually exclusive with `sql`. */
+  columns?: string[]
+  /** Declarative filter; only valid with `columns`. */
+  where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
 }
 
@@ -82,6 +108,16 @@ export interface Contract {
   projectorVersion: number
   /** The node/edge rules the engine runs for this source. */
   rules: ContractRule[]
+  /**
+   * Optional source-row filter evaluated once per row before any rule's
+   * `toRow`, on both the shared-scan and raw-SQL paths (LLP 0096 §4). The
+   * engine adds `columns` to the shared scan; raw-SQL rules must select
+   * them in their own SQL (the registry enforces this textually).
+   */
+  rowFilter?: {
+    columns: string[]
+    keep(row: Record<string, unknown>): boolean
+  }
 }
 
 /** The in-plugin registry source plugins contribute contracts into. */

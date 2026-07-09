@@ -14,7 +14,7 @@ import {
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
- * @import { Contract, GraphRow } from './types.js'
+ * @import { Contract, ContractRule, GraphRow, RulePredicate } from './types.js'
  */
 
 /**
@@ -45,26 +45,89 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       /** @type {Map<string, GraphRow>} */
       const edges = new Map()
 
+      /**
+       * Feed one source row through a set of rules into the node/edge maps.
+       * Merge is order-independent (`mergeRow`), so fanning a shared scan's
+       * row out to many rules is observationally identical to the old
+       * one-query-per-rule order.
+       *
+       * @param {Record<string, unknown>} row
+       * @param {ContractRule[]} rules
+       */
+      const applyRules = (row, rules) => {
+        for (const rule of rules) {
+          if (rule.where && !matchesPredicate(rule.where, row)) continue
+          const built = rule.toRow(row)
+          if (!built) continue
+          const target = rule.kind === 'node' ? nodes : edges
+          const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
+          const id = /** @type {string} */ (built[idKey])
+          const existing = target.get(id)
+          if (existing) mergeRow(existing, built)
+          else target.set(id, built)
+        }
+      }
+
       let sourceRows = 0
+      let scanCount = 0
       for (const contract of contracts) {
-        for (const rule of contract.rules) {
+        const keep = contract.rowFilter?.keep
+        const declarative = contract.rules.filter((rule) => rule.columns)
+        const raw = contract.rules.filter((rule) => typeof rule.sql === 'string')
+
+        // One shared scan per contract: the union of the declarative rules'
+        // columns (plus the row filter's), each rule's predicate evaluated
+        // in JS per row. This is the whole LLP 0095 fix: rule count no
+        // longer multiplies table scans, and the contract row filter runs
+        // once per row instead of once per rule per row.
+        // @ref LLP 0096#decision [implements]: one scan per contract; JS predicates with SQL null semantics; rowFilter once per row
+        if (declarative.length > 0) {
+          const columns = new Set()
+          for (const rule of declarative) {
+            for (const col of rule.columns ?? []) columns.add(col)
+            for (const col of predicateColumns(rule.where)) columns.add(col)
+          }
+          for (const col of contract.rowFilter?.columns ?? []) columns.add(col)
           const result = await executeQuerySql({
-            query: rule.sql,
+            query: `SELECT ${[...columns].sort().join(', ')} FROM ${contract.sourceDataset}`,
             registry: query,
             storage,
             config,
             refresh: 'always',
           })
           sourceRows += result.rows.length
-          const target = rule.kind === 'node' ? nodes : edges
-          const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
+          scanCount += 1
           for (const row of result.rows) {
-            const built = rule.toRow(row)
-            if (!built) continue
-            const id = /** @type {string} */ (built[idKey])
-            const existing = target.get(id)
-            if (existing) mergeRow(existing, built)
-            else target.set(id, built)
+            if (keep && !keep(row)) continue
+            applyRules(row, declarative)
+          }
+        }
+
+        // Raw-SQL rules run standalone, grouped by identical SQL text so
+        // rule pairs sharing a query (a surface's node + edge rule) cost one
+        // scan. Their SQL already selects the rowFilter's columns (registry
+        // enforced), so the filter applies here too.
+        /** @type {Map<string, ContractRule[]>} */
+        const bySql = new Map()
+        for (const rule of raw) {
+          const sql = /** @type {string} */ (rule.sql)
+          const group = bySql.get(sql)
+          if (group) group.push(rule)
+          else bySql.set(sql, [rule])
+        }
+        for (const [sql, rules] of bySql) {
+          const result = await executeQuerySql({
+            query: sql,
+            registry: query,
+            storage,
+            config,
+            refresh: 'always',
+          })
+          sourceRows += result.rows.length
+          scanCount += 1
+          for (const row of result.rows) {
+            if (keep && !keep(row)) continue
+            applyRules(row, rules)
           }
         }
       }
@@ -72,6 +135,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       const nodeRows = [...nodes.values()]
       const edgeRows = [...edges.values()]
       span.setAttribute('contract_count', contracts.length)
+      span.setAttribute('scan_count', scanCount)
       span.setAttribute('source_row_count', sourceRows)
       span.setAttribute('node_count', nodeRows.length)
       span.setAttribute('edge_count', edgeRows.length)
@@ -142,6 +206,54 @@ async function dedupExisting(rows, idCol, dataset, query, storage, config) {
     if (!isMissingDatasetError(err)) throw err
   }
   return rows.filter((r) => !seen.has(/** @type {string} */ (r[idCol])))
+}
+
+/**
+ * Evaluate a rule's declarative predicate against one source row with SQL
+ * semantics: every clause must hold, and a null or absent column never
+ * matches (`WHERE col = 'x'` skips null rows; so does this).
+ *
+ * @param {RulePredicate} where
+ * @param {Record<string, unknown>} row
+ * @returns {boolean}
+ * @ref LLP 0096#decision [implements]: eq/in/likePrefix only, AND-composed, null never matches
+ */
+export function matchesPredicate(where, row) {
+  if (where.eq) {
+    for (const [col, value] of Object.entries(where.eq)) {
+      if (row[col] !== value) return false
+    }
+  }
+  if (where.in) {
+    for (const [col, values] of Object.entries(where.in)) {
+      const v = row[col]
+      if (typeof v !== 'string' || !values.includes(v)) return false
+    }
+  }
+  if (where.likePrefix) {
+    for (const [col, prefix] of Object.entries(where.likePrefix)) {
+      const v = row[col]
+      if (typeof v !== 'string' || !v.startsWith(prefix)) return false
+    }
+  }
+  return true
+}
+
+/**
+ * The columns a predicate reads, so the shared scan selects them even when
+ * no rule's `columns` lists them (a rule may filter on a column `toRow`
+ * never touches).
+ *
+ * @param {RulePredicate | undefined} where
+ * @returns {string[]}
+ */
+function predicateColumns(where) {
+  if (!where) return []
+  return [
+    ...Object.keys(where.eq ?? {}),
+    ...Object.keys(where.in ?? {}),
+    ...Object.keys(where.likePrefix ?? {}),
+  ]
 }
 
 /**

@@ -126,9 +126,69 @@ test('contract registry rejects malformed rules, naming the offending rule index
   // than mid-projection (or by silently routing rows into the wrong target map).
   assert.throws(() => reg.register(sampleContract({ rules: [ok, { ...ok, kind: 'vertex' }] })), /rule 1 kind/)
   assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, type: '' }] })), /rule 0 type/)
-  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, sql: '' }] })), /rule 0 sql/)
+  assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, sql: '' }] })), /rule 0 must carry exactly one of sql or columns/)
   assert.throws(() => reg.register(sampleContract({ rules: [{ ...ok, toRow: 'nope' }] })), /rule 0 toRow/)
   assert.throws(() => reg.register(sampleContract({ rules: [null] })), /rule 0 must be an object/)
+})
+
+// @ref LLP 0096#decision [tests]: exactly one read form; where only rides columns; predicate and rowFilter shapes validated at registration
+test('contract registry validates the declarative rule form', () => {
+  const reg = createContractRegistry()
+  const decl = { kind: 'node', type: 'T', columns: ['a'], where: { eq: { b: 'x' } }, toRow: () => null }
+  reg.register(sampleContract({ rules: [decl] }))
+
+  const sql = { kind: 'node', type: 'T', sql: 'SELECT 1', toRow: () => null }
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [{ ...sql, columns: ['a'] }] })), /exactly one of sql or columns/)
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [{ ...sql, where: { eq: { b: 'x' } } }] })), /where is only valid with columns/)
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [{ ...decl, columns: [] }] })), /columns must be non-empty strings/)
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [{ ...decl, where: { gt: { b: 'x' } } }] })), /where.gt is not a supported predicate/)
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [{ ...decl, where: { eq: { b: 7 } } }] })), /where.eq.b must be a non-empty string/)
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [{ ...decl, where: { in: { b: [] } } }] })), /where.in.b must be a non-empty array/)
+})
+
+test('contract registry validates rowFilter, and raw sql must select its columns', () => {
+  const reg = createContractRegistry()
+  const filter = { columns: ['attributes'], keep: () => true }
+  const decl = { kind: 'node', type: 'T', columns: ['a'], toRow: () => null }
+  reg.register(sampleContract({ rules: [decl], rowFilter: filter }))
+
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [decl], rowFilter: { columns: [], keep: () => true } })), /rowFilter columns/)
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [decl], rowFilter: { columns: ['a'] } })), /rowFilter keep/)
+
+  // A raw-SQL rule under a rowFilter must select the filter's columns itself:
+  // the engine cannot inject columns into raw SQL, and keep() over an absent
+  // column would silently pass filtered rows through.
+  const raw = { kind: 'node', type: 'T', sql: 'SELECT a FROM x', toRow: () => null }
+  assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [raw], rowFilter: filter })), /raw sql must select rowFilter column 'attributes'/)
+  reg.register(sampleContract({ name: 'z', rules: [{ ...raw, sql: 'SELECT attributes, a FROM x' }], rowFilter: filter }))
+
+  // The guard checks the SELECT projection list, not a loose substring: the
+  // column named in a WHERE clause, or a different column whose name merely
+  // contains it, is not projected and must be rejected.
+  const notProjected = [
+    'SELECT a FROM x WHERE attributes IS NOT NULL',
+    'SELECT other_attributes FROM x',
+    'SELECT a FROM x WHERE b IN (SELECT attributes FROM y)',
+  ]
+  for (const sql of notProjected) {
+    assert.throws(
+      () => reg.register(sampleContract({ name: 'n', rules: [{ ...raw, sql }], rowFilter: filter })),
+      /raw sql must select rowFilter column 'attributes'/,
+      sql
+    )
+  }
+
+  // Projection forms that do provably carry the column are accepted: a
+  // qualified reference, an alias, and a wildcard.
+  const projected = [
+    'SELECT x.attributes, a FROM x',
+    'SELECT foo AS attributes, a FROM x',
+    'SELECT * FROM x',
+    'SELECT x.* FROM x',
+  ]
+  projected.forEach((sql, i) => {
+    reg.register(sampleContract({ name: `p${i}`, rules: [{ ...raw, sql }], rowFilter: filter }))
+  })
 })
 
 test('contract registry rejects a duplicate (plugin, name)', () => {

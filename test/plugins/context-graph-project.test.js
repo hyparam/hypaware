@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { firstSeenTime, mergeRow } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
+import { firstSeenTime, matchesPredicate, mergeRow } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
 
 /**
  * @param {Partial<Record<string, unknown>>} overrides
@@ -91,6 +91,23 @@ test('mergeRow tolerates rows with unparseable or missing first_seen', () => {
   assert.deepEqual(ba.props, ab.props)
   assert.equal(ab.first_seen, '2026-06-01T00:00:00.000Z')
   assert.equal(ba.first_seen, '2026-06-01T00:00:00.000Z')
+})
+
+// The equivalence e2e (context-graph-project-e2e.test.js) claims likePrefix
+// coverage, but the ai-gateway prefix surfaces run as raw SQL, so its JS
+// `likePrefix` branch is never actually evaluated there. Exercise it directly.
+// @ref LLP 0096#decision [tests]: likePrefix matches a string prefix; null and non-string columns never match
+test('matchesPredicate likePrefix keeps only matching-prefix string rows', () => {
+  const where = { likePrefix: { content_text: 'Base directory for this skill: ' } }
+  const match = { content_text: 'Base directory for this skill: /repo/skills/foo' }
+  const nonMatch = { content_text: 'a different message' }
+  const nullValue = { content_text: null }
+  const nonString = { content_text: 42 }
+
+  assert.equal(matchesPredicate(where, match), true, 'matching prefix is kept')
+  assert.equal(matchesPredicate(where, nonMatch), false, 'non-matching string is dropped')
+  assert.equal(matchesPredicate(where, nullValue), false, 'null never matches')
+  assert.equal(matchesPredicate(where, nonString), false, 'non-string never matches')
 })
 
 test('firstSeenTime normalizes strings, Dates, and epoch numbers', () => {

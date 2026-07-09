@@ -175,35 +175,24 @@ test('numeric natural keys are stringified', () => {
 // @ref LLP 0026#decision: Claude harness aux exchanges are retained (tagged
 // attributes.claude.aux_kind) rather than dropped; the graph contract must
 // exclude them so security-monitor traffic mints no Session/App/Tool noise.
-test('every rule selects attributes so the shared aux filter has its input', () => {
-  for (const r of contract.rules) {
-    assert.match(r.sql, /^SELECT\s+attributes\b/i, `rule ${r.kind}/${r.type} projects attributes`)
+// @ref LLP 0096#decision [tests]: the aux filter is the contract rowFilter,
+// evaluated once per source row by the engine (both scan paths), so these
+// assertions target keep() rather than each rule's toRow. The end-to-end
+// exclusion (rows never reaching any rule) is pinned by the projection e2e.
+test('the contract declares the aux rowFilter on attributes, and raw rules select it', () => {
+  assert.ok(contract.rowFilter, 'contract carries the aux rowFilter')
+  assert.deepEqual(contract.rowFilter.columns, ['attributes'])
+  for (const r of contract.rules.filter((r) => typeof r.sql === 'string')) {
+    assert.match(/** @type {string} */ (r.sql), /^SELECT\s+attributes\b/i, `raw rule ${r.kind}/${r.type} projects attributes itself`)
   }
 })
 
-test('aux-tagged rows are excluded from every node and edge rule', () => {
-  const aux = { attributes: { claude: { aux_kind: 'security_monitor' } } }
-  // Otherwise-valid rows that would each mint a node/edge if not aux.
-  assert.equal(rule('node', 'Session').toRow({ ...aux, conversation_id: 'conv-1', message_created_at: TS }), null)
-  assert.equal(rule('node', 'App').toRow({ ...aux, client_name: 'claude', message_created_at: TS }), null)
-  assert.equal(rule('node', 'Model').toRow({ ...aux, model: 'claude-opus', message_created_at: TS }), null)
-  assert.equal(rule('node', 'Tool').toRow({ ...aux, tool_name: 'Read', part_type: 'tool_call', message_created_at: TS }), null)
-  assert.equal(rule('node', 'File').toRow({ ...aux, tool_name: 'Read', tool_args: { file_path: '/x' }, message_created_at: TS }), null)
-  assert.equal(rule('edge', 'via').toRow({ ...aux, conversation_id: 'c', client_name: 'a', message_created_at: TS }), null)
-  assert.equal(rule('edge', 'used_model').toRow({ ...aux, conversation_id: 'c', model: 'm', message_created_at: TS }), null)
-  assert.equal(rule('edge', 'used').toRow({ ...aux, conversation_id: 'c', tool_name: 'Read', message_created_at: TS }), null)
-  assert.equal(rule('edge', 'touched').toRow({ ...aux, conversation_id: 'c', tool_name: 'Write', tool_args: { file_path: '/a.js' }, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Program').toRow({ ...aux, tool_name: 'Bash', tool_args: { command: 'git status' }, part_type: 'tool_call', message_created_at: TS }), null)
-  assert.equal(rule('edge', 'invoked').toRow({ ...aux, session_id: 's', tool_name: 'Bash', tool_args: { command: 'git status' }, part_type: 'tool_call', message_created_at: TS }), null)
-})
-
-test('aux filter handles attributes arriving as a JSON string', () => {
-  const row = rule('node', 'Session').toRow({
-    attributes: JSON.stringify({ claude: { aux_kind: 'security_monitor' } }),
-    conversation_id: 'conv-1',
-    message_created_at: TS,
-  })
-  assert.equal(row, null, 'aux_kind in a stringified attributes column is still excluded')
+test('the aux rowFilter drops aux-tagged rows and keeps real ones', () => {
+  const { keep } = /** @type {NonNullable<typeof contract.rowFilter>} */ (contract.rowFilter)
+  assert.equal(keep({ attributes: { claude: { aux_kind: 'security_monitor' } } }), false, 'aux object excluded')
+  assert.equal(keep({ attributes: JSON.stringify({ claude: { aux_kind: 'security_monitor' } }) }), false, 'aux_kind in a stringified attributes column is still excluded')
+  assert.equal(keep({ attributes: { claude: { client_name: 'claude' }, dev_run_id: 'run-1' } }), true, 'attributes without aux_kind pass')
+  assert.equal(keep({ attributes: null }), true, 'absent attributes pass')
 })
 
 test('non-aux rows pass through unchanged (attributes present but no aux_kind)', () => {
@@ -356,8 +345,8 @@ test('Commit -in-> Repo is the second `in` edge and converges with the GitHub ed
 
 test('Program/invoked rules select only tool_call rows from the two shell tools', () => {
   for (const r of [rule('node', 'Program'), rule('edge', 'invoked')]) {
-    assert.match(r.sql, /part_type = 'tool_call'/, `${r.kind}/${r.type} filters tool_call parts`)
-    assert.match(r.sql, /tool_name IN \('Bash', 'exec_command'\)/, `${r.kind}/${r.type} filters the shell tools`)
+    assert.equal(r.where?.eq?.part_type, 'tool_call', `${r.kind}/${r.type} filters tool_call parts`)
+    assert.deepEqual(r.where?.in?.tool_name, ['Bash', 'exec_command'], `${r.kind}/${r.type} filters the shell tools`)
   }
 })
 
@@ -430,24 +419,26 @@ const MARKER_TEXT = 'Base directory for this skill: /home/u/.claude/skills/hypaw
 const SLASH_TEXT = '<command-name>/hypaware-query</command-name>'
 const CODEX_READ_ARGS = { cmd: 'cat /home/u/.codex/skills/hypaware-query/SKILL.md' }
 
-// @ref LLP 0074#strict-filters [tests]: the SQL filters are the decision, not
+// @ref LLP 0074#strict-filters [tests]: the filters are the decision, not
 // tuning parameters; only role='user' text with a leading anchor is clean.
-test('Skill/ran rules declare the strict per-surface SQL filters', () => {
+// Surfaces 1/4 are declarative predicates (shared scan); surfaces 2/3 stay
+// raw SQL so the content_text prefix guard prunes server-side (LLP 0096).
+test('Skill/ran rules declare the strict per-surface filters', () => {
   for (const kind of /** @type {const} */ (['node', 'edge'])) {
     const type = kind === 'node' ? 'Skill' : 'ran'
     const tool = rule(kind, type, SKILL_TOOL)
-    assert.match(tool.sql, /part_type = 'tool_call' AND tool_name = 'Skill'/, `${kind} surface 1 filters Skill tool calls`)
+    assert.deepEqual(tool.where?.eq, { part_type: 'tool_call', tool_name: 'Skill' }, `${kind} surface 1 filters Skill tool calls`)
 
     const marker = rule(kind, type, SKILL_MARKER)
-    assert.match(marker.sql, /role = 'user' AND part_type = 'text'/, `${kind} surface 2 filters user text parts (assistant-role markers never reach toRow)`)
-    assert.match(marker.sql, /content_text LIKE 'Base directory for this skill: %'/, `${kind} surface 2 anchors the marker in SQL`)
+    assert.match(/** @type {string} */ (marker.sql), /role = 'user' AND part_type = 'text'/, `${kind} surface 2 filters user text parts (assistant-role markers never reach toRow)`)
+    assert.match(/** @type {string} */ (marker.sql), /content_text LIKE 'Base directory for this skill: %'/, `${kind} surface 2 anchors the marker in SQL`)
 
     const slash = rule(kind, type, SKILL_SLASH)
-    assert.match(slash.sql, /role = 'user' AND part_type = 'text'/, `${kind} surface 3 filters user text parts`)
-    assert.match(slash.sql, /content_text LIKE '<command-name>%'/, `${kind} surface 3 anchors the tag in SQL`)
+    assert.match(/** @type {string} */ (slash.sql), /role = 'user' AND part_type = 'text'/, `${kind} surface 3 filters user text parts`)
+    assert.match(/** @type {string} */ (slash.sql), /content_text LIKE '<command-name>%'/, `${kind} surface 3 anchors the tag in SQL`)
 
     const codex = rule(kind, type, SKILL_CODEX)
-    assert.match(codex.sql, /part_type = 'tool_call' AND tool_name = 'exec_command'/, `${kind} surface 4 filters exec_command tool calls`)
+    assert.deepEqual(codex.where?.eq, { part_type: 'tool_call', tool_name: 'exec_command' }, `${kind} surface 4 filters exec_command tool calls`)
   }
 })
 
@@ -592,14 +583,14 @@ test('false-positive matrix: near-miss signals mint nothing', () => {
   assert.equal(codexNode.toRow({ session_id: 's', tool_args: { cmd: 'cat ~/.codex/skills/hypaware-query/reference.md' }, message_created_at: TS }), null, 'reads a different file in the skill dir')
 })
 
-test('aux-tagged rows are excluded from the Skill and ran rules', () => {
+// @ref LLP 0096#decision [tests]: aux exclusion is the contract rowFilter's
+// job for every rule uniformly (the engine applies it before any toRow on
+// both scan paths), so the Skill/ran surfaces need no per-rule aux checks;
+// the rowFilter test above plus the projection e2e cover them.
+test('aux-tagged skill rows are excluded by the contract rowFilter', () => {
+  const { keep } = /** @type {NonNullable<typeof contract.rowFilter>} */ (contract.rowFilter)
   const aux = { attributes: { claude: { aux_kind: 'security_monitor' } } }
-  assert.equal(rule('node', 'Skill', SKILL_TOOL).toRow({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Skill', SKILL_MARKER).toRow({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Skill', SKILL_SLASH).toRow({ ...aux, session_id: 's', content_text: SLASH_TEXT, message_created_at: TS }), null)
-  assert.equal(rule('node', 'Skill', SKILL_CODEX).toRow({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
-  assert.equal(rule('edge', 'ran', SKILL_TOOL).toRow({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), null)
-  assert.equal(rule('edge', 'ran', SKILL_MARKER).toRow({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), null)
-  assert.equal(rule('edge', 'ran', SKILL_SLASH).toRow({ ...aux, session_id: 's', content_text: SLASH_TEXT, message_created_at: TS }), null)
-  assert.equal(rule('edge', 'ran', SKILL_CODEX).toRow({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), null)
+  assert.equal(keep({ ...aux, session_id: 's', tool_args: { skill: 'x1' }, message_created_at: TS }), false)
+  assert.equal(keep({ ...aux, session_id: 's', content_text: MARKER_TEXT, message_created_at: TS }), false)
+  assert.equal(keep({ ...aux, session_id: 's', tool_args: CODEX_READ_ARGS, message_created_at: TS }), false)
 })

@@ -33,11 +33,13 @@ const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'
  * hand-authored node/edge mappings that used to live in `@hypaware/context-graph`;
  * they now live here, beside the source they read. Rows are built with the
  * graph plugin's `kit` so the id recipe and provenance columns stay owned by
- * the graph plugin. This connector owns the SQL + `toRow` semantics and the
- * bridge-key recipe (`keys`, imported from `./graph-keys.js`).
+ * the graph plugin. This connector owns the read declarations (declarative
+ * columns/where, or raw SQL for the pushed-down prefix guards) + `toRow`
+ * semantics and the bridge-key recipe (`keys`, imported from
+ * `./graph-keys.js`).
  *
  * @param {GraphKit} kit
- * @returns {{ name: string, plugin: string, sourceDataset: string, projector: string, projectorVersion: number, rules: ContractRule[] }}
+ * @returns {{ name: string, plugin: string, sourceDataset: string, projector: string, projectorVersion: number, rules: ContractRule[], rowFilter: { columns: string[], keep(row: Record<string, unknown>): boolean } }}
  * @ref LLP 0023#contract-contribution [implements]: a source's contract, contributed via the capability; engine + kit stay central
  */
 export function createAiGatewayGraphContract(kit) {
@@ -58,7 +60,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Session',
-      sql: `SELECT session_id, cwd, git_branch, client_name, user_id, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['session_id', 'cwd', 'git_branch', 'client_name', 'user_id', 'message_created_at'],
       toRow(r) {
         const key = str(r.session_id)
         if (!key) return null
@@ -81,7 +83,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'App',
-      sql: `SELECT client_name, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['client_name', 'message_created_at'],
       toRow(r) {
         const key = str(r.client_name)
         if (!key) return null
@@ -93,7 +95,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Model',
-      sql: `SELECT model, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['model', 'message_created_at'],
       toRow(r) {
         const key = str(r.model)
         if (!key) return null
@@ -105,7 +107,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Tool',
-      sql: `SELECT tool_name, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      columns: ['tool_name', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call' } },
       toRow(r) {
         const key = str(r.tool_name)
         if (!key) return null
@@ -122,7 +125,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'File',
-      sql: `SELECT tool_name, tool_args, git_remote, repo_root, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      columns: ['tool_name', 'tool_args', 'git_remote', 'repo_root', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call' } },
       toRow(r) {
         const target = fileTargetFrom(keys, r.tool_name, r.tool_args, r.git_remote, r.repo_root)
         if (!target) return null
@@ -135,7 +139,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Repo',
-      sql: `SELECT git_remote, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['git_remote', 'message_created_at'],
       toRow(r) {
         const key = keys.repoKeyFromRemote(r.git_remote)
         if (!key) return null
@@ -150,7 +154,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Commit',
-      sql: `SELECT head_sha, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['head_sha', 'message_created_at'],
       toRow(r) {
         const key = keys.commitKey(r.head_sha)
         if (!key) return null
@@ -168,7 +172,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Program',
-      sql: `SELECT tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name IN ('Bash', 'exec_command')`,
+      columns: ['tool_name', 'tool_args', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call' }, in: { tool_name: ['Bash', 'exec_command'] } },
       toRow(r) {
         const key = programFrom(commandStringFrom(r.tool_name, r.tool_args))
         if (!key) return null
@@ -193,7 +198,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Skill',
-      sql: `SELECT session_id, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name = 'Skill'`,
+      columns: ['session_id', 'tool_args', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call', tool_name: 'Skill' } },
       toRow(r) {
         const key = skillFromToolArgs(r.tool_args)
         if (!key) return null
@@ -205,7 +211,12 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Skill',
-      sql: `SELECT session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
+      // Raw SQL on purpose: the prefix filter prunes `content_text` (the
+      // table's largest column) server-side, keeping it out of the shared
+      // scan's materialization. `attributes` rides for the contract
+      // rowFilter (registry-enforced).
+      // @ref LLP 0096#decision [constrained-by]: heavy-column prefix guards stay pushed down
+      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
       toRow(r) {
         const key = skillFromMarker(r.content_text)
         if (!key) return null
@@ -217,7 +228,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Skill',
-      sql: `SELECT session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
+      // Raw SQL on purpose, same pushdown rationale as the marker surface.
+      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
       toRow(r) {
         const key = skillFromSlash(r.content_text)
         if (!key) return null
@@ -234,7 +246,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'node',
       type: 'Skill',
-      sql: `SELECT session_id, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name = 'exec_command'`,
+      columns: ['session_id', 'tool_args', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call', tool_name: 'exec_command' } },
       toRow(r) {
         const key = skillFromCodexRead(commandStringFrom('exec_command', r.tool_args))
         if (!key) return null
@@ -249,7 +262,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'via',
-      sql: `SELECT session_id, client_name, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['session_id', 'client_name', 'message_created_at'],
       toRow(r) {
         const session = str(r.session_id)
         const app = str(r.client_name)
@@ -262,7 +275,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'used_model',
-      sql: `SELECT session_id, model, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['session_id', 'model', 'message_created_at'],
       toRow(r) {
         const session = str(r.session_id)
         const model = str(r.model)
@@ -275,7 +288,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'used',
-      sql: `SELECT session_id, tool_name, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      columns: ['session_id', 'tool_name', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call' } },
       toRow(r) {
         const session = str(r.session_id)
         const tool = str(r.tool_name)
@@ -290,7 +304,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'touched',
-      sql: `SELECT session_id, tool_name, tool_args, git_remote, repo_root, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call'`,
+      columns: ['session_id', 'tool_name', 'tool_args', 'git_remote', 'repo_root', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call' } },
       toRow(r) {
         const session = str(r.session_id)
         const target = fileTargetFrom(keys, r.tool_name, r.tool_args, r.git_remote, r.repo_root)
@@ -303,7 +318,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'in',
-      sql: `SELECT session_id, git_remote, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['session_id', 'git_remote', 'message_created_at'],
       toRow(r) {
         const session = str(r.session_id)
         const repo = keys.repoKeyFromRemote(r.git_remote)
@@ -316,7 +331,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'at',
-      sql: `SELECT session_id, head_sha, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['session_id', 'head_sha', 'message_created_at'],
       toRow(r) {
         const session = str(r.session_id)
         const commit = keys.commitKey(r.head_sha)
@@ -331,7 +346,7 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'in',
-      sql: `SELECT head_sha, git_remote, message_created_at FROM ${SOURCE_DATASET}`,
+      columns: ['head_sha', 'git_remote', 'message_created_at'],
       toRow(r) {
         const commit = keys.commitKey(r.head_sha)
         const repo = keys.repoKeyFromRemote(r.git_remote)
@@ -349,7 +364,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'invoked',
-      sql: `SELECT session_id, tool_name, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name IN ('Bash', 'exec_command')`,
+      columns: ['session_id', 'tool_name', 'tool_args', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call' }, in: { tool_name: ['Bash', 'exec_command'] } },
       toRow(r) {
         const session = str(r.session_id)
         const program = programFrom(commandStringFrom(r.tool_name, r.tool_args))
@@ -373,7 +389,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'ran',
-      sql: `SELECT session_id, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name = 'Skill'`,
+      columns: ['session_id', 'tool_args', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call', tool_name: 'Skill' } },
       toRow(r) {
         const session = str(r.session_id)
         const skill = skillFromToolArgs(r.tool_args)
@@ -388,7 +405,12 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'ran',
-      sql: `SELECT session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
+      // Raw SQL on purpose: the prefix filter prunes `content_text` (the
+      // table's largest column) server-side, keeping it out of the shared
+      // scan's materialization. `attributes` rides for the contract
+      // rowFilter (registry-enforced).
+      // @ref LLP 0096#decision [constrained-by]: heavy-column prefix guards stay pushed down
+      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE 'Base directory for this skill: %'`,
       toRow(r) {
         const session = str(r.session_id)
         const skill = skillFromMarker(r.content_text)
@@ -401,7 +423,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'ran',
-      sql: `SELECT session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
+      // Raw SQL on purpose, same pushdown rationale as the marker surface.
+      sql: `SELECT attributes, session_id, content_text, message_created_at FROM ${SOURCE_DATASET} WHERE role = 'user' AND part_type = 'text' AND content_text LIKE '<command-name>%'`,
       toRow(r) {
         const session = str(r.session_id)
         const skill = skillFromSlash(r.content_text)
@@ -417,7 +440,8 @@ export function createAiGatewayGraphContract(kit) {
     {
       kind: 'edge',
       type: 'ran',
-      sql: `SELECT session_id, tool_args, message_created_at FROM ${SOURCE_DATASET} WHERE part_type = 'tool_call' AND tool_name = 'exec_command'`,
+      columns: ['session_id', 'tool_args', 'message_created_at'],
+      where: { eq: { part_type: 'tool_call', tool_name: 'exec_command' } },
       toRow(r) {
         const session = str(r.session_id)
         const skill = skillFromCodexRead(commandStringFrom('exec_command', r.tool_args))
@@ -427,43 +451,30 @@ export function createAiGatewayGraphContract(kit) {
     },
   ]
 
-  // @ref LLP 0026#decision [implements]: tag-don't-drop: the gateway now
-  // RETAINS Claude harness aux exchanges (security monitor, etc.) tagged
-  // `attributes.claude.aux_kind` instead of dropping them. That traffic is
-  // real but not user conversation, so it must not mint graph
-  // Session/App/Model/Tool/File nodes or edges. One shared source filter:
-  // select `attributes` for every rule and drop aux rows before toRow runs,
-  // so each rule's SQL stays focused on its own columns.
-  const auxFilteredRules = rules.map((rule) => ({
-    ...rule,
-    sql: withAttributes(rule.sql),
-    /** @param {Record<string, unknown>} r */
-    toRow(r) {
-      if (auxKindOf(r.attributes)) return null
-      return rule.toRow(r)
-    },
-  }))
-
   return {
     name: 'ai-gateway-t0',
     plugin: PLUGIN_NAME,
     sourceDataset: SOURCE_DATASET,
     projector: PROJECTOR,
     projectorVersion: PROJECTOR_VERSION,
-    rules: auxFilteredRules,
+    rules,
+    // @ref LLP 0026#decision [implements]: tag-don't-drop: the gateway
+    // RETAINS Claude harness aux exchanges (security monitor, etc.) tagged
+    // `attributes.claude.aux_kind` instead of dropping them. That traffic is
+    // real but not user conversation, so it must not mint graph
+    // Session/App/Model/Tool/File nodes or edges.
+    // @ref LLP 0096#decision [implements]: the aux filter is a contract
+    // rowFilter, evaluated once per source row by the engine (both paths),
+    // instead of the old per-rule SQL prepend + toRow wrap that parsed
+    // `attributes` once per rule per row.
+    rowFilter: {
+      columns: ['attributes'],
+      /** @param {Record<string, unknown>} r */
+      keep(r) {
+        return auxKindOf(r.attributes) === null
+      },
+    },
   }
-}
-
-/**
- * Prepend the `attributes` column to a rule's projection so the shared aux
- * filter can read `attributes.claude.aux_kind` without each rule's SQL
- * repeating it. Every rule begins `SELECT <cols> FROM …`.
- *
- * @param {string} sql
- * @returns {string}
- */
-function withAttributes(sql) {
-  return sql.replace(/^SELECT\s+/i, 'SELECT attributes, ')
 }
 
 /**

@@ -425,3 +425,53 @@ test('graph neighbors traversal: --edge-type ran reaches Skill, --edge-type invo
     )
   }, SKILL_PROGRAM_ROWS)
 })
+
+/**
+ * Rebuild a contract's declarative rules as the raw SQL the engine used to
+ * run per rule, `attributes` prepended exactly like the old per-rule aux
+ * wrap. Raw-SQL rules pass through untouched. Running both variants over one
+ * fixture pins the JS predicate evaluator to the SQL engine's semantics.
+ *
+ * @param {Contract} contract
+ * @returns {Contract}
+ */
+function sqlTwin(contract) {
+  const rules = contract.rules.map((rule) => {
+    if (typeof rule.sql === 'string') return rule
+    const columns = ['attributes', ...(rule.columns ?? [])]
+    /** @type {string[]} */
+    const clauses = []
+    for (const [col, value] of Object.entries(rule.where?.eq ?? {})) clauses.push(`${col} = '${value}'`)
+    for (const [col, values] of Object.entries(rule.where?.in ?? {})) clauses.push(`${col} IN (${values.map((v) => `'${v}'`).join(', ')})`)
+    for (const [col, prefix] of Object.entries(rule.where?.likePrefix ?? {})) clauses.push(`${col} LIKE '${prefix}%'`)
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : ''
+    return { ...rule, columns: undefined, where: undefined, sql: `SELECT ${columns.join(', ')} FROM ${contract.sourceDataset}${where}` }
+  })
+  return { ...contract, rules }
+}
+
+// @ref LLP 0096#decision [tests]: the shared scan + JS predicates produce
+// bit-identical graph rows to the per-rule SQL execution they replaced,
+// over a fixture that exercises every predicate shape (eq, in, likePrefix)
+// plus the aux rowFilter and null columns.
+test('shared-scan projection is row-identical to per-rule SQL execution', async () => {
+  const fixture = [...ROWS, AUX_ROW, ...SKILL_PROGRAM_ROWS]
+  /** @type {{ ids: string[], rows: Record<string, unknown>[] }[]} */
+  const outcomes = []
+  for (const variant of ['declarative', 'sql-twin']) {
+    await withSeededGateway(async ({ registry, storage }) => {
+      const contract = createAiGatewayGraphContract({ nodeId, edgeId, makeRowBuilders })
+      const run = variant === 'declarative' ? contract : sqlTwin(contract)
+      const report = await projectGraph({ query: registry, storage, contracts: [run] })
+      assert.ok(report.nodesWritten > 0, `${variant}: fixture mints nodes`)
+      const nodes = await executeQuerySql({ query: 'SELECT node_id, node_type, natural_key, label, props FROM node', registry, storage, refresh: 'always' })
+      const edges = await executeQuerySql({ query: 'SELECT edge_id, src_id, dst_id, edge_type, props FROM edge', registry, storage, refresh: 'always' })
+      const key = (/** @type {Record<string, unknown>} */ r) => JSON.stringify(r)
+      outcomes.push({
+        ids: [...nodes.rows, ...edges.rows].map(key).sort(),
+        rows: [...nodes.rows, ...edges.rows],
+      })
+    }, fixture)
+  }
+  assert.deepEqual(outcomes[0].ids, outcomes[1].ids, 'identical node/edge rows from both execution paths')
+})
