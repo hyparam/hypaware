@@ -48,10 +48,24 @@ export function createContractRegistry(opts = {}) {
       throw new TypeError(`registerContract: '${contract.name}' rules must be a non-empty array`)
     }
     // Validate each rule's shape at registration, not at projection time: the
-    // engine reads `kind`/`sql`/`toRow` directly (project.js) and routes by
-    // `kind`, so a connector typo would otherwise surface as a confusing
-    // mid-projection failure (or silently route rows into the wrong target
-    // map) far from the contract that caused it.
+    // engine reads `kind`/`sql`/`columns`/`where`/`toRow` directly
+    // (project.js) and routes by `kind`, so a connector typo would otherwise
+    // surface as a confusing mid-projection failure (or silently route rows
+    // into the wrong target map) far from the contract that caused it.
+    // @ref LLP 0096#decision [implements]: exactly one read form per rule; `where` only rides `columns`; raw SQL must carry the rowFilter's columns itself
+    if (contract.rowFilter !== undefined) {
+      const filter = contract.rowFilter
+      const at = `'${contract.name}' rowFilter`
+      if (!filter || typeof filter !== 'object') {
+        throw new TypeError(`registerContract: ${at} must be an object`)
+      }
+      if (!Array.isArray(filter.columns) || filter.columns.length === 0 || filter.columns.some((c) => typeof c !== 'string' || c.length === 0)) {
+        throw new TypeError(`registerContract: ${at} columns must be non-empty strings`)
+      }
+      if (typeof filter.keep !== 'function') {
+        throw new TypeError(`registerContract: ${at} keep must be a function`)
+      }
+    }
     contract.rules.forEach((rule, i) => {
       const at = `'${contract.name}' rule ${i}`
       if (!rule || typeof rule !== 'object') {
@@ -63,8 +77,26 @@ export function createContractRegistry(opts = {}) {
       if (typeof rule.type !== 'string' || rule.type.length === 0) {
         throw new TypeError(`registerContract: ${at} type must be a non-empty string`)
       }
-      if (typeof rule.sql !== 'string' || rule.sql.length === 0) {
-        throw new TypeError(`registerContract: ${at} sql must be a non-empty string`)
+      const hasSql = typeof rule.sql === 'string' && rule.sql.length > 0
+      const hasColumns = Array.isArray(rule.columns)
+      if (hasSql === hasColumns) {
+        throw new TypeError(`registerContract: ${at} must carry exactly one of sql or columns`)
+      }
+      if (hasColumns) {
+        const cols = /** @type {unknown[]} */ (rule.columns)
+        if (cols.length === 0 || cols.some((c) => typeof c !== 'string' || c.length === 0)) {
+          throw new TypeError(`registerContract: ${at} columns must be non-empty strings`)
+        }
+        if (rule.where !== undefined) validatePredicate(rule.where, at)
+      } else if (rule.where !== undefined) {
+        throw new TypeError(`registerContract: ${at} where is only valid with columns`)
+      }
+      if (hasSql && contract.rowFilter) {
+        for (const col of contract.rowFilter.columns) {
+          if (!rule.sql?.includes(col)) {
+            throw new TypeError(`registerContract: ${at} raw sql must select rowFilter column '${col}'`)
+          }
+        }
       }
       if (typeof rule.toRow !== 'function') {
         throw new TypeError(`registerContract: ${at} toRow must be a function`)
@@ -84,6 +116,48 @@ export function createContractRegistry(opts = {}) {
       source_dataset: contract.sourceDataset,
       rules: contract.rules.length,
     })
+  }
+
+  /**
+   * A `where` must be built from the three supported predicate shapes only,
+   * with the value types the JS evaluator expects: anything else would
+   * silently match nothing at projection time.
+   *
+   * @param {unknown} where
+   * @param {string} at
+   */
+  function validatePredicate(where, at) {
+    if (!where || typeof where !== 'object') {
+      throw new TypeError(`registerContract: ${at} where must be an object`)
+    }
+    const w = /** @type {Record<string, unknown>} */ (where)
+    for (const key of Object.keys(w)) {
+      if (key !== 'eq' && key !== 'in' && key !== 'likePrefix') {
+        throw new TypeError(`registerContract: ${at} where.${key} is not a supported predicate (eq, in, likePrefix)`)
+      }
+    }
+    for (const shape of ['eq', 'likePrefix']) {
+      const block = w[shape]
+      if (block === undefined) continue
+      if (!block || typeof block !== 'object') {
+        throw new TypeError(`registerContract: ${at} where.${shape} must be an object`)
+      }
+      for (const [col, value] of Object.entries(block)) {
+        if (typeof value !== 'string' || value.length === 0) {
+          throw new TypeError(`registerContract: ${at} where.${shape}.${col} must be a non-empty string`)
+        }
+      }
+    }
+    if (w.in !== undefined) {
+      if (!w.in || typeof w.in !== 'object') {
+        throw new TypeError(`registerContract: ${at} where.in must be an object`)
+      }
+      for (const [col, list] of Object.entries(w.in)) {
+        if (!Array.isArray(list) || list.length === 0 || list.some((v) => typeof v !== 'string' || v.length === 0)) {
+          throw new TypeError(`registerContract: ${at} where.in.${col} must be a non-empty array of strings`)
+        }
+      }
+    }
   }
 
   /**

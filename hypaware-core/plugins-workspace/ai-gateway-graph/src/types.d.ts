@@ -3,11 +3,24 @@
 /** A materialized graph row (node or edge), keyed by column name. */
 export type GraphRow = Record<string, unknown>
 
-/** One T0 contract rule: a read-only SELECT plus a row mapper. */
+/** A declarative rule filter (LLP 0096): AND of eq / in / likePrefix, SQL null semantics. */
+export interface RulePredicate {
+  eq?: Record<string, string>
+  in?: Record<string, string[]>
+  likePrefix?: Record<string, string>
+}
+
+/**
+ * One T0 contract rule: a source read plus a row mapper. Declarative
+ * `columns` (+ optional `where`) joins the contract's shared scan; raw `sql`
+ * runs standalone (LLP 0096). Exactly one of the two.
+ */
 export interface ContractRule {
   kind: 'node' | 'edge'
   type: string
-  sql: string
+  sql?: string
+  columns?: string[]
+  where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
 }
 
