@@ -96,3 +96,8 @@ switch, and LLP 0072 already decided the picker never gets one.
   usually-absent file otherwise.
 - `hyp remote login --no-forward` and query-only logins never write the
   marker (they never reach the enrolling fork).
+
+> **Dormant while [LLP 0094](./0094-enrollment-picker-suspended.decision.md)
+> suspends the picker trigger:** no login writes the marker (with no pending
+> pick there is nothing to guard). The sink-driver hold and TTL behavior stay
+> implemented and tested for when the trigger returns.

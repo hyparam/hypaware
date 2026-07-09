@@ -25,7 +25,9 @@ const MAX_SHOWN_CANDIDATES = 50
 // Printed whenever the picker cannot run to completion (no candidates, a
 // non-TTY login, or a failed enumeration) so the capability stays
 // discoverable even when the interactive step is skipped (LLP 0072 #tty).
-const DURABLE_HINT = "tip: mark a directory local-only anytime with 'hyp ignore --local-only [path]'\n"
+// Exported so the login flow can print the same hint while the enrollment
+// trigger itself is disabled (LLP 0094).
+export const DURABLE_HINT = "tip: mark a directory local-only anytime with 'hyp ignore --local-only [path]'\n"
 
 // The dataset the candidate enumeration reads. Exported so the login flow
 // can ask "can this kernel snapshot run the enumeration at all?" against the

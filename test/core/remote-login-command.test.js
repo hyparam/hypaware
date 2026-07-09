@@ -737,170 +737,100 @@ test('--org= (equals form, empty value) is a usage error', async () => {
 })
 
 /* --------------------------------------------------------------------------
- * Login-time local-only directory picker wiring (LLP 0081 T7, issue #281):
- * the picker runs once the login-minted gateway is seeded, and (after the
- * issue #281 reordering) at the point each fork's local cache is populated:
- * the fresh-enroll fork after the daemon attaches and backfills, the
- * re-login/re-seed fork against the cache a prior daemon already filled.
- * These tests inject a `picker` test double (the same pattern as
- * `login`/`seed`) rather than exercising the real interactive prompt, which
- * `test/core/local-only-command.test.js` already covers.
+ * Login-time local-only directory picker wiring (LLP 0081 T7, issue #281),
+ * currently SUSPENDED (LLP 0094): the trigger is disabled pending redesign,
+ * so every fork that would have prompted prints the durable-command hint and
+ * never invokes the picker, the backfill wait, the registry refresh, or the
+ * pick-pending marker. These tests pin that disabled behavior; the picker's
+ * own editor semantics stay covered by test/core/local-only-command.test.js
+ * for when the trigger returns.
  * ------------------------------------------------------------------------ */
 
-test('the local-only picker runs after enrollCentralSink provisions the sink on --no-daemon (ordering, issue #281)', async () => {
+test('a --no-daemon login never prompts while the picker is suspended; it prints the durable hint (LLP 0094)', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out } = await makeCtx({ hypHome })
+  const { ctx, out, err } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
   const seedPath = path.join(hypHome, 'hypaware', 'config-control', 'seed.json')
 
-  /** @type {boolean | null} */
-  let seedExistedWhenPickerRan = null
-  /** @type {any} */
-  let seenArgs = null
-  const picker = /** @type {any} */ (async (args) => {
-    seenArgs = args
-    seedExistedWhenPickerRan = await fs.access(seedPath).then(() => true, () => false)
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
     return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
   })
 
-  // --no-daemon keeps the test off the real launchd/systemd install; the sink
-  // is still provisioned (the seed is written) before the picker runs. Because
-  // no forwarding daemon exists yet on this path, the list still lands before
-  // any export (R6 holds for --no-daemon).
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, picker })
   assert.equal(code, 0)
-  assert.equal(seedExistedWhenPickerRan, true, 'the picker now runs after the sink is provisioned (issue #281 reordering)')
-  assert.equal(seenArgs.stateDir, path.join(hypHome, 'hypaware'))
-  await fs.access(seedPath)
+  assert.equal(pickerCalled, false, 'the suspended trigger must never reach the picker (LLP 0094)')
+  assert.match(err.join(''), /hyp ignore --local-only/, 'the durable command stays discoverable')
+  await fs.access(seedPath) // the sink is still provisioned; only the prompt is withheld
   assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
 })
 
-test('on a fresh enroll the picker runs after attach+backfill and sees the now-populated cache, not the empty pre-enroll one (issue #281)', async () => {
+test('a fresh enroll skips the backfill wait and never prompts while the picker is suspended (LLP 0094)', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out } = await makeCtx({ hypHome })
-  // Interactive login: the backfill wait exists only to fill an interactive
-  // picker's list, so it is gated on the picker's own TTY check. stdin defaults
-  // to a TTY; mark stderr one too so the wait runs and feeds the picker.
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  // Fully interactive stdin+stderr: exactly the case that used to run the
+  // wait and then the picker; the suspended trigger must skip both.
   ctx.stderr.isTTY = true
   const login = /** @type {any} */ (async () => gatewaySession())
-
-  /** @type {string[]} */
-  const order = []
-  // The local cache is empty until the daemon attaches and its post-attach
-  // backfill (LLP 0037/0044) lands rows. Model that: the attach wait flips the
-  // captured set from empty to populated, and the captured-directory wait
-  // returns whatever is captured at the instant it runs.
-  /** @type {any[]} */
-  let captured = []
-  const enroll = /** @type {any} */ (async () => { order.push('enroll'); return { provisioned: true, daemonCode: 0 } })
-  const waitForAttach = /** @type {any} */ (async () => {
-    order.push('attach')
-    captured = [{ cwd: '/work/proj', repoRoot: '/work/proj', rows: 42, lastSeen: '2026-07-07' }]
-    return ['@hypaware/claude']
-  })
-  const waitForCaptured = /** @type {any} */ (async () => captured)
-
-  let pickerSawCount = -1
-  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
-    order.push('picker')
-    const list = args.listCandidates ? await args.listCandidates() : null
-    pickerSawCount = Array.isArray(list) ? list.length : 0
-    return { outcome: 'none', candidateCount: pickerSawCount, selectedCount: 0, excludedDirs: [] }
-  })
-
-  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker })
-  assert.equal(code, 0)
-  // The fix: the picker runs only after enrollment and the attach/backfill
-  // wait, so it enumerates the populated cache. Before the fix it ran first,
-  // against the empty pre-enroll cache: the silent-skip bug of issue #281.
-  assert.deepEqual(order, ['enroll', 'attach', 'picker'])
-  assert.equal(pickerSawCount, 1, 'the picker must see the backfilled candidate, not an empty pre-enroll cache')
-  assert.match(out.join(''), /capturing @hypaware\/claude/)
-})
-
-test('a non-interactive fresh enroll skips the backfill wait even with clients attached (no dead 30s stall, issue #281)', async () => {
-  const hypHome = await tmpHome()
-  // The picker prompts on stderr, so a redirected stderr ('hyp remote login
-  // 2>file') makes it no-op even with a TTY stdin. stdin stays a TTY (a piped
-  // stdin would divert to the static-token path, never reaching the picker);
-  // stderr carries no isTTY. The backfill wait only feeds that picker, so it
-  // must be skipped rather than stall up to 30s for a list it will never show.
-  const { ctx, out } = await makeCtx({ hypHome })
-  const login = /** @type {any} */ (async () => gatewaySession())
   const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
-  // A client DOES attach - the only reason the interactive path would wait.
   const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
   let capturedCalled = false
   const waitForCaptured = /** @type {any} */ (async () => { capturedCalled = true; return [{ cwd: '/work/proj' }] })
-  /** @type {any} */
-  let pickerArgs = null
-  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
-    pickerArgs = args
-    return { outcome: 'non_tty', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
+    return { outcome: 'none', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
   })
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker })
   assert.equal(code, 0)
-  assert.equal(capturedCalled, false, 'the backfill wait must be skipped on a non-TTY login (the picker will not prompt)')
-  // The picker still runs, enumerating the cache as-is (no injected list), and
-  // takes its own non-TTY durable-hint path.
-  assert.ok(pickerArgs, 'the picker still runs on a non-TTY login')
-  assert.equal(pickerArgs.listCandidates, undefined)
+  assert.equal(capturedCalled, false, 'no backfill wait: it exists only to fill a prompt that will not show (LLP 0094)')
+  assert.equal(pickerCalled, false)
+  assert.match(err.join(''), /hyp ignore --local-only/)
   assert.match(out.join(''), /capturing @hypaware\/claude/)
 })
 
-test('a fresh enroll with nothing attached skips the backfill wait and runs the picker against the cache as-is (issue #281)', async () => {
+test('a fresh enroll with nothing attached still prints the durable hint and never prompts (LLP 0094)', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out } = await makeCtx({ hypHome })
+  const { ctx, out, err } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
   const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
-  // Nothing attaches (no org config / slow pull): there is no post-attach
-  // backfill source, so the bounded captured-directory poll must be skipped
-  // rather than burning its whole 30s budget in silence.
   const waitForAttach = /** @type {any} */ (async () => [])
   let capturedCalled = false
   const waitForCaptured = /** @type {any} */ (async () => { capturedCalled = true; return [] })
-  /** @type {any} */
-  let pickerArgs = null
-  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
-    pickerArgs = args
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
     return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
   })
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker })
   assert.equal(code, 0)
-  assert.equal(capturedCalled, false, 'waitForCaptured must be skipped when nothing attached (no dead 30s wait)')
-  // The picker still runs, enumerating the cache as-is (no injected candidate
-  // list), so a re-run over a populated cache gets the editor and a fresh box
-  // gets the durable hint.
-  assert.ok(pickerArgs, 'the picker still runs when nothing attached')
-  assert.equal(pickerArgs.listCandidates, undefined)
+  assert.equal(capturedCalled, false)
+  assert.equal(pickerCalled, false)
+  assert.match(err.join(''), /hyp ignore --local-only/)
   assert.match(out.join(''), /no clients attached yet/)
 })
 
-test('a failed daemon install still runs the local-only picker before returning (issue #281 / R6)', async () => {
+test('a failed daemon install still prints the durable hint before returning (LLP 0094)', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
-  // Sink provisioned, but the daemon install fails: the machine is enrolled and
-  // told to finish with 'hyp daemon install'. No daemon runs yet, so - like the
-  // --no-daemon fork - the picker must still run before we return (the pre-281
-  // pre-provision picker covered this path; the reordering must not drop it).
   const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 3 }))
   let waited = false
   const waitForAttach = /** @type {any} */ (async () => { waited = true; return [] })
-  /** @type {any} */
-  let pickerArgs = null
-  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
-    pickerArgs = args
+  let pickerCalled = false
+  const picker = /** @type {any} */ (async () => {
+    pickerCalled = true
     return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
   })
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, picker })
   assert.equal(code, 3)
   assert.equal(waited, false) // still does not wait for attach on a failed install
-  assert.ok(pickerArgs, 'the picker must run on the daemon-install-failure path')
-  assert.equal(pickerArgs.listCandidates, undefined) // cache as-is, no injected list
+  assert.equal(pickerCalled, false)
+  assert.match(err.join(''), /hyp ignore --local-only/)
   assert.match(err.join(''), /the daemon install did not finish/)
 })
 
@@ -936,16 +866,14 @@ test('a query-only login (no gateway credential minted) never invokes the local-
   assert.equal(pickerCalled, false)
 })
 
-test('a real (non-injected) picker on a non-TTY login completes the browser flow unchanged (LLP 0072 #tty)', async () => {
+test('default wiring (no injected picker) completes the browser flow unchanged while suspended (LLP 0094)', async () => {
   const hypHome = await tmpHome()
-  // makeCtx's stderr has no `isTTY`, so the default-wired real picker cannot
-  // reach an interactive prompt here; it must resolve to a no-op.
   const { ctx, out } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
 
-  // No `picker` dep supplied: exercises the real `runLocalOnlyPicker` wired
-  // by `runRemoteLogin`'s defaults. The login must complete exactly as it
-  // did before this wiring existed.
+  // No `picker` dep supplied: exercises `runRemoteLogin`'s defaults. With the
+  // trigger suspended the real `runLocalOnlyPicker` is never reached; the
+  // login must complete exactly as it did before the wiring existed.
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
   assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
@@ -956,9 +884,9 @@ test('a real (non-injected) picker on a non-TTY login completes the browser flow
   assert.doesNotMatch(out.join(''), /capturing /)
 })
 
-test('a re-login (already-enrolled, re-seed path) still shows the local-only picker', async () => {
+test('a re-login (already-enrolled, re-seed path) prints the durable hint instead of the picker (LLP 0094)', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out } = await makeCtx({
+  const { ctx, out, err } = await makeCtx({
     hypHome,
     sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
   })
@@ -971,7 +899,8 @@ test('a re-login (already-enrolled, re-seed path) still shows the local-only pic
 
   const code = await runRemoteLogin(['prod'], ctx, { login, picker })
   assert.equal(code, 0)
-  assert.equal(pickerCalled, true)
+  assert.equal(pickerCalled, false)
+  assert.match(err.join(''), /hyp ignore --local-only/)
   assert.match(out.join(''), /seeded forwarding identity for sink 'fwd'/)
 })
 
@@ -980,8 +909,9 @@ test('a re-login (already-enrolled, re-seed path) still shows the local-only pic
  * boots before enrollment, so on a first-run box its query-registry snapshot
  * never registers `ai_gateway_messages` (the org config pull that enables
  * @hypaware/ai-gateway happens after enrollCentralSink installs the daemon).
- * The capture wait must poll through a refreshed registry, not the stale
- * snapshot whose enumeration can only ever fail to null.
+ * While the picker trigger is suspended (LLP 0094) the login never invokes
+ * the refresh; the direct unit tests below keep pinning the helper's
+ * contract for when the trigger returns.
  * ------------------------------------------------------------------------ */
 
 /** A minimal query-registry stub: knows exactly the given dataset names. */
@@ -989,59 +919,25 @@ function registryStub(/** @type {string[]} */ names) {
   return { getDataset: (/** @type {string} */ n) => (names.includes(n) ? { name: n } : undefined) }
 }
 
-test('a fresh enroll refreshes the capture registry and polls through its enumeration (issue #281 follow-up)', async () => {
+test('a fresh enroll never boots a refresh kernel nor polls the capture wait while suspended (LLP 0094)', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })
   ctx.stderr.isTTY = true
-  // The pre-enroll boot snapshot: no plugins, no dataset.
+  // The pre-enroll boot snapshot: no plugins, no dataset - the exact box the
+  // refresh existed for.
   ctx.query = registryStub([])
   const login = /** @type {any} */ (async () => gatewaySession())
   const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
   const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+  let freshenCalled = false
+  const freshen = /** @type {any} */ (async () => { freshenCalled = true; return null })
+  let capturedCalled = false
+  const waitForCaptured = /** @type {any} */ (async () => { capturedCalled = true; return [] })
 
-  let disposed = false
-  const freshEnumerate = async () => [{ cwd: '/work/proj', repoRoot: '/work/proj', rows: 42, lastSeen: '2026-07-08' }]
-  const freshen = /** @type {any} */ (async () => ({ enumerate: freshEnumerate, dispose: async () => { disposed = true } }))
-
-  /** @type {any} */ let waitOpts = null
-  const waitForCaptured = /** @type {any} */ (async (/** @type {any} */ opts) => {
-    waitOpts = opts
-    return opts.enumerate ? opts.enumerate() : null
-  })
-
-  let pickerSawCount = -1
-  let disposedWhenPickerRan = /** @type {boolean | null} */ (null)
-  const picker = /** @type {any} */ (async (/** @type {any} */ args) => {
-    disposedWhenPickerRan = disposed
-    const list = args.listCandidates ? await args.listCandidates() : null
-    pickerSawCount = Array.isArray(list) ? list.length : -1
-    return { outcome: 'none', candidateCount: pickerSawCount, selectedCount: 0, excludedDirs: [] }
-  })
-
-  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker, freshen })
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, freshen })
   assert.equal(code, 0)
-  assert.equal(waitOpts.enumerate, freshEnumerate, 'the capture wait must poll the refreshed enumeration, not the stale snapshot')
-  assert.equal(pickerSawCount, 1, 'the picker must see the candidates the refreshed registry enumerated')
-  assert.equal(disposedWhenPickerRan, false, 'the fresh kernel must stay alive while the picker uses its candidates')
-  assert.equal(disposed, true, 'the fresh kernel must be disposed before the login returns')
-})
-
-test('a failed registry refresh (null) falls back to the boot snapshot and never breaks the login', async () => {
-  const hypHome = await tmpHome()
-  const { ctx, out } = await makeCtx({ hypHome })
-  ctx.stderr.isTTY = true
-  const login = /** @type {any} */ (async () => gatewaySession())
-  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
-  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
-  const freshen = /** @type {any} */ (async () => null)
-  /** @type {any} */ let waitOpts = null
-  const waitForCaptured = /** @type {any} */ (async (/** @type {any} */ opts) => { waitOpts = opts; return null })
-  const picker = /** @type {any} */ (async () => ({ outcome: 'enumeration_failed', candidateCount: 0, selectedCount: 0, excludedDirs: [] }))
-
-  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker, freshen })
-  assert.equal(code, 0)
-  assert.equal(waitOpts.enumerate, undefined, 'a null refresh keeps the wait on its default (snapshot) enumeration')
-  assert.match(out.join(''), /capturing @hypaware\/claude/)
+  assert.equal(freshenCalled, false, 'no second kernel boot is paid for a prompt that will not show (LLP 0094)')
+  assert.equal(capturedCalled, false)
 })
 
 test('freshenCaptureEnumeration is a no-op when the boot snapshot already has the dataset (re-login on a populated box)', async () => {
@@ -1129,10 +1025,10 @@ test('freshenCaptureEnumeration with the REAL bootKernel enumerates through a da
 })
 
 /* --------------------------------------------------------------------------
- * Pick-pending export hold (LLP 0093): the fresh-enroll fork writes the
- * marker before enrollCentralSink, holds it through the pick, and clears it
- * on every exit path, so the daemon's first backfill cannot forward rows the
- * user is about to withhold.
+ * Pick-pending export hold (LLP 0093), dormant while the picker trigger is
+ * suspended (LLP 0094): with no pending pick there is nothing to guard, so
+ * no login fork writes the marker. The sink-driver hold and TTL behavior
+ * stay covered by their own tests for when the trigger returns.
  * ------------------------------------------------------------------------ */
 
 /** @param {string} hypHome */
@@ -1145,7 +1041,7 @@ async function markerExists(hypHome) {
   return fs.access(markerPathFor(hypHome)).then(() => true, () => false)
 }
 
-test('a fresh enroll writes the pick-pending marker before enroll, holds it through the pick, and clears it on return (LLP 0093)', async () => {
+test('a fresh enroll never writes the pick-pending marker while the picker is suspended (LLP 0094)', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })
   ctx.stderr.isTTY = true
@@ -1157,23 +1053,14 @@ test('a fresh enroll writes the pick-pending marker before enroll, holds it thro
     return { provisioned: true, daemonCode: 0 }
   })
   const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
-  const waitForCaptured = /** @type {any} */ (async () => [{ cwd: '/work/proj' }])
-  const freshen = /** @type {any} */ (async () => null)
 
-  let markerAtPick = /** @type {boolean | null} */ (null)
-  const picker = /** @type {any} */ (async () => {
-    markerAtPick = await markerExists(hypHome)
-    return { outcome: 'selected', candidateCount: 1, selectedCount: 1, excludedDirs: ['/work/proj'] }
-  })
-
-  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, waitForCaptured, picker, freshen })
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0)
-  assert.equal(markerAtEnroll, true, 'the marker must land BEFORE enrollCentralSink, so no daemon tick can beat it onto disk')
-  assert.equal(markerAtPick, true, 'the hold must persist through the pick itself')
-  assert.equal(await markerExists(hypHome), false, 'the hold is released once the login returns')
+  assert.equal(markerAtEnroll, false, 'with no pending pick there is nothing to guard (LLP 0094)')
+  assert.equal(await markerExists(hypHome), false)
 })
 
-test('a fresh enroll whose enrollment throws still clears the pick-pending marker (LLP 0093)', async () => {
+test('a fresh enroll whose enrollment throws leaves no pick-pending marker behind (LLP 0093/0094)', async () => {
   const hypHome = await tmpHome()
   const { ctx } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
@@ -1181,20 +1068,7 @@ test('a fresh enroll whose enrollment throws still clears the pick-pending marke
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll })
   assert.equal(code, 1)
-  assert.equal(await markerExists(hypHome), false, 'an error exit must not leave the export hold to its TTL')
-})
-
-test('a non-TTY fresh enroll clears the marker as soon as the picker no-ops (LLP 0093)', async () => {
-  const hypHome = await tmpHome()
-  const { ctx } = await makeCtx({ hypHome })
-  const login = /** @type {any} */ (async () => gatewaySession())
-  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
-  const waitForAttach = /** @type {any} */ (async () => [])
-  const picker = /** @type {any} */ (async () => ({ outcome: 'non_tty', candidateCount: 0, selectedCount: 0, excludedDirs: [] }))
-
-  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach, picker })
-  assert.equal(code, 0)
-  assert.equal(await markerExists(hypHome), false)
+  assert.equal(await markerExists(hypHome), false, 'no marker is written while suspended, and none may be left behind')
 })
 
 test('a re-login (already-enrolled, re-seed path) never writes the pick-pending marker (LLP 0093)', async () => {
@@ -1205,26 +1079,7 @@ test('a re-login (already-enrolled, re-seed path) never writes the pick-pending 
   })
   const login = /** @type {any} */ (async () => gatewaySession())
 
-  let markerAtPick = /** @type {boolean | null} */ (null)
-  const picker = /** @type {any} */ (async () => {
-    markerAtPick = await markerExists(hypHome)
-    return { outcome: 'no_candidates', candidateCount: 0, selectedCount: 0, excludedDirs: [] }
-  })
-
-  const code = await runRemoteLogin(['prod'], ctx, { login, picker })
+  const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
-  assert.equal(markerAtPick, false, 'a re-login edits a list whose daemon already forwards; no hold is written')
   assert.equal(await markerExists(hypHome), false)
-})
-
-test('a non-cancellation picker error is warned and never breaks enrollment', async () => {
-  const hypHome = await tmpHome()
-  const { ctx, out, err } = await makeCtx({ hypHome })
-  const login = /** @type {any} */ (async () => gatewaySession())
-  const picker = /** @type {any} */ (async () => { throw new Error('corrupt local-only list') })
-
-  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, picker })
-  assert.equal(code, 0)
-  assert.match(err.join(''), /could not run the local-only directory picker.*corrupt local-only list/)
-  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
 })
