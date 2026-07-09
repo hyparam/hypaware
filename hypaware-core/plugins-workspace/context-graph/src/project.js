@@ -14,7 +14,7 @@ import {
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
- * @import { Contract, GraphRow } from './types.js'
+ * @import { Contract, ContractRule, GraphRow, RulePredicate } from './types.js'
  */
 
 /**
@@ -52,7 +52,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
        * one-query-per-rule order.
        *
        * @param {Record<string, unknown>} row
-       * @param {import('./types.js').ContractRule[]} rules
+       * @param {ContractRule[]} rules
        */
       const applyRules = (row, rules) => {
         for (const rule of rules) {
@@ -107,7 +107,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         // rule pairs sharing a query (a surface's node + edge rule) cost one
         // scan. Their SQL already selects the rowFilter's columns (registry
         // enforced), so the filter applies here too.
-        /** @type {Map<string, import('./types.js').ContractRule[]>} */
+        /** @type {Map<string, ContractRule[]>} */
         const bySql = new Map()
         for (const rule of raw) {
           const sql = /** @type {string} */ (rule.sql)
@@ -213,12 +213,12 @@ async function dedupExisting(rows, idCol, dataset, query, storage, config) {
  * semantics: every clause must hold, and a null or absent column never
  * matches (`WHERE col = 'x'` skips null rows; so does this).
  *
- * @param {import('./types.js').RulePredicate} where
+ * @param {RulePredicate} where
  * @param {Record<string, unknown>} row
  * @returns {boolean}
  * @ref LLP 0096#decision [implements]: eq/in/likePrefix only, AND-composed, null never matches
  */
-function matchesPredicate(where, row) {
+export function matchesPredicate(where, row) {
   if (where.eq) {
     for (const [col, value] of Object.entries(where.eq)) {
       if (row[col] !== value) return false
@@ -244,7 +244,7 @@ function matchesPredicate(where, row) {
  * no rule's `columns` lists them (a rule may filter on a column `toRow`
  * never touches).
  *
- * @param {import('./types.js').RulePredicate | undefined} where
+ * @param {RulePredicate | undefined} where
  * @returns {string[]}
  */
 function predicateColumns(where) {

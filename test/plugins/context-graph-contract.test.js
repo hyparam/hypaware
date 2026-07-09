@@ -161,6 +161,34 @@ test('contract registry validates rowFilter, and raw sql must select its columns
   const raw = { kind: 'node', type: 'T', sql: 'SELECT a FROM x', toRow: () => null }
   assert.throws(() => reg.register(sampleContract({ name: 'y', rules: [raw], rowFilter: filter })), /raw sql must select rowFilter column 'attributes'/)
   reg.register(sampleContract({ name: 'z', rules: [{ ...raw, sql: 'SELECT attributes, a FROM x' }], rowFilter: filter }))
+
+  // The guard checks the SELECT projection list, not a loose substring: the
+  // column named in a WHERE clause, or a different column whose name merely
+  // contains it, is not projected and must be rejected.
+  const notProjected = [
+    'SELECT a FROM x WHERE attributes IS NOT NULL',
+    'SELECT other_attributes FROM x',
+    'SELECT a FROM x WHERE b IN (SELECT attributes FROM y)',
+  ]
+  for (const sql of notProjected) {
+    assert.throws(
+      () => reg.register(sampleContract({ name: 'n', rules: [{ ...raw, sql }], rowFilter: filter })),
+      /raw sql must select rowFilter column 'attributes'/,
+      sql
+    )
+  }
+
+  // Projection forms that do provably carry the column are accepted: a
+  // qualified reference, an alias, and a wildcard.
+  const projected = [
+    'SELECT x.attributes, a FROM x',
+    'SELECT foo AS attributes, a FROM x',
+    'SELECT * FROM x',
+    'SELECT x.* FROM x',
+  ]
+  projected.forEach((sql, i) => {
+    reg.register(sampleContract({ name: `p${i}`, rules: [{ ...raw, sql }], rowFilter: filter }))
+  })
 })
 
 test('contract registry rejects a duplicate (plugin, name)', () => {
