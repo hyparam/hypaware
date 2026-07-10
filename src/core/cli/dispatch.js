@@ -737,7 +737,7 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
  * @param {string} token
- * @returns {Promise<{ token: string, plugin: PluginName, state: InactiveState } | undefined>}
+ * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' } | undefined>}
  */
 async function findInactivePluginForCommand(discovery, token) {
   if (typeof token !== 'string' || token.length === 0 || token.startsWith('-')) return undefined
@@ -767,10 +767,6 @@ async function findInactivePluginForCommand(discovery, token) {
 }
 
 /**
- * @typedef {'absent' | 'disabled-local' | 'disabled-central'} InactiveState
- */
-
-/**
  * Classify *why* an in-pool plugin is inactive, so the dispatch-miss repair
  * line can advise the right fix. A plugin lands in the pool-but-not-selected
  * set for two config reasons: it is simply absent from the effective
@@ -785,7 +781,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * @ref LLP 0099#decision [implements]: absent vs disabled, and local vs central for the disabled case
  * @param {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>>} layered
  * @param {PluginName} name
- * @returns {InactiveState}
+ * @returns {'absent' | 'disabled-local' | 'disabled-central'}
  */
 function classifyInactiveState(layered, name) {
   const effectiveEntry = (layered.effective?.plugins ?? []).find((p) => p.name === name)

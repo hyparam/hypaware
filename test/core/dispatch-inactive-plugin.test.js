@@ -79,11 +79,14 @@ test('dispatch miss on an inactive bundled plugin command reports unavailable + 
     stderr.text(),
     /^hyp: 'graph' is provided by @hypaware\/context-graph, which is not in the active config$/m
   )
-  assert.match(
-    stderr.text(),
-    /^ {2}repair: add \{"name": "@hypaware\/context-graph"\} to plugins\[\] in /m
-  )
-  assert.match(stderr.text(), new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  // Byte-exact: the repair line is the LLP 0098-pinned wording (issue #294),
+  // so any drift in the exact phrasing must fail this test rather than slip
+  // past a prefix/regex match.
+  const repairLine = stderr
+    .text()
+    .split('\n')
+    .find((line) => line.startsWith('  repair:'))
+  assert.equal(repairLine, `  repair: add {"name": "@hypaware/context-graph"} to plugins[] in ${configPath}`)
   // It must NOT fall back to the generic message.
   assert.equal(stderr.text().includes('unknown command'), false)
 })
