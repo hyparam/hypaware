@@ -2,6 +2,7 @@
 
 import { createRequire } from 'node:module'
 import process from 'node:process'
+import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 
@@ -28,7 +29,7 @@ import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synt
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, CommandRegistration, CommandRegistry, CommandRunContext, HypAwareV2Config, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  */
@@ -234,8 +235,25 @@ export async function dispatch(argv, opts = {}) {
       }
       return group.unknownSub !== undefined ? 2 : 0
     }
-    stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
-    stderr.write(`run 'hyp --help' for the list of available commands\n`)
+    // Not a group either. Before the generic "unknown command", see whether
+    // the leading token exactly names a command declared by a plugin that is
+    // bundled/installed but NOT active in the effective config. If so the
+    // command is *unavailable*, not unknown: report which plugin provides it
+    // and how to enable it, instead of implying the feature does not exist. A
+    // genuine typo matches nothing here and still gets the generic message.
+    // @ref LLP 0098#decision [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
+    const inactive = await findInactivePluginForCommand(helpDiscovery, argv[0])
+    if (inactive) {
+      stderr.write(
+        `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
+      )
+      stderr.write(
+        `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
+      )
+    } else {
+      stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
+      stderr.write(`run 'hyp --help' for the list of available commands\n`)
+    }
     if (ownsKernel) {
       await stopBootStartedSources(kernel)
     }
@@ -615,46 +633,16 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
  * @returns {Promise<{ name: string, summary: string }[]>}
  * @ref LLP 0005#declarative [implements]: manifest lists commands before any plugin code is loaded
  */
-async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }) {
+async function collectPluginHelpCommands(discovery) {
   try {
-    const [bundled, installed] = await Promise.all([
-      discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {}),
-      discoverInstalledPlugins({ stateDir: stateRoot }),
-    ])
-    // Resolve the effective config the SAME way `bootKernel` does: with
-    // the discovered plugin catalog. Without it the merge validator treats
-    // every bundled plugin as unknown and drops local `plugins[]` additions
-    // (e.g. `@hypaware/context-graph`) from a fleet-joined host's effective
-    // config, so help would hide commands that actually dispatch.
-    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
-    const merged = await resolveLayeredConfigFromDisk({
-      stateRoot,
-      configPath,
-      knownPlugins: catalog.pluginMetadata,
-      knownDatasets: catalog.knownDatasets,
-    })
-
-    // Reuse boot's plugin SELECTION (the same pure computation `bootKernel`
-    // runs) so help lists only the manifests dispatch would actually
-    // activate. Dispatch boots ordinary commands with the `config` profile,
-    // so select with it too. This replicates the two boot selection rules a
-    // hand-rolled pool would miss: an installed plugin that *shadows* a
-    // bundled first-party name (boot rejects; nothing dispatches) and an
-    // installed plugin that *replaces* a same-named excluded bundled
-    // skeleton (its commands win, the skeleton's don't).
-    const { shadowing, selectedManifests } = selectBootPlugins({
-      discovered: bundled,
-      installed,
-      config: merged.effective,
-      bootProfile: 'config',
-    })
+    const selection = await computeBootSelection(discovery)
     // A shadow collision makes real boot throw before any command
     // dispatches; advertise no plugin commands rather than ones boot rejects.
-    if (shadowing.length > 0) return []
+    if (!selection || selection.shadowing.length > 0) return []
 
     /** @type {Map<string, { name: string, summary: string }>} */
     const out = new Map()
-    for (const entry of selectedManifests) {
+    for (const entry of selection.selectedManifests) {
       for (const cmd of entry.manifest.contributes?.commands ?? []) {
         if (!cmd || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
         out.set(cmd.name, {
@@ -669,4 +657,103 @@ async function collectPluginHelpCommands({ workspaceDir, stateRoot, configPath }
     // core commands only.
     return []
   }
+}
+
+/**
+ * Run boot's cheap discovery + plugin SELECTION without activating anything.
+ * Both the pre-boot `--help` synthesis and the dispatch-miss availability
+ * check need the exact plugin set (and its manifests) that a `config`-profile
+ * boot would activate, split from what it would leave inactive.
+ *
+ * Resolves the effective config the SAME way `bootKernel` does: with the
+ * discovered plugin catalog. Without the catalog the merge validator treats
+ * every bundled plugin as unknown and drops local `plugins[]` additions
+ * (e.g. `@hypaware/context-graph`) from a fleet-joined host's effective
+ * config. Then reuses the pure `selectBootPlugins` computation, so the caller
+ * sees exactly the pool/selection dispatch would (including the shadow and
+ * excluded-skeleton-vs-installed rules a hand-rolled pool would miss).
+ *
+ * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
+ * @returns {Promise<ReturnType<typeof selectBootPlugins>>}
+ */
+async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
+  const [bundled, installed] = await Promise.all([
+    discoverBundledPlugins(workspaceDir !== undefined ? { workspaceDir } : {}),
+    discoverInstalledPlugins({ stateDir: stateRoot }),
+  ])
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
+  const merged = await resolveLayeredConfigFromDisk({
+    stateRoot,
+    configPath,
+    knownPlugins: catalog.pluginMetadata,
+    knownDatasets: catalog.knownDatasets,
+  })
+  return selectBootPlugins({
+    discovered: bundled,
+    installed,
+    config: merged.effective,
+    bootProfile: 'config',
+  })
+}
+
+/**
+ * On a top-level dispatch miss, resolve whether `token` exactly names the
+ * leading command word declared by a plugin that is bundled or installed but
+ * NOT active in the effective config. Returns the owning plugin so the caller
+ * can say "unavailable, here's how to enable it" instead of "unknown".
+ *
+ * Exact match ONLY: `token` must equal the first word of a declared command
+ * name (`graph` for `graph project`). A typo matches nothing and falls
+ * through to the generic unknown-command message. Active plugins never reach
+ * here for their own commands: those matched `registry.match`/group help
+ * above, so at the miss path `token` is unowned by any active or core command.
+ *
+ * Best-effort and cheap: the same manifest discovery `--help` already runs,
+ * wrapped so any failure (missing workspace, unreadable config) degrades to
+ * "no suggestion" rather than corrupting the error path.
+ *
+ * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
+ * @param {string} token
+ * @returns {Promise<{ token: string, plugin: string } | undefined>}
+ */
+async function findInactivePluginForCommand(discovery, token) {
+  if (typeof token !== 'string' || token.length === 0 || token.startsWith('-')) return undefined
+  try {
+    const selection = await computeBootSelection(discovery)
+    // A shadow collision makes real boot throw; there is no dispatchable
+    // command set to reason about, so offer no suggestion.
+    if (selection.shadowing.length > 0) return undefined
+    // Inactive = in the boot pool but not selected for a `config` boot. Walk
+    // in pool order (bundled, then excluded, then installed) so the first
+    // declaring plugin wins a head-token collision, matching boot's own
+    // first-writer precedence.
+    for (const entry of selection.pool) {
+      const name = /** @type {PluginName} */ (entry.manifest.name)
+      if (selection.selected.has(name)) continue
+      for (const cmd of entry.manifest.contributes?.commands ?? []) {
+        if (!cmd || typeof cmd.name !== 'string') continue
+        if (cmd.name.split(' ')[0] === token) return { token, plugin: name }
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Render a config path for the repair line, collapsing the user's home
+ * directory to `~` so the hint reads like the documented default
+ * (`~/.hyp/hypaware-config.json`) rather than an absolute machine path.
+ *
+ * @param {string} configPath
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+function displayConfigPath(configPath, env) {
+  const home = env.HOME ?? os.homedir()
+  if (home && (configPath === home || configPath.startsWith(home + path.sep))) {
+    return `~${configPath.slice(home.length)}`
+  }
+  return configPath
 }
