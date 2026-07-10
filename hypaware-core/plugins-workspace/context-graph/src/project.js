@@ -81,6 +81,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         // longer multiplies table scans, and the contract row filter runs
         // once per row instead of once per rule per row.
         // @ref LLP 0096#decision [implements]: one scan per contract; JS predicates with SQL null semantics; rowFilter once per row
+        // @ref LLP 0095 [implements]: this shared scan is the read-amplification fix - rule count no longer multiplies table scans
         if (declarative.length > 0) {
           const columns = new Set()
           for (const rule of declarative) {
