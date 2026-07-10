@@ -1,10 +1,14 @@
 # Visual system & component vocabulary
 
 Reference for `hypaware-report-to-html`. The look of every rendered report is carried by
-`assets/style.css` (a self-contained **data-report** system: Space Grotesk for headings and
-numbers, a warm-neutral palette with `--accent`/`--good`/`--warn`/`--crit` semantic colors,
-tabular figures, `prefers-color-scheme` dark mode, and a print stylesheet) plus the raw-HTML
+`assets/style.css` (a self-contained **data-report** system: system type, hairline rules,
+`--accent`/`--good`/`--warn`/`--crit` semantic colors reserved for judgment, tabular
+figures, `prefers-color-scheme` dark mode, and a print stylesheet) plus the raw-HTML
 components below. No build-time tokens — just reference the stylesheet.
+
+The register is a professional internal report, not a product page: color appears on
+numbers, text, and thin rules rather than tinted backgrounds; charts are flat; there are
+no webfonts, gradients, shadows, or hover animations. Keep that restraint when restyling.
 
 **Two things are automatic**, no author markup needed:
 
@@ -151,6 +155,9 @@ a `.rec-stats` row, and a `.rec-go` call to action.
 - **A composition** (errors by type, tokens by tier) → a `barchart`, or a `stackbar` when
   the parts sum to a whole. Widths are percentages you compute; name the axis in
   `chart-title`, the takeaway in `chart-foot`.
+- **A per-entity rollup** (one row per user/gateway, team, repo, or model) → always a
+  `barchart` or `stackbar` alongside the table. By-user and by-team breakdowns are the
+  charts readers come to a usage or spend report for; don't leave them table-only.
 - **A single rate that *is* the story** (fail %, share %) → a `gauge`.
 - **A risk, caveat, or "already solved, don't chase it" aside** → a `callout`.
 - Keep the detailed source table **as well** when the numbers matter — the chart is the
@@ -163,6 +170,12 @@ Regenerated from the report set on every run (SKILL.md step 4). Uses the shared 
 and the `rec` card vocabulary so it matches the reports. List **every** built report,
 newest first; link each by explicit `html/<slug>/index.html` (a bare directory URL breaks
 under `file://`).
+
+The landing page is an **at-a-glance dashboard, not a table of contents**: each card
+carries the report's own headline numbers, hoisted from the top of that report's
+`metric-grid`, with no summary prose. A reader should get the fleet's state (and its
+trajectory, where a report states one) from the landing page alone, before opening
+anything.
 
 ```html
 <!DOCTYPE html>
@@ -181,8 +194,14 @@ under `file://`).
 <div class="rec-list">
   <!-- one card per report, newest first -->
   <a class="rec" href="html/<slug>/index.html" style="padding-left:1.4rem">
+    <p class="rec-kind">&lt;server · window, e.g. HYP_CENTRAL fleet · 30-day view&gt;</p>
     <h3>&lt;Title&gt;</h3>
-    <p>&lt;short scope / one-line summary&gt;</p>
+    <div class="rec-stats">
+      <!-- the report's top 3-4 metric-grid tiles, re-rendered as stats -->
+      <div class="rec-stat crit"><b>&lt;value&gt;</b><span>&lt;2-4 word label&gt;</span></div>
+      <div class="rec-stat warn"><b>&lt;value&gt;</b><span>&lt;2-4 word label&gt;</span></div>
+      <div class="rec-stat good"><b>&lt;value&gt;</b><span>&lt;2-4 word label&gt;</span></div>
+    </div>
     <p class="rec-go">open report →</p>
   </a>
 </div>
@@ -195,5 +214,16 @@ under `file://`).
 </html>
 ```
 
-Curate the per-report scope wording here — `index.html` is generated and overwritten each
-run, so edits made directly to the file won't survive.
+Per-card rules:
+
+- **Stats come from the report's `metric-grid`** (step 3 guarantees every report has one).
+  Take the first 3-4 tiles in source order, keep each value and judgment exactly
+  (`is-crit` → `crit`, `is-warn` → `warn`, `is-good` → `good`, neutral → no class),
+  compress the tile's label to 2-4 words, and drop the tile's note. Never recompute or
+  re-judge a number here; the card is a projection of the report, not a new analysis.
+- **No summary sentence.** The card is kicker + title + stats + `rec-go` only. The scope
+  line (`*Source: … · Window: …*` or the `## <server> · <window>` subtitle) becomes the
+  `rec-kind` kicker, trimmed to a short phrase.
+
+`index.html` is generated and overwritten each run, so edits made directly to the file
+won't survive.
