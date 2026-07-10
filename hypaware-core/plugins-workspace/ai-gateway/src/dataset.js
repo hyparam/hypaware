@@ -168,13 +168,35 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  */
 function withSchemaColumns(source) {
   const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
-  return {
+  /** @type {AsyncDataSource} */
+  const wrapped = {
     columns,
     numRows: source.numRows,
     scan(options) {
       return source.scan(options)
     },
   }
+  // Forward the column-stream hook so single-column aggregates stay on the
+  // engine's streaming fast path. A partition that physically lacks the
+  // requested column (the additive schema-drift case this wrapper exists
+  // for) surfaces its values as `undefined` holes in the chunk; normalize
+  // them to null, the same "this partition predates the column" value the
+  // row path reads, so accumulators see one representation either way.
+  // @ref LLP 0055 [implements]: withSchemaColumns forwards scanColumn; a partition lacking the column yields nulls, never throws
+  if (typeof source.scanColumn === 'function') {
+    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+    wrapped.scanColumn = (options) => ({
+      async *[Symbol.asyncIterator]() {
+        for await (const chunk of scanColumn(options)) {
+          for (let i = 0; i < chunk.length; i++) {
+            if (chunk[i] === undefined) /** @type {unknown[]} */ (chunk)[i] = null
+          }
+          yield chunk
+        }
+      },
+    })
+  }
+  return wrapped
 }
 
 /**

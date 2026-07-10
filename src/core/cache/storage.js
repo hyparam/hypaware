@@ -29,7 +29,7 @@ import path from 'node:path'
  * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncCells } from 'squirreling'
+ * @import { AsyncDataSource } from 'squirreling'
  */
 
 /**
@@ -303,34 +303,40 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async dataSourceForTable(tablePath) {
       const source = await dataSourceForTable(resolveIcebergDir(tablePath))
       if (!source) return null
-      return {
+      const publicColumns = source.columns.filter((c) => !INTERNAL_FIELDS.includes(c))
+      /** @type {AsyncDataSource} */
+      const wrapped = {
         numRows: source.numRows,
-        columns: source.columns.filter((c) => !INTERNAL_FIELDS.includes(c)),
+        columns: publicColumns,
         scan(options) {
-          const inner = source.scan({
-            ...options,
-            columns: options.columns?.filter((c) => !INTERNAL_FIELDS.includes(c)),
-          })
+          // Internal fields are hidden by PROJECTION, not by rebuilding every
+          // row: the inner scan is always given an explicit column list with
+          // the internal fields already stripped (the advertised public set
+          // when the caller asked for everything), so the rows it yields never
+          // carry an internal column and can be passed through untouched. The
+          // previous per-row rebuild (filter columns, re-key cells, re-spread
+          // resolved) allocated ~5 objects per row on every query, which
+          // dominated scan-side garbage on large datasets.
+          const requested = options?.columns
+          const columns = requested
+            ? requested.filter((c) => !INTERNAL_FIELDS.includes(c))
+            : publicColumns
+          const inner = source.scan({ ...options, columns })
           return {
             appliedWhere: inner.appliedWhere,
             appliedLimitOffset: inner.appliedLimitOffset,
-            async *rows() {
-              for await (const row of inner.rows()) {
-                const filteredColumns = row.columns.filter((c) => !INTERNAL_FIELDS.includes(c))
-                const filteredResolved = row.resolved
-                  ? Object.fromEntries(Object.entries(row.resolved).filter(([k]) => !INTERNAL_FIELDS.includes(k)))
-                  : undefined
-                /** @type {AsyncCells} */
-                const filteredCells = {}
-                for (const col of filteredColumns) {
-                  if (row.cells && col in row.cells) filteredCells[col] = row.cells[col]
-                }
-                yield { ...row, columns: filteredColumns, cells: filteredCells, resolved: filteredResolved }
-              }
-            },
+            rows: () => inner.rows(),
           }
         },
       }
+      // @ref LLP 0055 [implements]: forward the column-stream hook so the
+      // engine's streaming-aggregate fast path stays lit through the storage
+      // wrapper; internal fields are not advertised, so the engine can never
+      // request one here.
+      if (typeof source.scanColumn === 'function') {
+        wrapped.scanColumn = (options) => /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)(options)
+      }
+      return wrapped
     },
 
     async flushTable(tablePath, opts = {}) {

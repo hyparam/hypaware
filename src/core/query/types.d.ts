@@ -36,6 +36,17 @@ export interface ExecuteSqlOptions {
   scope?: QueryScope
   refresh?: RefreshMode
   log?: PluginLogger
+  /** Caller-supplied cancellation; linked into the signal the engine and data sources observe. */
+  signal?: AbortSignal
+  /**
+   * Execution memory budget: the query is refused (typed
+   * QueryExecutionBudgetError) once its sampled process-heap growth exceeds
+   * this many bytes. 0 disables the bound. Distinct from ContextControls,
+   * which cap display/output bytes after materialization; this bounds the
+   * execution itself. Defaults to the kernel ceiling (overridable with
+   * HYP_QUERY_MAX_HEAP_MB).
+   */
+  maxHeapBytes?: number
 }
 
 export interface ExecuteSqlResult {
