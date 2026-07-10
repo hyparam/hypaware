@@ -61,10 +61,18 @@ export class QueryExecutionBudgetError extends Error {
  * @param {number | undefined} optionBytes
  * @returns {number}
  */
-function resolveHeapBudgetBytes(optionBytes) {
+export function resolveHeapBudgetBytes(optionBytes) {
   if (optionBytes !== undefined) return optionBytes
-  const env = Number(process.env.HYP_QUERY_MAX_HEAP_MB)
-  if (Number.isFinite(env)) return env * 1024 * 1024
+  // A set-but-blank var (`export HYP_QUERY_MAX_HEAP_MB=`, how many config
+  // systems render an unset optional) must NOT silently disable the guard:
+  // Number('') and Number('  ') are 0 (finite), which reads as "disabled".
+  // Only a non-empty value counts as an override; anything else (unset or
+  // blank) falls through to the measured default.
+  const raw = process.env.HYP_QUERY_MAX_HEAP_MB?.trim()
+  if (raw) {
+    const env = Number(raw)
+    if (Number.isFinite(env)) return env * 1024 * 1024
+  }
   return DEFAULT_MAX_HEAP_GROWTH_BYTES
 }
 
@@ -233,10 +241,19 @@ export async function executeQuerySql(args) {
         // @ref LLP 0097 [implements]: heap-growth watchdog enforces the execution budget from the kernel while buffered-byte accounting stays an engine follow-up
         const budgetBytes = resolveHeapBudgetBytes(args.maxHeapBytes)
         const controller = new AbortController()
+        // Detach the linked-signal listener when the query settles: a
+        // long-lived upstream signal (one shared across many queries) would
+        // otherwise retain this controller closure per call.
+        /** @type {(() => void) | undefined} */
+        let removeUpstreamAbort
         if (args.signal) {
           const upstream = args.signal
           if (upstream.aborted) controller.abort(upstream.reason)
-          else upstream.addEventListener('abort', () => controller.abort(upstream.reason), { once: true })
+          else {
+            const onUpstreamAbort = () => controller.abort(upstream.reason)
+            upstream.addEventListener('abort', onUpstreamAbort, { once: true })
+            removeUpstreamAbort = () => upstream.removeEventListener('abort', onUpstreamAbort)
+          }
         }
         const baselineHeap = process.memoryUsage().heapUsed
         /** @type {QueryExecutionBudgetError | undefined} */
@@ -276,6 +293,13 @@ export async function executeQuerySql(args) {
         try {
           const results = squirrelExecuteSql({ tables, query: trimmed, signal: controller.signal })
           const rows = await collect(results)
+          // Terminal budget check: the inline guard only samples every
+          // BUDGET_CHECK_ROW_STRIDE rows (and per column chunk), and the
+          // interval watchdog cannot fire during a fully synchronous run, so
+          // growth concentrated in a sub-stride tail or in finalization would
+          // otherwise return a wrongly-successful result. One check after
+          // materialization closes that window before we record success.
+          guard.check()
           const columns = results.columns ?? []
           span.setAttribute('row_count', rows.length)
 
@@ -290,6 +314,7 @@ export async function executeQuerySql(args) {
           throw err
         } finally {
           if (watchdog) clearInterval(watchdog)
+          if (removeUpstreamAbort) removeUpstreamAbort()
         }
       } catch (err) {
         const budgeted = err instanceof QueryExecutionBudgetError

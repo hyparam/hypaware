@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { asyncRow } from 'squirreling'
-import { executeQuerySql, QueryExecutionBudgetError } from '../../src/core/query/sql.js'
+import { executeQuerySql, QueryExecutionBudgetError, resolveHeapBudgetBytes } from '../../src/core/query/sql.js'
 
 /**
  * @import { AsyncDataSource, SqlPrimitive } from 'squirreling/src/types.js'
@@ -84,6 +84,34 @@ test('a query whose heap growth exceeds the execution budget refuses with the ty
       return true
     }
   )
+})
+
+test('resolveHeapBudgetBytes resolves the effective ceiling and never disables on a blank env', () => {
+  const DEFAULT = 1024 * 1024 * 1024
+  const prev = process.env.HYP_QUERY_MAX_HEAP_MB
+  const withEnv = (/** @type {string | undefined} */ v, /** @type {() => void} */ body) => {
+    if (v === undefined) delete process.env.HYP_QUERY_MAX_HEAP_MB
+    else process.env.HYP_QUERY_MAX_HEAP_MB = v
+    body()
+  }
+  try {
+    // Explicit option always wins, including 0 (disable).
+    assert.equal(resolveHeapBudgetBytes(0), 0)
+    assert.equal(resolveHeapBudgetBytes(5 * 1024 * 1024), 5 * 1024 * 1024)
+    // Blank / whitespace-only must NOT resolve to 0 and disable the guard.
+    withEnv('', () => assert.equal(resolveHeapBudgetBytes(undefined), DEFAULT))
+    withEnv('   ', () => assert.equal(resolveHeapBudgetBytes(undefined), DEFAULT))
+    // Unset falls to the default.
+    withEnv(undefined, () => assert.equal(resolveHeapBudgetBytes(undefined), DEFAULT))
+    // Garbage falls to the default (NaN is not finite).
+    withEnv('512mb', () => assert.equal(resolveHeapBudgetBytes(undefined), DEFAULT))
+    // A real numeric override is honored, and an explicit 0 still disables.
+    withEnv('256', () => assert.equal(resolveHeapBudgetBytes(undefined), 256 * 1024 * 1024))
+    withEnv('0', () => assert.equal(resolveHeapBudgetBytes(undefined), 0))
+  } finally {
+    if (prev === undefined) delete process.env.HYP_QUERY_MAX_HEAP_MB
+    else process.env.HYP_QUERY_MAX_HEAP_MB = prev
+  }
 })
 
 test('maxHeapBytes 0 disables the budget entirely', async () => {
