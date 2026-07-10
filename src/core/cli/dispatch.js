@@ -629,7 +629,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
  * lock file) degrades to "no plugin commands" rather than failing
  * `--help`.
  *
- * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
+ * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
  * @returns {Promise<{ name: string, summary: string }[]>}
  * @ref LLP 0005#declarative [implements]: manifest lists commands before any plugin code is loaded
  */
