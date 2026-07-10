@@ -38,7 +38,8 @@ export function unionSources(sources) {
     for (const col of s.columns) allColumns.add(col)
     totalRows += s.numRows ?? 0
   }
-  return {
+  /** @type {AsyncDataSource} */
+  const union = {
     columns: Array.from(allColumns),
     numRows: totalRows,
     scan(options) {
@@ -67,6 +68,68 @@ export function unionSources(sources) {
       }
     },
   }
+  // The column-stream hook is offered only when EVERY partition can stream
+  // the column; a mixed union stays row-based so the engine's fallback owns
+  // correctness. Unlike scan(), the scanColumn contract has no
+  // appliedLimitOffset escape hatch: the source must fully honor
+  // limit/offset itself, so the union applies them over the CONCATENATED
+  // stream (they are not distributive across partitions, the same
+  // discipline scan() applies). Only the remaining-limit bound is pushed
+  // per partition, as an upper-bound optimization that can never change
+  // the result.
+  // @ref LLP 0055 [implements]: union forwards scanColumn by concatenating per-partition column streams; limit/offset apply to the merged stream
+  if (sources.every((s) => typeof s.scanColumn === 'function')) {
+    union.scanColumn = ({ column, limit, offset, signal }) => ({
+      async *[Symbol.asyncIterator]() {
+        let remainingSkip = offset ?? 0
+        let remaining = limit ?? Infinity
+        for (const source of sources) {
+          if (remaining <= 0) return
+          signal?.throwIfAborted()
+          // A known-empty or fully-skippable partition needs no stream.
+          const numRows = source.numRows
+          if (numRows !== undefined && numRows <= remainingSkip) {
+            remainingSkip -= numRows
+            continue
+          }
+          const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+          const chunks = scanColumn({
+            column,
+            // Per-partition upper bound: this partition can contribute at
+            // most the values still owed, including any skip not yet spent.
+            limit: remaining === Infinity ? undefined : remainingSkip + remaining,
+            signal,
+          })
+          for await (const chunk of chunks) {
+            signal?.throwIfAborted()
+            let start = 0
+            if (remainingSkip > 0) {
+              if (remainingSkip >= chunk.length) {
+                remainingSkip -= chunk.length
+                continue
+              }
+              start = remainingSkip
+              remainingSkip = 0
+            }
+            const end = remaining === Infinity
+              ? chunk.length
+              : Math.min(chunk.length, start + remaining)
+            if (start === 0 && end === chunk.length) {
+              yield chunk
+              remaining -= chunk.length
+            } else if (end > start) {
+              const slice = []
+              for (let i = start; i < end; i++) slice.push(chunk[i])
+              yield slice
+              remaining -= slice.length
+            }
+            if (remaining <= 0) break
+          }
+        }
+      },
+    })
+  }
+  return union
 }
 
 /**

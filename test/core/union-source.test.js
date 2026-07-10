@@ -179,6 +179,84 @@ test('unionSources tolerates a scan with no options', async () => {
   assert.deepEqual(out, [{ id: 'a1' }])
 })
 
+/**
+ * Add a recording `scanColumn` to a fake source, honoring its own
+ * limit/offset like the icebird-backed sources do (the scanColumn contract
+ * has no appliedLimitOffset escape hatch).
+ *
+ * @param {AsyncDataSource} source
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {{ column: string, limit?: number, offset?: number }[]} seenColumnScans
+ * @returns {AsyncDataSource}
+ */
+function withFakeScanColumn(source, rows, seenColumnScans) {
+  source.scanColumn = ({ column, limit, offset }) => ({
+    async *[Symbol.asyncIterator]() {
+      seenColumnScans.push({ column, limit, offset })
+      const start = offset ?? 0
+      const end = limit === undefined ? rows.length : Math.min(rows.length, start + limit)
+      if (end > start) yield rows.slice(start, end).map((r) => r[column] ?? null)
+    },
+  })
+  return source
+}
+
+test('unionSources omits scanColumn unless every partition can stream the column', () => {
+  const rows = [{ id: 'a1' }]
+  const withHook = withFakeScanColumn(fakeSource(rows, []), rows, [])
+  const withoutHook = fakeSource([{ id: 'b1' }], [])
+  assert.equal(typeof unionSources([withHook, withoutHook]).scanColumn, 'undefined', 'mixed union stays row-based')
+  assert.equal(typeof unionSources([withHook]).scanColumn, 'function')
+})
+
+test('unionSources scanColumn concatenates partitions and owns limit/offset over the merged stream', async () => {
+  /** @type {{ column: string, limit?: number, offset?: number }[]} */
+  const seen = []
+  const aRows = [{ v: 1 }, { v: 2 }, { v: 3 }]
+  const bRows = [{ v: 4 }, { v: 5 }, { v: 6 }]
+  const union = unionSources([
+    withFakeScanColumn(fakeSource(aRows, []), aRows, seen),
+    withFakeScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  /** @type {SqlPrimitive[]} */
+  const values = []
+  for await (const chunk of scanColumn({ column: 'v', offset: 2, limit: 3 })) {
+    for (let i = 0; i < chunk.length; i++) values.push(chunk[i])
+  }
+
+  // Offset/limit apply to the CONCATENATED stream: skip 1,2 then take 3.
+  assert.deepEqual(values, [3, 4, 5])
+  // Offset is never pushed per partition (not distributive); only the
+  // remaining-need upper bound is, so a partition never over-reads.
+  assert.deepEqual(seen, [
+    { column: 'v', limit: 5, offset: undefined },
+    { column: 'v', limit: 2, offset: undefined },
+  ])
+})
+
+test('unionSources scanColumn skips a whole partition its numRows proves is inside the offset', async () => {
+  /** @type {{ column: string, limit?: number, offset?: number }[]} */
+  const seen = []
+  const aRows = [{ v: 1 }, { v: 2 }]
+  const bRows = [{ v: 3 }, { v: 4 }]
+  const union = unionSources([
+    withFakeScanColumn(fakeSource(aRows, []), aRows, seen),
+    withFakeScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  /** @type {SqlPrimitive[]} */
+  const values = []
+  for await (const chunk of scanColumn({ column: 'v', offset: 3 })) {
+    for (let i = 0; i < chunk.length; i++) values.push(chunk[i])
+  }
+
+  assert.deepEqual(values, [4])
+  assert.deepEqual(seen, [{ column: 'v', limit: undefined, offset: undefined }], 'first partition never opened')
+})
+
 test('emptySource advertises the given columns and yields no rows', async () => {
   const source = emptySource(['x', 'y'])
   assert.deepEqual(source.columns, ['x', 'y'])

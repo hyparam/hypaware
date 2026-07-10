@@ -256,3 +256,44 @@ test('ai-gateway createDataSource pads declared schema columns absent from an ol
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('ai-gateway createDataSource streams scanColumn with nulls for a physically absent column', async () => {
+  // The column-stream analog of the schema-padding row test above: the
+  // engine's streaming-aggregate fast path consumes scanColumn, and a
+  // partition that predates a declared column must contribute nulls (never
+  // undefined, never a throw) so accumulators see the same value the row
+  // path reads. @ref LLP 0055
+  const cacheRoot = await makeTmpDir('scan-column')
+  try {
+    await appendRowsToSourceTable(
+      cacheRoot, DATASET_NAME, ['source=claude'],
+      TEST_COLUMNS, [{ id: 1, date: '2026-05-26' }, { id: 2, date: '2026-05-27' }]
+    )
+
+    const storage = createQueryStorageService({ cacheRoot })
+    /** @type {QueryScope} */
+    const scope = { limit: 1000 }
+    const partitions = await discoverParts({ cacheDir: cacheRoot, scope, config: { version: 2 } })
+    const source = await createDataSource(partitions, { scope, storage })
+
+    assert.equal(typeof source.scanColumn, 'function', 'the storage-backed source streams columns')
+    const scanColumn = /** @type {NonNullable<typeof source.scanColumn>} */ (source.scanColumn)
+
+    /** @type {unknown[]} */
+    const ids = []
+    for await (const chunk of scanColumn({ column: 'id' })) {
+      for (let i = 0; i < chunk.length; i++) ids.push(chunk[i])
+    }
+    assert.deepEqual([...ids].sort(), [1, 2], 'a physical column streams its values')
+
+    /** @type {unknown[]} */
+    const absent = []
+    for await (const chunk of scanColumn({ column: 'git_remote' })) {
+      for (let i = 0; i < chunk.length; i++) absent.push(chunk[i])
+    }
+    assert.equal(absent.length, 2)
+    for (const v of absent) assert.strictEqual(v, null, 'absent column streams null, not undefined')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})

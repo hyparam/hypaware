@@ -161,6 +161,10 @@ adds options to `ExecuteSqlOptions`, not a new import surface or a shim.
   `ai_gateway_messages` volume on a representative box — deferred to
   [LLP 0057](./0057-bounded-query-execution.plan.md). Until measured, ship a
   safe-low default and let operators raise it.
+  *Measured 2026-07-10; resolved by [LLP 0097](./0097-heap-growth-query-budget.decision.md),
+  which enforces the budget as sampled heap growth (default 1GiB) from the
+  kernel while per-operator buffered-row/byte accounting remains the engine
+  follow-up.*
 - **Spill-to-disk.** A future external-merge / spilling path would let large
   `ORDER BY` / `GROUP BY` **complete** instead of refusing; named as a deferred
   follow-up in [LLP 0056](./0056-refuse-over-spill-or-truncate.decision.md), not
