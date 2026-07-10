@@ -81,11 +81,19 @@ row, go-link). See the full snippet in `components.md`. The `###` heading + trai
 Stat-row discipline: 2–3 stats per card, each `<b>value</b><span>label</span>`, color
 class only when it carries judgment.
 
-## 4. Section pages — one strong visual per section
+## 4. Section pages: every claim gets a visual, breakdowns get charts
 
 Each section page opens with its own bold thesis directly under its `# ` title (hero
-fires there too), then picks **at most one or two** visuals for the evidence:
+fires there too), then gives each distinct claim **one** strong visual (typically 2-3
+per page; never two visuals restating the same numbers):
 
+- **Per-entity rollups always chart.** Any table with one row per user/gateway, team,
+  repo, or model (3+ rows) ships with a `barchart` of its leading metric, or a
+  `stackbar` when the story is share-of-total (messages or tokens by gateway, volume by
+  team). These "who" breakdowns are the charts readers come to a usage or spend report
+  for; a per-user table rendered only as a table is an under-visualized page. Chart by
+  the unit the data has (`gateway_id` ≈ one user/machine); roll up to teams only when a
+  grouping actually exists (a user-supplied mapping, cwd naming), never an invented one.
 - Composition (errors by type, tokens by contributor/tier) → `barchart`
   (widths = percent of the largest value, computed by you), or `stackbar` when parts
   sum to a whole.
@@ -132,8 +140,10 @@ are designed.
       every section page.
 - [ ] Headline numbers are a `metric-grid` with judgment colors and notes.
 - [ ] Findings on the one-pager are `rec` cards with stat rows.
-- [ ] Each section page has ≤2 purposeful visuals; source tables kept where numbers
-      matter.
+- [ ] Each section page's visuals each carry a distinct claim (typically 2-3 per page);
+      source tables kept where numbers matter.
+- [ ] Every per-entity rollup (by user/gateway, team, repo, model) has a companion
+      breakdown chart, not just a table.
 - [ ] Every headline number appears in a big-number surface (metric, gauge, stat row,
       chart) — not just bolded inline.
 - [ ] Display copy (labels, notes, tags, chart titles) is written for the surface, not

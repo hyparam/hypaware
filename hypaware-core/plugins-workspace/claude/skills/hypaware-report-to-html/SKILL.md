@@ -16,10 +16,13 @@ Two moving parts:
 1. **`build.sh`** (in the repo, pandoc-based) converts each `<slug>.md` — plus any
    `<slug>/` sections — into a self-contained `html/<slug>/` folder: `index.html` for the
    one-pager, one `<section>.html` per section with a "← Back to the report" nav,
-   `assets/style.css`, and a `.nojekyll`. It rewrites inter-file `.md` links to `.html`,
-   flattens the one-pager's `<slug>/section.md` links to `section.html`, and rebuilds
-   `html/` fresh every run (idempotent). A **flat** one-pager (no sibling `<slug>/` dir)
-   builds just `html/<slug>/index.html`.
+   `assets/style.css`, and a `.nojekyll`. It rewrites inter-file `.md` links to `.html`
+   on the **emitted HTML** (`href` attributes), which catches Markdown-syntax links and
+   links inside raw-HTML components (`rec` cards, callouts) in one pass: it flattens the
+   one-pager's `<slug>/section.md` links to `section.html` and maps cross-report links
+   (`../<other-slug>.md` → `../<other-slug>/index.html`, `../<other-slug>/sec.md` →
+   `../<other-slug>/sec.html`). `html/` is rebuilt fresh every run (idempotent). A
+   **flat** one-pager (no sibling `<slug>/` dir) builds just `html/<slug>/index.html`.
 2. **The top-level `index.html`** is the landing page linking to each `html/<slug>/`.
    `build.sh` does **not** generate it — this skill regenerates it from whatever reports
    are present, so it never goes stale.
@@ -53,8 +56,8 @@ Work relative to the repo root `~/hypaware-reports`.
    the user before building — see Notes.
 
 2. **Install / refresh the shared stylesheet.** The repo-root `assets/style.css` must be
-   the data-report stylesheet bundled with this skill. If it is missing, or is the old
-   pandoc-default sheet (no `--display`/`Space Grotesk` variables, no `.metric`/`.callout`/
+   the data-report stylesheet bundled with this skill. If it is missing, or is an older
+   sheet (a Google Fonts `@import`, `box-shadow` on cards, or no `.metric`/`.callout`/
    `.barchart` rules), copy this skill's `assets/style.css` over it before building:
    ```bash
    cp "$SKILL_DIR/assets/style.css" assets/style.css   # $SKILL_DIR = this skill's folder
@@ -63,11 +66,20 @@ Work relative to the repo root `~/hypaware-reports`.
    system; do not hand-tune per-page CSS.
 
 3. **Enrich the report Markdown (the step that makes it a data report).** For each
-   top-level `<slug>.md`, check whether it already uses the component vocabulary:
+   top-level `<slug>.md`, check whether it already uses the component vocabulary —
+   **both** halves of it, because partial enrichment is the common failure:
    ```bash
-   grep -L 'class="metric-grid"' *.md   # lists reports that still need enrichment
+   grep -L 'class="metric-grid"' *.md   # reports with no headline metric strip at all
+   grep -L 'class="rec"' *.md           # reports whose findings are still prose-only
    ```
-   For every listed report, work in **two phases — inventory first, markup second**:
+   A one-pager that has a `metric-grid` but no `rec` cards is **half-done, not done**:
+   its findings sit as `###` heading + paragraph + trailing link, so every number is
+   buried in a sentence and the reader has to open the section pages to see anything at
+   a glance. Finish it — convert the findings to cards (and rename any scaffolding
+   headings) rather than skipping it.
+
+   For every report needing work, proceed in **two phases — inventory first, markup
+   second**:
 
    **Phase A — inventory.** Read the whole report (one-pager + all section files) and
    write down, from its text and tables only: (1) the 3–6 headline numbers with a
@@ -100,6 +112,12 @@ Work relative to the repo root `~/hypaware-reports`.
      for the caveat; each section page opens with its own thesis and gets the inventory
      (3) visual — `barchart` / `stackbar` / `gauge` / `callout`. Keep source data tables
      where the exact numbers are the record.
+   - **A one-pager finding never stays heading + paragraph + trailing link.** Every
+     numbered finding on the one-pager becomes a `rec` card: its 2–3 strongest numbers
+     (from the Phase A inventory) move onto the card's stat row, the analysis trims to
+     1–2 sentences of body copy, and the section link becomes the card itself. A
+     qualitative finding with no strong numbers still becomes a card — it just carries a
+     lighter stat row (or none) rather than invented figures.
 
    **The design bar:** scroll the finished page — every screenful should have a visual
    anchor (a big number, a chart, a card row, a callout), no two adjacent blocks with the
@@ -112,14 +130,17 @@ Work relative to the repo root `~/hypaware-reports`.
    caption from the example appears in a different report's enriched output, that's
    contamination — every label and number must trace to the Phase A inventory. Reports
    differ: an adoption profile has different headline numbers, different judgments, and
-   maybe no "recommendations" at all (then rec cards don't apply — don't force them).
+   maybe no "recommendations" at all — but `rec` cards are the treatment for *findings*
+   of any kind, not just recommendations, so a descriptive report's numbered findings
+   still become cards; what you don't force is the stat row where no real numbers exist.
 
    **Hard rules:** every number, claim, and judgment must trace to the report's own text
    or tables — design changes presentation and display copy, it NEVER invents, recomputes,
    or reinterprets a finding; keep every link (cross-page links may move onto cards); keep
-   raw-HTML blocks separated by blank lines; skip files that already contain component
-   markup (the step is idempotent). These are source-file edits — include them in the
-   commit at the end.
+   raw-HTML blocks separated by blank lines; skip only files that already satisfy the
+   full contract (metric-grid **and** carded findings on a one-pager, thesis + visuals on
+   a section page) — the presence of one component does not make a file done. These are
+   source-file edits — include them in the commit at the end.
 
 4. **Build the HTML.** Run the repo's own script — don't reimplement pandoc:
    ```bash
@@ -128,14 +149,20 @@ Work relative to the repo root `~/hypaware-reports`.
    It prints `Built html/ : N report(s) …`. `html/` is wiped and rebuilt, so deleted or
    renamed reports never leave stale HTML behind.
 
-5. **Regenerate the top-level `index.html`.** List every built report and write a fresh
-   landing page (template in [`components.md`](components.md) → *Landing-page template*).
-   For each `html/<slug>/` (sorted newest-first — slugs are
-   `YYYY-MM-DD-…`), pull the display title and a one-line scope from the source `<slug>.md`:
-   - **Title** — the first `# ` heading.
-   - **Scope/desc** — the report's scope line: the italic `*Source: … · Window: … *` line
-     for adoption profiles, or the `## <server> · <window>` subtitle for the others. Trim
-     it to a short human phrase.
+5. **Regenerate the top-level `index.html` as an at-a-glance dashboard, not a table of
+   contents.** Write a fresh landing page (template in [`components.md`](components.md) →
+   *Landing-page template*). One card per built report, newest first (slugs are
+   `YYYY-MM-DD-…`), and each card carries the report's own headline numbers instead of a
+   summary sentence. For each `html/<slug>/`, pull from the source `<slug>.md`:
+   - **Title** - the first `# ` heading.
+   - **Kicker** - the report's scope line (the italic `*Source: … · Window: … *` line for
+     adoption profiles, or the `## <server> · <window>` subtitle for the others), trimmed
+     to a short phrase, as the card's `rec-kind` eyebrow.
+   - **Stats** - the report's top 3-4 `metric-grid` tiles (step 3 guarantees they exist),
+     re-rendered as `rec-stat`s on the card: same values, same crit/warn/good judgments,
+     labels compressed to 2-4 words, notes dropped. Rules in components.md. This hoists
+     each report's key results and progress onto the landing page, so a reader gets the
+     fleet's state without opening a report.
 
    Link each report by its explicit `html/<slug>/index.html`, **not** a bare
    `html/<slug>/` directory URL. A trailing-slash directory link relies on server-side
@@ -151,9 +178,15 @@ Work relative to the repo root `~/hypaware-reports`.
    grep -o '<title>[^<]*</title>' html/*/index.html
    grep -rlo 'href="[^"]*\.md"' html/ || echo "no leftover .md links ✓"
    grep -L 'metric-grid' html/*/index.html   # should print nothing
+   grep -L 'class="rec"' html/*/index.html   # should print nothing: findings are carded
+   grep -c 'rec-stat' index.html             # ≥ number of reports: landing cards carry stats
    ```
-   `href="….md"` in any built page means a link wasn't rewritten — investigate before
-   publishing. A page missing `metric-grid` means step 3 was skipped for that report.
+   `href="….md"` in any built page means a link wasn't rewritten — remember links live
+   both in Markdown syntax **and** inside raw-HTML components (`rec` card and callout
+   `href`s), and may point across reports; investigate before publishing. A page missing
+   `metric-grid` means step 3 was skipped for that report; one missing `rec` cards means
+   step 3 stopped halfway (headline strip done, findings left as prose); a landing page
+   without `rec-stat`s means step 5 produced a bare link list.
    Optionally open `index.html` (or `html/<slug>/index.html`) in a browser to
    eyeball it (check both light and dark — the stylesheet supports both).
 
@@ -171,9 +204,12 @@ Work relative to the repo root `~/hypaware-reports`.
 
 ## Visual system
 
-The stylesheet in `assets/style.css` is a self-contained **data-report** system (Space
-Grotesk headings/numbers, semantic `--accent`/`--good`/`--warn`/`--crit` palette, tabular
-figures, dark mode, print). **Two things are automatic**, no author markup: every page's
+The stylesheet in `assets/style.css` is a self-contained **data-report** system with a
+restrained, internal-report look: system type, hairline rules, small flat charts, a
+semantic `--accent`/`--good`/`--warn`/`--crit` palette reserved for judgment, tabular
+figures, dark mode, print. Deliberately absent: webfonts, gradients, card shadows, hover
+motion, rounded-card chrome; keep it that way when restyling. **Two things are
+automatic**, no author markup: every page's
 tables, code, blockquotes, and headings are restyled, and the **first bold paragraph
 directly under the `# ` title becomes a hero thesis callout** (`h1 + p`). So write each
 report's one-sentence thesis as the first paragraph, bold.
@@ -223,8 +259,8 @@ even when the content skills produced plain Markdown.
 - **pandoc dialect.** `build.sh` uses `-f gfm` and sets only `pagetitle` (not `title`).
   `gfm` passes raw HTML blocks through, which is what makes the component vocabulary work —
   leave those flags alone. Keep raw HTML blocks separated from Markdown by blank lines.
-- **Fonts need network.** The stylesheet `@import`s Space Grotesk from Google Fonts; it
-  degrades to `system-ui` offline. If the Pages site must be fully self-hosted, vendor the
-  font into `assets/` and swap the `@import` for a local `@font-face` — otherwise leave it.
+- **Fully self-contained.** The stylesheet uses system fonts only: no webfont `@import`,
+  no external assets, so pages render identically offline, on GitHub Pages, and from
+  `file://`. Don't reintroduce a webfont.
 - **Don't `rm` the source Markdown.** `build.sh` reads the top-level `<slug>.md` +
   `<slug>/` on every run; the HTML under `html/` is derived output.

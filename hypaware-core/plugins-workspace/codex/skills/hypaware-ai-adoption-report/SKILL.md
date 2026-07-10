@@ -91,6 +91,12 @@ layer is shorter and more glanceable than the one it summarizes.
 - **GitHub reach (where enriched):** the per-gateway-focus section file shows each gateway's repos
   and PRs reached, as of the graph's projection date from step 1 (a stale graph makes reach a floor,
   not an upper bound).
+- **Chart the who-breakdowns.** Keep the one-row-per-gateway tables from step 2 as the record, and
+  pair each with a breakdown chart following the HTML renderer's authoring contract
+  (`hypaware-report-to-html/authoring.md`; component snippets in `components.md` next to it):
+  share of messages and tokens by gateway on the utilization page, and the main-vs-subagent token
+  split on the parallelism page. Where a real team grouping exists (a user-supplied mapping, or
+  cwd naming), add a by-team rollup chart too; never invent teams the data doesn't show.
 - **Section files are analysis, not inventory.** Each detail section is its own `<dir>/<file>.md`, held to the same standard as the one-pager: it argues one claim, opens with that takeaway, and ties every number to what it means for the reader. A section file that is only a stat table has failed - fold it back into the one-pager rather than shipping it as a page. Cut table narration ("how to read the table") and standing bookkeeping prose; compress source/window/method to a few lines.
 - **No scope apologies (in any file).** Scope rules (what routes to which report) are authoring guidance, never report copy. Don't write "descriptive only", "no recommendations here", or routing disclaimers in the one-pager or any section file; state findings plainly, and where a sibling report owns the action a plain cross-link is enough.
 - **Capture-health note:** if subagent provenance doesn't reach the server, the standing #1
