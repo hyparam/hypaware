@@ -127,6 +127,22 @@ where" rule exists to prevent.
   wrappers do not compile against older icebird return shapes.
 - Third-party plugin sources with legacy `scanColumn` implementations keep
   working through `normalizeScanColumn`, at unfiltered-scan fidelity.
+- With a `where`, the union probes every partition's `scanColumn` up front
+  (the merged flags must be returned synchronously, and the AND needs all of
+  them), giving up the no-where branch's lazy sequential opens. This is
+  O(partitions) synchronous work per filtered scan and rests on a convention
+  the contract does not type: `scanColumn()` itself must be cheap, deferring
+  all IO to `chunks()`. Icebird honors this (flags come from already-loaded
+  manifest entries) and squirreling's engine makes the same eager call, but a
+  plugin source that starts IO at call time pays that cost once per partition
+  even when its chunks are never consumed. The lazy alternative (report
+  `appliedWhere: false` pessimistically, open partitions on demand) was
+  rejected: it forfeits engine trust on every filtered aggregate, trading a
+  cost that scales with partition count for per-value re-filtering that
+  scales with row count. If partition counts ever make the probe measurable,
+  compaction is the lever, not scan wiring.
 - New public surface on `hypaware/core/query`: `normalizeScanColumn`,
   `canPushWhere`, `whereColumns`, so plugin-side wrappers can apply the same
-  discipline without reimplementing predicate-column enumeration.
+  discipline without reimplementing predicate-column enumeration. A plugin
+  source implementing flagged `scanColumn` must follow the defer-IO rule
+  above: compute flags synchronously, start IO only in `chunks()`.
