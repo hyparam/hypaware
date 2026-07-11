@@ -5,7 +5,7 @@
 **Systems:** Query, Cache
 **Author:** Phil / Claude
 **Date:** 2026-06-30
-**Related:** LLP 0015, LLP 0054, LLP 0057
+**Related:** LLP 0015, LLP 0054, LLP 0057, LLP 0098
 
 > How scalar and distinct aggregates avoid buffering the scan. Implements the
 > `#streaming-first` requirement of [LLP 0054](./0054-bounded-query-execution.spec.md).
@@ -37,7 +37,11 @@ small and already typed in squirreling:
 scanColumn({ column, limit, offset, signal }) -> AsyncIterable<ArrayLike<SqlPrimitive>>
 ```
 
-an async iterable of column-value chunks.
+an async iterable of column-value chunks. (Squirreling 0.15 later extended
+this contract with a `where` predicate and a flagged `ScanColumnResults`
+return shape so FILTERED aggregates also stay streaming; see
+[LLP 0098](./0098-scancolumn-where-pushdown.decision.md). The bare-iterable
+shape above remains valid for unfiltered scans.)
 
 ## Options considered
 
