@@ -4,6 +4,7 @@ import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } fr
 
 import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
+import { normalizeScanColumn } from './scan-column.js'
 
 /**
  * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
@@ -118,14 +119,20 @@ function withHeapBudget(source, guard) {
   }
   if (typeof source.scanColumn === 'function') {
     const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
-    bounded.scanColumn = (options) => ({
-      async *[Symbol.asyncIterator]() {
-        for await (const chunk of scanColumn(options)) {
-          guard.check()
-          yield chunk
-        }
-      },
-    })
+    // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
+    bounded.scanColumn = (options) => {
+      const inner = normalizeScanColumn(scanColumn(options), options)
+      return {
+        appliedWhere: inner.appliedWhere,
+        appliedLimitOffset: inner.appliedLimitOffset,
+        async *chunks() {
+          for await (const chunk of inner.chunks()) {
+            guard.check()
+            yield chunk
+          }
+        },
+      }
+    }
   }
   return bounded
 }

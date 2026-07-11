@@ -18,11 +18,45 @@ import {
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../hypaware-plugin-kernel-types.js'
+ * @import { AsyncDataSource, ExprNode, SqlPrimitive } from 'squirreling/src/types.js'
  */
 
 /** @param {string} prefix */
 async function makeTmpDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), `hyp-ai-gw-${prefix}-`))
+}
+
+/**
+ * A `col = value` predicate as a squirreling ExprNode.
+ *
+ * @param {string} col
+ * @param {SqlPrimitive} value
+ * @returns {ExprNode}
+ */
+function eqWhere(col, value) {
+  return {
+    type: 'binary',
+    op: '=',
+    left: { type: 'identifier', name: col, positionStart: 0, positionEnd: 0 },
+    right: { type: 'literal', value, positionStart: 0, positionEnd: 0 },
+    positionStart: 0,
+    positionEnd: 0,
+  }
+}
+
+/**
+ * Drain a ScanColumnResults into flat values plus its flags.
+ *
+ * @param {ReturnType<NonNullable<AsyncDataSource['scanColumn']>>} result
+ */
+async function drainScanColumn(result) {
+  assert.ok('chunks' in result, 'wrapped scanColumn returns the flagged ScanColumnResults shape')
+  /** @type {SqlPrimitive[]} */
+  const values = []
+  for await (const chunk of result.chunks()) {
+    for (let i = 0; i < chunk.length; i++) values.push(chunk[i])
+  }
+  return { values, appliedWhere: result.appliedWhere, appliedLimitOffset: result.appliedLimitOffset }
 }
 
 /** @type {ColumnSpec[]} */
@@ -279,20 +313,48 @@ test('ai-gateway createDataSource streams scanColumn with nulls for a physically
     assert.equal(typeof source.scanColumn, 'function', 'the storage-backed source streams columns')
     const scanColumn = /** @type {NonNullable<typeof source.scanColumn>} */ (source.scanColumn)
 
-    /** @type {unknown[]} */
-    const ids = []
-    for await (const chunk of scanColumn({ column: 'id' })) {
-      for (let i = 0; i < chunk.length; i++) ids.push(chunk[i])
-    }
-    assert.deepEqual([...ids].sort(), [1, 2], 'a physical column streams its values')
+    const ids = await drainScanColumn(scanColumn({ column: 'id' }))
+    assert.deepEqual([...ids.values].sort(), [1, 2], 'a physical column streams its values')
 
-    /** @type {unknown[]} */
-    const absent = []
-    for await (const chunk of scanColumn({ column: 'git_remote' })) {
-      for (let i = 0; i < chunk.length; i++) absent.push(chunk[i])
-    }
-    assert.equal(absent.length, 2)
-    for (const v of absent) assert.strictEqual(v, null, 'absent column streams null, not undefined')
+    const absent = await drainScanColumn(scanColumn({ column: 'git_remote' }))
+    assert.equal(absent.values.length, 2)
+    for (const v of absent.values) assert.strictEqual(v, null, 'absent column streams null, not undefined')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('ai-gateway scanColumn pushes a convertible WHERE down to the parquet read and reports it applied', async () => {
+  // The filtered-aggregate path this whole chain exists for: a COUNT with a
+  // WHERE must not fall back to materializing every row. The source filters
+  // at the parquet layer and reports appliedWhere so the engine trusts the
+  // stream. @ref LLP 0098#wrapper-duties
+  const cacheRoot = await makeTmpDir('scan-column-where')
+  try {
+    await appendRowsToSourceTable(
+      cacheRoot, DATASET_NAME, ['source=claude'],
+      TEST_COLUMNS, [{ id: 1, date: '2026-05-26' }, { id: 2, date: '2026-05-27' }, { id: 3, date: '2026-05-27' }]
+    )
+
+    const storage = createQueryStorageService({ cacheRoot })
+    /** @type {QueryScope} */
+    const scope = { limit: 1000 }
+    const partitions = await discoverParts({ cacheDir: cacheRoot, scope, config: { version: 2 } })
+    const source = await createDataSource(partitions, { scope, storage })
+    const scanColumn = /** @type {NonNullable<typeof source.scanColumn>} */ (source.scanColumn)
+
+    // A physical predicate column: pushed down and applied.
+    const filtered = await drainScanColumn(scanColumn({ column: 'id', where: eqWhere('date', '2026-05-27') }))
+    assert.equal(filtered.appliedWhere, true, 'convertible predicate on a physical column is applied at the source')
+    assert.deepEqual([...filtered.values].sort(), [2, 3], 'only matching values stream')
+
+    // A DECLARED-but-physically-absent predicate column: stripped, so the
+    // parquet layer never sees a filter column it cannot find, and the
+    // engine re-filters over the null-normalized stream.
+    const stripped = await drainScanColumn(scanColumn({ column: 'id', where: eqWhere('git_remote', 'x') }))
+    assert.equal(stripped.appliedWhere, false, 'predicate on an absent column is left to the engine')
+    assert.equal(stripped.appliedLimitOffset, false)
+    assert.deepEqual([...stripped.values].sort(), [1, 2, 3], 'the full column streams for the engine to judge')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

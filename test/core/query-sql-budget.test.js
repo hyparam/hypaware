@@ -155,3 +155,33 @@ test('the streaming-aggregate scanColumn fast path stays lit through the budget 
   assert.equal(result.rows[0].n, 7)
   assert.deepEqual(scanColumnCalls, ['a'], 'the engine consumed the column stream, not buffered rows')
 })
+
+test('the budget decoration forwards WHERE to scanColumn and preserves the applied flags', async () => {
+  // A deliberately "lying" source is the only observable probe here: the
+  // engine's re-filter of correctly filtered values is idempotent, so a
+  // dropped appliedWhere flag would be invisible with an honest source.
+  // This source claims the predicate applied while yielding values that
+  // VIOLATE it; the count comes out 3 only if the flag survived the budget
+  // wrapper and the engine trusted the stream.
+  const rows = [{ a: 1 }]
+  /** @type {{ column: string, hasWhere: boolean }[]} */
+  const calls = []
+  const source = memorySource(rows)
+  source.scanColumn = ({ column, where }) => {
+    calls.push({ column, hasWhere: where !== undefined })
+    return {
+      appliedWhere: true,
+      appliedLimitOffset: false,
+      async *chunks() {
+        yield [101, 102, 103]
+      },
+    }
+  }
+  const result = await executeQuerySql({
+    query: 'SELECT COUNT(*) AS n FROM t WHERE a < 10',
+    registry: registryFor(source),
+    storage,
+  })
+  assert.equal(result.rows[0].n, 3, 'appliedWhere passed through, so the engine did not re-filter')
+  assert.deepEqual(calls, [{ column: 'a', hasWhere: true }], 'the predicate reached scanColumn through the budget wrapper')
+})

@@ -1,7 +1,9 @@
 // @ts-check
 
+import { normalizeScanColumn } from './scan-column.js'
+
 /**
- * @import { AsyncDataSource, ExprNode } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode, ScanColumnResults } from 'squirreling/src/types.js'
  */
 
 /**
@@ -70,64 +72,99 @@ export function unionSources(sources) {
   }
   // The column-stream hook is offered only when EVERY partition can stream
   // the column; a mixed union stays row-based so the engine's fallback owns
-  // correctness. Unlike scan(), the scanColumn contract has no
-  // appliedLimitOffset escape hatch: the source must fully honor
-  // limit/offset itself, so the union applies them over the CONCATENATED
-  // stream (they are not distributive across partitions, the same
-  // discipline scan() applies). Only the remaining-limit bound is pushed
-  // per partition, as an upper-bound optimization that can never change
-  // the result.
-  // @ref LLP 0055 [implements]: union forwards scanColumn by concatenating per-partition column streams; limit/offset apply to the merged stream
+  // correctness.
+  //
+  // With no `where`, the union fully owns limit/offset over the CONCATENATED
+  // stream (they are not distributive across partitions, the same discipline
+  // scan() applies); only the remaining-need upper bound is pushed per
+  // partition, as an optimization that can never change the result.
+  //
+  // With a `where`, the predicate is forwarded per partition under the same
+  // schema gate as scan() (a partition lacking a predicate column gets no
+  // filter), the union's `appliedWhere` is the AND across partitions, and
+  // limit/offset are neither forwarded nor applied: they are only meaningful
+  // AFTER the filter, and a partition that ignores `where` but eagerly
+  // slices would silently drop matching values. `appliedLimitOffset: false`
+  // hands the post-filter slice back to the engine.
+  // @ref LLP 0098#union-flags [implements]: merged appliedWhere is the AND across partitions; limit/offset never coexist with an unresolved where
   if (sources.every((s) => typeof s.scanColumn === 'function')) {
-    union.scanColumn = ({ column, limit, offset, signal }) => ({
-      async *[Symbol.asyncIterator]() {
-        let remainingSkip = offset ?? 0
-        let remaining = limit ?? Infinity
-        for (const source of sources) {
-          if (remaining <= 0) return
-          signal?.throwIfAborted()
-          // A known-empty or fully-skippable partition needs no stream.
-          const numRows = source.numRows
-          if (numRows !== undefined && numRows <= remainingSkip) {
-            remainingSkip -= numRows
-            continue
-          }
+    union.scanColumn = ({ column, where, limit, offset, signal }) => {
+      if (where) {
+        const predicateColumns = whereColumns(where)
+        // Probe every partition up front (starting a column scan does no IO
+        // until its chunks are consumed) so the merged flags are known
+        // before the engine decides whether to re-filter.
+        const subs = sources.map((source) => {
           const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
-          const chunks = scanColumn({
-            column,
-            // Per-partition upper bound: this partition can contribute at
-            // most the values still owed, including any skip not yet spent.
-            limit: remaining === Infinity ? undefined : remainingSkip + remaining,
-            signal,
-          })
-          for await (const chunk of chunks) {
-            signal?.throwIfAborted()
-            let start = 0
-            if (remainingSkip > 0) {
-              if (remainingSkip >= chunk.length) {
-                remainingSkip -= chunk.length
-                continue
-              }
-              start = remainingSkip
-              remainingSkip = 0
+          const push = canPushWhere(source, predicateColumns)
+          const options = push ? { column, where, signal } : { column, signal }
+          const result = normalizeScanColumn(scanColumn(options), options)
+          return { result, applied: push && result.appliedWhere }
+        })
+        return {
+          appliedWhere: subs.every((s) => s.applied),
+          appliedLimitOffset: false,
+          async *chunks() {
+            for (const sub of subs) {
+              signal?.throwIfAborted()
+              yield* sub.result.chunks()
             }
-            const end = remaining === Infinity
-              ? chunk.length
-              : Math.min(chunk.length, start + remaining)
-            if (start === 0 && end === chunk.length) {
-              yield chunk
-              remaining -= chunk.length
-            } else if (end > start) {
-              const slice = []
-              for (let i = start; i < end; i++) slice.push(chunk[i])
-              yield slice
-              remaining -= slice.length
-            }
-            if (remaining <= 0) break
-          }
+          },
         }
-      },
-    })
+      }
+      return {
+        appliedWhere: true,
+        appliedLimitOffset: true,
+        async *chunks() {
+          let remainingSkip = offset ?? 0
+          let remaining = limit ?? Infinity
+          for (const source of sources) {
+            if (remaining <= 0) return
+            signal?.throwIfAborted()
+            // A known-empty or fully-skippable partition needs no stream.
+            const numRows = source.numRows
+            if (numRows !== undefined && numRows <= remainingSkip) {
+              remainingSkip -= numRows
+              continue
+            }
+            const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+            const options = {
+              column,
+              // Per-partition upper bound: this partition can contribute at
+              // most the values still owed, including any skip not yet spent.
+              limit: remaining === Infinity ? undefined : remainingSkip + remaining,
+              signal,
+            }
+            const sub = normalizeScanColumn(scanColumn(options), options)
+            for await (const chunk of sub.chunks()) {
+              signal?.throwIfAborted()
+              let start = 0
+              if (remainingSkip > 0) {
+                if (remainingSkip >= chunk.length) {
+                  remainingSkip -= chunk.length
+                  continue
+                }
+                start = remainingSkip
+                remainingSkip = 0
+              }
+              const end = remaining === Infinity
+                ? chunk.length
+                : Math.min(chunk.length, start + remaining)
+              if (start === 0 && end === chunk.length) {
+                yield chunk
+                remaining -= chunk.length
+              } else if (end > start) {
+                const slice = []
+                for (let i = start; i < end; i++) slice.push(chunk[i])
+                yield slice
+                remaining -= slice.length
+              }
+              if (remaining <= 0) break
+            }
+          }
+        },
+      }
+    }
   }
   return union
 }
@@ -140,7 +177,7 @@ export function unionSources(sources) {
  * @param {Set<string> | null | undefined} predicateColumns
  * @returns {boolean}
  */
-function canPushWhere(source, predicateColumns) {
+export function canPushWhere(source, predicateColumns) {
   if (!predicateColumns) return false
   const have = new Set(source.columns)
   for (const col of predicateColumns) {
@@ -159,7 +196,7 @@ function canPushWhere(source, predicateColumns) {
  * @param {ExprNode | undefined} where
  * @returns {Set<string> | null}
  */
-function whereColumns(where) {
+export function whereColumns(where) {
   /** @type {Set<string>} */
   const names = new Set()
   let enumerable = true
