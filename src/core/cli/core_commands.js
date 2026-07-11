@@ -93,6 +93,14 @@ function buildCoreCommands(registry) {
       registry,
       name: 'query',
       summary: 'Query the local cache (sql, schema, status, ...)',
+      help:
+        'Query-executing subcommands (e.g. sql) accept kernel control flags:\n' +
+        '  --format <fmt>    --output <file>    --max-cell <n>    --max-bytes <n>\n' +
+        '  --remote [target] run against a remote MCP target instead of the local\n' +
+        '                    cache (bare --remote uses query.default_remote, else the\n' +
+        "                    shipped default; manage targets with 'hyp remote').\n" +
+        "See 'hyp query <subcommand> --help' for which flags a subcommand supports\n" +
+        '(status/schema/refresh/maintain are local-only and ignore --remote).',
     }),
     {
       name: 'query schema',
