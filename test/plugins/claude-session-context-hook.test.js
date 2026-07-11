@@ -193,7 +193,10 @@ test('hook captures repo identity for a real git repo and the projector stamps i
   try {
     const repo = path.join(env.homeDir, 'work', 'MyRepo')
     await fs.mkdir(repo, { recursive: true })
-    const git = (/** @type {string[]} */ ...args) => execFileAsync('git', ['-C', repo, ...args])
+    // Blank out host git config so user settings (commit signing, hooks,
+    // templates) cannot leak into the hermetic repo.
+    const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }
+    const git = (/** @type {string[]} */ ...args) => execFileAsync('git', ['-C', repo, ...args], { env: gitEnv })
     await git('init', '-q')
     await git('remote', 'add', 'origin', 'git@github.com:Acme/MyRepo.git')
     await fs.writeFile(path.join(repo, 'a.txt'), 'hi')
@@ -257,7 +260,10 @@ test('hook redacts credential userinfo from an https remote before it is recorde
   try {
     const repo = path.join(env.homeDir, 'work', 'CredRepo')
     await fs.mkdir(repo, { recursive: true })
-    const git = (/** @type {string[]} */ ...args) => execFileAsync('git', ['-C', repo, ...args])
+    // Blank out host git config so user settings (commit signing, hooks,
+    // templates) cannot leak into the hermetic repo.
+    const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }
+    const git = (/** @type {string[]} */ ...args) => execFileAsync('git', ['-C', repo, ...args], { env: gitEnv })
     await git('init', '-q')
     // A token-bearing HTTPS remote, exactly as `gh`/CI writes into remote.origin.url.
     await git('remote', 'add', 'origin', 'https://x-access-token:ghp_SUPERSECRET@github.com/Acme/CredRepo.git')
