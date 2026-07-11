@@ -495,12 +495,20 @@ function parseClientArgs(argv) {
         : 'client name is required'
       return false
     }
-    if (requestedClient && requestedClient !== value) {
-      r.error = `client specified multiple times (${requestedClient}, ${value})`
+    // Match client names case-insensitively. The products are branded
+    // "Claude"/"Codex" with capitals, but adapters register lowercase names
+    // (CLIENT_NAME = 'claude') and the `all` sentinel is lowercase, so
+    // `hyp attach Claude` / `hyp detach Codex` / `hyp attach ALL` are plausible
+    // user tokens. Normalizing the single user-supplied token here covers attach
+    // (live gateway registry), detach (client-descriptor map), and the `all`
+    // sentinel in one place; adapter registration is unchanged (#300).
+    const normalized = value.toLowerCase()
+    if (requestedClient && requestedClient !== normalized) {
+      r.error = `client specified multiple times (${requestedClient}, ${normalized})`
       return false
     }
-    requestedClient = value
-    r.client = value
+    requestedClient = normalized
+    r.client = normalized
     return true
   }
   for (let i = 0; i < argv.length; i++) {
