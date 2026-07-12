@@ -1,5 +1,8 @@
 // @ts-check
 
+import v8 from 'node:v8'
+import vm from 'node:vm'
+
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
 import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
@@ -79,6 +82,39 @@ export function resolveHeapBudgetBytes(optionBytes) {
 
 /** Rows between inline heap checks on a row scan. */
 const BUDGET_CHECK_ROW_STRIDE = 4096
+
+/** @type {(() => void) | null | undefined} */
+let cachedForcedGc
+
+/**
+ * Resolve a synchronous full-GC handle without requiring the process to be
+ * launched with --expose-gc: flip the flag at runtime just long enough to
+ * read `gc` out of a fresh context, then flip it back. Resolved once and
+ * cached; `null` means the runtime refused and the guard falls back to
+ * refusing on raw growth.
+ *
+ * @returns {(() => void) | null}
+ */
+function resolveForcedGc() {
+  if (cachedForcedGc !== undefined) return cachedForcedGc
+  /** @type {(() => void) | null} */
+  let resolved = null
+  const globalGc = /** @type {(() => void) | undefined} */ (/** @type {any} */ (globalThis).gc)
+  if (typeof globalGc === 'function') {
+    resolved = globalGc
+  } else {
+    try {
+      v8.setFlagsFromString('--expose-gc')
+      const gc = vm.runInNewContext('gc')
+      v8.setFlagsFromString('--no-expose-gc')
+      if (typeof gc === 'function') resolved = gc
+    } catch {
+      resolved = null
+    }
+  }
+  cachedForcedGc = resolved
+  return resolved
+}
 
 /**
  * Decorate a data source so its scans enforce the query's heap budget
@@ -275,12 +311,33 @@ export async function executeQuerySql(args) {
           if (watchdog) clearInterval(watchdog)
           return budgetError
         }
+        // A raw heapUsed delta counts not-yet-collected garbage as growth,
+        // and a streaming column scan allocates per-row garbage faster than
+        // V8 collects it on a large-heap host (observed in production:
+        // ~3.3GB of sampled "growth" on a 500k-row single-column scan whose
+        // live memory fits in under 100MB). Refusing on the raw delta kills
+        // exactly the streaming aggregates LLP 0055/0098 exist to keep
+        // cheap, so a crossing is confirmed first: force one full GC and
+        // re-measure, and only growth that survives collection (memory the
+        // query actually retains) refuses. A garbage-heavy but well-bounded
+        // query pays one forced GC per budget-width of garbage; a genuinely
+        // retaining query pays one GC and then refuses.
+        // @ref LLP 0097#confirm-with-gc [implements]: only growth that survives a full GC refuses; raw deltas count garbage
+        const confirmGrowth = () => {
+          const growth = process.memoryUsage().heapUsed - baselineHeap
+          if (growth <= budgetBytes) return undefined
+          const forcedGc = resolveForcedGc()
+          if (!forcedGc) return growth
+          forcedGc()
+          const settled = process.memoryUsage().heapUsed - baselineHeap
+          return settled > budgetBytes ? settled : undefined
+        }
         const guard = {
           check() {
             if (budgetBytes <= 0) return
             if (budgetError) throw budgetError
-            const growth = process.memoryUsage().heapUsed - baselineHeap
-            if (growth > budgetBytes) throw trip(growth)
+            const growth = confirmGrowth()
+            if (growth !== undefined) throw trip(growth)
           },
         }
         if (budgetBytes > 0) {
@@ -288,8 +345,8 @@ export async function executeQuerySql(args) {
           // further source rows (join amplification, output finalization)
           // but do yield to the event loop.
           watchdog = setInterval(() => {
-            const growth = process.memoryUsage().heapUsed - baselineHeap
-            if (growth > budgetBytes) trip(growth)
+            const growth = confirmGrowth()
+            if (growth !== undefined) trip(growth)
           }, HEAP_WATCH_INTERVAL_MS)
           watchdog.unref()
           for (const name of Object.keys(tables)) {

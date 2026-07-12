@@ -156,6 +156,42 @@ test('the streaming-aggregate scanColumn fast path stays lit through the budget 
   assert.deepEqual(scanColumnCalls, ['a'], 'the engine consumed the column stream, not buffered rows')
 })
 
+test('transient scan garbage does not trip the budget; only retained growth refuses', async () => {
+  // The guard confirms a crossing with a forced GC before refusing (LLP
+  // 0097#confirm-with-gc). Each chunk allocates ~25MB, holds it long
+  // enough for scavenges to promote it, then drops the reference before
+  // yielding: at the wrapper's per-chunk check the raw heapUsed delta is
+  // far over the 8MB budget, but none of it survives collection, so the
+  // query must complete. (The companion refusal test above proves memory
+  // that IS retained, the ORDER BY buffer, still refuses.)
+  // MIN, not COUNT(*): an unfiltered COUNT takes the numRows metadata
+  // shortcut and would never pull the column stream (or check the guard).
+  const rows = Array.from({ length: 4 }, (_, i) => ({ a: i + 1 }))
+  const source = memorySource(rows)
+  let chunksYielded = 0
+  source.scanColumn = ({ column }) => ({
+    appliedWhere: true,
+    appliedLimitOffset: true,
+    async *chunks() {
+      for (const row of rows) {
+        let hold = Array.from({ length: 200000 }, (_, i) => `transient-${i}-${'x'.repeat(100)}`)
+        assert.ok(hold.length > 0)
+        hold = []
+        chunksYielded++
+        yield [row[column] ?? null]
+      }
+    },
+  })
+  const result = await executeQuerySql({
+    query: 'SELECT MIN(a) AS n FROM t',
+    registry: registryFor(source),
+    storage,
+    maxHeapBytes: 8 * 1024 * 1024,
+  })
+  assert.equal(result.rows[0].n, 1)
+  assert.equal(chunksYielded, 4, 'the guard was checked against every chunk of the garbage-heavy stream')
+})
+
 test('the budget decoration forwards WHERE to scanColumn and preserves the applied flags', async () => {
   // A deliberately "lying" source is the only observable probe here: the
   // engine's re-filter of correctly filtered values is idempotent, so a
