@@ -81,6 +81,17 @@ test('a query whose heap growth exceeds the execution budget refuses with the ty
       assert.ok(err.observedBytes > 1)
       assert.match(err.message, /execution memory budget/)
       assert.match(err.message, /WHERE|LIMIT|aggregate/, 'message carries actionable guidance')
+      // The diagnostic suffix is the only evidence that travels with a
+      // refusal from a remote daemon: which check site tripped, the raw
+      // delta before the confirming GC, and whether a GC handle existed.
+      assert.match(
+        err.message,
+        /\[site=[a-z_]+ raw=\d+MB gc=(confirmed|unavailable) baseline=\d+MB\]$/,
+        'message carries the trip-site diagnosis'
+      )
+      assert.ok(err.diagnostics, 'typed error exposes the diagnostics object')
+      assert.equal(typeof err.diagnostics.site, 'string')
+      assert.ok(err.diagnostics.rawBytes >= err.observedBytes, 'raw delta includes what the GC later collected')
       return true
     }
   )

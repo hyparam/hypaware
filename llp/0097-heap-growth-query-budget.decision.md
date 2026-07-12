@@ -114,6 +114,18 @@ retaining query (the crasher class) pays one GC and then refuses as
 before. If the runtime refuses to hand out a GC handle, the guard falls
 back to refusing on the raw delta (the original, conservative behavior).
 
+Every refusal carries its own diagnosis, because the refusal often
+happens on a machine the investigator cannot inspect (a central daemon
+surfacing the message through MCP): the error message ends with
+`[site=<check-site> raw=<n>MB gc=confirmed|unavailable baseline=<n>MB]`,
+the typed error exposes the same values on `diagnostics`, and the
+`query.execute_sql` span records `budget_trip_site` / `budget_raw_mb` /
+`budget_settled_mb` / `budget_gc`. Sites are `row_scan` (inline stride),
+`column_chunk` (per column-stream chunk), `watchdog` (100ms interval),
+and `terminal` (post-materialization). The raw-vs-settled split says
+whether the refused memory was live or the GC handle was missing; the
+site says which execution phase held it.
+
 **Default ceiling: 1GiB growth**, from the Phase 0 measurements: every
 well-formed query in the measured set stays under ~500MB of growth (2x
 headroom), while the crasher class blows past 4GB. Operators override with
