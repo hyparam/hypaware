@@ -41,19 +41,31 @@ export class QueryExecutionBudgetError extends Error {
   /**
    * @param {number} limitBytes
    * @param {number} observedBytes
+   * @param {{ site: string, rawBytes: number, baselineBytes: number, gcMode: 'confirmed' | 'unavailable' }} [diagnostics]
    */
-  constructor(limitBytes, observedBytes) {
+  constructor(limitBytes, observedBytes, diagnostics) {
     const limitMb = Math.round(limitBytes / 1048576)
     const observedMb = Math.round(observedBytes / 1048576)
-    super(
+    let message =
       `query exceeded its execution memory budget (${observedMb}MB used of ${limitMb}MB) - ` +
       'add a WHERE/date filter, a LIMIT, or aggregate instead of selecting raw rows ' +
       '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
-    )
+    // The suffix is the refusal's own diagnosis, and it matters most when
+    // the refusal happens on a machine the investigator cannot inspect (a
+    // remote daemon surfacing this message through MCP): which check site
+    // tripped, how much of the raw delta survived the confirming GC, and
+    // whether a GC handle was available at all.
+    if (diagnostics) {
+      const rawMb = Math.round(diagnostics.rawBytes / 1048576)
+      const baselineMb = Math.round(diagnostics.baselineBytes / 1048576)
+      message += ` [site=${diagnostics.site} raw=${rawMb}MB gc=${diagnostics.gcMode} baseline=${baselineMb}MB]`
+    }
+    super(message)
     this.name = 'QueryExecutionBudgetError'
     this.code = 'query_budget_exceeded'
     this.limitBytes = limitBytes
     this.observedBytes = observedBytes
+    this.diagnostics = diagnostics
   }
 }
 
@@ -127,7 +139,7 @@ function resolveForcedGc() {
  * judged per query, not per table.
  *
  * @param {AsyncDataSource} source
- * @param {{ check: () => void }} guard
+ * @param {{ check: (site: string) => void }} guard
  * @returns {AsyncDataSource}
  */
 function withHeapBudget(source, guard) {
@@ -145,7 +157,7 @@ function withHeapBudget(source, guard) {
           for await (const row of inner.rows()) {
             if (++sinceCheck >= BUDGET_CHECK_ROW_STRIDE) {
               sinceCheck = 0
-              guard.check()
+              guard.check('row_scan')
             }
             yield row
           }
@@ -163,7 +175,7 @@ function withHeapBudget(source, guard) {
         appliedLimitOffset: inner.appliedLimitOffset,
         async *chunks() {
           for await (const chunk of inner.chunks()) {
-            guard.check()
+            guard.check('column_chunk')
             yield chunk
           }
         },
@@ -303,9 +315,18 @@ export async function executeQuerySql(args) {
         let budgetError
         /** @type {NodeJS.Timeout | undefined} */
         let watchdog
-        const trip = (/** @type {number} */ growth) => {
+        const trip = (/** @type {{ settled: number, raw: number, gcMode: 'confirmed' | 'unavailable' }} */ crossing, /** @type {string} */ site) => {
           if (!budgetError) {
-            budgetError = new QueryExecutionBudgetError(budgetBytes, growth)
+            budgetError = new QueryExecutionBudgetError(budgetBytes, crossing.settled, {
+              site,
+              rawBytes: crossing.raw,
+              baselineBytes: baselineHeap,
+              gcMode: crossing.gcMode,
+            })
+            span.setAttribute('budget_trip_site', site)
+            span.setAttribute('budget_raw_mb', Math.round(crossing.raw / 1048576))
+            span.setAttribute('budget_settled_mb', Math.round(crossing.settled / 1048576))
+            span.setAttribute('budget_gc', crossing.gcMode)
             controller.abort(budgetError)
           }
           if (watchdog) clearInterval(watchdog)
@@ -324,20 +345,22 @@ export async function executeQuerySql(args) {
         // retaining query pays one GC and then refuses.
         // @ref LLP 0097#confirm-with-gc [implements]: only growth that survives a full GC refuses; raw deltas count garbage
         const confirmGrowth = () => {
-          const growth = process.memoryUsage().heapUsed - baselineHeap
-          if (growth <= budgetBytes) return undefined
+          const raw = process.memoryUsage().heapUsed - baselineHeap
+          if (raw <= budgetBytes) return undefined
           const forcedGc = resolveForcedGc()
-          if (!forcedGc) return growth
+          if (!forcedGc) return { settled: raw, raw, gcMode: /** @type {const} */ ('unavailable') }
           forcedGc()
           const settled = process.memoryUsage().heapUsed - baselineHeap
-          return settled > budgetBytes ? settled : undefined
+          if (settled <= budgetBytes) return undefined
+          return { settled, raw, gcMode: /** @type {const} */ ('confirmed') }
         }
         const guard = {
-          check() {
+          /** @param {string} site */
+          check(site) {
             if (budgetBytes <= 0) return
             if (budgetError) throw budgetError
-            const growth = confirmGrowth()
-            if (growth !== undefined) throw trip(growth)
+            const crossing = confirmGrowth()
+            if (crossing !== undefined) throw trip(crossing, site)
           },
         }
         if (budgetBytes > 0) {
@@ -345,8 +368,8 @@ export async function executeQuerySql(args) {
           // further source rows (join amplification, output finalization)
           // but do yield to the event loop.
           watchdog = setInterval(() => {
-            const growth = confirmGrowth()
-            if (growth !== undefined) trip(growth)
+            const crossing = confirmGrowth()
+            if (crossing !== undefined) trip(crossing, 'watchdog')
           }, HEAP_WATCH_INTERVAL_MS)
           watchdog.unref()
           for (const name of Object.keys(tables)) {
@@ -363,7 +386,7 @@ export async function executeQuerySql(args) {
           // growth concentrated in a sub-stride tail or in finalization would
           // otherwise return a wrongly-successful result. One check after
           // materialization closes that window before we record success.
-          guard.check()
+          guard.check('terminal')
           const columns = results.columns ?? []
           span.setAttribute('row_count', rows.length)
 
