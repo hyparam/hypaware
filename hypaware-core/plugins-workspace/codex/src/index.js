@@ -215,7 +215,8 @@ function resolveConfigPath(ctx) {
  * @param {string | undefined} authMode
  * @param {number} port
  */
-function providerRouteForAuthMode(authMode, port) {
+// @ref LLP 0099#decision [implements]: only an affirmative chatgpt mode leaves the /v1 default
+export function providerRouteForAuthMode(authMode, port) {
   if (authMode === 'chatgpt') {
     return {
       baseUrl: `http://127.0.0.1:${port}/backend-api/codex`,
@@ -255,15 +256,28 @@ function resolveCodexHome(ctx) {
 }
 
 /**
+ * Read the Codex auth mode from auth.json. Newer Codex versions omit the
+ * `auth_mode` field, so when it is absent infer 'chatgpt' from the shape:
+ * OAuth `tokens` present with no `OPENAI_API_KEY` means a ChatGPT
+ * subscription login, which must route to `/backend-api/codex` (the
+ * subscription token is not scoped for the OpenAI `/v1` API).
+ *
  * @param {string} authPath
  * @returns {Promise<string | undefined>}
  */
-async function readCodexAuthMode(authPath) {
+// @ref LLP 0099#decision [implements]: infer chatgpt from tokens-without-key; explicit auth_mode wins
+export async function readCodexAuthMode(authPath) {
   try {
     const parsed = JSON.parse(await fs.readFile(authPath, 'utf8'))
     if (!parsed || typeof parsed !== 'object') return undefined
     const mode = Reflect.get(parsed, 'auth_mode')
-    return typeof mode === 'string' ? mode : undefined
+    if (typeof mode === 'string') return mode
+    const tokens = Reflect.get(parsed, 'tokens')
+    const apiKey = Reflect.get(parsed, 'OPENAI_API_KEY')
+    if (tokens && typeof tokens === 'object' && typeof apiKey !== 'string') {
+      return 'chatgpt'
+    }
+    return undefined
   } catch (err) {
     if (errCode(err) === 'ENOENT') return undefined
     return undefined
