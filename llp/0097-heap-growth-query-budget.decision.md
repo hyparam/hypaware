@@ -5,7 +5,7 @@
 **Systems:** Query, Cache
 **Author:** Phil / Claude
 **Date:** 2026-07-10
-**Related:** LLP 0054, LLP 0055, LLP 0056, LLP 0057
+**Related:** LLP 0054, LLP 0055, LLP 0056, LLP 0057, LLP 0098
 
 > How the kernel bounds query execution memory TODAY, with the pinned engine:
 > a sampled process-heap-growth guard checked inline on the scan path, refusing
@@ -90,6 +90,30 @@ a truncation ([LLP 0056](./0056-refuse-over-spill-or-truncate.decision.md)).
 query (sampled minus at-start baseline), so a long-lived daemon's resident
 baseline neither eats the budget nor causes blanket refusals.
 
+### <a id="confirm-with-gc"></a>Confirm a crossing with a forced GC before refusing
+
+Added 2026-07-11, after production falsified the original "unlikely"
+judgment on garbage-driven false trips (the last Consequences bullet as
+first written): on the central server (500k-row `ai_gateway_messages`),
+single-column streaming scans - the exact query class
+[LLP 0055](./0055-stream-aggregates-via-scancolumn.decision.md)/[LLP 0098](./0098-scancolumn-where-pushdown.decision.md)
+made cheap - sampled ~3.3GB of heap "growth" and refused, while the same
+scan completes inside a 100MB `--max-old-space-size` cap. The delta was
+uncollected per-row scan garbage: on a large-heap host V8 defers major
+collection for gigabytes, so `heapUsed` tracks allocation rate, not
+retention.
+
+The guard therefore confirms every crossing before refusing: force one
+full synchronous GC (a handle acquired at runtime via
+`v8.setFlagsFromString('--expose-gc')` + `vm.runInNewContext('gc')`, so
+the process needs no launch flag; cached after first resolve) and
+re-measure. Only growth that survives collection - memory the query
+actually retains - refuses. Costs: a well-bounded garbage-heavy query
+pays one forced GC per budget-width of garbage it allocates; a genuinely
+retaining query (the crasher class) pays one GC and then refuses as
+before. If the runtime refuses to hand out a GC handle, the guard falls
+back to refusing on the raw delta (the original, conservative behavior).
+
 **Default ceiling: 1GiB growth**, from the Phase 0 measurements: every
 well-formed query in the measured set stays under ~500MB of growth (2x
 headroom), while the crasher class blows past 4GB. Operators override with
@@ -110,11 +134,11 @@ crasher refuses in 0.7-1.2s at ~1.4GB peak RSS instead of dying at 6GB.
   Per-operator buffered-byte accounting (the LLP 0054 `#execution-budget`
   letter, upstream in squirreling) remains the precise refinement; when it
   lands, this guard stays as defense-in-depth.
-- `heapUsed` includes not-yet-collected garbage, so a pathologically
-  garbage-heavy but well-bounded query could trip early; measured headroom
-  (2x over the worst legitimate query) and the scavenge-on-allocation
-  behavior of young-generation garbage make this unlikely, and the refusal
-  message names the override.
+- `heapUsed` includes not-yet-collected garbage. The original bet that
+  measured headroom plus young-generation scavenging made false trips
+  unlikely did not survive contact with production; see
+  [`#confirm-with-gc`](#confirm-with-gc) for the falsification and the
+  confirm-before-refuse rule that replaced it.
 - Post-change measurements (same harness, same cache): every measured query
   got faster (up to -26% wall) and none regressed; the speed budget for this
   work ("within 10%") was met with margin.
