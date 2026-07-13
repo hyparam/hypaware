@@ -89,12 +89,20 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
             for (const col of predicateColumns(rule.where)) columns.add(col)
           }
           for (const col of contract.rowFilter?.columns ?? []) columns.add(col)
+          // Cache-to-cache read: the projection's output stays in the local
+          // cache, so the LLP 0105 visibility filter is bypassed here (else a
+          // daemon-context projection would silently drop local-only sessions
+          // from the graph even for private-context readers). Visibility is
+          // enforced when the graph datasets are READ, via their
+          // localOnlyContentColumns declaration (datasets.js).
+          // @ref LLP 0105#surfaces [constrained-by]: the filter governs read surfaces; derived-cache builds keep full fidelity and the derived dataset carries its own declaration
           const result = await executeQuerySql({
             query: `SELECT ${[...columns].sort().join(', ')} FROM ${contract.sourceDataset}`,
             registry: query,
             storage,
             config,
             refresh: 'always',
+            includeLocalOnly: true,
           })
           sourceRows += result.rows.length
           scanCount += 1
@@ -117,12 +125,14 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           else bySql.set(sql, [rule])
         }
         for (const [sql, rules] of bySql) {
+          // Same cache-to-cache bypass as the shared scan above.
           const result = await executeQuerySql({
             query: sql,
             registry: query,
             storage,
             config,
             refresh: 'always',
+            includeLocalOnly: true,
           })
           sourceRows += result.rows.length
           scanCount += 1
@@ -188,12 +198,16 @@ async function dedupExisting(rows, idCol, dataset, query, storage, config) {
   /** @type {Set<string>} */
   const seen = new Set()
   try {
+    // Dedup must see EVERY committed id (ids are content-addressed hashes,
+    // not content): a visibility-filtered id set would re-append rows the
+    // filter hid and corrupt idempotency. Cache-internal, so bypass.
     const res = await executeQuerySql({
       query: `SELECT ${idCol} FROM ${dataset}`,
       registry: query,
       storage,
       config,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     for (const r of res.rows) {
       const v = r[idCol]

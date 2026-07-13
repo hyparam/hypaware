@@ -59,6 +59,26 @@ export const EDGE_COLUMNS = Object.freeze([
 const COLUMNS = { node: NODE_COLUMNS, edge: EDGE_COLUMNS }
 
 /**
+ * Content-bearing columns per graph dataset, for the LLP 0105 query
+ * visibility filter. Graph rows aggregate across sessions and carry no
+ * per-row `cwd` provenance (the inline provenance is dataset+keys, not a
+ * directory), so the shared filter cannot judge a row's own class. This
+ * resolves LLP 0105 #graph-provenance on the suppression side: a caller
+ * whose context may not see local-only content gets these columns nulled
+ * while the structural columns (content-addressed ids and types) keep the
+ * graph walkable; propagating per-row provenance through the projection's
+ * merge remains open as the higher-fidelity follow-up. Keys, labels, and
+ * props can carry session-derived text and paths; `source_keys` carries the
+ * originating row keys.
+ *
+ * @ref LLP 0105#graph-provenance [implements]: unprovenanced graph rows expose structure, never content, to restricted callers
+ */
+const CONTENT_COLUMNS = {
+  node: ['natural_key', 'label', 'props', 'source_keys'],
+  edge: ['props', 'source_keys'],
+}
+
+/**
  * Spool/label table path the projector appends to. On flush the storage
  * service re-routes rows to `<dataset>/source=<...>/table/`; queries find
  * them via `discoverCachePartitions` (see createDataSource).
@@ -79,6 +99,7 @@ export function graphDatasetRegistration(dataset) {
     name: dataset,
     plugin: PLUGIN_NAME,
     schema: { columns: [...COLUMNS[dataset]] },
+    localOnlyContentColumns: [...CONTENT_COLUMNS[dataset]],
     primaryTimestampColumn: 'first_seen',
     discoverPartitions: (ctx) => discoverParts(ctx, dataset),
     refreshPartition: async () => /** @type {DatasetRefreshResult} */ ({ status: 'skipped', rows: 0 }),

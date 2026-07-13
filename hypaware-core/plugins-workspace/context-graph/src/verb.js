@@ -6,6 +6,7 @@ import { PLUGIN_NAME } from './datasets.js'
 /**
  * @import { VerbRegistration, VerbRenderControls, VerbRenderResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { LocalOnlyVisibilityReport } from '../../../../src/core/query/types.js'
  * @import { Direction, TraversalOk, TraversalErr } from './types.js'
  */
 
@@ -36,6 +37,14 @@ export const graphNeighborsVerb = {
       edge_type: { type: 'array', items: { type: 'string' }, description: 'Restrict traversal to these edge types.' },
       direction: { type: 'string', enum: ['out', 'in', 'both'], description: 'Edge direction to follow (default both).', default: 'both' },
       limit: { type: 'integer', description: 'Max neighbors to return (default 100).', default: 100, minimum: 1 },
+      // @ref LLP 0105#override [implements]: same informed-consent override as `hyp query sql`
+      'include-local-only': {
+        type: 'boolean',
+        default: false,
+        description:
+          'Include local-only graph content even when this context is synced. If this ' +
+          'session is itself captured, that content enters the transcript and can be forwarded.',
+      },
     },
     required: ['node'],
     positional: ['node'],
@@ -51,6 +60,8 @@ export const graphNeighborsVerb = {
       edgeTypes: /** @type {string[] | undefined} */ (params.edge_type),
       direction: /** @type {Direction} */ (params.direction),
       limit: /** @type {number} */ (params.limit),
+      callerCwd: ctx.callerCwd,
+      includeLocalOnly: params['include-local-only'] === true,
     })
     // Carry the query context onto a successful result so the renderer (and
     // an MCP consumer) can describe the walk without re-reading the params.
@@ -59,19 +70,40 @@ export const graphNeighborsVerb = {
       : result
   },
   render(result, controls) {
-    const r = /** @type {(TraversalOk & { depth: number, direction: Direction }) | TraversalErr} */ (result)
+    const r = /** @type {((TraversalOk & { depth: number, direction: Direction }) | TraversalErr) & { localOnly?: LocalOnlyVisibilityReport }} */ (result)
+    // Never-silent (LLP 0105): a walk over a visibility-filtered graph says
+    // so on stderr, counts only, whether it succeeded or failed to seed.
+    const notice = localOnlyNotice(r.localOnly)
     if (!r.ok) {
       const lines = [`hyp graph neighbors: ${r.error}`]
       for (const c of (r.candidates ?? []).slice(0, 10)) {
         lines.push(`  ${c.node_type}\t${c.natural_key}\t(${shortId(c.node_id)})`)
       }
-      return { stdout: '', stderr: lines.join('\n') + '\n', exitCode: 1 }
+      return { stdout: '', stderr: lines.join('\n') + '\n' + notice, exitCode: 1 }
     }
     if (controls.json) {
-      return { stdout: `${JSON.stringify(r, null, 2)}\n` }
+      return { stdout: `${JSON.stringify(r, null, 2)}\n`, ...(notice ? { stderr: notice } : {}) }
     }
-    return renderNeighbors(r)
+    const rendered = renderNeighbors(r)
+    return notice ? { ...rendered, stderr: (rendered.stderr ?? '') + notice } : rendered
   },
+}
+
+/**
+ * Stderr note when the LLP 0105 filter hid graph content from this caller.
+ *
+ * @param {LocalOnlyVisibilityReport | undefined} localOnly
+ * @returns {string}
+ */
+function localOnlyNotice(localOnly) {
+  if (!localOnly || (localOnly.withheldRows === 0 && localOnly.suppressedRows === 0)) return ''
+  const parts = []
+  if (localOnly.withheldRows > 0) parts.push(`withheld ${localOnly.withheldRows} row(s)`)
+  if (localOnly.suppressedRows > 0) {
+    parts.push(`suppressed content (labels/keys) on ${localOnly.suppressedRows} row(s) without per-row provenance`)
+  }
+  return `local-only: ${parts.join('; ')} for this ${localOnly.callerClass === 'unknown' ? 'unknown-context' : localOnly.callerClass} caller ` +
+    `(rerun with --include-local-only to include them; a captured session's transcript would then carry that content)\n`
 }
 
 /**

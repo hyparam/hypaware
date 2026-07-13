@@ -1026,6 +1026,16 @@ export interface DatasetRegistration {
   primaryTimestampColumn?: string
   fallbackTimestampColumns?: string[]
   cachePartitioning?: CachePartitioningDeclaration
+  /**
+   * Content-bearing columns of a dataset whose rows may lack per-row `cwd`
+   * provenance (derived tables that aggregate across sessions, e.g. the
+   * context-graph projection). The shared query visibility filter (LLP 0105)
+   * suppresses these columns to null on unprovenanced rows when the querying
+   * context may not see local-only content; structural columns pass through.
+   * Datasets whose rows always carry a `cwd` column need not declare this:
+   * the filter withholds by the row's own resolved class instead.
+   */
+  localOnlyContentColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
   createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
@@ -1264,6 +1274,15 @@ export interface VerbOperationContext {
   log: PluginLogger
   /** Local cache freshness control (CLI `--refresh`); meaningless remotely. */
   refresh: 'never' | 'auto' | 'always'
+  /**
+   * The querying context's working directory, for the LLP 0105 visibility
+   * filter: the terminal's cwd for a CLI invocation, the spawn directory for
+   * a local stdio MCP host. `null` when no caller directory is derivable (a
+   * transport that carries none), which the filter treats fail-closed.
+   * Verbs whose operation reads content-bearing datasets pass this through
+   * to `executeQuerySql` as `callerCwd`.
+   */
+  callerCwd: string | null
 }
 
 /** CLI render controls parsed by the kernel and passed to `render`. */
