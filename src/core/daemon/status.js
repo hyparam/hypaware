@@ -19,6 +19,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
+import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -598,6 +599,16 @@ export async function collectHypAwareStatus(opts = {}) {
     })
   }
 
+  // ----- first-sync export hold (LLP 0101 / LLP 0100 R9) -----
+  // A live hold pauses every sink tick driver-wide (LLP 0101 #hold): a held
+  // machine must never be a silent state, so the pending deadline is
+  // surfaced whenever one is live. `readFirstSyncDeadline` never throws and
+  // already reads an absent/expired/corrupt marker as null (fail-open), so
+  // this probe needs no diagnostic of its own - null here just means "no
+  // hold", the same as the driver's own check sees it.
+  // @ref LLP 0100#requirements [implements]: R9 - hyp status shows the pending first-sync deadline while the hold is live
+  const firstSyncHoldDeadline = await readFirstSyncDeadline({ stateDir: stateRoot })
+
   // ----- recent errors -----
   const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
   if (recentErrorCount > 0) {
@@ -643,6 +654,7 @@ export async function collectHypAwareStatus(opts = {}) {
     remoteConfig,
     clientActions,
     usagePolicy,
+    firstSyncHoldDeadline,
   }
 }
 

@@ -20,7 +20,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
 import { DURABLE_HINT } from '../commands/local_only.js'
-import { writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
+import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
 import { originOf } from '../remote/gateway_seed.js'
 import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
@@ -141,6 +141,27 @@ async function markFirstSyncHoldBestEffort(stateDir) {
     })
     return null
   }
+}
+
+/**
+ * The first-sync deadline message: an absolute local time, a statement that
+ * the first sync includes backfilled history, and the `hypaware-privacy`
+ * skill invocation hint ([LLP 0100 §flow](../../../llp/0100-enrollment-privacy-review.spec.md#flow)
+ * example copy). Printed to stderr unconditionally - the same wording on a
+ * TTY or a non-TTY login, since neither case is a prompt (LLP 0063 D3
+ * stands): this is a consent-surface statement, pinned by tests like the
+ * other consent surfaces.
+ *
+ * @ref LLP 0100#requirements [implements]: R1 - absolute deadline, backfill statement, skill hint, same on TTY and non-TTY
+ * @param {number} deadlineMs
+ * @param {string} centralUrl
+ * @returns {string}
+ */
+export function firstSyncHoldMessage(deadlineMs, centralUrl) {
+  return (
+    `first sync to ${centralUrl} is ${formatFirstSyncDeadline(deadlineMs)} and includes your backfilled history\n` +
+    "  to review what ships before then, open Claude or Codex and run the hypaware-privacy skill\n"
+  )
 }
 
 /**
@@ -536,7 +557,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // failing the login. `hyp join` and re-logins write nothing (LLP 0101
     // #which) - only this attended enrolling fork holds.
     // @ref LLP 0101 [implements]: attended enrolling login writes the hold before enrollCentralSink, no clear-on-exit
-    await markFirstSyncHoldBestEffort(stateDir)
+    const holdDeadline = await markFirstSyncHoldBestEffort(stateDir)
 
     /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
     let result
@@ -551,6 +572,15 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       return 1
     }
     ctx.stdout.write(`forwarding logs to ${centralUrl}\n`)
+    // Print the deadline once, ahead of every exit branch below (--no-daemon,
+    // a failed daemon install, or the normal attach-wait path): the hold and
+    // its deadline are already committed to disk regardless of how the daemon
+    // install itself goes, so the message stays true in all three. Absent only
+    // when the best-effort marker write above failed (LLP 0100 R1's message
+    // rides the hold, never invents one that was not actually written).
+    if (holdDeadline !== null) {
+      ctx.stderr.write(firstSyncHoldMessage(holdDeadline, centralUrl))
+    }
     // Without the daemon there is nothing to wait on: it is what pulls the org
     // config and runs the attach reconcile. Say what is left to do and stop.
     if (noDaemon) {

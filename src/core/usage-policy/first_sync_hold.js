@@ -45,6 +45,20 @@ export function computeFirstSyncDeadline(now = Date.now()) {
 }
 
 /**
+ * Format an absolute deadline (epoch ms) as a memorable local date/time. The
+ * one place the login message ([LLP 0100](../../../llp/0100-enrollment-privacy-review.spec.md)
+ * R1) and `hyp status` (R9) render "the deadline", so the two consent
+ * surfaces cannot drift apart on wording.
+ *
+ * @ref LLP 0100#requirements [implements]: shared formatting keeps R1's login message and R9's status line in sync
+ * @param {number} deadlineMs epoch ms
+ * @returns {string}
+ */
+export function formatFirstSyncDeadline(deadlineMs) {
+  return new Date(deadlineMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+/**
  * Path of the machine-local first-sync hold marker, co-located with the
  * `usage-policy/` state it lives beside (the machine-local policy lists).
  *
