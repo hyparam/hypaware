@@ -59,16 +59,27 @@ test('attach records the managed env + hook entries into the marker undo record'
 
     // Every managed hook spec is recorded with its command, and the
     // PostToolUse entry carries its matcher so the undo strips exactly
-    // what was installed.
+    // what was installed. session-context rides all four events; the
+    // classify-cwd hook (LLP 0106) rides the two session-start events
+    // (SessionStart, CwdChanged), so those events carry two entries each.
     const events = marker.managed.hooks.map((/** @type {any} */ h) => h.event).sort()
-    assert.deepEqual(events, ['CwdChanged', 'PostToolUse', 'SessionStart', 'UserPromptSubmit'])
+    assert.deepEqual(events, [
+      'CwdChanged', 'CwdChanged', 'PostToolUse', 'SessionStart', 'SessionStart', 'UserPromptSubmit',
+    ])
     for (const hook of marker.managed.hooks) {
-      assert.match(hook.command, /claude-hook session-context --state-file /)
+      assert.match(hook.command, /claude-hook (session-context --state-file |classify-cwd)/)
     }
+    // classify-cwd is installed exactly on SessionStart and CwdChanged.
+    const classifyEvents = marker.managed.hooks
+      .filter((/** @type {any} */ h) => /claude-hook classify-cwd\b/.test(h.command))
+      .map((/** @type {any} */ h) => h.event)
+      .sort()
+    assert.deepEqual(classifyEvents, ['CwdChanged', 'SessionStart'])
     const postToolUse = marker.managed.hooks.find((/** @type {any} */ h) => h.event === 'PostToolUse')
     assert.equal(postToolUse.matcher, 'Bash')
-    const sessionStart = marker.managed.hooks.find((/** @type {any} */ h) => h.event === 'SessionStart')
-    assert.equal(sessionStart.matcher, undefined)
+    assert.match(postToolUse.command, /claude-hook session-context --state-file /)
+    const sessionStartHooks = marker.managed.hooks.filter((/** @type {any} */ h) => h.event === 'SessionStart')
+    for (const hook of sessionStartHooks) assert.equal(hook.matcher, undefined)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
