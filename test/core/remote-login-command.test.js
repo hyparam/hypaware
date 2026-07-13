@@ -8,7 +8,7 @@ import path from 'node:path'
 
 import { runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
-import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
+import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
 async function tmpHome() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))
@@ -842,6 +842,80 @@ test('a fresh enroll writes the first-sync hold BEFORE enrollCentralSink, with a
   assert.ok(typeof deadline === 'number' && deadline > Date.now(), 'a future deadline remains after the login returns')
   // The deadline is the next local 11:59pm rule (LLP 0101 #deadline).
   assert.ok(Math.abs(deadline - computeFirstSyncDeadline(Date.now())) < 5 * 60_000)
+})
+
+/* --------------------------------------------------------------------------
+ * T6: the deadline message (LLP 0100 R1) - absolute local time, the
+ * backfilled-history statement, and the hypaware-privacy skill invocation
+ * hint, printed to stderr the same way whether stdin is a TTY or not (LLP
+ * 0063 D3 stands: this is a statement, never a prompt).
+ * ------------------------------------------------------------------------ */
+
+test('a fresh enroll on a TTY prints the deadline message on stderr (LLP 0100 R1)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+
+  const stateDir = path.join(hypHome, 'hypaware')
+  const deadline = await readFirstSyncDeadline({ stateDir })
+  assert.ok(typeof deadline === 'number')
+  const text = err.join('')
+  assert.match(text, /first sync to https:\/\/hyp\.internal is /)
+  assert.ok(
+    text.includes(formatFirstSyncDeadline(/** @type {number} */ (deadline))),
+    'the message names the deadline as an absolute local time, using the same formatting hyp status will use'
+  )
+  assert.match(text, /includes your backfilled history/)
+  assert.match(text, /open Claude or Codex and run the hypaware-privacy skill/)
+})
+
+test('a fresh enroll on non-TTY stdin prints the same deadline message on stderr (LLP 0100 R1)', async () => {
+  const hypHome = await tmpHome()
+  const stdin = { isTTY: false, async *[Symbol.asyncIterator]() { /* no chunks */ } }
+  const { ctx, err } = await makeCtx({ hypHome, stdin })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+
+  // A non-TTY login without a token file or piped token still takes the
+  // browser flow here (forceBrowser), the same fork an interactive login
+  // takes - only --token-file/piped-stdin-without-a-browser-flag differ.
+  const code = await runRemoteLogin(['prod', '--browser'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+
+  const text = err.join('')
+  assert.match(text, /first sync to https:\/\/hyp\.internal is /)
+  assert.match(text, /includes your backfilled history/)
+  assert.match(text, /open Claude or Codex and run the hypaware-privacy skill/)
+})
+
+test('--no-daemon still prints the deadline message: the hold is already committed regardless of the daemon install', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(err.join(''), /first sync to https:\/\/hyp\.internal is /)
+  assert.match(err.join(''), /hypaware-privacy skill/)
+})
+
+test('a re-login (already-enrolled) prints no deadline message: there is no first sync to defer', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login })
+  assert.equal(code, 0)
+  assert.doesNotMatch(err.join(''), /first sync to/)
 })
 
 test('a fresh enroll whose enrollment throws still holds (the marker landed pre-enroll and is never cleared) (LLP 0101)', async () => {

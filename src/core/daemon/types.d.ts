@@ -230,6 +230,15 @@ export interface HypAwareStatusReport {
    * `local_only_list_unreadable` diagnostic) - never a silent zero.
    */
   usagePolicy: { localOnlyDirCount: number } | null
+  /**
+   * The pending first-sync export hold's absolute deadline (epoch ms), read
+   * from the machine-local marker (LLP 0101). Null whenever no hold is live:
+   * never written (a re-login or `hyp join`), already expired, or unreadable
+   * - `readFirstSyncDeadline`'s fail-open contract reads all three as absent,
+   * matching exactly what the sink driver itself sees before it stops
+   * holding ticks. A held machine must never be a silent state (LLP 0100 R9).
+   */
+  firstSyncHoldDeadline: number | null
 }
 
 export interface CollectStatusOptions {
