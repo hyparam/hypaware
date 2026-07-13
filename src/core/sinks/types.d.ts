@@ -105,11 +105,12 @@ export interface TickReport {
     error?: string
   }>
   /**
-   * Present when the whole tick was skipped: an enrolling login's local-only
-   * pick was pending (fresh `usage-policy/pick-pending.json` marker), so no
-   * sink exported this tick (LLP 0093).
+   * Present when the whole tick was skipped: an enrolling login's first-sync
+   * review window is still open (the `usage-policy/first-sync-hold.json`
+   * marker carries a future deadline), so no sink exported this tick
+   * (LLP 0101).
    */
-  held?: 'pick_pending'
+  held?: 'first_sync_hold'
 }
 
 export interface MaterializeResult {
