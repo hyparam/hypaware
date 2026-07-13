@@ -19,12 +19,13 @@ import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_e
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import {
+  CLASS_RANK,
   createUsagePolicyResolver,
   findRepoRoot,
   isEqualOrDescendant,
   localOnlyListPath,
-  readLocalOnlyDirs,
-  writeLocalOnlyDirs,
+  readLocalOnlyEntries,
+  writeLocalOnlyEntries,
 } from '../usage-policy/index.js'
 import { executeQuerySql } from '../query/sql.js'
 import { pluginStateDir } from './plugin.js'
@@ -33,7 +34,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
- * @import { ResolveResult } from '../../../src/core/usage-policy/types.js'
+ * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
 /**
@@ -558,17 +559,25 @@ function expandDetachClientNames(requested, descriptors) {
   return [requested]
 }
 
+// Usage string shared by the parse-error path and the CLI help registry
+// (LLP 0103 #cli): kept next to the parser so the two never drift apart.
+const IGNORE_USAGE = 'hyp ignore [path] [--check] [--json] [--local-only | --private | --sync]'
+
 /**
- * Parse `hyp ignore` / `hyp unignore` argv: an optional positional path and
- * the `--check` / `--json` / `--local-only` flags (`--check` is meaningful
- * for `ignore` only; `--local-only` retargets both verbs at the
- * machine-local list instead of the `.hypignore` dotfile, LLP 0072 #cli).
+ * Parse `hyp ignore` / `hyp unignore` argv: an optional positional path, the
+ * `--check` / `--json` flags (`--check` is meaningful for `ignore` only), and
+ * the three machine-local marking flags (LLP 0103 #cli), mutually exclusive:
+ * `--local-only` (unchanged since LLP 0072), `--private` (a machine-local
+ * `ignore` entry), and `--sync` (an explicit machine-local `full` entry, this
+ * task's pick for the explicit-sync spelling). Bare `hyp ignore <path>` with
+ * none of the three keeps its LLP 0049 dotfile meaning.
  *
- * @ref LLP 0072#cli [implements]: `--local-only` flag parsing for both verbs
+ * @ref LLP 0103#cli [implements]: `--private` / `--sync` flag parsing, mutually exclusive with `--local-only`
  * @param {string[]} argv
- * @returns {{ check: boolean, json: boolean, localOnly: boolean, path?: string, error?: string }}
+ * @returns {{ check: boolean, json: boolean, localOnly: boolean, private: boolean, sync: boolean, path?: string, error?: string }}
  */
 function parseIgnoreArgs(argv) {
+  const empty = { check: false, json: false, localOnly: false, private: false, sync: false }
   const parsed = parseCommandArgv(argv, {
     type: 'object',
     properties: {
@@ -576,30 +585,39 @@ function parseIgnoreArgs(argv) {
       check: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
       'local-only': { type: 'boolean', default: false },
+      private: { type: 'boolean', default: false },
+      sync: { type: 'boolean', default: false },
     },
     positional: ['path'],
   })
-  if ('help' in parsed) {
-    return { check: false, json: false, localOnly: false, error: 'usage: hyp ignore [path] [--check] [--json] [--local-only]' }
+  if ('help' in parsed) return { ...empty, error: `usage: ${IGNORE_USAGE}` }
+  if (!parsed.ok) return { ...empty, error: parsed.error }
+  const p = /** @type {{ path?: string, check: boolean, json: boolean, 'local-only': boolean, private: boolean, sync: boolean }} */ (
+    parsed.params
+  )
+  const markingFlags = [p['local-only'], p.private, p.sync].filter(Boolean).length
+  if (markingFlags > 1) {
+    return { ...empty, error: '--local-only, --private, and --sync are mutually exclusive' }
   }
-  if (!parsed.ok) return { check: false, json: false, localOnly: false, error: parsed.error }
-  const p = /** @type {{ path?: string, check: boolean, json: boolean, 'local-only': boolean }} */ (parsed.params)
-  return { check: p.check, json: p.json, localOnly: p['local-only'], path: p.path }
+  return { check: p.check, json: p.json, localOnly: p['local-only'], private: p.private, sync: p.sync, path: p.path }
 }
 
 /**
- * `hyp ignore [path] [--check] [--local-only]`
+ * `hyp ignore [path] [--check] [--local-only | --private | --sync]`
  *
- * Without `--check`, writes a self-documenting `.hypignore` (comment header +
+ * Without any flag, writes a self-documenting `.hypignore` (comment header +
  * `ignore` token) so HypAware stops recording the folder subtree. The file
  * lands at the git **repo root** when the target is inside a repo, else at the
  * target directory; an explicit `path` overrides the default (cwd) target. The
  * write is idempotent (LLP 0049 R5): a path already governed by an ancestor
  * `.hypignore` is left as-is. With `--check`, reports status without writing.
- * With `--local-only`, adds the target to the machine-local list instead of
- * writing a dotfile (LLP 0072 #cli) — see {@link runIgnoreLocalOnly}.
+ * With one of the three machine-local flags, marks the target in the
+ * machine-local class-per-entry store instead of touching a dotfile
+ * (LLP 0103 #cli) — see {@link runMarkMachineLocal}. The bare-path dotfile
+ * meaning is unchanged from LLP 0049.
  *
  * @ref LLP 0049#cli [implements]: the `hyp ignore` verb: write the dotfile at the repo root, idempotent, with a prospective-only `--check`
+ * @ref LLP 0103#cli [implements]: `--private` / `--sync` dispatch to the machine-local marking verb, alongside the existing `--local-only`
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -610,7 +628,9 @@ export async function runIgnore(argv, ctx) {
     return 2
   }
   if (parsed.check) return runIgnoreCheck(parsed, ctx)
-  if (parsed.localOnly) return runIgnoreLocalOnly(parsed, ctx)
+  if (parsed.private) return runMarkMachineLocal(parsed, ctx, 'ignore')
+  if (parsed.localOnly) return runMarkMachineLocal(parsed, ctx, 'local-only')
+  if (parsed.sync) return runMarkMachineLocal(parsed, ctx, 'full')
 
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
@@ -651,28 +671,39 @@ export async function runIgnore(argv, ctx) {
 }
 
 /**
- * `hyp ignore --local-only [path]`
+ * `hyp ignore --private [path]` / `hyp ignore --local-only [path]` /
+ * `hyp ignore --sync [path]`
  *
- * Adds the resolved target to the machine-local `local-only` list
- * (LLP 0071) instead of writing a `.hypignore`: rows from the scope stay
- * recorded to the local cache (queryable) but are dropped at the export
- * seam (LLP 0070), rather than never being recorded at all. Resolves the
- * target the same way plain `hyp ignore` does — the git repo root when
- * `base` is inside one, else `base`; an explicit `path` overrides — and
- * never writes into a repo (R4): the only write is to the `HYP_HOME`-state
- * list file, so the target need not exist on disk or be a git repo.
+ * Marks the resolved target with `targetClass` in the machine-local
+ * class-per-entry store (LLP 0103) instead of writing a `.hypignore`: never
+ * writes into a repo (LLP 0071 R4, LLP 0100 R6), so the target need not exist
+ * on disk or be a git repo. Resolves the target the same way plain
+ * `hyp ignore` does — the git repo root when `base` is inside one, else
+ * `base`; an explicit `path` overrides.
  *
- * Idempotent (R8: reuses the shared resolver, not a second copy of path
- * logic): a target already governed — by an existing list entry (exact or
- * ancestor) or an even-more-restrictive `.hypignore` — is a no-op success
- * naming the governor, never a duplicate entry.
+ * - `ignore`: rows from the scope are never recorded (enforced at the
+ *   capture seam, same as a dotfile `ignore`).
+ * - `local-only`: rows stay recorded to the local cache (queryable) but are
+ *   dropped at the export seam (LLP 0070), unchanged since LLP 0072.
+ * - `full`: an explicit "asked; syncs" marker. It resolves identically to
+ *   the implicit default, but — unlike an unlisted directory — is a
+ *   recorded answer the classification hook (LLP 0106) can see, so it never
+ *   asks about this directory again.
  *
- * @ref LLP 0072#cli [implements]: `hyp ignore --local-only`, the add half of durable local-only authoring
+ * Idempotent and non-destructive (LLP 0104 boundary: marking never touches
+ * cached rows). A target already governed by a class at least as
+ * restrictive (`ignore`/`local-only`) — from either source — is a no-op
+ * success naming the governor; a `full` mark is idempotent only against an
+ * existing *explicit* machine-local `full` entry (the implicit default for
+ * an unlisted directory is not "already answered", LLP 0103).
+ *
+ * @ref LLP 0103#cli [implements]: the shared machine-local marking verb behind `--private` / `--local-only` / `--sync`
  * @param {{ path?: string }} parsed
  * @param {CommandRunContext} ctx
+ * @param {UsageClass} targetClass
  * @returns {Promise<number>}
  */
-async function runIgnoreLocalOnly(parsed, ctx) {
+async function runMarkMachineLocal(parsed, ctx, targetClass) {
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch adds/removes/checks the tree the caller actually pointed at.
@@ -681,39 +712,47 @@ async function runIgnoreLocalOnly(parsed, ctx) {
   // An explicit `path` overrides: record exactly the directory the caller
   // pointed at, mirroring the dotfile verb's placement rule.
   const targetDir = parsed.path ? base : (findRepoRoot(base) ?? base)
+  const resolvedTarget = path.resolve(targetDir)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
 
-  const existing = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(targetDir)
-  if (existing.class !== 'full') {
-    ctx.stdout.write(`already ${existing.class} (governed by ${existing.governedBy})\n`)
+  const existing = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(resolvedTarget)
+  const alreadyMarked =
+    targetClass === 'full'
+      ? existing.governedBy === listPath && existing.class === 'full'
+      : CLASS_RANK[existing.class] >= CLASS_RANK[targetClass]
+  if (alreadyMarked) {
+    ctx.stdout.write(`already ${existing.class} (governed by ${existing.governedBy ?? '(implicit default)'})\n`)
     return 0
   }
 
-  const dirs = await readLocalOnlyDirs({ stateDir })
-  const resolvedTarget = path.resolve(targetDir)
-  await writeLocalOnlyDirs({ stateDir, dirs: [...dirs, resolvedTarget] })
-  getLogger('usage-policy').info('usage_policy.local_only_add', {
+  const entries = await readLocalOnlyEntries({ stateDir })
+  const withoutTarget = entries.filter((entry) => entry.dir !== resolvedTarget)
+  await writeLocalOnlyEntries({ stateDir, entries: [...withoutTarget, { dir: resolvedTarget, class: targetClass }] })
+  getLogger('usage-policy').info('usage_policy.mark', {
     [Attr.COMPONENT]: 'cmd-ignore',
-    [Attr.OPERATION]: 'usage_policy.local_only_add',
+    [Attr.OPERATION]: 'usage_policy.mark',
+    class: targetClass,
     status: 'ok',
   })
   // Same latency caveat as the dotfile write: a running daemon's resolver
   // picks this up within the matcher's cache TTL, not instantly.
-  ctx.stdout.write(`added ${resolvedTarget} to the local-only list (${listPath})\n`)
+  ctx.stdout.write(`marked ${resolvedTarget} as ${targetClass} (${listPath})\n`)
   return 0
 }
 
 /**
- * `hyp unignore [path] [--local-only]`
+ * `hyp unignore [path] [--local-only | --private | --sync]`
  *
  * Removes the nearest governing `.hypignore`, re-enabling recording for the
  * subtree. Idempotent (LLP 0049 R5): unignoring a path that no `.hypignore`
- * governs succeeds as a no-op. With `--local-only`, removes every
- * machine-local list entry that governs the target instead (LLP 0072 #cli) —
- * see {@link runUnignoreLocalOnly}.
+ * governs succeeds as a no-op. With one of the three machine-local flags,
+ * removes every machine-local entry of that class that governs the target
+ * instead (LLP 0103 #cli, symmetric with the `hyp ignore` marking verbs) —
+ * see {@link runUnmarkMachineLocal}.
  *
  * @ref LLP 0049#cli [implements]: the `hyp unignore` verb: remove the governing dotfile, idempotent
+ * @ref LLP 0103#cli [implements]: `--private` / `--sync` dispatch to the symmetric machine-local unmarking verb
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -731,7 +770,9 @@ export async function runUnignore(argv, ctx) {
     ctx.stderr.write('error: --json is only valid for `hyp ignore --check`\n')
     return 2
   }
-  if (parsed.localOnly) return runUnignoreLocalOnly(parsed, ctx)
+  if (parsed.private) return runUnmarkMachineLocal(parsed, ctx, 'ignore')
+  if (parsed.localOnly) return runUnmarkMachineLocal(parsed, ctx, 'local-only')
+  if (parsed.sync) return runUnmarkMachineLocal(parsed, ctx, 'full')
 
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
@@ -759,43 +800,49 @@ export async function runUnignore(argv, ctx) {
 }
 
 /**
- * `hyp unignore --local-only [path]`
+ * `hyp unignore --private [path]` / `hyp unignore --local-only [path]` /
+ * `hyp unignore --sync [path]`
  *
- * Removes every machine-local `local-only` list entry that governs the
+ * Removes every machine-local entry of `targetClass` that governs the
  * target — equal to it, or an ancestor of it (the same segment-aware rule
  * the shared resolver applies, reused here via {@link isEqualOrDescendant}
  * rather than re-derived, R8) — mirroring dotfile `unignore`'s "remove the
- * governing thing" semantics. Idempotent: no governing entry is a no-op
- * success.
+ * governing thing" semantics. Entries of a different class are left alone
+ * (LLP 0104 boundary: unmarking is class-scoped and non-destructive of
+ * cached rows either way). Idempotent: no governing entry of that class is
+ * a no-op success.
  *
- * @ref LLP 0072#cli [implements]: `hyp unignore --local-only`, the remove half of durable local-only authoring
+ * @ref LLP 0103#cli [implements]: symmetric class-scoped removal for `--private` / `--local-only` / `--sync`
  * @param {{ path?: string }} parsed
  * @param {CommandRunContext} ctx
+ * @param {UsageClass} targetClass
  * @returns {Promise<number>}
  */
-async function runUnignoreLocalOnly(parsed, ctx) {
+async function runUnmarkMachineLocal(parsed, ctx, targetClass) {
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch adds/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const dirs = await readLocalOnlyDirs({ stateDir })
-  const governing = dirs.filter((dir) => isEqualOrDescendant(base, dir))
+  const entries = await readLocalOnlyEntries({ stateDir })
+  const governing = entries.filter((entry) => entry.class === targetClass && isEqualOrDescendant(base, entry.dir))
   if (governing.length === 0) {
-    ctx.stdout.write(`not local-only (no local-only entry governs ${base})\n`)
+    ctx.stdout.write(`not ${targetClass} (no machine-local ${targetClass} entry governs ${base})\n`)
     return 0
   }
 
-  const governingSet = new Set(governing)
-  const remaining = dirs.filter((dir) => !governingSet.has(dir))
-  await writeLocalOnlyDirs({ stateDir, dirs: remaining })
-  getLogger('usage-policy').info('usage_policy.local_only_remove', {
+  const governingDirs = new Set(governing.map((entry) => entry.dir))
+  const remaining = entries.filter((entry) => !governingDirs.has(entry.dir))
+  await writeLocalOnlyEntries({ stateDir, entries: remaining })
+  getLogger('usage-policy').info('usage_policy.unmark', {
     [Attr.COMPONENT]: 'cmd-unignore',
-    [Attr.OPERATION]: 'usage_policy.local_only_remove',
+    [Attr.OPERATION]: 'usage_policy.unmark',
+    class: targetClass,
     status: 'ok',
   })
+  const removedDirs = governing.map((entry) => entry.dir)
   ctx.stdout.write(
-    `removed ${governing.length} local-only entr${governing.length === 1 ? 'y' : 'ies'}: ${governing.join(', ')}\n`
+    `removed ${governing.length} ${targetClass} entr${governing.length === 1 ? 'y' : 'ies'}: ${removedDirs.join(', ')}\n`
   )
   return 0
 }
@@ -804,17 +851,20 @@ async function runUnignoreLocalOnly(parsed, ctx) {
  * `hyp ignore --check [path]`
  *
  * Reports whether `path` (default cwd) is currently ignored, the resolved
- * usage class and its governing source — a `.hypignore` dotfile, or the
- * machine-local `local-only` list file (LLP 0072 §cli: the extended
- * resolver reports both sources through the same `resolve()` call) — and the
- * residual count of already-cached rows from the scope. This is
- * prospective-only: `--check` never purges; it just surfaces the residue so
- * the rule stays debuggable (LLP 0049 #prospective-only). For a
- * `local-only`-governed scope, the residual count reads as "recorded
- * locally, withheld from forwarding" rather than "never recorded".
+ * usage class, and which source governs it — a `.hypignore` dotfile, or a
+ * machine-local class-per-entry (LLP 0103 #cli: `--check` names the
+ * governing source explicitly, not just the file path, so a `--private`/
+ * `--local-only`/`--sync` mark and a committed dotfile read distinctly even
+ * though both resolve through the same `resolve()` call) — and the residual
+ * count of already-cached rows from the scope. This is prospective-only:
+ * `--check` never purges; it just surfaces the residue so the rule stays
+ * debuggable (LLP 0049 #prospective-only), pointing at `hyp purge` for
+ * removing it. For a `local-only`-governed scope, the residual count reads
+ * as "recorded locally, withheld from forwarding" rather than "never
+ * recorded".
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
- * @ref LLP 0072#cli [implements]: `--check` reports the extended resolver's class + governing source (dotfile or list)
+ * @ref LLP 0103#cli [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
  * @param {{ json: boolean, path?: string }} parsed
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -831,6 +881,11 @@ async function runIgnoreCheck(parsed, ctx) {
   const governed = result.class !== 'full'
   const scopeDir = governed ? await resolveCheckScopeDir({ result, base, stateDir, listPath }) : base
   const residual = governed ? await countResidualCachedRows(scopeDir, ctx) : 0
+  // LLP 0103: name the governing source distinctly from the raw path, so a
+  // machine-local mark and a committed dotfile read differently even though
+  // both resolve through the same `resolve()` call.
+  const source = !result.governedBy ? 'none' : result.governedBy === listPath ? 'machine-local' : 'dotfile'
+  const purgeHint = residual ? ` (use 'hyp purge' to remove them)` : ''
 
   if (parsed.json) {
     ctx.stdout.write(
@@ -838,6 +893,7 @@ async function runIgnoreCheck(parsed, ctx) {
         path: base,
         ignored,
         governedBy: result.governedBy,
+        source,
         class: result.class,
         declared: result.declared,
         residualCachedRows: residual,
@@ -849,21 +905,23 @@ async function runIgnoreCheck(parsed, ctx) {
   ctx.stdout.write(`path: ${base}\n`)
   ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
   ctx.stdout.write(`class: ${result.class}\n`)
+  ctx.stdout.write(`source: ${source}\n`)
   ctx.stdout.write(`governed-by: ${result.governedBy ?? '(none)'}\n`)
-  ctx.stdout.write(`residual-cached-rows: ${residual === null ? 'unknown' : residual}\n`)
+  ctx.stdout.write(`residual-cached-rows: ${residual === null ? 'unknown' : residual}${purgeHint}\n`)
   return 0
 }
 
 /**
  * Resolve the directory whose residual cached rows `hyp ignore --check`
  * should count: the directory containing the governing `.hypignore` when
- * governed by a dotfile (unchanged from before `local-only` existed), or —
- * when governed by the machine-local list (`result.governedBy === listPath`)
- * — the most specific (longest) list entry that actually matches `base`,
- * found via the shared {@link isEqualOrDescendant} predicate rather than a
- * second copy of path logic (R8). The `resolve()` call already decided
- * *whether* something governs; this only identifies *which* listed directory
- * did, for display and scoping the residual count.
+ * governed by a dotfile (unchanged from before the machine-local list
+ * existed), or — when governed by the machine-local store
+ * (`result.governedBy === listPath`) — the most specific (longest) entry
+ * that actually matches `base`, found via the shared
+ * {@link isEqualOrDescendant} predicate rather than a second copy of path
+ * logic (R8). The `resolve()` call already decided *whether* something
+ * governs; this only identifies *which* listed directory did, for display
+ * and scoping the residual count.
  *
  * @param {{ result: ResolveResult, base: string, stateDir: string, listPath: string }} args
  * @returns {Promise<string>}
@@ -871,10 +929,10 @@ async function runIgnoreCheck(parsed, ctx) {
 async function resolveCheckScopeDir({ result, base, stateDir, listPath }) {
   if (!result.governedBy) return base
   if (result.governedBy !== listPath) return path.dirname(result.governedBy)
-  const dirs = await readLocalOnlyDirs({ stateDir })
-  const matches = dirs.filter((dir) => isEqualOrDescendant(base, dir))
+  const entries = await readLocalOnlyEntries({ stateDir })
+  const matches = entries.filter((entry) => isEqualOrDescendant(base, entry.dir))
   if (matches.length === 0) return base
-  return matches.reduce((best, dir) => (dir.length > best.length ? dir : best))
+  return matches.reduce((best, entry) => (entry.dir.length > best.dir.length ? entry : best)).dir
 }
 
 /**
