@@ -16,6 +16,12 @@
 > @ref LLP 0069 [implements] — the persistence half of the login directory picker.
 > @ref LLP 0031#query-is-local-only [constrained-by] — a machine-specific carve-out from central authority, by the same precedent.
 > @ref LLP 0049#non-goals [constrained-by] — usage policy is honored locally, never merged with central config.
+>
+> **Extended-by [LLP 0103](./0103-machine-local-policy-classes.decision.md):**
+> the file becomes class-per-entry (`ignore` | `local-only` | `full`,
+> version 2; version-1 `dirs` read as `local-only`). Every property decided
+> here (machine-local home, privacy, never central, `leave` leaves it alone)
+> carries over unchanged to the widened format.
 
 ## Context
 

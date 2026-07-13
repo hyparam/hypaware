@@ -16,6 +16,12 @@
 > export time. Local *query* uses a different read path, so `local-only` rows
 > stay locally queryable.
 >
+> **Extended-by [LLP 0105](./0105-query-seam-local-only-visibility.decision.md):**
+> "stays locally queryable" is qualified: queryable from contexts that are
+> themselves non-exported; query surfaces filter `local-only` rows out of
+> results returned into synced contexts, closing the transcript leak around
+> this seam.
+>
 > @ref LLP 0051#local-only [implements] — realizes the deferred class.
 > @ref LLP 0069 [implements] — the export-seam half of the login directory picker.
 > @ref LLP 0050#shared-matcher-in-core [constrained-by] — one shared resolver, extended not duplicated.
