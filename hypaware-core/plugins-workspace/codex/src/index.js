@@ -188,6 +188,7 @@ export async function activate(ctx) {
   for (const skillName of [
     'hypaware-query',
     'hypaware-reference',
+    'hypaware-privacy',
     'hypaware-ai-adoption-report',
     'hypaware-ai-improvement-report',
     'hypaware-ai-security-report',
