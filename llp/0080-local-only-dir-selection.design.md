@@ -1,7 +1,7 @@
 # LLP 0080: local-only directory selection — technical design
 
 **Type:** design
-**Status:** Active
+**Status:** Superseded
 **Systems:** Sinks, CLI, Onboarding, Config
 **Generated-by:** neutral
 **Author:** Phil / Claude
@@ -26,6 +26,13 @@
 > currently disabled pending redesign (the fresh-enroll candidate wait raced
 > the first backfill; the bounded 50-item presentation is also being
 > rethought). The machine-local list and export-seam withholding remain live.
+>
+> **Superseded-by [LLP 0102](./0102-skill-replaces-enrollment-picker.decision.md):**
+> the in-login picker this design specifies is retired permanently; the
+> replacement acquisition path is the review window plus the
+> `hypaware-privacy` skill ([LLP 0100](./0100-enrollment-privacy-review.spec.md)).
+> The non-picker substrate (machine-local list, export-seam withholding,
+> durable CLI) lives on under LLP 0069/0070/0071.
 
 ## Overview
 

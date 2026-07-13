@@ -73,6 +73,12 @@ mechanism is not repo-bound: a `.hypignore` anywhere in the ancestor chain
 The class set is **extensible**: adding `local-only` (or future classes like
 `redact`) is additive to this spec and the file format, not a rewrite.
 
+**Extended-by: [LLP 0103](./0103-machine-local-policy-classes.decision.md)** -
+the `ignore` class gains a second authoring source, an entry in the
+machine-local list (private, per-machine, no repo dotfile), and an explicit
+`full` ("asked; syncs") entry becomes representable there. The `.hypignore`
+dotfile semantics in this spec are unchanged.
+
 ## File format {#file-format}
 
 A `.hypignore` is a small text file:
@@ -149,6 +155,9 @@ dotfile should not be the only path:
    live recording and *future* backfills. Rows already in the cache from before
    the file existed are left untouched; retroactive deletion is a separate,
    destructive capability out of V1 scope. `--check` surfaces the residual count.
+   **Extended-by: [LLP 0104](./0104-hyp-purge.decision.md)** - the deferred
+   destructive capability ships as a standalone `hyp purge` verb; the marking
+   verbs here stay non-destructive, exactly as this non-goal holds.
 3. **No central/config interaction.** A `.hypignore` is a local repo dotfile,
    honored whenever found. It is not merged with layered config
    ([LLP 0031](./0031-layered-config.decision.md)) or pushed by central
