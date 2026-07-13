@@ -275,6 +275,11 @@ export async function run({ harness, expect }) {
     })
 
     // ----- smoke_step: assert_cache_queryable (locally queryable, never sent) -----
+    // LLP 0105 refined LLP 0070's "stays locally queryable" to "queryable
+    // from private contexts": the rows remain in the cache, and a caller
+    // standing in the local-only directory itself sees them all, while an
+    // unknown/synced caller has them withheld (that path has its own smoke,
+    // local_only_query_withhold).
     await step('assert_cache_queryable', async () => {
       const all = await executeQuerySql({
         query: `SELECT id, cwd, msg FROM ${DATASET} ORDER BY id`,
@@ -282,6 +287,7 @@ export async function run({ harness, expect }) {
         storage: /** @type {any} */ (kernel.storage),
         refresh: 'never',
         config: /** @type {any} */ ({ version: 2 }),
+        callerCwd: excludedCwd,
       })
       expect.that('cache: all 4 seeded rows remain in the local cache', all.rows.length, (v) => v === 4)
 
@@ -291,12 +297,25 @@ export async function run({ harness, expect }) {
         storage: /** @type {any} */ (kernel.storage),
         refresh: 'never',
         config: /** @type {any} */ ({ version: 2 }),
+        callerCwd: excludedCwd,
       })
       expect.that(
-        'cache: both excluded-cwd rows are still locally queryable',
+        'cache: both excluded-cwd rows are still locally queryable from their own directory',
         excludedRows.rows.map((r) => r.msg).sort(),
         (v) => JSON.stringify(v) === JSON.stringify([`excluded-1-${harness.devRunId}`, `excluded-2-${harness.devRunId}`].sort())
       )
+
+      // The second-order path is closed: the same query with no derivable
+      // caller withholds the local-only rows (LLP 0105 #unknown).
+      const unknownCaller = await executeQuerySql({
+        query: `SELECT id, msg FROM ${DATASET} ORDER BY id`,
+        registry: kernel.query,
+        storage: /** @type {any} */ (kernel.storage),
+        refresh: 'never',
+        config: /** @type {any} */ ({ version: 2 }),
+      })
+      expect.that('cache: an unknown caller sees only the clean rows', unknownCaller.rows.length, (v) => v === 2)
+      expect.that('cache: the withheld count is reported', unknownCaller.localOnly.withheldRows, (v) => v === 2)
     })
 
     // ----- smoke_step: status (R9 - never-silent withholding) -----

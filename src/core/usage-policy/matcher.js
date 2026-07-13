@@ -24,7 +24,10 @@ const CACHE_TTL_MS = 5_000
 // recorded — moot at the export seam, but total for completeness) beats
 // `local-only` (recorded, withheld from forwarding) beats `full` (the
 // default). Exported so CLI callers (LLP 0103 #cli marking verbs) compare
-// classes without a second copy of the ranking (R8's "one shared thing").
+// classes without a second copy of the ranking (R8's "one shared thing"),
+// and so the query-seam visibility filter (LLP 0105) compares a caller's
+// class against each row's class on this same restrictiveness lattice --
+// there is exactly one ordering in the codebase.
 // @ref LLP 0070#resolver [implements]: most-restrictive-wins ordering
 export const CLASS_RANK = { ignore: 2, 'local-only': 1, full: 0 }
 

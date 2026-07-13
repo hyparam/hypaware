@@ -111,6 +111,13 @@ export async function runVerbCommand(verb, argv, ctx) {
  * the per-invocation command context. Shared by the CLI projection and
  * the local MCP host so both run the operation identically.
  *
+ * `callerCwd` is the querying context's directory for the LLP 0105
+ * visibility filter: the terminal's cwd for a CLI invocation, and the spawn
+ * directory for the local stdio MCP host (an MCP client launches `hyp mcp`
+ * inside the project it serves, so the process cwd IS the caller's context).
+ * A context without a derivable cwd yields null, which the filter treats
+ * fail-closed (LLP 0105 #unknown).
+ *
  * @param {CommandRunContext} ctx
  * @param {'never'|'auto'|'always'} refresh
  * @returns {VerbOperationContext}
@@ -123,6 +130,7 @@ export function buildOperationContext(ctx, refresh) {
     env: ctx.env,
     log: noopVerbLogger(),
     refresh,
+    callerCwd: typeof ctx.cwd === 'string' && ctx.cwd.length > 0 ? ctx.cwd : null,
   }
 }
 

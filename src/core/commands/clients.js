@@ -958,12 +958,17 @@ async function countResidualCachedRows(scopeDir, ctx) {
     `WHERE cwd = '${lit}' OR cwd LIKE '${likePrefix}%' ` +
     `OR repo_root = '${lit}' OR repo_root LIKE '${likePrefix}%'`
   try {
+    // Residual-row COUNT for `hyp ignore --check`: the whole point is to
+    // count rows recorded under a directory the user is restricting, so the
+    // LLP 0105 visibility filter is bypassed; only the count (never content)
+    // reaches the local consent surface.
     const out = await executeQuerySql({
       query: sql,
       registry: ctx.query,
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       refresh: 'never',
       config: ctx.config,
+      includeLocalOnly: true,
     })
     let n = 0
     for (const row of out.rows ?? []) {

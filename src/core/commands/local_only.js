@@ -58,12 +58,18 @@ const ENUMERATE_SQL = `SELECT cwd, repo_root, COUNT(*) AS rows, MAX(date) AS las
  */
 export async function listCapturedDirectories({ query, storage, config }) {
   try {
+    // The enumeration is the privacy-review survey substrate: it must list
+    // local-only (and not-yet-classified) directories precisely so they can
+    // be reviewed and marked, and it returns directory names and counts,
+    // never message content, to a local consent surface. Bypassing the
+    // LLP 0105 filter here is what makes the review possible at all.
     const out = await executeQuerySql({
       query: ENUMERATE_SQL,
       registry: query,
       storage: /** @type {ExtendedQueryStorageService} */ (storage),
       refresh: 'never',
       config,
+      includeLocalOnly: true,
     })
     return collapseByCwd(out.rows ?? [])
   } catch {
