@@ -235,6 +235,7 @@ export async function activate(ctx) {
     'hypaware-reference',
     'hypaware-ignore',
     'hypaware-unignore',
+    'hypaware-privacy',
     'hypaware-ai-adoption-report',
     'hypaware-ai-improvement-report',
     'hypaware-ai-security-report',
