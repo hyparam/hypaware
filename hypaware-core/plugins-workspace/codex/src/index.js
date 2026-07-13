@@ -11,6 +11,7 @@ import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { createRolloutCwdResolver } from './rollout-cwd.js'
 import { attach, defaultConfigPath } from './settings.js'
+import { runCodexClassifyHook } from './classify_hook.js'
 import { errCode } from 'hypaware/core/util'
 
 /**
@@ -182,6 +183,18 @@ export async function activate(ctx) {
         { component: 'plugin.codex' }
       )
     },
+  })
+
+  // @ref LLP 0106 [implements]: Codex's degraded classification prompt. Codex
+  // has no SessionStart context-injection hook, so the "force" degrades to a
+  // firm first-prompt nag this command emits; same decision, copy, and verbs
+  // as Claude's blocking prompt.
+  ctx.commands.register({
+    name: 'codex-hook classify-cwd',
+    summary: 'Internal Codex hook: nag to classify an unclassified folder on an enrolled machine',
+    usage: 'hyp codex-hook classify-cwd',
+    hidden: true,
+    run: runCodexClassifyHook,
   })
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')

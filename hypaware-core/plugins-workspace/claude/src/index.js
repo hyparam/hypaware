@@ -14,6 +14,7 @@ import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
+import { runClaudeClassifyHook } from './classify_hook.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -214,6 +215,17 @@ export async function activate(ctx) {
     usage: 'hyp claude-hook session-context --state-file <absolute-path>',
     hidden: true,
     run: runClaudeSessionContextHook,
+  })
+
+  // @ref LLP 0106 [implements]: the SessionStart classification hook, installed
+  // at attach and reversed by hyp leave via the same marker perimeter as the
+  // session-context hook.
+  ctx.commands.register({
+    name: 'claude-hook classify-cwd',
+    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine',
+    usage: 'hyp claude-hook classify-cwd',
+    hidden: true,
+    run: runClaudeClassifyHook,
   })
 
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
