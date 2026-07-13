@@ -37,6 +37,7 @@ import { runSmoke, runVersion } from '../commands/misc.js'
 import { runSinkForce, runSinkMaintain } from '../commands/sink.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
+import { runPurge } from '../commands/purge.js'
 import {
   runAgentsInstall,
   runAttach,
@@ -268,6 +269,23 @@ function buildCoreCommands(registry) {
         '(symmetric with the matching hyp ignore flag).',
       ].join('\n'),
       run: runUnignore,
+    },
+    {
+      name: 'purge',
+      summary: 'Delete already-cached rows from the local cache (destructive)',
+      usage: 'hyp purge <path> | --session <id> | --ignored | --all [--yes] [--json]',
+      help: [
+        'Permanently deletes recorded rows from THIS machine\'s local cache.',
+        'Never contacts a sink or the remote and never deletes exported copies.',
+        'Exactly one target is required:',
+        '  <path>          rows whose cwd equals or descends from the path',
+        '  --session <id>  one session\'s rows',
+        '  --ignored       every row whose directory currently resolves to ignore',
+        '  --all           every recorded row, wholesale',
+        'Marking (hyp ignore) stays non-destructive; purge is the separate step.',
+        'Prompts on a TTY; pass --yes to delete non-interactively.',
+      ].join('\n'),
+      run: runPurge,
     },
     makeGroupCommand({
       registry,
