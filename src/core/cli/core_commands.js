@@ -244,11 +244,16 @@ function buildCoreCommands(registry) {
     {
       name: 'ignore',
       summary: 'Exclude a folder subtree from recording or forwarding',
-      usage: 'hyp ignore [path] [--check] [--json] [--local-only]',
+      usage: 'hyp ignore [path] [--check] [--json] [--local-only | --private | --sync]',
       help: [
         'Writes a .hypignore so HypAware never records this folder subtree.',
         'With --local-only, keeps recording locally but withholds the subtree',
-        'from forwarding. With --check, reports the current ignore status',
+        'from forwarding (machine-local, never written into the repo). With',
+        '--private, marks the subtree ignore in the same machine-local store',
+        'instead of writing a dotfile - never recorded, and never a repo',
+        'breadcrumb. With --sync, marks the subtree as explicitly synced (the',
+        'implicit default made durable, so it is not asked about again). With',
+        '--check, reports the current status - class and governing source -',
         'without writing anything.',
       ].join('\n'),
       run: runIgnore,
@@ -256,8 +261,12 @@ function buildCoreCommands(registry) {
     {
       name: 'unignore',
       summary: 'Resume recording for a previously ignored folder',
-      usage: 'hyp unignore [path] [--local-only]',
-      help: 'Removes the governing .hypignore (or the --local-only list entry)\nso recording/forwarding resumes.',
+      usage: 'hyp unignore [path] [--local-only | --private | --sync]',
+      help: [
+        'Removes the governing .hypignore. With --local-only, --private, or',
+        '--sync, removes machine-local entries of that class instead',
+        '(symmetric with the matching hyp ignore flag).',
+      ].join('\n'),
       run: runUnignore,
     },
     makeGroupCommand({

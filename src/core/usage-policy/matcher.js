@@ -7,7 +7,7 @@ import { parseHypignore } from './format.js'
 import { LocalOnlyListUnreadableError } from './local_only.js'
 
 /**
- * @import { ResolveResult, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
+ * @import { LocalOnlyEntry, ResolveResult, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  */
 
 const HYPIGNORE_FILENAME = '.hypignore'
@@ -23,13 +23,16 @@ const CACHE_TTL_MS = 5_000
 // Class precedence for merging the two usage-policy sources: `ignore` (never
 // recorded — moot at the export seam, but total for completeness) beats
 // `local-only` (recorded, withheld from forwarding) beats `full` (the
-// default). @ref LLP 0070#resolver [implements]: most-restrictive-wins ordering
-const CLASS_RANK = { ignore: 2, 'local-only': 1, full: 0 }
+// default). Exported so CLI callers (LLP 0103 #cli marking verbs) compare
+// classes without a second copy of the ranking (R8's "one shared thing").
+// @ref LLP 0070#resolver [implements]: most-restrictive-wins ordering
+export const CLASS_RANK = { ignore: 2, 'local-only': 1, full: 0 }
 
-// LLP 0071's on-disk list version. Kept in sync with local_only.js's private
-// constant of the same value; a version mismatch is treated as unreadable
-// (fail-safe), not silently coerced.
-const LOCAL_ONLY_LIST_VERSION = 1
+// LLP 0103's on-disk list version. Kept in sync with local_only.js's private
+// constant of the same value; a version mismatch (neither 1 nor 2) is
+// treated as unreadable (fail-safe), not silently coerced.
+const LOCAL_ONLY_LIST_VERSION_V1 = 1
+const LOCAL_ONLY_LIST_VERSION_V2 = 2
 
 /**
  * Create a usage-policy resolver: given an exchange's `cwd`, walk ancestor
@@ -92,7 +95,7 @@ export function createUsagePolicyResolver({
 } = {}) {
   /** @type {Map<string, { result: ResolveResult, expiresAt: number }>} */
   const cache = new Map()
-  /** @type {{ dirs: string[], expiresAt: number } | null} */
+  /** @type {{ entries: LocalOnlyEntry[], expiresAt: number } | null} */
   let listCache = null
 
   /**
@@ -155,50 +158,62 @@ export function createUsagePolicyResolver({
   }
 
   /**
-   * Check `cwd` against the machine-local `local-only` list, re-reading and
-   * re-parsing the list file at most once per `ttlMs` window (independent of
-   * how many distinct `cwd`s are resolved in that window). A missing file is
-   * "no exclusions" (`[]`); a present-but-unparseable file throws — the same
-   * fail-safe the store (`local_only.js`) applies, so a corrupt list fails the
-   * caller loudly rather than silently resolving to "nothing excluded"
-   * (LLP 0080 #fail-safe).
+   * Check `cwd` against the machine-local class-per-entry list (LLP 0103),
+   * re-reading and re-parsing the list file at most once per `ttlMs` window
+   * (independent of how many distinct `cwd`s are resolved in that window). A
+   * missing file is "no exclusions" (`[]`); a present-but-unparseable file
+   * throws — the same fail-safe the store (`local_only.js`) applies, so a
+   * corrupt list fails the caller loudly rather than silently resolving to
+   * "nothing excluded" (LLP 0080 #fail-safe). When more than one entry
+   * governs `cwd` (nested entries), the most specific (longest `dir`) wins,
+   * mirroring the `.hypignore` walk's nearest-governs rule; a tie is broken
+   * by the more restrictive class.
    *
    * @ref LLP 0071 [implements]: segment-aware equal-or-descendant list membership, second resolver source
+   * @ref LLP 0103 [implements]: the entry's own class governs, not a hardcoded `local-only`
    * @param {string} cwd absolute, already `path.resolve`d
    * @param {number} at current clock reading (ms)
    * @returns {ResolveResult | null} `null` when nothing in the list governs `cwd`
    */
   function matchList(cwd, at) {
-    const dirs = getListDirs(at)
-    if (!dirs.some((dir) => isEqualOrDescendant(cwd, dir))) return null
+    const entries = getListEntries(at)
+    const matches = entries.filter((entry) => isEqualOrDescendant(cwd, entry.dir))
+    if (matches.length === 0) return null
+    const governing = matches.reduce((best, entry) => {
+      if (entry.dir.length > best.dir.length) return entry
+      if (entry.dir.length === best.dir.length && CLASS_RANK[entry.class] > CLASS_RANK[best.class]) return entry
+      return best
+    })
     return {
-      class: 'local-only',
+      class: governing.class,
       governedBy: /** @type {string} */ (localOnlyListPath),
-      declared: 'local-only',
+      declared: governing.class,
     }
   }
 
   /**
    * @param {number} at
-   * @returns {string[]}
+   * @returns {LocalOnlyEntry[]}
    */
-  function getListDirs(at) {
-    if (listCache && listCache.expiresAt > at) return listCache.dirs
-    const dirs = readListDirsSync()
-    listCache = { dirs, expiresAt: at + ttlMs }
-    return dirs
+  function getListEntries(at) {
+    if (listCache && listCache.expiresAt > at) return listCache.entries
+    const entries = readListEntriesSync()
+    listCache = { entries, expiresAt: at + ttlMs }
+    return entries
   }
 
   /**
-   * Synchronously read and parse the LLP 0071 list file. Missing => `[]`
-   * (the common case); present-but-unreadable/malformed => throws
-   * {@link LocalOnlyListUnreadableError}, mirroring `readLocalOnlyDirs`'s
+   * Synchronously read and parse the LLP 0103 list file, migrating a
+   * version-1 `dirs` array on read as all-`local-only` entries. Missing =>
+   * `[]` (the common case); present-but-unreadable/malformed => throws
+   * {@link LocalOnlyListUnreadableError}, mirroring `readLocalOnlyEntries`'s
    * async fail-safe so both paths name the same `error_kind`.
    *
    * @ref LLP 0080#fail-safe [implements]: a corrupt list fails the resolve loudly, never silently to "no exclusions"
-   * @returns {string[]}
+   * @ref LLP 0103 [implements]: migrate-on-read for the sync capture-hot-path reader
+   * @returns {LocalOnlyEntry[]}
    */
-  function readListDirsSync() {
+  function readListEntriesSync() {
     const filePath = /** @type {string} */ (localOnlyListPath)
     if (!existsSync(filePath)) return []
     let raw
@@ -213,16 +228,31 @@ export function createUsagePolicyResolver({
     } catch (err) {
       throw new LocalOnlyListUnreadableError(filePath, { cause: err })
     }
-    if (
-      !parsed ||
-      typeof parsed !== 'object' ||
-      parsed.version !== LOCAL_ONLY_LIST_VERSION ||
-      !Array.isArray(parsed.dirs) ||
-      !parsed.dirs.every((/** @type {unknown} */ dir) => typeof dir === 'string')
-    ) {
-      throw new LocalOnlyListUnreadableError(filePath)
+    if (!parsed || typeof parsed !== 'object') throw new LocalOnlyListUnreadableError(filePath)
+
+    if (parsed.version === LOCAL_ONLY_LIST_VERSION_V1) {
+      if (!Array.isArray(parsed.dirs) || !parsed.dirs.every((/** @type {unknown} */ dir) => typeof dir === 'string')) {
+        throw new LocalOnlyListUnreadableError(filePath)
+      }
+      return parsed.dirs.map((/** @type {string} */ dir) => ({ dir: path.resolve(dir), class: /** @type {const} */ ('local-only') }))
     }
-    return parsed.dirs.map((/** @type {string} */ dir) => path.resolve(dir))
+    if (parsed.version === LOCAL_ONLY_LIST_VERSION_V2) {
+      const valid =
+        Array.isArray(parsed.entries) &&
+        parsed.entries.every(
+          (/** @type {unknown} */ entry) =>
+            entry !== null &&
+            typeof entry === 'object' &&
+            typeof (/** @type {{ dir?: unknown }} */ (entry)).dir === 'string' &&
+            Object.prototype.hasOwnProperty.call(CLASS_RANK, /** @type {{ class?: unknown }} */ (entry).class)
+        )
+      if (!valid) throw new LocalOnlyListUnreadableError(filePath)
+      return (/** @type {LocalOnlyEntry[]} */ (parsed.entries)).map((entry) => ({
+        dir: path.resolve(entry.dir),
+        class: entry.class,
+      }))
+    }
+    throw new LocalOnlyListUnreadableError(filePath)
   }
 
   /**
@@ -271,5 +301,15 @@ export function isEqualOrDescendant(cwd, dir) {
  */
 function mostRestrictive(dotfileResult, listResult) {
   if (!listResult) return dotfileResult
-  return CLASS_RANK[listResult.class] > CLASS_RANK[dotfileResult.class] ? listResult : dotfileResult
+  if (CLASS_RANK[listResult.class] > CLASS_RANK[dotfileResult.class]) return listResult
+  if (CLASS_RANK[listResult.class] < CLASS_RANK[dotfileResult.class]) return dotfileResult
+  // Tie (e.g. both `full`, or both `local-only`): the dotfile walk's result
+  // wins as the more specific, already-computed answer - UNLESS it's the
+  // unrecorded implicit default (`governedBy: null`) tying against a list
+  // entry that actually recorded an explicit answer (LLP 0103's explicit
+  // `full` marker resolves identically to "nothing governs" but must still
+  // name its governor, so the classification hook can tell "asked; syncs"
+  // apart from "never asked").
+  if (dotfileResult.governedBy === null && listResult.governedBy !== null) return listResult
+  return dotfileResult
 }

@@ -100,7 +100,7 @@ test('hyp ignore --local-only adds the git repo root to the machine-local list, 
 
     const res = await run('ignore', ['--local-only'], { cwd: sub, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /added/)
+    assert.match(res.stdout, /marked .* as local-only/)
 
     const dirs = await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(dirs, [root])
