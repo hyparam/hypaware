@@ -247,9 +247,26 @@ export async function dispatch(argv, opts = {}) {
       stderr.write(
         `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
       )
-      stderr.write(
-        `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
-      )
+      // The repair depends on *why* the plugin is inactive. Absent from
+      // plugins[] → add it (LLP 0098, byte-identical). Present but
+      // `enabled: false` → the entry exists, so tell the user to flip it, and
+      // when the fleet (central) layer is what disabled it, say it cannot be
+      // enabled locally at all rather than send them editing a local entry the
+      // additive merge would drop (collides_with_central).
+      // @ref LLP 0099#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
+      if (inactive.state === 'disabled-central') {
+        stderr.write(
+          `  repair: ${inactive.plugin} is disabled by the fleet (central) config and cannot be enabled locally; ask your fleet admin to enable it\n`
+        )
+      } else if (inactive.state === 'disabled-local') {
+        stderr.write(
+          `  repair: set "enabled": true on the {"name": "${inactive.plugin}"} entry in plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
+        )
+      } else {
+        stderr.write(
+          `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
+        )
+      }
     } else {
       stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
       stderr.write(`run 'hyp --help' for the list of available commands\n`)
@@ -673,8 +690,13 @@ async function collectPluginHelpCommands(discovery) {
  * sees exactly the pool/selection dispatch would (including the shadow and
  * excluded-skeleton-vs-installed rules a hand-rolled pool would miss).
  *
+ * Also returns the resolved `layered` config (effective + per-layer
+ * documents) so the dispatch-miss availability check can tell *why* a plugin
+ * is inactive: absent from `plugins[]` vs present-but-`enabled: false`, and in
+ * the disabled case which layer (central vs local) carries the entry.
+ *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} args
- * @returns {Promise<ReturnType<typeof selectBootPlugins>>}
+ * @returns {Promise<ReturnType<typeof selectBootPlugins> & { layered: Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>> }>}
  */
 async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
   const [bundled, installed] = await Promise.all([
@@ -682,18 +704,19 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
     discoverInstalledPlugins({ stateDir: stateRoot }),
   ])
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
-  const merged = await resolveLayeredConfigFromDisk({
+  const layered = await resolveLayeredConfigFromDisk({
     stateRoot,
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
   })
-  return selectBootPlugins({
+  const selection = selectBootPlugins({
     discovered: bundled,
     installed,
-    config: merged.effective,
+    config: layered.effective,
     bootProfile: 'config',
   })
+  return { ...selection, layered }
 }
 
 /**
@@ -714,7 +737,7 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
  * @param {string} token
- * @returns {Promise<{ token: string, plugin: string } | undefined>}
+ * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' } | undefined>}
  */
 async function findInactivePluginForCommand(discovery, token) {
   if (typeof token !== 'string' || token.length === 0 || token.startsWith('-')) return undefined
@@ -732,13 +755,39 @@ async function findInactivePluginForCommand(discovery, token) {
       if (selection.selected.has(name)) continue
       for (const cmd of entry.manifest.contributes?.commands ?? []) {
         if (!cmd || typeof cmd.name !== 'string') continue
-        if (cmd.name.split(' ')[0] === token) return { token, plugin: name }
+        if (cmd.name.split(' ')[0] === token) {
+          return { token, plugin: name, state: classifyInactiveState(selection.layered, name) }
+        }
       }
     }
     return undefined
   } catch {
     return undefined
   }
+}
+
+/**
+ * Classify *why* an in-pool plugin is inactive, so the dispatch-miss repair
+ * line can advise the right fix. A plugin lands in the pool-but-not-selected
+ * set for two config reasons: it is simply absent from the effective
+ * `plugins[]` (LLP 0098's case - add it), or it is present with
+ * `enabled: false` (the entry exists - flip it). For the disabled case the
+ * layer matters: the additive merge model (@ref LLP 0031#merge-model
+ * [constrained-by]) drops a local `plugins[]` entry whose name the central
+ * layer already declares, so a fleet-disabled plugin cannot be enabled from
+ * the local file - the effective disabled entry belongs to central iff central
+ * declares that name.
+ *
+ * @ref LLP 0099#decision [implements]: absent vs disabled, and local vs central for the disabled case
+ * @param {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>>} layered
+ * @param {PluginName} name
+ * @returns {'absent' | 'disabled-local' | 'disabled-central'}
+ */
+function classifyInactiveState(layered, name) {
+  const effectiveEntry = (layered.effective?.plugins ?? []).find((p) => p.name === name)
+  if (!effectiveEntry || effectiveEntry.enabled !== false) return 'absent'
+  const disabledByCentral = (layered.centralConfig?.plugins ?? []).some((p) => p.name === name)
+  return disabledByCentral ? 'disabled-central' : 'disabled-local'
 }
 
 /**
