@@ -37,6 +37,7 @@ import { runSmoke, runVersion } from '../commands/misc.js'
 import { runSinkForce, runSinkMaintain } from '../commands/sink.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
+import { runPurge } from '../commands/purge.js'
 import {
   runAgentsInstall,
   runAttach,
@@ -244,11 +245,16 @@ function buildCoreCommands(registry) {
     {
       name: 'ignore',
       summary: 'Exclude a folder subtree from recording or forwarding',
-      usage: 'hyp ignore [path] [--check] [--json] [--local-only]',
+      usage: 'hyp ignore [path] [--check] [--json] [--local-only | --private | --sync]',
       help: [
         'Writes a .hypignore so HypAware never records this folder subtree.',
         'With --local-only, keeps recording locally but withholds the subtree',
-        'from forwarding. With --check, reports the current ignore status',
+        'from forwarding (machine-local, never written into the repo). With',
+        '--private, marks the subtree ignore in the same machine-local store',
+        'instead of writing a dotfile - never recorded, and never a repo',
+        'breadcrumb. With --sync, marks the subtree as explicitly synced (the',
+        'implicit default made durable, so it is not asked about again). With',
+        '--check, reports the current status - class and governing source -',
         'without writing anything.',
       ].join('\n'),
       run: runIgnore,
@@ -256,9 +262,30 @@ function buildCoreCommands(registry) {
     {
       name: 'unignore',
       summary: 'Resume recording for a previously ignored folder',
-      usage: 'hyp unignore [path] [--local-only]',
-      help: 'Removes the governing .hypignore (or the --local-only list entry)\nso recording/forwarding resumes.',
+      usage: 'hyp unignore [path] [--local-only | --private | --sync]',
+      help: [
+        'Removes the governing .hypignore. With --local-only, --private, or',
+        '--sync, removes machine-local entries of that class instead',
+        '(symmetric with the matching hyp ignore flag).',
+      ].join('\n'),
       run: runUnignore,
+    },
+    {
+      name: 'purge',
+      summary: 'Delete already-cached rows from the local cache (destructive)',
+      usage: 'hyp purge <path> | --session <id> | --ignored | --all [--yes] [--json]',
+      help: [
+        'Permanently deletes recorded rows from THIS machine\'s local cache.',
+        'Never contacts a sink or the remote and never deletes exported copies.',
+        'Exactly one target is required:',
+        '  <path>          rows whose cwd equals or descends from the path',
+        '  --session <id>  one session\'s rows',
+        '  --ignored       every row whose directory currently resolves to ignore',
+        '  --all           every recorded row, wholesale',
+        'Marking (hyp ignore) stays non-destructive; purge is the separate step.',
+        'Prompts on a TTY; pass --yes to delete non-interactively.',
+      ].join('\n'),
+      run: runPurge,
     },
     makeGroupCommand({
       registry,

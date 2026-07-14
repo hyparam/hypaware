@@ -5,14 +5,21 @@ import vm from 'node:vm'
 
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
-import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
+import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
 import { normalizeScanColumn } from './scan-column.js'
+import {
+  callerSeesEverything,
+  defaultQueryVisibilityResolver,
+  resolveCallerClass,
+  withLocalOnlyVisibility,
+} from './visibility.js'
 
 /**
  * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from '../../../src/core/query/types.js'
+ * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
+ * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
 
@@ -207,6 +214,22 @@ export async function executeQuerySql(args) {
   const config = args.config ?? { version: 2 }
   const log = args.log
 
+  // LLP 0105 visibility filter, resolved lazily: the resolver (and the
+  // caller-class walk) is only constructed once a referenced dataset actually
+  // carries per-row provenance or declared content columns, so queries over
+  // plain derived tables pay nothing. Built once per call; the resolver's
+  // own per-cwd memoization amortizes the per-row resolve.
+  const includeLocalOnly = args.includeLocalOnly === true
+  /** @type {{ resolver: UsagePolicyResolver, callerRank: number, callerClass: LocalOnlyVisibilityReport['callerClass'] } | undefined} */
+  let visibility
+  const getVisibility = () => {
+    if (!visibility) {
+      const resolver = args.usagePolicyResolver ?? defaultQueryVisibilityResolver(storage)
+      visibility = { resolver, ...resolveCallerClass(resolver, args.callerCwd) }
+    }
+    return visibility
+  }
+
   return withSpan(
     'query.execute_sql',
     {
@@ -236,6 +259,8 @@ export async function executeQuerySql(args) {
         const datasetsUsed = []
         /** @type {string[]} */
         const freshnessMessages = []
+        /** @type {LocalOnlyVisibilityReport} */
+        const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
 
         for (const name of tableNames) {
           const dataset = registry.getDataset(name)
@@ -282,7 +307,35 @@ export async function executeQuerySql(args) {
             },
             { component: 'query' }
           )
-          tables[name] = source
+
+          // The LLP 0105 visibility filter: one wrapper at the one shared
+          // read path every surface (hyp query, hyp graph, the MCP tools)
+          // funnels through, never re-implemented per command (the LLP 0049
+          // R4 rule the export seam already follows). Only datasets that
+          // carry per-row `cwd` provenance or declared content columns are
+          // wrapped, and a top-of-lattice caller skips the wrapper so the
+          // scan fast paths stay lit for the common private-context case.
+          // @ref LLP 0105 [implements]: caller-class visibility enforced at the shared query read path
+          let table = source
+          if (!includeLocalOnly) {
+            const contentColumns = dataset.localOnlyContentColumns ?? []
+            const governable = source.columns.includes('cwd') ||
+              contentColumns.some((c) => source.columns.includes(c))
+            if (governable) {
+              const vis = getVisibility()
+              localOnly.callerClass = vis.callerClass
+              if (!callerSeesEverything(vis.callerRank)) {
+                localOnly.filtered = true
+                table = withLocalOnlyVisibility(source, {
+                  resolver: vis.resolver,
+                  callerRank: vis.callerRank,
+                  contentColumns,
+                  report: localOnly,
+                })
+              }
+            }
+          }
+          tables[name] = table
         }
 
         // Execution is bounded by a heap-growth watchdog: the engine and
@@ -389,11 +442,24 @@ export async function executeQuerySql(args) {
           guard.check('terminal')
           const columns = results.columns ?? []
           span.setAttribute('row_count', rows.length)
+          span.setAttribute('caller_usage_class', localOnly.callerClass)
+          span.setAttribute('local_only_withheld_rows', localOnly.withheldRows)
+          span.setAttribute('local_only_suppressed_rows', localOnly.suppressedRows)
+          // Counts only, never content or raw paths, matching the export
+          // seam's `usage_policy.export_drop` discipline (LLP 0080 #telemetry).
+          if (localOnly.withheldRows > 0 || localOnly.suppressedRows > 0) {
+            getLogger('query').debug('usage_policy.query_withhold', {
+              [Attr.COMPONENT]: 'query',
+              caller_usage_class: localOnly.callerClass,
+              withheld_row_count: localOnly.withheldRows,
+              suppressed_row_count: localOnly.suppressedRows,
+            })
+          }
 
           instruments.queryRunsTotal.add(1, { status: 'ok' })
           instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
 
-          return { columns, rows, datasets: datasetsUsed, freshnessMessages }
+          return { columns, rows, datasets: datasetsUsed, freshnessMessages, localOnly }
         } catch (err) {
           // Any abort surfaced while the budget stands tripped maps to the
           // typed refusal, whichever layer's abort check fired first.

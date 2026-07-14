@@ -50,7 +50,7 @@ deadline; `createSinkDriver.tick` exports nothing while `now < deadline`.**
   polarity: the machine-local policy lists are the privacy signal, the marker
   is only timing). A deadline in the past reads as absent and is
   opportunistically unlinked.
-- **Scope of the hold**: driver-wide, every sink, exactly as LLP 0093 chose
+- **Scope of the hold** {#hold}: driver-wide, every sink, exactly as LLP 0093 chose
   and for the same reasons: the driver cannot reliably know which sinks leave
   the machine, and a held local sink merely exports hours late, while one
   missed forward hold is a permanent leak.

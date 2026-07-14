@@ -84,6 +84,7 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
  *   clientName?: string,
  *   logger?: { warn(message: string, fields?: Record<string, unknown>): void, debug?: (m: string, f?: Record<string, unknown>) => void },
  *   resolver?: UsagePolicyResolver,
+ *   localOnlyListPath?: string,
  * }} opts
  * @returns {AiGatewayExchangeProjector}
  */
@@ -104,7 +105,9 @@ export function createClaudeExchangeProjector(opts) {
   // projector's lifetime so the capture hot path adds no unbounded fs work.
   // @ref LLP 0050 [implements]: the .hypignore capture-seam drop lives in the
   // client adapter, the only place that resolves a cwd; injectable for tests.
-  const resolver = opts.resolver ?? createUsagePolicyResolver()
+  // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
+  // source, so a `--private` (`ignore`) dir drops at capture, not just export.
+  const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
 
   return {
     name: 'claude-anthropic-messages',

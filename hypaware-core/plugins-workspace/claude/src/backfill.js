@@ -67,6 +67,7 @@ const DEFAULT_PLUGIN_NAME = '@hypaware/claude'
  *   pluginName?: string,
  *   deriveRepo?: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   resolver?: UsagePolicyResolver,
+ *   localOnlyListPath?: string,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -82,7 +83,10 @@ export function createClaudeBackfillProvider(opts) {
   // One resolver per backfill run (LLP 0050): the per-cwd cache reflects disk at
   // run time and is shared across the whole scan. Injectable for hermetic tests.
   // @ref LLP 0050 [implements]: skip ignored sessions at the capture seam.
-  const resolver = opts.resolver ?? createUsagePolicyResolver()
+  // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
+  // source, so `hyp backfill` skips `--private` (`ignore`) dirs, never re-importing
+  // sessions a live capture already dropped.
+  const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
 
   return {
     name: clientName,

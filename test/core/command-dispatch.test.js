@@ -541,7 +541,7 @@ test('leaf command --help renders summary, usage, and long help', async () => {
   assert.equal(code, 0)
   const out = stdout.text()
   assert.match(out, /^hyp ignore - Exclude a folder subtree/)
-  assert.match(out, /usage: hyp ignore \[path\] \[--check\] \[--json\] \[--local-only\]/)
+  assert.match(out, /usage: hyp ignore \[path\] \[--check\] \[--json\] \[--local-only \| --private \| --sync\]/)
   assert.match(out, /Writes a \.hypignore/)
 })
 

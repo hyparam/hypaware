@@ -7,6 +7,7 @@ import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { LocalOnlyVisibilityReport } from '../../../../src/core/query/types.js'
  * @import { GraphNode, GraphEdge, Direction, Neighbor, TraversalOk, TraversalErr } from './types.js'
  */
 
@@ -120,13 +121,29 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
  * them. Reads only the registered datasets, never the projection's internals,
  * so an alternate query path stays possible.
  *
- * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config, seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string }} args
- * @returns {Promise<TraversalOk | TraversalErr>}
+ * `callerCwd`/`includeLocalOnly` ride through to `executeQuerySql`, whose
+ * shared LLP 0105 filter decides visibility: a restricted caller gets the
+ * graph's structure with content columns (natural_key/label) suppressed, and
+ * the traversal result carries the aggregate report so the verb can say so.
+ *
+ * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config, seed: string, depth?: number, edgeTypes?: string[], direction?: Direction, limit?: number, type?: string, callerCwd?: string | null, includeLocalOnly?: boolean }} args
+ * @returns {Promise<(TraversalOk | TraversalErr) & { localOnly: LocalOnlyVisibilityReport }>}
  * @ref LLP 0064#query-reads-the-published-surface [implements]: reads node/edge via the registry, not project.js state
+ * @ref LLP 0105 [constrained-by]: hyp graph funnels through the same shared filter as hyp query; nothing is re-decided here
  */
-export async function queryNeighbors({ query, storage, config, seed, depth, edgeTypes, direction, limit, type }) {
-  const edgeRows = await loadRows(query, storage, config, `SELECT src_id, dst_id, edge_type FROM ${EDGE_DATASET}`)
-  const nodeRows = await loadRows(query, storage, config, `SELECT node_id, node_type, natural_key, label FROM ${NODE_DATASET}`)
+export async function queryNeighbors({ query, storage, config, seed, depth, edgeTypes, direction, limit, type, callerCwd, includeLocalOnly }) {
+  const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true }
+  const edges_ = await loadRows(query, storage, config, `SELECT src_id, dst_id, edge_type FROM ${EDGE_DATASET}`, visibility)
+  const nodes_ = await loadRows(query, storage, config, `SELECT node_id, node_type, natural_key, label FROM ${NODE_DATASET}`, visibility)
+  const edgeRows = edges_.rows
+  const nodeRows = nodes_.rows
+  /** @type {LocalOnlyVisibilityReport} */
+  const localOnly = {
+    callerClass: nodes_.localOnly.callerClass,
+    filtered: nodes_.localOnly.filtered || edges_.localOnly.filtered,
+    withheldRows: nodes_.localOnly.withheldRows + edges_.localOnly.withheldRows,
+    suppressedRows: nodes_.localOnly.suppressedRows + edges_.localOnly.suppressedRows,
+  }
 
   // Fold by graph identity before handing clean arrays to the pure traversal.
   // The published surface can carry pre-compaction duplicates: the same
@@ -144,7 +161,10 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
     nodeById.set(node_id, {
       node_id,
       node_type: String(r.node_type),
-      natural_key: String(r.natural_key),
+      // Suppressed content (a restricted caller under LLP 0105) arrives as
+      // null even though the column is non-nullable on disk; keep it empty
+      // rather than the string 'null' so seeds cannot falsely match it.
+      natural_key: r.natural_key == null ? '' : String(r.natural_key),
       label: r.label == null ? null : String(r.label),
     })
   }
@@ -156,11 +176,14 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
     if (!edgeById.has(id)) edgeById.set(id, edge)
   }
 
-  return traverse({
+  const result = traverse({
     nodes: [...nodeById.values()],
     edges: [...edgeById.values()],
     seed, depth, edgeTypes, direction, limit, type,
   })
+  // The report rides failures too: a seed that fails to resolve because its
+  // natural_key was suppressed must be explainable, not a bare "no match".
+  return { ...result, localOnly }
 }
 
 /**
@@ -168,9 +191,18 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
  * @param {ExtendedQueryStorageService} storage
  * @param {HypAwareV2Config | undefined} config
  * @param {string} sql
- * @returns {Promise<Record<string, unknown>[]>}
+ * @param {{ callerCwd: string | null, includeLocalOnly: boolean }} visibility
+ * @returns {Promise<{ rows: Record<string, unknown>[], localOnly: LocalOnlyVisibilityReport }>}
  */
-async function loadRows(query, storage, config, sql) {
-  const res = await executeQuerySql({ query: sql, registry: query, storage, config, refresh: 'always' })
-  return res.rows
+async function loadRows(query, storage, config, sql, visibility) {
+  const res = await executeQuerySql({
+    query: sql,
+    registry: query,
+    storage,
+    config,
+    refresh: 'always',
+    callerCwd: visibility.callerCwd,
+    includeLocalOnly: visibility.includeLocalOnly,
+  })
+  return { rows: res.rows, localOnly: res.localOnly }
 }

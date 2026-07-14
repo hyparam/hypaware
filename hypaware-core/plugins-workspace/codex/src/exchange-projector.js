@@ -38,14 +38,16 @@ import { canonicalJson, isPlainObject, parseMaybeJson, sha256Hex, stringValue } 
  * ChatGPT subscription mode) through one projector without exposing
  * provider semantics to the gateway core.
  *
- * @param {{ resolver?: UsagePolicyResolver, rolloutCwd?: RolloutCwdResolver }} [opts]
+ * @param {{ resolver?: UsagePolicyResolver, rolloutCwd?: RolloutCwdResolver, localOnlyListPath?: string }} [opts]
  * @returns {AiGatewayExchangeProjector}
  */
 export function createCodexExchangeProjector(opts = {}) {
   // One `.hypignore` resolver per projector instance (one per started
   // listener): the per-cwd cache then spans the listener's lifetime so the
   // capture hot path adds no unbounded fs work (LLP 0049 R6).
-  const resolver = opts.resolver ?? createUsagePolicyResolver()
+  // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
+  // source, so a `--private` (`ignore`) dir drops at capture, not just export.
+  const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
   // @ref LLP 0083 [implements]: the ChatGPT-subscription route carries no
   // in-band cwd, so fall back to the session rollout's session_meta.cwd. Left
   // undefined (no fallback) when the caller does not wire it, e.g. unit tests

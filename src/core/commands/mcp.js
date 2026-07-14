@@ -51,6 +51,12 @@ export async function runMcp(argv, ctx) {
   const server = createMcpServer({
     verbs: ctx.verbs,
     query: ctx.query,
+    // buildOperationContext derives `callerCwd` from ctx.cwd: an MCP client
+    // spawns this stdio server inside the project it serves, so the process
+    // cwd IS the querying context and the LLP 0105 visibility filter resolves
+    // the caller's real class instead of the fail-closed unknown backstop.
+    // A future transport that cannot derive one (e.g. --http) must pass a ctx
+    // whose cwd is absent so the filter stays fail-closed (LLP 0105 #unknown).
     runTool: (verb, params) => Promise.resolve(verb.operation(params, buildOperationContext(ctx, 'auto'))),
     transport: 'stdio',
     allowOperator: true,

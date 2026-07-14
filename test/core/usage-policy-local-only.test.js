@@ -53,14 +53,14 @@ test('writeLocalOnlyDirs then readLocalOnlyDirs round-trips the directory set', 
   assert.deepEqual(read, [dirA, dirB].sort())
 })
 
-test('writeLocalOnlyDirs persists the LLP 0071 on-disk shape', async () => {
+test('writeLocalOnlyDirs persists the LLP 0103 version-2 class-per-entry shape', async () => {
   const stateDir = await makeTmpDir()
   const dir = path.join(stateDir, 'proj')
   await writeLocalOnlyDirs({ stateDir, dirs: [dir] })
 
   const raw = await fs.readFile(localOnlyListPath(stateDir), 'utf8')
   const parsed = JSON.parse(raw)
-  assert.deepEqual(parsed, { version: 1, dirs: [dir] })
+  assert.deepEqual(parsed, { version: 2, entries: [{ dir, class: 'local-only' }] })
 })
 
 // --- dedupe / normalize ------------------------------------------------------

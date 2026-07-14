@@ -1,6 +1,7 @@
 import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { PartitionSpec } from 'icebird/src/types.js'
 import type { AsyncDataSource } from 'squirreling'
+import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
 // Partitioning declaration promoted to a neutral core home
 // (LLP 0003 / LLP 0022#shared-core-helpers). Re-exported here so existing
 // cache importers keep their `../types.d.ts` path.
@@ -20,6 +21,26 @@ export interface PartitionCursor {
     rowsDeleted?: number
     lastSnapshotId?: string
   }
+}
+
+// A `hyp purge` target: what to delete from the local cache (LLP 0104).
+// `subtree` and `session` carry the raw target; `ignored` carries the shared
+// usage-policy resolver so the sweep classes each row's `cwd` at scan time;
+// `all` is wholesale.
+export type PurgeTarget =
+  | { kind: 'subtree'; path: string }
+  | { kind: 'session'; id: string }
+  | { kind: 'ignored'; resolver: UsagePolicyResolver }
+  | { kind: 'all' }
+
+// The result of a `hyp purge` run: how many rows were position-deleted, how
+// many partitions were touched, and the distinct absolute `cwd`s among the
+// deleted rows (so the caller can warn when a purged subtree still resolves
+// `full` and would be re-imported by the next backfill, LLP 0104).
+export interface PurgeSummary {
+  rowsDeleted: number
+  partitionsAffected: number
+  purgedCwds: string[]
 }
 
 export interface CachePartitionMeta {

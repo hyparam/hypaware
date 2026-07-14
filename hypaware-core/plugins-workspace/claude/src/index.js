@@ -6,7 +6,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { attach, defaultSettingsPath } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
@@ -14,6 +16,7 @@ import { createClaudeBackfillProvider } from './backfill.js'
 import { createClaudeSettlementEnricher } from './settle.js'
 import { defaultSessionContextFile } from './session_context.js'
 import { runClaudeSessionContextHook } from './hook_command.js'
+import { runClaudeClassifyHook } from './classify_hook.js'
 
 /**
  * @import { AiGatewayCapability, AiGatewayClientAttachContext, CommandRunContext, HypAwareV2Config, PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -102,12 +105,23 @@ export async function activate(ctx) {
   // is created and writable before activate() runs.
   const stateFile = claudeSessionContextFile(ctx)
   const homeDir = ctx.env.HOME ?? os.homedir()
+  // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
+  // every capture-seam resolver so a `--private` (machine-local `ignore`) dir
+  // stops recording at capture, not just at the export seam. Without this the
+  // resolvers below fall back to a `.hypignore`-dotfile-only view blind to the
+  // list, and `hyp backfill` would re-import sessions the user asked to drop.
+  // The list lives at the SHARED state root (`readObservabilityEnv(ctx.env).stateDir`),
+  // the same path the export seam (activation.js) and query seam (visibility.js)
+  // read, NOT the per-plugin `ctx.paths.stateDir` (`<stateRoot>/plugins/<name>`)
+  // where the file never exists.
+  const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({
       homeDir,
       stateFile,
       clientName: CLIENT_NAME,
+      localOnlyListPath: localOnlyList,
       logger,
     })
   )
@@ -120,6 +134,7 @@ export async function activate(ctx) {
       homeDir,
       stateFile,
       clientName: CLIENT_NAME,
+      localOnlyListPath: localOnlyList,
     })
   )
 
@@ -132,6 +147,7 @@ export async function activate(ctx) {
       stateFile,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      localOnlyListPath: localOnlyList,
     })
   )
 
@@ -216,6 +232,17 @@ export async function activate(ctx) {
     run: runClaudeSessionContextHook,
   })
 
+  // @ref LLP 0106 [implements]: the SessionStart classification hook, installed
+  // at attach and reversed by hyp leave via the same marker perimeter as the
+  // session-context hook.
+  ctx.commands.register({
+    name: 'claude-hook classify-cwd',
+    summary: 'Internal Claude Code hook: prompt to classify an unclassified folder on an enrolled machine',
+    usage: 'hyp claude-hook classify-cwd',
+    hidden: true,
+    run: runClaudeClassifyHook,
+  })
+
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
   // @ref LLP 0011#interactive-walkthrough [implements]: contributes client skills the first-run walkthrough installs
   for (const skillName of [
@@ -223,6 +250,7 @@ export async function activate(ctx) {
     'hypaware-reference',
     'hypaware-ignore',
     'hypaware-unignore',
+    'hypaware-privacy',
     'hypaware-ai-adoption-report',
     'hypaware-ai-improvement-report',
     'hypaware-ai-security-report',

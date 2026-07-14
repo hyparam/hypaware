@@ -32,6 +32,7 @@
     "skills": [
       { "name": "hypaware-query", "clients": ["codex"] },
       { "name": "hypaware-reference", "clients": ["codex"] },
+      { "name": "hypaware-privacy", "clients": ["codex"] },
       { "name": "hypaware-ai-adoption-report", "clients": ["codex"] },
       { "name": "hypaware-ai-improvement-report", "clients": ["codex"] },
       { "name": "hypaware-ai-security-report", "clients": ["codex"] },

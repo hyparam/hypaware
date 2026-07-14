@@ -351,6 +351,56 @@ test('resolve: a corrupt local-only list throws, not silently "no exclusions" (f
   )
 })
 
+// --- matcher.js: LLP 0103 class-per-entry list (v2) ------------------------
+
+/** @param {Array<{ dir: string, class: 'ignore' | 'local-only' | 'full' }>} entries */
+function listFileV2(entries) {
+  return JSON.stringify({ version: 2, entries })
+}
+
+test('resolve: a v2 list entry resolves with its own recorded class, not a hardcoded local-only', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFileV2([{ dir: '/private/proj', class: 'ignore' }]) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.deepEqual(resolver.resolve('/private/proj'), {
+    class: 'ignore',
+    governedBy: LIST_PATH,
+    declared: 'ignore',
+  })
+})
+
+test('resolve: an explicit v2 "full" entry resolves to full, governed by the list (the "asked; syncs" marker)', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFileV2([{ dir: '/work/repo', class: 'full' }]) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  const result = resolver.resolve('/work/repo/sub')
+  assert.equal(result.class, 'full')
+  assert.equal(result.governedBy, LIST_PATH, 'an explicit full entry still names its governor, unlike the implicit default')
+})
+
+test('resolve: among nested v2 list entries the most specific (longest) dir wins', () => {
+  const fs = fakeFs({
+    [LIST_PATH]: listFileV2([
+      { dir: '/work/repo', class: 'local-only' },
+      { dir: '/work/repo/public', class: 'full' },
+    ]),
+  })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.equal(resolver.resolve('/work/repo/private').class, 'local-only')
+  assert.equal(resolver.resolve('/work/repo/public').class, 'full')
+  assert.equal(resolver.resolve('/work/repo/public/deep').class, 'full')
+})
+
+test('resolve: a v1 list is migrated on read, and continues to resolve as local-only', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFile(['/private/legacy']) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.equal(resolver.resolve('/private/legacy').class, 'local-only')
+})
+
+test('resolve: a v2 list entry with an unknown class throws, not silently "no exclusions" (fail-safe)', () => {
+  const fs = fakeFs({ [LIST_PATH]: listFileV2(/** @type {any} */ ([{ dir: '/a', class: 'bogus' }])) })
+  const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
+  assert.throws(() => resolver.resolve('/a'), LocalOnlyListUnreadableError)
+})
+
 test('createUsagePolicyResolver defaults fs to node:fs when none injected', () => {
   // A directory tree with no .hypignore resolves to full without throwing.
   const resolver = createUsagePolicyResolver()
