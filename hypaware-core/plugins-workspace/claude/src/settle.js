@@ -58,6 +58,7 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  *   projectsDir?: string,
  *   clientName?: string,
  *   resolver?: UsagePolicyResolver,
+ *   localOnlyListPath?: string,
  *   logger?: { info(message: string, fields?: Record<string, unknown>): void, warn(message: string, fields?: Record<string, unknown>): void },
  * }} opts
  * @returns {AiGatewaySettlementEnricher}
@@ -70,7 +71,9 @@ export function createClaudeSettlementEnricher(opts) {
   // flush path, mirroring the projector's live-capture resolver. Injectable
   // for tests. @ref LLP 0050 [constrained-by]: the same shared core matcher the
   // capture-seam drop uses; the drop just happens later here.
-  const resolver = opts.resolver ?? createUsagePolicyResolver()
+  // @ref LLP 0103 [implements]: consult the machine-local list too, so a late
+  // cwd resolving to a `--private` (`ignore`) dir still drops at settle.
+  const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
   const logger = opts.logger ?? getLogger('plugin.claude')
 
   return {

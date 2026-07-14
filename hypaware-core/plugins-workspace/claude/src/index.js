@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { attach, defaultSettingsPath } from './settings.js'
 import { anthropicUpstreamPreset, createClaudeExchangeProjector } from './projector.js'
@@ -103,12 +104,19 @@ export async function activate(ctx) {
   // is created and writable before activate() runs.
   const stateFile = claudeSessionContextFile(ctx)
   const homeDir = ctx.env.HOME ?? os.homedir()
+  // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
+  // every capture-seam resolver so a `--private` (machine-local `ignore`) dir
+  // stops recording at capture, not just at the export seam. Without this the
+  // resolvers below fall back to a `.hypignore`-dotfile-only view blind to the
+  // list, and `hyp backfill` would re-import sessions the user asked to drop.
+  const localOnlyList = localOnlyListPath(ctx.paths.stateDir)
 
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({
       homeDir,
       stateFile,
       clientName: CLIENT_NAME,
+      localOnlyListPath: localOnlyList,
       logger,
     })
   )
@@ -121,6 +129,7 @@ export async function activate(ctx) {
       homeDir,
       stateFile,
       clientName: CLIENT_NAME,
+      localOnlyListPath: localOnlyList,
     })
   )
 
@@ -133,6 +142,7 @@ export async function activate(ctx) {
       stateFile,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      localOnlyListPath: localOnlyList,
     })
   )
 

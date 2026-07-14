@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
@@ -83,6 +84,11 @@ export async function activate(ctx) {
 
   const homeDir = ctx.env.HOME ?? os.homedir()
   const codexHome = resolveCodexHome(ctx)
+  // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
+  // the capture-seam resolvers so a `--private` (machine-local `ignore`) dir
+  // stops recording at capture, not just at the export seam. Without it the
+  // resolvers fall back to a `.hypignore`-dotfile-only view blind to the list.
+  const localOnlyList = localOnlyListPath(ctx.paths.stateDir)
 
   // @ref LLP 0083 [implements]: give the live projector a rollout-based cwd
   // fallback for the ChatGPT-subscription route (which carries no in-band cwd),
@@ -91,6 +97,7 @@ export async function activate(ctx) {
   // cwd = NULL.
   gateway.registerExchangeProjector(createCodexExchangeProjector({
     rolloutCwd: createRolloutCwdResolver({ sessionsDir: path.join(codexHome, 'sessions') }),
+    localOnlyListPath: localOnlyList,
   }))
 
   // Backfill provider: imports the local Codex session rollouts the
@@ -102,6 +109,7 @@ export async function activate(ctx) {
       codexHome,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      localOnlyListPath: localOnlyList,
     })
   )
 
