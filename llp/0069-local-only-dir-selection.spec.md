@@ -163,6 +163,16 @@ is **no half-enrolled window** (see [dismiss semantics, LLP 0072 §default](./00
 > (which raced the first backfill and showed a partial candidate list) and
 > presentation. Enumeration, persistence, and enforcement below are unchanged;
 > the enrolling forks print the durable-command hint instead of prompting.
+>
+> **Trigger superseded by [LLP 0102](./0102-skill-replaces-enrollment-picker.decision.md).**
+> The in-login picker never returns; enrollment-time acquisition is now the
+> first-sync review window ([LLP 0101](./0101-first-sync-review-window.decision.md))
+> plus the `hypaware-privacy` skill
+> ([LLP 0100](./0100-enrollment-privacy-review.spec.md)). This section's
+> ordering rationale (persist before the first export) survives in the
+> window's "hold written before `enrollCentralSink`" rule; [enumerate](#enumerate),
+> [persist](#persist), and [enforce](#enforce) remain the substrate the skill
+> drives.
 
 The picker only makes sense on an **enrolling** login (one that provisions or
 already has a central sink). A `--no-forward` / query-only login

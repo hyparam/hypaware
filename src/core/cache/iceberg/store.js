@@ -3,11 +3,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { parquetReadObjects } from 'hyparquet'
 import {
   fileCatalog,
   icebergAppend,
   icebergCreateTable,
   icebergDataSource,
+  icebergDelete,
   icebergRead,
   loadLatestFileCatalogMetadata,
 } from 'icebird'
@@ -19,6 +21,11 @@ import {
 // `icebird/src/write/stage-position-delete.js` and `icebird/src/delete.js`).
 import { loadTable } from 'icebird/src/catalog/loadTable.js'
 import { fileCatalogCommit } from 'icebird/src/write/commit.js'
+// Deep imports for the position-delete purge path, matching retention.js's
+// reuse of the same icebird write internals (LLP 0104 rewrite mechanics).
+import { deleteFileAppliesToDataEntry } from 'icebird/src/delete.js'
+import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
+import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import {
@@ -35,7 +42,7 @@ import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
 /**
  * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AppendOptions, CachePartitioningDeclaration } from '../../../../src/core/cache/types.js'
- * @import { Catalog, Lister, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
+ * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
  * @import { AsyncDataSource, AsyncRow } from 'squirreling'
  */
 
@@ -269,6 +276,176 @@ export async function readRowsFromTable(tablePath) {
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
   const rows = await icebergRead({ tableUrl: url, metadata, resolver })
   return /** @type {Record<string, unknown>[]} */ (rows)
+}
+
+const PURGE_DELETE_BATCH_SIZE = 5000
+
+/**
+ * Delete every live row in the Iceberg table for which `predicate(row)` is
+ * true, by committing Iceberg position-delete files — the same mechanism the
+ * retention enforcer uses (LLP 0013), reused here for the `hyp purge`
+ * destructive verb (LLP 0104).
+ *
+ * Position-delete, not a rewrite of surviving rows: this is deliberate and is
+ * the resolution of LLP 0104's deferred rewrite mechanics.
+ *
+ *  - **`part_id` identity is preserved.** Surviving rows are never rewritten,
+ *    so their `part_id` — the deterministic `<message_id>#<part_index>`
+ *    forward-dedupe key — is unchanged. A later re-record of a purged
+ *    directory therefore mints identical `part_id`s that the forward sink's
+ *    chunk-level dedupe absorbs, so purge-then-re-record never produces
+ *    server-side duplicate identities (LLP 0104 consequences).
+ *  - **Watermark integrity.** Deletes never touch the `_hyp_ingest_seq` of
+ *    surviving rows, so no sink's high-water mark moves and no incremental
+ *    read is wedged. Purged rows are dropped by every subsequent read
+ *    (`icebergDataSource` applies position-deletes), so a purged row above a
+ *    sink's watermark is simply never exported, and one below it — already
+ *    exported — just vanishes locally. The deletes are durable in table
+ *    metadata, so a re-scan re-applies them: no resurrection via a stale
+ *    watermark.
+ *
+ * Rows already covered by a committed position-delete are skipped, so this is
+ * idempotent and composes with retention's deletes over the same table.
+ *
+ * @ref LLP 0104 [implements]: cache-only row deletion via position-deletes; preserves part_id identity and the export watermark
+ * @param {string} tablePath the Iceberg table directory
+ * @param {(row: Record<string, unknown>) => boolean} predicate
+ * @param {{ columns: string[] }} opts columns the predicate reads (intersected with the table schema)
+ * @returns {Promise<{ rowsDeleted: number, filesAffected: number, batchCount: number }>}
+ */
+export async function deleteMatchingRows(tablePath, predicate, opts) {
+  if (!tableExists(tablePath)) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
+  const { resolver, lister } = await getLocalIO()
+  const url = tableUrlForDir(tablePath)
+
+  /** @type {TableMetadata} */
+  let metadata
+  try {
+    const loaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+    metadata = loaded.metadata
+  } catch {
+    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
+  }
+  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
+    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
+  }
+
+  const dataFileMap = await findDataFileEntries(metadata, resolver)
+  if (dataFileMap.size === 0) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
+
+  // Only project columns that exist in the current schema; a predicate column
+  // absent from an older partition reads as `undefined`, which the caller's
+  // predicate must tolerate (the additive-schema contract, LLP 0032).
+  const schema = currentSchema(metadata)
+  const schemaColumns = new Set(schema?.fields.map((f) => f.name) ?? [])
+  const projected = opts.columns.filter((c) => schemaColumns.has(c))
+
+  const alreadyDeleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
+  const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
+
+  /** @type {{ file_path: string, pos: number }[]} */
+  let pending = []
+  let rowsDeleted = 0
+  let filesAffected = 0
+  let batchCount = 0
+
+  for (const [filePath] of dataFileMap) {
+    const positions = await scanFileForMatchingRows(
+      filePath, resolver, predicate, projected, alreadyDeleted.get(filePath)
+    )
+    if (positions.length === 0) continue
+    filesAffected++
+    pending.push(...positions.map((pos) => ({ file_path: filePath, pos })))
+    while (pending.length >= PURGE_DELETE_BATCH_SIZE) {
+      const batch = pending.splice(0, PURGE_DELETE_BATCH_SIZE)
+      await icebergDelete({ catalog, tableUrl: url, deletes: batch })
+      rowsDeleted += batch.length
+      batchCount++
+    }
+  }
+  if (pending.length > 0) {
+    await icebergDelete({ catalog, tableUrl: url, deletes: pending })
+    rowsDeleted += pending.length
+    batchCount++
+  }
+
+  return { rowsDeleted, filesAffected, batchCount }
+}
+
+/**
+ * Scan one Iceberg data file and return the row positions of live rows that
+ * satisfy `predicate`. Rows already covered by a committed position-delete are
+ * skipped so re-purges never re-plan the same delete.
+ *
+ * @param {string} filePath
+ * @param {Resolver} resolver
+ * @param {(row: Record<string, unknown>) => boolean} predicate
+ * @param {string[]} columns projected columns the predicate needs
+ * @param {Set<bigint>} [deletedPositions]
+ * @returns {Promise<number[]>}
+ */
+async function scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
+  /** @type {number[]} */
+  const positions = []
+  try {
+    const file = await Promise.resolve(resolver.reader(filePath))
+    const readOpts = columns.length > 0 ? { file, columns } : { file }
+    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects(readOpts))
+    for (let i = 0; i < rows.length; i++) {
+      if (deletedPositions?.has(BigInt(i))) continue
+      if (predicate(rows[i])) positions.push(i)
+    }
+  } catch {
+    // Unreadable file: skip rather than block the whole purge. The rows stay
+    // cached; a subsequent purge over a healthy file still removes them.
+  }
+  return positions
+}
+
+/**
+ * Load the set of already-committed position-delete row positions per data
+ * file, so a purge never re-plans a delete another purge or the retention
+ * enforcer already committed. Mirrors retention.js's private helper of the
+ * same name (LLP 0013); kept local to the iceberg store so the delete path is
+ * self-contained rather than reaching up into the retention module.
+ *
+ * @param {TableMetadata} metadata
+ * @param {Resolver} resolver
+ * @param {Map<string, { entry: ManifestEntry }>} dataFileMap
+ * @returns {Promise<Map<string, Set<bigint>>>}
+ */
+async function loadDeletedPositions(metadata, resolver, dataFileMap) {
+  const snapshotId = metadata['current-snapshot-id']
+  const snapshot = metadata.snapshots?.find((s) => String(s['snapshot-id']) === String(snapshotId))
+  if (!snapshot?.['manifest-list']) return new Map()
+  const manifests = /** @type {Manifest[]} */ (await fetchAvroRecords(snapshot['manifest-list'], resolver))
+  /** @type {ManifestEntry[]} */
+  const deleteEntries = []
+  await Promise.all(manifests.map(async (manifest) => {
+    if (manifest.content !== 1) return
+    const entries = await loadManifestEntries(manifest, resolver)
+    for (const entry of entries) {
+      if (entry.status === 2) continue
+      if (entry.data_file.content !== 1) continue
+      deleteEntries.push(entry)
+    }
+  }))
+  if (deleteEntries.length === 0) return new Map()
+  const { positionDeletesMap } = await fetchDeleteMaps(deleteEntries, resolver)
+  /** @type {Map<string, Set<bigint>>} */
+  const out = new Map()
+  for (const [filePath, groups] of positionDeletesMap) {
+    const found = dataFileMap.get(filePath)
+    if (!found) continue
+    /** @type {Set<bigint>} */
+    const set = new Set()
+    for (const group of groups) {
+      if (!deleteFileAppliesToDataEntry(found.entry, group.deleteEntry, metadata, 'position')) continue
+      for (const pos of group.positions) set.add(pos)
+    }
+    if (set.size > 0) out.set(filePath, set)
+  }
+  return out
 }
 
 /**

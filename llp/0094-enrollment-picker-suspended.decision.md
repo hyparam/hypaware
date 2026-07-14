@@ -1,7 +1,7 @@
 # LLP 0094: the enrollment picker trigger is suspended pending redesign
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** CLI, Onboarding, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-09
@@ -105,3 +105,11 @@ Chosen over the alternatives:
 - Re-enabling is a deliberate act: flip the constant only alongside the
   redesign that fixes enumeration, and record that as a new decision
   superseding this one.
+
+> **Superseded-by [LLP 0102](./0102-skill-replaces-enrollment-picker.decision.md):**
+> the redesign landed, and it is not a better picker. The in-login trigger is
+> retired permanently; enrollment-time refinement becomes the first-sync
+> review window ([LLP 0101](./0101-first-sync-review-window.decision.md))
+> plus the `hypaware-privacy` skill
+> ([LLP 0100](./0100-enrollment-privacy-review.spec.md)). The picker module
+> and its wiring are deleted rather than re-enabled.

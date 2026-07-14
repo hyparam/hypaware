@@ -30,13 +30,20 @@ import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hy
  */
 
 const MARKER_KEY = '_hypaware'
+// Each managed event lists which hook command kinds attach installs on it.
+// `session-context` (LLP 0085) captures cwd/git identity for the projector and
+// rides every event. `classify-cwd` (LLP 0106) is the session-start
+// classification prompt and rides only the events where a *fresh* working
+// directory appears - the session opening (SessionStart) and a mid-session cwd
+// change (CwdChanged) - so a new, still-unclassified folder is caught while it
+// makes no sense to re-ask on every prompt or Bash tool call.
 const MANAGED_HOOK_SPECS = [
-  { event: 'SessionStart' },
-  { event: 'CwdChanged' },
-  { event: 'UserPromptSubmit' },
-  { event: 'PostToolUse', matcher: 'Bash' },
+  { event: 'SessionStart', kinds: ['session-context', 'classify-cwd'] },
+  { event: 'CwdChanged', kinds: ['session-context', 'classify-cwd'] },
+  { event: 'UserPromptSubmit', kinds: ['session-context'] },
+  { event: 'PostToolUse', matcher: 'Bash', kinds: ['session-context'] },
 ]
-const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+session-context\b/
+const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+(session-context|classify-cwd)\b/
 
 export class ClaudeSettingsError extends Error {
   /**
@@ -94,7 +101,7 @@ export async function attach(opts) {
     : liveBaseUrl
 
   const baseUrl = `http://127.0.0.1:${port}`
-  const command = managedHookCommand(binPath, stateFile)
+  const commands = managedHookCommands(binPath, stateFile)
 
   // Keep deferred tool loading on through the gateway. Claude Code turns it off
   // whenever ANTHROPIC_BASE_URL is a non-first-party host - it assumes the proxy
@@ -114,7 +121,7 @@ export async function attach(opts) {
 
   env.ANTHROPIC_BASE_URL = baseUrl
   if (manageToolSearch) env.ENABLE_TOOL_SEARCH = 'true'
-  installSessionContextHooks(value, command)
+  installManagedHooks(value, commands)
   // Self-describing undo record: enough for the format-aware core undo
   // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed
   // ENABLE_TOOL_SEARCH we added, strip the managed hook entries, and delete
@@ -131,7 +138,7 @@ export async function attach(opts) {
         ANTHROPIC_BASE_URL: baseUrl,
         ...(manageToolSearch ? { ENABLE_TOOL_SEARCH: 'true' } : {}),
       },
-      hooks: managedHookEntries(command),
+      hooks: managedHookEntries(commands),
     },
     ...(prevBaseUrl !== undefined ? { prev_base_url: prevBaseUrl } : {}),
   }
@@ -227,10 +234,15 @@ function ensureObject(value, key) {
 }
 
 /**
+ * Install every managed hook: for each event in {@link MANAGED_HOOK_SPECS},
+ * strip any prior managed handlers, then push one group per command kind the
+ * event carries (`session-context`, and on session-start events `classify-cwd`
+ * too). A group is `{ matcher?, hooks: [{ type, command }] }`.
+ *
  * @param {Record<string, unknown>} value
- * @param {string} command
+ * @param {Record<string, string>} commands map from hook kind to its command string
  */
-function installSessionContextHooks(value, command) {
+function installManagedHooks(value, commands) {
   const hooksRoot = ensureObject(value, 'hooks')
   for (const spec of MANAGED_HOOK_SPECS) {
     const { event } = spec
@@ -238,29 +250,38 @@ function installSessionContextHooks(value, command) {
     const groups = Array.isArray(existing)
       ? existing.filter((group) => !isManagedHookGroup(group)).map(removeManagedHandlers)
       : []
-    groups.push({
-      ...(spec.matcher ? { matcher: spec.matcher } : {}),
-      hooks: [{ type: 'command', command }],
-    })
+    for (const kind of spec.kinds) {
+      groups.push({
+        ...(spec.matcher ? { matcher: spec.matcher } : {}),
+        hooks: [{ type: 'command', command: commands[kind] }],
+      })
+    }
     hooksRoot[event] = groups
   }
 }
 
 /**
- * The managed session-context hook entries this attach installs,
- * recorded into the marker's undo record so the core undo can strip
- * exactly what `installSessionContextHooks` added without re-deriving
- * them from the (possibly unloaded) plugin.
+ * The managed hook entries this attach installs, one per (event, kind),
+ * recorded into the marker's undo record so the core undo can strip exactly
+ * what {@link installManagedHooks} added without re-deriving them from the
+ * (possibly unloaded) plugin.
  *
- * @param {string} command
+ * @param {Record<string, string>} commands map from hook kind to its command string
  * @returns {{ event: string, matcher?: string, command: string }[]}
  */
-function managedHookEntries(command) {
-  return MANAGED_HOOK_SPECS.map((spec) => ({
-    event: spec.event,
-    ...(spec.matcher ? { matcher: spec.matcher } : {}),
-    command,
-  }))
+function managedHookEntries(commands) {
+  /** @type {{ event: string, matcher?: string, command: string }[]} */
+  const entries = []
+  for (const spec of MANAGED_HOOK_SPECS) {
+    for (const kind of spec.kinds) {
+      entries.push({
+        event: spec.event,
+        ...(spec.matcher ? { matcher: spec.matcher } : {}),
+        command: commands[kind],
+      })
+    }
+  }
+  return entries
 }
 
 /** @param {unknown} group */
@@ -292,11 +313,21 @@ function isManagedHookHandler(handler) {
 }
 
 /**
+ * The command string per managed hook kind. `session-context` needs the
+ * absolute state-file path baked in (the projector reads the same file);
+ * `classify-cwd` needs no arguments (it derives the machine-local list path and
+ * the enrollment state from `HYP_HOME`/config at run time).
+ *
  * @param {string} binPath
  * @param {string} stateFile
+ * @returns {Record<'session-context' | 'classify-cwd', string>}
  */
-function managedHookCommand(binPath, stateFile) {
-  return `${shellQuote(binPath)} claude-hook session-context --state-file ${shellQuote(stateFile)}`
+function managedHookCommands(binPath, stateFile) {
+  const bin = shellQuote(binPath)
+  return {
+    'session-context': `${bin} claude-hook session-context --state-file ${shellQuote(stateFile)}`,
+    'classify-cwd': `${bin} claude-hook classify-cwd`,
+  }
 }
 
 /** @param {string} value */

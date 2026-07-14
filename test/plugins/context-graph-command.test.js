@@ -84,6 +84,14 @@ async function withGraph(/** @type {(deps: { ctx: any, out: string[], errs: stri
     await appendRowsToSourceTable(cacheRoot, 'edge', ['source=a'], EDGE_COLUMNS, EDGES)
     const storage = createQueryStorageService({ cacheRoot })
     const { ctx, out, errs } = mkCtx({ query: registry, storage })
+    // Run these CLI tests from a private (ignore-classed) caller directory:
+    // top-of-lattice, so the LLP 0105 filter leaves the graph's content
+    // visible and the pre-existing render assertions keep their meaning. The
+    // restricted-caller rendering has its own test below.
+    const privateDir = path.join(cacheRoot, 'private-ctx')
+    await fs.mkdir(privateDir, { recursive: true })
+    await fs.writeFile(path.join(privateDir, '.hypignore'), '')
+    ctx.cwd = privateDir
     await body({ ctx, out, errs })
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
@@ -231,6 +239,34 @@ test('--json emits the structured result on stdout', async () => {
     assert.equal(parsed.neighbors.length, 4)
     assert.equal(parsed.truncated, false)
     assert.equal(errs.join(''), '')
+  })
+})
+
+// @ref LLP 0105#graph-provenance [tests]: from a synced (full-class) caller
+// directory the unprovenanced graph exposes structure only; the degradation
+// is counted on stderr, and --include-local-only (LLP 0105 #override)
+// restores full content from the same context.
+test('a synced caller context suppresses graph content, says so on stderr, and --include-local-only restores it', async () => {
+  await withGraph(async ({ ctx, out, errs }) => {
+    // Repoint the caller at a plain directory: nothing governs it, so it
+    // resolves to the implicit `full` and the filter is active.
+    const syncedDir = path.dirname(ctx.cwd)
+    ctx.cwd = path.join(syncedDir, 'synced-ctx')
+    await fs.mkdir(ctx.cwd, { recursive: true })
+
+    const failed = await runGraphNeighbors(['conv-1', '--direction', 'out'], ctx)
+    assert.equal(failed, 1, 'the natural-key seed is suppressed for this caller')
+    const stderr = errs.join('')
+    assert.match(stderr, /no node matches "conv-1"/)
+    assert.match(stderr, /local-only: suppressed content \(labels\/keys\) on \d+ row\(s\)/)
+    assert.match(stderr, /--include-local-only/)
+
+    out.length = 0
+    errs.length = 0
+    const code = await runGraphNeighbors(['conv-1', '--direction', 'out', '--include-local-only'], ctx)
+    assert.equal(code, 0)
+    assert.match(out.join(''), /graph neighbors: conv-1 \(Session\)/)
+    assert.equal(errs.join(''), '', 'the override restores content with no notice')
   })
 })
 

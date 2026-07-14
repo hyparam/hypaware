@@ -1,7 +1,7 @@
 # LLP 0093: fresh-enroll exports hold behind a bounded pick-pending marker
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Sinks, CLI, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-08
@@ -101,3 +101,11 @@ switch, and LLP 0072 already decided the picker never gets one.
 > suspends the picker trigger:** no login writes the marker (with no pending
 > pick there is nothing to guard). The sink-driver hold and TTL behavior stay
 > implemented and tested for when the trigger returns.
+
+> **Superseded-by [LLP 0101](./0101-first-sync-review-window.decision.md):**
+> the picker trigger never returns
+> ([LLP 0102](./0102-skill-replaces-enrollment-picker.decision.md)), so the
+> pick-pending semantics retire. The driver-wide tick hold this decision
+> built is reused and resized into the first-sync review window: an absolute
+> deadline stored in the marker, hours instead of a 10-minute TTL, same
+> bounded/fail-open doctrine.

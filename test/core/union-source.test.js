@@ -5,6 +5,7 @@ import test from 'node:test'
 
 import { asyncRow, parseSql } from 'squirreling'
 import { unionSources, emptySource } from '../../src/core/query/union-source.js'
+import { normalizeScanColumn } from '../../src/core/query/scan-column.js'
 
 /**
  * @import { AsyncDataSource, ExprNode, IdentifierNode, ScanOptions, SqlPrimitive } from 'squirreling/src/types.js'
@@ -177,6 +178,203 @@ test('unionSources tolerates a scan with no options', async () => {
     out.push(row.resolved)
   }
   assert.deepEqual(out, [{ id: 'a1' }])
+})
+
+/**
+ * Add a recording LEGACY `scanColumn` (bare AsyncIterable, no applied
+ * flags) to a fake source, honoring its own limit/offset. Exercises the
+ * union's normalization shim for pre-0.15 plugin sources.
+ *
+ * @param {AsyncDataSource} source
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} seenColumnScans
+ * @returns {AsyncDataSource}
+ */
+function withFakeScanColumn(source, rows, seenColumnScans) {
+  source.scanColumn = ({ column, where, limit, offset }) => ({
+    async *[Symbol.asyncIterator]() {
+      seenColumnScans.push({ column, where, limit, offset })
+      const start = offset ?? 0
+      const end = limit === undefined ? rows.length : Math.min(rows.length, start + limit)
+      if (end > start) yield rows.slice(start, end).map((r) => r[column] ?? null)
+    },
+  })
+  return source
+}
+
+/**
+ * Add a recording FLAGGED `scanColumn` (ScanColumnResults shape) that
+ * applies an equality `where` like the icebird source does, reporting
+ * `appliedWhere` honestly.
+ *
+ * @param {AsyncDataSource} source
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} seenColumnScans
+ * @returns {AsyncDataSource}
+ */
+function withFlaggedScanColumn(source, rows, seenColumnScans) {
+  source.scanColumn = ({ column, where, limit, offset }) => {
+    seenColumnScans.push({ column, where, limit, offset })
+    let matching = rows
+    if (where && where.type === 'binary' && where.left.type === 'identifier' && where.right.type === 'literal') {
+      const { name } = where.left
+      const { value } = where.right
+      matching = rows.filter((r) => r[name] === value)
+    }
+    return {
+      appliedWhere: true,
+      appliedLimitOffset: !where,
+      async *chunks() {
+        const start = where ? 0 : offset ?? 0
+        const end = limit === undefined ? matching.length : Math.min(matching.length, start + limit)
+        if (end > start) yield matching.slice(start, end).map((r) => r[column] ?? null)
+      },
+    }
+  }
+  return source
+}
+
+/**
+ * Drain a ScanColumnResults into flat values plus its flags.
+ *
+ * @param {ReturnType<NonNullable<AsyncDataSource['scanColumn']>>} result
+ */
+async function drainColumns(result) {
+  assert.ok('chunks' in result, 'union scanColumn returns the flagged ScanColumnResults shape')
+  /** @type {SqlPrimitive[]} */
+  const values = []
+  for await (const chunk of result.chunks()) {
+    for (let i = 0; i < chunk.length; i++) values.push(chunk[i])
+  }
+  return { values, appliedWhere: result.appliedWhere, appliedLimitOffset: result.appliedLimitOffset }
+}
+
+test('unionSources omits scanColumn unless every partition can stream the column', () => {
+  const rows = [{ id: 'a1' }]
+  const withHook = withFakeScanColumn(fakeSource(rows, []), rows, [])
+  const withoutHook = fakeSource([{ id: 'b1' }], [])
+  assert.equal(typeof unionSources([withHook, withoutHook]).scanColumn, 'undefined', 'mixed union stays row-based')
+  assert.equal(typeof unionSources([withHook]).scanColumn, 'function')
+})
+
+test('unionSources scanColumn concatenates partitions and owns limit/offset over the merged stream', async () => {
+  /** @type {{ column: string, limit?: number, offset?: number }[]} */
+  const seen = []
+  const aRows = [{ v: 1 }, { v: 2 }, { v: 3 }]
+  const bRows = [{ v: 4 }, { v: 5 }, { v: 6 }]
+  const union = unionSources([
+    withFakeScanColumn(fakeSource(aRows, []), aRows, seen),
+    withFakeScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  const { values, appliedWhere, appliedLimitOffset } = await drainColumns(scanColumn({ column: 'v', offset: 2, limit: 3 }))
+
+  // Offset/limit apply to the CONCATENATED stream: skip 1,2 then take 3.
+  assert.deepEqual(values, [3, 4, 5])
+  assert.equal(appliedWhere, true, 'no predicate was requested')
+  assert.equal(appliedLimitOffset, true, 'the union owns the merged slice')
+  // Offset is never pushed per partition (not distributive); only the
+  // remaining-need upper bound is, so a partition never over-reads.
+  assert.deepEqual(seen, [
+    { column: 'v', where: undefined, limit: 5, offset: undefined },
+    { column: 'v', where: undefined, limit: 2, offset: undefined },
+  ])
+})
+
+test('unionSources scanColumn skips a whole partition its numRows proves is inside the offset', async () => {
+  /** @type {{ column: string, limit?: number, offset?: number }[]} */
+  const seen = []
+  const aRows = [{ v: 1 }, { v: 2 }]
+  const bRows = [{ v: 3 }, { v: 4 }]
+  const union = unionSources([
+    withFakeScanColumn(fakeSource(aRows, []), aRows, seen),
+    withFakeScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  const { values } = await drainColumns(scanColumn({ column: 'v', offset: 3 }))
+
+  assert.deepEqual(values, [4])
+  assert.deepEqual(seen, [{ column: 'v', where: undefined, limit: undefined, offset: undefined }], 'first partition never opened')
+})
+
+test('unionSources scanColumn forwards where per partition and reports the merged appliedWhere', async () => {
+  /** @type {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} */
+  const seen = []
+  const aRows = [{ k: 'x', v: 1 }, { k: 'y', v: 2 }]
+  const bRows = [{ k: 'x', v: 3 }]
+  const union = unionSources([
+    withFlaggedScanColumn(fakeSource(aRows, []), aRows, seen),
+    withFlaggedScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const where = eqWhere('k', 'x')
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  const { values, appliedWhere, appliedLimitOffset } = await drainColumns(scanColumn({ column: 'v', where, limit: 5 }))
+
+  assert.deepEqual(values, [1, 3], 'each partition filtered its own values')
+  assert.equal(appliedWhere, true, 'every partition applied the predicate, so the engine need not re-filter')
+  assert.equal(appliedLimitOffset, false, 'a filtered slice belongs to the engine')
+  assert.equal(seen[0].where, where, 'predicate pushed to the first partition')
+  assert.equal(seen[1].where, where, 'predicate pushed to the second partition')
+  assert.equal(seen[0].limit, undefined, 'limit never coexists with a forwarded where')
+  assert.equal(seen[1].limit, undefined, 'limit never coexists with a forwarded where')
+})
+
+test('unionSources scanColumn drops where for a partition lacking a predicate column and reports appliedWhere false', async () => {
+  /** @type {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} */
+  const seen = []
+  // Additive schema drift: the second partition predates the `k` column.
+  const aRows = [{ k: 'x', v: 1 }, { k: 'y', v: 2 }]
+  const bRows = [{ v: 3 }]
+  const union = unionSources([
+    withFlaggedScanColumn(fakeSource(aRows, []), aRows, seen),
+    withFlaggedScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const where = eqWhere('k', 'x')
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  const { values, appliedWhere } = await drainColumns(scanColumn({ column: 'v', where }))
+
+  assert.deepEqual(values, [1, 3], 'the drifted partition streams unfiltered values for the engine to judge')
+  assert.equal(appliedWhere, false, 'one unfiltered partition means the engine re-applies the predicate')
+  assert.equal(seen[0].where, where)
+  assert.equal(seen[1].where, undefined, 'predicate dropped for the partition missing `k` (a parquet source would otherwise throw)')
+})
+
+test('unionSources scanColumn reports appliedWhere false over a legacy bare-iterable partition', async () => {
+  /** @type {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} */
+  const seen = []
+  const aRows = [{ k: 'x', v: 1 }]
+  const bRows = [{ k: 'y', v: 2 }]
+  const union = unionSources([
+    withFlaggedScanColumn(fakeSource(aRows, []), aRows, seen),
+    // Legacy shape: predates `where`, streams everything, reports nothing.
+    withFakeScanColumn(fakeSource(bRows, []), bRows, seen),
+  ])
+
+  const where = eqWhere('k', 'x')
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  const { values, appliedWhere } = await drainColumns(scanColumn({ column: 'v', where }))
+
+  assert.deepEqual(values, [1, 2], 'the legacy partition streams unfiltered values')
+  assert.equal(appliedWhere, false, 'a legacy partition cannot claim the predicate applied')
+})
+
+test('normalizeScanColumn passes a flagged result through and shims a legacy iterable', async () => {
+  /** @type {import('squirreling/src/types.js').ScanColumnResults} */
+  const flagged = { appliedWhere: true, appliedLimitOffset: false, async *chunks() {} }
+  assert.equal(normalizeScanColumn(flagged, { column: 'v' }), flagged, 'flagged shape is returned untouched')
+
+  const legacy = (async function* () { yield [1, 2] })()
+  const noWhere = normalizeScanColumn(legacy, { column: 'v', limit: 2 })
+  assert.equal(noWhere.appliedWhere, true, 'nothing to apply without a predicate')
+  assert.equal(noWhere.appliedLimitOffset, true, 'the legacy contract required the source to own limit/offset')
+
+  const withWhere = normalizeScanColumn((async function* () {})(), { column: 'v', where: eqWhere('v', 1) })
+  assert.equal(withWhere.appliedWhere, false, 'a legacy source predates where and cannot claim it')
+  assert.equal(withWhere.appliedLimitOffset, false, 'nor may it slice ahead of an unapplied predicate')
 })
 
 test('emptySource advertises the given columns and yields no rows', async () => {

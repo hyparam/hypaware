@@ -173,16 +173,68 @@ test('queryNeighbors reads node/edge through the query surface and walks (integr
 
     const storage = createQueryStorageService({ cacheRoot })
 
+    // These traversal tests read with the LLP 0105 override: graph rows carry
+    // no per-row provenance, so a bare caller context would get
+    // natural_key/label suppressed (that path has its own test below).
     // Forward: from the Session (by natural key) to the Tool it used.
-    const out = ok(await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out' }))
+    const out = ok(await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out', includeLocalOnly: true }))
     assert.equal(out.neighbors.length, 1)
     assert.equal(out.neighbors[0].node.node_id, 'n-tool')
     assert.equal(out.neighbors[0].edge_type, 'used')
     assert.equal(out.neighbors[0].direction, 'out')
 
     // Reverse: from the Tool back to the Sessions that used it.
-    const back = ok(await queryNeighbors({ query: registry, storage, seed: 'Bash', depth: 1, direction: 'in' }))
+    const back = ok(await queryNeighbors({ query: registry, storage, seed: 'Bash', depth: 1, direction: 'in', includeLocalOnly: true }))
     assert.deepEqual(idsOf(back.neighbors), new Set(['n-sess']))
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0105#graph-provenance [tests]: graph rows carry no per-row cwd, so
+// a caller whose context is not provably private gets the structure (ids,
+// types, edges) with content columns suppressed, a counted, never-silent
+// degradation; a private (ignore-classed) caller context sees everything.
+test('queryNeighbors suppresses graph content for an unknown caller and reports it', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-graph-query-'))
+  try {
+    const registry = createQueryRegistry()
+    registry.registerDataset(graphDatasetRegistration('node'))
+    registry.registerDataset(graphDatasetRegistration('edge'))
+
+    await appendRowsToSourceTable(cacheRoot, 'node', ['source=a'], NODE_COLUMNS, [
+      fullNode({ node_id: 'n-sess', node_type: 'Session', natural_key: 'conv-1', label: null }),
+      fullNode({ node_id: 'n-tool', node_type: 'Tool', natural_key: 'Bash', label: 'Bash' }),
+    ])
+    await appendRowsToSourceTable(cacheRoot, 'edge', ['source=a'], EDGE_COLUMNS, [
+      fullEdge({ edge_id: 'e-1', edge_type: 'used', src_id: 'n-sess', dst_id: 'n-tool', src_type: 'Session', dst_type: 'Tool' }),
+    ])
+
+    const storage = createQueryStorageService({ cacheRoot })
+
+    // No callerCwd: the fail-closed backstop. The natural-key seed cannot
+    // resolve (the key is suppressed), and the failure carries the report.
+    const suppressed = await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out' })
+    assert.equal(suppressed.ok, false)
+    assert.equal(suppressed.localOnly.filtered, true)
+    assert.equal(suppressed.localOnly.callerClass, 'unknown')
+    assert.ok(suppressed.localOnly.suppressedRows > 0, 'suppression is counted, never silent')
+
+    // Structure stays walkable by content-addressed id.
+    const byId = ok(await queryNeighbors({ query: registry, storage, seed: 'n-sess', depth: 1, direction: 'out' }))
+    assert.equal(byId.neighbors.length, 1)
+    assert.equal(byId.neighbors[0].node.node_id, 'n-tool')
+    assert.equal(byId.neighbors[0].node.natural_key, '', 'suppressed key stays empty, never the string "null"')
+
+    // A private caller context (an ignore-classed directory: its transcript
+    // is never even recorded) is top-of-lattice and sees everything.
+    const privateDir = path.join(cacheRoot, 'private-ctx')
+    await fs.mkdir(privateDir, { recursive: true })
+    await fs.writeFile(path.join(privateDir, '.hypignore'), '')
+    const open = ok(await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out', callerCwd: privateDir }))
+    assert.equal(open.neighbors[0].node.natural_key, 'Bash')
+    assert.equal(open.localOnly.filtered, false)
+    assert.equal(open.localOnly.suppressedRows, 0)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
@@ -214,7 +266,7 @@ test('queryNeighbors folds pre-compaction duplicate rows so a natural-key seed s
 
     // Natural-key seed resolves to the single semantic node (not ambiguous),
     // and the doubled edge is walked once.
-    const out = ok(await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out' }))
+    const out = ok(await queryNeighbors({ query: registry, storage, seed: 'conv-1', depth: 1, direction: 'out', includeLocalOnly: true }))
     assert.equal(out.neighbors.length, 1)
     assert.equal(out.neighbors[0].node.node_id, 'n-tool')
     assert.equal(out.reachable, 1)

@@ -43,9 +43,29 @@ export interface UsagePolicyResolver {
 // (`<stateDir>/usage-policy/local-only.json`, LLP 0071). `dirs` is a
 // normalized (absolute, deduplicated, sorted) set of directory paths; a
 // listed path need not exist on disk or be a git repo (LLP 0069 R4).
+// Superseded by `LocalOnlyListFileV2` (LLP 0103): a bare `dirs` array
+// migrates on read as all-`local-only` entries, exactly what it meant here.
 export interface LocalOnlyListFile {
   version: 1
   dirs: string[]
+}
+
+// A single class-per-entry record in the machine-local list (LLP 0103):
+// `dir` is normalized absolute; `class` is the explicit usage class the user
+// (or a review flow) assigned this directory, independent of any `.hypignore`
+// dotfile. An explicit `full` entry is not the same as "unlisted" — it
+// records "asked; syncs" so the classification hook (LLP 0106) can tell
+// "answered" from "never asked".
+export interface LocalOnlyEntry {
+  dir: string
+  class: UsageClass
+}
+
+// Version-2 on-disk shape of the machine-local list (LLP 0103): the
+// class-per-entry store that replaces the version-1 bare `dirs` array.
+export interface LocalOnlyListFileV2 {
+  version: 2
+  entries: LocalOnlyEntry[]
 }
 
 // Terminal sentinel an adapter's exchange projector returns to express an

@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
-import { unionSources, emptySource } from 'hypaware/core/query'
+import { canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
@@ -168,13 +168,51 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  */
 function withSchemaColumns(source) {
   const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
-  return {
+  /** @type {AsyncDataSource} */
+  const wrapped = {
     columns,
     numRows: source.numRows,
     scan(options) {
       return source.scan(options)
     },
   }
+  // Forward the column-stream hook so single-column aggregates stay on the
+  // engine's streaming fast path. A partition that physically lacks the
+  // requested column (the additive schema-drift case this wrapper exists
+  // for) surfaces its values as `undefined` holes in the chunk; normalize
+  // them to null, the same "this partition predates the column" value the
+  // row path reads, so accumulators see one representation either way.
+  //
+  // A `where` naming a DECLARED-but-physically-absent column can't be
+  // handed to the source: this wrapper is the only layer that knows the
+  // column exists at all, and a parquet-backed source throws on a filter
+  // column it can't find. Strip the predicate (and the limit/offset that
+  // are only meaningful after it) and report `appliedWhere: false`; the
+  // engine then filters over the null-normalized values, where IS NULL
+  // and friends read the absent column correctly.
+  // @ref LLP 0055 [implements]: withSchemaColumns forwards scanColumn; a partition lacking the column yields nulls, never throws
+  // @ref LLP 0098#wrapper-duties [implements]: a predicate naming a declared-but-absent column is stripped before it can reach a parquet filter
+  if (typeof source.scanColumn === 'function') {
+    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+    wrapped.scanColumn = (options) => {
+      const pushable = !options.where || canPushWhere(source, whereColumns(options.where))
+      const subOptions = pushable ? options : { column: options.column, signal: options.signal }
+      const inner = normalizeScanColumn(scanColumn(subOptions), subOptions)
+      return {
+        appliedWhere: pushable && inner.appliedWhere,
+        appliedLimitOffset: pushable && inner.appliedLimitOffset,
+        async *chunks() {
+          for await (const chunk of inner.chunks()) {
+            for (let i = 0; i < chunk.length; i++) {
+              if (chunk[i] === undefined) /** @type {unknown[]} */ (chunk)[i] = null
+            }
+            yield chunk
+          }
+        },
+      }
+    }
+  }
+  return wrapped
 }
 
 /**

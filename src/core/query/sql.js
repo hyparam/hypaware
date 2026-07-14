@@ -1,16 +1,196 @@
 // @ts-check
 
+import v8 from 'node:v8'
+import vm from 'node:vm'
+
 import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } from 'squirreling'
 
-import { Attr, getKernelInstruments, withSpan } from '../observability/index.js'
+import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS } from '../cache/spool.js'
+import { normalizeScanColumn } from './scan-column.js'
+import {
+  callerSeesEverything,
+  defaultQueryVisibilityResolver,
+  resolveCallerClass,
+  withLocalOnlyVisibility,
+} from './visibility.js'
 
 /**
  * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { ExecuteSqlOptions, ExecuteSqlResult, RefreshMode } from '../../../src/core/query/types.js'
+ * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
+ * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
+
+/**
+ * Default per-query heap-growth budget. Sized from the LLP 0057 Phase 0
+ * measurement pass (2026-07-10, ~202k-row / 931MB ai_gateway_messages):
+ * every well-formed query in the measured set peaks under ~500MB of
+ * process heap growth, while the issue-#9 crasher class (unbounded wide
+ * ORDER BY) grows past 4GB before dying. 1GiB refuses the crasher class
+ * with roomy headroom for legitimate queries.
+ */
+const DEFAULT_MAX_HEAP_GROWTH_BYTES = 1024 * 1024 * 1024
+
+/** How often the watchdog samples heap growth while a query runs. */
+const HEAP_WATCH_INTERVAL_MS = 100
+
+/**
+ * Typed refusal for a query whose execution outgrew its heap budget.
+ * Refusal, not truncation: a partial sort or partial aggregate would be a
+ * silently wrong answer. Callers render it as actionable guidance and map
+ * it to a 4xx (server) or non-zero exit (CLI).
+ *
+ * @ref LLP 0056 [implements]: over-budget queries refuse with a distinct typed error carrying the limit that was hit
+ */
+export class QueryExecutionBudgetError extends Error {
+  /**
+   * @param {number} limitBytes
+   * @param {number} observedBytes
+   * @param {{ site: string, rawBytes: number, baselineBytes: number, gcMode: 'confirmed' | 'unavailable' }} [diagnostics]
+   */
+  constructor(limitBytes, observedBytes, diagnostics) {
+    const limitMb = Math.round(limitBytes / 1048576)
+    const observedMb = Math.round(observedBytes / 1048576)
+    let message =
+      `query exceeded its execution memory budget (${observedMb}MB used of ${limitMb}MB) - ` +
+      'add a WHERE/date filter, a LIMIT, or aggregate instead of selecting raw rows ' +
+      '(raise the budget with HYP_QUERY_MAX_HEAP_MB if this query truly needs more)'
+    // The suffix is the refusal's own diagnosis, and it matters most when
+    // the refusal happens on a machine the investigator cannot inspect (a
+    // remote daemon surfacing this message through MCP): which check site
+    // tripped, how much of the raw delta survived the confirming GC, and
+    // whether a GC handle was available at all.
+    if (diagnostics) {
+      const rawMb = Math.round(diagnostics.rawBytes / 1048576)
+      const baselineMb = Math.round(diagnostics.baselineBytes / 1048576)
+      message += ` [site=${diagnostics.site} raw=${rawMb}MB gc=${diagnostics.gcMode} baseline=${baselineMb}MB]`
+    }
+    super(message)
+    this.name = 'QueryExecutionBudgetError'
+    this.code = 'query_budget_exceeded'
+    this.limitBytes = limitBytes
+    this.observedBytes = observedBytes
+    this.diagnostics = diagnostics
+  }
+}
+
+/**
+ * Resolve the effective heap-growth budget: explicit option, then the
+ * HYP_QUERY_MAX_HEAP_MB operator override, then the measured default.
+ * 0 (or a non-positive override) disables the watchdog entirely.
+ *
+ * @param {number | undefined} optionBytes
+ * @returns {number}
+ */
+export function resolveHeapBudgetBytes(optionBytes) {
+  if (optionBytes !== undefined) return optionBytes
+  // A set-but-blank var (`export HYP_QUERY_MAX_HEAP_MB=`, how many config
+  // systems render an unset optional) must NOT silently disable the guard:
+  // Number('') and Number('  ') are 0 (finite), which reads as "disabled".
+  // Only a non-empty value counts as an override; anything else (unset or
+  // blank) falls through to the measured default.
+  const raw = process.env.HYP_QUERY_MAX_HEAP_MB?.trim()
+  if (raw) {
+    const env = Number(raw)
+    if (Number.isFinite(env)) return env * 1024 * 1024
+  }
+  return DEFAULT_MAX_HEAP_GROWTH_BYTES
+}
+
+/** Rows between inline heap checks on a row scan. */
+const BUDGET_CHECK_ROW_STRIDE = 4096
+
+/** @type {(() => void) | null | undefined} */
+let cachedForcedGc
+
+/**
+ * Resolve a synchronous full-GC handle without requiring the process to be
+ * launched with --expose-gc: flip the flag at runtime just long enough to
+ * read `gc` out of a fresh context, then flip it back. Resolved once and
+ * cached; `null` means the runtime refused and the guard falls back to
+ * refusing on raw growth.
+ *
+ * @returns {(() => void) | null}
+ */
+function resolveForcedGc() {
+  if (cachedForcedGc !== undefined) return cachedForcedGc
+  /** @type {(() => void) | null} */
+  let resolved = null
+  const globalGc = /** @type {(() => void) | undefined} */ (/** @type {any} */ (globalThis).gc)
+  if (typeof globalGc === 'function') {
+    resolved = globalGc
+  } else {
+    try {
+      v8.setFlagsFromString('--expose-gc')
+      const gc = vm.runInNewContext('gc')
+      v8.setFlagsFromString('--no-expose-gc')
+      if (typeof gc === 'function') resolved = gc
+    } catch {
+      resolved = null
+    }
+  }
+  cachedForcedGc = resolved
+  return resolved
+}
+
+/**
+ * Decorate a data source so its scans enforce the query's heap budget
+ * INLINE, from within the row loop itself. A timer-based watchdog alone is
+ * not enough: a query whose reads resolve without real I/O (warm cache,
+ * synchronous resolvers) can hold the event loop for its entire run, so a
+ * setInterval callback never fires while a blocking operator's buffer
+ * grows. The stride keeps the memoryUsage() sample cost far below one
+ * sample per row. All sources of one query share `guard`, so growth is
+ * judged per query, not per table.
+ *
+ * @param {AsyncDataSource} source
+ * @param {{ check: (site: string) => void }} guard
+ * @returns {AsyncDataSource}
+ */
+function withHeapBudget(source, guard) {
+  /** @type {AsyncDataSource} */
+  const bounded = {
+    numRows: source.numRows,
+    columns: source.columns,
+    scan(options) {
+      const inner = source.scan(options)
+      return {
+        appliedWhere: inner.appliedWhere,
+        appliedLimitOffset: inner.appliedLimitOffset,
+        async *rows() {
+          let sinceCheck = 0
+          for await (const row of inner.rows()) {
+            if (++sinceCheck >= BUDGET_CHECK_ROW_STRIDE) {
+              sinceCheck = 0
+              guard.check('row_scan')
+            }
+            yield row
+          }
+        },
+      }
+    },
+  }
+  if (typeof source.scanColumn === 'function') {
+    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
+    // @ref LLP 0098#wrapper-duties [implements]: the budget decoration must pass appliedWhere/appliedLimitOffset through untouched, or the engine re-slices a filtered stream
+    bounded.scanColumn = (options) => {
+      const inner = normalizeScanColumn(scanColumn(options), options)
+      return {
+        appliedWhere: inner.appliedWhere,
+        appliedLimitOffset: inner.appliedLimitOffset,
+        async *chunks() {
+          for await (const chunk of inner.chunks()) {
+            guard.check('column_chunk')
+            yield chunk
+          }
+        },
+      }
+    }
+  }
+  return bounded
+}
 
 /**
  * Run a read-only SELECT against the kernel's dataset registry. The
@@ -33,6 +213,22 @@ export async function executeQuerySql(args) {
   const scope = args.scope ?? { limit: 1_000_000 }
   const config = args.config ?? { version: 2 }
   const log = args.log
+
+  // LLP 0105 visibility filter, resolved lazily: the resolver (and the
+  // caller-class walk) is only constructed once a referenced dataset actually
+  // carries per-row provenance or declared content columns, so queries over
+  // plain derived tables pay nothing. Built once per call; the resolver's
+  // own per-cwd memoization amortizes the per-row resolve.
+  const includeLocalOnly = args.includeLocalOnly === true
+  /** @type {{ resolver: UsagePolicyResolver, callerRank: number, callerClass: LocalOnlyVisibilityReport['callerClass'] } | undefined} */
+  let visibility
+  const getVisibility = () => {
+    if (!visibility) {
+      const resolver = args.usagePolicyResolver ?? defaultQueryVisibilityResolver(storage)
+      visibility = { resolver, ...resolveCallerClass(resolver, args.callerCwd) }
+    }
+    return visibility
+  }
 
   return withSpan(
     'query.execute_sql',
@@ -63,6 +259,8 @@ export async function executeQuerySql(args) {
         const datasetsUsed = []
         /** @type {string[]} */
         const freshnessMessages = []
+        /** @type {LocalOnlyVisibilityReport} */
+        const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
 
         for (const name of tableNames) {
           const dataset = registry.getDataset(name)
@@ -109,21 +307,173 @@ export async function executeQuerySql(args) {
             },
             { component: 'query' }
           )
-          tables[name] = source
+
+          // The LLP 0105 visibility filter: one wrapper at the one shared
+          // read path every surface (hyp query, hyp graph, the MCP tools)
+          // funnels through, never re-implemented per command (the LLP 0049
+          // R4 rule the export seam already follows). Only datasets that
+          // carry per-row `cwd` provenance or declared content columns are
+          // wrapped, and a top-of-lattice caller skips the wrapper so the
+          // scan fast paths stay lit for the common private-context case.
+          // @ref LLP 0105 [implements]: caller-class visibility enforced at the shared query read path
+          let table = source
+          if (!includeLocalOnly) {
+            const contentColumns = dataset.localOnlyContentColumns ?? []
+            const governable = source.columns.includes('cwd') ||
+              contentColumns.some((c) => source.columns.includes(c))
+            if (governable) {
+              const vis = getVisibility()
+              localOnly.callerClass = vis.callerClass
+              if (!callerSeesEverything(vis.callerRank)) {
+                localOnly.filtered = true
+                table = withLocalOnlyVisibility(source, {
+                  resolver: vis.resolver,
+                  callerRank: vis.callerRank,
+                  contentColumns,
+                  report: localOnly,
+                })
+              }
+            }
+          }
+          tables[name] = table
         }
 
-        const results = squirrelExecuteSql({ tables, query: trimmed })
-        const rows = await collect(results)
-        const columns = results.columns ?? []
-        span.setAttribute('row_count', rows.length)
+        // Execution is bounded by a heap-growth watchdog: the engine and
+        // every data source already honor an abort signal on their hot
+        // loops, so tripping the budget aborts the run mid-stream instead
+        // of letting a blocking operator (unbounded ORDER BY / GROUP BY /
+        // DISTINCT buffering) grow until the process is OOM-killed. The
+        // sampled process-heap growth is a stand-in for the per-operator
+        // buffered-byte accounting that belongs upstream in the engine.
+        // @ref LLP 0054#signal-threading [implements]: the kernel constructs the signal and forwards it into squirrelExecuteSql, activating the operators' abort checks
+        // @ref LLP 0097 [implements]: heap-growth watchdog enforces the execution budget from the kernel while buffered-byte accounting stays an engine follow-up
+        const budgetBytes = resolveHeapBudgetBytes(args.maxHeapBytes)
+        const controller = new AbortController()
+        // Detach the linked-signal listener when the query settles: a
+        // long-lived upstream signal (one shared across many queries) would
+        // otherwise retain this controller closure per call.
+        /** @type {(() => void) | undefined} */
+        let removeUpstreamAbort
+        if (args.signal) {
+          const upstream = args.signal
+          if (upstream.aborted) controller.abort(upstream.reason)
+          else {
+            const onUpstreamAbort = () => controller.abort(upstream.reason)
+            upstream.addEventListener('abort', onUpstreamAbort, { once: true })
+            removeUpstreamAbort = () => upstream.removeEventListener('abort', onUpstreamAbort)
+          }
+        }
+        const baselineHeap = process.memoryUsage().heapUsed
+        /** @type {QueryExecutionBudgetError | undefined} */
+        let budgetError
+        /** @type {NodeJS.Timeout | undefined} */
+        let watchdog
+        const trip = (/** @type {{ settled: number, raw: number, gcMode: 'confirmed' | 'unavailable' }} */ crossing, /** @type {string} */ site) => {
+          if (!budgetError) {
+            budgetError = new QueryExecutionBudgetError(budgetBytes, crossing.settled, {
+              site,
+              rawBytes: crossing.raw,
+              baselineBytes: baselineHeap,
+              gcMode: crossing.gcMode,
+            })
+            span.setAttribute('budget_trip_site', site)
+            span.setAttribute('budget_raw_mb', Math.round(crossing.raw / 1048576))
+            span.setAttribute('budget_settled_mb', Math.round(crossing.settled / 1048576))
+            span.setAttribute('budget_gc', crossing.gcMode)
+            controller.abort(budgetError)
+          }
+          if (watchdog) clearInterval(watchdog)
+          return budgetError
+        }
+        // A raw heapUsed delta counts not-yet-collected garbage as growth,
+        // and a streaming column scan allocates per-row garbage faster than
+        // V8 collects it on a large-heap host (observed in production:
+        // ~3.3GB of sampled "growth" on a 500k-row single-column scan whose
+        // live memory fits in under 100MB). Refusing on the raw delta kills
+        // exactly the streaming aggregates LLP 0055/0098 exist to keep
+        // cheap, so a crossing is confirmed first: force one full GC and
+        // re-measure, and only growth that survives collection (memory the
+        // query actually retains) refuses. A garbage-heavy but well-bounded
+        // query pays one forced GC per budget-width of garbage; a genuinely
+        // retaining query pays one GC and then refuses.
+        // @ref LLP 0097#confirm-with-gc [implements]: only growth that survives a full GC refuses; raw deltas count garbage
+        const confirmGrowth = () => {
+          const raw = process.memoryUsage().heapUsed - baselineHeap
+          if (raw <= budgetBytes) return undefined
+          const forcedGc = resolveForcedGc()
+          if (!forcedGc) return { settled: raw, raw, gcMode: /** @type {const} */ ('unavailable') }
+          forcedGc()
+          const settled = process.memoryUsage().heapUsed - baselineHeap
+          if (settled <= budgetBytes) return undefined
+          return { settled, raw, gcMode: /** @type {const} */ ('confirmed') }
+        }
+        const guard = {
+          /** @param {string} site */
+          check(site) {
+            if (budgetBytes <= 0) return
+            if (budgetError) throw budgetError
+            const crossing = confirmGrowth()
+            if (crossing !== undefined) throw trip(crossing, site)
+          },
+        }
+        if (budgetBytes > 0) {
+          // Second enforcement layer for execution phases that pull no
+          // further source rows (join amplification, output finalization)
+          // but do yield to the event loop.
+          watchdog = setInterval(() => {
+            const crossing = confirmGrowth()
+            if (crossing !== undefined) trip(crossing, 'watchdog')
+          }, HEAP_WATCH_INTERVAL_MS)
+          watchdog.unref()
+          for (const name of Object.keys(tables)) {
+            tables[name] = withHeapBudget(tables[name], guard)
+          }
+        }
 
-        instruments.queryRunsTotal.add(1, { status: 'ok' })
-        instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+        try {
+          const results = squirrelExecuteSql({ tables, query: trimmed, signal: controller.signal })
+          const rows = await collect(results)
+          // Terminal budget check: the inline guard only samples every
+          // BUDGET_CHECK_ROW_STRIDE rows (and per column chunk), and the
+          // interval watchdog cannot fire during a fully synchronous run, so
+          // growth concentrated in a sub-stride tail or in finalization would
+          // otherwise return a wrongly-successful result. One check after
+          // materialization closes that window before we record success.
+          guard.check('terminal')
+          const columns = results.columns ?? []
+          span.setAttribute('row_count', rows.length)
+          span.setAttribute('caller_usage_class', localOnly.callerClass)
+          span.setAttribute('local_only_withheld_rows', localOnly.withheldRows)
+          span.setAttribute('local_only_suppressed_rows', localOnly.suppressedRows)
+          // Counts only, never content or raw paths, matching the export
+          // seam's `usage_policy.export_drop` discipline (LLP 0080 #telemetry).
+          if (localOnly.withheldRows > 0 || localOnly.suppressedRows > 0) {
+            getLogger('query').debug('usage_policy.query_withhold', {
+              [Attr.COMPONENT]: 'query',
+              caller_usage_class: localOnly.callerClass,
+              withheld_row_count: localOnly.withheldRows,
+              suppressed_row_count: localOnly.suppressedRows,
+            })
+          }
 
-        return { columns, rows, datasets: datasetsUsed, freshnessMessages }
+          instruments.queryRunsTotal.add(1, { status: 'ok' })
+          instruments.queryDurationMs.record(Date.now() - start, { status: 'ok' })
+
+          return { columns, rows, datasets: datasetsUsed, freshnessMessages, localOnly }
+        } catch (err) {
+          // Any abort surfaced while the budget stands tripped maps to the
+          // typed refusal, whichever layer's abort check fired first.
+          if (budgetError) throw budgetError
+          throw err
+        } finally {
+          if (watchdog) clearInterval(watchdog)
+          if (removeUpstreamAbort) removeUpstreamAbort()
+        }
       } catch (err) {
+        const budgeted = err instanceof QueryExecutionBudgetError
         span.setAttribute('status', 'failed')
-        instruments.queryRunsTotal.add(1, { status: 'failed' })
+        if (budgeted) span.setAttribute('error_kind', 'budget_exceeded')
+        instruments.queryRunsTotal.add(1, { status: 'failed', ...(budgeted ? { error_kind: 'budget_exceeded' } : {}) })
         instruments.queryDurationMs.record(Date.now() - start, { status: 'failed' })
         throw err
       }

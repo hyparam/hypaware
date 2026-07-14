@@ -121,6 +121,9 @@ test('projectGraph runs a contributed contract end to end and is idempotent', as
       registry,
       storage,
       refresh: 'always',
+      // Direct assertion over the derived cache, not a caller-facing read:
+      // bypass the LLP 0105 visibility filter like the projection itself does.
+      includeLocalOnly: true,
     })
     assert.equal(res.rows.length, 1)
     assert.equal(res.rows[0].node_type, 'File')
@@ -146,6 +149,7 @@ test('projectGraph excludes retained Claude aux rows from the graph', async () =
       registry,
       storage,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     assert.equal(auxNode.rows.length, 0, 'aux-tagged traffic mints no graph node')
   }, [...ROWS, AUX_ROW])
@@ -206,6 +210,7 @@ test('bumping projectorVersion does not re-project: committed rows keep their or
       registry,
       storage,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     assert.equal(res.rows.length, 1, 'still exactly one Session row')
     assert.equal(res.rows[0].natural_key, 'sess-1')
@@ -347,6 +352,7 @@ test('a session sighted via both the marker and slash surfaces merges onto one r
       registry,
       storage,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     assert.equal(res.rows.length, 1, 'the marker and slash sightings collapse onto one edge id')
     assert.deepEqual(
@@ -371,6 +377,7 @@ test('issue #229 headline SQL: sessions-per-skill ranking', async () => {
       registry,
       storage,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     assert.deepEqual(res.rows.map((r) => [r.skill, Number(r.sessions)]), [
       ['hypaware-query', 2],
@@ -393,6 +400,7 @@ test('issue #230 headline SQL: which sessions ran the `git` program', async () =
       registry,
       storage,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     assert.deepEqual(new Set(res.rows.map((r) => r.session_id)), new Set(['sess-alpha', 'sess-beta']))
   }, SKILL_PROGRAM_ROWS)
@@ -409,16 +417,16 @@ test('graph neighbors traversal: --edge-type ran reaches Skill, --edge-type invo
     await projectGraph({ query: registry, storage, contracts: [contract] })
 
     // Out from a session, over `ran`: the Skill it ran.
-    const ranOut = okTraversal(await queryNeighbors({ query: registry, storage, seed: 'sess-alpha', edgeTypes: ['ran'], direction: 'out' }))
+    const ranOut = okTraversal(await queryNeighbors({ query: registry, storage, seed: 'sess-alpha', edgeTypes: ['ran'], direction: 'out', includeLocalOnly: true }))
     assert.deepEqual(ranOut.neighbors.map((n) => [n.node.node_type, n.node.natural_key]), [['Skill', 'hypaware-query']])
 
     // In from the Skill (seeded by name, `--type Skill` disambiguating the
     // seed), over `ran`: the sessions that ran it - both clients converge.
-    const ranIn = okTraversal(await queryNeighbors({ query: registry, storage, seed: 'hypaware-query', type: 'Skill', edgeTypes: ['ran'], direction: 'in' }))
+    const ranIn = okTraversal(await queryNeighbors({ query: registry, storage, seed: 'hypaware-query', type: 'Skill', edgeTypes: ['ran'], direction: 'in', includeLocalOnly: true }))
     assert.deepEqual(new Set(ranIn.neighbors.map((n) => n.node.natural_key)), new Set(['sess-alpha', 'sess-beta']))
 
     // Out from a session, over `invoked`: the Programs it ran.
-    const invokedOut = okTraversal(await queryNeighbors({ query: registry, storage, seed: 'sess-beta', edgeTypes: ['invoked'], direction: 'out' }))
+    const invokedOut = okTraversal(await queryNeighbors({ query: registry, storage, seed: 'sess-beta', edgeTypes: ['invoked'], direction: 'out', includeLocalOnly: true }))
     assert.deepEqual(
       new Set(invokedOut.neighbors.map((n) => `${n.node.node_type}:${n.node.natural_key}`)),
       new Set(['Program:git', 'Program:cat'])
@@ -464,8 +472,8 @@ test('shared-scan projection is row-identical to per-rule SQL execution', async 
       const run = variant === 'declarative' ? contract : sqlTwin(contract)
       const report = await projectGraph({ query: registry, storage, contracts: [run] })
       assert.ok(report.nodesWritten > 0, `${variant}: fixture mints nodes`)
-      const nodes = await executeQuerySql({ query: 'SELECT node_id, node_type, natural_key, label, props FROM node', registry, storage, refresh: 'always' })
-      const edges = await executeQuerySql({ query: 'SELECT edge_id, src_id, dst_id, edge_type, props FROM edge', registry, storage, refresh: 'always' })
+      const nodes = await executeQuerySql({ query: 'SELECT node_id, node_type, natural_key, label, props FROM node', registry, storage, refresh: 'always', includeLocalOnly: true })
+      const edges = await executeQuerySql({ query: 'SELECT edge_id, src_id, dst_id, edge_type, props FROM edge', registry, storage, refresh: 'always', includeLocalOnly: true })
       const key = (/** @type {Record<string, unknown>} */ r) => JSON.stringify(r)
       outcomes.push({
         ids: [...nodes.rows, ...edges.rows].map(key).sort(),

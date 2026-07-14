@@ -88,6 +88,7 @@ const COMPONENT = 'plugin.codex.backfill'
  *   clientName?: string,
  *   pluginName?: string,
  *   resolver?: UsagePolicyResolver,
+ *   localOnlyListPath?: string,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -99,7 +100,10 @@ export function createCodexBackfillProvider(opts) {
   const unsupportedLocations = opts.unsupportedLocations ?? defaultUnsupportedLocations(opts.homeDir)
   // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
   // the whole scan (LLP 0049 R6).
-  const resolver = opts.resolver ?? createUsagePolicyResolver()
+  // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
+  // source, so `hyp backfill` skips `--private` (`ignore`) dirs, never re-importing
+  // sessions a live capture already dropped.
+  const resolver = opts.resolver ?? createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
 
   return {
     name: clientName,

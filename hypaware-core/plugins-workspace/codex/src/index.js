@@ -6,11 +6,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { createRolloutCwdResolver } from './rollout-cwd.js'
 import { attach, defaultConfigPath } from './settings.js'
+import { runCodexClassifyHook } from './classify_hook.js'
 import { errCode } from 'hypaware/core/util'
 
 /**
@@ -82,6 +85,15 @@ export async function activate(ctx) {
 
   const homeDir = ctx.env.HOME ?? os.homedir()
   const codexHome = resolveCodexHome(ctx)
+  // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
+  // the capture-seam resolvers so a `--private` (machine-local `ignore`) dir
+  // stops recording at capture, not just at the export seam. Without it the
+  // resolvers fall back to a `.hypignore`-dotfile-only view blind to the list.
+  // The list lives at the SHARED state root (`readObservabilityEnv(ctx.env).stateDir`),
+  // the same path the export seam (activation.js) and query seam (visibility.js)
+  // read, NOT the per-plugin `ctx.paths.stateDir` (`<stateRoot>/plugins/<name>`)
+  // where the file never exists.
+  const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
   // @ref LLP 0083 [implements]: give the live projector a rollout-based cwd
   // fallback for the ChatGPT-subscription route (which carries no in-band cwd),
@@ -90,6 +102,7 @@ export async function activate(ctx) {
   // cwd = NULL.
   gateway.registerExchangeProjector(createCodexExchangeProjector({
     rolloutCwd: createRolloutCwdResolver({ sessionsDir: path.join(codexHome, 'sessions') }),
+    localOnlyListPath: localOnlyList,
   }))
 
   // Backfill provider: imports the local Codex session rollouts the
@@ -101,6 +114,7 @@ export async function activate(ctx) {
       codexHome,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      localOnlyListPath: localOnlyList,
     })
   )
 
@@ -184,10 +198,23 @@ export async function activate(ctx) {
     },
   })
 
+  // @ref LLP 0106 [implements]: Codex's degraded classification prompt. Codex
+  // has no SessionStart context-injection hook, so the "force" degrades to a
+  // firm first-prompt nag this command emits; same decision, copy, and verbs
+  // as Claude's blocking prompt.
+  ctx.commands.register({
+    name: 'codex-hook classify-cwd',
+    summary: 'Internal Codex hook: nag to classify an unclassified folder on an enrolled machine',
+    usage: 'hyp codex-hook classify-cwd',
+    hidden: true,
+    run: runCodexClassifyHook,
+  })
+
   const skillsRoot = path.resolve(skillsRootDir(), 'skills')
   for (const skillName of [
     'hypaware-query',
     'hypaware-reference',
+    'hypaware-privacy',
     'hypaware-ai-adoption-report',
     'hypaware-ai-improvement-report',
     'hypaware-ai-security-report',
@@ -215,7 +242,8 @@ function resolveConfigPath(ctx) {
  * @param {string | undefined} authMode
  * @param {number} port
  */
-function providerRouteForAuthMode(authMode, port) {
+// @ref LLP 0099#decision [implements]: only an affirmative chatgpt mode leaves the /v1 default
+export function providerRouteForAuthMode(authMode, port) {
   if (authMode === 'chatgpt') {
     return {
       baseUrl: `http://127.0.0.1:${port}/backend-api/codex`,
@@ -255,15 +283,28 @@ function resolveCodexHome(ctx) {
 }
 
 /**
+ * Read the Codex auth mode from auth.json. Newer Codex versions omit the
+ * `auth_mode` field, so when it is absent infer 'chatgpt' from the shape:
+ * OAuth `tokens` present with no `OPENAI_API_KEY` means a ChatGPT
+ * subscription login, which must route to `/backend-api/codex` (the
+ * subscription token is not scoped for the OpenAI `/v1` API).
+ *
  * @param {string} authPath
  * @returns {Promise<string | undefined>}
  */
-async function readCodexAuthMode(authPath) {
+// @ref LLP 0099#decision [implements]: infer chatgpt from tokens-without-key; explicit auth_mode wins
+export async function readCodexAuthMode(authPath) {
   try {
     const parsed = JSON.parse(await fs.readFile(authPath, 'utf8'))
     if (!parsed || typeof parsed !== 'object') return undefined
     const mode = Reflect.get(parsed, 'auth_mode')
-    return typeof mode === 'string' ? mode : undefined
+    if (typeof mode === 'string') return mode
+    const tokens = Reflect.get(parsed, 'tokens')
+    const apiKey = Reflect.get(parsed, 'OPENAI_API_KEY')
+    if (tokens && typeof tokens === 'object' && typeof apiKey !== 'string') {
+      return 'chatgpt'
+    }
+    return undefined
   } catch (err) {
     if (errCode(err) === 'ENOENT') return undefined
     return undefined

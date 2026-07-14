@@ -19,21 +19,3 @@ export interface CapturedDirectory {
   rows: number
   lastSeen: string | null
 }
-
-// How `runLocalOnlyPicker` settled (LLP 0072, LLP 0080 #picker). Mirrors the
-// `local_only.picker_result` telemetry `outcome` vocabulary exactly.
-export type LocalOnlyPickerOutcome =
-  | 'selected'
-  | 'none'
-  | 'cancelled'
-  | 'non_tty'
-  | 'no_candidates'
-  | 'enumeration_failed'
-
-export interface LocalOnlyPickerResult {
-  outcome: LocalOnlyPickerOutcome
-  candidateCount: number
-  selectedCount: number
-  /** The machine-local `local-only` list's contents after this run (unchanged from disk when nothing was persisted). */
-  excludedDirs: string[]
-}

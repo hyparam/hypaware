@@ -37,11 +37,16 @@ export async function runSql(runtime, query, opts = {}) {
     // A daemon source has only the plugin's config slice, not the global
     // HypAwareV2Config, and the default is correct for reads over our
     // registered datasets.
+    // Kernel-internal pipeline read (propose/curate over the local cache):
+    // the enrichment writes back into local plugin-owned tables, never into
+    // a transcript, so the LLP 0105 visibility filter is bypassed like the
+    // graph projection's cache-to-cache scans.
     const res = await executeQuerySql({
       query,
       registry: runtime.query,
       storage: runtime.storage,
       refresh: 'always',
+      includeLocalOnly: true,
     })
     return res.rows
   } catch (err) {
