@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
@@ -109,7 +110,11 @@ export async function activate(ctx) {
   // stops recording at capture, not just at the export seam. Without this the
   // resolvers below fall back to a `.hypignore`-dotfile-only view blind to the
   // list, and `hyp backfill` would re-import sessions the user asked to drop.
-  const localOnlyList = localOnlyListPath(ctx.paths.stateDir)
+  // The list lives at the SHARED state root (`readObservabilityEnv(ctx.env).stateDir`),
+  // the same path the export seam (activation.js) and query seam (visibility.js)
+  // read, NOT the per-plugin `ctx.paths.stateDir` (`<stateRoot>/plugins/<name>`)
+  // where the file never exists.
+  const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({

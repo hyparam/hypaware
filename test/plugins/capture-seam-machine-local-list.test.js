@@ -9,7 +9,10 @@ import test from 'node:test'
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
-import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+import { activate as activateClaude } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
+import { activate as activateCodex } from '../../hypaware-core/plugins-workspace/codex/src/index.js'
+import { appendSessionContext, defaultSessionContextFile } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
 import {
   USAGE_POLICY_DROP,
   localOnlyListPath,
@@ -18,16 +21,28 @@ import {
 
 /**
  * @ref LLP 0103 [tests]: the capture-seam resolvers honor the machine-local
- * usage-policy list, not just `.hypignore` dotfiles. Constructing the real
- * Claude and Codex projectors with `localOnlyListPath` (and NO injected
- * resolver) proves the production wiring: a directory marked `ignore` in the
- * machine-local list (`hyp ignore --private`) DROPS at the capture seam so
- * nothing is recorded, while a directory marked `local-only` (`hyp ignore
- * --local-only`) is STILL recorded here - it is queryable locally and withheld
- * only later at the export seam (LLP 0070/0105). Before this wiring the
- * factories fell back to a dotfile-only resolver blind to the list, so a
- * `--private` dir kept recording and `hyp backfill` re-imported it after a
+ * usage-policy list, not just `.hypignore` dotfiles. A directory marked
+ * `ignore` in the machine-local list (`hyp ignore --private`) DROPS at the
+ * capture seam so nothing is recorded, while a directory marked `local-only`
+ * (`hyp ignore --local-only`) is STILL recorded here - it is queryable locally
+ * and withheld only later at the export seam (LLP 0070/0105). Before this
+ * wiring the factories fell back to a dotfile-only resolver blind to the list,
+ * so a `--private` dir kept recording and `hyp backfill` re-imported it after a
  * purge.
+ *
+ * Two tiers of coverage:
+ *  - The factory-level tests construct the projectors directly with an explicit
+ *    `localOnlyListPath`. These pin the resolver *contract* (given the right
+ *    path, `ignore` drops and `local-only` records) but say NOTHING about how
+ *    `activate()` derives that path - they passed even while `activate()` wired
+ *    the wrong (per-plugin) directory.
+ *  - The `activate()`-level tests drive the real plugin `activate(ctx)` so the
+ *    projector's list path is whatever the production code derives. They stage a
+ *    per-plugin `ctx.paths.stateDir` (`<stateRoot>/plugins/<name>`) but write the
+ *    list at the SHARED state root (`readObservabilityEnv(ctx.env).stateDir`),
+ *    which is where the export and query seams also read. These fail against the
+ *    old `ctx.paths.stateDir` wiring and pass once `activate()` derives the
+ *    shared root.
  *
  * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -120,8 +135,202 @@ test('codex projector still records an exchange whose cwd is marked `local-only`
 })
 
 // ---------------------------------------------------------------------------
+// Production path derivation: drive the real `activate(ctx)` so the projector's
+// list path is whatever the plugin code computes, not one handed in by the test.
+// The list lives at the SHARED state root, while `ctx.paths.stateDir` is the
+// per-plugin dir - these tests fail if `activate()` reads the per-plugin dir.
+// ---------------------------------------------------------------------------
+
+test('claude activate() derives the machine-local list from the shared state root, so an `ignore` cwd drops at capture', async () => {
+  const env = await stageActivateEnv('@hypaware/claude')
+  try {
+    await writeList(env.stateRoot)
+    await writeTranscript({ homeDir: env.homeDir }, 'sess-ign', transcriptPair('sess-ign'))
+    await appendSessionContext(defaultSessionContextFile(env.pluginStateDir), {
+      session_id: 'sess-ign',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(IGNORED_ROOT, 'src'),
+      ts: '2026-07-13T09:59:00.000Z',
+    })
+
+    const projector = await claudeProjectorViaActivate(env)
+    const rows = await projectClaudeExchange(projector, 'sess-ign')
+    assert.equal(
+      rows.length,
+      0,
+      'activate() must resolve the shared-root list so a machine-local `ignore` dir drops at capture'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('claude activate() still records a `local-only` cwd (recorded at capture, withheld only at export)', async () => {
+  const env = await stageActivateEnv('@hypaware/claude')
+  try {
+    await writeList(env.stateRoot)
+    await writeTranscript({ homeDir: env.homeDir }, 'sess-lo', transcriptPair('sess-lo'))
+    await appendSessionContext(defaultSessionContextFile(env.pluginStateDir), {
+      session_id: 'sess-lo',
+      transcript_path: undefined,
+      git_branch: undefined,
+      cwd: path.join(LOCAL_ONLY_ROOT, 'src'),
+      ts: '2026-07-13T09:59:00.000Z',
+    })
+
+    const projector = await claudeProjectorViaActivate(env)
+    const rows = await projectClaudeExchange(projector, 'sess-lo')
+    assert.equal(rows.length, 2, 'a `local-only` dir is recorded at capture, not dropped')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('codex activate() derives the machine-local list from the shared state root, so an `ignore` cwd drops at capture', async () => {
+  const env = await stageActivateEnv('@hypaware/codex')
+  try {
+    await writeList(env.stateRoot)
+    const projector = await codexProjectorViaActivate(env)
+    const projection = projector.project(
+      codexExchange(path.join(IGNORED_ROOT, 'sub')),
+      { log: { debug() {}, info() {}, warn() {}, error() {} } }
+    )
+    assert.equal(
+      projection,
+      USAGE_POLICY_DROP,
+      'activate() must resolve the shared-root list so a machine-local `ignore` dir drops the codex exchange at capture'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('codex activate() still records a `local-only` cwd (recorded at capture, withheld only at export)', async () => {
+  const env = await stageActivateEnv('@hypaware/codex')
+  try {
+    await writeList(env.stateRoot)
+    const projector = await codexProjectorViaActivate(env)
+    const projection = /** @type {any} */ (projector.project(
+      codexExchange(LOCAL_ONLY_ROOT),
+      { log: { debug() {}, info() {}, warn() {}, error() {} } }
+    ))
+    assert.notEqual(projection, USAGE_POLICY_DROP, 'a `local-only` dir is recorded at capture, not dropped')
+    assert.ok(projection && Array.isArray(projection.messages), 'the exchange projects to real rows')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Stage a realistic activation layout: a per-plugin `ctx.paths.stateDir` under
+ * `<stateRoot>/plugins/<name>` AND a distinct SHARED `stateRoot` derived the
+ * same way the production seams derive it - `readObservabilityEnv(env).stateDir`
+ * from `HYP_HOME`. The machine-local list belongs at `stateRoot`, not the
+ * per-plugin dir, so a test that writes there exercises the real derivation.
+ *
+ * @param {string} pluginName
+ * @returns {Promise<{ homeDir: string, hypHome: string, env: NodeJS.ProcessEnv, stateRoot: string, pluginStateDir: string, cleanup: () => Promise<void> }>}
+ */
+async function stageActivateEnv(pluginName) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'capture-seam-activate-'))
+  const homeDir = path.join(root, 'home')
+  const hypHome = path.join(root, 'hyp-home')
+  const env = /** @type {NodeJS.ProcessEnv} */ ({ HOME: homeDir, HYP_HOME: hypHome })
+  const stateRoot = readObservabilityEnv(env).stateDir
+  const pluginStateDir = path.join(stateRoot, 'plugins', pluginName)
+  await fs.mkdir(homeDir, { recursive: true })
+  await fs.mkdir(stateRoot, { recursive: true })
+  await fs.mkdir(pluginStateDir, { recursive: true })
+  return {
+    homeDir,
+    hypHome,
+    env,
+    stateRoot,
+    pluginStateDir,
+    cleanup: () => fs.rm(root, { recursive: true, force: true }),
+  }
+}
+
+/**
+ * Drive the real `@hypaware/claude` `activate(ctx)` and return the exchange
+ * projector it registers, so its list path is whatever the plugin derives.
+ *
+ * @param {{ homeDir: string, env: NodeJS.ProcessEnv, pluginStateDir: string }} env
+ */
+async function claudeProjectorViaActivate(env) {
+  /** @type {any} */ let projector
+  const gateway = {
+    registerUpstreamPreset() {},
+    registerExchangeProjector(/** @type {any} */ p) { projector = p },
+    registerSettlementEnricher() {},
+    registerClient() {},
+  }
+  const ctx = /** @type {any} */ ({
+    env: env.env,
+    paths: { stateDir: env.pluginStateDir },
+    plugin: { version: '0.0.0-test' },
+    configRegistry: { registerSection() {} },
+    requireCapability: () => gateway,
+    backfills: { register() {} },
+    commands: { register() {} },
+    skills: { register() {} },
+    agents: { register() {} },
+    initPresets: { register() {} },
+  })
+  await activateClaude(ctx)
+  assert.ok(projector, 'claude activate() registered an exchange projector')
+  return projector
+}
+
+/**
+ * Drive the real `@hypaware/codex` `activate(ctx)` and return the exchange
+ * projector it registers.
+ *
+ * @param {{ homeDir: string, env: NodeJS.ProcessEnv, pluginStateDir: string }} env
+ */
+async function codexProjectorViaActivate(env) {
+  /** @type {any} */ let projector
+  const gateway = {
+    registerUpstreamPreset() {},
+    registerExchangeProjector(/** @type {any} */ p) { projector = p },
+    registerClient() {},
+  }
+  const ctx = /** @type {any} */ ({
+    env: env.env,
+    paths: { stateDir: env.pluginStateDir },
+    plugin: { version: '0.0.0-test' },
+    configRegistry: { registerSection() {} },
+    requireCapability: () => gateway,
+    backfills: { register() {} },
+    commands: { register() {} },
+    skills: { register() {} },
+  })
+  await activateCodex(ctx)
+  assert.ok(projector, 'codex activate() registered an exchange projector')
+  return projector
+}
+
+/**
+ * Wrap a claude exchange projector in the gateway dispatcher and project one
+ * synthetic exchange for `sessionId`.
+ *
+ * @param {any} projector
+ * @param {string} sessionId
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function projectClaudeExchange(projector, sessionId) {
+  const dispatcher = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [{ ...projector, _seq: 0 }],
+  })
+  return dispatcher.projectExchange(claudeExchange(sessionId))
+}
+
 
 /**
  * Write the machine-local usage-policy list (LLP 0103) for `stateDir`: one

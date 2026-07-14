@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
@@ -88,7 +89,11 @@ export async function activate(ctx) {
   // the capture-seam resolvers so a `--private` (machine-local `ignore`) dir
   // stops recording at capture, not just at the export seam. Without it the
   // resolvers fall back to a `.hypignore`-dotfile-only view blind to the list.
-  const localOnlyList = localOnlyListPath(ctx.paths.stateDir)
+  // The list lives at the SHARED state root (`readObservabilityEnv(ctx.env).stateDir`),
+  // the same path the export seam (activation.js) and query seam (visibility.js)
+  // read, NOT the per-plugin `ctx.paths.stateDir` (`<stateRoot>/plugins/<name>`)
+  // where the file never exists.
+  const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
   // @ref LLP 0083 [implements]: give the live projector a rollout-based cwd
   // fallback for the ChatGPT-subscription route (which carries no in-band cwd),
