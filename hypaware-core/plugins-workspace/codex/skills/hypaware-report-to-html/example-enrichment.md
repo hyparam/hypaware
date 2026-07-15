@@ -13,6 +13,14 @@ the reference for SKILL.md step 3: same moves, same class names, numbers taken v
 from the plain version. Component reference: [`components.md`](components.md); rules:
 [`authoring.md`](authoring.md).
 
+> ⚠ **The BEFORE below is the improvement review's OLD source shape.** Since 2026-07-14
+> that report emits a numbered **Proposed changes** list with no "Key numbers" table and
+> no findings section (authoring.md §2–3). For today's improvement review: no
+> `metric-grid` anywhere on its one-pager — map each numbered change to one `rec` card
+> (bold what = title, why = body, evidence = stat row) in source order. The
+> metric-grid moves below still apply to reports that HAVE a headline-numbers section
+> (usage, security). The class names and width/judgment mechanics are unchanged.
+
 ## BEFORE — plain Markdown as the report skills emit it
 
 ```markdown

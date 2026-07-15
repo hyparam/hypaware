@@ -15,8 +15,9 @@ Two moving parts:
 
 1. **`build.sh`** (in the repo, pandoc-based) converts each `<slug>.md` — plus any
    `<slug>/` sections — into a self-contained `html/<slug>/` folder: `index.html` for the
-   one-pager, one `<section>.html` per section with a "← Back to the report" nav,
-   `assets/style.css`, and a `.nojekyll`. It rewrites inter-file `.md` links to `.html`
+   one-pager with a "← All reports" nav back to the top-level landing page
+   (`../../index.html`), one `<section>.html` per section with a "← Back to the report"
+   nav, `assets/style.css`, and a `.nojekyll`. It rewrites inter-file `.md` links to `.html`
    on the **emitted HTML** (`href` attributes), which catches Markdown-syntax links and
    links inside raw-HTML components (`rec` cards, callouts) in one pass: it flattens the
    one-pager's `<slug>/section.md` links to `section.html` and maps cross-report links
@@ -66,17 +67,20 @@ Work relative to the repo root `~/hypaware-reports`.
    system; do not hand-tune per-page CSS.
 
 3. **Enrich the report Markdown (the step that makes it a data report).** For each
-   top-level `<slug>.md`, check whether it already uses the component vocabulary —
-   **both** halves of it, because partial enrichment is the common failure:
+   top-level `<slug>.md`, check whether it already uses the component vocabulary:
    ```bash
-   grep -L 'class="metric-grid"' *.md   # reports with no headline metric strip at all
-   grep -L 'class="rec"' *.md           # reports whose findings are still prose-only
+   grep -L 'class="rec"' *.md           # reports whose findings/changes are still prose-only
+   grep -L 'class="metric-grid"' *.md   # reports with no headline metric strip (see below)
    ```
-   A one-pager that has a `metric-grid` but no `rec` cards is **half-done, not done**:
-   its findings sit as `###` heading + paragraph + trailing link, so every number is
-   buried in a sentence and the reader has to open the section pages to see anything at
-   a glance. Finish it — convert the findings to cards (and rename any scaffolding
-   headings) rather than skipping it.
+   `rec` cards are required on every one-pager (findings or proposed changes). A
+   `metric-grid` is required **only where the source has a headline-numbers section**
+   (the usage and security reviews' "Key metrics"). The improvement review deliberately
+   has none — it opens with a numbered **Proposed changes** list (user-approved shape,
+   2026-07-14); each numbered change becomes one `rec` card (bold what = card title,
+   why-sentence = body, evidence numbers = stat row, section link = the card) and **no
+   metric strip is added above or instead of the change list**. A one-pager with a
+   metric-grid but no `rec` cards is **half-done, not done** — finish the cards rather
+   than skipping it.
 
    For every report needing work, proceed in **two phases — inventory first, markup
    second**:
@@ -94,15 +98,25 @@ Work relative to the repo root `~/hypaware-reports`.
    existing structure. Apply the recipe in [`authoring.md`](authoring.md) using ONLY the
    Phase A inventory, with [`example-enrichment.md`](example-enrichment.md) as a *shape*
    reference — and take a designer's liberties:
-   - **Restructure freely.** Reorder sections for narrative strength, merge or retitle
-     weak headings, delete decorative `---` rules and boilerplate scaffolding
-     ("Key numbers", "What this shows" → headings that say something). The document's
-     source order is not sacred; its facts are.
+   - **Restructure within the approved skeleton.** Merge or retitle weak headings inside
+     sections, delete decorative `---` rules — but the one-pager's top-level order is
+     **user-approved structure, not scaffolding** (2026-07-14): proposed changes / findings
+     lead, limitations and links follow. Never move a metric strip above a change list,
+     never split the evidence back out into a separate findings section, and keep the
+     standard heading vocabulary (Proposed changes / Key metrics / Key findings / Data
+     limitations / Supporting analysis) — retitle only headings that aren't part of that
+     skeleton.
    - **Rewrite for the surface.** Metric labels, card titles, stat labels, tag words,
      chart titles, and notes are *display copy* — write them fresh (2–4 word labels, one
-     punchy "so what" note), never paste sentence fragments from the prose. Body
-     paragraphs — the analysis itself — stay intact apart from trims where a visual now
-     carries the point.
+     plain "so what" note), never paste sentence fragments from the prose. Display copy
+     obeys the report-language rules: literal words, no metaphors or coined shorthand
+     (write "sessions open across days", never compress to a coinage like "marathon
+     sessions"), no pipeline vocabulary, absolute dates. Body paragraphs — the analysis
+     itself — stay intact apart from trims where a visual now carries the point.
+   - **Ready-to-apply artifacts are verbatim.** Proposed diffs, full skill/subagent file
+     drafts, tool-description text, and source→destination move tables render as the
+     code blocks / tables they are — never trimmed, carded, summarized, or reworded. They
+     are the deliverable, not display copy.
    - **Give every headline number the big treatment.** Any number the report leads with
      belongs in a `metric`, `gauge`, `rec-stat`, or chart — large, colored by judgment,
      with a note — not bolded inline in a sentence. After the pass, a number that matters
@@ -149,6 +163,25 @@ Work relative to the repo root `~/hypaware-reports`.
    It prints `Built html/ : N report(s) …`. `html/` is wiped and rebuilt, so deleted or
    renamed reports never leave stale HTML behind.
 
+   **Every report page must offer a way back to the landing page.** `build.sh` is
+   responsible for this: it prepends a `topnav` to each one-pager before pandoc runs. If
+   the repo's `build.sh` predates this (no `All reports` string in it —
+   `grep -q 'All reports' build.sh`), add the injection where the one-pager is built, then
+   re-run it:
+   ```bash
+   {
+     printf '<nav class="topnav"><a href="../../index.html">&#8592; All reports</a></nav>\n\n'
+     cat "$src"
+   } | pandoc -f gfm -t html5 -s \
+     --css assets/style.css \
+     --metadata pagetitle="$(page_title "$src" "$slug")" \
+     -o "$out/index.html"
+   ```
+   (i.e. pipe the nav + source into pandoc instead of passing `"$src"` as the input
+   file.) Section pages already chain back: "← Back to the report" → one-pager →
+   "← All reports" → landing page. The nav goes in **build.sh, not the source `.md`** —
+   the Markdown must stay renderer-agnostic.
+
 5. **Regenerate the top-level `index.html` as an at-a-glance dashboard, not a table of
    contents.** Write a fresh landing page (template in [`components.md`](components.md) →
    *Landing-page template*). One card per built report, newest first (slugs are
@@ -158,11 +191,13 @@ Work relative to the repo root `~/hypaware-reports`.
    - **Kicker** - the report's scope line (the italic `*Source: … · Window: … *` line for
      adoption profiles, or the `## <server> · <window>` subtitle for the others), trimmed
      to a short phrase, as the card's `rec-kind` eyebrow.
-   - **Stats** - the report's top 3-4 `metric-grid` tiles (step 3 guarantees they exist),
-     re-rendered as `rec-stat`s on the card: same values, same crit/warn/good judgments,
-     labels compressed to 2-4 words, notes dropped. Rules in components.md. This hoists
-     each report's key results and progress onto the landing page, so a reader gets the
-     fleet's state without opening a report.
+   - **Stats** - the report's top 3-4 headline numbers as `rec-stat`s on the card: from
+     its `metric-grid` tiles where it has one, otherwise (change-list reports like the
+     improvement review) from the `rec` cards' stat rows — same values, same
+     crit/warn/good judgments, labels compressed to 2-4 plain words (no coined
+     shorthand), notes dropped. Rules in components.md. This hoists each report's key
+     results and progress onto the landing page, so a reader gets the fleet's state
+     without opening a report.
 
    Link each report by its explicit `html/<slug>/index.html`, **not** a bare
    `html/<slug>/` directory URL. A trailing-slash directory link relies on server-side
@@ -177,16 +212,17 @@ Work relative to the repo root `~/hypaware-reports`.
    ls html/                                   # one dir per report
    grep -o '<title>[^<]*</title>' html/*/index.html
    grep -rlo 'href="[^"]*\.md"' html/ || echo "no leftover .md links ✓"
-   grep -L 'metric-grid' html/*/index.html   # should print nothing
-   grep -L 'class="rec"' html/*/index.html   # should print nothing: findings are carded
+   grep -L 'class="rec"' html/*/index.html   # should print nothing: findings/changes are carded
    grep -c 'rec-stat' index.html             # ≥ number of reports: landing cards carry stats
+   grep -L 'All reports' html/*/index.html   # should print nothing: every report links back
    ```
    `href="….md"` in any built page means a link wasn't rewritten — remember links live
    both in Markdown syntax **and** inside raw-HTML components (`rec` card and callout
    `href`s), and may point across reports; investigate before publishing. A page missing
-   `metric-grid` means step 3 was skipped for that report; one missing `rec` cards means
-   step 3 stopped halfway (headline strip done, findings left as prose); a landing page
-   without `rec-stat`s means step 5 produced a bare link list.
+   `rec` cards means step 3 was skipped or stopped halfway; a `metric-grid` is only
+   expected where the source report has a headline-numbers section (do NOT add one to a
+   change-list report to satisfy a check); a landing page without `rec-stat`s means
+   step 5 produced a bare link list.
    Optionally open `index.html` (or `html/<slug>/index.html`) in a browser to
    eyeball it (check both light and dark — the stylesheet supports both).
 

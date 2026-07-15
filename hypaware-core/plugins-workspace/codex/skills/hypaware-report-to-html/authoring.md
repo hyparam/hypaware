@@ -44,12 +44,16 @@ failures … and let the whole team run a flow only phil has.**
 The scope/date line becomes an `eyebrow` above the title. The thesis stays one bold
 paragraph — the stylesheet turns it into the hero box.
 
-## 2. "Key numbers" — metric grid, not a table
+## 2. Headline numbers — metric grid, not a table (only where the report has them)
 
-Every report's headline numbers section (the 2-column Metric/Readout table) becomes a
-`metric-grid` of 3–6 cards. Color carries judgment: `is-crit` = problem, `is-warn` =
-exposure, `is-good` = healthy/solved, no class = neutral. Keep any *detail* tables that
-follow; only the headline strip converts.
+A report's headline-numbers section (the usage and security reviews' **Key metrics**)
+becomes a `metric-grid` of 3–6 cards. Color carries judgment: `is-crit` = problem,
+`is-warn` = exposure, `is-good` = healthy/solved, no class = neutral. Keep any *detail*
+tables that follow; only the headline strip converts.
+
+**Not every report has one.** The improvement review opens with a numbered **Proposed
+changes** list and has no metrics section by design (user-approved, 2026-07-14) — do NOT
+add a metric strip to it; its changes become `rec` cards (§3) and lead the page.
 
 ```markdown
 <p class="eyebrow">The numbers that set the agenda</p>
@@ -71,15 +75,24 @@ follow; only the headline strip converts.
 Every card needs a `note` that says why the number matters — a bare number is not a
 finding.
 
-## 3. Findings index — rec cards, not `###` + link
+## 3. Findings / proposed changes — rec cards, not `###` + link
 
-On the one-pager, each finding/recommendation that links to a section page becomes an
+On the one-pager, each finding or proposed change that links to a section page becomes an
 `<a class="rec">` card (number badge, kind eyebrow, title, 1–2 sentence body, 2–3 stat
 row, go-link). See the full snippet in `components.md`. The `###` heading + trailing
 `<a href="…">section →</a>` pattern is replaced by the card — don't emit both.
 
+For the improvement review's numbered change list, the mapping is fixed: bold imperative
+= card title, the why-sentence = body, the evidence numbers = stat row, the section link
+= the card itself; card order = list order (highest leverage first — never resequenced).
+
 Stat-row discipline: 2–3 stats per card, each `<b>value</b><span>label</span>`, color
 class only when it carries judgment.
+
+**Ready-to-apply artifacts stay verbatim.** Proposed AGENTS.md diffs, full skill/subagent
+file drafts, tool-description text, and source→destination move tables are deliverables,
+not display copy: render them as the code blocks / tables they are, never trimmed,
+carded, or reworded.
 
 ## 4. Section pages: every claim gets a visual, breakdowns get charts
 
@@ -125,9 +138,14 @@ literal):
 - **Tag words** — a single judgment noun: Exposure, Risk, Solved, Caveat, Basis.
 - **Chart titles** — name the axis and scope ("Edit-tool errors by message · 30 days");
   **chart-foot** — the takeaway, one line.
-- **Section headings** — replace scaffolding ("Key numbers", "What this shows") with
-  headings that carry the message ("The numbers that set the agenda", "The four
-  recommendations").
+- **Language rules bind display copy too** (user feedback 2026-07-14): literal words
+  only — no metaphors, pipeline vocabulary, or coined shorthand (write "sessions open
+  across days", never a coinage like "marathon sessions"); when a card names a skill or
+  tool as a fix, the body says in one clause what it literally does; dates absolute.
+- **Section headings** — the one-pager's skeleton headings (Proposed changes / Key
+  metrics / Key findings / Data limitations / Supporting analysis) are user-approved
+  standard vocabulary: keep them. Inside section pages, retitle weak headings to state
+  the literal fact ("Worker lanes default to Opus"), never a punchy coinage or metaphor.
 
 Conversion is the floor, not the bar: a page that preserves the Markdown's structure and
 phrasing with components sprinkled in is a failed pass. The Markdown supplies facts,
@@ -138,8 +156,12 @@ are designed.
 
 - [ ] Eyebrow + `# title` + bold thesis, nothing between them — on the one-pager AND
       every section page.
-- [ ] Headline numbers are a `metric-grid` with judgment colors and notes.
-- [ ] Findings on the one-pager are `rec` cards with stat rows.
+- [ ] Headline numbers are a `metric-grid` with judgment colors and notes — only on
+      reports that have a Key metrics section; none added to change-list reports.
+- [ ] Findings / proposed changes on the one-pager are `rec` cards with stat rows, in
+      source order.
+- [ ] Diffs, proposed files, and move tables are verbatim code blocks/tables — nothing
+      trimmed or reworded.
 - [ ] Each section page's visuals each carry a distinct claim (typically 2-3 per page);
       source tables kept where numbers matter.
 - [ ] Every per-entity rollup (by user/gateway, team, repo, model) has a companion
