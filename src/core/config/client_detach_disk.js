@@ -24,7 +24,7 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
  * **self-describing undo record** that `attach()` wrote (LLP 0045 §Part 3). The
  * routine is **format-aware but plugin-agnostic**: it understands `json`
  * (marker-key), `toml` (managed-block), and `json_path` (nested marker
- * object) — the same dispatch
+ * object): the same dispatch
  * `probeClientAttached` uses on the *read* side — and how to replay an undo
  * record, never "Claude" vs "Codex". It imports no plugin code (which would not
  * survive the plugin being unloaded), subsuming what the adapters' old

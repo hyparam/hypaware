@@ -328,6 +328,47 @@ test('re-attach at the same port RESTORES a drifted provider models list', () =>
   )
 })
 
+test('re-attach at the same port refuses a malformed marker instead of silently no-oping', () => {
+  const once = prepareAttach({
+    agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+  }, OPTS)
+
+  // A marker header that no longer parses (or parses but carries no
+  // managed record) cannot be reversed, so a same-port re-attach must
+  // refuse loudly rather than pretend it is attached.
+  for (const badMarker of ['not json {', JSON.stringify({ port: 4317 })]) {
+    const drifted = /** @type {any} */ (structuredClone(once.config))
+    drifted.models.providers.hypaware.headers[MARKER_HEADER] = badMarker
+    assert.throws(
+      () => prepareAttach(drifted, OPTS),
+      (/** @type {any} */ err) =>
+        err instanceof OpenclawSettingsError && err.code === 'MALFORMED_MARKER',
+      `expected MALFORMED_MARKER for marker ${JSON.stringify(badMarker)}`
+    )
+  }
+})
+
+test('re-attach at the same port HEALS a drifted provider api / apiKey', () => {
+  const once = prepareAttach({
+    agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+  }, OPTS)
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  // Provider-field drift within the injected block itself: the api dialect
+  // and the apiKey interpolation were both mangled. The wholesale provider
+  // compare heals them back to the builder's values.
+  drifted.models.providers.hypaware.api = 'openai-chat'
+  drifted.models.providers.hypaware.apiKey = 'sk-literal-leak'
+
+  const healed = prepareAttach(drifted, OPTS)
+  assert.equal(healed.changed, true)
+  assert.equal(healed.action, 'updated')
+  const provider = /** @type {any} */ (healed.config).models.providers.hypaware
+  assert.equal(provider.api, 'anthropic-messages')
+  assert.equal(provider.apiKey, '${ANTHROPIC_API_KEY}')
+  // The undo record still names the user's own pre-attach primary.
+  assert.equal(readRecord(healed.config).managed.set[0].prev, 'anthropic/claude-sonnet-4-5')
+})
+
 test('re-attach with the marker parent object removed refuses rather than silently no-oping', () => {
   const once = prepareAttach({
     agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
@@ -751,6 +792,82 @@ test('attach dry-run reads but never writes, and reports the plan', async () => 
     assert.equal(payload.client, 'openclaw')
     assert.equal(payload.dry_run, true)
     assert.equal(payload.changed, false)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('dry-run surfaces a refusal even when the endpoint has no usable port (127.0.0.1:0)', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    const body = JSON.stringify({
+      agents: { defaults: { model: { primary: 'openrouter/gpt-5' } } },
+    }, null, 2)
+    await fs.writeFile(settingsPath, body)
+
+    const io = streams()
+    // The dispatcher hands the placeholder `:0` endpoint before the
+    // gateway source is started; the dry run must still read + validate
+    // the config so a non-Anthropic primary is refused in the plan.
+    await assert.rejects(
+      attach({
+        endpoint: 'http://127.0.0.1:0',
+        stdout: io.stdout,
+        stderr: io.stderr,
+        dryRun: true,
+        json: true,
+        env: { ANTHROPIC_API_KEY: 'sk-ant-x' },
+        homeDir: dir,
+        version: '1.0.0',
+        settingsPath,
+      }),
+      (/** @type {any} */ err) =>
+        err instanceof OpenclawSettingsError && err.code === 'NON_ANTHROPIC_PRIMARY'
+    )
+    // A refusal is a plan outcome, not a mutation: the file is untouched.
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), body)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an untouched same-port re-attach through attach() is a true no-op (no write, mtime unchanged)', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({
+      agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+    }, null, 2))
+    const env = { ANTHROPIC_API_KEY: 'sk-ant-x' }
+
+    const first = await attach({
+      endpoint: ENDPOINT,
+      stdout: streams().stdout,
+      stderr: streams().stderr,
+      env,
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    assert.equal(first.action, 'attached')
+    const afterFirst = await fs.stat(settingsPath)
+
+    const io = streams()
+    const second = await attach({
+      endpoint: ENDPOINT,
+      stdout: io.stdout,
+      stderr: io.stderr,
+      env,
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    // Nothing drifted, so the same-port re-attach neither reports a change
+    // nor rewrites the file: the mtime is byte-identical to the first write.
+    assert.equal(second.changed, false)
+    assert.equal(second.action, 'noop')
+    const afterSecond = await fs.stat(settingsPath)
+    assert.equal(afterSecond.mtimeMs, afterFirst.mtimeMs)
+    assert.match(io.out.join(''), /already attached/)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

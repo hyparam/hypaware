@@ -177,7 +177,11 @@ export function openclawSessionId(reqBody, systemText, exchangeId) {
   if (systemText) return hashShort(systemText.slice(0, SESSION_HASH_HEAD_CHARS))
   const messages = Array.isArray(reqBody.messages) ? reqBody.messages : []
   if (messages.length > 0 && isPlainObject(messages[0])) {
-    return hashShort(JSON.stringify(messages[0].content))
+    // A message with absent `content` stringifies to undefined, which
+    // sha256Hex cannot digest: fall back to the exchange id so a
+    // content-less first message degrades to a stable session key
+    // instead of throwing and dropping the exchange.
+    return hashShort(JSON.stringify(messages[0].content) ?? exchangeId)
   }
   return hashShort(exchangeId)
 }
@@ -307,7 +311,13 @@ function reconstructAssistantMessage(streamEvents) {
 function finalizeBlock(blocksByIndex, partialJsonByIndex, index) {
   const block = blocksByIndex.get(index)
   if (!block || !partialJsonByIndex.has(index)) return
-  block.input = parseMaybeJson(partialJsonByIndex.get(index) ?? '')
+  const partial = partialJsonByIndex.get(index) ?? ''
+  // Only overwrite the block's input when the stream actually carried
+  // input_json_delta bytes. A tool_use block with no deltas is a valid
+  // empty-input call: keep the input the content_block_start seeded (or
+  // default to {}), never clobber it with parseMaybeJson('') === ''.
+  if (partial.length > 0) block.input = parseMaybeJson(partial)
+  else if (block.input === undefined) block.input = {}
   partialJsonByIndex.delete(index)
 }
 

@@ -43,6 +43,13 @@ export const MARKER_HEADER = 'x-hypaware-marker'
 
 const ANTHROPIC_PREFIX = 'anthropic/'
 
+// A harmless valid port used only to run the dry-run pure transform when
+// the real endpoint has no usable port yet (the dispatcher's
+// `127.0.0.1:0` placeholder before the gateway source is started). The
+// resulting provider block is never written to disk and the plan reports
+// the real (possibly undefined) port, so this value never surfaces.
+const DRY_RUN_TRANSFORM_PORT = 1
+
 export class OpenclawSettingsError extends Error {
   /**
    * @param {string} message
@@ -470,24 +477,25 @@ export async function attach(opts) {
 
   if (opts.dryRun) {
     const port = safePort(opts.endpoint)
-    /** @type {ReturnType<typeof prepareAttach> | undefined} */
-    let prepared
-    if (port !== undefined) {
-      // Read-only plan: run the pure transform against the on-disk config
-      // so a dry run reports the real action (and surfaces refusals such
-      // as a non-Anthropic primary) without writing anything.
-      const { value } = await readSettings(settingsPath)
-      prepared = prepareAttach(value, { port, version: opts.version })
-    }
+    // Read-only plan: always run the pure transform against the on-disk
+    // config so a dry run reports the real action AND surfaces refusals
+    // (e.g. a non-Anthropic primary) without writing anything. When the
+    // endpoint has no usable port yet (the dispatcher's `127.0.0.1:0`
+    // placeholder before the gateway source starts), a harmless valid
+    // placeholder port keeps the transform legal; nothing reaches disk
+    // and the plan still reports the real (possibly undefined) port, so
+    // no bogus baseUrl is printed.
+    const { value } = await readSettings(settingsPath)
+    const prepared = prepareAttach(value, { port: port ?? DRY_RUN_TRANSFORM_PORT, version: opts.version })
     writeAttachOutput(opts, {
       status: 'ok',
       dryRun: true,
       settingsPath,
       port,
       changed: false,
-      action: prepared?.action,
-      model: prepared?.model,
-      prevPrimary: prepared?.prevPrimary,
+      action: prepared.action,
+      model: prepared.model,
+      prevPrimary: prepared.prevPrimary,
     })
     return { changed: false, action: 'dry_run', settingsPath }
   }

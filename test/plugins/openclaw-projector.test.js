@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   anthropicUpstreamPreset,
   createOpenclawExchangeProjector,
+  openclawSessionId,
 } from '../../hypaware-core/plugins-workspace/openclaw/src/projector.js'
 import {
   anthropicUpstreamPreset as claudeAnthropicUpstreamPreset,
@@ -188,6 +189,94 @@ test('project() assembles a streamed assistant message from SSE events', async (
   assert.deepEqual(assistant.content, [{ type: 'text', text: 'hello' }])
   assert.equal(assistant.stop_reason, 'end_turn')
   assert.deepEqual(assistant.attributes.usage, { input_tokens: 7, output_tokens: 3 })
+})
+
+/**
+ * Project an exchange whose assistant turn is streamed as the given SSE
+ * event objects.
+ *
+ * @param {Array<Record<string, unknown>>} events
+ * @returns {Promise<any>}
+ */
+async function projectStreamed(events) {
+  const projector = createOpenclawExchangeProjector()
+  return /** @type {any} */ (await projector.project(exchange({
+    is_sse: true,
+    request_body: JSON.stringify(REQUEST),
+    response_body: null,
+    stream_events: events.map((event, i) => ({
+      kind: 'stream_event',
+      exchange_id: 'ex-sse',
+      t_ms: i,
+      event: event.type,
+      data: JSON.stringify(event),
+    })),
+  }), context()))
+}
+
+// @ref LLP 0109#gateway-capture [tests]: a streamed tool_use block with no
+// input_json_delta is a valid empty-input call; its input must stay the {}
+// the content_block_start seeded, never be clobbered to '' at finalize.
+test('project() preserves an empty-input streamed tool_use call', async () => {
+  const projection = await projectStreamed([
+    { type: 'message_start', message: { id: 'msg_tu0', model: 'claude-sonnet-4-5', usage: { input_tokens: 4 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_0', name: 'now', input: {} } },
+    // No content_block_delta: the tool takes no arguments.
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ])
+
+  assert.ok(projection)
+  const assistant = projection.messages.at(-1)
+  assert.equal(assistant.stop_reason, 'tool_use')
+  assert.deepEqual(assistant.content, [{ type: 'tool_use', id: 'tu_0', name: 'now', input: {} }])
+  // Specifically not the empty string that parseMaybeJson('') yields.
+  assert.notEqual(assistant.content[0].input, '')
+})
+
+// @ref LLP 0109#gateway-capture [tests]: a streamed tool_use with
+// input_json_delta bytes is parsed into the accumulated JSON object.
+test('project() parses a non-empty-input streamed tool_use call', async () => {
+  const projection = await projectStreamed([
+    { type: 'message_start', message: { id: 'msg_tu1', model: 'claude-sonnet-4-5', usage: { input_tokens: 4 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_1', name: 'search', input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"q":' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"hi"}' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ])
+
+  assert.ok(projection)
+  const assistant = projection.messages.at(-1)
+  assert.deepEqual(assistant.content, [{ type: 'tool_use', id: 'tu_1', name: 'search', input: { q: 'hi' } }])
+})
+
+// @ref LLP 0109#gateway-capture [tests]: session-id fallback must degrade,
+// not throw, when the first message has no content and there is no system
+// prompt (JSON.stringify(undefined) is undefined, which sha256Hex cannot
+// digest), so a content-less exchange still projects instead of dropping.
+test('openclawSessionId falls back to the exchange id for a content-less first message', () => {
+  const reqBody = { messages: [{ role: 'user' }] }
+  const id = openclawSessionId(reqBody, undefined, 'ex-fallback')
+  const idFromEmpty = openclawSessionId({ messages: [] }, undefined, 'ex-fallback')
+  assert.equal(typeof id, 'string')
+  assert.equal(id.length, 16)
+  // With no hashable content it keys on the exchange id, same as no messages.
+  assert.equal(id, idFromEmpty)
+})
+
+test('project() does not drop an exchange whose first message has no content', async () => {
+  const projector = createOpenclawExchangeProjector()
+  const projection = /** @type {any} */ (await projector.project(exchange({
+    exchange_id: 'ex-nocontent',
+    request_body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [{ role: 'user' }] }),
+    response_body: JSON.stringify(RESPONSE),
+  }), context()))
+
+  assert.ok(projection, 'exchange should project rather than throw/drop')
+  assert.equal(projection.session_id, openclawSessionId({ messages: [{ role: 'user' }] }, undefined, 'ex-nocontent'))
 })
 
 test('project() declines an unparseable request body', async () => {
