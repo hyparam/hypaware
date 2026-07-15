@@ -30,6 +30,7 @@ import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_se
 
 /**
  * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { Stats } from 'node:fs'
  */
 
 export const CLIENT_NAME = 'openclaw'
@@ -362,7 +363,7 @@ async function readSettings(settingsPath) {
   // through a symlink would silently retarget whatever it points at and
   // desync from what OpenClaw re-reads, so refuse up front.
   // @ref LLP 0109#attach-plugin-owned [implements]: writes are atomic, mtime-gated, and never through a symlink
-  /** @type {import('node:fs').Stats | undefined} */
+  /** @type {Stats | undefined} */
   let lstat
   try {
     lstat = await fs.lstat(settingsPath)
