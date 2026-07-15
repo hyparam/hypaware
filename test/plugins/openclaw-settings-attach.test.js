@@ -13,6 +13,27 @@ import {
   defaultSettingsPath,
   prepareAttach,
 } from '../../hypaware-core/plugins-workspace/openclaw/src/settings.js'
+import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
+
+/**
+ * The core `json_path` descriptor for OpenClaw, matching the attach_probe
+ * the manifest declares. Used to prove the core probe (which keys off
+ * marker-path existence alone) and the on-disk capture state agree after
+ * a re-attach heals config drift.
+ *
+ * @type {any}
+ */
+const OPENCLAW_DESCRIPTOR = {
+  plugin: '@hypaware/openclaw',
+  name: 'openclaw',
+  skillDir: 'skills/openclaw',
+  attachProbe: {
+    format: 'json_path',
+    settings_file: '.openclaw/openclaw.json',
+    marker_path: 'models.providers.hypaware',
+    marker_record: 'headers.x-hypaware-marker',
+  },
+}
 
 /**
  * LLP 0109 attach transform: OpenClaw's strictly-validated config root
@@ -168,6 +189,99 @@ test('re-attach at a new port rewrites baseUrl but preserves the original prev v
   assert.deepEqual(record.managed, readRecord(once.config).managed)
 })
 
+test('re-attach at the same port HEALS a drifted primary and allowlist instead of silently no-oping', () => {
+  // Attach once against a config that carries an allowlist.
+  const once = prepareAttach({
+    agents: {
+      defaults: {
+        model: { primary: 'anthropic/claude-sonnet-4-5' },
+        models: ['anthropic/claude-sonnet-4-5'],
+      },
+    },
+  }, OPTS)
+  assert.equal(once.action, 'attached')
+
+  // External drift: the marker provider survives, but the primary is
+  // repointed straight back to anthropic and the allowlist loses our
+  // managed id. Capture is now silently off while the marker still
+  // exists, so the core probe would report attached.
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  drifted.agents.defaults.model.primary = 'anthropic/claude-sonnet-4-5'
+  drifted.agents.defaults.models = ['anthropic/claude-sonnet-4-5']
+
+  // Re-attach at the SAME port must restore capture, not no-op.
+  const healed = prepareAttach(drifted, OPTS)
+  assert.equal(healed.changed, true)
+  assert.equal(healed.action, 'updated')
+
+  const config = /** @type {any} */ (healed.config)
+  assert.equal(config.agents.defaults.model.primary, 'hypaware/claude-sonnet-4-5')
+  assert.ok(config.agents.defaults.models.includes('hypaware/claude-sonnet-4-5'))
+
+  // The undo record still names the user's ORIGINAL pre-attach primary,
+  // never the drifted value, so a later detach still restores it.
+  const record = readRecord(healed.config)
+  assert.deepEqual(record.managed.set, [{
+    path: 'agents.defaults.model.primary',
+    value: 'hypaware/claude-sonnet-4-5',
+    prev: 'anthropic/claude-sonnet-4-5',
+  }])
+})
+
+test('re-attach heals a drifted primary that OpenClaw hot-reloaded to a DIFFERENT model', () => {
+  const once = prepareAttach({
+    agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+  }, OPTS)
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  // A hot-reload revert / user edit that points the primary somewhere
+  // else entirely, not just back to the original.
+  drifted.agents.defaults.model.primary = 'anthropic/claude-opus-4'
+
+  const healed = prepareAttach(drifted, OPTS)
+  assert.equal(healed.changed, true)
+  assert.equal(healed.action, 'updated')
+  assert.equal(
+    /** @type {any} */ (healed.config).agents.defaults.model.primary,
+    'hypaware/claude-sonnet-4-5'
+  )
+})
+
+test('re-attach heals drift AND rewrites the port when both changed', () => {
+  const once = prepareAttach({
+    agents: {
+      defaults: {
+        model: { primary: 'anthropic/claude-sonnet-4-5' },
+        models: ['anthropic/claude-sonnet-4-5'],
+      },
+    },
+  }, OPTS)
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  drifted.agents.defaults.model.primary = 'anthropic/claude-sonnet-4-5'
+
+  const healed = prepareAttach(drifted, { port: 5001, version: '1.2.0', attachedAt: OPTS.attachedAt })
+  const config = /** @type {any} */ (healed.config)
+  assert.equal(healed.action, 'updated')
+  assert.equal(config.models.providers.hypaware.baseUrl, 'http://127.0.0.1:5001')
+  assert.equal(config.agents.defaults.model.primary, 'hypaware/claude-sonnet-4-5')
+  assert.equal(readRecord(healed.config).port, 5001)
+})
+
+test('re-attach with the marker parent object removed refuses rather than silently no-oping', () => {
+  const once = prepareAttach({
+    agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+  }, OPTS)
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  // The whole agents.defaults.model object was removed: re-pointing the
+  // primary would silently no-op, so attach must refuse loudly.
+  delete drifted.agents.defaults.model
+
+  assert.throws(
+    () => prepareAttach(drifted, OPTS),
+    (/** @type {any} */ err) =>
+      err instanceof OpenclawSettingsError && err.code === 'DRIFT_CONFLICT'
+  )
+})
+
 test('a non-Anthropic primary is refused with a clear error', () => {
   assert.throws(
     () => prepareAttach({
@@ -287,6 +401,131 @@ test('attach warns on stderr (non-fatally) when ANTHROPIC_API_KEY is unset', asy
     })
     assert.equal(result.changed, true)
     assert.match(io.err.join(''), /ANTHROPIC_API_KEY is not set/)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('attach warns naming a stale resolved-provider cache that could override config', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({
+      agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+    }))
+    // Seed OpenClaw's per-agent resolved-provider cache alongside the
+    // settings file: <home>/agents/<id>/agent/models.json.
+    const cachePath = path.join(dir, 'agents', 'default', 'agent', 'models.json')
+    await fs.mkdir(path.dirname(cachePath), { recursive: true })
+    await fs.writeFile(cachePath, JSON.stringify({ baseUrl: 'https://api.anthropic.com' }))
+
+    const io = streams()
+    await attach({
+      endpoint: ENDPOINT,
+      stdout: io.stdout,
+      stderr: io.stderr,
+      // Key set so the ANTHROPIC_API_KEY warning does not fire; only the
+      // stale-cache warning should appear.
+      env: { ANTHROPIC_API_KEY: 'sk-ant-x' },
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    const err = io.err.join('')
+    assert.match(err, /caches resolved providers/)
+    assert.match(err, new RegExp(cachePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.doesNotMatch(err, /ANTHROPIC_API_KEY is not set/)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('attach does not warn about caches when the agents dir is absent', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({
+      agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+    }))
+    const io = streams()
+    await attach({
+      endpoint: ENDPOINT,
+      stdout: io.stdout,
+      stderr: io.stderr,
+      env: { ANTHROPIC_API_KEY: 'sk-ant-x' },
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    assert.deepEqual(io.err, [])
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('re-attach through attach() heals on-disk drift so the core probe reflects real capture', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({
+      agents: {
+        defaults: {
+          model: { primary: 'anthropic/claude-sonnet-4-5' },
+          models: ['anthropic/claude-sonnet-4-5'],
+        },
+      },
+    }, null, 2))
+
+    const env = { ANTHROPIC_API_KEY: 'sk-ant-x' }
+    const first = await attach({
+      endpoint: ENDPOINT,
+      stdout: streams().stdout,
+      stderr: streams().stderr,
+      env,
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    assert.equal(first.action, 'attached')
+
+    // External drift: marker provider survives, primary + allowlist revert.
+    const drifted = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    drifted.agents.defaults.model.primary = 'anthropic/claude-sonnet-4-5'
+    drifted.agents.defaults.models = ['anthropic/claude-sonnet-4-5']
+    await fs.writeFile(settingsPath, JSON.stringify(drifted, null, 2))
+
+    // Status probes attached (marker exists) even though capture drifted -
+    // the silent-miss the heal closes.
+    const preProbe = await probeClientAttachFromDescriptor({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: dir,
+      env: { OPENCLAW_HOME: dir },
+    })
+    assert.equal(preProbe.attached, true)
+
+    const io = streams()
+    const healed = await attach({
+      endpoint: ENDPOINT,
+      stdout: io.stdout,
+      stderr: io.stderr,
+      env,
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    // Pre-fix this re-attach was a silent no-op (changed:false), leaving
+    // the file drifted; post-fix it restores capture.
+    assert.equal(healed.changed, true)
+    assert.equal(healed.action, 'updated')
+
+    const written = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(written.agents.defaults.model.primary, 'hypaware/claude-sonnet-4-5')
+    assert.ok(written.agents.defaults.models.includes('hypaware/claude-sonnet-4-5'))
+
+    // Status now reflects reality: attached AND capture is genuinely routed.
+    const postProbe = await probeClientAttachFromDescriptor({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: dir,
+      env: { OPENCLAW_HOME: dir },
+    })
+    assert.equal(postProbe.attached, true)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

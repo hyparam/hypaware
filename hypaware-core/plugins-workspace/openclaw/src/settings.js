@@ -30,7 +30,7 @@ import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_se
 
 /**
  * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { Stats } from 'node:fs'
+ * @import { Dirent, Stats } from 'node:fs'
  */
 
 export const CLIENT_NAME = 'openclaw'
@@ -93,11 +93,18 @@ export function defaultSettingsPath(env, homeDir) {
  *    `agents.defaults.models` allowlist exists, appends
  *    `hypaware/<model>` to it (recording the addition).
  *
- * Re-attach (provider already present): same port is a no-op; a new
- * port rewrites `baseUrl` and the record's `port`/`attached_at`/
- * `version` while preserving the ORIGINAL `managed` undo record (prev
- * values, created parents, appends), so detach after any number of
- * re-attaches still restores the user's own settings.
+ * Re-attach (provider already present): the recorded `managed`
+ * mutations are re-verified against the live config and re-applied when
+ * they have drifted (the marker provider survived but the primary was
+ * repointed away from `hypaware/<model>`, or the allowlist entry was
+ * dropped) so traffic never goes silently uncaptured while the probe
+ * still reports attached. A same-port re-attach with no drift is a
+ * no-op; a same-port re-attach that healed drift, or any new port,
+ * reports `updated`. A new port also rewrites `baseUrl` and the
+ * record's `port`/`attached_at`/`version`. In every case the ORIGINAL
+ * `managed` undo record (prev values, created parents, appends) is
+ * preserved, so detach after any number of re-attaches still restores
+ * the user's own settings.
  *
  * @ref LLP 0109#attach-plugin-owned [implements]: the undo record shape ({ managed: { added, created_parents, set, appended } })
  * @param {Record<string, unknown>} configObject
@@ -188,8 +195,9 @@ export function prepareAttach(configObject, opts) {
 
 /**
  * Handle a re-attach: the managed provider already exists, so parse its
- * marker record and either no-op (same port) or rewrite the gateway
- * port while preserving the original undo record.
+ * marker record, heal any drifted capture mutations, and either no-op
+ * (same port, nothing drifted) or rewrite the gateway port - always
+ * preserving the original undo record.
  *
  * @param {Record<string, unknown>} config
  * @param {Record<string, unknown>} provider
@@ -223,8 +231,21 @@ function reattach(config, provider, opts) {
     : []
   const model = typeof providerModels[0] === 'string' ? providerModels[0] : undefined
 
+  // Re-verify the recorded capture mutations are still live. The core
+  // probe reports attached on marker-path existence ALONE, so a marker
+  // that survived a config edit (or an OpenClaw hot-reload revert) while
+  // the primary drifted off `hypaware/<model>` (or lost its allowlist
+  // entry) would probe as attached yet capture nothing. Re-applying the
+  // recorded mutations heals the drift and restores capture, keeping
+  // `status` honest. The ORIGINAL `managed` block is never rewritten, so
+  // `prev` still names the user's own pre-attach values.
+  // @ref LLP 0109#attach-plugin-owned [implements]: re-attach replays the recorded set + appended mutations so a drifted marker never captures nothing
+  const healed = reapplyManaged(config, managed)
+
   if (record.port === opts.port) {
-    return { config, changed: false, action: 'noop', model, prevPrimary }
+    return healed
+      ? { config, changed: true, action: 'updated', model, prevPrimary }
+      : { config, changed: false, action: 'noop', model, prevPrimary }
   }
 
   // Port changed: rewrite baseUrl and the record's envelope fields, but
@@ -240,6 +261,59 @@ function reattach(config, provider, opts) {
     managed,
   })
   return { config, changed: true, action: 'updated', model, prevPrimary }
+}
+
+/**
+ * Re-apply the recorded `managed` capture mutations to `config` in place
+ * when they have drifted, reusing the same path model attach records
+ * (`set` = repoint the primary, `appended` = the allowlist join). Only
+ * touches what actually drifted, so a config already in place is left
+ * byte-for-byte unchanged. Returns whether anything was restored.
+ *
+ * @param {Record<string, unknown>} config
+ * @param {Record<string, unknown>} managed
+ * @returns {boolean}
+ */
+function reapplyManaged(config, managed) {
+  let changed = false
+
+  const setEntries = Array.isArray(managed.set) ? managed.set.filter(isPlainObject) : []
+  for (const entry of setEntries) {
+    if (typeof entry.path !== 'string' || typeof entry.value !== 'string') continue
+    const segments = entry.path.split('.')
+    if (readPath(config, segments) === entry.value) continue
+    const parent = readPath(config, segments.slice(0, -1))
+    if (!isPlainObject(parent)) {
+      // The parent object the primary lives under was removed wholesale;
+      // re-pointing would silently no-op (writePath needs the parent), so
+      // refuse rather than leave the user believing capture is on.
+      throw new OpenclawSettingsError(
+        `cannot restore capture: '${entry.path}' has no parent object to re-point ` +
+          `(the injected ${PROVIDER_PATH} provider is present but the config drifted). ` +
+          'run hyp detach --client openclaw and re-attach after fixing the config',
+        { code: 'DRIFT_CONFLICT' }
+      )
+    }
+    writePath(config, segments, entry.value)
+    changed = true
+  }
+
+  const appendedEntries = Array.isArray(managed.appended)
+    ? managed.appended.filter(isPlainObject)
+    : []
+  for (const entry of appendedEntries) {
+    if (typeof entry.path !== 'string' || typeof entry.value !== 'string') continue
+    const target = readPath(config, entry.path.split('.'))
+    // Only heal an allowlist that still exists but lost our entry. A
+    // wholesale-removed allowlist means OpenClaw enforces no allowlist, so
+    // the managed primary already passes and there is nothing to restore.
+    if (Array.isArray(target) && !target.includes(entry.value)) {
+      target.push(entry.value)
+      changed = true
+    }
+  }
+
+  return changed
 }
 
 /**
@@ -308,6 +382,23 @@ export async function attach(opts) {
     )
   }
 
+  // OpenClaw caches resolved providers in
+  // `<home>/agents/<id>/agent/models.json`, where a non-empty cached
+  // `baseUrl` wins over config, so a stale cache can shadow the injected
+  // hypaware provider and traffic keeps going straight to Anthropic even
+  // though attach succeeded. We do not edit agent state; we warn, naming
+  // the exact files, so the operator can clear them if capture does not
+  // take effect.
+  // @ref LLP 0109#known-v1-limitations-revisit-triggers [implements]: attach warns naming the resolved-provider cache files that can override config
+  const staleCaches = await findStaleModelCaches(settingsPath)
+  if (staleCaches.length > 0) {
+    opts.stderr.write(
+      `warning: OpenClaw caches resolved providers in ${staleCaches.join(', ')}; a ` +
+        'non-empty cached baseUrl there can override the injected hypaware provider - ' +
+        'delete these files if OpenClaw traffic is not captured after attach\n'
+    )
+  }
+
   if (opts.dryRun) {
     const port = safePort(opts.endpoint)
     /** @type {ReturnType<typeof prepareAttach> | undefined} */
@@ -352,6 +443,41 @@ export async function attach(opts) {
   const result = { changed: prepared.changed, action: prepared.action, settingsPath }
   if (prepared.prevPrimary !== undefined) result.prevPrimary = prepared.prevPrimary
   return result
+}
+
+/**
+ * Scan for OpenClaw's per-agent resolved-provider caches
+ * (`<home>/agents/<id>/agent/models.json`, siblings of the settings
+ * file) whose cached `baseUrl` can override the injected provider.
+ * Best-effort: any scan error (including a missing `agents` dir) yields
+ * an empty list, since a missing cache cannot shadow anything. Returned
+ * sorted for a stable warning.
+ *
+ * @param {string} settingsPath
+ * @returns {Promise<string[]>}
+ */
+async function findStaleModelCaches(settingsPath) {
+  const agentsDir = path.join(path.dirname(settingsPath), 'agents')
+  /** @type {Dirent[]} */
+  let entries
+  try {
+    entries = await fs.readdir(agentsDir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  /** @type {string[]} */
+  const found = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const candidate = path.join(agentsDir, entry.name, 'agent', 'models.json')
+    try {
+      await fs.access(candidate)
+      found.push(candidate)
+    } catch {
+      // No cache for this agent; nothing to warn about.
+    }
+  }
+  return found.sort()
 }
 
 /**

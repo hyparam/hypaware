@@ -60,9 +60,20 @@ export async function run({ harness, expect }) {
     version: 2,
     plugins: [
       {
+        // A concrete `listen` port (not `:0`) is load-bearing for the
+        // OpenClaw dry-run below: `hyp attach --dry-run` derives the
+        // gateway endpoint from this configured `listen` (the source is
+        // never started in a CLI dispatch, so `localEndpoint()` is
+        // unavailable), and the OpenClaw adapter only runs
+        // `readSettings()`/`prepareAttach()` against the seeded config
+        // when that derived port is defined - a `:0` listen resolves to
+        // port 0, which the adapter treats as the unstarted placeholder
+        // and skips the validation entirely. The port is never bound in
+        // this smoke (activation registers the source without listening),
+        // so a fixed value cannot collide across parallel runs.
         name: '@hypaware/ai-gateway',
         config: {
-          listen: '127.0.0.1:0',
+          listen: '127.0.0.1:4317',
           upstreams: [
             { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' },
           ],
