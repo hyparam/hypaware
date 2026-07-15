@@ -3,7 +3,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hypaware/core/util'
+import { ConcurrentEditError, atomicWriteFile, canonicalJson, errCode, isPlainObject } from 'hypaware/core/util'
 import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_settings_path.js'
 
 /**
@@ -29,7 +29,6 @@ import { resolveClientSettingsPath } from '../../../../src/core/daemon/client_se
  */
 
 /**
- * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { Dirent, Stats } from 'node:fs'
  */
 
@@ -93,18 +92,22 @@ export function defaultSettingsPath(env, homeDir) {
  *    `agents.defaults.models` allowlist exists, appends
  *    `hypaware/<model>` to it (recording the addition).
  *
- * Re-attach (provider already present): the recorded `managed`
- * mutations are re-verified against the live config and re-applied when
- * they have drifted (the marker provider survived but the primary was
- * repointed away from `hypaware/<model>`, or the allowlist entry was
- * dropped) so traffic never goes silently uncaptured while the probe
- * still reports attached. A same-port re-attach with no drift is a
- * no-op; a same-port re-attach that healed drift, or any new port,
- * reports `updated`. A new port also rewrites `baseUrl` and the
- * record's `port`/`attached_at`/`version`. In every case the ORIGINAL
- * `managed` undo record (prev values, created parents, appends) is
- * preserved, so detach after any number of re-attaches still restores
- * the user's own settings.
+ * Re-attach (provider already present): the ENTIRE managed footprint is
+ * re-derived from the same builders first attach used and reconciled to
+ * the live config, so no drifted field can leave the probe reporting
+ * attached while capture is silently off. That covers both the
+ * config-level mutations (the primary repoint and the allowlist join)
+ * and every field of the injected provider block itself - `baseUrl`,
+ * `api`, `apiKey`, `headers` (including the `x-hypaware-client` match
+ * signal), the `x-hypaware-marker` record, and `models` - since a
+ * blanked baseUrl or a missing client header routes nowhere or is
+ * unattributed even though the marker path still exists. A same-port
+ * re-attach with nothing drifted is a no-op; a same-port re-attach that
+ * healed any drift, or any new port, reports `updated`. A new port also
+ * rewrites `baseUrl` and the record's `port`/`attached_at`/`version`. In
+ * every case the ORIGINAL `managed` undo record (prev values, created
+ * parents, appends) is preserved verbatim, so detach after any number of
+ * re-attaches still restores the user's own settings.
  *
  * @ref LLP 0109#attach-plugin-owned [implements]: the undo record shape ({ managed: { added, created_parents, set, appended } })
  * @param {Record<string, unknown>} configObject
@@ -177,17 +180,12 @@ export function prepareAttach(configObject, opts) {
     appended.push({ path: MODELS_ALLOWLIST_PATH, value: managedPrimary })
   }
 
-  const record = {
-    attached_at: attachedAt,
-    version: opts.version,
-    port: opts.port,
-    managed: {
-      added: [PROVIDER_PATH],
-      created_parents: createdParents,
-      set,
-      appended,
-    },
-  }
+  const record = attachRecord(attachedAt, opts.version, opts.port, {
+    added: [PROVIDER_PATH],
+    created_parents: createdParents,
+    set,
+    appended,
+  })
   providers[PROVIDER_ID] = buildProvider(opts.port, [model], record)
 
   return { config, changed: true, action: 'attached', model, prevPrimary: primary }
@@ -195,9 +193,20 @@ export function prepareAttach(configObject, opts) {
 
 /**
  * Handle a re-attach: the managed provider already exists, so parse its
- * marker record, heal any drifted capture mutations, and either no-op
- * (same port, nothing drifted) or rewrite the gateway port - always
+ * marker record, heal any drift across the WHOLE managed footprint, and
+ * either no-op (same port, nothing drifted) or report `updated` - always
  * preserving the original undo record.
+ *
+ * The heal has two halves that together close the "attached-but-not-
+ * capturing" gap the core probe (marker-path existence alone) cannot see:
+ *  1. the recorded config-level mutations (`set` = primary repoint,
+ *     `appended` = allowlist join), via `reapplyManaged`; and
+ *  2. every field of the injected provider block, by re-deriving it from
+ *     the SAME `buildProvider` first attach used and reconciling the live
+ *     entry to it, so a blanked `baseUrl`, a removed `x-hypaware-client`
+ *     header, a repointed `api`/`apiKey`, a mangled marker, or a drifted
+ *     `models` list is restored rather than left to route nowhere or go
+ *     unattributed while the marker path still exists.
  *
  * @param {Record<string, unknown>} config
  * @param {Record<string, unknown>} provider
@@ -226,41 +235,86 @@ function reattach(config, provider, opts) {
   const managed = record.managed
   const setEntries = Array.isArray(managed.set) ? managed.set.filter(isPlainObject) : []
   const prevPrimary = typeof setEntries[0]?.prev === 'string' ? setEntries[0].prev : undefined
+  const model = reattachModel(setEntries, provider)
+
+  // Half 1: re-verify the recorded config-level mutations are still live.
+  // The core probe reports attached on marker-path existence ALONE, so a
+  // marker that survived a config edit (or an OpenClaw hot-reload revert)
+  // while the primary drifted off `hypaware/<model>` (or lost its
+  // allowlist entry) would probe as attached yet capture nothing.
+  // Re-applying the recorded mutations heals the drift and restores
+  // capture. The ORIGINAL `managed` block is never rewritten, so `prev`
+  // still names the user's own pre-attach values. A wholesale-removed
+  // parent object is unrecoverable and refuses with DRIFT_CONFLICT.
+  // @ref LLP 0109#attach-plugin-owned [implements]: re-attach replays the recorded set + appended mutations so a drifted marker never captures nothing
+  const configHealed = reapplyManaged(config, managed)
+
+  // Half 2: re-derive the complete injected provider block from the same
+  // builder first attach used and reconcile the live entry to it. A same
+  // port keeps the record's existing envelope (so an untouched provider
+  // compares byte-equal and stays a no-op); a new port refreshes
+  // `port`/`attached_at`/`version` and hence `baseUrl`. The ORIGINAL
+  // `managed` block rides through unchanged, so `prev` still names the
+  // user's own pre-attach values, never one of ours.
+  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
+  const samePort = record.port === opts.port
+  const attachedAt = samePort && typeof record.attached_at === 'string' ? record.attached_at : opts.attachedAt
+  const version = samePort && typeof record.version === 'string' ? record.version : opts.version
+  // model is present for any well-formed marker (its set entry always
+  // carries `hypaware/<model>`); the empty fallback is only for a record
+  // so degenerate it names no model at all.
+  const models = model === undefined ? [] : [model]
+  const desired = buildProvider(opts.port, models, attachRecord(attachedAt, version, opts.port, managed))
+  const providerHealed = reconcileProvider(config, provider, desired)
+
+  const changed = configHealed || providerHealed
+  return changed
+    ? { config, changed: true, action: 'updated', model, prevPrimary }
+    : { config, changed: false, action: 'noop', model, prevPrimary }
+}
+
+/**
+ * Derive the bare managed model id (e.g. `claude-sonnet-4-5`) for a
+ * re-attach. The authoritative source is the recorded primary repoint
+ * value (`hypaware/<model>`), which survives even when the injected
+ * provider's own `models` list has drifted; the live provider list is a
+ * fallback only.
+ *
+ * @param {Array<Record<string, unknown>>} setEntries
+ * @param {Record<string, unknown>} provider
+ * @returns {string | undefined}
+ */
+function reattachModel(setEntries, provider) {
+  const managedPrimary = typeof setEntries[0]?.value === 'string' ? setEntries[0].value : undefined
+  const prefix = `${PROVIDER_ID}/`
+  if (managedPrimary && managedPrimary.startsWith(prefix)) {
+    return managedPrimary.slice(prefix.length)
+  }
   const providerModels = Array.isArray(provider.models)
     ? provider.models.filter((m) => typeof m === 'string')
     : []
-  const model = typeof providerModels[0] === 'string' ? providerModels[0] : undefined
+  return typeof providerModels[0] === 'string' ? providerModels[0] : undefined
+}
 
-  // Re-verify the recorded capture mutations are still live. The core
-  // probe reports attached on marker-path existence ALONE, so a marker
-  // that survived a config edit (or an OpenClaw hot-reload revert) while
-  // the primary drifted off `hypaware/<model>` (or lost its allowlist
-  // entry) would probe as attached yet capture nothing. Re-applying the
-  // recorded mutations heals the drift and restores capture, keeping
-  // `status` honest. The ORIGINAL `managed` block is never rewritten, so
-  // `prev` still names the user's own pre-attach values.
-  // @ref LLP 0109#attach-plugin-owned [implements]: re-attach replays the recorded set + appended mutations so a drifted marker never captures nothing
-  const healed = reapplyManaged(config, managed)
-
-  if (record.port === opts.port) {
-    return healed
-      ? { config, changed: true, action: 'updated', model, prevPrimary }
-      : { config, changed: false, action: 'noop', model, prevPrimary }
-  }
-
-  // Port changed: rewrite baseUrl and the record's envelope fields, but
-  // keep the ORIGINAL `managed` block so `prev` still names the user's
-  // own pre-attach values, never a value we wrote ourselves.
-  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
-  provider.baseUrl = gatewayBaseUrl(opts.port)
-  headers[CLIENT_HEADER] = CLIENT_NAME
-  headers[MARKER_HEADER] = JSON.stringify({
-    attached_at: opts.attachedAt,
-    version: opts.version,
-    port: opts.port,
-    managed,
-  })
-  return { config, changed: true, action: 'updated', model, prevPrimary }
+/**
+ * Reconcile the live injected provider entry to `desired` (the output of
+ * `buildProvider`) when any field has drifted, replacing it wholesale so
+ * a blanked, repointed, or removed managed field is fully restored.
+ * Comparison is key-order independent, so a byte-identical entry is left
+ * untouched and the re-attach stays a no-op. Returns whether anything
+ * changed.
+ *
+ * @param {Record<string, unknown>} config
+ * @param {Record<string, unknown>} provider
+ * @param {Record<string, unknown>} desired
+ * @returns {boolean}
+ */
+function reconcileProvider(config, provider, desired) {
+  if (canonicalJson(provider) === canonicalJson(desired)) return false
+  const providers = readPath(config, ['models', 'providers'])
+  // The provider was read from this same parent, so it is always present.
+  if (isPlainObject(providers)) providers[PROVIDER_ID] = desired
+  return true
 }
 
 /**
@@ -339,6 +393,21 @@ function buildProvider(port, models, record) {
     },
     models,
   }
+}
+
+/**
+ * The self-describing undo record embedded in the provider's headers.
+ * First attach and re-attach both build it here so the serialized marker
+ * (hence the re-attach no-op byte comparison) can never diverge.
+ *
+ * @param {string} attachedAt
+ * @param {string} version
+ * @param {number} port
+ * @param {unknown} managed
+ * @returns {{ attached_at: string, version: string, port: number, managed: unknown }}
+ */
+function attachRecord(attachedAt, version, port, managed) {
+  return { attached_at: attachedAt, version, port, managed }
 }
 
 /** @param {number} port */

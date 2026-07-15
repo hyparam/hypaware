@@ -266,6 +266,68 @@ test('re-attach heals drift AND rewrites the port when both changed', () => {
   assert.equal(readRecord(healed.config).port, 5001)
 })
 
+test('re-attach at the same port HEALS a blanked or repointed provider baseUrl', () => {
+  // The marker provider survives (the core probe still reports attached)
+  // but its baseUrl drifted, so traffic routes nowhere (blanked) or
+  // straight past the gateway to Anthropic (repointed) while capture is
+  // silently off. A same-port re-attach must restore it, not no-op.
+  for (const badUrl of ['', 'https://api.anthropic.com']) {
+    const once = prepareAttach({
+      agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+    }, OPTS)
+    const drifted = /** @type {any} */ (structuredClone(once.config))
+    drifted.models.providers.hypaware.baseUrl = badUrl
+
+    const healed = prepareAttach(drifted, OPTS)
+    assert.equal(healed.changed, true)
+    assert.equal(healed.action, 'updated')
+    assert.equal(
+      /** @type {any} */ (healed.config).models.providers.hypaware.baseUrl,
+      'http://127.0.0.1:4317'
+    )
+    // Healing the provider block never disturbs the undo record: prev
+    // still names the user's own pre-attach primary.
+    assert.equal(readRecord(healed.config).managed.set[0].prev, 'anthropic/claude-sonnet-4-5')
+  }
+})
+
+test('re-attach at the same port RESTORES a removed x-hypaware-client header', () => {
+  // Without the client header every request through the injected provider
+  // is unattributed by the projector, even though the marker path exists
+  // and the probe reports attached. Re-attach must put it back.
+  const once = prepareAttach({
+    agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+  }, OPTS)
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  delete drifted.models.providers.hypaware.headers['x-hypaware-client']
+
+  const healed = prepareAttach(drifted, OPTS)
+  assert.equal(healed.changed, true)
+  assert.equal(healed.action, 'updated')
+  assert.equal(
+    /** @type {any} */ (healed.config).models.providers.hypaware.headers['x-hypaware-client'],
+    'openclaw'
+  )
+  // The marker record still parses and preserves the original prev.
+  assert.equal(readRecord(healed.config).managed.set[0].prev, 'anthropic/claude-sonnet-4-5')
+})
+
+test('re-attach at the same port RESTORES a drifted provider models list', () => {
+  const once = prepareAttach({
+    agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+  }, OPTS)
+  const drifted = /** @type {any} */ (structuredClone(once.config))
+  drifted.models.providers.hypaware.models = ['anthropic/claude-opus-4']
+
+  const healed = prepareAttach(drifted, OPTS)
+  assert.equal(healed.changed, true)
+  assert.equal(healed.action, 'updated')
+  assert.deepEqual(
+    /** @type {any} */ (healed.config).models.providers.hypaware.models,
+    ['claude-sonnet-4-5']
+  )
+})
+
 test('re-attach with the marker parent object removed refuses rather than silently no-oping', () => {
   const once = prepareAttach({
     agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
@@ -520,6 +582,74 @@ test('re-attach through attach() heals on-disk drift so the core probe reflects 
     assert.ok(written.agents.defaults.models.includes('hypaware/claude-sonnet-4-5'))
 
     // Status now reflects reality: attached AND capture is genuinely routed.
+    const postProbe = await probeClientAttachFromDescriptor({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: dir,
+      env: { OPENCLAW_HOME: dir },
+    })
+    assert.equal(postProbe.attached, true)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('re-attach through attach() heals a repointed provider baseUrl + dropped client header so capture is real', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({
+      agents: { defaults: { model: { primary: 'anthropic/claude-sonnet-4-5' } } },
+    }, null, 2))
+
+    const env = { ANTHROPIC_API_KEY: 'sk-ant-x' }
+    const first = await attach({
+      endpoint: ENDPOINT,
+      stdout: streams().stdout,
+      stderr: streams().stderr,
+      env,
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    assert.equal(first.action, 'attached')
+
+    // Provider-field drift: the injected provider (hence the marker path)
+    // survives, but its baseUrl was repointed straight back at Anthropic
+    // and the x-hypaware-client header was dropped. Traffic now bypasses
+    // the gateway and is unattributed even though the probe sees a marker.
+    const drifted = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    drifted.models.providers.hypaware.baseUrl = 'https://api.anthropic.com'
+    delete drifted.models.providers.hypaware.headers['x-hypaware-client']
+    await fs.writeFile(settingsPath, JSON.stringify(drifted, null, 2))
+
+    // The core probe keys off marker-path existence alone, so it reports
+    // attached despite the routing/attribution gap - the silent miss the
+    // provider-block heal closes.
+    const preProbe = await probeClientAttachFromDescriptor({
+      descriptor: OPENCLAW_DESCRIPTOR,
+      homeDir: dir,
+      env: { OPENCLAW_HOME: dir },
+    })
+    assert.equal(preProbe.attached, true)
+
+    const healed = await attach({
+      endpoint: ENDPOINT,
+      stdout: streams().stdout,
+      stderr: streams().stderr,
+      env,
+      homeDir: dir,
+      version: '1.0.0',
+      settingsPath,
+    })
+    // Pre-fix this same-port re-attach was a silent no-op (changed:false),
+    // leaving the file routed at Anthropic; post-fix it restores capture.
+    assert.equal(healed.changed, true)
+    assert.equal(healed.action, 'updated')
+
+    const written = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(written.models.providers.hypaware.baseUrl, 'http://127.0.0.1:4317')
+    assert.equal(written.models.providers.hypaware.headers['x-hypaware-client'], 'openclaw')
+
+    // Status still reflects reality: attached AND now genuinely routed.
     const postProbe = await probeClientAttachFromDescriptor({
       descriptor: OPENCLAW_DESCRIPTOR,
       homeDir: dir,
