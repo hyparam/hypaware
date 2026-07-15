@@ -7,10 +7,31 @@ import test from 'node:test'
 import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
 import {
   compileUpstreams,
+  forwardHeaders,
   matchUpstream,
   pathMatchesPrefix,
   startProxy,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
+
+// @ref LLP 0109#consequences [tests]: `x-hypaware-*` request headers are
+// gateway-local metadata (projector match signal + undo record); the
+// upstream request must never carry them, while ordinary headers pass
+// through untouched.
+test('forwardHeaders strips x-hypaware-* request headers before proxying upstream', () => {
+  const out = forwardHeaders({
+    'content-type': 'application/json',
+    'anthropic-version': '2023-06-01',
+    'x-hypaware-client': 'openclaw',
+    'X-HypAware-Marker': '{"port":4317}',
+    'x-hypaware': 'boundary case: no trailing dash, forwarded',
+  }, 'api.anthropic.com')
+  assert.equal(out['content-type'], 'application/json')
+  assert.equal(out['anthropic-version'], '2023-06-01')
+  assert.equal(out.host, 'api.anthropic.com')
+  assert.equal(out['x-hypaware-client'], undefined)
+  assert.equal(out['X-HypAware-Marker'], undefined)
+  assert.equal(out['x-hypaware'], 'boundary case: no trailing dash, forwarded')
+})
 
 test('compileUpstreams sorts by descending priority, then longer prefix, then registration order', () => {
   const compiled = compileUpstreams([

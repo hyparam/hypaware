@@ -45,6 +45,28 @@ export function parseMaybeJson(value) {
 }
 
 /**
+ * Walk a dotted path of plain literal segments through nested plain
+ * objects. Segments split on `.` with no escaping: a segment may
+ * contain any character except a dot (e.g. `x-hypaware-marker`), so a
+ * key that itself contains a dot cannot be addressed. Returns the value
+ * at the leaf, or `undefined` when any intermediate step is not a plain
+ * object or a key is absent.
+ *
+ * @param {unknown} root
+ * @param {string} dottedPath
+ * @returns {unknown}
+ */
+export function getAtDottedPath(root, dottedPath) {
+  /** @type {unknown} */
+  let current = root
+  for (const segment of dottedPath.split('.')) {
+    if (!isPlainObject(current)) return undefined
+    current = current[segment]
+  }
+  return current
+}
+
+/**
  * Deep-copy with object keys sorted recursively, so two structurally
  * equal values serialize identically.
  *

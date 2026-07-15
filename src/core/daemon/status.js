@@ -18,6 +18,7 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
+import { getAtDottedPath, isPlainObject } from '../util/json_util.js'
 import { localOnlyListPath, LocalOnlyListUnreadableError, readLocalOnlyDirs } from '../usage-policy/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -892,9 +893,9 @@ function readRetention(config) {
 
 /**
  * Probe on-disk client settings using the descriptor's attach_probe
- * definition. Supports JSON (marker key lookup) and TOML (header
- * string search) formats. Returns a probe result without importing
- * any client plugin code.
+ * definition. Supports JSON (marker key lookup), TOML (header string
+ * search), and JSON-path (nested marker object lookup) formats.
+ * Returns a probe result without importing any client plugin code.
  *
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
  * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
@@ -928,6 +929,31 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       return { attached: raw.includes(probe.marker_header), settingsPath }
     }
 
+    // json_path: the marker is a nested managed object located by a dotted
+    // path, not a top-level key (which some clients' strict root schemas
+    // reject). Path segments are plain literals split on '.' with no
+    // escaping: a segment may contain dashes (e.g. `x-hypaware-marker`)
+    // but a key containing a dot cannot be addressed.
+    // @ref LLP 0109#probe-and-detach-core-owned [implements]: attached iff the object at marker_path exists; version/port come from the JSON-encoded undo record at marker_record
+    if (probe.format === 'json_path' && probe.marker_path) {
+      /** @type {unknown} */
+      const parsed = JSON.parse(raw)
+      const marker = getAtDottedPath(parsed, probe.marker_path)
+      if (!isPlainObject(marker)) return { attached: false, settingsPath }
+      // The undo record rides inside the marker as a JSON-encoded string.
+      // The marker alone is the attach signal, so a missing or malformed
+      // record still reports attached; version/port just stay unknown.
+      const record = probe.marker_record !== undefined
+        ? parseJsonRecordString(getAtDottedPath(marker, probe.marker_record))
+        : undefined
+      return {
+        attached: true,
+        settingsPath,
+        version: typeof record?.version === 'string' ? record.version : undefined,
+        port: typeof record?.port === 'number' ? String(record.port) : undefined,
+      }
+    }
+
     return { attached: false, settingsPath }
   } catch (err) {
     const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
@@ -938,6 +964,25 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
       error: err instanceof Error ? err.message : String(err),
     }
   }
+}
+
+/**
+ * Parse a JSON-encoded record string into a plain object; `undefined`
+ * for non-strings, parse failures, and non-object payloads.
+ *
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | undefined}
+ */
+function parseJsonRecordString(value) {
+  if (typeof value !== 'string') return undefined
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return undefined
+  }
+  return isPlainObject(parsed) ? parsed : undefined
 }
 
 /**
