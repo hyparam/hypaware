@@ -1,6 +1,6 @@
 ---
 name: hypaware-ai-spend-report
-description: AI Spend Review for a HypAware server: where tokens go (by user/repo/model/gateway), what work they go on (graph-clustered), and how to spend less (waste scorecard + cost levers). Token volume, never dollars. Saves a dated report under hypaware-reports/; first asks which HypAware source to query (local logs or a remote server) via the hypaware-query skill.
+description: "SUPERSEDED by hypaware-ai-usage-report (merged with the adoption profile, 2026-07-13) — invoke that skill instead unless the user explicitly asks for a standalone spend review. Original scope: AI Spend Review for a HypAware server: where tokens go (by user/repo/model/gateway), what work they go on (graph-clustered), and how to spend less (waste scorecard + cost levers). Token volume, never dollars. Saves a dated report under hypaware-reports/; first asks which HypAware source to query (local logs or a remote server) via the hypaware-query skill."
 ---
 
 # AI Spend Review
@@ -19,8 +19,7 @@ list it once). Present the options,
 ask which one (or more) to run the review against, then proceed against the chosen source.
 
 **Tokens, never dollars.** Capture is partial, so stop at token volume and behavioral proxies.
-Query mechanics (`--remote`, date-pruning the 30s timeout, the SQL dialect, sampling) live in
-the **hypaware-query** skill; read it first.
+Query mechanics are step 0 of the procedure — a mandatory read, not a reference.
 
 ## Token math (get this right; every breakdown reconciles to it)
 Usage is in `attributes.usage` (NOT `raw_frame`): `input_tokens`, `output_tokens`,
@@ -46,6 +45,22 @@ WHERE date BETWEEN '<start>' AND '<end>'
 ```
 
 ## Procedure
+0. **Load query mechanics BEFORE the first query — skills, not memory.** After the user picks a
+   source and before any `hyp query sql`, read the **hypaware-query** skill (invoke it or Read
+   its SKILL.md), and the **hypaware-graph** skill if `hyp query status` lists `node`/`edge`
+   datasets. Memory notes from past runs do NOT substitute — stale notes have cost real runs
+   failed queries and server crashes (a phantom "100-row output cap"; message-table `cwd` scans
+   that 504'd then OOM'd the prod server). Route by shape, per hypaware-query's "when the graph
+   answers it cheaper" boundary: entity/connection questions go to the graph's tiny `node`/`edge`
+   tables — sessions per repo/model/tool/file, skill and program rollups (graph-only facets),
+   client mix, work-type clustering by shared-file `touched` edges, and gateway→person
+   attribution (`min/max(session_id)` per gateway from messages — an ID-only aggregate — then
+   look those session_ids up in graph Session nodes' `props.cwd`). The **token spine stays on
+   `ai_gateway_messages`**: token sums, counts, ordering — date-sliced to server-sized ranges,
+   and **never GROUP BY / DISTINCT / row-fetch wide content columns (`cwd`, `content_text`) at
+   scale** (that query shape kills servers). Capture stderr and check it even on success —
+   truncation and server-cap notices land there. If a query fails, come back to this step; don't
+   iterate on the failing SQL.
 1. **Coverage + footprint.** Window; usage coverage, `model`-column coverage (token-weighted),
    user/repo coverage; distinct gateways, sessions, claude/codex mix. `user_id` is ~always null
    → attribute by `gateway_id` (≈ one machine/user) and always show an explicit **unattributed**

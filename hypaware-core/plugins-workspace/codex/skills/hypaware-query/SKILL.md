@@ -58,8 +58,16 @@ Never read a smaller CLI row count as "fewer rows matched" — it is the display
 
 ## SQL dialect notes
 
-- `json_extract_scalar()` does not exist. `JSON_EXTRACT` does, but it errors on rows where a JSON-typed column (notably `tool_args`) holds a plain string instead of a JSON object ("first argument must be JSON string or object, got string").
+The engine is SELECT-only with a deliberately small SQL surface. Every bullet below is a rejection observed in recorded sessions; when a query fails, the error message echoes the available columns, so read it before retrying.
+
+- SELECT-only: `SHOW`, `DESCRIBE`, DDL, and `information_schema` are parse errors. Discover a table's columns with `hyp query schema <table>` or `SELECT * FROM <table> LIMIT 1`, never introspection statements. Dataset names come from `hyp query status` (on a standard install: `ai_gateway_messages`, `node`, `edge`); never guess a table name.
+- Boolean predicates: `IS NOT TRUE` / `IS TRUE` are not parsed (`NOT` must be followed by `NULL`). Compare directly: `col = true`, `col = false`, or `col IS NULL`.
+- Cast types are only STRING, INT, BIGINT, FLOAT, BOOL. `TRY_CAST`, `CAST(... AS TIMESTAMP)`, and `TIMESTAMP '...'` literals do not exist. Filter time ranges on the STRING `date` column (`date >= 'YYYY-MM-DD'`); the event-time column is `message_created_at` (there is no `timestamp` column).
+- `ANY_VALUE` does not exist: use `MAX`/`MIN`. `regexp_like` does not exist: use `REGEXP_MATCHES` for a boolean match, `REGEXP_SUBSTR` to extract, or plain `LIKE`. `LIKE ... ESCAPE` is not parsed.
+- Regexp position arguments are 1-based: `regexp_extract(str, pattern, 1)`, never `0`.
+- `json_extract_scalar()` does not exist. `JSON_EXTRACT` does, but it errors on rows where a JSON-typed column (notably `tool_args`) holds a plain string instead of a JSON object ("first argument must be JSON string or object, got string"). Dotted identifiers (`usage.output_tokens`) are not columns; extract JSON fields explicitly.
 - The robust pattern for extracting fields from `tool_args` is a regex over the raw text, e.g. `regexp_extract(CAST(tool_args AS VARCHAR), '"command":"([^"]+)', 1)`.
+- Never invent a `--remote` target name: discover configured targets with `hyp remote list` first.
 
 ## AI gateway message model
 

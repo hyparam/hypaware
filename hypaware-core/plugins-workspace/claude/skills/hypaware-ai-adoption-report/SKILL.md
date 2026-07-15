@@ -1,6 +1,6 @@
 ---
 name: hypaware-ai-adoption-report
-description: AI Adoption Profile for a HypAware server: descriptive "who's using the fleet and how": per-gateway utilization (volume + focus: top models, tools, repos, themes) and parallelism/fan-out (multi-agent adoption, concurrency, main-vs-subagent split, payoff).
+description: "SUPERSEDED by hypaware-ai-usage-report (merged with the spend review, 2026-07-13) — invoke that skill instead unless the user explicitly asks for a standalone adoption profile. Original scope: AI Adoption Profile for a HypAware server: descriptive \"who's using the fleet and how\": per-gateway utilization (volume + focus: top models, tools, repos, themes) and parallelism/fan-out (multi-agent adoption, concurrency, main-vs-subagent split, payoff)."
 ---
 
 # AI Adoption Profile
@@ -23,13 +23,31 @@ list it once). Present the options,
 ask which one (or more) to profile, then proceed against the chosen source.
 
 **Descriptive only.** Route every *action* out: "fan out more/less" and tooling go to
-**hypaware-ai-improvement-report**, token waste to **hypaware-ai-spend-report**. Query mechanics
-live in the **hypaware-query** skill; reuse hypaware-ai-spend-report's token spine for
-any token figure. For descriptive who-used-what rollups (distinct sessions per
-repo/model/tool/file), prefer the **hypaware-graph** skill, which reads them from the projected
-graph instead of scanning messages; keep token figures on messages.
+**hypaware-ai-improvement-report**, token waste to **hypaware-ai-spend-report**. Reuse
+hypaware-ai-spend-report's token spine for any token figure. Query mechanics are step 0 below —
+a mandatory read, not a reference.
 
 ## Procedure
+0. **Load query mechanics BEFORE the first query — skills, not memory.** After the user picks a
+   source and before you run any `hyp query sql`, read the **hypaware-query** skill (invoke it or
+   Read its SKILL.md), and the **hypaware-graph** skill if `hyp query status` lists `node`/`edge`
+   datasets. Memory notes and recall of past runs do NOT substitute: stale notes have cost real
+   runs failed queries and server crashes (a phantom "100-row output cap"; message-table `cwd`
+   scans that 504'd and then OOM'd the prod server). Then route every question by shape, per
+   hypaware-query's "when the graph answers it cheaper" boundary:
+   - **Graph first (`node`/`edge` — tiny, join-safe) for every entity/connection question:**
+     which sessions used a repo/model/tool/file, skill and program rollups (these two exist ONLY
+     in the graph — SQL reconstructions disagree with the projection), client mix, co-occurrence,
+     and gateway→person attribution — take `min/max(session_id)` per gateway from messages (an
+     ID-only aggregate), then look those session_ids up in graph Session nodes (`props.cwd`,
+     `props.client_name`). **Never GROUP BY / DISTINCT / row-fetch wide content columns (`cwd`,
+     `content_text`) on the messages table at scale** — that is the query shape that kills servers.
+   - **Messages (`ai_gateway_messages`) only for per-message measures:** token sums, distinct
+     part/session counts, timestamps and ordering, `is_sidechain`/`agent_id`, content sampling.
+     Slice long windows into server-sized date ranges; capture stderr and check it even on
+     success (truncation and server-cap notices land there).
+   If you skipped this step and a query fails, the fix is to come back here — not to iterate on
+   the failing SQL.
 1. **Scope + coverage.** Distinct `gateway_id` (the unit; `user_id` is ~always null, so don't
    measure reach by it); window; coverage of `gateway_id`, token usage, and subagent provenance
    (`agent_id` / `is_sidechain` / `parent_thread_id`, transcript-enriched, may not survive
