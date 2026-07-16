@@ -129,7 +129,12 @@ export async function createDataSource(partitions, ctx) {
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)
-    if (source && (source.numRows ?? 0) > 0) sources.push(source)
+    // Skip only sources KNOWN empty. icebird omits numRows when the current
+    // snapshot carries position deletes (a live count would need a scan), so
+    // treating undefined as 0 here silently dropped every partition touched
+    // by a retention or purge delete and blinded all queries to surviving rows.
+    // @ref LLP 0104 [constrained-by]: position deletes leave an unknowable count that must not read as an empty partition
+    if (source && source.numRows !== 0) sources.push(source)
   }
 
   if (sources.length === 0) return emptySource(GASCITY_SCHEMA_COLUMNS.map((c) => c.name))

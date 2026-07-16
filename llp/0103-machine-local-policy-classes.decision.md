@@ -67,6 +67,9 @@ the sensitive thing.
   `ignore` entry, and an explicit-sync marking whose spelling the design doc
   picks. `hyp unignore` grows symmetric removal. The review skill and the
   hook only ever use the machine-local forms.
+  Extended-by: [LLP 0110](./0110-hyp-policy-verb.issue.md) - the flag-on-ignore
+  spelling this paragraph left open is retired in favor of a class-neutral
+  `hyp policy` verb; the class taxonomy above is unchanged.
 
 ## The surface matrix, settled
 
