@@ -5,9 +5,13 @@ description: Render the Markdown HypAware reports under hypaware-reports/ into a
 
 # Render HypAware reports to HTML
 
-The `~/hypaware-reports/` git repo holds the outputs of the HypAware report skills
-(`hypaware-ai-adoption-report`, `-spend-report`, `-security-report`,
-`-improvement-report`). Each report is a dated one-pager `<slug>.md` at the top level,
+The `~/hypaware-reports/` git repo holds the outputs of the HypAware report skills:
+`hypaware-ai-usage-report` (the merged team review — since 2026-07-15 it also carries
+the former adoption / spend / improvement content; since 2026-07-16 its ranked changes
+live on a `proposed-changes.md` section page and the one-pager's Proposed changes block
+is a short pointer to it) and `hypaware-ai-security-report`; archives may hold adoption / spend /
+improvement one-pagers from the superseded skills. Each report is a dated one-pager
+`<slug>.md` at the top level,
 optionally with a sibling `<slug>/` folder of section `.md` files. This skill turns that
 Markdown into a browsable static site and keeps the landing page in sync.
 
@@ -72,15 +76,24 @@ Work relative to the repo root `~/hypaware-reports`.
    grep -L 'class="rec"' *.md           # reports whose findings/changes are still prose-only
    grep -L 'class="metric-grid"' *.md   # reports with no headline metric strip (see below)
    ```
-   `rec` cards are required on every one-pager (findings or proposed changes). A
+   `rec` entries are required wherever the source carries a findings or changes list. A
    `metric-grid` is required **only where the source has a headline-numbers section**
-   (the usage and security reviews' "Key metrics"). The improvement review deliberately
-   has none — it opens with a numbered **Proposed changes** list (user-approved shape,
-   2026-07-14); each numbered change becomes one `rec` card (bold what = card title,
-   why-sentence = body, evidence numbers = stat row, section link = the card) and **no
-   metric strip is added above or instead of the change list**. A one-pager with a
-   metric-grid but no `rec` cards is **half-done, not done** — finish the cards rather
-   than skipping it.
+   (the usage and security reviews' "Key metrics"). **Follow the source's layout —
+   enrichment never moves content between pages:**
+   - **Usage review, 2026-07-16+ (two-page shape):** the one-pager has a Key metrics
+     strip and ONE entry list (Key findings); its **Proposed changes block is a 1-2 line
+     pointer** (count + top change + link to the proposed-changes page) — leave it as
+     prose, never re-inflate the list there. The full ranked list lives on the
+     **`proposed-changes.md` section page** — the one section page that carries a
+     `rec-list`: each numbered change becomes one `rec` entry (bold what = entry title,
+     why-sentence = body, evidence numbers = stat line, and the entry links its
+     `change-<slug>.md` artifact page). That page also keeps its opening thesis line.
+   - **Usage review, 2026-07-15 (predates the split):** the numbered Proposed changes
+     list sits on the one-pager — card it there, after Key findings.
+   - **Legacy standalone improvement review:** no metric strip — its change list leads,
+     and none is added above or instead of it.
+   A one-pager with a metric-grid but no `rec` entries is **half-done, not done** —
+   finish the entries rather than skipping it.
 
    For every report needing work, proceed in **two phases — inventory first, markup
    second**:
@@ -99,20 +112,29 @@ Work relative to the repo root `~/hypaware-reports`.
    Phase A inventory, with [`example-enrichment.md`](example-enrichment.md) as a *shape*
    reference — and take a designer's liberties:
    - **Restructure within the approved skeleton.** Merge or retitle weak headings inside
-     sections, delete decorative `---` rules — but the one-pager's top-level order is
-     **user-approved structure, not scaffolding** (2026-07-14): proposed changes / findings
-     lead, limitations and links follow. Never move a metric strip above a change list,
-     never split the evidence back out into a separate findings section, and keep the
-     standard heading vocabulary (Proposed changes / Key metrics / Key findings / Data
-     limitations / Supporting analysis) — retitle only headings that aren't part of that
-     skeleton.
+     sections, delete decorative `---` rules — but the one-pager's top-level block order
+     is **user-approved structure, not scaffolding**: keep the source report's order
+     exactly (the merged usage review runs Headline → Key metrics → Key findings →
+     Proposed changes → Data limitations → Supporting analysis; since 2026-07-16 the
+     Proposed changes block is a short pointer to the proposed-changes section page —
+     keep it that size; a legacy improvement review leads with its change list and
+     takes no metric strip). Never split a
+     change's evidence back out into a separate findings section, and keep the standard
+     heading vocabulary (Key metrics / Key findings / Proposed changes / Data
+     limitations / Supporting analysis) — retitle only headings that aren't part of
+     that skeleton.
    - **Rewrite for the surface.** Metric labels, card titles, stat labels, tag words,
      chart titles, and notes are *display copy* — write them fresh (2–4 word labels, one
      plain "so what" note), never paste sentence fragments from the prose. Display copy
      obeys the report-language rules: literal words, no metaphors or coined shorthand
      (write "sessions open across days", never compress to a coinage like "marathon
-     sessions"), no pipeline vocabulary, absolute dates. Body paragraphs — the analysis
-     itself — stay intact apart from trims where a visual now carries the point.
+     sessions"), no pipeline vocabulary, absolute dates. It also keeps the usage
+     review's improvement-not-evaluation stance: cards, chart titles, and judgment
+     colors attach to patterns and defaults, never to a named person (no "top spender"
+     leaderboards, no crit/warn coloring on a person's name) — enrichment must not
+     re-frame a neutral allocation table into a person-ranking visual. Body
+     paragraphs — the analysis itself — stay intact apart from trims where a visual
+     now carries the point.
    - **Ready-to-apply artifacts are verbatim.** Proposed diffs, full skill/subagent file
      drafts, tool-description text, and source→destination move tables render as the
      code blocks / tables they are — never trimmed, carded, summarized, or reworded. They
@@ -163,24 +185,79 @@ Work relative to the repo root `~/hypaware-reports`.
    It prints `Built html/ : N report(s) …`. `html/` is wiped and rebuilt, so deleted or
    renamed reports never leave stale HTML behind.
 
-   **Every report page must offer a way back to the landing page.** `build.sh` is
-   responsible for this: it prepends a `topnav` to each one-pager before pandoc runs. If
-   the repo's `build.sh` predates this (no `All reports` string in it —
-   `grep -q 'All reports' build.sh`), add the injection where the one-pager is built, then
-   re-run it:
+   **Every report page must carry the Hyperparam masthead and a way back to the landing
+   page.** `build.sh` is responsible for both: it prepends a `masthead` header (brand
+   mark + "Hyperparam" + a doc label — "Internal report · generated <date> from HypAware
+   data", the date from the slug — + the back-nav) to every page before
+   pandoc runs, passes `-H assets/head.html` (the favicon `<link>`), and copies
+   `assets/favicon.svg` (the hyperparam.app mark; the in-page `brand-mark` renders it
+   ink-colored via CSS mask) into each output's `assets/`. If the repo's `build.sh`
+   predates this (no `masthead` string in it — `grep -q masthead build.sh`), add the
+   injection where each page is built, then re-run it:
    ```bash
+   masthead() { # $1 = nav html for the right-hand slot, $2 = doc label
+     printf '<header class="masthead">\n<span class="brand"><span class="brand-mark"></span>Hyperparam</span>\n<span class="doc-label">%s</span>\n<nav class="topnav">%s</nav>\n</header>\n\n' "$2" "$1"
+   }
+   doc_label() { # $1 = slug — says the page is a generated static report, not the HypAware app
+     case "$1" in
+       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*) printf 'Internal report · generated %s from HypAware data' "${1:0:10}" ;;
+       *) printf 'Internal report · generated from HypAware data' ;;
+     esac
+   }
    {
-     printf '<nav class="topnav"><a href="../../index.html">&#8592; All reports</a></nav>\n\n'
+     masthead '<a href="../../index.html">&#8592; All reports</a>' "$(doc_label "$slug")"   # sections: 'index.html' / 'Back to the report'
      cat "$src"
    } | pandoc -f gfm -t html5 -s \
      --css assets/style.css \
+     -H assets/head.html \
      --metadata pagetitle="$(page_title "$src" "$slug")" \
      -o "$out/index.html"
    ```
-   (i.e. pipe the nav + source into pandoc instead of passing `"$src"` as the input
-   file.) Section pages already chain back: "← Back to the report" → one-pager →
-   "← All reports" → landing page. The nav goes in **build.sh, not the source `.md`** —
-   the Markdown must stay renderer-agnostic.
+   (i.e. pipe the masthead + source into pandoc instead of passing `"$src"` as the input
+   file; `assets/head.html` is two `<link rel="icon">` lines — the SVG
+   (`type="image/svg+xml"`) plus a **PNG fallback** (`type="image/png" sizes="64x64"
+   href="assets/favicon.png"`), because **Safari doesn't render SVG favicons** — and
+   build.sh regenerates it if missing. build.sh copies both `favicon.svg` and
+   `favicon.png` into each output's `assets/`, and regenerates the PNG if absent:
+   `sips -s format png -z 64 64 assets/favicon.svg --out assets/favicon.png`. If
+   `assets/favicon.svg` is missing, restore it from this skill's `assets/` — prefer that
+   over re-downloading `https://hyperparam.app/favicon.svg`: the site's SVG is filled
+   solid white (`fill="#fff"`, invisible on a light browser tab); the skill's copy
+   replaces that with an embedded theme-aware style
+   (`path{fill:#33465c}` + `@media (prefers-color-scheme:dark){path{fill:#aec2d6}}` —
+   the stylesheet's slate ink values). If you must re-download, re-apply that edit and
+   regenerate the PNG. The in-page `brand-mark` is unaffected either way — CSS masks it
+   to the page's ink color. Don't expect a favicon at all on pages opened via `file://`:
+   Chrome doesn't load favicons from local files — check on the served site or a local
+   `python3 -m http.server`.) Section pages chain back:
+   "← Back to the report" → one-pager → "← All reports" → landing page. The masthead
+   goes in **build.sh, not the source `.md`** — the Markdown must stay renderer-agnostic.
+
+   **Every page also carries a "Copy … as Markdown" masthead action** (user request
+   2026-07-16: readers paste reports into an agent). build.sh implements it:
+   - It copies each page's raw Markdown next to the built HTML — `index.md` (the
+     one-pager), one `<section>.md` per section — and concatenates `full.md` (one-pager
+     + every section, `---`-separated, file order). These raw files keep their `.md`
+     links untouched (they're source for agents, `rewrite_hrefs` never touches them).
+   - It writes `assets/copy-md.js` if missing (fetch the `data-src` file → clipboard;
+     button text flips to "Copied" for 1.5s; on any failure — e.g. `file://`, where
+     fetch is blocked — it falls back to navigating to the raw `.md`), copies it into
+     each output's `assets/`, and `assets/head.html` gains a third line:
+     `<script defer src="assets/copy-md.js"></script>`. The script MUST use the
+     `ClipboardItem`-with-a-promise pattern (`navigator.clipboard.write([new
+     ClipboardItem({'text/plain': fetchPromise.then(t => new Blob([t]))})])`), with
+     plain `writeText` only as a secondary attempt: Safari revokes the click's
+     clipboard permission across an `await`, so fetch-then-`writeText` silently drops
+     to the open-the-raw-md fallback on Safari.
+   - The masthead nav gets the button after the back link: the one-pager's is
+     `<a href="#" class="copy-md" data-src="full.md">Copy report as Markdown</a>`,
+     each section page's is the same with `data-src="<section>.md"` and the label
+     "Copy page as Markdown". **`data-src`, never `href`** — `rewrite_hrefs` and the
+     leftover-`.md` check must not see these as document links.
+   If the repo's build.sh predates this (`grep -q copy-md build.sh` fails), add the
+   three pieces above and re-run. Canonical copies of `copy-md.js` and `head.html` ship
+   in this skill's `assets/` — restore from there rather than re-deriving the script
+   from this description.
 
 5. **Regenerate the top-level `index.html` as an at-a-glance dashboard, not a table of
    contents.** Write a fresh landing page (template in [`components.md`](components.md) →
@@ -192,12 +269,22 @@ Work relative to the repo root `~/hypaware-reports`.
      adoption profiles, or the `## <server> · <window>` subtitle for the others), trimmed
      to a short phrase, as the card's `rec-kind` eyebrow.
    - **Stats** - the report's top 3-4 headline numbers as `rec-stat`s on the card: from
-     its `metric-grid` tiles where it has one, otherwise (change-list reports like the
-     improvement review) from the `rec` cards' stat rows — same values, same
+     its `metric-grid` tiles where it has one, otherwise (legacy change-list reports
+     like the standalone improvement review) from the `rec` cards' stat rows — same values, same
      crit/warn/good judgments, labels compressed to 2-4 plain words (no coined
      shorthand), notes dropped. Rules in components.md. This hoists each report's key
      results and progress onto the landing page, so a reader gets the fleet's state
      without opening a report.
+
+   **Proposed-changes companion card** (user decision 2026-07-16): when a report has a
+   `<slug>/proposed-changes.md` section page, the landing page gets a **second card
+   directly below that report's card**, linking `html/<slug>/proposed-changes.html` —
+   the ranked changes are a first-class landing-page destination, not reachable only
+   through the report. Title "Proposed changes"; kicker = the report's scope phrase with
+   `· ranked changes` appended; stats = the change count (from the page's thesis) plus
+   that page's 2-3 strongest stat-row figures hoisted from its `rec` cards — same
+   values, same judgments, labels compressed to 2-4 plain words; `rec-go` reads
+   "open changes →". Snippet in components.md.
 
    Link each report by its explicit `html/<slug>/index.html`, **not** a bare
    `html/<slug>/` directory URL. A trailing-slash directory link relies on server-side
@@ -211,10 +298,15 @@ Work relative to the repo root `~/hypaware-reports`.
    ```bash
    ls html/                                   # one dir per report
    grep -o '<title>[^<]*</title>' html/*/index.html
-   grep -rlo 'href="[^"]*\.md"' html/ || echo "no leftover .md links ✓"
+   grep -rlo --include='*.html' 'href="[^"]*\.md"' html/ || echo "no leftover .md links ✓"
+   # (--include='*.html' matters: the raw index.md/full.md/<section>.md shipped next to
+   # each page keep their .md links on purpose — only built pages must be clean)
+   grep -L 'class="copy-md"' html/*/*.html    # should print nothing: every page has its copy action
+   ls html/*/full.md                          # one per report: the copy-report payload exists
    grep -L 'class="rec"' html/*/index.html   # should print nothing: findings/changes are carded
    grep -c 'rec-stat' index.html             # ≥ number of reports: landing cards carry stats
    grep -L 'All reports' html/*/index.html   # should print nothing: every report links back
+   grep -o 'href="html/[^"]*proposed-changes.html"' index.html  # one hit per report that has a proposed-changes page
    ```
    `href="….md"` in any built page means a link wasn't rewritten — remember links live
    both in Markdown syntax **and** inside raw-HTML components (`rec` card and callout

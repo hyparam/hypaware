@@ -1,7 +1,8 @@
 # Authoring reports for the data-report renderer
 
-**Audience: the report-GENERATING skills** (`hypaware-ai-adoption-report`,
-`-spend-report`, `-security-report`, `-improvement-report`) — follow this while writing
+**Audience: the report-GENERATING skills** (`hypaware-ai-usage-report` — the merged
+team review — and `-security-report`; legacy adoption/spend/improvement one-pagers
+follow the same rules) — follow this while writing
 the report Markdown. The renderer (`hypaware-report-to-html`) ships a stylesheet that
 styles two kinds of content: standard Markdown (automatic) and a raw-HTML component
 vocabulary (opt-in, catalog in [`components.md`](components.md)). A report written
@@ -15,10 +16,10 @@ Markdown inside a block is NOT processed — write inner content as HTML
 
 ## 1. Page opening — required shape
 
-The hero thesis is CSS-automatic but **only if the bold thesis paragraph is the first
+The lead thesis is CSS-automatic but **only if the bold thesis paragraph is the first
 thing after the `# ` title**. Do not put a `##` subtitle or `---` between them.
 
-WRONG (kills the hero):
+WRONG (kills the lead styling):
 
 ```markdown
 # AI Improvement Review
@@ -42,18 +43,26 @@ failures … and let the whole team run a flow only phil has.**
 ```
 
 The scope/date line becomes an `eyebrow` above the title. The thesis stays one bold
-paragraph — the stylesheet turns it into the hero box.
+paragraph — the stylesheet sets it as the lead paragraph (since the 2026-07-16
+restyle a plain emphasized paragraph, deliberately not a box).
 
 ## 2. Headline numbers — metric grid, not a table (only where the report has them)
 
 A report's headline-numbers section (the usage and security reviews' **Key metrics**)
-becomes a `metric-grid` of 3–6 cards. Color carries judgment: `is-crit` = problem,
+becomes a `metric-grid` of 3–6 key figures. Since the 2026-07-16 restyle these render
+as ruled rows (label · value · note, values at text size), not tiles — the class
+vocabulary is unchanged. Color carries judgment: `is-crit` = problem,
 `is-warn` = exposure, `is-good` = healthy/solved, no class = neutral. Keep any *detail*
 tables that follow; only the headline strip converts.
 
-**Not every report has one.** The improvement review opens with a numbered **Proposed
-changes** list and has no metrics section by design (user-approved, 2026-07-14) — do NOT
-add a metric strip to it; its changes become `rec` cards (§3) and lead the page.
+**Not every report has one.** The merged usage review has a Key metrics strip; since
+2026-07-16 its one-pager's **Proposed changes** block is a 1-2 line pointer (count +
+top change + link) and the full ranked list lives on the **proposed-changes section
+page** — keep both exactly that way (pointer stays prose on the brief; the list cards
+as `rec` entries on its own page, §3). The 2026-07-15 report predates the split and
+carries the numbered list on its one-pager. A legacy standalone improvement review
+opens with its change list and has no metrics section by design — do NOT add a metric
+strip to it; its changes become `rec` entries (§3) and lead the page.
 
 ```markdown
 <p class="eyebrow">The numbers that set the agenda</p>
@@ -72,41 +81,55 @@ add a metric strip to it; its changes become `rec` cards (§3) and lead the page
 </div>
 ```
 
-Every card needs a `note` that says why the number matters — a bare number is not a
+Every metric needs a `note` that says why the number matters — a bare number is not a
 finding.
 
-## 3. Findings / proposed changes — rec cards, not `###` + link
+## 3. Findings / proposed changes — rec entries, not `###` + link
 
-On the one-pager, each finding or proposed change that links to a section page becomes an
-`<a class="rec">` card (number badge, kind eyebrow, title, 1–2 sentence body, 2–3 stat
-row, go-link). See the full snippet in `components.md`. The `###` heading + trailing
-`<a href="…">section →</a>` pattern is replaced by the card — don't emit both.
+On the one-pager (Key findings) and on the proposed-changes page (the ranked change
+list), each item that links onward becomes an
+`<a class="rec">` entry. Since the 2026-07-16 restyle it renders as a numbered list
+item — number, bold title, then body, stat line, and go-link flowing as one quiet line,
+with the kind tag at the right margin — not a card. Same markup: number badge, kind
+eyebrow, title, 1–2 sentence body, 2–3 stat row, go-link (full snippet in
+`components.md`). The `###` heading + trailing `<a href="…">section →</a>` pattern is
+replaced by the entry — don't emit both.
 
-For the improvement review's numbered change list, the mapping is fixed: bold imperative
-= card title, the why-sentence = body, the evidence numbers = stat row, the section link
-= the card itself; card order = list order (highest leverage first — never resequenced).
+For a numbered Proposed changes list (on the usage review's proposed-changes page
+since 2026-07-16 — earlier reports and legacy improvement reviews carry it on the
+one-pager), the mapping is fixed: bold imperative
+= entry title, the why-sentence = body, the evidence numbers = stat row, the entry
+links the change's `change-<slug>.md` page; entry order = list order (highest leverage
+first — never resequenced). The one-pager's pointer block (2026-07-16+) stays prose —
+never expand it back into entries.
 
-Stat-row discipline: 2–3 stats per card, each `<b>value</b><span>label</span>`, color
+Stat-row discipline: 2–3 stats per entry, each `<b>value</b><span>label</span>`, color
 class only when it carries judgment.
 
 **Ready-to-apply artifacts stay verbatim.** Proposed AGENTS.md diffs, full skill/subagent
 file drafts, tool-description text, and source→destination move tables are deliverables,
 not display copy: render them as the code blocks / tables they are, never trimmed,
-carded, or reworded.
+componentized, or reworded.
 
 ## 4. Section pages: every claim gets a visual, breakdowns get charts
 
-Each section page opens with its own bold thesis directly under its `# ` title (hero
-fires there too), then gives each distinct claim **one** strong visual (typically 2-3
+Each section page opens with its own bold thesis directly under its `# ` title (the
+lead styling fires there too), then gives each distinct claim **one** strong visual (typically 2-3
 per page; never two visuals restating the same numbers):
 
-- **Per-entity rollups always chart.** Any table with one row per user/gateway, team,
-  repo, or model (3+ rows) ships with a `barchart` of its leading metric, or a
-  `stackbar` when the story is share-of-total (messages or tokens by gateway, volume by
-  team). These "who" breakdowns are the charts readers come to a usage or spend report
-  for; a per-user table rendered only as a table is an under-visualized page. Chart by
-  the unit the data has (`gateway_id` ≈ one user/machine); roll up to teams only when a
-  grouping actually exists (a user-supplied mapping, cwd naming), never an invented one.
+- **Per-entity rollups always chart.** Any table with one row per person, team, repo,
+  or model (3+ rows) ships with a `barchart` of its leading metric, or a `stackbar`
+  when the story is share-of-total (messages or tokens by person, volume by team).
+  These breakdowns are the charts readers come to a usage report for; a rollup table
+  rendered only as a table is an under-visualized page. Chart at the grain the report
+  chose (per-person for small teams, team/repo/cohort rollups above that); roll up to
+  teams only when a grouping actually exists (a user-supplied mapping, cwd naming),
+  never an invented one. Charts of people show allocation shares, never rankings with
+  judgment colors — crit/warn coloring on a named person's bar re-frames an allocation
+  as an evaluation, which the usage review's audience contract bans. Identity always
+  wears the slate ramp `--s1`..`--s4` (share order); `--good`/`--warn`/`--crit` are
+  reserved for judgment and never paint a person, model, repo, or work-type segment
+  (color discipline in `components.md`).
 - Composition (errors by type, tokens by contributor/tier) → `barchart`
   (widths = percent of the largest value, computed by you), or `stackbar` when parts
   sum to a whole.
@@ -127,7 +150,7 @@ sections don't need decoration.
 
 ## 6. Write for the surface — display copy is copywriting, not quotation
 
-Component text is read at a glance; prose fragments pasted into cards read as clutter.
+Component text is read at a glance; prose fragments pasted into components read as clutter.
 Rewrite for each surface (meaning must stay true to the source — wording should not stay
 literal):
 
@@ -140,7 +163,7 @@ literal):
   **chart-foot** — the takeaway, one line.
 - **Language rules bind display copy too** (user feedback 2026-07-14): literal words
   only — no metaphors, pipeline vocabulary, or coined shorthand (write "sessions open
-  across days", never a coinage like "marathon sessions"); when a card names a skill or
+  across days", never a coinage like "marathon sessions"); when an entry names a skill or
   tool as a fix, the body says in one clause what it literally does; dates absolute.
 - **Section headings** — the one-pager's skeleton headings (Proposed changes / Key
   metrics / Key findings / Data limitations / Supporting analysis) are user-approved
@@ -158,15 +181,17 @@ are designed.
       every section page.
 - [ ] Headline numbers are a `metric-grid` with judgment colors and notes — only on
       reports that have a Key metrics section; none added to change-list reports.
-- [ ] Findings / proposed changes on the one-pager are `rec` cards with stat rows, in
-      source order.
+- [ ] Key findings on the one-pager — and the ranked list on the proposed-changes page
+      (2026-07-16+ layout; earlier reports carry it on the one-pager) — are `rec`
+      entries with stat lines, in source order; the brief's Proposed changes pointer
+      stays a 1-2 line paragraph.
 - [ ] Diffs, proposed files, and move tables are verbatim code blocks/tables — nothing
       trimmed or reworded.
 - [ ] Each section page's visuals each carry a distinct claim (typically 2-3 per page);
       source tables kept where numbers matter.
 - [ ] Every per-entity rollup (by user/gateway, team, repo, model) has a companion
       breakdown chart, not just a table.
-- [ ] Every headline number appears in a big-number surface (metric, gauge, stat row,
+- [ ] Every headline number appears in a data surface (metric row, gauge, stat line,
       chart) — not just bolded inline.
 - [ ] Display copy (labels, notes, tags, chart titles) is written for the surface, not
       pasted from prose; scaffolding headings replaced.
