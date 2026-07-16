@@ -22,6 +22,7 @@ import { appendSessionContext } from '../../hypaware-core/plugins-workspace/clau
  * the exact path `hyp backfill claude` exercises in production.
  *
  * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
+ * @import { UsagePolicyResolver } from '../../src/core/usage-policy/types.js'
  */
 
 // ---------------------------------------------------------------------------
@@ -837,6 +838,17 @@ function rowsWithCwd(sessionId, cwd) {
   ]
 }
 
+// The default usage-policy resolver walks the REAL filesystem for `.hypignore`
+// ancestors (LLP 0050), so a developer's own policy file governing a realistic
+// test cwd (e.g. one at /Users/phil/workspace) would make the provider skip
+// the session and fail the test. Tests that use real-looking cwds inject this
+// permissive resolver to stay hermetic.
+/** @type {UsagePolicyResolver} */
+const permissiveResolver = {
+  resolve: () => ({ class: 'full', governedBy: null, declared: null }),
+  isIgnored: () => false,
+}
+
 test('recovers git_remote/repo_root from the transcript cwd when the record predates git capture', async () => {
   const env = await stageEnv()
   try {
@@ -848,6 +860,7 @@ test('recovers git_remote/repo_root from the transcript cwd when the record pred
     const provider = createClaudeBackfillProvider({
       homeDir: env.homeDir,
       stateFile: env.stateFile,
+      resolver: permissiveResolver,
       deriveRepo: async (cwd) => {
         derivedFor.push(/** @type {string} */ (cwd))
         return cwd === '/Users/phil/workspace/repo-z'
@@ -973,6 +986,7 @@ test('recovers git_remote from the record cwd when the record predates git captu
     const provider = createClaudeBackfillProvider({
       homeDir: env.homeDir,
       stateFile: env.stateFile,
+      resolver: permissiveResolver,
       deriveRepo: async (cwd) => {
         derivedFor.push(/** @type {string} */ (cwd))
         return cwd === '/Users/phil/workspace/repo-canon'
