@@ -1,7 +1,7 @@
 # LLP 0109: OpenClaw client adapter plugin
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway, Config
 **Author:** Kenny Daniel
 **Date:** 2026-07-15
