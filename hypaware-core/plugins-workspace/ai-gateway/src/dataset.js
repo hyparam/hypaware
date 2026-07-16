@@ -141,7 +141,12 @@ export async function createDataSource(partitions, ctx) {
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)
-    if (source && (source.numRows ?? 0) > 0) sources.push(source)
+    // Skip only sources KNOWN empty. icebird omits numRows when the current
+    // snapshot carries position deletes (a live count would need a scan), so
+    // treating undefined as 0 here silently dropped every partition touched
+    // by hyp purge and blinded all queries to its surviving rows.
+    // @ref LLP 0104 [constrained-by]: purge deletes rows via position deletes; an unknowable count must not read as an empty partition
+    if (source && source.numRows !== 0) sources.push(source)
   }
 
   if (sources.length === 0) return emptySource(SCHEMA_COLUMN_NAMES)
