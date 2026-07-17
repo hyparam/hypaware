@@ -702,8 +702,11 @@ export async function runIgnore(argv, ctx) {
  * repo root: an explicit `path` argument always wins (the caller pointed at
  * it directly), otherwise resolve `base` up to its containing repo root, or
  * `base` itself outside a repo. Shared by the `hyp ignore` bare-dotfile
- * branch and the machine-local marking branches so both spellings (and the
- * future `policy` verb) apply one placement rule (LLP 0103 #cli).
+ * branch and the deprecated `--private`/`--local-only`/`--sync` alias
+ * branches so both keep one placement rule (LLP 0103 #cli). `policy set`
+ * does not call this: it marks the resolved directory exactly as pointed at,
+ * with no repo-root default (LLP 0111 #set); only the flag-alias edge needs
+ * the legacy default preserved (LLP 0111 #aliases).
  *
  * @param {string} base
  * @param {string | undefined} explicitPath
@@ -720,10 +723,11 @@ function repoRootDefaultTarget(base, explicitPath) {
  * Marks `targetDir` with `targetClass` in the machine-local class-per-entry
  * store (LLP 0103) instead of writing a `.hypignore`: never writes into a
  * repo (LLP 0071 R4, LLP 0100 R6), so the target need not exist on disk or be
- * a git repo. Verb-agnostic: the caller decides `targetDir` (today via
+ * a git repo. Verb-agnostic: the caller decides `targetDir` (the deprecated
+ * `--private`/`--local-only`/`--sync` flag branches resolve it via
  * {@link repoRootDefaultTarget}, matching plain `hyp ignore`'s placement
- * rule), so this implementation is shared by the `--private`/`--local-only`/
- * `--sync` flag branches and, in a future task, the `policy set` runner.
+ * rule; `policy set` passes its already-resolved path with no repo-root
+ * default, LLP 0111 #set), so this one implementation backs both spellings.
  *
  * - `ignore`: rows from the scope are never recorded (enforced at the
  *   capture seam, same as a dotfile `ignore`).
@@ -914,10 +918,10 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
  * as "recorded locally, withheld from forwarding" rather than "never
  * recorded".
  *
- * Verb-agnostic: the caller resolves `targetDir` (today the flag form's
- * cwd-relative `base`, no repo-root default), so this implementation is
- * shared by `hyp ignore --check` and, in a future task, the `policy show`
- * runner.
+ * Verb-agnostic: the caller resolves `targetDir` (the flag form's
+ * cwd-relative `base`, no repo-root default; `policy show` resolves the same
+ * way), so this one implementation backs both `hyp ignore --check` and
+ * `policy show`.
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
  * @ref LLP 0103#cli [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
