@@ -19,5 +19,8 @@
     "scripts",
     "src",
     "test"
+  ],
+  "exclude": [
+    "hypaware-core/plugins-workspace/*/skills"
   ]
 }
