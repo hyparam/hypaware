@@ -535,7 +535,8 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // privacy refinement is now the first-sync review window plus the
   // hypaware-privacy skill, run afterwards against a settled cache. Login
   // finishes fast; each fork prints the durable-command hint so the CLI floor
-  // (`hyp ignore --local-only`, `hyp ignore --private`) stays discoverable.
+  // (`hyp policy set [path] local-only`, `hyp policy set [path] ignore`) stays
+  // discoverable.
 
   // No sink targets this server yet: provision one so login forwards from one
   // command (LLP 0063 D2/D5). enrollCentralSink writes join's sink block, seeds

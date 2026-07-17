@@ -125,7 +125,7 @@ export async function runPurge(argv, ctx) {
       `still record and will be re-imported by the next backfill:\n`
     )
     for (const dir of resurrectable) ctx.stderr.write(`  ${dir}\n`)
-    ctx.stderr.write("tip: mark them ignored first with 'hyp ignore --private <path>' so the purge is durable\n")
+    ctx.stderr.write("tip: mark them ignored first with 'hyp policy set <path> ignore' so the purge is durable\n")
   }
 
   return 0
