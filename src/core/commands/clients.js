@@ -635,15 +635,16 @@ export async function runIgnore(argv, ctx) {
     ctx.stderr.write(`error: ${parsed.error}\n`)
     return 2
   }
-  if (parsed.check) return runIgnoreCheck(parsed, ctx)
-  if (parsed.private) return runMarkMachineLocal(parsed, ctx, 'ignore')
-  if (parsed.localOnly) return runMarkMachineLocal(parsed, ctx, 'local-only')
-  if (parsed.sync) return runMarkMachineLocal(parsed, ctx, 'full')
-
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
+  if (parsed.check) return runIgnoreCheck({ targetDir: base, ctx, json: parsed.json })
+  if (parsed.private) return runMarkMachineLocal({ targetDir: repoRootDefaultTarget(base, parsed.path), ctx, targetClass: 'ignore' })
+  if (parsed.localOnly)
+    return runMarkMachineLocal({ targetDir: repoRootDefaultTarget(base, parsed.path), ctx, targetClass: 'local-only' })
+  if (parsed.sync) return runMarkMachineLocal({ targetDir: repoRootDefaultTarget(base, parsed.path), ctx, targetClass: 'full' })
+
   // Idempotent (R5): a fresh resolver reflects disk. Any governing ancestor
   // `.hypignore` already ignores `base` (V1 has no un-ignore directive, any
   // `.hypignore` resolves to `ignore`), so re-ignoring is a no-op success
@@ -656,7 +657,7 @@ export async function runIgnore(argv, ctx) {
 
   // Default target: the repo root when `base` is in a git repo, else `base`.
   // An explicit `path` overrides: write exactly where the caller pointed.
-  const targetDir = parsed.path ? base : (findRepoRoot(base) ?? base)
+  const targetDir = repoRootDefaultTarget(base, parsed.path)
   const file = path.join(targetDir, '.hypignore')
   try {
     await fs.writeFile(file, HYPIGNORE_TEMPLATE)
@@ -679,15 +680,32 @@ export async function runIgnore(argv, ctx) {
 }
 
 /**
+ * Shared target-resolution rule for the marking verbs that default to a git
+ * repo root: an explicit `path` argument always wins (the caller pointed at
+ * it directly), otherwise resolve `base` up to its containing repo root, or
+ * `base` itself outside a repo. Shared by the `hyp ignore` bare-dotfile
+ * branch and the machine-local marking branches so both spellings (and the
+ * future `policy` verb) apply one placement rule (LLP 0103 #cli).
+ *
+ * @param {string} base
+ * @param {string | undefined} explicitPath
+ * @returns {string}
+ */
+function repoRootDefaultTarget(base, explicitPath) {
+  return explicitPath ? base : (findRepoRoot(base) ?? base)
+}
+
+/**
  * `hyp ignore --private [path]` / `hyp ignore --local-only [path]` /
  * `hyp ignore --sync [path]`
  *
- * Marks the resolved target with `targetClass` in the machine-local
- * class-per-entry store (LLP 0103) instead of writing a `.hypignore`: never
- * writes into a repo (LLP 0071 R4, LLP 0100 R6), so the target need not exist
- * on disk or be a git repo. Resolves the target the same way plain
- * `hyp ignore` does — the git repo root when `base` is inside one, else
- * `base`; an explicit `path` overrides.
+ * Marks `targetDir` with `targetClass` in the machine-local class-per-entry
+ * store (LLP 0103) instead of writing a `.hypignore`: never writes into a
+ * repo (LLP 0071 R4, LLP 0100 R6), so the target need not exist on disk or be
+ * a git repo. Verb-agnostic: the caller decides `targetDir` (today via
+ * {@link repoRootDefaultTarget}, matching plain `hyp ignore`'s placement
+ * rule), so this implementation is shared by the `--private`/`--local-only`/
+ * `--sync` flag branches and, in a future task, the `policy set` runner.
  *
  * - `ignore`: rows from the scope are never recorded (enforced at the
  *   capture seam, same as a dotfile `ignore`).
@@ -706,20 +724,10 @@ export async function runIgnore(argv, ctx) {
  * an unlisted directory is not "already answered", LLP 0103).
  *
  * @ref LLP 0103#cli [implements]: the shared machine-local marking verb behind `--private` / `--local-only` / `--sync`
- * @param {{ path?: string }} parsed
- * @param {CommandRunContext} ctx
- * @param {UsageClass} targetClass
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass }} args
  * @returns {Promise<number>}
  */
-async function runMarkMachineLocal(parsed, ctx, targetClass) {
-  // Resolve a relative `path` arg against the command-context cwd (matching the
-  // sibling verbs above), not the Node process cwd, so injected/remote/test
-  // dispatch adds/removes/checks the tree the caller actually pointed at.
-  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  // Default target: the repo root when `base` is in a git repo, else `base`.
-  // An explicit `path` overrides: record exactly the directory the caller
-  // pointed at, mirroring the dotfile verb's placement rule.
-  const targetDir = parsed.path ? base : (findRepoRoot(base) ?? base)
+async function runMarkMachineLocal({ targetDir, ctx, targetClass }) {
   const resolvedTarget = path.resolve(targetDir)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
@@ -778,14 +786,14 @@ export async function runUnignore(argv, ctx) {
     ctx.stderr.write('error: --json is only valid for `hyp ignore --check`\n')
     return 2
   }
-  if (parsed.private) return runUnmarkMachineLocal(parsed, ctx, 'ignore')
-  if (parsed.localOnly) return runUnmarkMachineLocal(parsed, ctx, 'local-only')
-  if (parsed.sync) return runUnmarkMachineLocal(parsed, ctx, 'full')
-
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
+  if (parsed.private) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'ignore' })
+  if (parsed.localOnly) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'local-only' })
+  if (parsed.sync) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'full' })
+
   const { governedBy } = createUsagePolicyResolver().resolve(base)
   if (!governedBy) {
     ctx.stdout.write(`not ignored (no .hypignore governs ${base})\n`)
@@ -811,31 +819,29 @@ export async function runUnignore(argv, ctx) {
  * `hyp unignore --private [path]` / `hyp unignore --local-only [path]` /
  * `hyp unignore --sync [path]`
  *
- * Removes every machine-local entry of `targetClass` that governs the
- * target — equal to it, or an ancestor of it (the same segment-aware rule
- * the shared resolver applies, reused here via {@link isEqualOrDescendant}
- * rather than re-derived, R8) — mirroring dotfile `unignore`'s "remove the
- * governing thing" semantics. Entries of a different class are left alone
- * (LLP 0104 boundary: unmarking is class-scoped and non-destructive of
- * cached rows either way). Idempotent: no governing entry of that class is
- * a no-op success.
+ * Removes every machine-local entry of `targetClass` that governs
+ * `targetDir` — equal to it, or an ancestor of it (the same segment-aware
+ * rule the shared resolver applies, reused here via
+ * {@link isEqualOrDescendant} rather than re-derived, R8) — mirroring
+ * dotfile `unignore`'s "remove the governing thing" semantics. Entries of a
+ * different class are left alone (LLP 0104 boundary: unmarking is
+ * class-scoped and non-destructive of cached rows either way). Idempotent:
+ * no governing entry of that class is a no-op success. Verb-agnostic: the
+ * caller resolves `targetDir` (today the flag forms' cwd-relative `base`,
+ * with no repo-root default), so this implementation is shared by the
+ * `--private`/`--local-only`/`--sync` flag branches and, in a future task,
+ * the `policy unset` runner.
  *
  * @ref LLP 0103#cli [implements]: symmetric class-scoped removal for `--private` / `--local-only` / `--sync`
- * @param {{ path?: string }} parsed
- * @param {CommandRunContext} ctx
- * @param {UsageClass} targetClass
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass }} args
  * @returns {Promise<number>}
  */
-async function runUnmarkMachineLocal(parsed, ctx, targetClass) {
-  // Resolve a relative `path` arg against the command-context cwd (matching the
-  // sibling verbs above), not the Node process cwd, so injected/remote/test
-  // dispatch adds/removes/checks the tree the caller actually pointed at.
-  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
+async function runUnmarkMachineLocal({ targetDir, ctx, targetClass }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const entries = await readLocalOnlyEntries({ stateDir })
-  const governing = entries.filter((entry) => entry.class === targetClass && isEqualOrDescendant(base, entry.dir))
+  const governing = entries.filter((entry) => entry.class === targetClass && isEqualOrDescendant(targetDir, entry.dir))
   if (governing.length === 0) {
-    ctx.stdout.write(`not ${targetClass} (no machine-local ${targetClass} entry governs ${base})\n`)
+    ctx.stdout.write(`not ${targetClass} (no machine-local ${targetClass} entry governs ${targetDir})\n`)
     return 0
   }
 
@@ -871,23 +877,23 @@ async function runUnmarkMachineLocal(parsed, ctx, targetClass) {
  * as "recorded locally, withheld from forwarding" rather than "never
  * recorded".
  *
+ * Verb-agnostic: the caller resolves `targetDir` (today the flag form's
+ * cwd-relative `base`, no repo-root default), so this implementation is
+ * shared by `hyp ignore --check` and, in a future task, the `policy show`
+ * runner.
+ *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
  * @ref LLP 0103#cli [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
- * @param {{ json: boolean, path?: string }} parsed
- * @param {CommandRunContext} ctx
+ * @param {{ targetDir: string, ctx: CommandRunContext, json: boolean }} args
  * @returns {Promise<number>}
  */
-async function runIgnoreCheck(parsed, ctx) {
-  // Resolve a relative `path` arg against the command-context cwd (matching the
-  // sibling verbs above), not the Node process cwd, so injected/remote/test
-  // dispatch writes/removes/checks the tree the caller actually pointed at.
-  const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
+async function runIgnoreCheck({ targetDir, ctx, json }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
-  const result = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(base)
+  const result = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(targetDir)
   const ignored = result.class === 'ignore'
   const governed = result.class !== 'full'
-  const scopeDir = governed ? await resolveCheckScopeDir({ result, base, stateDir, listPath }) : base
+  const scopeDir = governed ? await resolveCheckScopeDir({ result, base: targetDir, stateDir, listPath }) : targetDir
   const residual = governed ? await countResidualCachedRows(scopeDir, ctx) : 0
   // LLP 0103: name the governing source distinctly from the raw path, so a
   // machine-local mark and a committed dotfile read differently even though
@@ -895,10 +901,10 @@ async function runIgnoreCheck(parsed, ctx) {
   const source = !result.governedBy ? 'none' : result.governedBy === listPath ? 'machine-local' : 'dotfile'
   const purgeHint = residual ? ` (use 'hyp purge' to remove them)` : ''
 
-  if (parsed.json) {
+  if (json) {
     ctx.stdout.write(
       JSON.stringify({
-        path: base,
+        path: targetDir,
         ignored,
         governedBy: result.governedBy,
         source,
@@ -910,7 +916,7 @@ async function runIgnoreCheck(parsed, ctx) {
     return 0
   }
 
-  ctx.stdout.write(`path: ${base}\n`)
+  ctx.stdout.write(`path: ${targetDir}\n`)
   ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
   ctx.stdout.write(`class: ${result.class}\n`)
   ctx.stdout.write(`source: ${source}\n`)
