@@ -751,7 +751,7 @@ test('a --no-daemon login prints the durable hint and provisions the sink (LLP 0
 
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(err.join(''), /hyp ignore --local-only/, 'the durable command stays discoverable')
+  assert.match(err.join(''), /hyp policy set \[path\] local-only/, 'the durable command stays discoverable')
   await fs.access(seedPath) // the sink is still provisioned
   assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
 })
@@ -766,7 +766,7 @@ test('a fresh enroll prints the durable hint and never polls a capture wait (LLP
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0)
-  assert.match(err.join(''), /hyp ignore --local-only/)
+  assert.match(err.join(''), /hyp policy set \[path\] local-only/)
   assert.match(out.join(''), /capturing @hypaware\/claude/)
 })
 
@@ -781,7 +781,7 @@ test('a failed daemon install still prints the durable hint before returning (LL
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 3)
   assert.equal(waited, false, 'a failed install does not wait for attach')
-  assert.match(err.join(''), /hyp ignore --local-only/)
+  assert.match(err.join(''), /hyp policy set \[path\] local-only/)
   assert.match(err.join(''), /the daemon install did not finish/)
 })
 
@@ -795,7 +795,7 @@ test('a re-login (already-enrolled, re-seed path) prints the durable hint (LLP 0
 
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(err.join(''), /hyp ignore --local-only/)
+  assert.match(err.join(''), /hyp policy set \[path\] local-only/)
   assert.match(out.join(''), /seeded forwarding identity for sink 'fwd'/)
 })
 
