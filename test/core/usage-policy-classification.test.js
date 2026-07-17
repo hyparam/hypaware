@@ -29,19 +29,19 @@ import {
 // copy is load-bearing (many users' first contact with the class vocabulary),
 // so it is pinned here like the other consent surfaces.
 
-test('verbArgvForClass maps each class to its hyp ignore marking verb (LLP 0103 T2)', () => {
-  assert.deepEqual(verbArgvForClass('full', '/work/repo'), ['ignore', '--sync', '/work/repo'])
-  assert.deepEqual(verbArgvForClass('local-only', '/work/repo'), ['ignore', '--local-only', '/work/repo'])
-  assert.deepEqual(verbArgvForClass('ignore', '/work/repo'), ['ignore', '--private', '/work/repo'])
+test('verbArgvForClass maps each class to its hyp policy set token (LLP 0111 #teaching)', () => {
+  assert.deepEqual(verbArgvForClass('full', '/work/repo'), ['policy', 'set', '/work/repo', 'sync'])
+  assert.deepEqual(verbArgvForClass('local-only', '/work/repo'), ['policy', 'set', '/work/repo', 'local-only'])
+  assert.deepEqual(verbArgvForClass('ignore', '/work/repo'), ['policy', 'set', '/work/repo', 'ignore'])
   assert.throws(() => verbArgvForClass(/** @type {any} */ ('nope'), '/x'), /unknown class/)
 })
 
-test('the three choices are presented least-to-most restrictive with their verbs', () => {
+test('the three choices are presented least-to-most restrictive with their tokens', () => {
   assert.deepEqual(CLASSIFICATION_CHOICES.map((c) => c.class), ['full', 'local-only', 'ignore'])
-  assert.deepEqual(CLASSIFICATION_CHOICES.map((c) => c.flag), ['--sync', '--local-only', '--private'])
+  assert.deepEqual(CLASSIFICATION_CHOICES.map((c) => c.token), ['sync', 'local-only', 'ignore'])
 })
 
-test('buildClassificationPrompt names the folder, all three classes, and each verb', () => {
+test('buildClassificationPrompt names the folder, all three classes, and each policy set command', () => {
   const prompt = buildClassificationPrompt({ cwd: '/work/secret-repo' })
   assert.match(prompt, /\/work\/secret-repo/)
   assert.match(prompt, /enrolled/)
@@ -50,9 +50,14 @@ test('buildClassificationPrompt names the folder, all three classes, and each ve
   assert.match(prompt, /sync:/)
   assert.match(prompt, /local-only:/)
   assert.match(prompt, /ignore:/)
-  assert.match(prompt, /hyp ignore --sync \/work\/secret-repo/)
-  assert.match(prompt, /hyp ignore --local-only \/work\/secret-repo/)
-  assert.match(prompt, /hyp ignore --private \/work\/secret-repo/)
+  assert.match(prompt, /hyp policy set \/work\/secret-repo sync/)
+  assert.match(prompt, /hyp policy set \/work\/secret-repo local-only/)
+  assert.match(prompt, /hyp policy set \/work\/secret-repo ignore/)
+  // Exit criterion (LLP 0110): the hook never teaches an ignore-spelled command
+  // for a non-ignore class - the deprecated flag spellings are gone entirely.
+  assert.equal(/hyp ignore --sync/.test(prompt), false)
+  assert.equal(/hyp ignore --local-only/.test(prompt), false)
+  assert.equal(/hyp ignore --private/.test(prompt), false)
   // Repo style: no em dashes anywhere in the consent copy.
   assert.equal(prompt.includes('—'), false)
 })
@@ -160,7 +165,7 @@ test('evaluateCwdClassification never fails the session on a corrupt list or a b
   assert.equal(result.enrolled, false)
 })
 
-test('the classification answer lands via the real hyp ignore verbs (LLP 0106 -> LLP 0103)', async () => {
+test('the classification answer lands via the real hyp policy set verb (LLP 0106 -> LLP 0111 -> LLP 0103)', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'classify-verb-repo-'))
   const hypHome = mkdtempSync(path.join(tmpdir(), 'classify-verb-home-'))
   try {
@@ -174,7 +179,7 @@ test('the classification answer lands via the real hyp ignore verbs (LLP 0106 ->
 
     // Answer "ignore" by running exactly the argv the hook advertises.
     const argv = verbArgvForClass('ignore', root)
-    assert.deepEqual(argv, ['ignore', '--private', root])
+    assert.deepEqual(argv, ['policy', 'set', root, 'ignore'])
     const res = await runVerb(argv, { cwd: root, hypHome })
     assert.equal(res.code, 0, res.stderr)
 
@@ -211,8 +216,15 @@ function makeResolver(result) {
 async function runVerb(argv, opts) {
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
-  const command = /** @type {CommandRegistration} */ (registry.get('ignore'))
-  assert.ok(command, 'ignore is registered')
+  // The marking answer now dispatches the two-word `policy set` verb
+  // (LLP 0111 #teaching), so resolve a two-word command name before falling
+  // back to the single-word form - exactly how the CLI's group dispatch works.
+  const twoWord = argv.length >= 2 ? `${argv[0]} ${argv[1]}` : null
+  const useTwoWord = Boolean(twoWord && registry.get(twoWord))
+  const name = useTwoWord ? /** @type {string} */ (twoWord) : argv[0]
+  const rest = useTwoWord ? argv.slice(2) : argv.slice(1)
+  const command = /** @type {CommandRegistration} */ (registry.get(name))
+  assert.ok(command, `${name} is registered`)
   const stdout = makeBuf()
   const stderr = makeBuf()
   const ctx = /** @type {any} */ ({
@@ -224,7 +236,7 @@ async function runVerb(argv, opts) {
     query: { getDataset: () => undefined, listDatasets: () => [] },
     storage: { cacheRoot: path.join(opts.cwd, '.cache'), pendingInfo: async () => ({ pending: false }) },
   })
-  const code = await command.run(argv.slice(1), /** @type {CommandRunContext} */ (ctx))
+  const code = await command.run(rest, /** @type {CommandRunContext} */ (ctx))
   return { code, stdout: stdout.text(), stderr: stderr.text() }
 }
 
