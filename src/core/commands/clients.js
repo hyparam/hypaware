@@ -640,10 +640,27 @@ export async function runIgnore(argv, ctx) {
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
   if (parsed.check) return runIgnoreCheck({ targetDir: base, ctx, json: parsed.json })
-  if (parsed.private) return runMarkMachineLocal({ targetDir: repoRootDefaultTarget(base, parsed.path), ctx, targetClass: 'ignore' })
+  if (parsed.private)
+    return runMarkMachineLocal({
+      targetDir: repoRootDefaultTarget(base, parsed.path),
+      ctx,
+      targetClass: 'ignore',
+      component: 'cmd-ignore',
+    })
   if (parsed.localOnly)
-    return runMarkMachineLocal({ targetDir: repoRootDefaultTarget(base, parsed.path), ctx, targetClass: 'local-only' })
-  if (parsed.sync) return runMarkMachineLocal({ targetDir: repoRootDefaultTarget(base, parsed.path), ctx, targetClass: 'full' })
+    return runMarkMachineLocal({
+      targetDir: repoRootDefaultTarget(base, parsed.path),
+      ctx,
+      targetClass: 'local-only',
+      component: 'cmd-ignore',
+    })
+  if (parsed.sync)
+    return runMarkMachineLocal({
+      targetDir: repoRootDefaultTarget(base, parsed.path),
+      ctx,
+      targetClass: 'full',
+      component: 'cmd-ignore',
+    })
 
   // Idempotent (R5): a fresh resolver reflects disk. Any governing ancestor
   // `.hypignore` already ignores `base` (V1 has no un-ignore directive, any
@@ -724,10 +741,11 @@ function repoRootDefaultTarget(base, explicitPath) {
  * an unlisted directory is not "already answered", LLP 0103).
  *
  * @ref LLP 0103#cli [implements]: the shared machine-local marking verb behind `--private` / `--local-only` / `--sync`
- * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass }} args
+ * @ref LLP 0111#surface [implements]: also the shared implementation behind `policy set`; only the `component` attribute names the dispatching verb
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass, component: string }} args
  * @returns {Promise<number>}
  */
-async function runMarkMachineLocal({ targetDir, ctx, targetClass }) {
+export async function runMarkMachineLocal({ targetDir, ctx, targetClass, component }) {
   const resolvedTarget = path.resolve(targetDir)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
@@ -746,7 +764,7 @@ async function runMarkMachineLocal({ targetDir, ctx, targetClass }) {
   const withoutTarget = entries.filter((entry) => entry.dir !== resolvedTarget)
   await writeLocalOnlyEntries({ stateDir, entries: [...withoutTarget, { dir: resolvedTarget, class: targetClass }] })
   getLogger('usage-policy').info('usage_policy.mark', {
-    [Attr.COMPONENT]: 'cmd-ignore',
+    [Attr.COMPONENT]: component,
     [Attr.OPERATION]: 'usage_policy.mark',
     class: targetClass,
     status: 'ok',
@@ -790,9 +808,10 @@ export async function runUnignore(argv, ctx) {
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  if (parsed.private) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'ignore' })
-  if (parsed.localOnly) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'local-only' })
-  if (parsed.sync) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'full' })
+  if (parsed.private) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'ignore', component: 'cmd-unignore' })
+  if (parsed.localOnly)
+    return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'local-only', component: 'cmd-unignore' })
+  if (parsed.sync) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'full', component: 'cmd-unignore' })
 
   const { governedBy } = createUsagePolicyResolver().resolve(base)
   if (!governedBy) {
@@ -819,29 +838,40 @@ export async function runUnignore(argv, ctx) {
  * `hyp unignore --private [path]` / `hyp unignore --local-only [path]` /
  * `hyp unignore --sync [path]`
  *
- * Removes every machine-local entry of `targetClass` that governs
- * `targetDir` — equal to it, or an ancestor of it (the same segment-aware
- * rule the shared resolver applies, reused here via
- * {@link isEqualOrDescendant} rather than re-derived, R8) — mirroring
- * dotfile `unignore`'s "remove the governing thing" semantics. Entries of a
- * different class are left alone (LLP 0104 boundary: unmarking is
- * class-scoped and non-destructive of cached rows either way). Idempotent:
- * no governing entry of that class is a no-op success. Verb-agnostic: the
- * caller resolves `targetDir` (today the flag forms' cwd-relative `base`,
- * with no repo-root default), so this implementation is shared by the
- * `--private`/`--local-only`/`--sync` flag branches and, in a future task,
- * the `policy unset` runner.
+ * Removes every machine-local entry that governs `targetDir`, equal to it,
+ * or an ancestor of it (the same segment-aware rule the shared resolver
+ * applies, reused here via {@link isEqualOrDescendant} rather than
+ * re-derived, R8), mirroring dotfile `unignore`'s "remove the governing
+ * thing" semantics. When `targetClass` is given, removal is scoped to that
+ * one class and entries of a different class are left alone (LLP 0104
+ * boundary: unmarking is class-scoped and non-destructive of cached rows
+ * either way): this is what the `--private`/`--local-only`/`--sync`
+ * `hyp unignore` flag branches pass. When `targetClass` is omitted, removal
+ * is class-neutral: every machine-local entry governing `targetDir`, of any
+ * class, is removed - `policy unset <path>`'s "back to the implicit
+ * default" default (LLP 0111 #unset). Idempotent either way: no governing
+ * entry (of that class, or of any class) is a no-op success. Verb-agnostic:
+ * the caller resolves `targetDir` (today the flag forms' cwd-relative
+ * `base`, with no repo-root default) and supplies `component` to name the
+ * dispatching verb in the structured log event.
  *
  * @ref LLP 0103#cli [implements]: symmetric class-scoped removal for `--private` / `--local-only` / `--sync`
- * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass }} args
+ * @ref LLP 0111#unset [implements]: the class-neutral `targetClass === undefined` branch backing `policy unset <path>`
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass?: UsageClass, component: string }} args
  * @returns {Promise<number>}
  */
-async function runUnmarkMachineLocal({ targetDir, ctx, targetClass }) {
+export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, component }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const entries = await readLocalOnlyEntries({ stateDir })
-  const governing = entries.filter((entry) => entry.class === targetClass && isEqualOrDescendant(targetDir, entry.dir))
+  const governing = entries.filter(
+    (entry) => (targetClass === undefined || entry.class === targetClass) && isEqualOrDescendant(targetDir, entry.dir)
+  )
   if (governing.length === 0) {
-    ctx.stdout.write(`not ${targetClass} (no machine-local ${targetClass} entry governs ${targetDir})\n`)
+    if (targetClass === undefined) {
+      ctx.stdout.write(`not governed (no machine-local entry governs ${targetDir})\n`)
+    } else {
+      ctx.stdout.write(`not ${targetClass} (no machine-local ${targetClass} entry governs ${targetDir})\n`)
+    }
     return 0
   }
 
@@ -849,15 +879,20 @@ async function runUnmarkMachineLocal({ targetDir, ctx, targetClass }) {
   const remaining = entries.filter((entry) => !governingDirs.has(entry.dir))
   await writeLocalOnlyEntries({ stateDir, entries: remaining })
   getLogger('usage-policy').info('usage_policy.unmark', {
-    [Attr.COMPONENT]: 'cmd-unignore',
+    [Attr.COMPONENT]: component,
     [Attr.OPERATION]: 'usage_policy.unmark',
-    class: targetClass,
+    class: targetClass ?? 'any',
     status: 'ok',
   })
-  const removedDirs = governing.map((entry) => entry.dir)
-  ctx.stdout.write(
-    `removed ${governing.length} ${targetClass} entr${governing.length === 1 ? 'y' : 'ies'}: ${removedDirs.join(', ')}\n`
-  )
+  const entrySuffix = governing.length === 1 ? 'y' : 'ies'
+  if (targetClass === undefined) {
+    // Class-neutral: name each removed entry's own class since they can differ.
+    const removedDescr = governing.map((entry) => `${entry.dir} (${entry.class})`).join(', ')
+    ctx.stdout.write(`removed ${governing.length} entr${entrySuffix}: ${removedDescr}\n`)
+  } else {
+    const removedDirs = governing.map((entry) => entry.dir)
+    ctx.stdout.write(`removed ${governing.length} ${targetClass} entr${entrySuffix}: ${removedDirs.join(', ')}\n`)
+  }
   return 0
 }
 
@@ -884,10 +919,11 @@ async function runUnmarkMachineLocal({ targetDir, ctx, targetClass }) {
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
  * @ref LLP 0103#cli [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
+ * @ref LLP 0111#show [implements]: also the shared implementation behind `policy show`; `--json` stays byte-compatible with the `--check --json` field set
  * @param {{ targetDir: string, ctx: CommandRunContext, json: boolean }} args
  * @returns {Promise<number>}
  */
-async function runIgnoreCheck({ targetDir, ctx, json }) {
+export async function runIgnoreCheck({ targetDir, ctx, json }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
   const result = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(targetDir)
