@@ -146,7 +146,7 @@ registry.
   **hypaware-ai-spend-report**, **-adoption-report**, **-security-report**, or
   **-improvement-report** skills.
 - Opt a folder out of recording - `hyp ignore` / `hyp unignore` write or remove
-  a `.hypignore` for the folder subtree (`hyp ignore --check` reports what
+  a `.hypignore` for the folder subtree (`hyp policy show` reports what
   governs a path).
 - "Is it working?" or diagnose a problem - `hyp status` (with `--json` for the
   stable shape); its `diagnostics:` section carries `repair:` lines to run.

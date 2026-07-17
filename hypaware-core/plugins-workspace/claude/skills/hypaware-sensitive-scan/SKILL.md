@@ -92,7 +92,7 @@ All examples redacted. Two groups, then the caveat:
   current session forward, reverse with `/hypaware-unignore`).
 - **Caveat (always).** The sensitive rows above are **already recorded**; ignoring is
   prospective and does not delete them. Show the residual with
-  `hyp ignore --check <path>` (reports the governor and how many cached rows from the
+  `hyp policy show <path>` (reports the governor and how many cached rows from the
   scope remain). Retroactive purge is out of scope.
 
 ## Notes
