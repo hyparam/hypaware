@@ -86,6 +86,7 @@ export function verbArgvForClass(cls, targetPath) {
  *
  * No em dashes and `-` in runtime strings, per the repo style.
  *
+ * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
  * @param {{ cwd: string }} args
  * @returns {string}
  */
@@ -105,9 +106,12 @@ export function buildClassificationPrompt({ cwd }) {
     lines.push(`      hyp ignore ${choice.flag} ${cwd}`)
   }
   lines.push('')
-  lines.push('Pick one with the user and run its command. If the user is unsure, the safe')
-  lines.push('choice is local-only (recorded here, never forwarded). This affects only')
-  lines.push('what HypAware records and forwards; it does not change your task.')
+  lines.push('Present these three choices as a selection menu using your environment\'s')
+  lines.push('native question tool (in Claude Code, the AskUserQuestion tool); do not ask')
+  lines.push('in open-ended text unless no such tool exists. Then run the chosen command.')
+  lines.push('If the user is unsure, the safe choice is local-only (recorded here, never')
+  lines.push('forwarded). This affects only what HypAware records and forwards; it does')
+  lines.push('not change your task.')
   return lines.join('\n')
 }
 

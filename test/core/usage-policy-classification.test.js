@@ -53,6 +53,10 @@ test('buildClassificationPrompt names the folder, all three classes, and each ve
   assert.match(prompt, /hyp ignore --sync \/work\/secret-repo/)
   assert.match(prompt, /hyp ignore --local-only \/work\/secret-repo/)
   assert.match(prompt, /hyp ignore --private \/work\/secret-repo/)
+  // @ref LLP 0113 [tests]: the menu mandate is part of the pinned consent copy
+  assert.match(prompt, /selection menu/)
+  assert.match(prompt, /AskUserQuestion/)
+  assert.match(prompt, /unless no such tool exists/)
   // Repo style: no em dashes anywhere in the consent copy.
   assert.equal(prompt.includes('—'), false)
 })
