@@ -5,8 +5,12 @@
  * @import { AiGatewayConfig, UpstreamConfig } from './types.js'
  */
 
-const DEFAULT_LISTEN = '127.0.0.1:0'
+// @ref LLP 0114#fixed-default-port [implements]: a stable well-known default (0x4859 = "HY") instead of an ephemeral bind
+const DEFAULT_LISTEN = '127.0.0.1:18521'
 const DEFAULT_GATEWAY_ID = 'hypaware-local'
+
+/** The bind the default falls back to when its port is already taken. */
+export const FALLBACK_LISTEN = '127.0.0.1:0'
 
 /**
  * Validate and normalize the ai-gateway config slice. Returns the
@@ -19,15 +23,15 @@ const DEFAULT_GATEWAY_ID = 'hypaware-local'
  */
 export function compileConfig(raw) {
   const cfg = isObject(raw) ? raw : {}
-  const listen = typeof cfg.listen === 'string' && cfg.listen.length > 0
-    ? cfg.listen
-    : DEFAULT_LISTEN
+  const listenConfigured = typeof cfg.listen === 'string' && cfg.listen.length > 0
+  const listen = listenConfigured ? /** @type {string} */ (cfg.listen) : DEFAULT_LISTEN
   const gatewayId = typeof cfg.gateway_id === 'string' && cfg.gateway_id.length > 0
     ? cfg.gateway_id
     : DEFAULT_GATEWAY_ID
   const upstreams = compileUpstreams(cfg.upstreams)
   const redactHeaders = compileStringArray(cfg.redact_headers)
-  return { listen, gatewayId, upstreams, redactHeaders }
+  // @ref LLP 0114#explicit-listen-fails-loudly [constrained-by]: only a defaulted listen may fall back on EADDRINUSE
+  return { listen, listenConfigured, gatewayId, upstreams, redactHeaders }
 }
 
 /**

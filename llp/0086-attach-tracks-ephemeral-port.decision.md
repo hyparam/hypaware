@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-07
 **Related:** LLP 0016, LLP 0036, LLP 0041, LLP 0044, LLP 0045
+**Extended-by:** LLP 0114 (the default listen port is now fixed; the ephemeral port and this tracking machinery remain as the fallback)
 
 > [Issue #277](https://github.com/hyparam/hypaware/issues/277) (a real user
 > report): the daemon's gateway binds an **ephemeral** port by default

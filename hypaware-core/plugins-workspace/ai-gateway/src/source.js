@@ -7,7 +7,7 @@ import {
   getLogger,
 } from '../../../../src/core/observability/index.js'
 
-import { compileConfig } from './config.js'
+import { compileConfig, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from './control.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createAiGatewayMessageProjector } from './message_projector.js'
@@ -18,7 +18,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
 
 /**
  * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { FinishedRow, GatewayState, StartedProxy, UpstreamConfig } from './types.js'
+ * @import { AiGatewayConfig, FinishedRow, GatewayState, StartedProxy, UpstreamConfig } from './types.js'
  * @import { Exchange } from './recorder.js'
  */
 
@@ -159,8 +159,9 @@ async function launchListener(ctx, state, liveState) {
     }
   }
 
-  const proxy = await startProxy({
-    listen: config.listen,
+  /** @param {string} listen */
+  const bind = (listen) => startProxy({
+    listen,
     upstreams: mergeUpstreams(config.upstreams, state),
     startExchange: (init) => recorder.startExchange(init),
     onExchangeFinished,
@@ -170,6 +171,8 @@ async function launchListener(ctx, state, liveState) {
     // @ref LLP 0066#control-path
     onControlRequest: createControlHandler({ ignoredSessions: state.ignoredSessions, log: ctx.log }),
   })
+
+  const proxy = await bindProxyWithFallback({ config, bind, log: ctx.log })
 
   state.listen = { host: proxy.host, port: proxy.port }
 
@@ -181,6 +184,31 @@ async function launchListener(ctx, state, liveState) {
   }
 
   return proxy
+}
+
+/**
+ * Bind the listener at the compiled `listen` address, falling back to an
+ * ephemeral bind when - and only when - the address was the *default* and its
+ * port is already taken. A configured `listen` is a stated requirement, so its
+ * bind failure (and any non-EADDRINUSE failure) propagates unchanged.
+ *
+ * @param {{ config: AiGatewayConfig, bind: (listen: string) => Promise<StartedProxy>, log: { warn(message: string, fields?: Record<string, unknown>): void } }} args
+ * @returns {Promise<StartedProxy>}
+ * @ref LLP 0114#ephemeral-fallback [implements]: a defaulted listen whose port is taken falls back to an ephemeral bind; a configured listen fails loudly
+ */
+export async function bindProxyWithFallback({ config, bind, log }) {
+  try {
+    return await bind(config.listen)
+  } catch (err) {
+    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+    if (config.listenConfigured || code !== 'EADDRINUSE') throw err
+    log.warn('aigw.default_port_taken', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      listen: config.listen,
+      fallback: FALLBACK_LISTEN,
+    })
+    return bind(FALLBACK_LISTEN)
+  }
 }
 
 /**

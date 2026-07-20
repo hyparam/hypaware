@@ -82,8 +82,12 @@ export interface UpstreamConfig {
 }
 
 export interface AiGatewayConfig {
-  /** Address as "host:port" (defaults to 127.0.0.1:0). */
+  /** Address as "host:port" (defaults to 127.0.0.1:18521, LLP 0114). */
   listen: string
+  /** True when `listen` came from config rather than the default. A defaulted
+   *  listen may fall back to an ephemeral bind on EADDRINUSE; a configured one
+   *  never does (LLP 0114). */
+  listenConfigured: boolean
   /** Value for the `gateway_id` column. */
   gatewayId: string
   upstreams: UpstreamConfig[]

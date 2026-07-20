@@ -202,8 +202,10 @@ async function runClientLifecycle(action, argv, ctx) {
           endpoint = configuredGatewayEndpoint(ctx.config)
           if (!endpoint) {
             // No gateway bound in this process and no configured `listen` to
-            // fall back on: the default ephemeral-port, daemon-managed install
-            // (an unpinned gateway binds a port only the running daemon knows).
+            // fall back on: the default daemon-managed install (an unpinned
+            // gateway binds the well-known default port, or its ephemeral
+            // fallback when that port was taken - LLP 0114 - so only the
+            // running daemon knows the proven port).
             // The daemon persists that bound port to status.json, so discover
             // it - guarded by a daemon-liveness check - instead of guessing or
             // reporting the internal endpoint error.

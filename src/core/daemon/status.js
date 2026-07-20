@@ -123,10 +123,12 @@ export function gatewaySourceDetails(sources) {
  * running for this state root, no status file exists, or the gateway source
  * recorded no bound port.
  *
- * This is the discovery mechanism manual `hyp attach` uses on the default
- * ephemeral-port install: the gateway binds a port only the running daemon
- * knows, and the daemon persists it here (issue #277 / LLP 0086). It never
- * fabricates a port for a daemon that is not running.
+ * This is the discovery mechanism manual `hyp attach` uses on a default
+ * install: only the running daemon knows which port it actually bound (the
+ * well-known default, its ephemeral fallback when that port was taken - LLP
+ * 0114 - or a pre-0114 ephemeral bind), and the daemon persists it here
+ * (issue #277 / LLP 0086). It never fabricates a port for a daemon that is
+ * not running.
  *
  * @param {{ stateRoot: string }} args
  * @returns {string | undefined}
