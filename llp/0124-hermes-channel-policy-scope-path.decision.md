@@ -1,7 +1,7 @@
 # LLP 0124: channel sessions get a canonical policy scope path
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-20

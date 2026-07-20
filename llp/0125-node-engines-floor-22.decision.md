@@ -1,7 +1,7 @@
 # LLP 0125: the Node engines floor moves to 22.12
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Core, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20

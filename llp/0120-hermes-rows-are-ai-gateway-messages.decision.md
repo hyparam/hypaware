@@ -1,7 +1,7 @@
 # LLP 0120: hermes rows are ai_gateway_messages rows, not a new table
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins, Cache
 **Author:** Phil / Claude
 **Date:** 2026-07-20

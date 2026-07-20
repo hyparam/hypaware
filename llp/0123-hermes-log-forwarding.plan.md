@@ -1,7 +1,7 @@
 # LLP 0123: hermes log forwarding - implementation plan
 
 **Type:** Plan
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20
@@ -35,7 +35,8 @@ task's tests.
 
 - T3 and T4 are independent after T2 and can run in parallel; T5 merges the
   surfaces; T6 closes the loop end-to-end.
-- The LLP cluster (0118-0123) rides the first implementation PR; status flips
-  (Draft -> Accepted -> Active) stay author-owned and are not tasks.
+- The LLP cluster (0118-0125) landed Accepted via its own docs PR; the
+  Accepted -> Active flips ride the implementation PRs and stay author-owned,
+  not tasks.
 - No task modifies `@hypaware/ai-gateway`, the cache schema, settlement, or
   any sink: the adapter is purely additive at the plugin seam.

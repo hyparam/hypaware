@@ -1,7 +1,7 @@
 # LLP 0122: hermes log forwarding - technical design
 
 **Type:** Design
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20

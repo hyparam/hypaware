@@ -1,7 +1,7 @@
 # LLP 0121: the hermes adapter ships bundled, not as a standalone repo
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20

@@ -1,7 +1,7 @@
 # LLP 0119: hermes capture pulls from state.db, not push, not the wire
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20

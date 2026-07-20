@@ -1,7 +1,7 @@
 # LLP 0118: hermes log forwarding
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Sources, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-20
