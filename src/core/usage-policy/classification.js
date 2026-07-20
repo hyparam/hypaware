@@ -12,10 +12,11 @@ import { localOnlyListPath } from './local_only.js'
  * Session-start classification (LLP 0106): on an enrolled machine, an
  * interactive session opened in a directory with no explicit governing usage
  * class is asked - once - to classify the folder (sync / local-only / ignore).
- * The answer is written through the same CLI marking verbs the human and the
- * privacy skill use (LLP 0103 #cli), landing an explicit machine-local entry so
- * the folder is never asked about again. Choosing sync writes the explicit
- * `full` entry, which is precisely what suppresses the next prompt.
+ * The answer is written through the same `hyp policy set` verb the human and
+ * the privacy skill use (LLP 0111 #teaching, LLP 0103 #cli), landing an
+ * explicit machine-local entry so the folder is never asked about again.
+ * Choosing sync writes the explicit `full` entry, which is precisely what
+ * suppresses the next prompt.
  *
  * This module is the shared, client-agnostic core the per-client hooks call:
  * the Claude hook (`hyp claude-hook classify-cwd`, a blocking SessionStart
@@ -30,42 +31,49 @@ import { localOnlyListPath } from './local_only.js'
 
 /**
  * The three usage classes, in the order the prompt presents them (least to
- * most restrictive), each paired with the `hyp ignore` marking verb that
- * records it (LLP 0103 #cli). One store, three writers (skill, hook, hand-run
- * CLI); the hook advertises exactly the verbs the other two use.
+ * most restrictive), each paired with the `hyp policy set` class token that
+ * records it (LLP 0111 #teaching, LLP 0103 #cli). One store, three writers
+ * (skill, hook, hand-run CLI); the hook advertises exactly the verb the other
+ * two use. The token is the CLI-edge vocabulary (`sync` maps onto the stored
+ * `full`); the deprecated `hyp ignore --sync` misnomer is gone from the copy.
  *
- * @ref LLP 0106 [implements]: the hook's answer is written via the same CLI verbs, landing an LLP 0103 entry
- * @type {ReadonlyArray<{ class: UsageClass, flag: '--sync' | '--local-only' | '--private', label: string, blurb: string }>}
+ * @ref LLP 0106 [implements]: the hook's answer is written via the same CLI verb, landing an LLP 0103 entry
+ * @ref LLP 0111#teaching [implements]: the consent copy teaches `hyp policy set <path> <token>`, not the `hyp ignore --sync` misnomer
+ * @type {ReadonlyArray<{ class: UsageClass, token: 'sync' | 'local-only' | 'ignore', label: string, blurb: string }>}
  */
 export const CLASSIFICATION_CHOICES = [
   {
     class: 'full',
-    flag: '--sync',
+    token: 'sync',
     label: 'sync',
     blurb: "this folder's sessions upload to the shared server (the current default)",
   },
   {
     class: 'local-only',
-    flag: '--local-only',
+    token: 'local-only',
     label: 'local-only',
     blurb: 'keep sessions on this machine only, never forward them to the server',
   },
   {
     class: 'ignore',
-    flag: '--private',
+    token: 'ignore',
     label: 'ignore',
     blurb: 'do not record this folder\'s sessions at all',
   },
 ]
 
 /**
- * The `hyp ignore` argv that records `targetPath` as `cls` in the machine-local
- * store (LLP 0103): `full` -> `--sync`, `local-only` -> `--local-only`,
- * `ignore` -> `--private`. Returned as an argv array (not a shell string) so a
- * caller can dispatch it directly against the same verb the human runs, which
- * is exactly what the "answer lands via the verbs" contract pins.
+ * The `hyp policy set` argv that records `targetPath` as `cls` in the
+ * machine-local store (LLP 0111 #teaching, LLP 0103): `full` -> `sync`,
+ * `local-only` -> `local-only`, `ignore` -> `ignore`. Returned as an argv
+ * array (not a shell string) so a caller can dispatch it directly against the
+ * same two-word `policy set` verb the human runs, which is exactly what the
+ * "answer lands via the verbs" contract pins. The `policy set` verb has been
+ * registered since T2, so the hook never advertises a spelling the binary
+ * lacks.
  *
- * @ref LLP 0106 [implements]: map a chosen class to the T2 marking verb
+ * @ref LLP 0106 [implements]: map a chosen class to the marking verb the hook dispatches
+ * @ref LLP 0111#teaching [implements]: emit `policy set <path> <token>`, retiring the `hyp ignore --sync` misnomer
  * @param {UsageClass} cls
  * @param {string} targetPath absolute path of the folder to classify
  * @returns {string[]}
@@ -73,7 +81,7 @@ export const CLASSIFICATION_CHOICES = [
 export function verbArgvForClass(cls, targetPath) {
   const choice = CLASSIFICATION_CHOICES.find((c) => c.class === cls)
   if (!choice) throw new Error(`verbArgvForClass: unknown class ${String(cls)}`)
-  return ['ignore', choice.flag, targetPath]
+  return ['policy', 'set', targetPath, choice.token]
 }
 
 /**
@@ -86,6 +94,7 @@ export function verbArgvForClass(cls, targetPath) {
  *
  * No em dashes and `-` in runtime strings, per the repo style.
  *
+ * @ref LLP 0111#teaching [implements]: prints `hyp policy set <cwd> <token>`; the exit criterion is that no non-ignore class is ever taught with an ignore-spelled command
  * @ref LLP 0113 [implements]: the copy itself mandates menu presentation, tool-neutral with the Claude tool named, so tool-less clients degrade to prose
  * @param {{ cwd: string }} args
  * @returns {string}
@@ -103,7 +112,7 @@ export function buildClassificationPrompt({ cwd }) {
   ]
   for (const choice of CLASSIFICATION_CHOICES) {
     lines.push(`  - ${choice.label}: ${choice.blurb}`)
-    lines.push(`      hyp ignore ${choice.flag} ${cwd}`)
+    lines.push(`      hyp policy set ${cwd} ${choice.token}`)
   }
   lines.push('')
   lines.push('Present these three choices as a selection menu using your environment\'s')

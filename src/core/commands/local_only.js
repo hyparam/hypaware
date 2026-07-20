@@ -12,7 +12,7 @@ import { executeQuerySql } from '../query/sql.js'
 // after the in-login picker's retirement (LLP 0102): the review window plus
 // the hypaware-privacy skill are the enrollment-time refinement now, and this
 // command is the client-independent way to withhold a directory at any time.
-export const DURABLE_HINT = "tip: mark a directory local-only anytime with 'hyp ignore --local-only [path]'\n"
+export const DURABLE_HINT = "tip: mark a directory local-only anytime with 'hyp policy set [path] local-only'\n"
 
 // The dataset the captured-directory enumeration reads. Exported so the
 // hypaware-privacy skill's survey (LLP 0069 #enumerate, LLP 0100 §skill) and

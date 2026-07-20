@@ -46,6 +46,7 @@ import {
   runSkillsInstall,
   runUnignore,
 } from '../commands/clients.js'
+import { runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
 
 /**
  * @import { CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -256,6 +257,10 @@ function buildCoreCommands(registry) {
         'implicit default made durable, so it is not asked about again). With',
         '--check, reports the current status - class and governing source -',
         'without writing anything.',
+        '',
+        'Deprecated: the --local-only/--private/--sync/--check flags now live as',
+        'hyp policy set/show; use hyp policy instead. Bare hyp ignore [path]',
+        '(the .hypignore dotfile author) is not deprecated.',
       ].join('\n'),
       run: runIgnore,
     },
@@ -267,8 +272,52 @@ function buildCoreCommands(registry) {
         'Removes the governing .hypignore. With --local-only, --private, or',
         '--sync, removes machine-local entries of that class instead',
         '(symmetric with the matching hyp ignore flag).',
+        '',
+        'Deprecated: the --local-only/--private/--sync flags now live as',
+        'hyp policy unset; use hyp policy instead. Bare hyp unignore [path]',
+        '(the .hypignore remover) is not deprecated.',
       ].join('\n'),
       run: runUnignore,
+    },
+    makeGroupCommand({
+      registry,
+      name: 'policy',
+      summary: 'Mark a folder machine-local usage class (sync, local-only, ignore)',
+      help: [
+        'The class-neutral successor to the hyp ignore --sync/--local-only/--private',
+        'flags: writes to the same machine-local, class-per-entry store (never a',
+        '.hypignore dotfile). set/show/unset act on one path; list enumerates every',
+        'machine-local entry on this machine.',
+      ].join('\n'),
+    }),
+    {
+      name: 'policy set',
+      summary: 'Mark a folder machine-local sync, local-only, or ignore',
+      usage: 'hyp policy set <path> sync|local-only|ignore',
+      run: runPolicySet,
+    },
+    {
+      name: 'policy show',
+      summary: 'Report the usage class governing a folder and its source',
+      usage: 'hyp policy show [path] [--json]',
+      run: runPolicyShow,
+    },
+    {
+      name: 'policy unset',
+      summary: 'Remove machine-local markings governing a folder (optionally scoped to one class)',
+      usage: 'hyp policy unset <path> [sync|local-only|ignore]',
+      help: [
+        'With no trailing class token, removes every machine-local entry governing',
+        '<path> (class-neutral: back to the implicit default). With a trailing',
+        'sync/local-only/ignore token, removes only entries of that class.',
+      ].join('\n'),
+      run: runPolicyUnset,
+    },
+    {
+      name: 'policy list',
+      summary: 'Enumerate machine-local usage-class entries',
+      usage: 'hyp policy list [--json]',
+      run: runPolicyList,
     },
     {
       name: 'purge',

@@ -334,7 +334,7 @@ test('runPurge subtree warns about resurrection when the dir still resolves full
     assert.equal(code, 0)
     assert.match(stderr.text, /still record and will be re-imported/)
     assert.match(stderr.text, /home\/u\/repoA/)
-    assert.match(stderr.text, /hyp ignore --private/)
+    assert.match(stderr.text, /hyp policy set <path> ignore/)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })

@@ -91,9 +91,9 @@ WHERE cwd = '<dir>' ORDER BY date DESC LIMIT 40" --format json --output /tmp/sam
 
 Before you propose or apply **anything**, explain the classes in plain language, including what the org can and cannot see in each case:
 
-- **ignore** (`hyp ignore --private <dir>`): never recorded going forward; the machine-local rule stops capture at the source. Existing cached rows are **purgeable** (Step 6) but are not removed by marking alone. The org sees **nothing** from this directory.
-- **local-only** (`hyp ignore --local-only <dir>`): recorded and queryable **here** on this machine, but **never forwarded**. Withheld at the export seam. The org sees **nothing**, while you keep local history.
-- **sync** (`hyp ignore --sync <dir>`): the explicit "this ships" choice - forwarded to the org server like the default. Marking `--sync` records an explicit decision so this directory is not asked about again. The org sees this directory's captured exchanges.
+- **ignore** (`hyp policy set <dir> ignore`): never recorded going forward; the machine-local rule stops capture at the source. Existing cached rows are **purgeable** (Step 6) but are not removed by marking alone. The org sees **nothing** from this directory.
+- **local-only** (`hyp policy set <dir> local-only`): recorded and queryable **here** on this machine, but **never forwarded**. Withheld at the export seam. The org sees **nothing**, while you keep local history.
+- **sync** (`hyp policy set <dir> sync`): the explicit "this ships" choice - forwarded to the org server like the default. Marking it `sync` records an explicit decision so this directory is not asked about again. The org sees this directory's captured exchanges.
 
 Name the trade honestly: `local-only` keeps your history usable locally; `ignore` is stronger (nothing is even recorded once marked) but you lose local queryability too.
 
@@ -112,14 +112,14 @@ Then **apply nothing without per-item user confirmation.** Propose, wait for a y
 Apply each confirmed decision **only** through the `hyp` verbs below. **Never** author policy files or write anything into the user's repositories - the machine-local store is the only target.
 
 ```bash
-hyp ignore --private <dir>       # class: ignore  (stop recording this dir)
-hyp ignore --local-only <dir>    # class: local-only (record here, never forward)
-hyp ignore --sync <dir>          # class: sync (explicit "this ships")
-hyp ignore --check <dir>         # report the governing source + class, and residual cached rows; never writes
-hyp unignore --private|--local-only|--sync <dir>   # symmetric removal per class
+hyp policy set <dir> ignore      # class: ignore  (stop recording this dir)
+hyp policy set <dir> local-only  # class: local-only (record here, never forward)
+hyp policy set <dir> sync        # class: sync (explicit "this ships")
+hyp policy show <dir>            # report the governing source + class, and residual cached rows; never writes
+hyp policy unset <dir> [class]   # remove markings (class-neutral by default; a trailing class scopes it)
 ```
 
-`hyp ignore --check <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
+`hyp policy show <dir>` names **which source governs** (a committed `.hypignore` dotfile vs a machine-local entry) and the entry's class, and reports how many already-cached rows still sit under it - the residue that purge (below) clears. Marking is always **non-destructive**: it changes future capture/forwarding, not existing cached rows.
 
 **For every directory you mark `ignore`, and every session you flag as sensitive, offer `hyp purge` as a separately confirmed step** so that "completely ignored" also means "not sitting in the cache". Purge is destructive and cache-only (it never contacts the server); confirm each purge on its own.
 
@@ -129,10 +129,10 @@ hyp purge --session <id>     # delete all cached rows for one session (cheapest:
 hyp purge --ignored          # sweep every cached row whose cwd currently resolves to `ignore`
 ```
 
-Purge prompts for confirmation on a TTY; it errors on a bare `hyp purge` with no target. Sequencing matters: **mark `--private` first, then purge** - purging a directory that still resolves to `sync`/default warns that the next backfill will re-import it. Once a directory is `ignore`d, the capture seam blocks re-import, so the purge is durable. A common close-out for a directory the user wants fully gone:
+Purge prompts for confirmation on a TTY; it errors on a bare `hyp purge` with no target. Sequencing matters: **mark the directory `ignore` first, then purge** - purging a directory that still resolves to `sync`/default warns that the next backfill will re-import it. Once a directory is `ignore`d, the capture seam blocks re-import, so the purge is durable. A common close-out for a directory the user wants fully gone:
 
 ```bash
-hyp ignore --private <dir> && hyp purge <dir>
+hyp policy set <dir> ignore && hyp purge <dir>
 ```
 
 ## After the review
