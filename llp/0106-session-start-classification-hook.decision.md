@@ -82,4 +82,6 @@ governs, has the user classify the folder before work proceeds.**
   consent-and-reversal perimeter; `hyp leave` disables it with the rest.
 - The prompt copy is load-bearing (it is many users' first contact with the
   class vocabulary) and should be pinned by tests like the other consent
-  surfaces.
+  surfaces. Its presentation is pinned too: the ask must render as a native
+  selection menu where the client has one (Extended-by:
+  [LLP 0113](./0113-classification-ask-menu-presentation.decision.md)).
