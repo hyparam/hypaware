@@ -50,9 +50,11 @@ test('a defaulted listen falls back to an ephemeral bind on EADDRINUSE', async (
   const log = captureLog()
   /** @type {string[]} */
   const attempts = []
+  let fallbacks = 0
   const proxy = await bindProxyWithFallback({
     config,
     log,
+    onFallback: () => { fallbacks += 1 },
     bind: async (listen) => {
       attempts.push(listen)
       if (listen === config.listen) throw bindError('EADDRINUSE')
@@ -63,6 +65,23 @@ test('a defaulted listen falls back to an ephemeral bind on EADDRINUSE', async (
   assert.equal(proxy.port, 54321)
   assert.equal(log.warns.length, 1)
   assert.equal(log.warns[0].message, 'aigw.default_port_taken')
+  // @ref LLP 0114#fallback-is-visible [tests]: the fallback path signals the
+  // caller so the steady status surface can record it.
+  assert.equal(fallbacks, 1)
+})
+
+test('a clean default bind never signals fallback', async () => {
+  const config = compileConfig({ upstreams: [] })
+  const log = captureLog()
+  let fallbacks = 0
+  await bindProxyWithFallback({
+    config,
+    log,
+    onFallback: () => { fallbacks += 1 },
+    bind: async () => /** @type {any} */ ({ host: '127.0.0.1', port: 18521, stop: async () => {} }),
+  })
+  assert.equal(fallbacks, 0)
+  assert.equal(log.warns.length, 0)
 })
 
 // @ref LLP 0114#explicit-listen-fails-loudly [tests]: a configured listen

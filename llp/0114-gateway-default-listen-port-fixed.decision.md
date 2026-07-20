@@ -1,7 +1,7 @@
 # LLP 0114: The gateway's default listen port is fixed, with ephemeral fallback
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Config, Sources, Gateway, Daemon
 **Author:** Phil / Claude
 **Date:** 2026-07-20
@@ -59,6 +59,18 @@ back.** A user- or fleet-configured address is a stated requirement; silently
 binding somewhere else would put the gateway where nobody is looking. A
 configured bind failure stays a loud source-start failure, unchanged.
 
+<a id="fallback-is-visible"></a>**A fallback boot is visible in status, not
+only in a log line.** The fixed port creates the expectation "the gateway is
+at 18521"; out-of-band consumers (curl, scripts, dashboards) are pointed at
+it, so the exception must be loud in the tool operators actually run. The
+gateway source's `status()` details record `listen_fallback: true` when the
+bind came through the fallback path (riding the existing
+`SourceSnapshot.details` plumbing into `status.json`), and `hyp status` emits
+a `gateway_port_fallback` warning naming the taken default. Like
+`client_attach_stale` (LLP 0086 §status-drift-diagnostic), the warning is
+non-degrading: a fallback boot is a working install, so it never flips
+`overall`.
+
 ## Consequences
 
 - LLP 0086's mechanisms (status.json as the live-port source of truth,
@@ -71,4 +83,18 @@ configured bind failure stays a loud source-start failure, unchanged.
   install's clients re-attach to 18521 on the first daemon restart via the
   normal LLP 0086 drift re-attach.
 - If 18521 is taken, that boot behaves like pre-0114 (ephemeral); nothing
-  breaks, the warning names the fallback.
+  breaks, and the fallback is visible both at boot (`aigw.default_port_taken`)
+  and steadily (`listen_fallback` in status details, `gateway_port_fallback`
+  in `hyp status`).
+- <a id="interception-accepted"></a>**Daemon-down interception is accepted,
+  not newly created.** While the daemon is stopped, anything that binds
+  127.0.0.1:18521 receives attached clients' traffic (auth headers, prompt
+  bodies) until the next boot re-attaches or `gateway_port_fallback` surfaces
+  the squatter. A fixed port makes that window *predictable* where it was
+  merely *possible* pre-0114 (a stale marker pointed at a dead ephemeral port
+  any process could win). It grants no new privilege: a local process able to
+  bind the port can already read the client settings files and tokens
+  directly; a localhost port is not where the security boundary lives.
+  Mutual gateway/client authentication (a per-install token) was considered
+  and declined as disproportionate for a local dev-observability tool - do
+  not add it as a drive-by hardening without revisiting this decision.

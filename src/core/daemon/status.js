@@ -99,7 +99,7 @@ const GATEWAY_PLUGIN_NAME = '@hypaware/ai-gateway'
  * failed to bind).
  *
  * @param {SourceSnapshot[] | undefined} sources
- * @returns {{ host: string, port: number } | undefined}
+ * @returns {{ host: string, port: number, listenFallback: boolean, listenFallbackFrom?: string } | undefined}
  * @ref LLP 0086#endpoint-discovery [implements]: the daemon's live bound port is read from status.json sources[].details, not guessed
  */
 export function gatewaySourceDetails(sources) {
@@ -113,7 +113,13 @@ export function gatewaySourceDetails(sources) {
   const port = details.port
   if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0) return undefined
   const host = typeof details.host === 'string' && details.host.length > 0 ? details.host : '127.0.0.1'
-  return { host, port }
+  // @ref LLP 0114#fallback-is-visible [implements]: the gateway records whether this bind came through the default-port fallback
+  const listenFallback = details.listen_fallback === true
+  const listenFallbackFrom =
+    typeof details.listen_fallback_from === 'string' && details.listen_fallback_from.length > 0
+      ? details.listen_fallback_from
+      : undefined
+  return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
 }
 
 /**
@@ -483,6 +489,21 @@ export async function collectHypAwareStatus(opts = {}) {
   // instead of silent capture loss (issue #277 / LLP 0086).
   const liveGateway = daemon.running ? gatewaySourceDetails(daemonStatusFile?.sources) : undefined
   const liveGatewayPort = liveGateway ? String(liveGateway.port) : undefined
+  if (liveGateway?.listenFallback) {
+    // The daemon is bound, but not where the fixed default promised: the
+    // default port was taken at boot and the gateway fell back to an
+    // ephemeral bind. Attach self-heals (LLP 0086), but out-of-band
+    // consumers pointed at the well-known port are talking to whatever
+    // holds it. Non-degrading: a fallback boot is a working install.
+    // @ref LLP 0114#fallback-is-visible [implements]: hyp status warns when the gateway runs on its ephemeral fallback instead of the fixed default
+    const from = liveGateway.listenFallbackFrom ?? 'its default listen address'
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'gateway_port_fallback',
+      message: `the gateway's default listen ${from} was taken at boot - it fell back to an ephemeral bind on port ${liveGatewayPort}; anything pointed at the default port is talking to the process that holds it`,
+      repair: [`free ${from} and restart the daemon - attached clients re-point automatically`],
+    })
+  }
   /** @type {ClientAttachReport[]} */
   const clients = []
   const clientDescriptors = catalog?.clientDescriptors ?? new Map()
