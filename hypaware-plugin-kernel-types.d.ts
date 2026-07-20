@@ -72,6 +72,7 @@ export type PluginPermission =
   | 'read_claude_transcripts'
   | 'write_claude_settings'
   | 'write_codex_settings'
+  | 'write_openclaw_settings'
   | string
 
 export type PluginRuntime = 'node'
@@ -154,10 +155,23 @@ export interface PluginClientManifest {
 }
 
 export interface PluginAttachProbeManifest {
-  format: 'json' | 'toml'
+  format: 'json' | 'toml' | 'json_path'
   settings_file: string
   marker_key?: string
   marker_header?: string
+  /**
+   * `json_path` only: dotted path to the managed object whose presence
+   * means the client is attached (e.g. `models.providers.hypaware`).
+   * Segments are plain literals split on `.` with no escaping, so a
+   * key containing a dot cannot be addressed.
+   */
+  marker_path?: string
+  /**
+   * `json_path` only: dotted path RELATIVE to the marker object to a
+   * string property holding the JSON-encoded self-describing undo
+   * record (e.g. `headers.x-hypaware-marker`).
+   */
+  marker_record?: string
 }
 
 export interface PluginCommandManifest {

@@ -369,13 +369,21 @@ function errorDetail(err) {
  * @param {string} upstreamHost
  * @returns {OutgoingHttpHeaders}
  */
-function forwardHeaders(reqHeaders, upstreamHost) {
+export function forwardHeaders(reqHeaders, upstreamHost) {
   /** @type {OutgoingHttpHeaders} */
   const out = {}
   for (const key of Object.keys(reqHeaders)) {
     const lower = key.toLowerCase()
     if (lower === 'host') continue
     if (HOP_BY_HOP_HEADERS.has(lower)) continue
+    // `x-hypaware-*` request headers are gateway-local metadata that
+    // client adapters inject for projector matching (e.g. OpenClaw's
+    // `x-hypaware-client` and its `x-hypaware-marker` undo record).
+    // They are stripped here, AFTER the exchange recorder captured the
+    // original request headers, so projectors still see them but no
+    // provider ever does.
+    // @ref LLP 0109#consequences [implements]: inert metadata, never forwarded upstream
+    if (lower.startsWith('x-hypaware-')) continue
     const value = reqHeaders[key]
     if (value === undefined) continue
     out[key] = value

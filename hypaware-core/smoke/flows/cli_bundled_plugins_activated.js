@@ -19,7 +19,8 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *     adapter (the adapter's own `client.attach` span fires with
  *     `dry_run=true` and the dry-run banner lands on stdout).
  *  3. `hyp attach --client codex --dry-run` reaches the Codex adapter
- *     (same shape).
+ *     (same shape), and `hyp attach --client openclaw --dry-run`
+ *     reaches the OpenClaw adapter against a seeded OPENCLAW_HOME.
  *  4. `hyp status --json` emits a stable JSON document listing the
  *     configured sources, sinks, clients, and active plugins. Because
  *     neither `@hypaware/central` nor `@hypaware/gascity` is in this
@@ -46,10 +47,11 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // Stage a v2 config that selects six of the nine V1-bundled
-  // plugins. `@hypaware/format-jsonl`, `@hypaware/s3`, and
-  // `@hypaware/format-iceberg` are intentionally omitted so the smoke
-  // can assert the "skipped" log surface. `@hypaware/central` and
+  // Stage a v2 config that selects seven of the V1-bundled plugins.
+  // `@hypaware/format-jsonl`, `@hypaware/s3`, `@hypaware/format-iceberg`,
+  // `@hypaware/context-graph`, and `@hypaware/ai-gateway-graph` are
+  // intentionally omitted so the smoke can assert the "skipped" log
+  // surface. `@hypaware/central` and
   // `@hypaware/gascity` are not in this config, they are excluded from
   // default activation but activatable via explicit config.
   const configPath = defaultConfigPath(harness.hypHome)
@@ -58,9 +60,20 @@ export async function run({ harness, expect }) {
     version: 2,
     plugins: [
       {
+        // A concrete `listen` port (not `:0`) is load-bearing for the
+        // OpenClaw dry-run below: `hyp attach --dry-run` derives the
+        // gateway endpoint from this configured `listen` (the source is
+        // never started in a CLI dispatch, so `localEndpoint()` is
+        // unavailable), and the OpenClaw adapter only runs
+        // `readSettings()`/`prepareAttach()` against the seeded config
+        // when that derived port is defined - a `:0` listen resolves to
+        // port 0, which the adapter treats as the unstarted placeholder
+        // and skips the validation entirely. The port is never bound in
+        // this smoke (activation registers the source without listening),
+        // so a fixed value cannot collide across parallel runs.
         name: '@hypaware/ai-gateway',
         config: {
-          listen: '127.0.0.1:0',
+          listen: '127.0.0.1:4317',
           upstreams: [
             { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' },
           ],
@@ -74,6 +87,7 @@ export async function run({ harness, expect }) {
       },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
       { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/openclaw' },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
     ],
@@ -119,6 +133,7 @@ export async function run({ harness, expect }) {
     '@hypaware/codex',
     '@hypaware/format-parquet',
     '@hypaware/local-fs',
+    '@hypaware/openclaw',
     '@hypaware/otel',
   ]
   expect.that(
@@ -178,6 +193,58 @@ export async function run({ harness, expect }) {
     (v) => typeof v === 'string' && v.includes('(dry-run) Would attach Codex')
   )
 
+  // ----- 3b. hyp attach --client openclaw --dry-run -----
+  // Seeded OPENCLAW_HOME keeps the step hermetic: the adapter refuses a
+  // missing settings file or a non-Anthropic primary (LLP 0109), so the
+  // real user HOME must never leak into this dispatch. The placeholder
+  // API key suppresses the unset-ANTHROPIC_API_KEY stderr warning.
+  const openclawHome = path.join(harness.hypHome, 'openclaw-home')
+  await fs.mkdir(openclawHome, { recursive: true })
+  await fs.writeFile(
+    path.join(openclawHome, 'openclaw.json'),
+    JSON.stringify({
+      agents: { defaults: { model: { primary: 'anthropic/claude-opus-4-8' } } },
+    }, null, 2) + '\n'
+  )
+  // The adapter reads its activation ctx.env, which is process.env in
+  // this in-process dispatch (same convention claude_attach_detach uses
+  // for HOME), so the overrides must go on process.env for the step.
+  const openclawEnv = {
+    ...baseEnv,
+    OPENCLAW_HOME: openclawHome,
+    ANTHROPIC_API_KEY: 'smoke-placeholder',
+  }
+  const prevOpenclawHome = process.env.OPENCLAW_HOME
+  const prevAnthropicKey = process.env.ANTHROPIC_API_KEY
+  process.env.OPENCLAW_HOME = openclawHome
+  process.env.ANTHROPIC_API_KEY = 'smoke-placeholder'
+  const openclawStdout = makeBuf()
+  const openclawStderr = makeBuf()
+  /** @type {number} */
+  let openclawCode
+  try {
+    openclawCode = await dispatch(
+      ['attach', '--client', 'openclaw', '--dry-run'],
+      { stdout: openclawStdout, stderr: openclawStderr, env: openclawEnv }
+    )
+  } finally {
+    if (prevOpenclawHome === undefined) delete process.env.OPENCLAW_HOME
+    else process.env.OPENCLAW_HOME = prevOpenclawHome
+    if (prevAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = prevAnthropicKey
+  }
+  expect.that('dispatch: hyp attach --client openclaw --dry-run exited 0', openclawCode, (v) => v === 0)
+  expect.that(
+    'stderr: openclaw attach dry-run had no errors',
+    openclawStderr.text(),
+    (v) => typeof v === 'string' && v.length === 0
+  )
+  expect.that(
+    "stdout: openclaw dry-run prints '(dry-run) Would attach OpenClaw'",
+    openclawStdout.text(),
+    (v) => typeof v === 'string' && v.includes('(dry-run) Would attach OpenClaw')
+  )
+
   // ----- 4. hyp status --json -----
   const statusStdout = makeBuf()
   const statusStderr = makeBuf()
@@ -205,9 +272,10 @@ export async function run({ harness, expect }) {
     (v) => Array.isArray(v) && v.includes('ai-gateway') && v.includes('otlp')
   )
   expect.that(
-    'status: clients include claude and codex',
+    'status: clients include claude, codex, and openclaw',
     (status?.clients ?? []).slice().sort(),
-    (v) => Array.isArray(v) && v.join(',').includes('claude') && v.join(',').includes('codex')
+    (v) => Array.isArray(v) && v.join(',').includes('claude') && v.join(',').includes('codex') &&
+      v.join(',').includes('openclaw')
   )
   expect.that(
     'status: daemon block is present with a deterministic shape',
@@ -256,18 +324,19 @@ export async function run({ harness, expect }) {
     (/** @type {any} */ s) => s.attributes?.boot_profile === 'config'
   )
   expect.that(
-    'traces: at least one config-profile boot reports plugins_activated=6',
+    'traces: at least one config-profile boot reports plugins_activated=7',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_activated),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 6)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 7)
   )
   // Skipped = allowlist plugins this flow's config does not name (the
   // excluded-from-default set never reaches the skip loop). Bumps
-  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST, most
-  // recently @hypaware/context-graph (3 -> 4).
+  // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
+  // this flow's config: currently format-jsonl, s3, format-iceberg,
+  // context-graph, and ai-gateway-graph (5).
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=4',
+    'traces: at least one config-profile boot reports plugins_skipped=5',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 4)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 5)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/openclaw",
+  "version": "1.0.0",
+  "description": "OpenClaw client adapter for HypAware. Injects a dedicated 'hypaware' model provider into OpenClaw's openclaw.json to route Anthropic traffic through the local AI gateway, and projects the captured Anthropic Messages exchanges into ai_gateway_messages.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_openclaw_settings"
+  ],
+  "requires": {
+    "capabilities": {
+      "hypaware.ai-gateway": "^2.0.0"
+    }
+  },
+  "contributes": {
+    "client": {
+      "name": "openclaw",
+      "skill_dir": ".openclaw/skills",
+      "attach_probe": {
+        "format": "json_path",
+        "settings_file": ".openclaw/openclaw.json",
+        "marker_path": "models.providers.hypaware",
+        "marker_record": "headers.x-hypaware-marker"
+      },
+      "required_upstreams": ["anthropic"]
+    },
+    "config_sections": [
+      {
+        "section": "openclaw",
+        "summary": "OpenClaw adapter config, including the optional attach-on-join policy { on_join }."
+      }
+    ]
+  }
+}
