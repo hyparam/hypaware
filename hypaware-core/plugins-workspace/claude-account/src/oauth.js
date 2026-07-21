@@ -17,7 +17,7 @@ export const OAUTH_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
 export const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
 export const OAUTH_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback'
 export const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
-export const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference'
+export const OAUTH_SCOPES = 'user:inference'
 
 /** Header a subscription OAuth bearer must ride beside on API calls. */
 export const OAUTH_BETA_HEADER = 'oauth-2025-04-20'
@@ -38,20 +38,21 @@ function base64url(buf) {
 export function createAuthorizationAttempt() {
   const verifier = base64url(randomBytes(32))
   const challenge = base64url(createHash('sha256').update(verifier).digest())
-  const state = base64url(randomBytes(16))
+  const state = base64url(randomBytes(32))
   return { verifier, challenge, state }
 }
 
 /**
  * @param {{ challenge: string, state: string }} attempt
+ * @param {string} [redirectUri] loopback callback for the listener flow; defaults to the manual code-display page
  * @returns {string}
  */
-export function buildAuthorizeUrl(attempt) {
+export function buildAuthorizeUrl(attempt, redirectUri = OAUTH_REDIRECT_URI) {
   const url = new URL(OAUTH_AUTHORIZE_URL)
   url.searchParams.set('code', 'true')
   url.searchParams.set('client_id', OAUTH_CLIENT_ID)
   url.searchParams.set('response_type', 'code')
-  url.searchParams.set('redirect_uri', OAUTH_REDIRECT_URI)
+  url.searchParams.set('redirect_uri', redirectUri)
   url.searchParams.set('scope', OAUTH_SCOPES)
   url.searchParams.set('code_challenge', attempt.challenge)
   url.searchParams.set('code_challenge_method', 'S256')
@@ -92,6 +93,7 @@ export function parsePastedAuthorization(input) {
  *   code: string,
  *   state: string,
  *   attempt: { verifier: string, state: string },
+ *   redirectUri?: string,
  *   fetchImpl?: typeof fetch,
  *   now?: () => number,
  * }} opts
@@ -106,7 +108,8 @@ export async function exchangeAuthorizationCode(opts) {
     code: opts.code,
     state: opts.state,
     client_id: OAUTH_CLIENT_ID,
-    redirect_uri: OAUTH_REDIRECT_URI,
+    // Must match the redirect_uri the authorize request carried.
+    redirect_uri: opts.redirectUri ?? OAUTH_REDIRECT_URI,
     code_verifier: opts.attempt.verifier,
   }, opts.fetchImpl)
   return grantToRecord(grant, opts.now ?? Date.now)

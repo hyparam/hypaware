@@ -1,5 +1,7 @@
 // @ts-check
 
+import { spawn } from 'node:child_process'
+import http from 'node:http'
 import readline from 'node:readline/promises'
 
 import { CLAUDE_ACCOUNT_CONFIG_SECTION, resolveMode, validateClaudeAccountConfig } from './config.js'
@@ -145,19 +147,31 @@ async function runLogin(cmdCtx, mode, stateDir) {
     return 1
   }
   const attempt = createAuthorizationAttempt()
-  const url = buildAuthorizeUrl(attempt)
+  // Loopback-callback flow: the consumer authorize endpoint accepts a
+  // localhost redirect (the Claude CLI's own login shape) where the
+  // hosted code-display callback gets 'invalid request format'. The
+  // paste prompt stays as a fallback and races the listener.
+  const callback = await startCallbackServer(attempt.state)
+  const redirectUri = callback ? `http://localhost:${callback.port}/callback` : undefined
+  const url = buildAuthorizeUrl(attempt, redirectUri)
   cmdCtx.stdout.write('Sign in with your Claude account.\n\n')
-  cmdCtx.stdout.write(`Open this URL in your browser:\n\n  ${url}\n\n`)
-  cmdCtx.stdout.write('After authorizing, the page shows a code. Paste it below.\n')
+  cmdCtx.stdout.write(`Opening your browser (or open this URL yourself):\n\n  ${url}\n\n`)
+  cmdCtx.stdout.write('Waiting for the browser; if it cannot reach this machine, paste the code below.\n')
+  openInBrowser(url)
 
   const rl = readline.createInterface({
     input: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
     output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (cmdCtx.stdout)),
   })
   try {
-    const pasted = await rl.question('Code: ')
-    const { code, state } = parsePastedAuthorization(pasted)
-    const record = await exchangeAuthorizationCode({ code, state, attempt })
+    const pastePromise = rl.question('Code: ').then((pasted) => parsePastedAuthorization(pasted))
+    // A settled race leaves the loser pending; readline close (finally)
+    // rejects a pending question, so keep that rejection handled.
+    pastePromise.catch(() => {})
+    const { code, state } = await (callback
+      ? Promise.race([callback.result, pastePromise])
+      : pastePromise)
+    const record = await exchangeAuthorizationCode({ code, state, attempt, redirectUri })
     const filePath = credentialFilePath(stateDir)
     await withCredentialLock(filePath, async () => {
       writeStoredCredential(filePath, record)
@@ -170,6 +184,75 @@ async function runLogin(cmdCtx, mode, stateDir) {
     return 1
   } finally {
     rl.close()
+    callback?.close()
+  }
+}
+
+/**
+ * Bind an ephemeral loopback HTTP listener for the OAuth redirect. The
+ * returned `result` resolves with the callback's code+state once the
+ * browser lands on it; `close` tears the listener down. Resolves null
+ * when the bind fails (sandboxed/odd environments), in which case the
+ * caller falls back to the manual code-display flow.
+ *
+ * @param {string} expectedState
+ * @returns {Promise<{ port: number, result: Promise<{ code: string, state: string }>, close: () => void } | null>}
+ */
+function startCallbackServer(expectedState) {
+  return new Promise((resolve) => {
+    const server = http.createServer()
+    /** @type {(value: { code: string, state: string }) => void} */
+    let settle = () => {}
+    /** @type {Promise<{ code: string, state: string }>} */
+    const result = new Promise((res) => { settle = res })
+    server.on('request', (req, res) => {
+      const requestUrl = new URL(req.url ?? '/', 'http://localhost')
+      if (requestUrl.pathname !== '/callback') {
+        res.statusCode = 404
+        res.end()
+        return
+      }
+      const code = requestUrl.searchParams.get('code')
+      const state = requestUrl.searchParams.get('state')
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      if (!code || state !== expectedState) {
+        res.statusCode = 400
+        res.end('<p>Sign-in failed (bad callback); return to the terminal.</p>')
+        return
+      }
+      res.end('<p>Signed in. You can close this tab and return to the terminal.</p>')
+      settle({ code, state })
+    })
+    server.on('error', () => resolve(null))
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address !== 'object') {
+        resolve(null)
+        return
+      }
+      resolve({ port: address.port, result, close: () => server.close() })
+    })
+  })
+}
+
+/**
+ * Best-effort: open the sign-in URL in the default browser, the way the
+ * Claude CLI's own login does. The printed URL stays the source of
+ * truth; a missing opener or headless session just skips silently.
+ *
+ * @param {string} url
+ */
+function openInBrowser(url) {
+  const opener = process.platform === 'darwin' ? 'open'
+    : process.platform === 'win32' ? 'cmd'
+    : 'xdg-open'
+  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
+  try {
+    const child = spawn(opener, args, { stdio: 'ignore', detached: true })
+    child.on('error', () => {})
+    child.unref()
+  } catch {
+    // No opener available: the URL is printed above; nothing else to do.
   }
 }
 
