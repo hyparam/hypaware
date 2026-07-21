@@ -143,14 +143,19 @@ async function markFirstSyncHoldBestEffort(stateDir) {
   }
 }
 
+const FIRST_SYNC_RULE = '─'.repeat(62)
+
 /**
  * The first-sync deadline message: an absolute local time, a statement that
  * the first sync includes backfilled history, and the `hypaware-privacy`
  * skill invocation hint ([LLP 0100 §flow](../../../llp/0100-enrollment-privacy-review.spec.md#flow)
- * example copy). Printed to stderr unconditionally - the same wording on a
- * TTY or a non-TTY login, since neither case is a prompt (LLP 0063 D3
- * stands): this is a consent-surface statement, pinned by tests like the
- * other consent surfaces.
+ * example copy), set off from the surrounding login chatter by rule lines so
+ * the review hint is not buried mid-stream. Printed to stderr
+ * unconditionally - the same wording on a TTY or a non-TTY login, since
+ * neither case is a prompt (LLP 0063 D3 stands): this is a consent-surface
+ * statement, pinned by tests like the other consent surfaces. Each pinned
+ * phrase stays whole on its own line so the content assertions survive the
+ * decoration.
  *
  * @ref LLP 0100#requirements [implements]: R1 - absolute deadline, backfill statement, skill hint, same on TTY and non-TTY
  * @param {number} deadlineMs
@@ -159,8 +164,17 @@ async function markFirstSyncHoldBestEffort(stateDir) {
  */
 export function firstSyncHoldMessage(deadlineMs, centralUrl) {
   return (
-    `first sync to ${centralUrl} is ${formatFirstSyncDeadline(deadlineMs)} and includes your backfilled history\n` +
-    "  to review what ships before then, open Claude or Codex and run the hypaware-privacy skill\n"
+    '\n' +
+    `${FIRST_SYNC_RULE}\n` +
+    '  PRIVACY - review before first sync\n' +
+    '\n' +
+    `  first sync to ${centralUrl} is ${formatFirstSyncDeadline(deadlineMs)}\n` +
+    '  and includes your backfilled history\n' +
+    '\n' +
+    '  to review what ships before then,\n' +
+    '  open Claude or Codex and run the hypaware-privacy skill\n' +
+    `${FIRST_SYNC_RULE}\n` +
+    '\n'
   )
 }
 
