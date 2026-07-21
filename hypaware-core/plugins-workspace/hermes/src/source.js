@@ -40,6 +40,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { AI_GATEWAY_MESSAGES_DATASET, PROJECTED_EXCHANGE_KIND } from '../../../../src/core/backfill/scan_util.js'
+import { resolveHermesEnabled } from './config.js'
 import { HermesStateDbError } from './errors.js'
 import { HERMES_CLIENT_NAME, projectHermesSession } from './projector.js'
 import { openHermesStateDb } from './state_db.js'
@@ -83,6 +84,14 @@ export const HERMES_PARTITION_SEGMENT = 'hermes'
  * @returns {Promise<StartedSource>}
  */
 export async function startHermesSource(ctx) {
+  // @ref LLP 0122#config [implements]: the `enabled: false` static kill switch.
+  // It is enforced here (in the `start` callback), not in `activate()`, so it
+  // holds no matter who starts the source. `activate()` only registers the
+  // source; the daemon runtime is the sole starter (issue #348), and it starts
+  // every registered source unconditionally, so the gate has to live on this
+  // side of the boundary.
+  if (!resolveHermesEnabled(ctx.config)) return createDisabledSource(ctx)
+
   const runner = createHermesPollRunner(ctx)
   let activeCtx = ctx
   let stopped = false
@@ -166,6 +175,40 @@ export async function startHermesSource(ctx) {
 }
 
 /**
+ * The `StartedSource` returned when `enabled: false` turns ongoing capture
+ * off (LLP 0122#config). It opens nothing, runs no timer, and reports a
+ * stable disabled status, so a kill-switched source is a clean no-op the
+ * daemon can list without special-casing. `hyp backfill hermes` is
+ * unaffected: the backfill provider is registered independently in
+ * `activate()`.
+ *
+ * @param {PluginActivationContext} ctx
+ * @returns {StartedSource}
+ */
+function createDisabledSource(ctx) {
+  const homeDir = resolveHomeDir(ctx)
+  const stateDbPath = resolveStateDbPath(ctx, homeDir)
+  ctx.log.info('hermes.source_disabled', {
+    component: 'hermes',
+    operation: 'hermes.start',
+    state_db: stateDbPath,
+    detail: 'hermes.enabled = false',
+  })
+  return {
+    async status() {
+      return {
+        state: 'ready',
+        message: 'hermes ongoing capture disabled (hermes.enabled = false)',
+        rowsWritten: 0,
+        details: { state_db: stateDbPath, enabled: false },
+      }
+    },
+    async reload() {},
+    async stop() {},
+  }
+}
+
+/**
  * Build a fresh {@link HermesPollRunner} from the activation context's
  * config slice. Exported so tests can drive {@link runHermesPollTick}
  * directly, without going through `startHermesSource`'s timer.
@@ -182,6 +225,8 @@ export function createHermesPollRunner(ctx) {
     homeDir,
     stateDir: ctx.paths.stateDir,
     resolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyList }),
+    // Seed only: `runHermesPollTick` re-mints this per tick so the shared
+    // materializer re-scans committed rows every tick (LLP 0122#watermark).
     devRunId: randomUUID(),
     db: null,
     watermark: {},
@@ -210,6 +255,19 @@ export function createHermesPollRunner(ctx) {
  * @returns {Promise<void>}
  */
 export async function runHermesPollTick(runner, ctx) {
+  // @ref LLP 0122#watermark [implements]: refresh the dedupe scan every tick.
+  // The shared `ai_gateway.projected_exchange` materializer memoizes its
+  // committed-`part_id` seen-set per `devRunId` and never refreshes it while
+  // the id is stable. A daemon runner that reused one id for its whole
+  // lifetime therefore never re-observed rows committed between ticks (by an
+  // earlier tick, a `hyp backfill`, or - before the activation fix - a
+  // concurrent CLI poll), so whole-session re-projection re-appended the
+  // already-written prefix instead of dropping it (issue #348). Minting a
+  // fresh id per tick forces a fresh committed scan, so an already-written
+  // prefix is dropped on every re-projection (spec R2). The id is minted once
+  // per tick (not per session), so sessions within a tick still share one scan
+  // and dedupe against each other.
+  runner.devRunId = randomUUID()
   try {
     await withSpan(
       'hermes.poll',

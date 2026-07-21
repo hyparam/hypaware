@@ -13,10 +13,9 @@
  *   claude/codex adapters, registered beside them in the plugins workspace.
  *
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  */
 
-import { HERMES_CONFIG_SECTION, resolveHermesEnabled, validateHermesConfig } from './config.js'
+import { HERMES_CONFIG_SECTION, validateHermesConfig } from './config.js'
 import { createHermesBackfillProvider } from './backfill.js'
 import { HERMES_CLIENT_NAME } from './projector.js'
 import { resolveHomeDir, resolveStateDbPath, startHermesSource } from './source.js'
@@ -40,14 +39,24 @@ export const configSection = { section: HERMES_CONFIG_SECTION, validate: validat
  * Registers the `[hermes]` config section, the `hermes` backfill provider
  * (always available: `hyp backfill hermes` behaves the same whether or not
  * ongoing capture is enabled), and the `hermes` poll source. The source is
- * always *registered* so it is discoverable and its config section wired,
- * but only *started* when `enabled` resolves true (LLP 0122#config):
- * `enabled: false` is a static kill switch for ongoing capture, distinct
- * from the source's own missing-`state.db` idle mode (spec R9), which
- * applies either way once started.
+ * only *registered* here, never started: activation runs on every kernel
+ * boot (every `hyp` CLI invocation), and the daemon runtime is the sole
+ * starter of registered sources (`src/core/daemon/runtime.js`,
+ * `startConfiguredSources`). This mirrors `@hypaware/claude` and
+ * `@hypaware/codex`, which register their capture wiring in `activate()`
+ * and never start it in-process. Starting a poll source from `activate()`
+ * ran a full poll tick on every CLI boot, concurrently with the daemon
+ * runner, producing duplicate `part_id` rows (issue #348).
+ *
+ * The `enabled: false` kill switch (LLP 0122#config) is honored inside the
+ * source's own `start` callback (`startHermesSource`), so it applies no
+ * matter who starts the source, and the `state.db` idle mode (spec R9)
+ * still applies once started.
  *
  * @param {PluginActivationContext} ctx
  * @ref LLP 0121 [implements]: config section + source + backfill registration, no dataset of its own
+ * @ref LLP 0118#requirements [implements]: spec R6 ongoing capture is wired by
+ *   registering the source; the daemon runtime, not activation, starts it.
  */
 export async function activate(ctx) {
   ctx.configRegistry.registerSection({
@@ -76,9 +85,4 @@ export async function activate(ctx) {
       pluginName: PLUGIN_NAME,
     })
   )
-
-  if (resolveHermesEnabled(ctx.config)) {
-    const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
-    await sources.start(SOURCE_NAME, ctx)
-  }
 }
