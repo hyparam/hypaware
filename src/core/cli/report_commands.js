@@ -22,6 +22,7 @@ import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_clien
 import { positionals, valueFlag } from './remote_commands.js'
 
 /**
+ * @import { Stats } from 'node:fs'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -78,7 +79,7 @@ export async function runReportPublish(argv, ctx) {
   let body
   /** @type {string} */
   let contentType
-  /** @type {import('node:fs').Stats} */
+  /** @type {Stats} */
   let stat
   try {
     stat = await fs.stat(source)
