@@ -396,7 +396,7 @@ function errorKind(err) {
 }
 
 /** @param {PluginActivationContext} ctx @returns {string} */
-function resolveHomeDir(ctx) {
+export function resolveHomeDir(ctx) {
   return ctx.env.HOME ?? os.homedir()
 }
 
@@ -409,7 +409,7 @@ function resolveHomeDir(ctx) {
  * @param {string} homeDir
  * @returns {string}
  */
-function resolveStateDbPath(ctx, homeDir) {
+export function resolveStateDbPath(ctx, homeDir) {
   const config = /** @type {Record<string, unknown>} */ (ctx.config ?? {})
   const raw = config.state_db
   if (typeof raw === 'string' && raw.trim().length > 0) return expandHome(raw.trim(), homeDir)
@@ -423,7 +423,8 @@ function expandHome(raw, homeDir) {
   return raw
 }
 
-const DURATION_RE = /^(\d+)(ms|s|m|h)$/
+/** Duration string shape `poll_interval` accepts: an integer plus an `ms`/`s`/`m`/`h` suffix. Exported so `config.js` validates against the same pattern this module parses. */
+export const DURATION_RE = /^(\d+)(ms|s|m|h)$/
 
 /**
  * Resolve `poll_interval` from config (LLP 0122#config's
@@ -435,7 +436,7 @@ const DURATION_RE = /^(\d+)(ms|s|m|h)$/
  * @param {PluginActivationContext} ctx
  * @returns {number}
  */
-function resolvePollIntervalMs(ctx) {
+export function resolvePollIntervalMs(ctx) {
   const config = /** @type {Record<string, unknown>} */ (ctx.config ?? {})
   const raw = config.poll_interval
   if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.round(raw)
