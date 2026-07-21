@@ -36,11 +36,9 @@
       { "name": "hypaware-graph", "clients": ["codex"] },
       { "name": "hypaware-sensitive-scan", "clients": ["codex"] },
       { "name": "hypaware-ai-usage-report", "clients": ["codex"] },
-      { "name": "hypaware-ai-adoption-report", "clients": ["codex"] },
-      { "name": "hypaware-ai-improvement-report", "clients": ["codex"] },
-      { "name": "hypaware-ai-security-report", "clients": ["codex"] },
-      { "name": "hypaware-ai-spend-report", "clients": ["codex"] },
-      { "name": "hypaware-report-to-html", "clients": ["codex"] }
+      { "name": "hypaware-report-to-html", "clients": ["codex"] },
+      { "name": "hypaware-publish-report", "clients": ["codex"] },
+      { "name": "hypaware-apply-report-changes", "clients": ["codex"] }
     ],
     "config_sections": [
       {
