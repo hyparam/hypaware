@@ -29,7 +29,23 @@ export const querySqlVerb = {
     properties: {
       sql: {
         type: 'string',
-        description: 'A single read-only SELECT over the registered datasets.',
+        description:
+          'A single read-only SELECT over the registered datasets. ' +
+          'Query rules (violations are the top observed failure causes): ' +
+          '(1) Always filter ai_gateway_messages on the date column (STRING, ' +
+          "'YYYY-MM-DD', e.g. date BETWEEN '2026-07-01' AND '2026-07-10'); " +
+          'unfiltered scans time out and can degrade the server for all ' +
+          'users. Keep date-filtered slices under about 10 days. ' +
+          '(2) Dialect: SELECT-only, no SHOW/DESCRIBE/information_schema. ' +
+          'String concat is ||. Column names: conversation_source (not ' +
+          'source), client_name (not cli). Only the date column compares as ' +
+          'a string: a TIMESTAMP column compared to a string silently ' +
+          'returns 0 rows. Token usage lives at JSON attributes.usage on ' +
+          "role='assistant' rows: JSON_EXTRACT(attributes, " +
+          "'$.usage.output_tokens'), CAST AS BIGINT. " +
+          '(3) Sums over ai_gateway_messages must deduplicate by part_id ' +
+          'first (the table can re-log rows): inner GROUP BY part_id with ' +
+          'MAX(...), then aggregate.',
         greedy: true,
       },
       // @ref LLP 0105#override [implements]: the informed-consent override; the help text names the transcript-capture consequence and bundled skills never pass it
