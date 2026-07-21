@@ -58,16 +58,32 @@ under the credential store's discipline (LLP 0117), never in the MDM
 payload. Credential rotation is local: the next helper run returns the new
 value, no profile re-push.
 
-<a id="helper-contract"></a>**The helper is `hyp claude-account
-credential` under Desktop's helper contract.** The contract, as probed from
-the app: print ONLY the credential to stdout, either a bare token or JSON
-`{"token", "headers"}`; helper-supplied headers merge over static config
-(helper wins); Desktop caches for the advertised ttl, refreshes at
-min(2 min, ttl/2), and re-runs the helper on an upstream 401. The helper
-must not live under a macOS TCC-protected directory (Documents, Desktop,
-Downloads). Subscription mode rides the JSON form to add the
-`anthropic-beta: oauth-2025-04-20` header beside the bearer token; org-key
-mode returns the key for the profile's configured auth scheme.
+<a id="helper-contract"></a>**The helper is a generated wrapper that runs
+`hyp claude-account credential`.** The contract, verified against the app
+bundle: `inferenceCredentialHelper` is a single string that must be an
+**absolute path to an executable, which Desktop runs with no arguments**,
+reading trimmed stdout; exit code must be `0`. Because the app passes no
+argv, the profile cannot reference `hyp claude-account credential` directly.
+`@hypaware/claude-desktop` therefore generates a tiny wrapper executable that
+`exec`s `hyp claude-account credential` and points the profile at the
+wrapper's absolute path (the shape the personal-machine prototype already
+proved). The wrapper is written under HypAware's state dir (`~/.hyp/...`),
+never a macOS TCC-protected directory (Documents, Desktop, Downloads), and is
+marked executable. Because Desktop launches it with the app's environment
+(no non-default `HYP_HOME` / `HYP_CONFIG`), the wrapper exports the config env
+captured at generation time so it resolves the same config the daemon uses no
+matter who launches it.
+
+`hyp claude-account credential` prints ONLY the credential to stdout as JSON
+`{"token", "headers", "ttlSec"}`; helper-supplied headers merge over static
+config (helper wins). Desktop caches for the advertised ttl
+(`inferenceCredentialHelperTtlSec`, default 3600), silently refreshes ahead
+of expiry, and re-runs the wrapper on an upstream 401. Subscription mode
+returns the `anthropic-beta: oauth-2025-04-20` header beside the bearer
+token; org-key mode returns the key for the profile's `x-api-key` scheme.
+(`inferenceCustomHeaders` is the app's static alternative for constant
+headers, but routing them through the helper keeps one code path and lets
+the beta header follow the credential kind.)
 
 ## Consequences
 

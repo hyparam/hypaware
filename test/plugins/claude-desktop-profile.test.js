@@ -9,6 +9,7 @@ import {
   DEFAULT_MODELS,
   STABLE_DEFAULT_LISTEN,
   buildManagedProfile,
+  renderCredentialHelperScript,
   renderManagedPreferencesPlist,
   resolveGatewayBaseUrl,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
@@ -92,13 +93,12 @@ test('resolveGatewayBaseUrl honors and normalizes the endpoint override', () => 
   )
 })
 
-test('buildManagedProfile renders the full payload and carries no secret material', () => {
+test('buildManagedProfile renders the app schema and carries no secret material', () => {
   const profile = buildManagedProfile({
     baseUrl: `http://${STABLE_DEFAULT_LISTEN}`,
     authScheme: 'bearer',
     models: [...DEFAULT_MODELS],
-    helperPath: '/usr/local/bin/hyp',
-    helperArgs: ['claude-account', 'credential'],
+    helperPath: '/Users/x/.hyp/hypaware/plugins/@hypaware/claude-desktop/credential-helper.sh',
     bundleId: 'com.anthropic.claudefordesktop',
   })
   assert.deepEqual(profile, {
@@ -111,9 +111,8 @@ test('buildManagedProfile renders the full payload and carries no secret materia
       'claude-haiku-4-5-20251001',
       'claude-fable-5',
     ],
-    inferenceCredentialKind: 'helper',
-    inferenceCredentialHelperPath: '/usr/local/bin/hyp',
-    inferenceCredentialHelperArgs: ['claude-account', 'credential'],
+    inferenceCredentialKind: 'helper-script',
+    inferenceCredentialHelper: '/Users/x/.hyp/hypaware/plugins/@hypaware/claude-desktop/credential-helper.sh',
   })
   const serialized = JSON.stringify(profile)
   assert.ok(!/sk-ant|api[_-]?key['":]/i.test(serialized), 'profile must not embed credentials')
@@ -124,11 +123,51 @@ test('org_key mode renders under the x-api-key scheme', () => {
     baseUrl: `http://${STABLE_DEFAULT_LISTEN}`,
     authScheme: 'x-api-key',
     models: ['claude-sonnet-5'],
-    helperPath: '/usr/local/bin/hyp',
-    helperArgs: ['claude-account', 'credential'],
+    helperPath: '/usr/local/hyp/credential-helper.sh',
     bundleId: 'com.anthropic.claudefordesktop',
   })
   assert.equal(profile.inferenceGatewayAuthScheme, 'x-api-key')
+  assert.equal(profile.inferenceCredentialKind, 'helper-script')
+})
+
+test('renderCredentialHelperScript wraps the credential command via the absolute interpreter, no args', () => {
+  const script = renderCredentialHelperScript({
+    nodeBin: '/usr/local/bin/node',
+    hypBin: '/usr/local/bin/hyp.js',
+    args: ['claude-account', 'credential'],
+  })
+  assert.ok(script.startsWith('#!/bin/sh\n'))
+  assert.ok(script.includes('exec /usr/local/bin/node /usr/local/bin/hyp.js claude-account credential'))
+})
+
+test('renderCredentialHelperScript shell-quotes a path with spaces', () => {
+  const script = renderCredentialHelperScript({
+    nodeBin: '/usr/local/bin/node',
+    hypBin: '/Applications/My App/hyp.js',
+    args: ['claude-account', 'credential'],
+  })
+  assert.ok(script.includes("exec /usr/local/bin/node '/Applications/My App/hyp.js' claude-account credential"))
+})
+
+test('renderCredentialHelperScript embeds a non-default HYP env, omits an empty one', () => {
+  const withEnv = renderCredentialHelperScript({
+    nodeBin: '/usr/local/bin/node',
+    hypBin: '/usr/local/bin/hyp.js',
+    args: ['claude-account', 'credential'],
+    env: { HYP_HOME: '/opt/hyp home', HYP_CONFIG: '/etc/hyp/config.json', UNRELATED: 'x' },
+  })
+  assert.ok(withEnv.includes("export HYP_HOME='/opt/hyp home'"))
+  assert.ok(withEnv.includes('export HYP_CONFIG=/etc/hyp/config.json'))
+  assert.ok(!withEnv.includes('UNRELATED'))
+  assert.ok(withEnv.indexOf('export HYP_HOME') < withEnv.indexOf('exec '))
+
+  const noEnv = renderCredentialHelperScript({
+    nodeBin: '/usr/local/bin/node',
+    hypBin: '/usr/local/bin/hyp.js',
+    args: ['claude-account', 'credential'],
+    env: {},
+  })
+  assert.ok(!noEnv.includes('export HYP_'))
 })
 
 test('renderManagedPreferencesPlist emits a well-formed dict', () => {
@@ -136,8 +175,7 @@ test('renderManagedPreferencesPlist emits a well-formed dict', () => {
     baseUrl: 'http://127.0.0.1:18521',
     authScheme: 'bearer',
     models: ['claude-sonnet-5', 'claude-opus-4-8'],
-    helperPath: '/path/with <angle>/hyp',
-    helperArgs: ['claude-account', 'credential'],
+    helperPath: '/path/with <angle>/credential-helper.sh',
     bundleId: 'com.anthropic.claudefordesktop',
   })
   const plist = renderManagedPreferencesPlist(profile)

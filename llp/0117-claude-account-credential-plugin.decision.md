@@ -54,6 +54,9 @@ the single owner of the Anthropic credential. It contributes the
 capability for other plugins (the Desktop profile renderer consumes it),
 and registers the `claude-account` CLI commands: `credential` (the LLP 0116
 helper surface), `login` / `logout` (subscription mode), and `status`.
+`credential` is invoked through the wrapper executable `@hypaware/claude-desktop`
+generates, because Desktop runs the helper with no arguments (LLP 0116); the
+command surface here is unchanged by that.
 
 <a id="mode-is-fleet-policy"></a>**The mode is a fleet-policy switch.**
 `claude_account.mode` selects `org_key` or `subscription`. Because plugin
