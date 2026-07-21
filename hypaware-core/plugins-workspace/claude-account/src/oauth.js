@@ -13,9 +13,9 @@ import { isPlainObject } from 'hypaware/core/util'
 // integration contract: they can change without notice, which is why
 // subscription mode is an informed opt-in rather than the fleet default.
 // @ref LLP 0117#tos-open-question [constrained-by]: unsupported surface; do not harden claims about it either way without verified terms text
-export const OAUTH_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
-export const OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
-export const OAUTH_REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback'
+export const OAUTH_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
+export const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
+export const OAUTH_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback'
 export const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference'
 
