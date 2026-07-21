@@ -10,7 +10,7 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import { HermesStateDbError } from './errors.js'
-import { projectHermesSession } from './projector.js'
+import { hermesTimestampToIso, projectHermesSession } from './projector.js'
 import { openHermesStateDb } from './state_db.js'
 
 /**
@@ -231,15 +231,18 @@ async function* runHermesBackfill(args) {
 }
 
 /**
- * A session's window key: its `started_at`, parsed to epoch millis. An
- * unparseable timestamp is treated as absent (kept by `filterByWindow`
- * rather than dropped), matching that helper's "no timestamp -> keep"
- * convention for legacy/malformed records.
+ * A session's window key: its `started_at`, parsed to epoch millis. Hermes
+ * stores `started_at` as an epoch-seconds REAL, so it is normalized to ISO
+ * (`hermesTimestampToIso`) before parsing, exactly like the projection seam;
+ * a bare `Date.parse` of the raw float would yield NaN and silently disable
+ * window filtering. An unparseable timestamp is treated as absent (kept by
+ * `filterByWindow` rather than dropped), matching that helper's "no timestamp
+ * -> keep" convention for legacy/malformed records.
  *
  * @param {HermesSessionRow} session
  * @returns {number | undefined}
  */
 function startedAtMs(session) {
-  const ms = Date.parse(session.started_at)
+  const ms = Date.parse(hermesTimestampToIso(session.started_at) ?? '')
   return Number.isFinite(ms) ? ms : undefined
 }

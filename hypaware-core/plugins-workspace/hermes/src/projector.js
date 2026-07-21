@@ -69,6 +69,38 @@ export function hermesScopeId(id) {
 }
 
 /**
+ * Convert a hermes stored timestamp to ISO-8601. Hermes records
+ * `messages.timestamp` and `sessions.started_at`/`ended_at` as epoch-seconds
+ * REAL (a float carrying fractional milliseconds), which `node:sqlite`
+ * surfaces as a JS number. The shared materializer keeps only STRING
+ * `message_created_at` / `conversation_started_at` values
+ * (`message_projector.js`: `stringValue(...) ?? tsStart`), so a raw number is
+ * silently discarded and every row falls back to the projection's wall-clock
+ * `tsStart`. Converting here, at the projection seam, is what makes the cached
+ * rows carry hermes's own stored times and stay identical across
+ * re-projections (so content-hash dedupe holds).
+ *
+ * `Math.round` on the millisecond product absorbs the ~1e-4 ms error a float
+ * epoch-seconds value carries, so a whole-millisecond instant round-trips
+ * exactly. An already-ISO string passes through unchanged (the reader documents
+ * ISO but hands columns back verbatim, and older/test fixtures are strings);
+ * NULL / absent / non-finite values yield `undefined` (nothing to stamp).
+ *
+ * @ref LLP 0122#projection [implements]: the timestamp column mapping emits the
+ *   ISO-8601 the `ai_gateway_messages` materializer consumes.
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+export function hermesTimestampToIso(value) {
+  if (value == null) return undefined
+  if (typeof value === 'string') return value.length > 0 ? value : undefined
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return new Date(Math.round(value * 1000)).toISOString()
+  }
+  return undefined
+}
+
+/**
  * The canonical per-channel policy scope path a channel session's `cwd` is
  * stamped with, so the standard `.hypignore` / machine-local marking
  * machinery governs channel sessions with no hermes-specific config
@@ -246,7 +278,7 @@ function sessionEndMessage(session) {
     role: 'system',
     content: [{ type: 'status', status: 'session_end' }],
     message_id: mintHermesSessionEndId(session.id),
-    message_created_at: session.ended_at,
+    message_created_at: hermesTimestampToIso(session.ended_at),
     attributes,
   }
 }
@@ -339,7 +371,7 @@ export async function projectHermesSession(args) {
         // `message_id` (which folds in session id + part index for
         // dedupe-safe identity per spec R2).
         provider_uuid: String(row.id),
-        message_created_at: row.timestamp,
+        message_created_at: hermesTimestampToIso(row.timestamp),
       }
       if (i === lastIndex) {
         if (row.token_count != null) projected.attributes = { usage: { total_tokens: row.token_count } }
@@ -366,7 +398,8 @@ export async function projectHermesSession(args) {
     entrypoint: session.source,
     messages: projectedMessages,
   }
-  if (session.started_at) exchange.conversation_started_at = session.started_at
+  const conversationStartedAt = hermesTimestampToIso(session.started_at)
+  if (conversationStartedAt) exchange.conversation_started_at = conversationStartedAt
   if (session.model) exchange.model = session.model
   if (session.system_prompt) exchange.system_text = session.system_prompt
   if (session.parent_session_id != null) exchange.parent_thread_id = hermesScopeId(session.parent_session_id)
