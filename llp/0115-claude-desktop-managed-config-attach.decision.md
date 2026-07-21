@@ -1,7 +1,7 @@
 # LLP 0115: Claude Desktop attaches via org-managed 3P-inference config
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway, Onboarding
 **Author:** Phil / Claude
 **Date:** 2026-07-20

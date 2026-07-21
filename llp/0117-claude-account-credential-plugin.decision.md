@@ -1,7 +1,7 @@
 # LLP 0117: @hypaware/claude-account owns the Anthropic credential; the kind is a fleet-policy switch
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Config, CLI
 **Author:** Phil / Claude
 **Date:** 2026-07-20
