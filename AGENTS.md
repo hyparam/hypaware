@@ -140,3 +140,77 @@ npm run smoke -- daemon_foreground_start_stop
   usually means the file changed underneath you (a formatter or another agent).
 - If the same Edit fails twice, stop retrying: re-read, rebuild the edit from
   the current content, or fall back to Write.
+
+## Repository layout
+
+```
+src/
+  core/                 # the kernel
+    observability/      # tracer, logger, meter, attrs, span helpers
+    manifest.js
+    dep_graph.js
+    registry/           # capabilities, commands, datasets, sources, sinks
+    runtime/            # paths, activation, loader, daemon runtime
+    cache/              # intrinsic Iceberg-backed cache
+    cli/                # dispatch, walkthrough, core_commands
+    config/             # v2 schema, validator
+    daemon/             # platform installers (launchd / systemd) + lifecycle
+    plugin_install/     # resolver, fetch, lock, update_check
+    sinks/              # cron driver + encoder utility
+hypaware-core/
+  smoke/                # `hyp smoke <name>` flows
+  plugins-workspace/
+    ai-gateway/         # @hypaware/ai-gateway
+    otel/               # @hypaware/otel
+    local-fs/           # @hypaware/local-fs
+    format-parquet/     # @hypaware/format-parquet
+    format-jsonl/       # @hypaware/format-jsonl
+    claude/             # @hypaware/claude
+    codex/              # @hypaware/codex
+    central/            # @hypaware/central (bundled, opt-in via `hyp join`)
+    gascity/            # @hypaware/gascity (bundled, opt-in)
+bin/
+  hypaware.js           # CLI entrypoint (bound to both `hypaware` and `hyp`)
+```
+
+## Release checklist
+
+Run before tagging a new HypAware release:
+
+```sh
+npm test                  # if a test script is present
+npm run typecheck         # if a typecheck script is present
+npm pack --dry-run        # verify the published file set
+```
+
+Re-run the smoke battery and confirm every one is green:
+
+```sh
+hyp smoke package_bin_boot
+hyp smoke cli_bundled_plugins_activated
+hyp smoke daemon_foreground_start_stop
+hyp smoke daemon_install_render
+hyp smoke walkthrough_picker_to_first_query
+hyp smoke client_attach_idempotent
+hyp smoke gateway_claude_capture
+hyp smoke gateway_codex_capture
+hyp smoke hypignore_capture_drop
+hyp smoke local_only_export_withhold
+hyp smoke otel_loopback_capture
+hyp smoke local_parquet_export
+hyp smoke status_diagnostics
+```
+
+Finally, exercise the manual gate end-to-end on at least one macOS host
+and one Linux host:
+
+```sh
+npm pack
+npx ./hypaware-*.tgz
+hypaware status
+hypaware daemon restart
+hypaware query sql "select count(*) from ai_gateway_messages"
+hypaware query sql "select count(*) from traces"
+hypaware query sql "select count(*) from logs"
+hypaware daemon uninstall
+```
