@@ -117,6 +117,36 @@ export function deriveMcpEndpoint(url) {
   return parsed.toString()
 }
 
+/** The path hypaware-server mounts its reports plane at. */
+const REPORTS_PATH = '/v1/reports'
+
+/**
+ * Derive the reports endpoint (`<base>/v1/reports`) from the one registered
+ * target URL. Third sibling of {@link deriveIdentityBase} and
+ * {@link deriveMcpEndpoint}: a registered URL whose path already ends in
+ * `/v1/mcp` (the originally-documented form) is a server base wearing its MCP
+ * suffix, so that suffix is stripped before appending the reports path; any
+ * path prefix before it is preserved. An unparseable URL is returned unchanged
+ * so this never masks a bad URL.
+ *
+ * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
+ * @returns {string}
+ * @ref LLP 0111#endpoint [implements]: reports endpoint derives from the registered base; no second URL is configured
+ */
+export function deriveReportsEndpoint(url) {
+  /** @type {URL} */
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return url
+  }
+  let trimmedPath = parsed.pathname.replace(/\/+$/, '')
+  if (trimmedPath.endsWith(MCP_PATH)) trimmedPath = trimmedPath.slice(0, -MCP_PATH.length)
+  parsed.pathname = `${trimmedPath}${REPORTS_PATH}`
+  return parsed.toString()
+}
+
 /**
  * @param {string} stateDir
  * @returns {string}

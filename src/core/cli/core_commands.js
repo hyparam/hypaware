@@ -2,6 +2,7 @@
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteRemove } from './remote_commands.js'
+import { runReportDelete, runReportGet, runReportList, runReportPublish } from './report_commands.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
 import { makeGroupCommand } from './group_help.js'
@@ -463,6 +464,52 @@ function buildCoreCommands(registry) {
       summary: 'Remove a remote target and its stored token',
       usage: 'hyp remote remove <name>',
       run: runRemoteRemove,
+    },
+    // @ref LLP 0111#not-verbs [constrained-by]: report subcommands stay REST commands, never ctx.verbs; MCP report tools are the server's to register
+    makeGroupCommand({
+      registry,
+      name: 'report',
+      summary: "Publish and read reports on a remote server's reports plane",
+      help:
+        "Reports are server-hosted (there is no local reports plane); every\n" +
+        'subcommand takes --remote <target> and defaults to the default remote\n' +
+        "target, the same resolution as bare --remote on queries. Reads use\n" +
+        'your login session; publish and delete need the publisher role (or an\n' +
+        "operator-minted publish token stored via 'hyp remote login <target>\n" +
+        "--token-file <path>').",
+    }),
+    {
+      name: 'report publish',
+      summary: "Publish a report (single .html/.md file, or a folder bundle) to the org's reports plane",
+      usage: 'hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]',
+      help: [
+        'A file publishes a single document; a folder publishes a bundle (its',
+        'root must contain report.html or report.md, built with the system',
+        "tar as --format=ustar). kind names the report family (e.g.",
+        "usage-review); period is the covered slice (e.g. 2026-W29).",
+        '--org applies only with the operator admin token, which must name',
+        'its org explicitly.',
+      ].join('\n'),
+      run: runReportPublish,
+    },
+    {
+      name: 'report list',
+      summary: "List the org's published reports (newest first)",
+      usage: 'hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <publishedAt>] [--org <org>] [--json] [--remote <target>]',
+      run: runReportList,
+    },
+    {
+      name: 'report get',
+      summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
+      usage: 'hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]',
+      run: runReportGet,
+    },
+    {
+      name: 'report delete',
+      summary: "Delete a published report from the org's reports plane (destructive)",
+      usage: 'hyp report delete <kind> <period> <id> [--yes] [--org <org>] [--remote <target>]',
+      help: 'Org-wide and permanent: the report disappears for every member.\nPrompts on a TTY; pass --yes to delete non-interactively.',
+      run: runReportDelete,
     },
     {
       name: 'version',
