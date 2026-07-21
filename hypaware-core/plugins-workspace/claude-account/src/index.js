@@ -150,7 +150,10 @@ async function runLogin(cmdCtx, mode, stateDir) {
   cmdCtx.stdout.write(`Open this URL in your browser:\n\n  ${url}\n\n`)
   cmdCtx.stdout.write('After authorizing, the page shows a code. Paste it below.\n')
 
-  const rl = readline.createInterface({ input: cmdCtx.stdin, output: cmdCtx.stdout })
+  const rl = readline.createInterface({
+    input: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
+    output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (cmdCtx.stdout)),
+  })
   try {
     const pasted = await rl.question('Code: ')
     const { code, state } = parsePastedAuthorization(pasted)

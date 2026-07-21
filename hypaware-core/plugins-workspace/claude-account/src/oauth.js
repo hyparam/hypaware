@@ -154,7 +154,7 @@ async function postTokenGrant(body, fetchImpl) {
     || typeof json.expires_in !== 'number') {
     throw new Error('token endpoint returned an unrecognized shape')
   }
-  return /** @type {OauthTokenGrant} */ (json)
+  return /** @type {OauthTokenGrant} */ (/** @type {unknown} */ (json))
 }
 
 /**

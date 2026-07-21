@@ -24,7 +24,7 @@ function hypConfigWithGateway(gatewayConfig) {
   return {
     version: 2,
     plugins: [
-      { name: /** @type {never} */ ('@hypaware/ai-gateway'), config: gatewayConfig },
+      { name: /** @type {never} */ ('@hypaware/ai-gateway'), config: /** @type {any} */ (gatewayConfig) },
       { name: /** @type {never} */ ('@hypaware/claude') },
     ],
   }

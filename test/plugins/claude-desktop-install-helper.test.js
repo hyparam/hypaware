@@ -21,26 +21,28 @@ import {
 function fakeCtx(opts) {
   /** @type {Map<string, any>} */
   const commands = new Map()
-  return {
-    ctx: {
-      config: {},
-      paths: { stateDir: opts.stateDir },
-      log: { info() {}, warn() {}, error() {}, debug() {} },
-      configRegistry: { registerSection() {} },
-      commands: { register(cmd) { commands.set(cmd.name, cmd) } },
-      requireCapability(name) {
-        if (name === 'hypaware.ai-gateway') return {}
-        if (name === 'hypaware.anthropic-credential') {
-          return { mode: opts.mode, helperCommandArgs: ['claude-account', 'credential'] }
-        }
-        throw new Error(`unexpected capability ${name}`)
-      },
+  const ctx = /** @type {any} */ ({
+    config: {},
+    paths: { stateDir: opts.stateDir },
+    log: { info() {}, warn() {}, error() {}, debug() {} },
+    configRegistry: { registerSection() {} },
+    commands: { register(/** @type {any} */ cmd) { commands.set(cmd.name, cmd) } },
+    requireCapability(/** @type {string} */ name) {
+      if (name === 'hypaware.ai-gateway') return {}
+      if (name === 'hypaware.anthropic-credential') {
+        return { mode: opts.mode, helperCommandArgs: ['claude-account', 'credential'] }
+      }
+      throw new Error(`unexpected capability ${name}`)
     },
-    commands,
-  }
+  })
+  return { ctx, commands }
 }
 
-/** @param {(argv: string[], cmdCtx: any) => Promise<number>} run */
+/**
+ * @param {(argv: string[], cmdCtx: any) => Promise<number>} run
+ * @param {string[]} argv
+ * @param {any} [config]
+ */
 async function invoke(run, argv, config) {
   let out = ''
   let err = ''
