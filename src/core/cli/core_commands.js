@@ -416,6 +416,7 @@ function buildCoreCommands(registry) {
       usage: 'hyp remote remove <name>',
       run: runRemoteRemove,
     },
+    // @ref LLP 0111#not-verbs [constrained-by]: report subcommands stay REST commands, never ctx.verbs; MCP report tools are the server's to register
     makeGroupCommand({
       registry,
       name: 'report',

@@ -60,6 +60,7 @@ export async function runReportPublish(argv, ctx) {
   const source = positionals(argv, VALUE_FLAGS)[0]
   const kind = valueFlag(argv, '--kind').value
   const period = valueFlag(argv, '--period').value
+  // @ref LLP 0111#period-explicit [constrained-by]: period is the coverage window only the generator knows; never default it from the current date
   if (!source || !kind || !period) {
     ctx.stderr.write('usage: hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]\n')
     return 2

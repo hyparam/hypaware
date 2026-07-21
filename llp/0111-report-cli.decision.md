@@ -81,6 +81,37 @@ publish-scope holder can delete any of the org's reports, server LLP 0053's
 write-side face), so it follows `hyp purge`'s confirmation posture
 (LLP 0104) rather than `remote remove`'s silent one.
 
+<a id="period-explicit"></a>**`--period` is always explicit; there is no
+default and no `auto` sentinel.** The established convention (the
+`hypaware-publish-report` skill) makes period the report's *coverage
+window*, never the publish date: a weekly report about week 28 published on
+Monday of week 29 must say `2026-W28`. A now-derived default would silently
+mislabel exactly that most-common case, and the CLI can never compute the
+coverage window - only the report generator that did the date math knows
+it. The actual scheduled publishers are the report skills, which already
+compute their date range, so the ergonomic win of a default is near zero.
+This also keeps the server's period grammar genuinely open rather than
+freezing an ISO-week convention client-side.
+
+<a id="not-verbs"></a>**The `report` group stays a REST command group; MCP
+report tools are the server's to register.** LLP 0034 subsumes bespoke REST
+with MCP tools for *query-shaped* operations (typed params in, structured
+result out), and the reports plane is mostly not that: publish uploads
+local file bytes, get streams arbitrary binary artifacts (images, fonts)
+where base64-in-JSON would bloat a 32 MiB bundle, and the REST routes must
+exist anyway for the browser-viewing story. Only `list` is purely
+query-shaped, and routing it over MCP while its siblings ride REST would
+split the auth and error handling (including the write-401 messaging
+above) for no gain. Nor do report verbs belong in the *client* registry:
+the plane is server-only, so a client verb would have no local operation,
+and the verb surface has no remote-only exposure class. Agent reach comes
+from the server side instead, per LLP 0034's zero-client-change promise: a
+server-registered read-class `report_list` / entry-document `report_get`
+tool appears to every direct-installed MCP client and to the `hyp mcp
+--remote` proxy with no change in this repo. That registration is a
+server-corpus decision (LLP 0034 §server-coordination pattern); this
+document only records why the client does not mirror it.
+
 <a id="write-401"></a>**A write 401 that survives the refresh retry is
 explained as scope, not only expiry.** The server answers 401 (not 403) to
 a valid read-class session that lacks `report-publish`, so on publish and
@@ -104,13 +135,18 @@ or store a publish token. Reads keep `describeAuthRejection` unchanged.
 ## Open questions
 
 - `hyp report open <kind> <period> <id>`: launch the entry document in a
-  browser once the server's cookie-session viewing story lands (server
-  LLP 0060 open question).
-- Report list/get as MCP verbs, so agents reach reports through the same
-  tool surface as queries (mirrors the server-side MCP open question).
-- Period ergonomics: a `--period` default derived from the current ISO week
-  would help scheduled publishes, but freezes a convention (`2026-W29`) the
-  server deliberately left open.
+  browser. Blocked on the server's cookie-session viewing story (server
+  LLP 0060 open question): a browser holds no bearer, so the URL the
+  command would open cannot authenticate yet. An interim download-and-open
+  was considered and rejected: a bundle's entry `report.html` references
+  sibling assets a lone temp file breaks, the API has no manifest route to
+  mirror a bundle from, and a `.md` entry document opened via `file://`
+  renders as plain text. `hyp report get --output` already covers the
+  single-`.html` case an interim would have served. Once server viewing
+  lands, `open` is a URL derivation plus platform launcher, nothing more.
+- Server-side `report_list` / `report_get` read-class MCP tools: proposed
+  to the server corpus (see #not-verbs); until the server registers them,
+  agents without a logged-in `hyp` have no report reach.
 
 ## References
 
