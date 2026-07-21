@@ -24,7 +24,7 @@ test('createAuthorizationAttempt derives the S256 challenge from the verifier', 
 test('buildAuthorizeUrl carries the PKCE and state parameters', () => {
   const attempt = { challenge: 'chal', state: 'st4te' }
   const url = new URL(buildAuthorizeUrl(attempt))
-  assert.equal(url.origin, 'https://claude.ai')
+  assert.equal(url.origin, 'https://claude.com')
   assert.equal(url.searchParams.get('client_id'), OAUTH_CLIENT_ID)
   assert.equal(url.searchParams.get('redirect_uri'), OAUTH_REDIRECT_URI)
   assert.equal(url.searchParams.get('code_challenge'), 'chal')
