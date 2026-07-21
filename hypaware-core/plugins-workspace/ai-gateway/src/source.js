@@ -7,7 +7,7 @@ import {
   getLogger,
 } from '../../../../src/core/observability/index.js'
 
-import { compileConfig } from './config.js'
+import { compileConfig, FALLBACK_LISTEN } from './config.js'
 import { createControlHandler } from './control.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createAiGatewayMessageProjector } from './message_projector.js'
@@ -18,7 +18,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
 
 /**
  * @import { PluginActivationContext, SourceStatus, StartedSource } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { FinishedRow, GatewayState, StartedProxy, UpstreamConfig } from './types.js'
+ * @import { AiGatewayConfig, FinishedRow, GatewayState, StartedProxy, UpstreamConfig } from './types.js'
  * @import { Exchange } from './recorder.js'
  */
 
@@ -36,8 +36,8 @@ export function createStartSource(state) {
    * @returns {Promise<StartedSource>}
    */
   return async function startAiGatewaySource(ctx) {
-    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined }} */
-    const liveState = { rowsWritten: 0, exchangeBytes: 0, lastError: undefined }
+    /** @type {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined }} */
+    const liveState = { rowsWritten: 0, exchangeBytes: 0, lastError: undefined, listenFallbackFrom: undefined }
 
     let proxy = await launchListener(ctx, state, liveState)
 
@@ -56,6 +56,11 @@ export function createStartSource(state) {
             // @ref LLP 0066#ephemeral — surface the live opt-out count so an
             // operator can see an active session drop without grepping logs.
             ignored_sessions: state.ignoredSessions.size,
+            // @ref LLP 0114#fallback-is-visible [implements]: a fallback boot is
+            // readable from status.json steadily, not only from a boot-time log line
+            ...(liveState.listenFallbackFrom
+              ? { listen_fallback: true, listen_fallback_from: liveState.listenFallbackFrom }
+              : {}),
           },
         }
         if (liveState.lastError) status.lastError = liveState.lastError
@@ -88,7 +93,7 @@ export function createStartSource(state) {
  *
  * @param {PluginActivationContext} ctx
  * @param {GatewayState} state
- * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined }} liveState
+ * @param {{ rowsWritten: number, exchangeBytes: number, lastError: string | undefined, listenFallbackFrom: string | undefined }} liveState
  * @returns {Promise<StartedProxy>}
  */
 async function launchListener(ctx, state, liveState) {
@@ -159,8 +164,9 @@ async function launchListener(ctx, state, liveState) {
     }
   }
 
-  const proxy = await startProxy({
-    listen: config.listen,
+  /** @param {string} listen */
+  const bind = (listen) => startProxy({
+    listen,
     upstreams: mergeUpstreams(config.upstreams, state),
     startExchange: (init) => recorder.startExchange(init),
     onExchangeFinished,
@@ -169,6 +175,14 @@ async function launchListener(ctx, state, liveState) {
     // before upstream matching, never proxied, no exchange recorded.
     // @ref LLP 0066#control-path
     onControlRequest: createControlHandler({ ignoredSessions: state.ignoredSessions, log: ctx.log }),
+  })
+
+  liveState.listenFallbackFrom = undefined
+  const proxy = await bindProxyWithFallback({
+    config,
+    bind,
+    log: ctx.log,
+    onFallback: () => { liveState.listenFallbackFrom = config.listen },
   })
 
   state.listen = { host: proxy.host, port: proxy.port }
@@ -181,6 +195,35 @@ async function launchListener(ctx, state, liveState) {
   }
 
   return proxy
+}
+
+/**
+ * Bind the listener at the compiled `listen` address, falling back to an
+ * ephemeral bind when - and only when - the address was the *default* and its
+ * port is already taken. A configured `listen` is a stated requirement, so its
+ * bind failure (and any non-EADDRINUSE failure) propagates unchanged.
+ *
+ * `onFallback` fires just before the fallback bind so the caller can record
+ * "this boot is on the fallback path" for the steady status surface.
+ *
+ * @param {{ config: AiGatewayConfig, bind: (listen: string) => Promise<StartedProxy>, log: { warn(message: string, fields?: Record<string, unknown>): void }, onFallback?: () => void }} args
+ * @returns {Promise<StartedProxy>}
+ * @ref LLP 0114#ephemeral-fallback [implements]: a defaulted listen whose port is taken falls back to an ephemeral bind; a configured listen fails loudly
+ */
+export async function bindProxyWithFallback({ config, bind, log, onFallback }) {
+  try {
+    return await bind(config.listen)
+  } catch (err) {
+    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+    if (config.listenConfigured || code !== 'EADDRINUSE') throw err
+    log.warn('aigw.default_port_taken', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      listen: config.listen,
+      fallback: FALLBACK_LISTEN,
+    })
+    onFallback?.()
+    return bind(FALLBACK_LISTEN)
+  }
 }
 
 /**
