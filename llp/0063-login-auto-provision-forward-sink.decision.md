@@ -1,7 +1,7 @@
 # LLP 0063: Login-initiated enrollment — auto-provision the central sink
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Active
 **Systems:** CLI, Onboarding, Sinks, Gateway
 **Author:** Kenny / Claude
 **Date:** 2026-07-04

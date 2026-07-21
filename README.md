@@ -5,17 +5,48 @@ Modular logs and telemetry collector. Plugin-kernel architecture.
 HypAware captures conversations and traffic from local AI clients (Claude
 Code, Codex), raw Anthropic / OpenAI API traffic, and OpenTelemetry
 logs / traces / metrics into a local query cache and optional Parquet
-exports. It runs fully local by default, no central server required, and a
-host can optionally join a fleet (`hyp join`) to forward its recordings to a
-central server.
+exports.
+
+There are two ways to run it:
+
+- **Solo, fully local.** No central server, no account. Everything stays in
+  a local query cache on your machine. Start with [`npx hypaware`](#quickstart-solo-fully-local).
+- **With your team.** Each machine signs into your organization on the
+  central server with one command, [`hyp remote login`](#set-up-for-your-team-hyp-remote-login),
+  and forwards its recordings there so usage, spend, and activity can be
+  queried and reported across the whole team.
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
-## Quickstart
+**Contents:**
+[Requirements](#requirements) ·
+[Quickstart](#quickstart-solo-fully-local) ·
+[Team setup](#set-up-for-your-team-hyp-remote-login) ·
+[Files](#files-and-directories) ·
+[Querying](#querying-captured-data) ·
+[Activity graph](#building-and-querying-the-activity-graph) ·
+[Clients](#attaching-and-detaching-ai-clients) ·
+[Privacy controls](#controlling-what-is-recorded-and-forwarded) ·
+[Daemon](#daemon-lifecycle) ·
+[Troubleshooting](#troubleshooting) ·
+[Uninstalling](#uninstalling) ·
+[Project documents](#project-documents)
+
+## Requirements
+
+- Node.js >= 22.12
+- macOS (launchd) or Linux (systemd `--user`) for the persistent daemon
+
+## Quickstart (solo, fully local)
 
 ```sh
 npx hypaware
 ```
+
+When run through `npx`, the walkthrough also installs a durable global copy
+of the CLI (`npm install -g hypaware`) so the daemon and the `hyp` command
+outlive the `npx` cache. Every command below is available as both `hyp` and
+`hypaware`.
 
 On a TTY this launches the interactive walkthrough:
 
@@ -60,10 +91,56 @@ Other init flags:
 | `--from-file <config.json>`| Skip the picker and load a known-good config            |
 | `--bin <path>`             | Override the binary path the daemon installer uses      |
 
-## Joining a centrally-managed fleet (`hyp join`)
+## Set up for your team (`hyp remote login`)
 
-`hyp join` enrolls a host in a fleet so its recordings are forwarded to a
-central sink:
+If your organization is set up on the central server, enrolling a machine is
+one command:
+
+```sh
+npx hypaware remote login
+```
+
+This opens a browser sign-in. Your organization is resolved from your work
+email domain, and the machine enrolls itself: it provisions the forwarding
+sink, stores a per-machine credential (mode `0600`, never in shell history),
+installs the persistent daemon, and starts capturing and forwarding. No
+bootstrap token, no URL to copy, no hand-edited config.
+
+The same sign-in also unlocks remote queries, so you can ask questions
+across the whole team's recordings, not just this machine's:
+
+```sh
+hyp query sql "select count(*) from ai_gateway_messages" --remote
+```
+
+**Privacy review before anything ships.** Nothing is forwarded immediately.
+The first sync (which includes backfilled history) waits until at least
+11:59pm local time on the day you enroll, and the login prints the exact
+deadline. Before then, open Claude or Codex and run the `hypaware-privacy`
+skill to review what will ship, mark directories ignore / local-only / sync,
+and purge anything sensitive.
+
+Useful login flags: `--no-forward` signs in for remote queries only (no
+enrollment), `--no-browser` prints the sign-in URL instead of opening one,
+`--token-file <path>` / stdin supply a static token, and `--host <label>`
+overrides the host label the server shows for this machine.
+
+> **Want this for your team?** We host organizations on the central server.
+> [Get in touch](https://hypstack.ai/) and we will set one up for your email
+> domain; after that, everyone on the team onboards with the single
+> `hyp remote login` above.
+
+For the full rollout story (fleet tokens, managed config, Claude Desktop
+capture, verifying machines) see the
+[team setup guide](./docs/TEAM_SETUP.md); for what enrollment means for
+each person's data, see
+[what HypAware records and how to control it](./docs/PRIVACY.md).
+
+### Unattended enrollment (`hyp join`)
+
+For scripted rollouts (MDM, dotfiles, CI images) where no browser is
+available, `hyp join` enrolls a host with a fleet policy token instead of an
+interactive sign-in:
 
 ```sh
 hyp join <url> [token]
@@ -139,7 +216,7 @@ behalf.
 
 ## Attaching and detaching AI clients
 
-Attach a single client (idempotent — running twice is a no-op):
+Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
 hyp attach claude
@@ -166,45 +243,45 @@ scripting. Claude writes only HypAware-related keys to
 `~/.claude/settings.json`; Codex writes a `hypaware` provider entry to
 `~/.codex/config.toml`. Unrelated keys in either file are preserved.
 
-## Opting a folder out of recording (`.hypignore`)
+## Controlling what is recorded and forwarded
 
-A `.hypignore` file declares a data-usage policy for a directory subtree. It
-currently carries exactly one class, `ignore`: AI gateway exchanges (Claude /
-Codex) whose working directory is at or under a directory containing a
-`.hypignore` are never written to the local cache. The live LLM call is
-untouched; only persistence is suppressed.
+Every directory subtree resolves to a usage class, evaluated gitignore-style
+from an exchange's working directory: `sync` (recorded, forwarded to the
+team server if enrolled; the default), `local-only` (recorded, never
+forwarded), or `ignore` (never recorded; the live LLM call is untouched,
+only persistence is suppressed). When multiple markings apply, the most
+restrictive wins.
 
-Resolution is gitignore-style: from an exchange's `cwd`, HypAware walks up the
-directory tree, and any `.hypignore` found on the way governs. Dropping one
-file at a repo root covers the whole repo, but the file works anywhere in the
-ancestor chain, including outside a git repo.
-
-Manage it with the CLI (idempotent; hand-authoring the dotfile is optional):
+There are two ways to mark a subtree:
 
 ```sh
-hyp ignore              # write a .hypignore at the repo root (or cwd if not in a repo)
-hyp ignore <path>       # ignore a specific directory subtree
-hyp ignore --check      # report whether cwd is ignored, which file governs, and
-                        # how many already-cached rows from the scope remain
-hyp unignore            # remove the governing .hypignore, re-enabling recording
+hyp ignore [path]                     # write a committable .hypignore dotfile (travels with the repo)
+hyp unignore [path]                   # remove it, re-enabling recording
+
+hyp policy set <path> ignore          # same effect, stored machine-local (no dotfile in the repo)
+hyp policy set <path> local-only      # recorded but never forwarded
+hyp policy set <path> sync            # explicitly synced, not asked again
+hyp policy show [path]                # which class governs, and from which source
+hyp policy list                       # every machine-local entry
+hyp policy unset <path> [class]       # back to the implicit default
 ```
 
-`hyp ignore` writes a self-documenting file (a comment header plus the `ignore`
-token); an empty or comment-only `.hypignore` also means `ignore`. Pass
-`--json` to `hyp ignore` for a machine-readable result.
+Markings are prospective only: rows captured before a marking existed stay
+in the cache. Delete those with the separate destructive step:
 
-Two things to know:
+```sh
+hyp purge <path> | --session <id> | --ignored | --all   # delete already-cached rows (prompts; --yes to skip)
+```
 
-- **Prospective only.** A `.hypignore` gates future recording and backfills.
-  Rows already captured before the file existed are left in place; `hyp ignore
-  --check` surfaces that residual count.
-- **Folder matching needs a `cwd`.** Only the Claude and Codex pathways supply
-  one, so `.hypignore` is a no-op for the `raw-anthropic` / `raw-openai`
-  proxy and OTEL sources.
+To pause recording for just the current Claude or Codex session (in-memory,
+reversible) use the `hypaware-ignore` and `hypaware-unignore` skills.
 
-To pause recording for just the current Claude session (in-memory, reversible,
-not committed) use the `/hypaware-ignore` and `/hypaware-unignore` skills
-instead.
+The full model, including what enrollment forwards and the first-sync
+privacy review, is in
+[what HypAware records and how to control it](./docs/PRIVACY.md). One
+caveat worth repeating: directory markings need a working directory, which
+only the Claude and Codex pathways supply, so they are a no-op for the
+`raw-anthropic` / `raw-openai` proxy and OTEL sources.
 
 ## Daemon lifecycle
 
@@ -218,7 +295,7 @@ hyp daemon uninstall    # remove the service file (config + recordings are kept)
 ```
 
 `hyp daemon install --dry-run --json` prints the rendered plist or unit
-content and target paths without touching the filesystem — useful for
+content and target paths without touching the filesystem, useful for
 verifying what `hyp init` will install.
 
 ## Troubleshooting
@@ -254,99 +331,51 @@ run directly. The common Phase 8 conditions:
 
 Useful follow-on commands when a diagnostic fires:
 
-- `hyp daemon restart` — bounce the persistent daemon
-- `hyp daemon install` — re-install the launchd / systemd unit
-- `hyp attach --client claude` / `hyp attach --client codex` — wire a
+- `hyp daemon restart`: bounce the persistent daemon
+- `hyp daemon install`: re-install the launchd / systemd unit
+- `hyp attach --client claude` / `hyp attach --client codex`: wire a
   selected client into the local gateway
-- `hyp init --from-file <path>` — rebuild the config from a known-good
+- `hyp init --from-file <path>`: rebuild the config from a known-good
   file without re-running the interactive picker
 
-## Release checklist
+## Uninstalling
 
-Run before tagging a new HypAware release:
-
-```sh
-npm test                  # if a test script is present
-npm run typecheck         # if a typecheck script is present
-npm pack --dry-run        # verify the published file set
-```
-
-Re-run the smoke battery and confirm every one is green:
+To remove HypAware from a machine completely:
 
 ```sh
-hyp smoke package_bin_boot
-hyp smoke cli_bundled_plugins_activated
-hyp smoke daemon_foreground_start_stop
-hyp smoke daemon_install_render
-hyp smoke walkthrough_picker_to_first_query
-hyp smoke client_attach_idempotent
-hyp smoke gateway_claude_capture
-hyp smoke gateway_codex_capture
-hyp smoke hypignore_capture_drop
-hyp smoke local_only_export_withhold
-hyp smoke otel_loopback_capture
-hyp smoke local_parquet_export
-hyp smoke status_diagnostics
+hyp leave                     # only if enrolled with a team server: stop forwarding, drop the credential
+hyp detach claude             # restore each attached client's own settings
+hyp detach codex
+hyp daemon uninstall          # remove the launchd / systemd service file
+npm uninstall -g hypaware     # remove the CLI
+rm -rf ~/.hyp                 # delete all local recordings, config, and state
 ```
 
-Finally, exercise the manual gate end-to-end on at least one macOS host
-and one Linux host:
-
-```sh
-npm pack
-npx ./hypaware-*.tgz
-hypaware status
-hypaware daemon restart
-hypaware query sql "select count(*) from ai_gateway_messages"
-hypaware query sql "select count(*) from traces"
-hypaware query sql "select count(*) from logs"
-hypaware daemon uninstall
-```
-
-## Layout
-
-```
-src/
-  core/                 # the kernel
-    observability/      # tracer, logger, meter, attrs, span helpers
-    manifest.js
-    dep_graph.js
-    registry/           # capabilities, commands, datasets, sources, sinks
-    runtime/            # paths, activation, loader, daemon runtime
-    cache/              # intrinsic Iceberg-backed cache
-    cli/                # dispatch, walkthrough, core_commands
-    config/             # v2 schema, validator
-    daemon/             # platform installers (launchd / systemd) + lifecycle
-    plugin_install/     # resolver, fetch, lock, update_check
-    sinks/              # cron driver + encoder utility
-hypaware-core/
-  smoke/                # `hyp smoke <name>` flows
-  plugins-workspace/
-    ai-gateway/         # @hypaware/ai-gateway
-    otel/               # @hypaware/otel
-    local-fs/           # @hypaware/local-fs
-    format-parquet/     # @hypaware/format-parquet
-    format-jsonl/       # @hypaware/format-jsonl
-    claude/             # @hypaware/claude
-    codex/              # @hypaware/codex
-    central/            # @hypaware/central (bundled, opt-in via `hyp join`)
-    gascity/            # @hypaware/gascity (bundled, opt-in)
-bin/
-  hypaware.js           # CLI entrypoint (bound to both `hypaware` and `hyp`)
-```
+The first four steps are non-destructive and reversible; deleting `~/.hyp`
+permanently removes every local recording. Note that copies already
+forwarded to a team server or exported to Parquet are not affected; see
+[docs/PRIVACY.md](./docs/PRIVACY.md).
 
 ## Project documents
+
+User-facing guides live under [`docs/`](./docs/):
+
+- [`docs/TEAM_SETUP.md`](./docs/TEAM_SETUP.md): rolling HypAware out across a team
+- [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
+- [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp plugin new` / `hyp plugin doctor`)
+
+Contributor material (repository layout, release checklist, test model)
+lives in [`AGENTS.md`](./AGENTS.md).
 
 Design rationale lives in numbered **LLP documents** under [`llp/`](./llp/)
 (Linked Literate Programming). Start here:
 
-- [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md) — root overview and subsystem map
-- [`llp/0002-v1-scope.decision.md`](./llp/0002-v1-scope.decision.md) — what actually shipped in V1
-- [`llp/0001-adopting-llp.plan.md`](./llp/0001-adopting-llp.plan.md) — how this docs system was set up
+- [`llp/0000-hypaware.explainer.md`](./llp/0000-hypaware.explainer.md): root overview and subsystem map
+- [`llp/0002-v1-scope.decision.md`](./llp/0002-v1-scope.decision.md): what actually shipped in V1
+- [`llp/0001-adopting-llp.plan.md`](./llp/0001-adopting-llp.plan.md): how this docs system was set up
 
 The former monolithic docs (`hypaware-design.md`, `finish-v1.md`,
 `hypaware-implementation-plan.md`) were decomposed into the LLP corpus and are
-preserved under [`llp/tombstones/`](./llp/tombstones/).
-
-- [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md) — how to write a plugin (`hyp plugin new` / `hyp plugin doctor`)
-- [`hypaware-plugin-kernel-types.d.ts`](./hypaware-plugin-kernel-types.d.ts) — public plugin interfaces
+preserved under [`llp/tombstones/`](./llp/tombstones/). Public plugin
+interfaces are declared in
+[`hypaware-plugin-kernel-types.d.ts`](./hypaware-plugin-kernel-types.d.ts).
