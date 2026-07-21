@@ -29,7 +29,7 @@
     "hypaware-plugin-kernel-types.d.ts"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "scripts": {
     "test": "node scripts/run-tests.js",

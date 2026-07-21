@@ -28,6 +28,7 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
   '@hypaware/otel',
   '@hypaware/claude',
   '@hypaware/codex',
+  '@hypaware/hermes',
   '@hypaware/openclaw',
   '@hypaware/local-fs',
   '@hypaware/s3',

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/hermes",
+  "version": "1.0.0",
+  "description": "Hermes Agent client adapter for HypAware. Reads Hermes's own state.db read-only (LLP 0119) and materializes sessions/messages into ai_gateway_messages via the shared ai_gateway.projected_exchange materializer (LLP 0120): a backfill provider for history and a poll source for ongoing capture. No gateway proxying, no changes to Hermes.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.12",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "read_home",
+    "read_state",
+    "write_state"
+  ],
+  "requires": {
+    "plugins": {
+      "@hypaware/ai-gateway": "^2.0.0"
+    }
+  },
+  "contributes": {
+    "config_sections": [
+      {
+        "section": "hermes",
+        "summary": "Hermes adapter config: enabled, state_db (override), poll_interval."
+      }
+    ],
+    "sources": [{ "name": "hermes" }]
+  }
+}
