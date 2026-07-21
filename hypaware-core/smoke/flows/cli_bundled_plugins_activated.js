@@ -332,11 +332,11 @@ export async function run({ harness, expect }) {
   // excluded-from-default set never reaches the skip loop). Bumps
   // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
   // this flow's config: currently format-jsonl, s3, format-iceberg,
-  // context-graph, and ai-gateway-graph (5).
+  // context-graph, ai-gateway-graph, and hermes (6).
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=5',
+    'traces: at least one config-profile boot reports plugins_skipped=6',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 5)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 6)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
