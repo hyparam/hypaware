@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/claude-account",
+  "version": "1.0.0",
+  "description": "Owns the Anthropic credential for attached clients that cannot hold their own (Claude Desktop). Fleet policy picks the credential kind: a static org API key, or a per-user Claude subscription sign-in. Exposes the credential-helper command Desktop's managed 3P-inference profile points at.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "provides": {
+    "capabilities": {
+      "hypaware.anthropic-credential": "1.0.0"
+    }
+  },
+  "contributes": {
+    "commands": [
+      { "name": "claude-account credential", "summary": "Print the resolved Anthropic credential (Desktop helper contract)" },
+      { "name": "claude-account login", "summary": "Sign in with your Claude account (subscription mode)" },
+      { "name": "claude-account logout", "summary": "Forget the stored subscription credential" },
+      { "name": "claude-account status", "summary": "Show credential mode and sign-in state" }
+    ],
+    "config_sections": [
+      {
+        "section": "claude_account",
+        "summary": "Anthropic credential policy: { mode: 'org_key' | 'subscription', api_key?, api_key_env? }. A central config that names this section locks the mode fleet-wide."
+      }
+    ]
+  }
+}

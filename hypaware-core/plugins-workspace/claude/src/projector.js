@@ -8,6 +8,7 @@ import {
   anthropicMessageAttributes,
   anthropicMessages,
   claudeAuxKind,
+  claudeClientName,
   claudeClientVersion,
   hasAnthropicHeaderSignature,
   headerValue,
@@ -91,7 +92,10 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 export function createClaudeExchangeProjector(opts) {
   const projectsDir = opts.projectsDir ?? defaultClaudeProjectsDir(opts.homeDir)
   const stateFile = opts.stateFile
-  const clientName = opts.clientName ?? 'claude'
+  // Fallback client name for non-Desktop Anthropic traffic; the actual
+  // name is resolved per exchange from the User-Agent (LLP 0115) so
+  // Claude Desktop rows are attributed to `claude-desktop`, not `claude`.
+  const defaultClientName = opts.clientName ?? 'claude'
   const logger = opts.logger
   // Cached by size+mtime so the capture hot path re-reads the channel
   // only when the hook appended a record.
@@ -237,6 +241,7 @@ export function createClaudeExchangeProjector(opts) {
         sessionId
       )
       const conversationSource = anthropicConversationSource(headers)
+      const clientName = claudeClientName(headers, defaultClientName)
       const clientVersion = claudeClientVersion(headers)
       const conversationFields = anthropicConversationFields(reqBody, responseBody)
       const exchangeAttrs = anthropicExchangeAttributes(
