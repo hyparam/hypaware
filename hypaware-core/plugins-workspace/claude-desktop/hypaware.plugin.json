@@ -16,6 +16,7 @@
   "contributes": {
     "commands": [
       { "name": "claude-desktop profile", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
+      { "name": "claude-desktop install-helper", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
       { "name": "claude-desktop status", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" }
     ],
     "config_sections": [
