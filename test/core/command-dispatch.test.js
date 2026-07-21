@@ -796,6 +796,35 @@ function fakeClientKernel() {
   return { registry, kernel, calls }
 }
 
+test('dispatch forwards a real stdin to command run when the caller omits opts.stdin', async () => {
+  // Regression for #352: the bin entry calls `dispatch(argv)` with no opts,
+  // so a command that reads stdin (e.g. `hyp claude-account login`) received
+  // `ctx.stdin === undefined` and wrongly reported "needs an interactive
+  // terminal". stdin must default to `process.stdin`, just as stdout/stderr do.
+  const registry = createCommandRegistry()
+  /** @type {unknown} */
+  let seenStdin = 'not-run'
+  registry.register({
+    name: 'stdinprobe',
+    summary: 'Capture the stdin dispatch hands the command',
+    usage: 'hyp stdinprobe',
+    async run(_argv, ctx) {
+      seenStdin = ctx.stdin
+      return 0
+    },
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  // Deliberately omit `stdin` from opts, mirroring `dispatch(argv)` in bin.
+  const code = await dispatch(['stdinprobe'], { stdout, stderr, registry, kernel })
+
+  assert.equal(code, 0)
+  assert.equal(stderr.text(), '')
+  assert.equal(seenStdin, process.stdin)
+})
+
 function makeBuf() {
   let value = ''
   return {
