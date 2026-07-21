@@ -10,6 +10,8 @@ import { collectHypAwareStatus, gatewaySourceDetails, writeStatusFile } from '..
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
+/** @import { CollectStatusOptions } from '../../src/core/daemon/types.js' */
+
 // The `gateway_port_fallback` diagnostic: a fallback boot (default port
 // taken, gateway on an ephemeral bind) must be readable from `hyp status`,
 // not only from a boot-time log line. Non-degrading, like
@@ -45,7 +47,11 @@ function writeRunningDaemon(stateRoot, details) {
   }))
 }
 
-function collectOpts(/** @type {string} */ hypHome) {
+/**
+ * @param {string} hypHome
+ * @returns {CollectStatusOptions}
+ */
+function collectOpts(hypHome) {
   // Stub out the launch-agent probe so the machine's real daemon install
   // cannot leak into the report; daemon liveness then comes from the pid
   // file written above.
