@@ -259,12 +259,20 @@ overwrite confirm) but two things change:
    "picker": {
      "label": "capture Claude Code conversations",
      "compose": {
-       "plugin": "@hypaware/claude",
+       "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
        "requires_gateway": true,
        "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
      }
    }
    ```
+
+   As shipped, `compose.plugin` is a full plugin instance (`{ name, config }`),
+   not just a name, so a row carries its adapter's config (e.g. the gateway
+   `proxy`) with it, and `gateway_upstream` accepts either a single upstream
+   or an array (the Codex row contributes both its `openai` and `chatgpt`
+   upstreams). A gateway-independent plugin (`@hypaware/otel`) is placed
+   before the export sink plugins and a gateway-requiring one after, matching
+   the retired switch's plugin order.
 
    `composePickerConfig` becomes a fold: union the requested gateway
    upstreams (deduped by `name`), include each picked descriptor's `plugin`,

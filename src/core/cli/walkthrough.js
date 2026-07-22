@@ -28,7 +28,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
  * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ClientDescriptor } from '../../../src/core/types.js'
+ * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  */
 
@@ -297,41 +297,19 @@ function backfillConsentTitle(providers, retentionDays) {
 }
 
 /**
- * Phase 5 picker source contributions. These are the user-facing
- * inputs for the V1 npx first-run flow. Each value maps to a plugin
- * composition rule in `composePickerConfig`. They are NOT tied to
- * the source registry (which carries lower-level source contributions
- * like `ai-gateway` and `otlp`).
+ * Presentation order for the manifest-sourced picker rows. The row DATA
+ * (label, summary, detection, and composition rules) lives in each
+ * plugin's `contributes.picker` manifest now (`@ref LLP 0130#picker-block`);
+ * core no longer owns that list. This array fixes only the ORDER the rows
+ * are shown in, a UX policy core still keeps: first-class client
+ * integrations first, then raw/advanced API-proxy modes, then infra
+ * receivers. A descriptor whose id is absent here sorts after all known
+ * ids (preserving catalog order among them), so a newly-contributed picker
+ * row still appears rather than being dropped.
  *
- * @type {{ value: PickerSource, label: string, summary: string }[]}
+ * @type {string[]}
  */
-const PICKER_SOURCES = [
-  {
-    value: 'claude',
-    label: 'capture Claude Code conversations',
-    summary: 'Configures Claude Code, installs Claude helper skills, and enriches rows from local Claude transcripts.',
-  },
-  {
-    value: 'codex',
-    label: 'capture Codex conversations',
-    summary: 'Configures Codex to use the local gateway and records Codex request/response traffic.',
-  },
-  {
-    value: 'raw-anthropic',
-    label: 'capture raw Anthropic API traffic',
-    summary: 'Advanced API proxy mode for scripts, SDK apps, or other tools you manually point at HypAware.',
-  },
-  {
-    value: 'raw-openai',
-    label: 'capture raw OpenAI API traffic',
-    summary: 'Advanced API proxy mode for OpenAI-compatible clients you manually point at HypAware.',
-  },
-  {
-    value: 'otel',
-    label: 'receive OTEL logs/traces/metrics',
-    summary: 'Starts a local OTLP HTTP receiver for apps that export OpenTelemetry signals.',
-  },
-]
+const PICKER_DISPLAY_ORDER = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
 
 /**
  * Phase 5 export options.
@@ -403,12 +381,19 @@ export async function runPickerWalkthrough(opts) {
     }
   }
 
+  // The picker table is manifest-sourced now: each plugin declares its
+  // rows in `contributes.picker` (`@ref LLP 0130#picker-block`), replacing
+  // the retired hardcoded PICKER_SOURCES list. Both the interactive prompt
+  // options and `composePickerConfig`'s fold read from these descriptors.
+  const pickerDescriptors = await loadPickerDescriptors()
+  const descriptorList = [...pickerDescriptors.values()]
+
   await withSpan(
     'walkthrough.start',
     {
       [Attr.COMPONENT]: 'walkthrough',
       [Attr.OPERATION]: 'walkthrough.start',
-      sources_available: PICKER_SOURCES.length,
+      sources_available: descriptorList.length,
       exports_available: PICKER_EXPORTS.length,
       sources_detected: detected.size,
       detected_sources: [...detected].join(','),
@@ -438,15 +423,15 @@ export async function runPickerWalkthrough(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect? (space to toggle, enter to confirm)',
-        options: PICKER_SOURCES.map((s) => ({
-          value: s.value,
-          label: detected.has(s.value) ? `${s.label} · detected` : s.label,
-          summary: s.summary,
-          ...(detected.has(s.value) ? { checked: true } : {}),
+        options: descriptorList.map((d) => ({
+          value: d.id,
+          label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
+          ...(d.summary ? { summary: d.summary } : {}),
+          ...(detected.has(/** @type {PickerSource} */ (d.id)) ? { checked: true } : {}),
         })),
       })
       const sources = /** @type {PickerSource[]} */ (
-        sourceRaw.filter((v) => PICKER_SOURCES.some((s) => s.value === v))
+        sourceRaw.filter((v) => descriptorList.some((d) => d.id === v))
       )
 
       // Export destination is not asked interactively. A local query
@@ -484,6 +469,7 @@ export async function runPickerWalkthrough(opts) {
   const hypHome = resolveHypHome(env)
   const config = composePickerConfig({
     sources: picks.sources,
+    descriptors: pickerDescriptors,
     exportChoice: picks.exportChoice,
     retentionDays: picks.retentionDays,
     hypHome,
@@ -627,64 +613,81 @@ export async function runPickerWalkthrough(opts) {
 /**
  * Compose a v2 config from Phase 5 picker selections.
  *
- * Composition rules (per bead hy-5oz4 §Compose explicit config):
- *   - `@hypaware/ai-gateway` is included when any AI-traffic source is
- *     picked (claude, codex, raw-anthropic, raw-openai).
- *   - The Anthropic upstream is included when claude or raw-anthropic
- *     is picked. OpenAI API and ChatGPT subscription upstreams are
- *     included when codex is picked; raw-openai only adds the OpenAI
- *     API upstream. Provider-specific prefixes let the gateway route
- *     both Codex auth modes.
- *   - `@hypaware/otel` is included when `otel` is picked.
- *   - `@hypaware/claude` and `@hypaware/codex` adapter plugins are
- *     included for their respective high-level sources.
- *   - `@hypaware/local-fs` + `@hypaware/format-parquet` are included
- *     when `exportChoice === 'local-parquet'`, along with a `local`
- *     sink wired to write parquet files under `<HYP_HOME>/exports`.
+ * The source half of composition is a fold over each picked descriptor's
+ * own `compose` contribution (`@ref LLP 0130#picker-block`), sourced from
+ * the plugin manifests rather than a hardcoded core switch:
+ *   - `@hypaware/ai-gateway` is included once when any picked descriptor
+ *     sets `requires_gateway`.
+ *   - Its `upstreams` are the union of every picked descriptor's requested
+ *     `gateway_upstream`(s), deduped by `name` in descriptor iteration
+ *     order (so Anthropic precedes OpenAI precedes the ChatGPT
+ *     subscription upstream, matching the retired switch's fixed order).
+ *   - Each picked descriptor's `plugin` (the adapter plugin instance, e.g.
+ *     `@hypaware/claude`, `@hypaware/otel`) is included. A
+ *     gateway-requiring plugin lands after the export sink plugins; a
+ *     gateway-independent one before them, preserving the retired switch's
+ *     plugin order.
+ *
+ * The export half is unchanged (it is the sink-choice layer, not
+ * plugin-picker territory): `@hypaware/local-fs` + `@hypaware/format-parquet`
+ * plus a `local` sink writing parquet under `<HYP_HOME>/exports` are
+ * included when `exportChoice === 'local-parquet'`.
  *
  * @param {{
  *   sources: PickerSource[],
+ *   descriptors: Map<string, PickerDescriptor>,
  *   exportChoice: PickerExport,
  *   retentionDays: number,
  *   hypHome: string,
  * }} args
  * @returns {HypAwareV2Config}
  * @ref LLP 0011#no-architectural-names [implements]: user picks what/where; HypAware derives the explicit plugin set, no role labels
+ * @ref LLP 0130#picker-block [implements]: composition folds each picked descriptor's manifest `compose` data instead of a hardcoded switch
  */
 export function composePickerConfig(args) {
-  const wantsAnthropic = args.sources.includes('claude') || args.sources.includes('raw-anthropic')
-  const wantsCodex = args.sources.includes('codex')
-  const wantsOpenai = wantsCodex || args.sources.includes('raw-openai')
-  const wantsGateway = wantsAnthropic || wantsOpenai
-  const wantsOtel = args.sources.includes('otel')
+  const picked = /** @type {Set<string>} */ (new Set(args.sources))
+
+  let requiresGateway = false
+  /** @type {{ name: string, base_url: string, path_prefix: string, provider?: string }[]} */
+  const upstreams = []
+  // Gateway-independent adapter plugins (e.g. `@hypaware/otel`) land before
+  // the export sink plugins; gateway-requiring ones (`@hypaware/claude`,
+  // `@hypaware/codex`) land after, matching the retired switch's order.
+  /** @type {PluginConfigInstance[]} */
+  const preExportPlugins = []
+  /** @type {PluginConfigInstance[]} */
+  const postExportPlugins = []
+
+  for (const descriptor of args.descriptors.values()) {
+    if (!picked.has(descriptor.id)) continue
+    const compose = descriptor.compose
+    if (!compose) continue
+    if (compose.requires_gateway) requiresGateway = true
+    const requested = compose.gateway_upstream === undefined
+      ? []
+      : Array.isArray(compose.gateway_upstream)
+        ? compose.gateway_upstream
+        : [compose.gateway_upstream]
+    for (const up of requested) {
+      if (!upstreams.some((existing) => existing.name === up.name)) upstreams.push({ ...up })
+    }
+    if (compose.plugin) {
+      if (compose.requires_gateway) postExportPlugins.push(compose.plugin)
+      else preExportPlugins.push(compose.plugin)
+    }
+  }
 
   /** @type {PluginConfigInstance[]} */
   const plugins = []
 
-  if (wantsGateway) {
-    /** @type {{ name: string, base_url: string, path_prefix: string, provider?: string }[]} */
-    const upstreams = []
-    if (wantsAnthropic) {
-      upstreams.push({ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' })
-    }
-    if (wantsOpenai) {
-      upstreams.push({ name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' })
-    }
-    if (wantsCodex) {
-      upstreams.push({ name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' })
-    }
+  if (requiresGateway) {
     plugins.push({
       name: '@hypaware/ai-gateway',
       config: { listen: '127.0.0.1:8787', upstreams },
     })
   }
 
-  if (wantsOtel) {
-    plugins.push({
-      name: '@hypaware/otel',
-      config: { listen_host: '127.0.0.1', listen_port: 4318 },
-    })
-  }
+  plugins.push(...preExportPlugins)
 
   /** @type {Record<string, SinkConfigInstance>} */
   const sinks = {}
@@ -701,18 +704,7 @@ export function composePickerConfig(args) {
     }
   }
 
-  if (args.sources.includes('claude')) {
-    plugins.push({
-      name: /** @type {PluginName} */ ('@hypaware/claude'),
-      config: { proxy: '@hypaware/ai-gateway' },
-    })
-  }
-  if (args.sources.includes('codex')) {
-    plugins.push({
-      name: /** @type {PluginName} */ ('@hypaware/codex'),
-      config: { proxy: '@hypaware/ai-gateway' },
-    })
-  }
+  plugins.push(...postExportPlugins)
 
   /** @type {HypAwareV2Config} */
   const config = {
@@ -1143,9 +1135,9 @@ async function stopFinaleStartedSources(sources) {
  * bundled plugins and runs the descriptor-driven `detectPickerSources`
  * (`@ref LLP 0130#picker-block [implements]`) against it in place of
  * the old hardcoded `detectClientSources` table. Detected ids are cast
- * to `PickerSource`; `PICKER_SOURCES` filters any unrecognized id back
- * out downstream, so a picker-only id an untouched `PICKER_SOURCES`
- * does not recognize is silently dropped rather than surfaced.
+ * to `PickerSource`; the descriptor-sourced picker table filters any
+ * unrecognized id back out downstream, so a picker-only id the current
+ * descriptors do not recognize is silently dropped rather than surfaced.
  *
  * @param {{ env: NodeJS.ProcessEnv }} opts
  * @returns {Promise<Set<PickerSource>>}
@@ -1155,6 +1147,43 @@ async function defaultPickerDetect(opts) {
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   const detected = await detectPickerSources(catalog, opts.env)
   return /** @type {Set<PickerSource>} */ (detected)
+}
+
+/**
+ * Load the manifest-sourced picker descriptors (`@ref LLP 0130#picker-block`)
+ * from the bundled plugin catalog, in `PICKER_DISPLAY_ORDER`. This is the
+ * replacement for the retired hardcoded `PICKER_SOURCES` table: the picker
+ * prompt options and `composePickerConfig`'s fold both read from it.
+ * Discovery failure yields an empty map rather than blocking init.
+ *
+ * @returns {Promise<Map<string, PickerDescriptor>>}
+ */
+async function loadPickerDescriptors() {
+  try {
+    const bundled = await discoverBundledPlugins()
+    const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+    return orderPickerDescriptors(catalog.pickerDescriptors)
+  } catch {
+    return new Map()
+  }
+}
+
+/**
+ * Sort picker descriptors into `PICKER_DISPLAY_ORDER`, keeping any
+ * unlisted id after the known ones in catalog order (Array.prototype.sort
+ * is stable). Returns a fresh insertion-ordered map so both the prompt
+ * option list and `composePickerConfig`'s fold iterate the same order.
+ *
+ * @param {Map<string, PickerDescriptor>} descriptors
+ * @returns {Map<string, PickerDescriptor>}
+ */
+function orderPickerDescriptors(descriptors) {
+  const rank = (/** @type {string} */ id) => {
+    const i = PICKER_DISPLAY_ORDER.indexOf(id)
+    return i === -1 ? PICKER_DISPLAY_ORDER.length : i
+  }
+  const ordered = [...descriptors.values()].sort((a, b) => rank(a.id) - rank(b.id))
+  return new Map(ordered.map((d) => [d.id, d]))
 }
 
 /**

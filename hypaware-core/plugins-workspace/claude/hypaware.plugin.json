@@ -31,6 +31,18 @@
       },
       "required_upstreams": ["anthropic"]
     },
+    "picker": [
+      {
+        "name": "claude",
+        "label": "capture Claude Code conversations",
+        "summary": "Configures Claude Code, installs Claude helper skills, and enriches rows from local Claude transcripts.",
+        "compose": {
+          "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
+          "requires_gateway": true,
+          "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
+        }
+      }
+    ],
     "skills": [
       { "name": "hypaware-query", "clients": ["claude"] },
       { "name": "hypaware-reference", "clients": ["claude"] },

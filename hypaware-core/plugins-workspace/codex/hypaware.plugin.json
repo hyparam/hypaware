@@ -29,6 +29,21 @@
       },
       "required_upstreams": ["openai", "chatgpt"]
     },
+    "picker": [
+      {
+        "name": "codex",
+        "label": "capture Codex conversations",
+        "summary": "Configures Codex to use the local gateway and records Codex request/response traffic.",
+        "compose": {
+          "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },
+          "requires_gateway": true,
+          "gateway_upstream": [
+            { "name": "openai", "base_url": "https://api.openai.com", "path_prefix": "/v1", "provider": "openai" },
+            { "name": "chatgpt", "base_url": "https://chatgpt.com", "path_prefix": "/backend-api/codex", "provider": "chatgpt" }
+          ]
+        }
+      }
+    ],
     "skills": [
       { "name": "hypaware-query", "clients": ["codex"] },
       { "name": "hypaware-reference", "clients": ["codex"] },
