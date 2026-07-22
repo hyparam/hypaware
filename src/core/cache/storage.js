@@ -27,7 +27,7 @@ import path from 'node:path'
 
 /**
  * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
- * @import { CachePartitioningDeclaration, ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
  */
@@ -98,11 +98,12 @@ export function resolveIcebergDir(tablePath) {
  *   getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined,
  *   getSettleHook?: (dataset: string) => ((rows: Record<string, unknown>[], ctx: { storage: ExtendedQueryStorageService }) => Promise<Record<string, unknown>[]>) | undefined,
  *   usagePolicyResolver?: UsagePolicyResolver,
+ *   sourceWithholdResolver?: SourceWithholdResolver,
  * }} args
  * @returns {ExtendedQueryStorageService}
  * @ref LLP 0013#write-path-and-query [implements]: kernel-owned cache write path; every source row lands here
  */
-export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver }) {
+export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
   const meter = getMeter('cache')
@@ -242,6 +243,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // one-time migration never re-exports on every tick (LLP 0040 §6 risk #1).
     async *readRowsSince(tablePath, opts = {}) {
       const since = continuationToSeq(opts.since)
+      const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
       const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
       // @ref LLP 0070#enforce [constrained-by]: withholding must not depend on
       // the caller's projection. The filter reads each row's own `cwd`; a
@@ -254,7 +256,21 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // (`projected === undefined` means "all columns", which already carries
       // `cwd`; no forcing and no stripping needed.)
       const forceCwd = usagePolicyResolver !== undefined && projected !== undefined && !projected.includes('cwd')
-      const scanColumns = forceCwd ? [...projected, 'cwd'] : projected
+      // @ref LLP 0132#source-scoped-withholding [implements]: same not-bypassable-by-projection
+      // guarantee as `cwd` above, but the forced column is dataset-specific
+      // (`attributionColumnFor`) rather than a fixed name; `undefined` means
+      // this dataset declared no `attribution_column`, so nothing is forced
+      // and no row of this dataset is ever withheld on this basis.
+      const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
+      const forceAttribution =
+        attributionColumn !== undefined && projected !== undefined && !projected.includes(attributionColumn)
+      /** @type {string[] | undefined} */
+      let scanColumns = projected
+      if (forceCwd || forceAttribution) {
+        scanColumns = [...(/** @type {string[]} */ (projected))]
+        if (forceCwd) scanColumns.push('cwd')
+        if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
+      }
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -263,6 +279,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       let droppedRowCount = 0
       /** @type {Set<string>} */
       const droppedCwdHashes = new Set()
+      let droppedSourceRowCount = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
@@ -282,9 +299,22 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           yield { after, dropped: true }
           continue
         }
-        // We forced `cwd` in for the filter only; don't leak it into a payload
-        // the caller's projection didn't ask for.
+        // @ref LLP 0132#source-scoped-withholding [implements]: a row attributed
+        // to a picker source classified `'local'` on a machine with a central
+        // layer is dropped from the payload here, same drop-but-advance
+        // continuation semantics as the `cwd` filter above, so a sink's
+        // watermark still moves past a withheld row (LLP 0070#incremental).
+        if (sourceWithholdResolver && attributionColumn !== undefined && sourceWithholdResolver.shouldWithhold(row[attributionColumn])) {
+          droppedRowCount += 1
+          droppedSourceRowCount += 1
+          yield { after, dropped: true }
+          continue
+        }
+        // We forced `cwd`/the attribution column in for the filters only;
+        // don't leak either into a payload the caller's projection didn't ask
+        // for.
         if (forceCwd) delete row.cwd
+        if (forceAttribution) delete row[/** @type {string} */ (attributionColumn)]
         yield { row, after }
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw
@@ -293,9 +323,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       if (droppedRowCount > 0) {
         logger.debug('usage_policy.export_drop', {
           [Attr.COMPONENT]: 'cache',
-          [Attr.DATASET]: datasetForTablePath(cacheRoot, tablePath) ?? 'unknown',
+          [Attr.DATASET]: dataset,
           dropped_row_count: droppedRowCount,
           distinct_cwd_count: droppedCwdHashes.size,
+          ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
         })
       }
     },
