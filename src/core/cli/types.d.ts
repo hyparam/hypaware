@@ -116,10 +116,11 @@ export interface RunPickerWalkthroughOptions {
   prompt?: AsyncPickPrompt
   retentionPrompt?: AsyncRetentionPrompt
   /**
-   * Override the system source detector. Defaults to the real
-   * filesystem-based {@link detectClientSources}. Only consulted in
-   * interactive mode (no pre-baked `picks`); tests inject a stub so the
-   * picker's preselected boxes do not depend on the dev's home dir.
+   * Override the system source detector. Defaults to a catalog-backed
+   * wrapper around the real filesystem-based `detectPickerSources`.
+   * Only consulted in interactive mode (no pre-baked `picks`); tests
+   * inject a stub so the picker's preselected boxes do not depend on
+   * the dev's home dir.
    */
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   /**

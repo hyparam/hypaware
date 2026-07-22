@@ -67,9 +67,9 @@ test('validateManifest accepts a picker array with all three probe variants', ()
   const result = validateManifest(
     baseManifest({
       picker: [
-        { label: 'Claude Code', summary: 'capture conversations', detect: { settings_file: '.claude/settings.json' } },
-        { label: 'Claude Desktop', detect: { app_bundle: '/Applications/Claude.app' }, needs_setup: true, configure_command: 'claude-desktop install' },
-        { label: 'Hermes', detect: { path: '~/.hermes' } },
+        { name: 'claude', label: 'Claude Code', summary: 'capture conversations', detect: { settings_file: '.claude/settings.json' } },
+        { name: 'claude-desktop', label: 'Claude Desktop', detect: { app_bundle: '/Applications/Claude.app' }, needs_setup: true, configure_command: 'claude-desktop install' },
+        { name: 'hermes', label: 'Hermes', detect: { path: '~/.hermes' } },
       ],
     })
   )
@@ -77,33 +77,39 @@ test('validateManifest accepts a picker array with all three probe variants', ()
 })
 
 test('validateManifest accepts a picker row without a detect probe', () => {
-  const result = validateManifest(baseManifest({ picker: [{ label: 'OTEL export' }] }))
+  const result = validateManifest(baseManifest({ picker: [{ name: 'otel', label: 'OTEL export' }] }))
   assert.equal(result.ok, true)
 })
 
 test('validateManifest keeps unknown picker fields opaque (e.g. compose)', () => {
   const result = validateManifest(
     baseManifest({
-      picker: [{ label: 'raw Anthropic', compose: { plugin: '@hypaware/claude', requires_gateway: true } }],
+      picker: [{ name: 'raw-anthropic', label: 'raw Anthropic', compose: { plugin: '@hypaware/claude', requires_gateway: true } }],
     })
   )
   assert.equal(result.ok, true)
 })
 
 test('validateManifest rejects a non-array picker', () => {
-  const result = validateManifest(baseManifest({ picker: { label: 'nope' } }))
+  const result = validateManifest(baseManifest({ picker: { name: 'nope', label: 'nope' } }))
   assert.equal(result.ok, false)
   assert.equal(result.message, 'contributes.picker must be an array when present')
 })
 
+test('validateManifest rejects a picker row missing a name', () => {
+  const result = validateManifest(baseManifest({ picker: [{ label: 'no name' }] }))
+  assert.equal(result.ok, false)
+  assert.equal(result.message, 'contributes.picker entries require a name (string)')
+})
+
 test('validateManifest rejects a picker row missing a label', () => {
-  const result = validateManifest(baseManifest({ picker: [{ summary: 'no label' }] }))
+  const result = validateManifest(baseManifest({ picker: [{ name: 'x', summary: 'no label' }] }))
   assert.equal(result.ok, false)
   assert.equal(result.message, 'contributes.picker entries require a label (string)')
 })
 
 test('validateManifest rejects a detect probe with no recognized variant', () => {
-  const result = validateManifest(baseManifest({ picker: [{ label: 'x', detect: { bogus: 'y' } }] }))
+  const result = validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', detect: { bogus: 'y' } }] }))
   assert.equal(result.ok, false)
   assert.equal(
     result.message,
@@ -113,7 +119,7 @@ test('validateManifest rejects a detect probe with no recognized variant', () =>
 
 test('validateManifest rejects a detect probe with more than one variant', () => {
   const result = validateManifest(
-    baseManifest({ picker: [{ label: 'x', detect: { app_bundle: '/A.app', path: '~/.a' } }] })
+    baseManifest({ picker: [{ name: 'x', label: 'x', detect: { app_bundle: '/A.app', path: '~/.a' } }] })
   )
   assert.equal(result.ok, false)
   assert.equal(
@@ -123,13 +129,13 @@ test('validateManifest rejects a detect probe with more than one variant', () =>
 })
 
 test('validateManifest rejects a non-string probe path', () => {
-  const result = validateManifest(baseManifest({ picker: [{ label: 'x', detect: { path: 5 } }] }))
+  const result = validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', detect: { path: 5 } }] }))
   assert.equal(result.ok, false)
   assert.equal(result.message, 'contributes.picker detect.path must be a non-empty string')
 })
 
 test('validateManifest rejects a non-boolean needs_setup', () => {
-  const result = validateManifest(baseManifest({ picker: [{ label: 'x', needs_setup: 'yes' }] }))
+  const result = validateManifest(baseManifest({ picker: [{ name: 'x', label: 'x', needs_setup: 'yes' }] }))
   assert.equal(result.ok, false)
   assert.equal(result.message, 'contributes.picker needs_setup must be a boolean when present')
 })

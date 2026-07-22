@@ -184,12 +184,17 @@ export interface PluginAttachProbeManifest {
 /**
  * One row in the `hyp init` wizard's client/source picker, contributed
  * declaratively by a plugin's manifest rather than a hardcoded core
- * table (LLP 0130). The manifest's picker source id (the `name` under
- * which the plugin registers, e.g. `claude`, `codex`, `claude-desktop`)
- * keys the row; the fields below drive its label, initial detection,
- * and, for a `needs_setup` row, the command that configures it.
+ * table (LLP 0130). `name` is the picker source id that keys the row
+ * (e.g. `claude`, `codex`, `raw-anthropic`); one plugin may contribute
+ * more than one row (`@hypaware/ai-gateway` contributes both
+ * `raw-anthropic` and `raw-openai`), so each row names its own id
+ * rather than inheriting the plugin's package name. The remaining
+ * fields drive the row's label, initial detection, and, for a
+ * `needs_setup` row, the command that configures it.
  */
 export interface PluginPickerContribution {
+  /** Picker source id keying this row. */
+  name: string
   /** Human-readable row label shown in the picker prompt. */
   label: string
   /** One-line description of what picking this row captures. */

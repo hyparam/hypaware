@@ -7,64 +7,102 @@ import path from 'node:path'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 
 /**
- * @import { PickerSource } from '../../../src/core/cli/types.js'
+ * @import { PickerDetectProbe } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginCatalog } from '../../../src/core/types.js'
  */
 
 /**
- * The client sources the first-run picker can autodetect, paired with
- * the `settings_file` their plugin manifest declares for the attach
- * probe. Detection stats the *directory* that holds this file (the
- * client's config home): the "tool is installed on this system"
- * signal, not the file itself, so HypAware writing the settings file
- * on attach never makes a source detect itself.
+ * Inspect the system for the tools/apps a plugin's `contributes.picker`
+ * row declares a presence probe for, and return the set of picker
+ * source ids that are present. Fully descriptor-driven: no source is
+ * hardcoded here, the plugin manifest owns which probe variant its row
+ * uses (`settings_file`, `app_bundle`, `path`) via `catalog.pickerDescriptors`
+ * (`@ref LLP 0130#picker-block [implements]`).
  *
- * This list is intentionally hardcoded rather than read from
- * `catalog.clientDescriptors[*].attach_probe`. At first `npx hypaware`
- * run only bundled plugins exist, so there is no third-party client
- * plugin to discover, and the picker's source list (`PICKER_SOURCES`)
- * is itself hardcoded. If the picker is ever made plugin-driven, move
- * detection to iterate the client descriptors and read each
- * `attach_probe.settings_file` (see `probeClientAttachFromDescriptor`
- * in daemon/status.js) in that same change, not before.
+ * This is the migration the file's own header comment used to
+ * anticipate ("If the picker is ever made plugin-driven, move
+ * detection to iterate the client descriptors..."): detection now
+ * iterates `catalog.pickerDescriptors` instead of a hardcoded table.
  *
- * @type {{ source: PickerSource, client: string, settingsFile: string }[]}
+ * Best-effort: any probe failure (stat error, missing env override,
+ * unrecognized probe variant, etc) is "not present," never thrown. The
+ * result only seeds the picker's initial checkbox state; the user can
+ * still toggle every box.
+ *
+ * @param {PluginCatalog} catalog
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<Set<string>>}
  */
-const DETECTABLE_CLIENT_SOURCES = [
-  { source: 'claude', client: 'claude', settingsFile: '.claude/settings.json' },
-  { source: 'codex', client: 'codex', settingsFile: '.codex/config.toml' },
-]
-
-/**
- * Inspect the system for installed client tools and return the set of
- * picker sources that are present. A source is "present" when the
- * config-home directory of its client exists (`~/.claude`, and
- * `$CODEX_HOME` ?? `~/.codex`). Honors `$CLAUDE_HOME`/`$CODEX_HOME` via
- * the shared {@link resolveClientSettingsPath}.
- *
- * Best-effort: any stat outcome other than "directory exists" is
- * treated as not-present, so detection never blocks or throws the
- * walkthrough. The result only seeds the picker's initial checkbox
- * state; the user can still toggle every box.
- *
- * @param {{ env: NodeJS.ProcessEnv }} opts
- * @returns {Promise<Set<PickerSource>>}
- */
-export async function detectClientSources(opts) {
-  const env = opts.env
+export async function detectPickerSources(catalog, env) {
   const homeDir = env.HOME ?? os.homedir()
-  /** @type {Set<PickerSource>} */
+  /** @type {Set<string>} */
   const detected = new Set()
   await Promise.all(
-    DETECTABLE_CLIENT_SOURCES.map(async ({ source, client, settingsFile }) => {
-      const settingsPath = resolveClientSettingsPath(client, settingsFile, env, homeDir)
-      const configHome = path.dirname(settingsPath)
+    [...catalog.pickerDescriptors.values()].map(async (descriptor) => {
+      const probe = descriptor.detect
+      if (!probe) return
       try {
-        const stat = await fsp.stat(configHome)
-        if (stat.isDirectory()) detected.add(source)
+        if (await probeIsPresent(descriptor.id, probe, env, homeDir)) {
+          detected.add(descriptor.id)
+        }
       } catch {
-        // ENOENT (or any stat failure) → tool not present; leave unset.
+        // ENOENT (or any probe failure) → source not present; leave unset.
       }
     })
   )
   return detected
+}
+
+/**
+ * Evaluate a single picker row's presence probe.
+ *
+ * - `settings_file` reuses the existing {@link resolveClientSettingsPath}
+ *   check: does the *directory* holding this file (the client's config
+ *   home) exist? Unchanged behavior for `claude`/`codex`.
+ * - `app_bundle` stats the literal path (e.g. `/Applications/Claude.app`).
+ * - `path` stats the literal path, honoring the same `$FOO_HOME`-style
+ *   env override {@link resolveClientSettingsPath} already applies for
+ *   `settings_file` probes: `${SOURCE_ID}_HOME`, when set, replaces the
+ *   manifest's literal path outright.
+ *
+ * @param {string} sourceId
+ * @param {PickerDetectProbe} probe
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} homeDir
+ * @returns {Promise<boolean>}
+ */
+async function probeIsPresent(sourceId, probe, env, homeDir) {
+  if ('settings_file' in probe) {
+    const settingsPath = resolveClientSettingsPath(sourceId, probe.settings_file, env, homeDir)
+    const configHome = path.dirname(settingsPath)
+    const stat = await fsp.stat(configHome)
+    return stat.isDirectory()
+  }
+  if ('app_bundle' in probe) {
+    await fsp.stat(probe.app_bundle)
+    return true
+  }
+  if ('path' in probe) {
+    const target = resolvePathProbeTarget(sourceId, probe.path, env)
+    await fsp.stat(target)
+    return true
+  }
+  return false
+}
+
+/**
+ * Resolve a `path` probe's literal path, honoring a `$FOO_HOME`-style
+ * env override the same way `resolveClientSettingsPath` does for
+ * `settings_file` probes, except the override replaces the literal
+ * path outright rather than being joined onto a home-relative one.
+ *
+ * @param {string} sourceId
+ * @param {string} literalPath
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+function resolvePathProbeTarget(sourceId, literalPath, env) {
+  const envKey = `${sourceId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
+  const override = env[envKey]
+  return typeof override === 'string' && override.length > 0 ? override : literalPath
 }

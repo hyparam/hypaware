@@ -305,6 +305,122 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   assert.deepEqual(codex?.requiredUpstreams, ['openai', 'chatgpt'])
 })
 
+test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed by row name', () => {
+  const catalog = buildPluginCatalog([
+    {
+      ok: true,
+      manifest: /** @type {any} */ ({
+        schema_version: 1,
+        name: '@hypaware/ai-gateway',
+        version: '2.0.0',
+        hypaware_api: '^1.0.0',
+        runtime: 'node',
+        entrypoint: './index.js',
+        contributes: {
+          picker: [
+            {
+              name: 'raw-anthropic',
+              label: 'capture raw Anthropic API traffic',
+              detect: { settings_file: '.anthropic/config.json' },
+            },
+            {
+              name: 'raw-openai',
+              label: 'capture raw OpenAI API traffic',
+              needs_setup: false,
+            },
+          ],
+        },
+      }),
+      manifestPath: '/bundled/ai-gateway/hypaware.plugin.json',
+      rootDir: '/bundled/ai-gateway',
+    },
+    {
+      ok: true,
+      manifest: /** @type {any} */ ({
+        schema_version: 1,
+        name: '@hypaware/claude-desktop',
+        version: '1.0.0',
+        hypaware_api: '^1.0.0',
+        runtime: 'node',
+        entrypoint: './index.js',
+        contributes: {
+          picker: [
+            {
+              name: 'claude-desktop',
+              label: 'Claude Desktop',
+              summary: 'The Claude Mac app',
+              detect: { app_bundle: '/Applications/Claude.app' },
+              needs_setup: true,
+              configure_command: 'claude-desktop install',
+            },
+          ],
+        },
+      }),
+      manifestPath: '/bundled/claude-desktop/hypaware.plugin.json',
+      rootDir: '/bundled/claude-desktop',
+    },
+  ])
+
+  assert.equal(catalog.pickerDescriptors.size, 3)
+
+  const rawAnthropic = catalog.pickerDescriptors.get('raw-anthropic')
+  assert.equal(rawAnthropic?.plugin, '@hypaware/ai-gateway')
+  assert.equal(rawAnthropic?.label, 'capture raw Anthropic API traffic')
+  assert.deepEqual(rawAnthropic?.detect, { settings_file: '.anthropic/config.json' })
+  assert.equal(rawAnthropic?.needsSetup, undefined)
+
+  const rawOpenai = catalog.pickerDescriptors.get('raw-openai')
+  assert.equal(rawOpenai?.plugin, '@hypaware/ai-gateway')
+  assert.equal(rawOpenai?.needsSetup, false)
+
+  const claudeDesktop = catalog.pickerDescriptors.get('claude-desktop')
+  assert.equal(claudeDesktop?.plugin, '@hypaware/claude-desktop')
+  assert.equal(claudeDesktop?.summary, 'The Claude Mac app')
+  assert.deepEqual(claudeDesktop?.detect, { app_bundle: '/Applications/Claude.app' })
+  assert.equal(claudeDesktop?.needsSetup, true)
+  assert.equal(claudeDesktop?.configureCommand, 'claude-desktop install')
+})
+
+test('buildPluginCatalog picker descriptors are first-manifest-wins on a name collision', () => {
+  const catalog = buildPluginCatalog(
+    [
+      {
+        ok: true,
+        manifest: /** @type {any} */ ({
+          schema_version: 1,
+          name: '@hypaware/claude',
+          version: '2.0.0',
+          hypaware_api: '^1.0.0',
+          runtime: 'node',
+          entrypoint: './index.js',
+          contributes: { picker: [{ name: 'claude', label: 'bundled label' }] },
+        }),
+        manifestPath: '/bundled/hypaware.plugin.json',
+        rootDir: '/bundled',
+      },
+    ],
+    [
+      {
+        ok: true,
+        manifest: /** @type {any} */ ({
+          schema_version: 1,
+          name: '@third-party/claude-clone',
+          version: '0.1.0',
+          hypaware_api: '^1.0.0',
+          runtime: 'node',
+          entrypoint: './index.js',
+          contributes: { picker: [{ name: 'claude', label: 'installed label' }] },
+        }),
+        manifestPath: '/installed/hypaware.plugin.json',
+        rootDir: '/installed',
+      },
+    ]
+  )
+
+  assert.equal(catalog.pickerDescriptors.get('claude')?.label, 'bundled label')
+  assert.equal(catalog.pickerDescriptors.get('claude')?.plugin, '@hypaware/claude')
+})
+
 test('buildPluginCatalog collects known datasets from manifest contributions', async () => {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])

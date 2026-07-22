@@ -12,7 +12,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { ensureDurableBinForNpx } from './global_install.js'
-import { detectClientSources } from './detect.js'
+import { detectPickerSources } from './detect.js'
 import { multiselect, select, text } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
@@ -395,7 +395,7 @@ export async function runPickerWalkthrough(opts) {
   /** @type {Set<PickerSource>} */
   let detected = new Set()
   if (interactive) {
-    const detect = opts.detect ?? detectClientSources
+    const detect = opts.detect ?? defaultPickerDetect
     try {
       detected = await detect({ env })
     } catch {
@@ -1136,6 +1136,25 @@ async function stopFinaleStartedSources(sources) {
     // Best-effort. The dispatcher cleanup will make the same call on
     // command exit; this early stop is only to avoid daemon port races.
   }
+}
+
+/**
+ * Default detector for the interactive picker: builds a catalog from
+ * bundled plugins and runs the descriptor-driven `detectPickerSources`
+ * (`@ref LLP 0130#picker-block [implements]`) against it in place of
+ * the old hardcoded `detectClientSources` table. Detected ids are cast
+ * to `PickerSource`; `PICKER_SOURCES` filters any unrecognized id back
+ * out downstream, so a picker-only id an untouched `PICKER_SOURCES`
+ * does not recognize is silently dropped rather than surfaced.
+ *
+ * @param {{ env: NodeJS.ProcessEnv }} opts
+ * @returns {Promise<Set<PickerSource>>}
+ */
+async function defaultPickerDetect(opts) {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const detected = await detectPickerSources(catalog, opts.env)
+  return /** @type {Set<PickerSource>} */ (detected)
 }
 
 /**

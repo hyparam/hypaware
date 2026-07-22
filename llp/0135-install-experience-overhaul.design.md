@@ -69,6 +69,7 @@ specifies, as an addition to `hypaware-plugin-kernel-types.d.ts`'s
 
 ```ts
 interface PluginPickerContribution {
+  name: string
   label: string
   summary: string
   detect?: PickerDetectProbe
@@ -82,11 +83,19 @@ type PickerDetectProbe =
   | { path: string }              // new: stat-exists check on a directory (mirrors today's dir-exists rule)
 ```
 
+`name` is the picker source id (e.g. `claude`, `codex`, `claude-desktop`,
+`hermes`, `raw-anthropic`). It is required on every row, not on the plugin
+manifest as a whole, because `contributes.picker` is array-shaped precisely so
+one plugin can contribute more than one row (`@hypaware/ai-gateway` needs both
+`raw-anthropic` and `raw-openai`); the plugin manifest's own top-level `name`
+can't disambiguate between them. This mirrors every other array-shaped
+`contributes.*` entry (`skills`, `commands`, `agents`, `datasets`,
+`init_presets`), which all key off a per-row `name: string`.
+
 `buildPluginCatalog` (`src/core/plugin_catalog.js`) reads `contributes.picker`
 the same pass it already reads `contributes.client` (lines 61-77 today), first-
 manifest-wins, into a new `pickerDescriptors: Map<string, PickerDescriptor>`
-keyed by the plugin's picker source id (the manifest's `name`, e.g. `claude`,
-`codex`, `claude-desktop`, `hermes`). `PICKER_SOURCES`
+keyed by each row's `name`. `PICKER_SOURCES`
 (`src/core/cli/walkthrough.js:308`) is deleted; its five entries become
 `contributes.picker` blocks on `@hypaware/claude`, `@hypaware/codex`,
 `@hypaware/ai-gateway` (for `raw-anthropic` / `raw-openai`, two descriptors from

@@ -181,11 +181,12 @@ const PICKER_PROBE_KEYS = ['settings_file', 'app_bundle', 'path']
 
 /**
  * Validate `contributes.picker`. It is optional; when present it must be
- * an array of picker rows, each with a `label` string and, optionally, a
- * `summary` string, a single-variant `detect` probe, a `needs_setup`
- * boolean, and a `configure_command` string. Unknown fields are accepted
- * (kept opaque like the rest of the `contributes` block) so later
- * additions such as `compose` pass through untouched.
+ * an array of picker rows, each with a `name` (the picker source id
+ * that keys the row) and `label` string, and, optionally, a `summary`
+ * string, a single-variant `detect` probe, a `needs_setup` boolean, and
+ * a `configure_command` string. Unknown fields are accepted (kept
+ * opaque like the rest of the `contributes` block) so later additions
+ * such as `compose` pass through untouched.
  *
  * @param {unknown} picker
  * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
@@ -200,6 +201,9 @@ function validatePickerContributions(picker) {
       return invalid('contributes.picker entries must be objects')
     }
     const r = /** @type {Record<string, unknown>} */ (row)
+    if (!isNonEmptyString(r.name)) {
+      return invalid('contributes.picker entries require a name (string)')
+    }
     if (!isNonEmptyString(r.label)) {
       return invalid('contributes.picker entries require a label (string)')
     }
