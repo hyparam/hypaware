@@ -202,6 +202,16 @@ export interface HypAwareStatusReport {
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
   clients: ClientAttachReport[]
+  /**
+   * Picked (configured) clients grouped by two-layer provenance (LLP
+   * 0132): `syncing` are the clients the central layer manages (their rows
+   * forward to the org sink), `localOnly` are user-added local-layer
+   * clients whose rows are collected and locally queryable but never
+   * forwarded (LLP 0132 #rule). Null on a solo host with no central layer
+   * (nothing is withheld, so the V1 surface is unchanged); a managed host's
+   * local addition must never be a silent state (LLP 0132 #never-silent).
+   */
+  clientSync: { syncing: string[]; localOnly: string[] } | null
   retention: { days: number; source: 'config' | 'default' }
   cache: { totalBytes: number; oldestDate: string | null }
   recentErrorCount: number

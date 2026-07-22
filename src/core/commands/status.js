@@ -191,6 +191,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       ...(c.port ? { port: c.port } : {}),
       ...(c.error ? { error: c.error } : {}),
     })),
+    // Picked clients grouped by provenance (LLP 0132 #never-silent). Null on
+    // a solo host with no central layer, so the V1 JSON shape is unchanged.
+    client_sync: report.clientSync
+      ? { syncing: report.clientSync.syncing, local_only: report.clientSync.localOnly }
+      : null,
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
       dir: cacheRoot,
@@ -342,6 +347,18 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       if (seen.has(name)) continue
       stdout.write(`    - ${name}  [registered]\n`)
     }
+  }
+
+  // Never-silent client provenance split (LLP 0132 #never-silent): on a
+  // managed host the picked clients divide into what the fleet forwards
+  // (`syncing`) and what stays on this machine (`local-only`), so a local
+  // addition is never invisible. Null (a solo host) leaves the V1 surface
+  // unchanged.
+  if (report.clientSync) {
+    const list = (/** @type {string[]} */ names) => (names.length > 0 ? names.join(' · ') : '(none)')
+    stdout.write(
+      `    syncing: ${list(report.clientSync.syncing)} - local-only: ${list(report.clientSync.localOnly)}\n`
+    )
   }
 
   stdout.write(`  cache:           ${cacheRoot}\n`)
