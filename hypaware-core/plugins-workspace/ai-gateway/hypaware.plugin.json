@@ -16,6 +16,26 @@
   "contributes": {
     "sources": [{ "name": "ai-gateway" }],
     "datasets": [{ "name": "ai_gateway_messages" }],
-    "config_sections": [{ "section": "ai-gateway" }]
+    "config_sections": [{ "section": "ai-gateway" }],
+    "picker": [
+      {
+        "name": "raw-anthropic",
+        "label": "capture raw Anthropic API traffic",
+        "summary": "Advanced API proxy mode for scripts, SDK apps, or other tools you manually point at HypAware.",
+        "compose": {
+          "requires_gateway": true,
+          "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
+        }
+      },
+      {
+        "name": "raw-openai",
+        "label": "capture raw OpenAI API traffic",
+        "summary": "Advanced API proxy mode for OpenAI-compatible clients you manually point at HypAware.",
+        "compose": {
+          "requires_gateway": true,
+          "gateway_upstream": { "name": "openai", "base_url": "https://api.openai.com", "path_prefix": "/v1", "provider": "openai" }
+        }
+      }
+    ]
   }
 }

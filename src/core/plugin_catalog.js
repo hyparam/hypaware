@@ -97,6 +97,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           if (row.detect) descriptor.detect = row.detect
           if (typeof row.needs_setup === 'boolean') descriptor.needsSetup = row.needs_setup
           if (typeof row.configure_command === 'string') descriptor.configureCommand = row.configure_command
+          if (row.compose && typeof row.compose === 'object') descriptor.compose = row.compose
           pickerDescriptors.set(row.name, descriptor)
         }
       }

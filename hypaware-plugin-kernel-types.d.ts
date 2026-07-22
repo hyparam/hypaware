@@ -217,6 +217,55 @@ export interface PluginPickerContribution {
    * process through `CommandRunContext.commands.run`.
    */
   configure_command?: string
+  /**
+   * Composition contribution: the data `composePickerConfig` folds to
+   * build the local-layer config when this row is picked (LLP 0130). It
+   * carries, in manifest data, the same knowledge the retired hardcoded
+   * `composePickerConfig` switch held in core: which plugin instance the
+   * pick adds, whether it needs the local AI gateway, and which gateway
+   * upstream(s) it requests. Rows with no `compose` (a detection-only or
+   * `needs_setup` client the picker's config write handles) contribute
+   * nothing to the fold.
+   */
+  compose?: PluginPickerCompose
+}
+
+/**
+ * A picker row's composition contribution, folded by
+ * `composePickerConfig` (LLP 0130#picker-block). Every field is
+ * optional: a row may add a plugin, request the gateway, contribute
+ * gateway upstreams, or any combination.
+ */
+export interface PluginPickerCompose {
+  /**
+   * Plugin instance added to the composed config when this row is
+   * picked. A gateway-requiring plugin (`requires_gateway: true`) is
+   * placed after the export sink plugins; a gateway-independent plugin
+   * is placed before them, matching the retired switch's plugin order.
+   */
+  plugin?: PluginConfigInstance
+  /**
+   * True when picking this row implies the local AI gateway
+   * (`@hypaware/ai-gateway`). The gateway plugin is included once when
+   * any picked row sets this.
+   */
+  requires_gateway?: boolean
+  /**
+   * Gateway upstream(s) this row requests. The fold unions the requested
+   * upstreams across all picked rows, deduped by `name`, into the
+   * gateway plugin's `upstreams`. Accepts a single upstream or an array.
+   */
+  gateway_upstream?: PluginPickerGatewayUpstream | PluginPickerGatewayUpstream[]
+}
+
+/**
+ * One upstream a picker row requests on the local AI gateway.
+ */
+export interface PluginPickerGatewayUpstream {
+  name: string
+  base_url: string
+  path_prefix: string
+  provider?: string
 }
 
 /**

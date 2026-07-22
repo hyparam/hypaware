@@ -4,6 +4,7 @@ import type {
   PluginContributionManifest,
   PluginManifest,
   PluginName,
+  PluginPickerCompose,
 } from '../../hypaware-plugin-kernel-types.d.ts'
 import type { CapabilityRegistryHandle } from './registry/types.d.ts'
 import type { PluginMetadata } from './config/types.d.ts'
@@ -41,6 +42,11 @@ export interface PickerDescriptor {
   detect?: PickerDetectProbe
   needsSetup?: boolean
   configureCommand?: string
+  /**
+   * Composition contribution folded by `composePickerConfig` to build
+   * the local-layer config for this pick (`PluginPickerContribution.compose`).
+   */
+  compose?: PluginPickerCompose
 }
 
 export interface PluginCatalog {
