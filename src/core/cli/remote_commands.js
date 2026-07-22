@@ -120,6 +120,33 @@ function defaultSleep(ms) {
 }
 
 /**
+ * Wait for the daemon's first reconcile to converge on the org config after
+ * an enrolling login, so the wizard's join phase can lock the org-owned
+ * picker rows before it composes (LLP 0129). "Converged" means at least one
+ * client attached: the daemon only attaches after it has pulled and applied
+ * the org config, so an attach is proof the central layer landed. This reuses
+ * the bounded attach-wait `runBrowserLogin` already performs internally
+ * (`waitForClientAttach`) rather than adding a second poll loop; the join
+ * phase gets a small `{ ok, attached }` verdict instead of the raw list.
+ *
+ * A timeout (the org has no published config - the no-config 404 steady
+ * state - or a slow first pull) returns `{ ok: false, attached: [] }`, and
+ * the wizard shows an unlocked picker rather than blocking. Timing out is not
+ * an error here for the same reason it is not one for `waitForClientAttach`.
+ *
+ * @ref LLP 0129#join-before-picker [implements]: the bounded org-config wait before the picker composes, reusing the login lane's own reconcile-wait instead of a second poll loop
+ * @param {{ env: NodeJS.ProcessEnv, homeDir?: string, probe?: () => Promise<string[]>, sleep?: (ms: number) => Promise<void> }} opts
+ * @param {{ timeoutMs?: number, intervalMs?: number }} [waitOpts]
+ * @returns {Promise<{ ok: boolean, attached: string[] }>}
+ */
+export async function waitForCentralConverge({ env, homeDir, probe, sleep }, { timeoutMs, intervalMs } = {}) {
+  // `waitForClientAttach` defaults `timeoutMs`/`intervalMs`/`sleep` on
+  // `undefined`, so forwarding an unset value keeps its own defaults.
+  const attached = await waitForClientAttach({ env, homeDir, timeoutMs, intervalMs, probe, sleep })
+  return { ok: attached.length > 0, attached }
+}
+
+/**
  * Write the first-sync export hold marker (LLP 0101) without ever failing the
  * login: the hold is a refinement of the enrollment, so a marker that cannot
  * be written degrades to today's behavior (exports may tick before the
@@ -654,6 +681,17 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
 }
 
 /**
+ * The two D7 messages that describe a *definitive* org membership/permission
+ * rejection (`no_membership`, `org_not_permitted`): retrying the same login
+ * cannot fix either; an admin has to act. Exported as the single source of
+ * truth so the wizard join phase's `classifyLoginFailure` recognizes them
+ * from the captured login-lane stderr without re-encoding the taxonomy
+ * (LLP 0058 D7). A transient/other error carries neither phrase.
+ */
+export const LOGIN_NO_MEMBERSHIP_MESSAGE = 'this account is not a member of any org on this server - ask an admin to invite you'
+export const LOGIN_ORG_NOT_PERMITTED_MESSAGE = 'the selected org is not permitted for this account - check the --org name'
+
+/**
  * Translate a server-surfaced callback `error` (D7) into a clear message. The
  * client never sees the user's org list, so `org_selection_required` instructs
  * a re-run with `--org` rather than enumerating.
@@ -668,11 +706,11 @@ function explainLoginError(callbackError, err) {
     case 'access_denied':
       return 'login was denied at the provider'
     case 'no_membership':
-      return 'this account is not a member of any org on this server - ask an admin to invite you'
+      return LOGIN_NO_MEMBERSHIP_MESSAGE
     case 'org_selection_required':
       return 'this account has more than one org - re-run with --org <name> to choose one'
     case 'org_not_permitted':
-      return 'the selected org is not permitted for this account - check the --org name'
+      return LOGIN_ORG_NOT_PERMITTED_MESSAGE
     default:
       return err instanceof Error ? err.message : String(err)
   }
