@@ -38,13 +38,18 @@ export const configSection = {
 /**
  * Activate `@hypaware/claude-desktop`.
  *
- * Desktop is deliberately not a `contributes.client`: the LLP 0044
- * attach-on-join loop requires a reversible settings-file write and
- * Desktop has no writable settings file. The adapter's whole surface
- * is rendering the org-managed profile an MDM distributes plus the
- * no-arg credential wrapper that profile points at.
+ * Corrects LLP 0115's "no writable settings file" premise: the live-test
+ * findings in LLP 0133 identify the managed-preferences plist
+ * (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`) as a
+ * real local surface, so the manifest now also declares `contributes.client`
+ * and `contributes.picker` (LLP 0130) for the `hyp init` wizard's `needs_setup`
+ * row. This does not reinstate generic attach-on-join (LLP 0044): the plugin
+ * registers no runtime `ctx.clients` adapter, so the generic reconciler's
+ * `desired()` (`action_attach.js`) stays inert for `claude-desktop` and the
+ * plist is placed only via the explicit `claude-desktop install` command,
+ * attended, with its own sudo prompt and idempotent re-run (LLP 0131).
  *
- * @ref LLP 0115#no-attach-on-join [implements]: explicit render/install commands instead of an attach probe
+ * @ref LLP 0133#attribution [constrained-by]: the client descriptor and picker row exist for wizard/attach-status plumbing, but captured rows still land under client_name "claude" with entrypoint "claude-desktop-3p"; query and hyp status surfaces key off entrypoint, not this descriptor's name
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {
@@ -95,7 +100,65 @@ export async function activate(ctx) {
     run: async (argv, cmdCtx) => runStatus(cmdCtx, sectionConfig, credential, stateDir),
   })
 
+  // `claude-desktop install` and `claude-desktop verify` are the picker's
+  // `configure_command` and the post-wizard verify hint (LLP 0135, LLP
+  // 0133#one-surface). Registered here as stubs so the manifest's
+  // `contributes.picker` row is immediately usable by the generic pick and
+  // configure phases; T13 replaces these bodies with the real login/helper/
+  // residue/plist/restart sequence in `src/install.js` and `src/verify.js`.
+  ctx.commands.register({
+    name: 'claude-desktop install',
+    plugin: PLUGIN_NAME,
+    summary: 'Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt',
+    usage: 'hyp claude-desktop install [--print-commands]',
+    help: 'Not yet implemented (tracked in a follow-up task). Will run the credential login chain '
+      + '(LLP 0117), write the credential helper (LLP 0116), back up and clear stale Claude-3p dialog '
+      + 'residue, write the managed-preferences plist via an inline sudo prompt (LLP 0133#solo-sudo), '
+      + 'and prompt for a Desktop restart. --print-commands will print the privileged commands without '
+      + 'running them.',
+    run: async (argv, cmdCtx) => runInstallStub(argv, cmdCtx),
+  })
+
+  ctx.commands.register({
+    name: 'claude-desktop verify',
+    plugin: PLUGIN_NAME,
+    summary: 'Verify the Desktop plist install and print the in-app capture-check hint',
+    usage: 'hyp claude-desktop verify',
+    help: 'Not yet implemented (tracked in a follow-up task). Will check the automatic half (plist '
+      + 'present, residue cleared) into the exit code and print the in-app half (send a message, '
+      + 'confirm capture) as a hint only, never a blocking wizard step (LLP 0131#verify-is-a-hint).',
+    run: async (argv, cmdCtx) => runVerifyStub(argv, cmdCtx),
+  })
+
   ctx.log.info('claude-desktop activated', { credential_mode: credential.mode })
+}
+
+/**
+ * Stub for `claude-desktop install`. Registers the command and its
+ * `hyp init` picker wiring now; the real login/helper/residue/plist/
+ * restart sequence lands in a follow-up task's `src/install.js`.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} cmdCtx
+ * @returns {Promise<number>}
+ */
+async function runInstallStub(argv, cmdCtx) {
+  cmdCtx.stderr.write('claude-desktop install: not yet implemented\n')
+  return 1
+}
+
+/**
+ * Stub for `claude-desktop verify`. The real two-tier verify (automatic
+ * plist/residue check plus a printed in-app hint) lands in a follow-up
+ * task's `src/verify.js`.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} cmdCtx
+ * @returns {Promise<number>}
+ */
+async function runVerifyStub(argv, cmdCtx) {
+  cmdCtx.stderr.write('claude-desktop verify: not yet implemented\n')
+  return 1
 }
 
 /**

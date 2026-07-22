@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/claude-desktop",
   "version": "1.0.0",
-  "description": "Claude Desktop adapter for HypAware. Desktop has no writable settings file, so this plugin renders the org-managed third-party-inference profile (stable gateway endpoint, manual model list, credential-helper reference) for MDM distribution instead of attach-on-join.",
+  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a fleet, and contributes the hyp init wizard's Claude Desktop picker row.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -14,10 +14,31 @@
     }
   },
   "contributes": {
+    "client": {
+      "name": "claude-desktop",
+      "skill_dir": ".claude/skills",
+      "agent_dir": ".claude/agents",
+      "attach_probe": {
+        "format": "json_path",
+        "settings_file": "/Library/Managed Preferences/com.anthropic.claudefordesktop.plist",
+        "marker_path": "inferenceCredentialHelper"
+      }
+    },
+    "picker": [
+      {
+        "label": "Claude Desktop",
+        "summary": "The Claude Mac app",
+        "detect": { "app_bundle": "/Applications/Claude.app" },
+        "needs_setup": true,
+        "configure_command": "claude-desktop install"
+      }
+    ],
     "commands": [
       { "name": "claude-desktop profile", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
       { "name": "claude-desktop install-helper", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
-      { "name": "claude-desktop status", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" }
+      { "name": "claude-desktop status", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" },
+      { "name": "claude-desktop install", "summary": "Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt" },
+      { "name": "claude-desktop verify", "summary": "Verify the Desktop plist install and print the in-app capture-check hint" }
     ],
     "config_sections": [
       {
