@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runRemoteLogin, runRemoteRemove, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
@@ -339,6 +339,24 @@ test('waitForClientAttach swallows a probe that throws mid-poll and still times 
   const names = await waitForClientAttach({ env: {}, timeoutMs: 0, intervalMs: 1, probe, sleep })
   assert.deepEqual(names, []) // the throw was swallowed; timed out to the fallback
   assert.ok(calls >= 1)
+})
+
+// `waitForCentralConverge` (LLP 0129 #join-before-picker) reuses the login
+// lane's own bounded attach-wait to give the wizard join phase a small
+// `{ ok, attached }` convergence verdict, not a second poll loop.
+test('waitForCentralConverge: an attach is convergence (ok:true with the attached list)', async () => {
+  let calls = 0
+  const probe = /** @type {any} */ (async () => { calls += 1; return calls >= 2 ? ['@hypaware/claude'] : [] })
+  const sleep = /** @type {any} */ (async () => {})
+  const verdict = await waitForCentralConverge({ env: {}, probe, sleep }, { timeoutMs: 10_000, intervalMs: 1 })
+  assert.deepEqual(verdict, { ok: true, attached: ['@hypaware/claude'] })
+})
+
+test('waitForCentralConverge: a timeout is the no-org-config steady state (ok:false, empty)', async () => {
+  const probe = /** @type {any} */ (async () => [])
+  const sleep = /** @type {any} */ (async () => {})
+  const verdict = await waitForCentralConverge({ env: {}, probe, sleep }, { timeoutMs: 0, intervalMs: 1 })
+  assert.deepEqual(verdict, { ok: false, attached: [] })
 })
 
 test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3)', async () => {
