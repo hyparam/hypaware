@@ -50,6 +50,90 @@ test('validateManifest rejects malformed nested maps', () => {
   assert.equal(result.message, 'provides.capabilities must be a map of capability name -> version')
 })
 
+/** Minimal valid manifest scaffold for picker-contribution cases. */
+function baseManifest(contributes) {
+  return {
+    schema_version: 1,
+    name: '@hypaware/example',
+    version: '1.2.3',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './src/index.js',
+    contributes,
+  }
+}
+
+test('validateManifest accepts a picker array with all three probe variants', () => {
+  const result = validateManifest(
+    baseManifest({
+      picker: [
+        { label: 'Claude Code', summary: 'capture conversations', detect: { settings_file: '.claude/settings.json' } },
+        { label: 'Claude Desktop', detect: { app_bundle: '/Applications/Claude.app' }, needs_setup: true, configure_command: 'claude-desktop install' },
+        { label: 'Hermes', detect: { path: '~/.hermes' } },
+      ],
+    })
+  )
+  assert.equal(result.ok, true)
+})
+
+test('validateManifest accepts a picker row without a detect probe', () => {
+  const result = validateManifest(baseManifest({ picker: [{ label: 'OTEL export' }] }))
+  assert.equal(result.ok, true)
+})
+
+test('validateManifest keeps unknown picker fields opaque (e.g. compose)', () => {
+  const result = validateManifest(
+    baseManifest({
+      picker: [{ label: 'raw Anthropic', compose: { plugin: '@hypaware/claude', requires_gateway: true } }],
+    })
+  )
+  assert.equal(result.ok, true)
+})
+
+test('validateManifest rejects a non-array picker', () => {
+  const result = validateManifest(baseManifest({ picker: { label: 'nope' } }))
+  assert.equal(result.ok, false)
+  assert.equal(result.message, 'contributes.picker must be an array when present')
+})
+
+test('validateManifest rejects a picker row missing a label', () => {
+  const result = validateManifest(baseManifest({ picker: [{ summary: 'no label' }] }))
+  assert.equal(result.ok, false)
+  assert.equal(result.message, 'contributes.picker entries require a label (string)')
+})
+
+test('validateManifest rejects a detect probe with no recognized variant', () => {
+  const result = validateManifest(baseManifest({ picker: [{ label: 'x', detect: { bogus: 'y' } }] }))
+  assert.equal(result.ok, false)
+  assert.equal(
+    result.message,
+    'contributes.picker detect must set exactly one of settings_file, app_bundle, path'
+  )
+})
+
+test('validateManifest rejects a detect probe with more than one variant', () => {
+  const result = validateManifest(
+    baseManifest({ picker: [{ label: 'x', detect: { app_bundle: '/A.app', path: '~/.a' } }] })
+  )
+  assert.equal(result.ok, false)
+  assert.equal(
+    result.message,
+    'contributes.picker detect must set exactly one of settings_file, app_bundle, path'
+  )
+})
+
+test('validateManifest rejects a non-string probe path', () => {
+  const result = validateManifest(baseManifest({ picker: [{ label: 'x', detect: { path: 5 } }] }))
+  assert.equal(result.ok, false)
+  assert.equal(result.message, 'contributes.picker detect.path must be a non-empty string')
+})
+
+test('validateManifest rejects a non-boolean needs_setup', () => {
+  const result = validateManifest(baseManifest({ picker: [{ label: 'x', needs_setup: 'yes' }] }))
+  assert.equal(result.ok, false)
+  assert.equal(result.message, 'contributes.picker needs_setup must be a boolean when present')
+})
+
 test('matchesSemverRange covers exact, wildcard, caret, tilde, and comparisons', () => {
   assert.equal(matchesSemverRange('1.2.3', '1.2.3'), true)
   assert.equal(matchesSemverRange('1.2.3', '*'), true)
