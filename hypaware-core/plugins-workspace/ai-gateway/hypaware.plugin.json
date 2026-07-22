@@ -15,7 +15,7 @@
   },
   "contributes": {
     "sources": [{ "name": "ai-gateway" }],
-    "datasets": [{ "name": "ai_gateway_messages" }],
+    "datasets": [{ "name": "ai_gateway_messages", "attribution_column": "client_name" }],
     "config_sections": [{ "section": "ai-gateway" }],
     "picker": [
       {

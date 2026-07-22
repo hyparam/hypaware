@@ -16,6 +16,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { activatePlugins } from './loader.js'
 import { createKernelRuntime } from './activation.js'
+import { buildSourceWithholdResolver } from './source_withhold.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import {
   V1_BUNDLED_PLUGIN_ALLOWLIST,
@@ -81,13 +82,6 @@ export async function bootKernel(opts = {}) {
       status: 'ok',
     },
     async (span) => {
-      const commandRegistry = opts.commandRegistry ?? createCommandRegistry()
-      const runtime = createKernelRuntime({
-        commandRegistry,
-        cacheRoot,
-        ...(opts.configControl ? { configControl: opts.configControl } : {}),
-      })
-
       const discovered = await discoverBundledPlugins({ workspaceDir: opts.workspaceDir })
       span.setAttribute('bundled_available', discovered.loaded.length)
       if (discovered.failed.length > 0) {
@@ -177,6 +171,20 @@ export async function bootKernel(opts = {}) {
         span.setAttribute('config_layers', 'central+local')
         if (merged.drops.length > 0) span.setAttribute('local_entries_dropped', merged.drops.length)
       }
+
+      // The kernel runtime (and its storage service) is built here, after
+      // the catalog and layered config are known, rather than at the top of
+      // this function: `sourceWithholdResolver` needs both to classify each
+      // picker source's provenance (LLP 0132 #source-scoped-withholding),
+      // and nothing before this point reads `runtime`.
+      // @ref LLP 0132#source-scoped-withholding [implements]: boot builds the resolver once, from the very catalog + merged config this boot just resolved
+      const commandRegistry = opts.commandRegistry ?? createCommandRegistry()
+      const runtime = createKernelRuntime({
+        commandRegistry,
+        cacheRoot,
+        ...(opts.configControl ? { configControl: opts.configControl } : {}),
+        sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged }),
+      })
 
       // Full plugin pool + selection (shared with help so `hyp --help`
       // advertises exactly the command set this boot would activate and

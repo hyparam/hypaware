@@ -20,7 +20,7 @@ import { isSafeContributionName } from './contribution_names.js'
 
 /**
  * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
+ * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
 
@@ -47,6 +47,7 @@ import { isSafeContributionName } from './contribution_names.js'
  *   storage?: ExtendedQueryStorageService,
  *   cacheRoot?: string,
  *   configControl?: ConfigControlFacade,
+ *   sourceWithholdResolver?: SourceWithholdResolver,
  * }} [opts]
  * @returns {KernelRuntime}
  * @ref LLP 0003#intrinsic-not-plugin-provided [implements]: query + storage are wired in as intrinsic services, not plugin contributions
@@ -63,6 +64,13 @@ export function createKernelRuntime(opts = {}) {
     // machine-local list under `<stateDir>/usage-policy/` — and `cacheRoot` is
     // `<stateDir>/cache`, so its parent is the state dir the list lives beside.
     usagePolicyResolver: createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(path.dirname(cacheRoot)) }),
+    // @ref LLP 0132#source-scoped-withholding [implements]: caller-supplied
+    // (`bootKernel`, built once from `classifyClientProvenance` + the plugin
+    // catalog, since both need the resolved plugin catalog and two-layer
+    // config this constructor doesn't have). `undefined` on a machine with
+    // no central layer or nothing to withhold: every current caller of
+    // `createKernelRuntime` is untouched until it opts in.
+    ...(opts.sourceWithholdResolver ? { sourceWithholdResolver: opts.sourceWithholdResolver } : {}),
   })
   const commands = opts.commandRegistry ?? createCommandRegistry()
   // The verb registry projects each verb into a CLI command on the shared
