@@ -5,7 +5,12 @@
 **Systems:** Sinks, Cache
 **Author:** Phil / Claude
 **Date:** 2026-07-06
-**Related:** LLP 0049, LLP 0050, LLP 0051, LLP 0069, LLP 0014, LLP 0022, LLP 0030, LLP 0038, LLP 0039, LLP 0029
+**Related:** LLP 0049, LLP 0050, LLP 0051, LLP 0069, LLP 0014, LLP 0022, LLP 0030, LLP 0038, LLP 0039, LLP 0029, LLP 0132
+
+> **Extended by [LLP 0132](./0132-managed-local-additions-local-only.decision.md).**
+> The seam gains a second, source-scoped withholding key alongside the
+> `cwd`-derived one: rows from local-layer-only sources on a managed
+> machine are withheld from forward exports wholesale.
 
 > Promotes the [`local-only`](./0051-usage-policy-future-extensions.decision.md#local-only)
 > usage class from *reserved/deferred* to *shipped*, and fixes its mechanics:

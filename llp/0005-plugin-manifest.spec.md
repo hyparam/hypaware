@@ -10,6 +10,12 @@
 > The declarative manifest every plugin ships. Decomposed from
 > `hypaware-design.md` (Plugin Manifest).
 
+> **Extended by [LLP 0130](./0130-declarative-picker-descriptors.decision.md).**
+> `contributes` gains a declarative `picker` block (label, detect probe
+> data, `needs_setup`, `configure_command`) so the init wizard's source
+> list is plugin-contributed. Normative prose lands here with the
+> implementation.
+
 ## One shape, no privileged variant
 
 Every plugin — first-party and third-party — ships the **same manifest shape**.

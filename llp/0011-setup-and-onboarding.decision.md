@@ -10,6 +10,16 @@
 > The first-run experience. Decomposed from `hypaware-design.md`
 > (Setup and Onboarding).
 
+> **Amended by [LLP 0129](./0129-init-wizard-fork.decision.md)** (via
+> [LLP 0128](./0128-install-experience-overhaul.rfc.md)): the walkthrough
+> gains a top-level join-a-team / local fork ahead of the picker, and the
+> "centrally-managed installs drop Reconfigure" rule below is revised to a
+> scoped "adjust what this machine collects" entry. Picker entries become
+> plugin-contributed manifest data
+> ([LLP 0130](./0130-declarative-picker-descriptors.decision.md)),
+> realizing the plugin-contributed picks this document already named. The
+> prose below is rewritten with the implementation.
+
 ## Interactive walkthrough
 
 The primary way to get a HypAware install on the ground is the interactive
