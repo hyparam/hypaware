@@ -724,11 +724,10 @@ export interface CommandRunContext {
    * implementation invoke another registered command by name and receive
    * its exit code, without exposing the full mutable command registry.
    * The wizard's configure phase runs a `needs_setup` picker row's
-   * `configure_command` through this (LLP 0130). Optional here because
-   * the dispatcher does not populate it yet; T4 wires the runtime and
-   * tightens this to always-present.
+   * `configure_command` through this (LLP 0130). The dispatcher always
+   * populates it, so it is present for every command body.
    */
-  commands?: { run(name: string, argv: string[]): Promise<number> }
+  commands: { run(name: string, argv: string[]): Promise<number> }
   /**
    * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
    * enumerates this to assemble the MCP tool surface; the projected CLI
