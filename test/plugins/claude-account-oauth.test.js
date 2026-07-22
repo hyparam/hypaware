@@ -33,6 +33,12 @@ test('buildAuthorizeUrl carries the PKCE and state parameters', () => {
   assert.equal(url.searchParams.get('response_type'), 'code')
 })
 
+test('buildAuthorizeUrl honors a loopback redirect override', () => {
+  const attempt = { challenge: 'chal', state: 'st4te' }
+  const url = new URL(buildAuthorizeUrl(attempt, 'http://localhost:49152/callback'))
+  assert.equal(url.searchParams.get('redirect_uri'), 'http://localhost:49152/callback')
+})
+
 test('parsePastedAuthorization handles code#state and full URLs', () => {
   assert.deepEqual(parsePastedAuthorization(' abc#def \n'), { code: 'abc', state: 'def' })
   assert.deepEqual(
@@ -86,6 +92,33 @@ test('exchangeAuthorizationCode maps the grant into a stored record', async () =
   assert.equal(body.grant_type, 'authorization_code')
   assert.equal(body.code_verifier, 'ver1f1er')
   assert.equal(body.client_id, OAUTH_CLIENT_ID)
+  assert.equal(body.redirect_uri, OAUTH_REDIRECT_URI)
+})
+
+test('exchangeAuthorizationCode echoes the loopback redirect it authorized with', async () => {
+  /** @type {unknown[]} */
+  const bodies = []
+  await exchangeAuthorizationCode({
+    code: 'abc',
+    state: 'st',
+    attempt: { verifier: 'v', state: 'st' },
+    redirectUri: 'http://localhost:49152/callback',
+    fetchImpl: /** @type {typeof fetch} */ (async (url, init) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return /** @type {Response} */ (/** @type {unknown} */ ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'sk-ant-oat01-new',
+          refresh_token: 'sk-ant-ort01-new',
+          expires_in: 3600,
+          scope: 'user:inference',
+        }),
+      }))
+    }),
+  })
+  const body = /** @type {Record<string, unknown>} */ (bodies[0])
+  assert.equal(body.redirect_uri, 'http://localhost:49152/callback')
 })
 
 test('exchangeAuthorizationCode rejects an unrecognized token response', async () => {
