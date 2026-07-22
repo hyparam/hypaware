@@ -72,14 +72,20 @@ function reduceMultiselect(state, key) {
     case 'j':
       return { ...state, cursor: (state.cursor + 1) % n, error: undefined }
     case 'space': {
+      const cur = state.options[state.cursor]
+      // A disabled row (e.g. a fleet-locked source) is context-only: the
+      // cursor can rest on it, but toggling is a no-op.
+      if (cur.disabled) return { ...state, error: undefined }
       const opts = state.options.slice()
-      const cur = opts[state.cursor]
       opts[state.cursor] = { ...cur, checked: !cur.checked }
       return { ...state, options: opts, error: undefined }
     }
     case 'a': {
-      const allChecked = state.options.every((o) => o.checked)
-      const opts = state.options.map((o) => ({ ...o, checked: !allChecked }))
+      // Select-all ignores disabled rows: they keep their fixed checked
+      // state and never flip with the toggleable rows.
+      const toggleable = state.options.filter((o) => !o.disabled)
+      const allChecked = toggleable.length > 0 && toggleable.every((o) => o.checked)
+      const opts = state.options.map((o) => (o.disabled ? o : { ...o, checked: !allChecked }))
       return { ...state, options: opts, error: undefined }
     }
   }

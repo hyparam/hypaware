@@ -28,6 +28,7 @@ export async function multiselect(spec) {
       label: o.label,
       ...(o.summary !== undefined ? { summary: o.summary } : {}),
       checked: !!o.checked,
+      ...(o.disabled ? { disabled: true } : {}),
     })),
     cursor: 0,
     status: 'active',

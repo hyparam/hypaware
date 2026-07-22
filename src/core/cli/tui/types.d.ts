@@ -16,6 +16,8 @@ export interface MultiselectOption {
   label: string
   summary?: string
   checked: boolean
+  /** Read-only row: shown but not toggleable by space or select-all. */
+  disabled?: boolean
 }
 
 export interface MultiselectState {
@@ -63,6 +65,8 @@ export interface MultiSelectOption {
   label: string
   summary?: string
   checked?: boolean
+  /** Read-only row: shown but not toggleable by space or select-all. */
+  disabled?: boolean
 }
 
 export interface MultiSelectSpec {
