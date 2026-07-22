@@ -38,7 +38,8 @@
       { "name": "hypaware-ai-usage-report", "clients": ["codex"] },
       { "name": "hypaware-report-to-html", "clients": ["codex"] },
       { "name": "hypaware-publish-report", "clients": ["codex"] },
-      { "name": "hypaware-apply-report-changes", "clients": ["codex"] }
+      { "name": "hypaware-apply-report-changes", "clients": ["codex"] },
+      { "name": "hypaware-apply-report-github-changes", "clients": ["codex"] }
     ],
     "config_sections": [
       {

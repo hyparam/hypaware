@@ -42,7 +42,8 @@
       { "name": "hypaware-ai-usage-report", "clients": ["claude"] },
       { "name": "hypaware-report-to-html", "clients": ["claude"] },
       { "name": "hypaware-publish-report", "clients": ["claude"] },
-      { "name": "hypaware-apply-report-changes", "clients": ["claude"] }
+      { "name": "hypaware-apply-report-changes", "clients": ["claude"] },
+      { "name": "hypaware-apply-report-github-changes", "clients": ["claude"] }
     ],
     "agents": [
       { "name": "hypaware-analyst", "clients": ["claude"] }

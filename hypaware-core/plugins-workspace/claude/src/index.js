@@ -257,6 +257,7 @@ export async function activate(ctx) {
     'hypaware-report-to-html',
     'hypaware-publish-report',
     'hypaware-apply-report-changes',
+    'hypaware-apply-report-github-changes',
   ]) {
     ctx.skills.register({
       name: skillName,
