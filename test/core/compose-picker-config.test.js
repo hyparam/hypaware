@@ -192,3 +192,31 @@ test('configure-later export behaves like keep-local (no sinks block)', async ()
     query: QUERY,
   })
 })
+
+// Regression (neutral review of PR #375): the real bundled claude/codex
+// picker rows must carry the `settings_file` detect probe the retired
+// `DETECTABLE_CLIENT_SOURCES` table used, so `detectPickerSources` still
+// pre-checks them. The detect.test.js fixture supplies its own probes, so
+// it cannot catch a manifest that ships without one; this asserts the real
+// manifests directly (LLP 0136 T2/T6: detection must stay byte-identical).
+test('real claude/codex picker rows carry the settings_file detect probe', async () => {
+  const d = await realPickerDescriptors()
+  assert.deepEqual(d.get('claude')?.detect, { settings_file: '.claude/settings.json' })
+  assert.deepEqual(d.get('codex')?.detect, { settings_file: '.codex/config.toml' })
+})
+
+// Regression (neutral review of PR #375): every bundled plugin manifest
+// must pass validation. `discoverBundledPlugins` routes an invalid
+// manifest to `.failed` (a warning, not a boot error), so a manifest that
+// fails validation silently drops the whole plugin - all its commands and
+// picker rows - while tests built on hand-written fixtures still pass. A
+// claude-desktop picker row shipped without its required `name` slipped
+// through exactly this way. Assert the real bundled set has zero failures.
+test('no bundled plugin manifest fails validation', async () => {
+  const bundled = await discoverBundledPlugins()
+  assert.deepEqual(
+    bundled.failed,
+    [],
+    `bundled manifests failed validation: ${bundled.failed.map((f) => `${f.manifestPath}: ${f.message}`).join('; ')}`
+  )
+})

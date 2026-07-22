@@ -34,6 +34,7 @@
         "name": "codex",
         "label": "capture Codex conversations",
         "summary": "Configures Codex to use the local gateway and records Codex request/response traffic.",
+        "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },
           "requires_gateway": true,

@@ -36,6 +36,7 @@
         "name": "claude",
         "label": "capture Claude Code conversations",
         "summary": "Configures Claude Code, installs Claude helper skills, and enriches rows from local Claude transcripts.",
+        "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
           "plugin": { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
           "requires_gateway": true,
