@@ -25,10 +25,10 @@ export interface HermesSessionRow {
   cwd: string | null
   /** Parent session id for subagent/child sessions, namespaced the same way as `id`. */
   parent_session_id: number | null
-  /** ISO-8601 session start timestamp. */
-  started_at: string
-  /** ISO-8601 session end timestamp, or NULL while the session is open. */
-  ended_at: string | null
+  /** Session start timestamp. Hermes stores it as an epoch-seconds REAL (a float with fractional millis), surfaced by node:sqlite as a number; the projector normalizes it to ISO-8601 (`hermesTimestampToIso`). A string is tolerated (already ISO). */
+  started_at: number | string
+  /** Session end timestamp, or NULL while the session is open. Same epoch-seconds REAL shape as `started_at`. */
+  ended_at: number | string | null
   /** Terminal reason once `ended_at` is set (e.g. `completed`, `error`, `cancelled`). */
   end_reason: string | null
   /** Upstream billing provider label hermes recorded for this session. */
@@ -78,8 +78,8 @@ export interface HermesMessageRow {
   tool_call_id: string | null
   /** Reasoning/thinking text, when the model emitted it. */
   reasoning: string | null
-  /** ISO-8601 message timestamp. */
-  timestamp: string
+  /** Message timestamp. Hermes stores it as an epoch-seconds REAL (a float with fractional millis), surfaced by node:sqlite as a number; the projector normalizes it to ISO-8601 (`hermesTimestampToIso`). A string is tolerated (already ISO). */
+  timestamp: number | string
   /** Per-message token count, when hermes records one for this message. */
   token_count: number | null
   /** Finish reason for this message's generation, when applicable. */

@@ -118,6 +118,12 @@ function bootProfileActivatesPlugins(bootProfile) {
 export async function dispatch(argv, opts = {}) {
   const stdout = opts.stdout ?? process.stdout
   const stderr = opts.stderr ?? process.stderr
+  // Default stdin to the process stream, exactly as stdout/stderr do. The bin
+  // entry calls dispatch(argv) with no opts, so without this fallback every
+  // plugin command runs with an undefined ctx.stdin and interactive flows
+  // (e.g. `hyp claude-account login`) wrongly report "needs an interactive
+  // terminal".
+  const stdin = opts.stdin ?? process.stdin
   const env = opts.env ?? process.env
   const cwd = opts.cwd ?? process.cwd()
 
@@ -293,7 +299,7 @@ export async function dispatch(argv, opts = {}) {
   const cmdCtx = {
     stdout,
     stderr,
-    stdin: opts.stdin,
+    stdin,
     env,
     cwd,
     config: activeConfig,

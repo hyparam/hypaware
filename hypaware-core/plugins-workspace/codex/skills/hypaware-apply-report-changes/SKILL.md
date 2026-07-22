@@ -60,9 +60,8 @@ Keep the report's own numbering throughout so the user can cross-reference.
 
 Show one numbered entry per applicable change: the report's bold imperative,
 the estimated saving (labeled estimate), and exactly which local paths would
-be created or edited. Then collect an explicit per-change selection (an
-AskUserQuestion multi-select in chunks when the list is short, a numbered
-reply otherwise). Rules:
+be created or edited. Then collect an explicit per-change selection (ask the user to answer with
+the numbers to apply). Rules:
 
 - Never default to "all". No selection, no changes.
 - An artifact that would OVERWRITE an existing file gets a diff shown at

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/claude-desktop",
+  "version": "1.0.0",
+  "description": "Claude Desktop adapter for HypAware. Desktop has no writable settings file, so this plugin renders the org-managed third-party-inference profile (stable gateway endpoint, manual model list, credential-helper reference) for MDM distribution instead of attach-on-join.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "requires": {
+    "capabilities": {
+      "hypaware.ai-gateway": "^2.0.0",
+      "hypaware.anthropic-credential": "^1.0.0"
+    }
+  },
+  "contributes": {
+    "commands": [
+      { "name": "claude-desktop profile", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
+      { "name": "claude-desktop install-helper", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
+      { "name": "claude-desktop status", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" }
+    ],
+    "config_sections": [
+      {
+        "section": "claude_desktop",
+        "summary": "Desktop profile inputs: { models?, endpoint?, helper_path?, bundle_id? }. Rendered values only; the profile never carries a secret."
+      }
+    ]
+  }
+}

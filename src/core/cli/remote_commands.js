@@ -307,14 +307,15 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
 /**
  * Return the positional arguments in order, skipping flags and the value slot
  * of any value-taking flag (so e.g. `--org acme` is not read as a positional).
- * The one parser every `remote` subcommand uses, so a value flag added to any
+ * The one parser every `remote` subcommand uses (and the `report` group,
+ * which shares this file's flag conventions), so a value flag added to any
  * of them never misreads its value as a positional.
  *
  * @param {string[]} argv
  * @param {Set<string>} [valueFlags]
  * @returns {string[]}
  */
-function positionals(argv, valueFlags = new Set()) {
+export function positionals(argv, valueFlags = new Set()) {
   /** @type {string[]} */
   const out = []
   for (let i = 0; i < argv.length; i++) {
@@ -341,7 +342,7 @@ function positionals(argv, valueFlags = new Set()) {
  * @param {string} flag e.g. `--org`
  * @returns {{ present: boolean, value: string | undefined }}
  */
-function valueFlag(argv, flag) {
+export function valueFlag(argv, flag) {
   const eq = `${flag}=`
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]

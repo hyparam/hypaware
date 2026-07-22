@@ -120,3 +120,23 @@ npm run smoke -- core_boot_noop
 npm run smoke -- gateway_codex_capture
 npm run smoke -- daemon_foreground_start_stop
 ```
+
+## Session hygiene
+
+- Close working sessions at the end of the day. Before closing a session you
+  intend to continue, ask the agent for a continuation summary: open questions,
+  key file paths, decisions made, and the next step. Start the next day's
+  session from that summary instead of reopening the old session.
+- A session reopened on a later day re-reads its entire history on every
+  exchange. If a session has crossed a day boundary and its history no longer
+  informs the current step, start fresh.
+- Long autonomous runs (loops, overnight workflows) are exempt: they manage
+  their own context.
+
+## Edit rules
+
+- Read a file (or the region you will change) before your first Edit to it in
+  a session, and re-read it before retrying any failed Edit; the failure
+  usually means the file changed underneath you (a formatter or another agent).
+- If the same Edit fails twice, stop retrying: re-read, rebuild the edit from
+  the current content, or fall back to Write.

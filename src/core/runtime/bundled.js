@@ -61,6 +61,12 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * capabilities (which no default-activated plugin provides) and spends on
  * model calls, so it too activates only via explicit config.
  *
+ * The Claude Desktop pair follows it too: `@hypaware/claude-account`
+ * holds a real credential (an org API key or a subscription token
+ * store), so enabling it is a deliberate fleet-policy decision, and
+ * `@hypaware/claude-desktop` requires the credential capability that
+ * only that opt-in provides.
+ *
  * @type {ReadonlySet<PluginName>}
  * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  */
@@ -72,6 +78,8 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/completion-anthropic',
   '@hypaware/completion-openai',
   '@hypaware/context-graph-enrich',
+  '@hypaware/claude-account',
+  '@hypaware/claude-desktop',
 ]))
 
 /**

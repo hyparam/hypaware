@@ -224,8 +224,26 @@ export function resolveAnthropicConversationId(reqBody, exchangeId, sessionId) {
 export function claudeClientVersion(headers) {
   const ua = headerValue(headers, 'user-agent')
   if (typeof ua !== 'string') return undefined
-  const match = /^claude-cli\/([^/\s]+)/.exec(ua)
+  const match = /^(?:claude-cli|Claude-Desktop)\/([^/\s]+)/i.exec(ua)
   return match?.[1]
+}
+
+/**
+ * Resolve the client name for an Anthropic exchange from its
+ * User-Agent. Claude Desktop routes the same `/v1/messages` shape as
+ * the CLI through the gateway, so without this both land under the CLI
+ * default and per-client analytics (usage reports, activity graph)
+ * cannot tell them apart. Desktop sends `Claude-Desktop/<version>`.
+ *
+ * @ref LLP 0115#desktop-rows-are-distinguishable [implements]: stamp `claude-desktop` off the Desktop UA so Desktop traffic is its own client
+ * @param {Record<string, string | string[] | undefined> | undefined} headers
+ * @param {string} fallback  Client name for non-Desktop Anthropic traffic.
+ * @returns {string}
+ */
+export function claudeClientName(headers, fallback = 'claude') {
+  const ua = headerValue(headers, 'user-agent')
+  if (typeof ua === 'string' && /^Claude-Desktop\//i.test(ua)) return 'claude-desktop'
+  return fallback
 }
 
 /**

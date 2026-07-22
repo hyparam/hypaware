@@ -219,11 +219,8 @@ export async function activate(ctx) {
     'hypaware-graph',
     'hypaware-sensitive-scan',
     'hypaware-ai-usage-report',
-    'hypaware-ai-adoption-report',
-    'hypaware-ai-improvement-report',
-    'hypaware-ai-security-report',
-    'hypaware-ai-spend-report',
     'hypaware-report-to-html',
+    'hypaware-publish-report',
     'hypaware-apply-report-changes',
     'hypaware-apply-report-github-changes',
   ]) {
