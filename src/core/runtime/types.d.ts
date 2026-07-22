@@ -20,7 +20,7 @@ import type {
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
-import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
+import type { ExtendedQueryStorageService, SourceWithholdResolver } from '../cache/types.d.ts'
 import type { ClientDescriptor, LoadedManifest, FailedManifest } from '../types.d.ts'
 import type {
   CapabilityRegistryHandle,
@@ -173,6 +173,7 @@ export interface CreateKernelRuntimeArgs {
   storage?: ExtendedQueryStorageService
   cacheRoot?: string
   configControl?: ConfigControlFacade
+  sourceWithholdResolver?: SourceWithholdResolver
 }
 
 export interface CreateActivationContextArgs {

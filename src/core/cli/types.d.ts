@@ -43,6 +43,13 @@ export interface WalkthroughOption {
    * the legacy numbered prompt, which has no preselection concept.
    */
   checked?: boolean
+  /**
+   * Renders the row as read-only context: shown (and, when `checked`,
+   * pre-checked) but not toggleable. The wizard pick phase sets this for
+   * central-layer-locked sources (LLP 0031 provenance vocabulary); they
+   * are filtered out of the returned picks regardless of the prompt.
+   */
+  disabled?: boolean
 }
 
 export interface WalkthroughQuestion {
@@ -116,10 +123,11 @@ export interface RunPickerWalkthroughOptions {
   prompt?: AsyncPickPrompt
   retentionPrompt?: AsyncRetentionPrompt
   /**
-   * Override the system source detector. Defaults to the real
-   * filesystem-based {@link detectClientSources}. Only consulted in
-   * interactive mode (no pre-baked `picks`); tests inject a stub so the
-   * picker's preselected boxes do not depend on the dev's home dir.
+   * Override the system source detector. Defaults to a catalog-backed
+   * wrapper around the real filesystem-based `detectPickerSources`.
+   * Only consulted in interactive mode (no pre-baked `picks`); tests
+   * inject a stub so the picker's preselected boxes do not depend on
+   * the dev's home dir.
    */
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   /**

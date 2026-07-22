@@ -825,6 +825,75 @@ test('dispatch forwards a real stdin to command run when the caller omits opts.s
   assert.equal(seenStdin, process.stdin)
 })
 
+test('ctx.commands.run dispatches a registered command with the same exit code and output as the CLI path', async () => {
+  // T4 seam: a command body can invoke another registered command by name
+  // through `ctx.commands.run` and get its exit code, without touching the
+  // mutable registry. Running the same target through the seam and through
+  // the normal `hyp <name>` CLI path must be byte-identical.
+  const registry = createCommandRegistry()
+  /** @type {unknown} */
+  let seenCommands = 'not-run'
+  // The target command: writes to stdout/stderr and returns a nonzero exit
+  // code, so both the output and the exit code have something to prove.
+  registry.register({
+    name: 'seamtarget',
+    summary: 'Emit fixed output and a nonzero exit code',
+    usage: 'hyp seamtarget [args...]',
+    async run(argv, ctx) {
+      ctx.stdout.write(`seamtarget out: ${argv.join(' ')}\n`)
+      ctx.stderr.write('seamtarget err\n')
+      return 7
+    },
+  })
+  // The caller: delegates straight through the seam, adding no output of
+  // its own, so the only thing the buffers can differ by is the seam.
+  registry.register({
+    name: 'seamcaller',
+    summary: 'Invoke seamtarget through ctx.commands.run',
+    usage: 'hyp seamcaller [args...]',
+    async run(argv, ctx) {
+      seenCommands = ctx.commands
+      return ctx.commands.run('seamtarget', argv)
+    },
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+
+  const argv = ['--flag', 'value']
+
+  // Normal CLI path: `hyp seamtarget --flag value`.
+  const directOut = makeBuf()
+  const directErr = makeBuf()
+  const directCode = await dispatch(['seamtarget', ...argv], {
+    stdout: directOut,
+    stderr: directErr,
+    registry,
+    kernel,
+  })
+
+  // Seam path: `hyp seamcaller --flag value`, which runs seamtarget through
+  // ctx.commands.run.
+  const seamOut = makeBuf()
+  const seamErr = makeBuf()
+  const seamCode = await dispatch(['seamcaller', ...argv], {
+    stdout: seamOut,
+    stderr: seamErr,
+    registry,
+    kernel,
+  })
+
+  // The seam is populated and exposes only `run`, never the registry.
+  assert.equal(typeof (/** @type {any} */ (seenCommands).run), 'function')
+  assert.equal(/** @type {any} */ (seenCommands).register, undefined)
+
+  // Identical exit code and identical stdout/stderr across the two paths.
+  assert.equal(seamCode, 7)
+  assert.equal(seamCode, directCode)
+  assert.equal(seamOut.text(), directOut.text())
+  assert.equal(seamOut.text(), 'seamtarget out: --flag value\n')
+  assert.equal(seamErr.text(), directErr.text())
+  assert.equal(seamErr.text(), 'seamtarget err\n')
+})
+
 function makeBuf() {
   let value = ''
   return {

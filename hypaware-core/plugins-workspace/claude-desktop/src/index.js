@@ -4,14 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
+import { resolveHelperPath, resolveHypBin, resolveInputs } from './inputs.js'
 import {
-  DEFAULT_BUNDLE_ID,
-  DEFAULT_MODELS,
   buildManagedProfile,
   renderCredentialHelperScript,
   renderManagedPreferencesPlist,
-  resolveGatewayBaseUrl,
 } from './profile.js'
+import { runInstall } from './install.js'
+import { runVerify } from './verify.js'
 
 /**
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -19,10 +19,11 @@ import {
  * @import { ProfileInputs } from './types.js'
  */
 
-export const PLUGIN_NAME = '@hypaware/claude-desktop'
+// Re-exported for existing/external callers that imported the wrapper's
+// basename off this module before it moved to inputs.js.
+export { HELPER_BASENAME } from './inputs.js'
 
-/** Basename of the generated credential-helper wrapper under the state dir. */
-export const HELPER_BASENAME = 'credential-helper.sh'
+export const PLUGIN_NAME = '@hypaware/claude-desktop'
 
 /**
  * Side-effect-free config-section export so the kernel apply path can
@@ -38,13 +39,18 @@ export const configSection = {
 /**
  * Activate `@hypaware/claude-desktop`.
  *
- * Desktop is deliberately not a `contributes.client`: the LLP 0044
- * attach-on-join loop requires a reversible settings-file write and
- * Desktop has no writable settings file. The adapter's whole surface
- * is rendering the org-managed profile an MDM distributes plus the
- * no-arg credential wrapper that profile points at.
+ * Corrects LLP 0115's "no writable settings file" premise: the live-test
+ * findings in LLP 0133 identify the managed-preferences plist
+ * (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`) as a
+ * real local surface, so the manifest now also declares `contributes.client`
+ * and `contributes.picker` (LLP 0130) for the `hyp init` wizard's `needs_setup`
+ * row. This does not reinstate generic attach-on-join (LLP 0044): the plugin
+ * registers no runtime `ctx.clients` adapter, so the generic reconciler's
+ * `desired()` (`action_attach.js`) stays inert for `claude-desktop` and the
+ * plist is placed only via the explicit `claude-desktop install` command,
+ * attended, with its own sudo prompt and idempotent re-run (LLP 0131).
  *
- * @ref LLP 0115#no-attach-on-join [implements]: explicit render/install commands instead of an attach probe
+ * @ref LLP 0133#attribution [constrained-by]: the client descriptor and picker row exist for wizard/attach-status plumbing, but captured rows still land under client_name "claude" with entrypoint "claude-desktop-3p"; query and hyp status surfaces key off entrypoint, not this descriptor's name
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {
@@ -95,65 +101,38 @@ export async function activate(ctx) {
     run: async (argv, cmdCtx) => runStatus(cmdCtx, sectionConfig, credential, stateDir),
   })
 
+  // `claude-desktop install` and `claude-desktop verify` are the picker's
+  // `configure_command` and the post-wizard verify hint (LLP 0135, LLP
+  // 0133#one-surface). The command bodies live in src/install.js and
+  // src/verify.js; this registration just wires the resolved inputs
+  // (sectionConfig, the credential capability, stateDir) through.
+  ctx.commands.register({
+    name: 'claude-desktop install',
+    plugin: PLUGIN_NAME,
+    summary: 'Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt',
+    usage: 'hyp claude-desktop install [--print-commands]',
+    help: 'Runs the credential login chain (LLP 0117), writes the credential helper (LLP 0116), backs '
+      + 'up and clears stale Claude-3p dialog residue, writes the managed-preferences plist via an '
+      + 'inline sudo prompt (LLP 0133#solo-sudo), and prompts for a Desktop restart. Refuses up front '
+      + 'if the effective gateway listen is ephemeral (127.0.0.1:0, LLP 0114). Every step re-checks its '
+      + 'own already-done state, so a bailed sudo prompt converges on re-run (LLP 0131#idempotent-rerun). '
+      + '--print-commands prints the privileged commands without running them.',
+    run: async (argv, cmdCtx) => runInstall(argv, cmdCtx, { sectionConfig, credential, stateDir }),
+  })
+
+  ctx.commands.register({
+    name: 'claude-desktop verify',
+    plugin: PLUGIN_NAME,
+    summary: 'Verify the Desktop plist install and print the in-app capture-check hint',
+    usage: 'hyp claude-desktop verify',
+    help: 'Checks the automatic half (managed plist present and up to date, dialog residue cleared) '
+      + 'and sets the exit code from it. Also prints the in-app half as a hint only (send a message in '
+      + 'Claude Desktop, confirm it was captured); that half is never checked automatically and never '
+      + 'blocks (LLP 0131#verify-is-a-hint).',
+    run: async (argv, cmdCtx) => runVerify(argv, cmdCtx, { sectionConfig, credential, stateDir }),
+  })
+
   ctx.log.info('claude-desktop activated', { credential_mode: credential.mode })
-}
-
-/**
- * Absolute path of the `hyp` executable to embed in the wrapper.
- * Desktop runs the wrapper outside any shell profile, so a bare `hyp`
- * on PATH is not a given; resolve the running CLI's entry script.
- *
- * @returns {string}
- */
-function resolveHypBin() {
-  const entry = process.argv[1]
-  if (typeof entry === 'string' && entry.length > 0) {
-    try {
-      return fs.realpathSync(entry)
-    } catch {
-      return entry
-    }
-  }
-  return 'hyp'
-}
-
-/**
- * Resolve the wrapper's absolute path: `claude_desktop.helper_path`
- * override, else `<stateDir>/credential-helper.sh`.
- *
- * @param {Record<string, unknown>} sectionConfig
- * @param {string} stateDir
- * @returns {string}
- */
-function resolveHelperPath(sectionConfig, stateDir) {
-  const override = sectionConfig.helper_path
-  if (typeof override === 'string' && override.length > 0) return override
-  return path.join(stateDir, HELPER_BASENAME)
-}
-
-/**
- * @param {Record<string, unknown>} sectionConfig
- * @param {AnthropicCredentialCapability} credential
- * @param {CommandRunContext} cmdCtx
- * @param {string} stateDir
- * @returns {ProfileInputs}
- */
-function resolveInputs(sectionConfig, credential, cmdCtx, stateDir) {
-  const models = Array.isArray(sectionConfig.models)
-    ? /** @type {string[]} */ (sectionConfig.models)
-    : [...DEFAULT_MODELS]
-  const bundleId = typeof sectionConfig.bundle_id === 'string' && sectionConfig.bundle_id.length > 0
-    ? sectionConfig.bundle_id
-    : DEFAULT_BUNDLE_ID
-  return {
-    baseUrl: resolveGatewayBaseUrl({ hypConfig: cmdCtx.config, sectionConfig }),
-    // An org key presents under the x-api-key scheme; a subscription
-    // bearer rides `bearer` plus the helper-supplied beta header.
-    authScheme: credential.mode === 'org_key' ? 'x-api-key' : 'bearer',
-    models,
-    helperPath: resolveHelperPath(sectionConfig, stateDir),
-    bundleId,
-  }
 }
 
 /**

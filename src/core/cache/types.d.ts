@@ -248,6 +248,38 @@ export interface RetentionResult {
   sourceTableResults: RetentionSourceTableResult[]
 }
 
+/**
+ * Export-seam source-scoped withholding (LLP 0132 #source-scoped-withholding):
+ * a second, optional `readRowsSince` resolver alongside `UsagePolicyResolver`.
+ * Where `UsagePolicyResolver` reads a row's own `cwd`, this one reads a
+ * dataset-declared **attribution column** (`PluginDatasetManifest.attribution_column`,
+ * e.g. `client_name` for `ai_gateway_messages`) and withholds rows attributed
+ * to a picker source classified `'local'` on a machine with a central layer
+ * (`classifyClientProvenance`, LLP 0132 #rule): a local addition on a managed
+ * machine never leaves it, even though it stays fully queryable locally.
+ *
+ * Built once at boot (`createSourceWithholdResolver`, `src/core/cache/source-withhold.js`)
+ * and threaded through `createQueryStorageService` the same way
+ * `usagePolicyResolver` already is.
+ */
+export interface SourceWithholdResolver {
+  /**
+   * The attribution column `readRowsSince` should force into the scan for
+   * `dataset`, or `undefined` when the dataset declared no
+   * `attribution_column`, the conservative default, matching `local-only`'s
+   * original design: a dataset with no declared attribution column is never
+   * subject to source-scoped withholding.
+   */
+  attributionColumnFor(dataset: string): string | undefined
+  /**
+   * True when a row's own attribution-column value names a withheld picker
+   * source id: drop-but-advance (the row is withheld from the payload but
+   * still moves the watermark past it, mirroring the `cwd` filter's
+   * continuation semantics).
+   */
+  shouldWithhold(attributionValue: unknown): boolean
+}
+
 export type ExtendedQueryStorageService = QueryStorageService & {
   dataSourceForTable(tablePath: string): Promise<AsyncDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>

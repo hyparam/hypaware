@@ -128,6 +128,35 @@ test('multiselect: a with mixed selection checks all', () => {
   assert.deepEqual(next.options.map((/** @type {any} */ o) => o.checked), [true, true])
 })
 
+test('multiselect: space on a disabled row is a no-op', () => {
+  const s = multiselectState({
+    cursor: 0,
+    options: [
+      { value: 'locked', label: 'Locked', checked: true, disabled: true },
+      { value: 'b', label: 'B', checked: false },
+    ],
+  })
+  const next = /** @type {any} */ (reduce(s, { name: 'space' }))
+  assert.equal(next.options[0].checked, true)
+})
+
+test('multiselect: a leaves disabled rows fixed and toggles the rest', () => {
+  /** @type {any} */
+  let s = multiselectState({
+    options: [
+      { value: 'locked', label: 'Locked', checked: true, disabled: true },
+      { value: 'b', label: 'B', checked: false },
+      { value: 'c', label: 'C', checked: false },
+    ],
+  })
+  s = reduce(s, { name: 'a' })
+  // Locked row stays checked; the toggleable rows flip on.
+  assert.deepEqual(s.options.map((/** @type {any} */ o) => o.checked), [true, true, true])
+  s = reduce(s, { name: 'a' })
+  // Locked row still fixed; the toggleable rows flip back off.
+  assert.deepEqual(s.options.map((/** @type {any} */ o) => o.checked), [true, false, false])
+})
+
 test('multiselect: digit keys 1-3 jump to in-range index', () => {
   const s = multiselectState()
   for (let i = 1; i <= 3; i++) {

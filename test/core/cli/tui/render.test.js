@@ -55,6 +55,37 @@ test('multiselect: cursor row uses pointer ">", others use space', () => {
   assert.ok(lines.some((l) => l.startsWith('  [ ] C')))
 })
 
+test('multiselect: a disabled row renders its label and checkbox', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'multiselect',
+    title: 'pick',
+    options: [
+      { value: 'locked', label: 'Claude · managed by your fleet', checked: true, disabled: true },
+      { value: 'b', label: 'B', checked: false },
+    ],
+    cursor: 0,
+    status: 'active',
+  }
+  const lines = render(state, { color: false }).split('\n')
+  assert.ok(lines.some((l) => l.includes('[x] Claude · managed by your fleet')))
+})
+
+test('multiselect: a disabled row under the cursor renders dim, not the cyan cursor color', () => {
+  /** @type {any} */
+  const state = {
+    kind: 'multiselect',
+    title: 'pick',
+    options: [{ value: 'locked', label: 'Locked', checked: true, disabled: true }],
+    cursor: 0,
+    status: 'active',
+  }
+  const out = render(state, { color: true })
+  // Dim (2m), never the cursor cyan (36m), even though the cursor rests on it.
+  assert.match(out, /\x1b\[2m/)
+  assert.doesNotMatch(out, /\x1b\[36m/)
+})
+
 test('multiselect: summary lines appear under labels when set', () => {
   /** @type {any} */
   const state = {

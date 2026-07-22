@@ -1,8 +1,10 @@
 import type {
+  PickerDetectProbe,
   PluginAttachProbeManifest,
   PluginContributionManifest,
   PluginManifest,
   PluginName,
+  PluginPickerCompose,
 } from '../../hypaware-plugin-kernel-types.d.ts'
 import type { CapabilityRegistryHandle } from './registry/types.d.ts'
 import type { PluginMetadata } from './config/types.d.ts'
@@ -25,11 +27,34 @@ export interface ClientDescriptor {
   requiredUpstreams?: string[]
 }
 
+/**
+ * One `hyp init` wizard picker row, resolved from a plugin's
+ * `contributes.picker` manifest entry. `id` is the picker source id
+ * (`PluginPickerContribution.name`) keying the row; `plugin` is the
+ * owning plugin, used by provenance checks to resolve a picker source
+ * id to its central-vs-local membership.
+ */
+export interface PickerDescriptor {
+  plugin: PluginName
+  id: string
+  label: string
+  summary?: string
+  detect?: PickerDetectProbe
+  needsSetup?: boolean
+  configureCommand?: string
+  /**
+   * Composition contribution folded by `composePickerConfig` to build
+   * the local-layer config for this pick (`PluginPickerContribution.compose`).
+   */
+  compose?: PluginPickerCompose
+}
+
 export interface PluginCatalog {
   plugins: Map<PluginName, PluginCatalogEntry>
   pluginMetadata: Map<PluginName, PluginMetadata>
   knownDatasets: Set<string>
   clientDescriptors: Map<string, ClientDescriptor>
+  pickerDescriptors: Map<string, PickerDescriptor>
 }
 
 // --- dep_graph ---

@@ -148,6 +148,12 @@ export function validateManifest(value) {
   if (m.contributes !== undefined && !isPlainObject(m.contributes)) {
     return invalid('contributes must be an object when present')
   }
+  if (isPlainObject(m.contributes)) {
+    const pickerCheck = validatePickerContributions(
+      /** @type {Record<string, unknown>} */ (m.contributes).picker
+    )
+    if (!pickerCheck.ok) return pickerCheck
+  }
   /** @type {PluginManifest} */
   const manifest = {
     schema_version: 1,
@@ -164,6 +170,83 @@ export function validateManifest(value) {
   if (isStringArray(m.permissions)) manifest.permissions = /** @type {PluginPermission[]} */ (m.permissions)
   if (isPlainObject(m.contributes)) manifest.contributes = /** @type {PluginContributionManifest} */ (m.contributes)
   return { ok: true, manifest }
+}
+
+/**
+ * Recognized `PickerDetectProbe` variant keys. Exactly one must be
+ * present, carrying a non-empty string path.
+ * @ref LLP 0130#picker-block: the declarative picker probe variants.
+ */
+const PICKER_PROBE_KEYS = ['settings_file', 'app_bundle', 'path']
+
+/**
+ * Validate `contributes.picker`. It is optional; when present it must be
+ * an array of picker rows, each with a `name` (the picker source id
+ * that keys the row) and `label` string, and, optionally, a `summary`
+ * string, a single-variant `detect` probe, a `needs_setup` boolean, and
+ * a `configure_command` string. Unknown fields are accepted (kept
+ * opaque like the rest of the `contributes` block) so later additions
+ * such as `compose` pass through untouched.
+ *
+ * @param {unknown} picker
+ * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
+ */
+function validatePickerContributions(picker) {
+  if (picker === undefined) return { ok: true }
+  if (!Array.isArray(picker)) {
+    return invalid('contributes.picker must be an array when present')
+  }
+  for (const row of picker) {
+    if (!isPlainObject(row)) {
+      return invalid('contributes.picker entries must be objects')
+    }
+    const r = /** @type {Record<string, unknown>} */ (row)
+    if (!isNonEmptyString(r.name)) {
+      return invalid('contributes.picker entries require a name (string)')
+    }
+    if (!isNonEmptyString(r.label)) {
+      return invalid('contributes.picker entries require a label (string)')
+    }
+    if (r.summary !== undefined && typeof r.summary !== 'string') {
+      return invalid('contributes.picker summary must be a string when present')
+    }
+    if (r.needs_setup !== undefined && typeof r.needs_setup !== 'boolean') {
+      return invalid('contributes.picker needs_setup must be a boolean when present')
+    }
+    if (r.configure_command !== undefined && typeof r.configure_command !== 'string') {
+      return invalid('contributes.picker configure_command must be a string when present')
+    }
+    if (r.detect !== undefined) {
+      const detectCheck = validatePickerProbe(r.detect)
+      if (!detectCheck.ok) return detectCheck
+    }
+  }
+  return { ok: true }
+}
+
+/**
+ * Validate a single `PickerDetectProbe`: a plain object carrying exactly
+ * one recognized variant key (`settings_file` / `app_bundle` / `path`)
+ * whose value is a non-empty string.
+ *
+ * @param {unknown} detect
+ * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
+ */
+function validatePickerProbe(detect) {
+  if (!isPlainObject(detect)) {
+    return invalid('contributes.picker detect must be an object when present')
+  }
+  const d = /** @type {Record<string, unknown>} */ (detect)
+  const present = PICKER_PROBE_KEYS.filter((k) => d[k] !== undefined)
+  if (present.length !== 1) {
+    return invalid(
+      `contributes.picker detect must set exactly one of ${PICKER_PROBE_KEYS.join(', ')}`
+    )
+  }
+  if (!isNonEmptyString(d[present[0]])) {
+    return invalid(`contributes.picker detect.${present[0]} must be a non-empty string`)
+  }
+  return { ok: true }
 }
 
 /**

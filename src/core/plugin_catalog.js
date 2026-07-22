@@ -2,15 +2,19 @@
 
 /**
  * @import { CapabilityName, PluginManifest, PluginName } from '../../hypaware-plugin-kernel-types.js'
- * @import { ClientDescriptor, LoadedManifest, PluginCatalog, PluginCatalogEntry } from '../../src/core/types.js'
+ * @import { ClientDescriptor, LoadedManifest, PickerDescriptor, PluginCatalog, PluginCatalogEntry } from '../../src/core/types.js'
  * @import { PluginMetadata } from '../../src/core/config/types.js'
  */
 
 /**
  * Build a plugin catalog from loaded manifests. The catalog derives
- * capability metadata, known datasets, client descriptors, and
- * contribution summaries from the manifest files themselves rather
- * than a hardcoded table.
+ * capability metadata, known datasets, client descriptors, `hyp init`
+ * picker descriptors, and contribution summaries from the manifest
+ * files themselves rather than a hardcoded table.
+ *
+ * @ref LLP 0130#picker-block [implements]: pickerDescriptors is read
+ * in the same pass as clientDescriptors, first-manifest-wins, keyed by
+ * each row's own `name` (a manifest may contribute more than one row).
  *
  * Callers should pass both `bundled.loaded` and `bundled.excluded`
  * manifests so excluded plugins (like `@hypaware/gascity`) remain
@@ -34,6 +38,8 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
   const knownDatasets = new Set()
   /** @type {Map<string, ClientDescriptor>} */
   const clientDescriptors = new Map()
+  /** @type {Map<string, PickerDescriptor>} */
+  const pickerDescriptors = new Map()
 
   for (const source of [bundledManifests, installedManifests]) {
     for (const entry of source) {
@@ -75,10 +81,30 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           clientDescriptors.set(client.name, descriptor)
         }
       }
+
+      const pickerRows = entry.manifest.contributes?.picker
+      if (Array.isArray(pickerRows)) {
+        for (const row of pickerRows) {
+          if (!row || typeof row.name !== 'string' || typeof row.label !== 'string') continue
+          if (pickerDescriptors.has(row.name)) continue
+          /** @type {PickerDescriptor} */
+          const descriptor = {
+            plugin: name,
+            id: row.name,
+            label: row.label,
+          }
+          if (typeof row.summary === 'string') descriptor.summary = row.summary
+          if (row.detect) descriptor.detect = row.detect
+          if (typeof row.needs_setup === 'boolean') descriptor.needsSetup = row.needs_setup
+          if (typeof row.configure_command === 'string') descriptor.configureCommand = row.configure_command
+          if (row.compose && typeof row.compose === 'object') descriptor.compose = row.compose
+          pickerDescriptors.set(row.name, descriptor)
+        }
+      }
     }
   }
 
-  return { plugins, pluginMetadata, knownDatasets, clientDescriptors }
+  return { plugins, pluginMetadata, knownDatasets, clientDescriptors, pickerDescriptors }
 }
 
 /**

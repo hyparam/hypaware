@@ -132,6 +132,13 @@ export interface PluginProvides {
 
 export interface PluginContributionManifest {
   client?: PluginClientManifest
+  /**
+   * Picker rows this plugin contributes to the `hyp init` wizard. One
+   * plugin may contribute more than one row (e.g. `@hypaware/ai-gateway`
+   * contributes both `raw-anthropic` and `raw-openai`), so this is an
+   * array, sibling to the single `client` descriptor above.
+   */
+  picker?: PluginPickerContribution[]
   commands?: PluginCommandManifest[]
   config_sections?: PluginConfigSectionManifest[]
   sources?: PluginSourceManifest[]
@@ -174,6 +181,102 @@ export interface PluginAttachProbeManifest {
   marker_record?: string
 }
 
+/**
+ * One row in the `hyp init` wizard's client/source picker, contributed
+ * declaratively by a plugin's manifest rather than a hardcoded core
+ * table (LLP 0130). `name` is the picker source id that keys the row
+ * (e.g. `claude`, `codex`, `raw-anthropic`); one plugin may contribute
+ * more than one row (`@hypaware/ai-gateway` contributes both
+ * `raw-anthropic` and `raw-openai`), so each row names its own id
+ * rather than inheriting the plugin's package name. The remaining
+ * fields drive the row's label, initial detection, and, for a
+ * `needs_setup` row, the command that configures it.
+ */
+export interface PluginPickerContribution {
+  /** Picker source id keying this row. */
+  name: string
+  /** Human-readable row label shown in the picker prompt. */
+  label: string
+  /** One-line description of what picking this row captures. */
+  summary?: string
+  /**
+   * Best-effort presence probe seeding the row's initial checkbox
+   * state. A probe failure means "not present," never an error.
+   */
+  detect?: PickerDetectProbe
+  /**
+   * True when picking this row is not sufficient on its own: an
+   * attended `configure_command` must run to place the integration
+   * (e.g. Claude Desktop's managed-preferences plist). Absent/false
+   * rows are configured entirely by the picker's config write.
+   */
+  needs_setup?: boolean
+  /**
+   * Command name (as registered under `contributes.commands`) the
+   * wizard's configure phase invokes for a `needs_setup` row, run in
+   * process through `CommandRunContext.commands.run`.
+   */
+  configure_command?: string
+  /**
+   * Composition contribution: the data `composePickerConfig` folds to
+   * build the local-layer config when this row is picked (LLP 0130). It
+   * carries, in manifest data, the same knowledge the retired hardcoded
+   * `composePickerConfig` switch held in core: which plugin instance the
+   * pick adds, whether it needs the local AI gateway, and which gateway
+   * upstream(s) it requests. Rows with no `compose` (a detection-only or
+   * `needs_setup` client the picker's config write handles) contribute
+   * nothing to the fold.
+   */
+  compose?: PluginPickerCompose
+}
+
+/**
+ * A picker row's composition contribution, folded by
+ * `composePickerConfig` (LLP 0130#picker-block). Every field is
+ * optional: a row may add a plugin, request the gateway, contribute
+ * gateway upstreams, or any combination.
+ */
+export interface PluginPickerCompose {
+  /**
+   * Plugin instance added to the composed config when this row is
+   * picked. A gateway-requiring plugin (`requires_gateway: true`) is
+   * placed after the export sink plugins; a gateway-independent plugin
+   * is placed before them, matching the retired switch's plugin order.
+   */
+  plugin?: PluginConfigInstance
+  /**
+   * True when picking this row implies the local AI gateway
+   * (`@hypaware/ai-gateway`). The gateway plugin is included once when
+   * any picked row sets this.
+   */
+  requires_gateway?: boolean
+  /**
+   * Gateway upstream(s) this row requests. The fold unions the requested
+   * upstreams across all picked rows, deduped by `name`, into the
+   * gateway plugin's `upstreams`. Accepts a single upstream or an array.
+   */
+  gateway_upstream?: PluginPickerGatewayUpstream | PluginPickerGatewayUpstream[]
+}
+
+/**
+ * One upstream a picker row requests on the local AI gateway.
+ */
+export interface PluginPickerGatewayUpstream {
+  name: string
+  base_url: string
+  path_prefix: string
+  provider?: string
+}
+
+/**
+ * A picker row's presence probe. Exactly one variant key is set; the
+ * detector switches on which key is present.
+ */
+export type PickerDetectProbe =
+  | { settings_file: string } // reuses the `contributes.client.attach_probe` settings-file shape
+  | { app_bundle: string } // stat-exists check on a macOS `.app` bundle path
+  | { path: string } // stat-exists check on a directory (honors `$FOO_HOME`-style env overrides)
+
 export interface PluginCommandManifest {
   name: string
   summary?: string
@@ -208,6 +311,14 @@ export interface PluginDatasetManifest {
   name: string
   summary?: string
   source?: string
+  /**
+   * Row column carrying the picker source id a row is attributed to
+   * (e.g. `client_name` for `ai_gateway_messages`, where claude/codex/
+   * hermes rows all land). Enables source-scoped export withholding:
+   * a dataset with no declared `attribution_column` is never subject
+   * to source-scoped withholding (LLP 0132).
+   */
+  attribution_column?: string
 }
 
 export interface PluginSkillManifest {
@@ -662,6 +773,15 @@ export interface CommandRunContext {
   capabilities: CapabilityRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
+  /**
+   * In-process command dispatch seam (kernel-owned). Lets a command
+   * implementation invoke another registered command by name and receive
+   * its exit code, without exposing the full mutable command registry.
+   * The wizard's configure phase runs a `needs_setup` picker row's
+   * `configure_command` through this (LLP 0130). The dispatcher always
+   * populates it, so it is present for every command body.
+   */
+  commands: { run(name: string, argv: string[]): Promise<number> }
   /**
    * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
    * enumerates this to assemble the MCP tool surface; the projected CLI
