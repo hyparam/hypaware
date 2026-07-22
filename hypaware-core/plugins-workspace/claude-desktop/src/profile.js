@@ -139,10 +139,14 @@ export function renderCredentialHelperScript(opts) {
 }
 
 /**
+ * Quote a single argv token for display or `/bin/sh -c` use. Exported so
+ * `install.js` can render the privileged plist/restart commands for
+ * `--print-commands` with the same quoting rule the wrapper script uses.
+ *
  * @param {string} value
  * @returns {string}
  */
-function shellQuote(value) {
+export function shellQuote(value) {
   if (/^[A-Za-z0-9_./-]+$/.test(value)) return value
   return `'${value.replaceAll("'", "'\\''")}'`
 }
