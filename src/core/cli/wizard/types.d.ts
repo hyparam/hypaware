@@ -1,6 +1,14 @@
 import type { CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
 import type { PickerDescriptor, PluginCatalog } from '../../types.d.ts'
+import type {
+  AsyncPickPrompt,
+  AsyncRetentionPrompt,
+  PickerExport,
+  PickerExportOrigin,
+  PickerPicks,
+  PickerSource,
+} from '../types.d.ts'
 
 /**
  * The wizard's top-level pathway choice (LLP 0129 #fork). `quit` is the
@@ -186,4 +194,72 @@ export interface RunWizardJoinOptions {
    * layers.
    */
   resolveLayered?: () => Promise<LayeredProvenance>
+}
+
+/**
+ * The wizard pick phase (LLP 0135 #pick). Options come from
+ * `catalog.pickerDescriptors` (LLP 0130), central-layer-locked rows render
+ * checked and disabled (LLP 0031 provenance vocabulary) and are filtered
+ * out of the returned picks before composition (LLP 0129
+ * #join-before-picker). Non-interactive callers set `picks` and skip
+ * prompting, matching today's `interactive = !opts.picks` split.
+ */
+export interface RunWizardPickOptions {
+  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stdin?: NodeJS.ReadableStream
+  env: NodeJS.ProcessEnv
+  /**
+   * The plugin catalog (T2). Picker rows come from
+   * `catalog.pickerDescriptors`; when omitted the phase loads the bundled
+   * catalog itself, matching `runPickerWalkthrough`'s self-loading shape.
+   */
+  catalog?: Pick<PluginCatalog, 'pickerDescriptors'>
+  /**
+   * Central-layer-locked source ids from the join phase (LLP 0129
+   * #join-before-picker). Each renders checked and disabled with the
+   * `· managed by your fleet` label suffix, and is filtered out of the
+   * returned `sourcesPicked` so composition never re-adds a source the
+   * central layer already owns.
+   */
+  locked?: string[]
+  /** True on a managed machine's scoped re-entry (LLP 0129 #returning-gate). */
+  scoped?: boolean
+  /** Pre-baked picks; non-interactive callers set this and skip prompting. */
+  picks?: PickerPicks
+  /** Provenance of `picks.exportChoice`, for telemetry only. */
+  exportOrigin?: PickerExportOrigin
+  /** Override the source prompt (tests pre-bake answers). */
+  prompt?: AsyncPickPrompt
+  /** Override the retention prompt (tests pre-bake answers). */
+  retentionPrompt?: AsyncRetentionPrompt
+  /** Override the system source detector (interactive only). */
+  detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
+  /** Overwrite an existing local config non-interactively (`--force`). */
+  force?: boolean
+  /** Interactive overwrite confirm, consulted only when a config exists. */
+  confirmOverwrite?: (targetPath: string) => Promise<boolean>
+}
+
+/**
+ * The pick phase result. A superset of the fields the configure phase
+ * (`descriptors`) and the finale (`config`, `configPath`, `sourcesPicked`,
+ * ...) read. `cancelled` short-circuits the orchestrator; `exitCode` is 130
+ * on a cancel, 1 on an overwrite refusal, else 0.
+ */
+export interface WizardPickResult {
+  exitCode: number
+  /** True when the user cancelled at a prompt (exitCode 130). */
+  cancelled?: boolean
+  configPath: string
+  config: HypAwareV2Config
+  /** Picked source ids, with locked (central-layer) ids removed. */
+  sourcesPicked: PickerSource[]
+  exportPicked: PickerExport
+  clientsPicked: ('claude' | 'codex')[]
+  retentionDays: number
+  /** The picked, locked-filtered descriptors, for the configure phase. */
+  descriptors: PickerDescriptor[]
+  /** Source ids rendered locked in this run (central-layer, LLP 0031). */
+  lockedSources: string[]
 }

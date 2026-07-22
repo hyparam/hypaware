@@ -43,6 +43,13 @@ export interface WalkthroughOption {
    * the legacy numbered prompt, which has no preselection concept.
    */
   checked?: boolean
+  /**
+   * Renders the row as read-only context: shown (and, when `checked`,
+   * pre-checked) but not toggleable. The wizard pick phase sets this for
+   * central-layer-locked sources (LLP 0031 provenance vocabulary); they
+   * are filtered out of the returned picks regardless of the prompt.
+   */
+  disabled?: boolean
 }
 
 export interface WalkthroughQuestion {

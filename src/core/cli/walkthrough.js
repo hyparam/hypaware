@@ -51,7 +51,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * } from '../../../src/core/cli/types.js'
  */
 
-const DEFAULT_RETENTION_DAYS = 30
+export const DEFAULT_RETENTION_DAYS = 30
 
 /**
  * Resolve the HYP_HOME root the same way the kernel does (matches
@@ -59,7 +59,7 @@ const DEFAULT_RETENTION_DAYS = 30
  *
  * @param {NodeJS.ProcessEnv} env
  */
-function resolveHypHome(env) {
+export function resolveHypHome(env) {
   if (env.HYP_HOME) return env.HYP_HOME
   const home = env.HOME ?? ''
   return path.join(home, '.hyp')
@@ -81,7 +81,10 @@ function legacyNumberedPromptFactory(opts) {
     try {
       output.write(`\n${question.title}\n`)
       question.options.forEach((opt, idx) => {
-        output.write(`  ${idx + 1}) ${opt.label}\n`)
+        // Locked (disabled) rows are shown for context but never selectable
+        // by number - they are already in the central layer and are filtered
+        // out of the returned picks downstream regardless.
+        output.write(`  ${idx + 1}) ${opt.label}${opt.disabled ? ' (locked)' : ''}\n`)
         if (opt.summary && opt.summary !== opt.label) {
           output.write(`     ${opt.summary}\n`)
         }
@@ -132,7 +135,7 @@ function legacyRetentionPromptFactory(opts) {
  * @param {{ stdin?: NodeJS.ReadableStream, stdout: { write(chunk: string): unknown } }} opts
  * @returns {(targetPath: string) => Promise<boolean>}
  */
-function defaultOverwriteConfirmFactory(opts) {
+export function defaultOverwriteConfirmFactory(opts) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
   return async function (targetPath) {
@@ -163,6 +166,7 @@ function tuiPromptFactory(opts) {
         label: o.label,
         ...(o.summary && o.summary !== o.label ? { summary: o.summary } : {}),
         ...(o.checked ? { checked: true } : {}),
+        ...(o.disabled ? { disabled: true } : {}),
       })),
       ...(question.bounds ? { bounds: question.bounds } : {}),
       clearOnResolve: true,
@@ -213,7 +217,7 @@ function tuiRetentionPromptFactory(opts) {
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncPickPrompt}
  */
-function defaultPromptFactory(opts) {
+export function defaultPromptFactory(opts) {
   if (shouldUseTui(opts)) return tuiPromptFactory(opts)
   return legacyNumberedPromptFactory(opts)
 }
@@ -222,7 +226,7 @@ function defaultPromptFactory(opts) {
  * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
  * @returns {AsyncRetentionPrompt}
  */
-function defaultRetentionPromptFactory(opts) {
+export function defaultRetentionPromptFactory(opts) {
   if (shouldUseTui(opts)) return tuiRetentionPromptFactory(opts)
   return legacyRetentionPromptFactory(opts)
 }
@@ -1142,7 +1146,7 @@ async function stopFinaleStartedSources(sources) {
  * @param {{ env: NodeJS.ProcessEnv }} opts
  * @returns {Promise<Set<PickerSource>>}
  */
-async function defaultPickerDetect(opts) {
+export async function defaultPickerDetect(opts) {
   const bundled = await discoverBundledPlugins()
   const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   const detected = await detectPickerSources(catalog, opts.env)
@@ -1158,7 +1162,7 @@ async function defaultPickerDetect(opts) {
  *
  * @returns {Promise<Map<string, PickerDescriptor>>}
  */
-async function loadPickerDescriptors() {
+export async function loadPickerDescriptors() {
   try {
     const bundled = await discoverBundledPlugins()
     const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
@@ -1177,7 +1181,7 @@ async function loadPickerDescriptors() {
  * @param {Map<string, PickerDescriptor>} descriptors
  * @returns {Map<string, PickerDescriptor>}
  */
-function orderPickerDescriptors(descriptors) {
+export function orderPickerDescriptors(descriptors) {
   const rank = (/** @type {string} */ id) => {
     const i = PICKER_DISPLAY_ORDER.indexOf(id)
     return i === -1 ? PICKER_DISPLAY_ORDER.length : i

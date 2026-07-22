@@ -67,7 +67,11 @@ function renderMultiselect(state, opts) {
     const pointer = cursor ? '>' : ' '
     const box = o.checked ? '[x]' : '[ ]'
     const row = `${pointer} ${box} ${o.label}`
-    if (cursor) {
+    if (o.disabled) {
+      // Read-only rows render dimmed even under the cursor so their locked
+      // status stays legible.
+      lines.push(paint(row, ANSI.dim, opts.color))
+    } else if (cursor) {
       lines.push(paint(row, ANSI.cyan, opts.color))
     } else if (o.checked) {
       lines.push(paint(row, ANSI.green, opts.color))
