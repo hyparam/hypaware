@@ -4,14 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
+import { resolveHelperPath, resolveHypBin, resolveInputs } from './inputs.js'
 import {
-  DEFAULT_BUNDLE_ID,
-  DEFAULT_MODELS,
   buildManagedProfile,
   renderCredentialHelperScript,
   renderManagedPreferencesPlist,
-  resolveGatewayBaseUrl,
 } from './profile.js'
+import { runInstall } from './install.js'
+import { runVerify } from './verify.js'
 
 /**
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -19,10 +19,11 @@ import {
  * @import { ProfileInputs } from './types.js'
  */
 
-export const PLUGIN_NAME = '@hypaware/claude-desktop'
+// Re-exported for existing/external callers that imported the wrapper's
+// basename off this module before it moved to inputs.js.
+export { HELPER_BASENAME } from './inputs.js'
 
-/** Basename of the generated credential-helper wrapper under the state dir. */
-export const HELPER_BASENAME = 'credential-helper.sh'
+export const PLUGIN_NAME = '@hypaware/claude-desktop'
 
 /**
  * Side-effect-free config-section export so the kernel apply path can
@@ -102,21 +103,21 @@ export async function activate(ctx) {
 
   // `claude-desktop install` and `claude-desktop verify` are the picker's
   // `configure_command` and the post-wizard verify hint (LLP 0135, LLP
-  // 0133#one-surface). Registered here as stubs so the manifest's
-  // `contributes.picker` row is immediately usable by the generic pick and
-  // configure phases; T13 replaces these bodies with the real login/helper/
-  // residue/plist/restart sequence in `src/install.js` and `src/verify.js`.
+  // 0133#one-surface). The command bodies live in src/install.js and
+  // src/verify.js; this registration just wires the resolved inputs
+  // (sectionConfig, the credential capability, stateDir) through.
   ctx.commands.register({
     name: 'claude-desktop install',
     plugin: PLUGIN_NAME,
     summary: 'Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt',
     usage: 'hyp claude-desktop install [--print-commands]',
-    help: 'Not yet implemented (tracked in a follow-up task). Will run the credential login chain '
-      + '(LLP 0117), write the credential helper (LLP 0116), back up and clear stale Claude-3p dialog '
-      + 'residue, write the managed-preferences plist via an inline sudo prompt (LLP 0133#solo-sudo), '
-      + 'and prompt for a Desktop restart. --print-commands will print the privileged commands without '
-      + 'running them.',
-    run: async (argv, cmdCtx) => runInstallStub(argv, cmdCtx),
+    help: 'Runs the credential login chain (LLP 0117), writes the credential helper (LLP 0116), backs '
+      + 'up and clears stale Claude-3p dialog residue, writes the managed-preferences plist via an '
+      + 'inline sudo prompt (LLP 0133#solo-sudo), and prompts for a Desktop restart. Refuses up front '
+      + 'if the effective gateway listen is ephemeral (127.0.0.1:0, LLP 0114). Every step re-checks its '
+      + 'own already-done state, so a bailed sudo prompt converges on re-run (LLP 0131#idempotent-rerun). '
+      + '--print-commands prints the privileged commands without running them.',
+    run: async (argv, cmdCtx) => runInstall(argv, cmdCtx, { sectionConfig, credential, stateDir }),
   })
 
   ctx.commands.register({
@@ -124,99 +125,14 @@ export async function activate(ctx) {
     plugin: PLUGIN_NAME,
     summary: 'Verify the Desktop plist install and print the in-app capture-check hint',
     usage: 'hyp claude-desktop verify',
-    help: 'Not yet implemented (tracked in a follow-up task). Will check the automatic half (plist '
-      + 'present, residue cleared) into the exit code and print the in-app half (send a message, '
-      + 'confirm capture) as a hint only, never a blocking wizard step (LLP 0131#verify-is-a-hint).',
-    run: async (argv, cmdCtx) => runVerifyStub(argv, cmdCtx),
+    help: 'Checks the automatic half (managed plist present and up to date, dialog residue cleared) '
+      + 'and sets the exit code from it. Also prints the in-app half as a hint only (send a message in '
+      + 'Claude Desktop, confirm it was captured); that half is never checked automatically and never '
+      + 'blocks (LLP 0131#verify-is-a-hint).',
+    run: async (argv, cmdCtx) => runVerify(argv, cmdCtx, { sectionConfig, credential, stateDir }),
   })
 
   ctx.log.info('claude-desktop activated', { credential_mode: credential.mode })
-}
-
-/**
- * Stub for `claude-desktop install`. Registers the command and its
- * `hyp init` picker wiring now; the real login/helper/residue/plist/
- * restart sequence lands in a follow-up task's `src/install.js`.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} cmdCtx
- * @returns {Promise<number>}
- */
-async function runInstallStub(argv, cmdCtx) {
-  cmdCtx.stderr.write('claude-desktop install: not yet implemented\n')
-  return 1
-}
-
-/**
- * Stub for `claude-desktop verify`. The real two-tier verify (automatic
- * plist/residue check plus a printed in-app hint) lands in a follow-up
- * task's `src/verify.js`.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} cmdCtx
- * @returns {Promise<number>}
- */
-async function runVerifyStub(argv, cmdCtx) {
-  cmdCtx.stderr.write('claude-desktop verify: not yet implemented\n')
-  return 1
-}
-
-/**
- * Absolute path of the `hyp` executable to embed in the wrapper.
- * Desktop runs the wrapper outside any shell profile, so a bare `hyp`
- * on PATH is not a given; resolve the running CLI's entry script.
- *
- * @returns {string}
- */
-function resolveHypBin() {
-  const entry = process.argv[1]
-  if (typeof entry === 'string' && entry.length > 0) {
-    try {
-      return fs.realpathSync(entry)
-    } catch {
-      return entry
-    }
-  }
-  return 'hyp'
-}
-
-/**
- * Resolve the wrapper's absolute path: `claude_desktop.helper_path`
- * override, else `<stateDir>/credential-helper.sh`.
- *
- * @param {Record<string, unknown>} sectionConfig
- * @param {string} stateDir
- * @returns {string}
- */
-function resolveHelperPath(sectionConfig, stateDir) {
-  const override = sectionConfig.helper_path
-  if (typeof override === 'string' && override.length > 0) return override
-  return path.join(stateDir, HELPER_BASENAME)
-}
-
-/**
- * @param {Record<string, unknown>} sectionConfig
- * @param {AnthropicCredentialCapability} credential
- * @param {CommandRunContext} cmdCtx
- * @param {string} stateDir
- * @returns {ProfileInputs}
- */
-function resolveInputs(sectionConfig, credential, cmdCtx, stateDir) {
-  const models = Array.isArray(sectionConfig.models)
-    ? /** @type {string[]} */ (sectionConfig.models)
-    : [...DEFAULT_MODELS]
-  const bundleId = typeof sectionConfig.bundle_id === 'string' && sectionConfig.bundle_id.length > 0
-    ? sectionConfig.bundle_id
-    : DEFAULT_BUNDLE_ID
-  return {
-    baseUrl: resolveGatewayBaseUrl({ hypConfig: cmdCtx.config, sectionConfig }),
-    // An org key presents under the x-api-key scheme; a subscription
-    // bearer rides `bearer` plus the helper-supplied beta header.
-    authScheme: credential.mode === 'org_key' ? 'x-api-key' : 'bearer',
-    models,
-    helperPath: resolveHelperPath(sectionConfig, stateDir),
-    bundleId,
-  }
 }
 
 /**
