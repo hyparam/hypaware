@@ -306,6 +306,16 @@ export async function dispatch(argv, opts = {}) {
     plugins: activePlugins,
     capabilities: kernel.capabilities,
     query: kernel.query,
+    // In-process command dispatch seam. A thin `run(name, argv)` wrapper
+    // over the module-private `runCommandByName`, populated here the same
+    // way `skills`/`agents`/`backfills` are pulled off the kernel. Exposes
+    // only the ability to invoke a registered command by name (and get its
+    // exit code), never the mutable command registry itself.
+    // @ref LLP 0130#configure-command [implements]: the wizard's configure phase runs a picker row's configure_command in-process through this seam
+    commands: {
+      run: (name, cmdArgv) =>
+        runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel }),
+    },
     verbs: kernel.verbs,
     storage: kernel.storage,
     skills: kernel.skills,
