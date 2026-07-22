@@ -132,6 +132,13 @@ export interface PluginProvides {
 
 export interface PluginContributionManifest {
   client?: PluginClientManifest
+  /**
+   * Picker rows this plugin contributes to the `hyp init` wizard. One
+   * plugin may contribute more than one row (e.g. `@hypaware/ai-gateway`
+   * contributes both `raw-anthropic` and `raw-openai`), so this is an
+   * array, sibling to the single `client` descriptor above.
+   */
+  picker?: PluginPickerContribution[]
   commands?: PluginCommandManifest[]
   config_sections?: PluginConfigSectionManifest[]
   sources?: PluginSourceManifest[]
@@ -174,6 +181,48 @@ export interface PluginAttachProbeManifest {
   marker_record?: string
 }
 
+/**
+ * One row in the `hyp init` wizard's client/source picker, contributed
+ * declaratively by a plugin's manifest rather than a hardcoded core
+ * table (LLP 0130). The manifest's picker source id (the `name` under
+ * which the plugin registers, e.g. `claude`, `codex`, `claude-desktop`)
+ * keys the row; the fields below drive its label, initial detection,
+ * and, for a `needs_setup` row, the command that configures it.
+ */
+export interface PluginPickerContribution {
+  /** Human-readable row label shown in the picker prompt. */
+  label: string
+  /** One-line description of what picking this row captures. */
+  summary?: string
+  /**
+   * Best-effort presence probe seeding the row's initial checkbox
+   * state. A probe failure means "not present," never an error.
+   */
+  detect?: PickerDetectProbe
+  /**
+   * True when picking this row is not sufficient on its own: an
+   * attended `configure_command` must run to place the integration
+   * (e.g. Claude Desktop's managed-preferences plist). Absent/false
+   * rows are configured entirely by the picker's config write.
+   */
+  needs_setup?: boolean
+  /**
+   * Command name (as registered under `contributes.commands`) the
+   * wizard's configure phase invokes for a `needs_setup` row, run in
+   * process through `CommandRunContext.commands.run`.
+   */
+  configure_command?: string
+}
+
+/**
+ * A picker row's presence probe. Exactly one variant key is set; the
+ * detector switches on which key is present.
+ */
+export type PickerDetectProbe =
+  | { settings_file: string } // reuses the `contributes.client.attach_probe` settings-file shape
+  | { app_bundle: string } // stat-exists check on a macOS `.app` bundle path
+  | { path: string } // stat-exists check on a directory (honors `$FOO_HOME`-style env overrides)
+
 export interface PluginCommandManifest {
   name: string
   summary?: string
@@ -208,6 +257,14 @@ export interface PluginDatasetManifest {
   name: string
   summary?: string
   source?: string
+  /**
+   * Row column carrying the picker source id a row is attributed to
+   * (e.g. `client_name` for `ai_gateway_messages`, where claude/codex/
+   * hermes rows all land). Enables source-scoped export withholding:
+   * a dataset with no declared `attribution_column` is never subject
+   * to source-scoped withholding (LLP 0132).
+   */
+  attribution_column?: string
 }
 
 export interface PluginSkillManifest {
@@ -662,6 +719,16 @@ export interface CommandRunContext {
   capabilities: CapabilityRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
+  /**
+   * In-process command dispatch seam (kernel-owned). Lets a command
+   * implementation invoke another registered command by name and receive
+   * its exit code, without exposing the full mutable command registry.
+   * The wizard's configure phase runs a `needs_setup` picker row's
+   * `configure_command` through this (LLP 0130). Optional here because
+   * the dispatcher does not populate it yet; T4 wires the runtime and
+   * tightens this to always-present.
+   */
+  commands?: { run(name: string, argv: string[]): Promise<number> }
   /**
    * Verb registry (kernel-owned). Populated by the dispatcher. `hyp mcp`
    * enumerates this to assemble the MCP tool surface; the projected CLI
