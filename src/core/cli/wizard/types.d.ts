@@ -1,11 +1,15 @@
-import type { CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
+import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
 import type { PickerDescriptor, PluginCatalog } from '../../types.d.ts'
 import type {
+  AsyncBackfillConsentPrompt,
   AsyncPickPrompt,
   AsyncRetentionPrompt,
+  FinaleSummary,
+  PickerBackfillRunner,
   PickerExport,
   PickerExportOrigin,
+  PickerFinaleActions,
   PickerPicks,
   PickerSource,
 } from '../types.d.ts'
@@ -151,6 +155,13 @@ export interface WizardJoinResult {
    */
   lockedSources?: string[]
   /**
+   * True when the org config converged, i.e. the machine now carries a
+   * central layer. Drives the pick phase's `managed` annotation
+   * (LLP 0132 #never-silent). Absent on the timeout/404 fall-through:
+   * nothing is pinned yet, so the picker renders unmanaged.
+   */
+  managed?: boolean
+  /**
    * On a failure (`'failed' | 'abandoned'`): the login lane's own captured
    * explanation, so `runInitWizard`'s `printJoinFailure` can echo the D7
    * meaning without re-deriving it.
@@ -223,6 +234,15 @@ export interface RunWizardPickOptions {
    * central layer already owns.
    */
   locked?: string[]
+  /**
+   * True when the machine carries a central layer (a completed join, or a
+   * managed machine's re-entry). Every non-locked row then renders with
+   * the `· stays on this machine` suffix: an addition beyond the org set
+   * is collected but never forwarded (LLP 0132 #never-silent), and the
+   * picker says so before the box is ticked. Distinct from `locked` being
+   * non-empty - a managed org config may pin zero picker sources.
+   */
+  managed?: boolean
   /** True on a managed machine's scoped re-entry (LLP 0129 #returning-gate). */
   scoped?: boolean
   /** Pre-baked picks; non-interactive callers set this and skip prompting. */
@@ -239,6 +259,85 @@ export interface RunWizardPickOptions {
   force?: boolean
   /** Interactive overwrite confirm, consulted only when a config exists. */
   confirmOverwrite?: (targetPath: string) => Promise<boolean>
+}
+
+/**
+ * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
+ * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
+ * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the
+ * orchestrator short-circuits straight to the pick phase + finale, matching
+ * the walkthrough's `interactive = !opts.picks` split.
+ *
+ * The phase overrides (`gate`, `fork`, `join`, `pick`, `configure`,
+ * `finaleRunner`) exist for tests, which drive the state machine with
+ * scripted phases; production callers pass none of them.
+ */
+export interface RunInitWizardOptions {
+  stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
+  stdin?: NodeJS.ReadableStream
+  env: NodeJS.ProcessEnv
+  /**
+   * The command context: the join phase's login lane runs against it and
+   * the configure phase invokes `ctx.commands.run` through it. Its
+   * registries also back the returning gate's status collection.
+   */
+  ctx: CommandRunContext
+  /** Finale registries, identical to the walkthrough's. */
+  capabilities: CapabilityRegistry
+  sources?: { stopAll?: () => Promise<void> }
+  skills?: { list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[] }
+  agents?: { list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[] }
+  backfill?: PickerBackfillRunner
+  finale?: PickerFinaleActions
+  /** Pre-baked picks: the non-interactive short-circuit. */
+  picks?: PickerPicks
+  exportOrigin?: PickerExportOrigin
+  force?: boolean
+  /** Threaded to the configure phase's `--print-commands` passthrough. */
+  printCommands?: boolean
+  /**
+   * Runs the full `hyp status` report when the returning gate's
+   * "See full status" is chosen. Supplied by `runInit` so the wizard
+   * module does not import command modules.
+   */
+  runStatus?: () => Promise<number>
+  /** Pre-built catalog (tests); defaults to the bundled-plugin catalog. */
+  catalog?: PluginCatalog
+  /** Phase overrides (tests). */
+  gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
+  fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>
+  join?: (opts: RunWizardJoinOptions) => Promise<WizardJoinResult>
+  pick?: (opts: RunWizardPickOptions) => Promise<WizardPickResult>
+  configure?: (picked: ConfigurePhasePicked, opts: RunConfigurePhaseOptions) => Promise<ConfigurePhaseResult>
+  finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
+  /** Pick-phase prompt seams, threaded through unchanged (tests). */
+  prompt?: AsyncPickPrompt
+  retentionPrompt?: AsyncRetentionPrompt
+  detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
+  confirmOverwrite?: (targetPath: string) => Promise<boolean>
+  backfillConsentPrompt?: AsyncBackfillConsentPrompt
+}
+
+/**
+ * The wizard's overall outcome. `exitCode` is what `hyp init` returns:
+ * 0 on success or a deliberate quit, 1 on an overwrite refusal, 130 on a
+ * cancelled prompt. The remaining fields mirror the pick result for
+ * callers that want them; absent when the run ended before the pick
+ * phase (gate quit, fork quit).
+ */
+export interface InitWizardResult {
+  exitCode: number
+  /** The pathway the run took; absent when it ended at the gate/fork. */
+  pathway?: 'team' | 'local' | 'scoped'
+  cancelled?: boolean
+  configPath?: string
+  config?: HypAwareV2Config
+  sourcesPicked?: PickerSource[]
+  clientsPicked?: ('claude' | 'codex')[]
+  lockedSources?: string[]
+  configureResults?: ConfigurePhaseEntryResult[]
+  finale?: FinaleSummary
 }
 
 /**

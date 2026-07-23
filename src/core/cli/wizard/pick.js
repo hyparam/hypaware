@@ -35,6 +35,14 @@ import {
 const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
 
 /**
+ * Label suffix applied to every non-locked row on a managed machine: a
+ * source the dev adds beyond the org-configured set is collected but
+ * never forwarded, and the picker must say so up front rather than the
+ * dev discovering the split later in `hyp status`.
+ */
+const LOCAL_ONLY_LABEL_SUFFIX = ' · stays on this machine'
+
+/**
  * The wizard pick phase (LLP 0135 #pick). Keeps `runPickerWalkthrough`'s
  * prompt/write/guard/overwrite-confirm shape but sources its rows from the
  * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
@@ -61,6 +69,7 @@ const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  *
  * @ref LLP 0130#picker-block [implements]: picker rows and composition read the manifest-sourced descriptors, not a core switch
  * @ref LLP 0031#status-provenance [implements]: a locked row renders with the fleet-managed provenance label rather than silently
+ * @ref LLP 0132#never-silent [implements]: on a managed machine, non-locked rows are labeled "stays on this machine"
  *
  * @param {RunWizardPickOptions} opts
  * @returns {Promise<WizardPickResult>}
@@ -132,7 +141,7 @@ export async function runWizardPick(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect? (space to toggle, enter to confirm)',
-        options: descriptorList.map((d) => buildPickOption(d, detected, lockedSet)),
+        options: descriptorList.map((d) => buildPickOption(d, detected, lockedSet, opts.managed === true)),
       })
       rawSources = /** @type {PickerSource[]} */ (
         sourceRaw.filter((v) => descriptors.has(v))
@@ -251,21 +260,27 @@ export async function runWizardPick(opts) {
  * Build one picker row's prompt option from its descriptor. A locked row
  * is checked and disabled with the `· managed by your fleet` suffix; a
  * merely detected row is checked with the ` · detected` suffix; otherwise
- * the bare descriptor label.
+ * the bare descriptor label. On a managed machine every non-locked row
+ * additionally carries `· stays on this machine`, so a dev toggling a box
+ * beyond the org set knows the addition is local-only before picking it
+ * (LLP 0132 #never-silent).
  *
  * @param {PickerDescriptor} d
  * @param {Set<PickerSource>} detected
  * @param {Set<string>} lockedSet
+ * @param {boolean} managed
  * @returns {WalkthroughOption}
  */
-function buildPickOption(d, detected, lockedSet) {
+function buildPickOption(d, detected, lockedSet, managed) {
   const locked = lockedSet.has(d.id)
   const isDetected = detected.has(/** @type {PickerSource} */ (d.id))
-  const label = locked
-    ? `${d.label}${LOCKED_LABEL_SUFFIX}`
-    : isDetected
-      ? `${d.label} · detected`
-      : d.label
+  let label = d.label
+  if (locked) {
+    label += LOCKED_LABEL_SUFFIX
+  } else {
+    if (isDetected) label += ' · detected'
+    if (managed) label += LOCAL_ONLY_LABEL_SUFFIX
+  }
   return {
     value: d.id,
     label,

@@ -185,10 +185,20 @@ export async function runInitWizard(opts) {
   if (picked.cancelled) return picked
 
   const configured = await runConfigurePhase(picked, opts)  // @ref LLP 0131
+  const finale = await runWizardFinale({ picked, configured, joinedAlready: pathway === 'team', opts })
   await narratePrivacyIfTeamPath(opts, pathway)              // @ref LLP 0134#login-lane, unchanged mechanism
-  return await runWizardFinale({ picked, configured, joinedAlready: pathway === 'team', opts })
+  return finale
 }
 ```
+
+As shipped, the privacy narration runs *after* the finale rather than
+before it: the setup's last words state when the first upload happens and
+that nothing has left the machine yet (the LLP 0128 experience goal), so
+they must not scroll away under the finale's install/attach/backfill
+output. The pick phase also renders every non-locked row with a
+`· stays on this machine` suffix when the machine carries a central layer
+(`@ref LLP 0132#never-silent`), threaded as a `managed` input computed by
+the join phase (on convergence) or the returning gate (scoped re-entry).
 
 `evaluateReturningGate` reads `hyp status`'s existing summary and central-
 layer check; on a `'scoped-reconfigure'` machine (managed, per
@@ -424,7 +434,8 @@ it.
 Unchanged mechanism ([LLP 0100](./0100-enrollment-privacy-review.spec.md),
 [LLP 0101](./0101-first-sync-review-window.decision.md)): `narratePrivacyIfTeamPath`
 prints the first-sync hold deadline and the `hypaware-privacy` skill hint
-after the configure phase, on the team pathway only. No prompt, no picker:
+as the wizard's closing words (after the finale), on the team pathway only,
+stating explicitly that nothing has been uploaded yet. No prompt, no picker:
 `@ref LLP 0134#login-lane [constrained-by]`: the review window rides the
 login lane exactly as before; the wizard only narrates it.
 
@@ -434,7 +445,10 @@ login lane exactly as before; the wizard only narrates it.
 input, `joinedAlready`: when true (team pathway), the daemon-install and
 attach steps are skipped if `hyp status` already reports them done from the
 join lane, rather than re-running (`@ref LLP 0134#login-lane`, "the finale
-detects and skips what enrollment already did"). Skills/agents install is
+detects and skips what enrollment already did"). Only the *install* is
+skipped (a `skipDaemonInstall` finale flag distinct from `skipDaemon`): the
+daemon restart still runs, because the pick phase just wrote a new local
+layer the running daemon must pick up. Skills/agents install is
 untouched: it already iterates `clientsPicked` against
 `buildWalkthroughClientDescriptorMap()` (`walkthrough.js:873-923`), which is
 generic over any client descriptor including the new `claude-desktop` one, so

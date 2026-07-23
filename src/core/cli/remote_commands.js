@@ -681,15 +681,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
 }
 
 /**
- * The two D7 messages that describe a *definitive* org membership/permission
- * rejection (`no_membership`, `org_not_permitted`): retrying the same login
- * cannot fix either; an admin has to act. Exported as the single source of
- * truth so the wizard join phase's `classifyLoginFailure` recognizes them
- * from the captured login-lane stderr without re-encoding the taxonomy
- * (LLP 0058 D7). A transient/other error carries neither phrase.
+ * The D7 messages that describe a *definitive* login rejection: retrying
+ * the same bare login cannot fix any of them. For `no_membership` and
+ * `org_not_permitted` an admin has to act; for `org_selection_required`
+ * (a multi-org account with no selector) the user has to pick an org via
+ * `hyp remote login --org <name>`, which the wizard's bare login cannot
+ * supply. Exported as the single source of truth so the wizard join
+ * phase's `classifyLoginFailure` recognizes them from the captured
+ * login-lane stderr without re-encoding the taxonomy (LLP 0058 D7). A
+ * transient/other error carries none of these phrases.
  */
 export const LOGIN_NO_MEMBERSHIP_MESSAGE = 'this account is not a member of any org on this server - ask an admin to invite you'
 export const LOGIN_ORG_NOT_PERMITTED_MESSAGE = 'the selected org is not permitted for this account - check the --org name'
+export const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run with --org <name> to choose one'
 
 /**
  * Translate a server-surfaced callback `error` (D7) into a clear message. The
@@ -708,7 +712,7 @@ function explainLoginError(callbackError, err) {
     case 'no_membership':
       return LOGIN_NO_MEMBERSHIP_MESSAGE
     case 'org_selection_required':
-      return 'this account has more than one org - re-run with --org <name> to choose one'
+      return LOGIN_ORG_SELECTION_MESSAGE
     case 'org_not_permitted':
       return LOGIN_ORG_NOT_PERMITTED_MESSAGE
     default:
