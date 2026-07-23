@@ -11,6 +11,7 @@ import { resolveConfigPath, resolveLayeredConfigFromDisk } from '../../runtime/b
 import {
   LOGIN_NO_MEMBERSHIP_MESSAGE,
   LOGIN_ORG_NOT_PERMITTED_MESSAGE,
+  LOGIN_ORG_SELECTION_MESSAGE,
   runRemoteLogin,
   waitForCentralConverge,
 } from '../remote_commands.js'
@@ -102,26 +103,45 @@ async function runJoinFlow(opts, span) {
     return { status: 'ok', lockedSources: [] }
   }
 
+  const lockedSources = await computeCentralLockedSources(opts)
+  return { status: 'ok', lockedSources, managed: true }
+}
+
+/**
+ * Compute the picker source ids the central layer owns: resolve the
+ * two-layer config from disk and keep every catalog picker id whose
+ * owning plugin classifies `'central'`. The pick phase locks exactly this
+ * set (LLP 0129 #join-before-picker). Shared by the join phase (after
+ * convergence) and the wizard's scoped re-entry, where no join runs but a
+ * managed machine's org rows must still render locked.
+ *
+ * The classifier needs the catalog as its third argument to resolve a
+ * source id to its owning plugin (the design sketch elides it for
+ * brevity).
+ *
+ * @param {Pick<RunWizardJoinOptions, 'env' | 'catalog' | 'resolveLayered'>} opts
+ * @returns {Promise<string[]>}
+ */
+export async function computeCentralLockedSources(opts) {
   const resolveLayered = opts.resolveLayered ?? (() => defaultResolveLayered(opts))
   const layered = await resolveLayered()
-  // The pick phase locks a row iff the central layer owns it (LLP 0129). The
-  // classifier needs the catalog as its third argument to resolve a source id
-  // to its owning plugin (the design sketch elides it for brevity).
-  const lockedSources = [...opts.catalog.pickerDescriptors.keys()].filter(
+  return [...opts.catalog.pickerDescriptors.keys()].filter(
     (id) => classifyClientProvenance(id, layered, opts.catalog) === 'central'
   )
-  return { status: 'ok', lockedSources }
 }
 
 /**
  * Map an incomplete login to the fork-returning outcome (LLP 0129
  * #failed-join-returns-to-fork). The login lane already wrote the human
  * explanation to stderr via `explainLoginError`; we only classify by
- * matching the two *definitive* D7 rejection phrases (`no_membership`,
- * `org_not_permitted`) it emits. Those mean an admin has to act, so
- * retrying the same login is futile -> `'failed'`. Anything else - a
- * transient network error, a login timeout, an abandoned browser flow, a
- * store/seed failure - is retriable, so -> `'abandoned'`.
+ * matching the *definitive* D7 rejection phrases it emits:
+ * `no_membership` and `org_not_permitted` mean an admin has to act, and
+ * `org_selection_required` (a multi-org account) needs an explicit
+ * `hyp remote login --org <name>` the wizard's bare login cannot supply.
+ * Retrying the same login is futile for all three -> `'failed'`.
+ * Anything else - a transient network error, a login timeout, an
+ * abandoned browser flow, a store/seed failure - is retriable, so ->
+ * `'abandoned'`.
  *
  * @ref LLP 0058#d7 [constrained-by]: reuses the login lane's existing membership/permission taxonomy rather than re-encoding it
  * @param {Pick<LoginLaneResult, 'stderr'>} login
@@ -129,7 +149,11 @@ async function runJoinFlow(opts, span) {
  */
 export function classifyLoginFailure(login) {
   const stderr = login?.stderr ?? ''
-  if (stderr.includes(LOGIN_NO_MEMBERSHIP_MESSAGE) || stderr.includes(LOGIN_ORG_NOT_PERMITTED_MESSAGE)) {
+  if (
+    stderr.includes(LOGIN_NO_MEMBERSHIP_MESSAGE) ||
+    stderr.includes(LOGIN_ORG_NOT_PERMITTED_MESSAGE) ||
+    stderr.includes(LOGIN_ORG_SELECTION_MESSAGE)
+  ) {
     return 'failed'
   }
   return 'abandoned'
@@ -161,7 +185,7 @@ async function defaultRunLogin(opts) {
  * (LLP 0031). Reads the same local + central layers `bootKernel` does; both
  * read-only.
  *
- * @param {RunWizardJoinOptions} opts
+ * @param {Pick<RunWizardJoinOptions, 'env' | 'catalog'>} opts
  * @returns {Promise<LayeredProvenance>}
  */
 async function defaultResolveLayered(opts) {

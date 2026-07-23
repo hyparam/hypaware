@@ -7,6 +7,7 @@ import { classifyLoginFailure, runWizardJoin } from '../../../../src/core/cli/wi
 import {
   LOGIN_NO_MEMBERSHIP_MESSAGE,
   LOGIN_ORG_NOT_PERMITTED_MESSAGE,
+  LOGIN_ORG_SELECTION_MESSAGE,
 } from '../../../../src/core/cli/remote_commands.js'
 
 /**
@@ -94,6 +95,13 @@ test('classifyLoginFailure: org_not_permitted is a definitive rejection -> faile
   assert.equal(classifyLoginFailure({ stderr: `hyp remote login: ${LOGIN_ORG_NOT_PERMITTED_MESSAGE}\n` }), 'failed')
 })
 
+// A multi-org account is definitive *for the wizard*: its bare login can
+// never pass --org, so retrying the fork's "Join a team" is futile; the fix
+// is a manual `hyp remote login --org <name>` then re-entering `hyp init`.
+test('classifyLoginFailure: org_selection_required (multi-org account) -> failed', () => {
+  assert.equal(classifyLoginFailure({ stderr: `hyp remote login: ${LOGIN_ORG_SELECTION_MESSAGE}\n` }), 'failed')
+})
+
 test('classifyLoginFailure: a transient network error is retriable -> abandoned', () => {
   assert.equal(classifyLoginFailure({ stderr: 'hyp remote login: connect ETIMEDOUT 10.0.0.1:443\n' }), 'abandoned')
 })
@@ -164,7 +172,9 @@ test('runWizardJoin: convergence with no central-owned rows locks nothing', asyn
     resolveLayered: async () => lc,
   })
   const out = await runWizardJoin(opts)
-  assert.deepEqual(out, { status: 'ok', lockedSources: [] })
+  // `managed` is still true: the central layer exists even though it owns
+  // no picker rows, so the pick phase annotates additions (LLP 0132).
+  assert.deepEqual(out, { status: 'ok', lockedSources: [], managed: true })
 })
 
 // --- runWizardJoin: the timeout / no-org-config branch ---

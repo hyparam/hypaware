@@ -30,6 +30,19 @@
       },
       "required_upstreams": ["anthropic"]
     },
+    "picker": [
+      {
+        "name": "openclaw",
+        "label": "capture OpenClaw conversations",
+        "summary": "Configures OpenClaw to route Anthropic traffic through the local gateway and records the captured exchanges.",
+        "detect": { "settings_file": ".openclaw/openclaw.json" },
+        "compose": {
+          "plugin": { "name": "@hypaware/openclaw" },
+          "requires_gateway": true,
+          "gateway_upstream": { "name": "anthropic", "base_url": "https://api.anthropic.com", "path_prefix": "/v1/messages", "provider": "anthropic" }
+        }
+      }
+    ],
     "config_sections": [
       {
         "section": "openclaw",

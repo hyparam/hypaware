@@ -45,9 +45,10 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *   the running sources with `dev_run_id` preserved.
  * - SQL count(*) on both `logs` and `ai_gateway_messages` returns 1
  *   under the same `dev_run_id`.
- * - The Phase 5 span contract (`walkthrough.start`,
- *   `walkthrough.write_config`, `daemon.install`, `client.attach`,
- *   `skills.install`, `walkthrough.finish`) is honored.
+ * - The wizard pick-phase span contract (`wizard.pick.start`,
+ *   `wizard.pick.write_config`, `daemon.install`, `client.attach`,
+ *   `skills.install`, `wizard.pick.finish`) is honored (`hyp init` routes
+ *   through `runInitWizard` -> `runWizardPick` now, LLP 0135).
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -435,22 +436,23 @@ export async function run({ harness, expect }) {
     const traces = await expect.traces()
 
     const startSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.start'
+      (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
+    // 8 bundled picker rows: claude, codex, claude-desktop, openclaw,
+    // hermes, raw-anthropic, raw-openai, otel.
     expect.that(
-      'traces: walkthrough.start span emitted with sources_available=6',
+      'traces: wizard.pick.start span emitted with sources_available=8',
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 6 &&
-        v.exports_available === 3
+        v.sources_available === 8
     )
 
     const writeSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.write_config'
+      (/** @type {any} */ t) => t.name === 'wizard.pick.write_config'
     )
     expect.that(
-      'traces: walkthrough.write_config span emitted with plugin_count',
+      'traces: wizard.pick.write_config span emitted with plugin_count',
       writeSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
@@ -460,10 +462,10 @@ export async function run({ harness, expect }) {
     )
 
     const finishSpans = traces.filter(
-      (/** @type {any} */ t) => t.name === 'walkthrough.finish'
+      (/** @type {any} */ t) => t.name === 'wizard.pick.finish'
     )
     expect.that(
-      'traces: walkthrough.finish span has Phase 5 picks counts',
+      'traces: wizard.pick.finish span has Phase 5 picks counts',
       finishSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
@@ -529,11 +531,11 @@ export async function run({ harness, expect }) {
 
     const logs = await expect.logs()
     const pickLogs = logs.filter(
-      (/** @type {any} */ l) => l.body === 'walkthrough.pick'
+      (/** @type {any} */ l) => l.body === 'wizard.pick'
     )
     const pickTypes = new Set(pickLogs.map((/** @type {any} */ l) => l.attributes?.pick_type))
     expect.that(
-      'logs: walkthrough.pick emitted for sources AND exports',
+      'logs: wizard.pick emitted for sources AND exports',
       pickTypes,
       (v) => v instanceof Set && v.has('sources') && v.has('exports')
     )

@@ -1,7 +1,7 @@
 # LLP 0136: Install-experience overhaul implementation plan
 
 **Type:** plan
-**Status:** Active
+**Status:** Implemented
 **Related:** LLP 0135, LLP 0128
 **Generated-by:** neutral
 
@@ -44,6 +44,19 @@ stays deferred; no task below implements it.
 Every task lands with `npm test` green on its own. Repo style: no
 semicolons, no em dashes, JSDoc types (no `@typedef`, no inline `import()`
 types).
+
+**Completion note.** T1-T10, T12, and T13 shipped with the
+install-experience overhaul PR (#375). T11 (orchestration) landed in a
+follow-up along with three items the phase modules had left open: picker
+manifest entries for `@hypaware/openclaw` and `@hypaware/hermes` (both use
+the `settings_file` probe - the `path` probe's literal is absolute-only,
+which a static manifest cannot express for a home-relative directory), the
+pick phase's managed-machine "stays on this machine" row annotation
+(LLP 0132 #never-silent), and the wizard's closing first-sync privacy
+narration. One deliberate deviation from T11's letter: `runWizardFinale`
+skips only the daemon *install* on the team pathway (a new
+`skipDaemonInstall` finale flag) - the restart still runs, because the
+wizard just wrote a new local layer the daemon must pick up.
 
 ## Tasks
 

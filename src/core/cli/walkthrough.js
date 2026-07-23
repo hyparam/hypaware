@@ -359,9 +359,14 @@ const PICKER_EXPORTS = [
  * `walkthrough.write_config`, `daemon.install`, `client.attach`,
  * `skills.install`, `walkthrough.finish`.
  *
+ * Superseded as `hyp init`'s entry point by `runInitWizard`
+ * (LLP 0135 #orchestration), which drives the same pick/write/finale
+ * machinery through the wizard's pick phase. Kept as the direct
+ * programmatic surface existing tests and smokes exercise.
+ *
  * @param {RunPickerWalkthroughOptions} opts
  * @returns {Promise<PickerWalkthroughResult>}
- * @ref LLP 0011#interactive-walkthrough [implements]: canonical npx first-run; composes plugin-contributed what/where picks
+ * @ref LLP 0011#interactive-walkthrough [implements]: the pre-wizard walkthrough shape; hyp init now fronts it with runInitWizard
  */
 export async function runPickerWalkthrough(opts) {
   const { capabilities, stdout, env } = opts
@@ -575,6 +580,33 @@ export async function runPickerWalkthrough(opts) {
 
   if (cancelled) writeCancelledNotice(opts.stderr)
 
+  writeWalkthroughRunSummary({ stdout, configPath, finaleSummary })
+
+  return {
+    exitCode,
+    configPath,
+    config,
+    sourcesPicked: picks.sources,
+    exportPicked: picks.exportChoice,
+    clientsPicked,
+    retentionDays: picks.retentionDays,
+    ...(finaleSummary ? { finale: finaleSummary } : {}),
+  }
+}
+
+/**
+ * Print the closing run summary: the written config path plus one line
+ * per finale action that ran (daemon target, attaches, skills/agents
+ * counts) and the first-query hint. Shared by `runPickerWalkthrough` and
+ * the wizard orchestrator so both entry points end a run identically.
+ *
+ * @param {{
+ *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   configPath: string,
+ *   finaleSummary?: FinaleSummary | undefined,
+ * }} args
+ */
+export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }) {
   stdout.write('\n')
   stdout.write(`✓ Wrote ${configPath}\n`)
   if (finaleSummary?.daemonInstall && !finaleSummary.daemonInstall.skipped) {
@@ -589,6 +621,10 @@ export async function runPickerWalkthrough(opts) {
     }
   }
   for (const a of finaleSummary?.attach ?? []) {
+    if (a.skipped) {
+      stdout.write(`attach: ${a.client} already attached\n`)
+      continue
+    }
     const tag = a.dryRun ? '(dry-run) ' : ''
     stdout.write(`${tag}attach: ${a.client} ${a.ok ? 'ok' : 'failed'}\n`)
   }
@@ -601,17 +637,6 @@ export async function runPickerWalkthrough(opts) {
     stdout.write(`${tag}agents: ${finaleSummary.agentsInstalled.length} copied\n`)
   }
   stdout.write(`next: hyp query sql 'select count(*) from logs'\n`)
-
-  return {
-    exitCode,
-    configPath,
-    config,
-    sourcesPicked: picks.sources,
-    exportPicked: picks.exportChoice,
-    clientsPicked,
-    retentionDays: picks.retentionDays,
-    ...(finaleSummary ? { finale: finaleSummary } : {}),
-  }
 }
 
 /**
@@ -730,6 +755,12 @@ export function composePickerConfig(args) {
  * (`daemon.install`, `client.attach` (via the adapter),
  * `skills.install`, `agents.install`).
  *
+ * Exported for the wizard orchestrator (LLP 0135 #finale), which wraps
+ * it with the team-pathway skips: `finale.skipDaemonInstall` skips only
+ * the install step (the restart still runs so the just-written local
+ * config takes effect), and `skipAttachClients` names picked clients the
+ * join lane already attached.
+ *
  * @param {{
  *   finale: PickerFinaleActions,
  *   clientsPicked: ('claude'|'codex')[],
@@ -747,13 +778,15 @@ export function composePickerConfig(args) {
  *   stdin?: NodeJS.ReadableStream,
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
+ *   skipAttachClients?: Set<string>,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runPickerFinale(args) {
+export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
   const homeDir = env.HOME ?? ''
+  const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
 
   // The attach/start cutoff: backfill imports history strictly before
   // this instant so it never overlaps with live gateway capture, which
@@ -762,7 +795,7 @@ async function runPickerFinale(args) {
 
   /** @type {FinaleSummary} */
   const summary = {
-    daemonInstall: { skipped: !!finale.skipDaemon, dryRun },
+    daemonInstall: { skipped: skipInstall, dryRun },
     globalInstall: { skipped: true, installed: false },
     attach: [],
     skillsInstalled: [],
@@ -771,7 +804,7 @@ async function runPickerFinale(args) {
     backfill: [],
   }
 
-  if (!finale.skipDaemon) {
+  if (!skipInstall) {
     if (!dryRun) await stopFinaleStartedSources(sources)
     await withSpan(
       'daemon.install',
@@ -840,6 +873,10 @@ async function runPickerFinale(args) {
     /** @type {AiGatewayCapability} */
     const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
     for (const client of clientsPicked) {
+      if (args.skipAttachClients?.has(client)) {
+        summary.attach.push({ client, dryRun, ok: true, skipped: true })
+        continue
+      }
       const adapter = gateway.getClient(client)
       if (!adapter) {
         summary.attach.push({ client, dryRun, ok: false })
