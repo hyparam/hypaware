@@ -10,6 +10,10 @@ import { installDaemon, renderDaemonInstall } from '../../src/core/daemon/instal
 import { isNpxBinPath, globalHypawareBin } from '../../src/core/cli/global_install.js'
 import { runDaemonInstall } from '../../src/core/commands/daemon.js'
 
+/**
+ * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
+ */
+
 // Regression for #384: `ensureDurableBinForNpx` had a single call site in
 // the walkthrough finale, so `hyp daemon install` and the join/enroll
 // lane installed launchd/systemd against the ephemeral `_npx` bin. When
@@ -130,14 +134,14 @@ test('hyp daemon install (no --bin) upgrades the process argv _npx bin to a dura
 test('runDaemonInstall dry-run still surfaces the _npx bin without a global install (escape hatch)', async () => {
   const home = tmpHome()
   let out = ''
-  const ctx = {
+  const ctx = /** @type {any} */ ({
     env: { HOME: home, ...NPX_ENV },
     stdout: { write(c) { out += String(c) } },
     stderr: { write() {} },
-  }
+  })
   // Force platform + a known argv-style bin by passing --bin so the test
   // is host-independent; --dry-run must render without any npm install.
-  const code = await runDaemonInstall(['--dry-run', '--bin', NPX_BIN, '--platform', 'darwin'], ctx)
+  const code = await runDaemonInstall(['--dry-run', '--bin', NPX_BIN, '--platform', 'darwin'], /** @type {CommandRunContext} */ (ctx))
   assert.equal(code, 0)
   assert.ok(out.includes(NPX_BIN), 'dry-run renders the given bin, no durable upgrade')
 })
