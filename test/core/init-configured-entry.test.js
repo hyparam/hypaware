@@ -8,14 +8,13 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
-import {
-  buildConfiguredMenuOptions,
-  legacyConfiguredActionPrompt,
-  renderConfigSummary,
-} from '../../src/core/commands/init.js'
+import { renderConfigSummary } from '../../src/core/cli/wizard/fork.js'
 
-// Re-running `hypaware` on a configured install fronts the first-run
-// picker with a friendly summary + menu instead of starting fresh.
+// Re-running `hypaware` on a configured install fronts the wizard with
+// the returning gate's friendly summary + menu instead of starting
+// fresh. The gate itself (options, legacy prompt, scoped re-entry) is
+// unit-tested in test/core/cli/wizard/fork.test.js; this file keeps the
+// summary renderer and the end-to-end dispatch shape.
 // @ref LLP 0011#returning-to-a-configured-install [tests]:
 
 /**
@@ -85,44 +84,6 @@ test('renderConfigSummary: no sinks falls back to local cache only', () => {
   assert.match(stdout.text(), /Saving to:\s+local query cache only/)
 })
 
-test('buildConfiguredMenuOptions: locked configs drop the Reconfigure option', () => {
-  const unlocked = buildConfiguredMenuOptions(false).map((o) => o.value)
-  assert.deepEqual(unlocked, ['reconfigure', 'status', 'quit'])
-
-  const locked = buildConfiguredMenuOptions(true).map((o) => o.value)
-  assert.deepEqual(locked, ['status', 'quit'])
-})
-
-/** @param {string} input */
-function ctxWithStdin(input) {
-  const stdout = makeBuf()
-  return {
-    ctx: /** @type {any} */ ({ stdin: Readable.from([input]), stdout }),
-    stdout,
-  }
-}
-
-test('legacyConfiguredActionPrompt: a bare enter takes the default (quit)', async () => {
-  const { ctx, stdout } = ctxWithStdin('\n')
-  const choice = await legacyConfiguredActionPrompt(ctx, buildConfiguredMenuOptions(false))
-  assert.equal(choice, 'quit')
-  // The numbered menu was printed for the user.
-  assert.match(stdout.text(), /1\) Reconfigure/)
-  assert.match(stdout.text(), /What would you like to do\?/)
-})
-
-test('legacyConfiguredActionPrompt: a valid number selects that option', async () => {
-  const { ctx } = ctxWithStdin('1\n')
-  const choice = await legacyConfiguredActionPrompt(ctx, buildConfiguredMenuOptions(false))
-  assert.equal(choice, 'reconfigure')
-})
-
-test('legacyConfiguredActionPrompt: an out-of-range answer quits rather than guessing', async () => {
-  const { ctx } = ctxWithStdin('9\n')
-  const choice = await legacyConfiguredActionPrompt(ctx, buildConfiguredMenuOptions(false))
-  assert.equal(choice, 'quit')
-})
-
 // End-to-end through dispatch: a configured install run with no args
 // shows the summary + menu and, on quit, exits 0 WITHOUT entering the
 // first-run picker. HYP_NO_TUI=1 forces the readline menu so the fake
@@ -151,6 +112,31 @@ test('hyp init on a configured install fronts the picker with the summary menu',
   assert.match(stdout.text(), /What would you like to do\?/)
   // The first-run picker never ran.
   assert.doesNotMatch(stdout.text(), /Welcome to HypAware/)
+})
+
+// First run (no config): the gate falls through to the wizard's pathway
+// fork, whose bare-enter default is quit - `hyp init` on a fresh machine
+// never writes anything by accident (LLP 0129 #fork).
+test('hyp init first run presents the pathway fork; a bare enter quits untouched', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-first-run-fork-'))
+
+  const stdout = /** @type {any} */ (makeBuf())
+  stdout.isTTY = true
+  const stderr = makeBuf()
+
+  const code = await dispatch(['init'], {
+    stdout,
+    stderr,
+    stdin: /** @type {any} */ (Readable.from(['\n'])),
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HYP_NO_TUI: '1' },
+  })
+
+  assert.equal(code, 0, stderr.text())
+  assert.match(stdout.text(), /Join a team, or set up HypAware locally\?/)
+  assert.match(stdout.text(), /1\) Join a team/)
+  assert.match(stdout.text(), /2\) Local install and configuration/)
+  // Quit left no config behind.
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })
 
 // Choosing "See full status" must render the real status report off the

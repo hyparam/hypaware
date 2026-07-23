@@ -123,6 +123,56 @@ test('otel alone composes the otel receiver, no gateway', async () => {
   })
 })
 
+test('openclaw alone composes the gateway + anthropic upstream + openclaw adapter', async () => {
+  const d = await realPickerDescriptors()
+  assert.deepEqual(compose(d, ['openclaw']), {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/openclaw' },
+    ],
+    query: QUERY,
+    sinks: LOCAL_SINK,
+  })
+})
+
+// Hermes proxies nothing, but its manifest requires the ai-gateway plugin
+// (shared materializer), so its row sets `requires_gateway` with no
+// upstream: picked alone, the gateway plugin is present with an empty
+// upstream list, which `compileUpstreams` accepts.
+test('hermes alone composes the gateway (no upstreams) + hermes adapter', async () => {
+  const d = await realPickerDescriptors()
+  assert.deepEqual(compose(d, ['hermes']), {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [] } },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/hermes' },
+    ],
+    query: QUERY,
+    sinks: LOCAL_SINK,
+  })
+})
+
+test('claude + hermes share the gateway; hermes adds no upstream', async () => {
+  const d = await realPickerDescriptors()
+  assert.deepEqual(compose(d, ['claude', 'hermes']), {
+    version: 2,
+    plugins: [
+      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/local-fs' },
+      { name: '@hypaware/format-parquet' },
+      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/hermes' },
+    ],
+    query: QUERY,
+    sinks: LOCAL_SINK,
+  })
+})
+
 test('claude + codex union the anthropic/openai/chatgpt upstreams and both adapters', async () => {
   const d = await realPickerDescriptors()
   assert.deepEqual(compose(d, ['claude', 'codex']), {
@@ -203,6 +253,17 @@ test('real claude/codex picker rows carry the settings_file detect probe', async
   const d = await realPickerDescriptors()
   assert.deepEqual(d.get('claude')?.detect, { settings_file: '.claude/settings.json' })
   assert.deepEqual(d.get('codex')?.detect, { settings_file: '.codex/config.toml' })
+})
+
+// openclaw/hermes detect via the same home-relative `settings_file` shape
+// (parent-dir-exists on `~/.openclaw` / `~/.hermes`, `$OPENCLAW_HOME` /
+// `$HERMES_HOME` overrides honored). Hermes deliberately does not use the
+// `path` probe: its literal is absolute-only, which a static manifest
+// cannot express for a home-relative directory.
+test('real openclaw/hermes picker rows carry the settings_file detect probe', async () => {
+  const d = await realPickerDescriptors()
+  assert.deepEqual(d.get('openclaw')?.detect, { settings_file: '.openclaw/openclaw.json' })
+  assert.deepEqual(d.get('hermes')?.detect, { settings_file: '.hermes/state.db' })
 })
 
 // Regression (neutral review of PR #375): every bundled plugin manifest

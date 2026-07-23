@@ -18,6 +18,18 @@
     }
   },
   "contributes": {
+    "picker": [
+      {
+        "name": "hermes",
+        "label": "capture Hermes Agent sessions",
+        "summary": "Imports sessions from Hermes's own state.db read-only: history backfill plus ongoing polling, no proxying.",
+        "detect": { "settings_file": ".hermes/state.db" },
+        "compose": {
+          "plugin": { "name": "@hypaware/hermes" },
+          "requires_gateway": true
+        }
+      }
+    ],
     "config_sections": [
       {
         "section": "hermes",

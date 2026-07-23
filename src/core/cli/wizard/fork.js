@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { CollectStatusOptions } from '../../../../src/core/daemon/types.js'
+ * @import { CollectStatusOptions, HypAwareStatusReport } from '../../../../src/core/daemon/types.js'
  * @import { ConfiguredMenuOption } from '../../../../src/core/cli/types.js'
  * @import { EvaluateReturningGateOptions, ReturningGateAction, ReturningGateResult, RunWizardForkOptions, WizardForkChoice } from '../../../../src/core/cli/wizard/types.js'
  */
@@ -154,6 +154,7 @@ export async function evaluateReturningGate(opts) {
   }
 
   const managed = !!(report.layered && report.layered.hasCentral)
+  renderConfigSummary({ report, locked: managed, stdout: opts.stdout })
   const options = buildReturningGateOptions(managed)
   const action = await promptReturningGateChoice(opts, options, managed)
   log.info('wizard.returning_gate', { [Attr.COMPONENT]: 'wizard', action, managed })
@@ -234,6 +235,103 @@ export async function legacyReturningGatePrompt(opts, options, title = 'What wou
   const choice = await legacyMenuPrompt(opts, options, title)
   return /** @type {ReturningGateAction} */ (choice)
 }
+
+/**
+ * Compact, friendly one-screen summary of an existing install, rendered
+ * by the returning gate before its menu. The full diagnostic surface
+ * stays in `hyp status`; this is just enough to recognise the setup
+ * before deciding whether to reconfigure. Moved here from
+ * `commands/init.js`'s retired configured-entry gate; defensive against
+ * partial reports because gate tests drive it with minimal fixtures.
+ *
+ * @param {{ report: HypAwareStatusReport, locked: boolean, stdout: RunWizardForkOptions['stdout'] }} args
+ */
+export function renderConfigSummary({ report, locked, stdout }) {
+  stdout.write(locked ? 'HypAware is set up (managed by your fleet).\n\n' : 'HypAware is set up.\n\n')
+  stdout.write(`  Collecting:  ${summariseCollecting(report)}\n`)
+  stdout.write(`  Saving to:   ${summariseSinks(report)}\n`)
+  stdout.write(`  Daemon:      ${summariseDaemon(report.daemon)}\n`)
+  stdout.write(
+    `  Cache:       ${formatBytesShort(report.cache?.totalBytes ?? 0)} · ${report.retention?.days ?? '?'}-day retention\n`
+  )
+  if (locked) stdout.write('\n  Settings are locked here and managed centrally.\n')
+  stdout.write('\n')
+}
+
+/**
+ * What's being collected, in human terms: configured AI clients first
+ * (Claude, Codex), falling back to raw source names (OTEL, proxies).
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {string}
+ */
+function summariseCollecting(report) {
+  const clients = (report.clients ?? [])
+    .filter((c) => c.configured)
+    .map((c) => FRIENDLY_CLIENT_LABELS[c.name] ?? c.name.charAt(0).toUpperCase() + c.name.slice(1))
+  if (clients.length > 0) return clients.join(', ')
+  const sources = (report.sources ?? []).map((s) => s.name)
+  if (sources.length > 0) return sources.join(', ')
+  return 'nothing yet'
+}
+
+/**
+ * Where captured data lands. Dedupes friendly per-plugin labels; when no
+ * sink is configured the local query cache is the only durable store.
+ *
+ * @param {HypAwareStatusReport} report
+ * @returns {string}
+ */
+function summariseSinks(report) {
+  const sinks = report.sinks ?? []
+  if (sinks.length === 0) return 'local query cache only'
+  /** @type {string[]} */
+  const labels = []
+  for (const s of sinks) {
+    const label = FRIENDLY_SINK_LABELS[s.plugin] ?? s.instance
+    if (!labels.includes(label)) labels.push(label)
+  }
+  return labels.join(' + ')
+}
+
+/**
+ * One-word daemon state for the summary; `hyp status` carries the detail.
+ *
+ * @param {HypAwareStatusReport['daemon'] | undefined} daemon
+ * @returns {string}
+ */
+function summariseDaemon(daemon) {
+  if (daemon?.running) return 'running'
+  if (daemon?.installed) return 'installed, not running'
+  return 'not installed'
+}
+
+/**
+ * Short human byte count for the cache line (e.g. `65 MB`). Rounds to
+ * whole MB/KB so the summary stays glanceable.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytesShort(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${Math.round(bytes)} B`
+}
+
+const FRIENDLY_CLIENT_LABELS = /** @type {Record<string, string>} */ ({
+  claude: 'Claude',
+  codex: 'Codex',
+})
+
+const FRIENDLY_SINK_LABELS = /** @type {Record<string, string>} */ ({
+  '@hypaware/format-parquet': 'local Parquet files',
+  '@hypaware/format-jsonl': 'local JSONL files',
+  '@hypaware/local-fs': 'local files',
+  '@hypaware/central': 'central fleet sink',
+})
 
 /**
  * Shared numbered-menu readline prompt behind both `legacyForkPrompt` and

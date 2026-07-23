@@ -20,7 +20,20 @@ export type AsyncBackfillConsentPrompt = (args: {
   retentionDays: number
 }) => Promise<boolean>
 
-export type PickerSource = 'claude' | 'codex' | 'raw-anthropic' | 'raw-openai' | 'otel'
+/**
+ * The bundled picker source ids. Rows are manifest-sourced (LLP 0130), so
+ * this union tracks the bundled plugins' `contributes.picker` names; a
+ * third-party plugin's row flows through as a plain string at runtime.
+ */
+export type PickerSource =
+  | 'claude'
+  | 'codex'
+  | 'claude-desktop'
+  | 'openclaw'
+  | 'hermes'
+  | 'raw-anthropic'
+  | 'raw-openai'
+  | 'otel'
 export type PickerExport = 'keep-local' | 'local-parquet' | 'configure-later'
 
 /**
@@ -97,6 +110,15 @@ export interface PickerFinaleActions {
   binPath?: string
   /** When true, run daemon install but skip the restart step. */
   skipDaemonRestart?: boolean
+  /**
+   * When true, skip only the daemon-install step while keeping the
+   * restart. The wizard's team pathway sets this when `hyp status`
+   * already reports the daemon installed from the join lane
+   * (LLP 0134 #login-lane: the finale detects and skips what enrollment
+   * already did), but the local config it just wrote still needs a
+   * restart to take effect.
+   */
+  skipDaemonInstall?: boolean
 }
 
 export interface RunPickerWalkthroughOptions {
@@ -211,7 +233,8 @@ export interface FinaleSummary {
     binPath?: string
     packageSpec?: string
   }
-  attach: { client: 'claude' | 'codex'; dryRun: boolean; ok: boolean }[]
+  /** `skipped` marks a client the wizard left alone because `hyp status` already reported it attached (team pathway). */
+  attach: { client: 'claude' | 'codex'; dryRun: boolean; ok: boolean; skipped?: boolean }[]
   skillsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: 'claude' | 'codex'; dest: string; dryRun: boolean }[]
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }

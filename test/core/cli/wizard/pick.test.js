@@ -229,6 +229,46 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
+// --- managed machines: local additions annotated (LLP 0132) ---
+// @ref LLP 0132#never-silent [tests]:
+
+test('runWizardPick: on a managed machine, non-locked rows say "stays on this machine"', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt([])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
+    detect: async () => new Set(['codex']),
+    locked: ['claude'],
+    managed: true,
+  }))
+  const rows = state.question.options
+  // The locked row keeps the fleet label and never the local-only one.
+  const claudeRow = rows.find((/** @type {any} */ o) => o.value === 'claude')
+  assert.match(claudeRow.label, /managed by your fleet/)
+  assert.doesNotMatch(claudeRow.label, /stays on this machine/)
+  // Every non-locked row is annotated, detected or not.
+  const codexRow = rows.find((/** @type {any} */ o) => o.value === 'codex')
+  assert.match(codexRow.label, /detected · stays on this machine/)
+  const otelRow = rows.find((/** @type {any} */ o) => o.value === 'otel')
+  assert.match(otelRow.label, /stays on this machine/)
+})
+
+test('runWizardPick: an unmanaged (solo) machine never shows the local-only suffix', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt([])
+  await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
+    detect: async () => new Set(['claude']),
+  }))
+  for (const row of state.question.options) {
+    assert.doesNotMatch(row.label, /stays on this machine/)
+  }
+})
+
 // --- overwrite guard ---
 
 test('runWizardPick: refuses to clobber an existing config without --force (exit 1, not cancelled)', async () => {
