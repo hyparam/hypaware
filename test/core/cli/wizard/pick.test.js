@@ -173,7 +173,10 @@ test('runWizardPick: a locked source is filtered out of the returned picks and c
     locked: ['claude'],
   }))
   assert.deepEqual(result.sourcesPicked, ['codex'])
-  assert.deepEqual(result.clientsPicked, ['codex'])
+  // The locked claude is dropped from local-layer composition, but it is still
+  // a picked client for the finale's per-machine local work (attach, skills,
+  // agents), so clientsPicked names both (issue #380).
+  assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
   assert.deepEqual(result.lockedSources, ['claude'])
   assert.deepEqual(result.descriptors.map((d) => d.id), ['codex'])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
@@ -194,6 +197,36 @@ test('runWizardPick: an unknown locked id is ignored, not surfaced as a row', as
   }))
   assert.deepEqual(result.lockedSources, [])
   assert.ok(!state.question.options.some((/** @type {any} */ o) => o.value === 'does-not-exist'))
+})
+
+test('runWizardPick: a fully fleet-managed machine still reports its locked clients as picked so the finale installs skills/agents', async () => {
+  // A fleet-managed machine where the org locks BOTH clients. The picker rows
+  // render checked+disabled and are dropped from the local-layer composition
+  // (they already live in the central layer), so sourcesPicked is empty and no
+  // adapter is re-composed. But clientsPicked drives the finale's per-machine
+  // local work (attach, skills install, agents install), which is NOT in the
+  // central layer, so it must still name both locked clients. Deriving it from
+  // the composition-filtered sources made it empty here, silently no-op'ing the
+  // finale on every fleet-managed machine (issue #380).
+  // @ref LLP 0135#finale [tests]: skills/agents install iterates clientsPicked, which must include org-locked clients
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt(['claude', 'codex'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
+    detect: async () => new Set(),
+    locked: ['claude', 'codex'],
+  }))
+  // Nothing composed into the local layer: both clients are centrally managed.
+  assert.deepEqual(result.sourcesPicked, [])
+  assert.deepEqual(result.lockedSources, ['claude', 'codex'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.ok(!written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/claude'))
+  assert.ok(!written.plugins.some((/** @type {any} */ p) => p.name === '@hypaware/codex'))
+  // ...but the finale must still see both clients to install their local
+  // skills/agents and attach settings.
+  assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
 })
 
 // --- managed machines: local additions annotated (LLP 0132) ---
