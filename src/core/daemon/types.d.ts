@@ -9,6 +9,7 @@ import type {
   ExtendedSourceRegistry,
 } from '../registry/types.d.ts'
 import type { KernelRuntime } from '../runtime/types.d.ts'
+import type { CommandRunner, DurableBinResult } from '../cli/types.d.ts'
 
 /**
  * Daemon health states the smoke and `hyp daemon status` rely on.
@@ -331,6 +332,8 @@ export interface SystemdInstallPlan {
   nodePath: string
   unitDir: string
   manageCommands: string[][]
+  /** Result of the npx->durable global-bin upgrade installDaemon ran (if any). */
+  globalInstall?: DurableBinResult
 }
 
 export interface LaunchctlResult {
@@ -383,13 +386,36 @@ export interface LaunchAgentInstallPlan {
   nodePath: string
   plistDir: string
   manageCommands: string[][]
+  /** Result of the npx->durable global-bin upgrade installDaemon ran (if any). */
+  globalInstall?: DurableBinResult
 }
 
 export type DaemonInstallPlan = LaunchAgentInstallPlan | SystemdInstallPlan
 
+/**
+ * Override seam for the npx->durable global-bin upgrade installDaemon
+ * runs before writing the service unit. Production leaves this unset
+ * (process.env / process streams / the real npm runner); tests inject a
+ * fake env + runner so no global npm install actually happens.
+ */
+export interface DurableBinUpgradeSeam {
+  env?: NodeJS.ProcessEnv
+  stdout?: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  runner?: CommandRunner
+}
+
 export interface DaemonInstallOptions {
   /** Absolute path to the HypAware CLI entrypoint. */
   binPath: string
+  /**
+   * binPath came from an explicit `--bin`, so installDaemon must NOT
+   * rewrite it into a durable global bin even if it looks like an
+   * `_npx` path (the explicit-bin escape hatch).
+   */
+  binExplicit?: boolean
+  /** Override seam for the npx->durable global-bin upgrade (tests only). */
+  durableBin?: DurableBinUpgradeSeam
   /** Config path passed to the daemon (defaults to ~/.hyp/hypaware-config.json). */
   configPath?: string
   /** Override the launch label (defaults to com.hyperparam.hypaware). */
