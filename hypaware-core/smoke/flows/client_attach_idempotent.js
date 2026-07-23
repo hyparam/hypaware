@@ -190,10 +190,16 @@ export async function run({ harness, expect }) {
       afterSecondClaude?._hypaware,
       (v) => v !== null && typeof v === 'object' && typeof v.port === 'number'
     )
+    // Attach manages two SessionStart hooks (session-context and the
+    // local-only classify-cwd hook); idempotency means one entry each.
     expect.that(
-      'claude settings: managed SessionStart hook installed exactly once',
+      'claude settings: both managed SessionStart hooks installed exactly once',
       afterSecondClaude?.hooks?.SessionStart,
-      (v) => Array.isArray(v) && v.length === 1
+      (v) =>
+        Array.isArray(v) &&
+        v.length === 2 &&
+        v.filter((e) => JSON.stringify(e).includes('session-context')).length === 1 &&
+        v.filter((e) => JSON.stringify(e).includes('classify-cwd')).length === 1
     )
     expect.that(
       'claude settings: managed PostToolUse hook installed exactly once',

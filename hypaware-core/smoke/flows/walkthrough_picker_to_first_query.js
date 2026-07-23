@@ -76,10 +76,21 @@ export async function run({ harness, expect }) {
     codex: path.join(pluginsRoot, 'codex'),
   }
 
+  // Same recipe as gateway_claude_capture: a distinct name so the merge
+  // in source.js does not collapse this entry into the Claude plugin's
+  // contributed anthropic preset (which would swap the base_url for
+  // api.anthropic.com), with a priority that wins routing over it. The
+  // claude projector still matches on path + headers, so the exchange
+  // projects into ai_gateway_messages.
   const aiGatewayConfig = {
     listen: '127.0.0.1:0',
     upstreams: [
-      { name: 'echo', base_url: echo.url, path_prefix: '/' },
+      {
+        name: 'echo-anthropic',
+        base_url: echo.url,
+        path_prefix: '/v1/messages',
+        priority: 1000,
+      },
     ],
   }
   const otelConfig = { listen_host: '127.0.0.1', listen_port: 0 }
@@ -101,14 +112,25 @@ export async function run({ harness, expect }) {
 
   const stableBinPath = path.join(harness.tmpDir, 'stable', 'hypaware-bin', 'hypaware')
 
-  try {
+  /**
+   * Activate the six workspace plugins with the smoke's injected
+   * ai-gateway (echo upstream) and otel (ephemeral port) configs.
+   * Called once for the init phase and again into a fresh kernel for
+   * the capture phase: init's finale boots the bundled plugins from
+   * the picker-written config, which repoints the ai-gateway runtime
+   * module singleton away from the echo upstream.
+   *
+   * @param {ReturnType<typeof createKernelRuntime>} targetKernel
+   * @param {string} smokeStep
+   */
+  async function activateInjectedPlugins(targetKernel, smokeStep) {
     await runRoot(
       'kernel.boot',
       {
         [Attr.COMPONENT]: 'kernel',
         [Attr.OPERATION]: 'boot',
         [Attr.SMOKE_NAME]: harness.smokeName,
-        [Attr.SMOKE_STEP]: 'picker_activate',
+        [Attr.SMOKE_STEP]: smokeStep,
         [Attr.DEV_RUN_ID]: harness.devRunId,
         status: 'ok',
       },
@@ -143,11 +165,15 @@ export async function run({ harness, expect }) {
           plugins: entries,
           stateRoot: harness.stateDir,
           runId: harness.devRunId,
-          runtime: kernel,
+          runtime: targetKernel,
           tmpRoot: path.join(harness.tmpDir, 'plugin-temp'),
         })
       }
     )
+  }
+
+  try {
+    await activateInjectedPlugins(kernel, 'picker_activate')
 
     // ----- 1. hyp init via Phase 5 flags -----
     const initStdout = makeBuf()
@@ -232,47 +258,16 @@ export async function run({ harness, expect }) {
       (v) => v === codexBaseline
     )
 
-    // ----- 3b. Real attach during init uses the configured gateway port -----
-    const realInitStdout = makeBuf()
-    const realInitStderr = makeBuf()
-    const realInitCode = await dispatch(
-      [
-        'init',
-        '--yes',
-        '--source', 'claude',
-        '--export', 'keep-local',
-        '--retention-days', '30',
-        '--no-daemon',
-        '--bin', stableBinPath,
-      ],
-      {
-        stdout: realInitStdout,
-        stderr: realInitStderr,
-        kernel,
-        registry,
-        env: smokeEnv(harness),
-      }
-    )
-    expect.that('dispatch: real hyp init attach exited 0', realInitCode, (v) => v === 0)
-    expect.that(
-      'stderr: real hyp init attach had no errors',
-      realInitStderr.text(),
-      (v) => typeof v === 'string' && v.length === 0
-    )
-    const realClaudeSettings = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
-    expect.that(
-      'real init attach: claude marker uses configured gateway port',
-      realClaudeSettings?._hypaware?.port,
-      (v) => v === 8787
-    )
-    expect.that(
-      'real init attach: claude base URL uses configured gateway endpoint',
-      realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
-      (v) => v === 'http://127.0.0.1:8787'
-    )
-
     // ----- 4. Start the sources and exercise both ingest paths -----
-    const otelStarted = kernel.sources.started('otlp')
+    // Fresh kernel + re-activation: the init dispatches above booted the
+    // bundled plugins from the picker-written config, so the ai-gateway
+    // runtime singleton no longer points at the injected echo upstream.
+    const captureRegistry = createCommandRegistry()
+    registerCoreCommands(captureRegistry)
+    const captureKernel = createKernelRuntime({ commandRegistry: captureRegistry, cacheRoot })
+    await activateInjectedPlugins(captureKernel, 'capture_activate')
+
+    const otelStarted = captureKernel.sources.started('otlp')
     if (!otelStarted) {
       throw new Error('walkthrough_picker_to_first_query: source `otlp` not started after activate')
     }
@@ -285,11 +280,11 @@ export async function run({ harness, expect }) {
     }
 
     const runtime = requireAiGatewayRuntime()
-    await kernel.sources.start('ai-gateway', runtime.ctx)
+    await captureKernel.sources.start('ai-gateway', runtime.ctx)
     runtime.started = true
 
     /** @type {AiGatewayCapability} */
-    const gatewayApi = kernel.capabilities.require(
+    const gatewayApi = captureKernel.capabilities.require(
       '@smoke/walkthrough-picker',
       'hypaware.ai-gateway',
       '^2.0.0'
@@ -313,7 +308,7 @@ export async function run({ harness, expect }) {
       messages: [{ role: 'user', content: `picker ${harness.devRunId}` }],
     })
     const gatewayResponse = await postThroughGateway({
-      url: `${gatewayUrl}/v1/echo`,
+      url: `${gatewayUrl}/v1/messages`,
       headers: {
         'content-type': 'application/json',
         'x-hyp-dev-run-id': harness.devRunId,
@@ -326,7 +321,7 @@ export async function run({ harness, expect }) {
       (v) => v === 200
     )
 
-    await kernel.sources.stop('ai-gateway')
+    await captureKernel.sources.stop('ai-gateway')
 
     // ----- 5. SQL assertions on both datasets -----
     const sql = `
@@ -344,8 +339,8 @@ export async function run({ harness, expect }) {
       {
         stdout: sqlStdout,
         stderr: sqlStderr,
-        kernel,
-        registry,
+        kernel: captureKernel,
+        registry: captureRegistry,
         env: smokeEnv(harness),
       }
     )
@@ -381,13 +376,60 @@ export async function run({ harness, expect }) {
       Number(logsRow?.n ?? 0),
       (v) => v === 1
     )
+    // One projected exchange = two message rows (user + assistant).
     expect.that(
-      'sql: ai_gateway_messages has exactly one row for this dev_run_id',
+      'sql: ai_gateway_messages has the projected user+assistant rows for this dev_run_id',
       Number(aigwRow?.n ?? 0),
-      (v) => v === 1
+      (v) => v === 2
     )
 
-    // ----- 6. Span + log assertions -----
+    // ----- 6. Real attach during init uses the configured gateway port -----
+    // Runs after the capture + SQL phase: init re-boots the kernel from
+    // the picker-written config (post-attach one-shot re-boot), which
+    // replaces this smoke's injected echo upstream, so the echo
+    // round-trip must complete first. The dry-run above already wrote
+    // the config, and init refuses to overwrite an existing config
+    // without --force (LLP 0129).
+    const realInitStdout = makeBuf()
+    const realInitStderr = makeBuf()
+    const realInitCode = await dispatch(
+      [
+        'init',
+        '--yes',
+        '--force',
+        '--source', 'claude',
+        '--export', 'keep-local',
+        '--retention-days', '30',
+        '--no-daemon',
+        '--bin', stableBinPath,
+      ],
+      {
+        stdout: realInitStdout,
+        stderr: realInitStderr,
+        kernel,
+        registry,
+        env: smokeEnv(harness),
+      }
+    )
+    expect.that('dispatch: real hyp init attach exited 0', realInitCode, (v) => v === 0)
+    expect.that(
+      'stderr: real hyp init attach had no errors',
+      realInitStderr.text(),
+      (v) => typeof v === 'string' && v.length === 0
+    )
+    const realClaudeSettings = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
+    expect.that(
+      'real init attach: claude marker uses configured gateway port',
+      realClaudeSettings?._hypaware?.port,
+      (v) => v === 8787
+    )
+    expect.that(
+      'real init attach: claude base URL uses configured gateway endpoint',
+      realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
+      (v) => v === 'http://127.0.0.1:8787'
+    )
+
+    // ----- 7. Span + log assertions -----
     await obs.shutdown()
 
     const traces = await expect.traces()
@@ -396,11 +438,11 @@ export async function run({ harness, expect }) {
       (/** @type {any} */ t) => t.name === 'walkthrough.start'
     )
     expect.that(
-      'traces: walkthrough.start span emitted with sources_available=5',
+      'traces: walkthrough.start span emitted with sources_available=6',
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 5 &&
+        v.sources_available === 6 &&
         v.exports_available === 3
     )
 
@@ -585,15 +627,19 @@ async function startEchoUpstream() {
     const chunks = /** @type {Buffer[]} */ ([])
     req.on('data', (c) => chunks.push(c))
     req.on('end', () => {
-      const body = Buffer.concat(chunks)
+      Buffer.concat(chunks)
+      // Anthropic-shaped response so the claude plugin's projector
+      // matches and projects the exchange into ai_gateway_messages.
       res.statusCode = 200
       res.setHeader('content-type', 'application/json')
       res.end(
         JSON.stringify({
-          url: req.url,
-          method: req.method,
-          headers: req.headers,
-          bodyBytes: body.length,
+          id: 'msg_smoke_echo',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-picker',
+          content: [{ type: 'text', text: 'ok' }],
+          usage: { input_tokens: 1, output_tokens: 1 },
         })
       )
     })

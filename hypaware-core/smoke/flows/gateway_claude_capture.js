@@ -383,27 +383,27 @@ export async function run({ harness, expect }) {
     )
   }
 
-  // Verify rows land in new per-client/date partition layout
+  // Verify rows land in the Iceberg source=<source> partition layout
+  // (mirrors gateway_codex_capture's assertions on the same seam).
   const { discoverCachePartitions } = await import('../../../src/core/cache/partition.js')
   const cacheRoot = path.join(harness.hypHome, 'hypaware', 'cache')
   const partitions = await discoverCachePartitions(cacheRoot, {
     datasets: ['ai_gateway_messages'],
   })
-  const clientPartitions = partitions.filter(
-    (p) => p.partition.client && p.partition.date,
+  const sourcePartitions = partitions.filter(
+    (p) => typeof p.partition.source === 'string',
   )
   expect.that(
-    'partitions: at least one client=*/date=* partition exists for ai_gateway_messages',
-    clientPartitions,
+    'partitions: source=* partitions exist for ai_gateway_messages',
+    sourcePartitions,
     (v) => Array.isArray(v) && v.length >= 1,
   )
-  const today = new Date().toISOString().slice(0, 10)
-  const claudeToday = clientPartitions.find(
-    (p) => p.partition.client === 'claude' && p.partition.date === today,
+  const claudePartition = sourcePartitions.find(
+    (p) => p.partition.source === 'claude',
   )
   expect.that(
-    `partitions: client=claude/date=${today} partition exists with rows`,
-    claudeToday,
+    'partitions: source=claude partition exists with rows',
+    claudePartition,
     (v) => v !== undefined && v.rowCount > 0,
   )
 

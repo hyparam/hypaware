@@ -23,7 +23,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
  *
  *   - `good`: base dir is a clean tmp dir; the tick lands a
  *                  readable Parquet file under
- *                  `<dir>/logs/partition=all/partition=all.parquet`.
+ *                  `<dir>/logs/source=<x>/source=<x>.<since>-<last>.parquet`.
  *   - `broken`: a regular file is pre-staged at
  *                  `<dir>/logs`, so `fs.mkdir(partitionDir,
  *                  recursive: true)` inside `local-fs.writeBlob` hits
@@ -67,7 +67,7 @@ export async function run({ harness, expect }) {
   await fs.mkdir(brokenDir, { recursive: true })
   // Stage the failure up front (before the daemon's auto-tick loop
   // can race past it): writeBlob will try to mkdir
-  // `<brokenDir>/logs/partition=all` recursively, which hits ENOTDIR
+  // `<brokenDir>/logs/source=<x>` recursively, which hits ENOTDIR
   // because `<brokenDir>/logs` is already a regular file.
   await fs.writeFile(path.join(brokenDir, 'logs'), 'not-a-directory')
 
@@ -178,16 +178,26 @@ export async function run({ harness, expect }) {
 
   // ----- Inspect the Parquet artifact written by `good` -----
   // Incremental sink reads (LLP 0040) embed the exported `[sinceSeq, lastSeq]`
-  // ingest-seq range in the filename, so the blob is
-  // `partition=all.<since>-<last>.parquet` (first export starts at 0).
-  const goodPartitionDir = path.join(goodDir, 'logs', 'partition=all')
-  const goodBlobs = (await fs.readdir(goodPartitionDir)).filter((n) => /^partition=all\.\d+-\d+\.parquet$/.test(n))
+  // ingest-seq range in the filename, and the export tree partitions by
+  // source, so the blob is `logs/source=<x>/source=<x>.<since>-<last>.parquet`
+  // (first export starts at 0; the smoke's OTLP row carries no source, so
+  // the partition value is `unknown`).
+  const goodDatasetDir = path.join(goodDir, 'logs')
+  const goodPartitionNames = (await fs.readdir(goodDatasetDir)).filter((n) => n.startsWith('source='))
+  expect.that(
+    `good sink: exactly one source= partition dir under ${goodDatasetDir}`,
+    goodPartitionNames,
+    (names) => Array.isArray(names) && names.length === 1,
+  )
+  const goodPartitionDir = path.join(goodDatasetDir, goodPartitionNames[0] ?? 'source=unknown')
+  const goodBlobs = (await fs.readdir(goodPartitionDir).catch(() => []))
+    .filter((n) => /^source=[^.]+\.\d+-\d+\.parquet$/.test(n))
   expect.that(
     `good sink: exactly one ranged parquet blob under ${goodPartitionDir}`,
     goodBlobs,
     (names) => Array.isArray(names) && names.length === 1,
   )
-  const goodFile = path.join(goodPartitionDir, goodBlobs[0] ?? 'partition=all.0-0.parquet')
+  const goodFile = path.join(goodPartitionDir, goodBlobs[0] ?? 'source=unknown.0-0.parquet')
   const goodStat = await fs.stat(goodFile)
   expect.that(
     `good sink: ${goodFile} is a non-empty Parquet file`,

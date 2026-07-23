@@ -74,6 +74,10 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
       stdout: io.stdout,
       stderr,
       stdin: io.stdin,
+      // Stub detection: the default detector probes machine-global paths
+      // (e.g. /Applications/Claude.app), which would pre-check rows and
+      // change the picks depending on the host running the test.
+      detect: async () => new Set(),
       env: {
         HOME: tmp,
         HYP_HOME: path.join(tmp, '.hyp'),

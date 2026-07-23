@@ -212,9 +212,9 @@ export async function run({ harness, expect }) {
       expect.that('cli: hyp ignore --local-only exited 0', code, (v) => v === 0)
       expect.that('cli: hyp ignore --local-only had no stderr', stderr.text(), (v) => v.length === 0)
       expect.that(
-        'cli: hyp ignore --local-only confirms the added directory',
+        'cli: hyp ignore --local-only confirms the marked directory',
         stdout.text(),
-        (v) => v.includes('added') && v.includes(excludedCwd) && v.includes('local-only list')
+        (v) => v.includes('marked') && v.includes(excludedCwd) && v.includes('as local-only')
       )
     })
 
