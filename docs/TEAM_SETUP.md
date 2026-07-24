@@ -10,7 +10,7 @@ anyone who signs in with a verified email on your claimed domain joins your
 organization automatically. 
 
 > To get an organization,
-> [get in touch](https://hypstack.ai/) and we will set one up for your
+> [get in touch](https://hyperparam.app/contact) and we will set one up for your
 > domain.
 
 ## Run the setup
