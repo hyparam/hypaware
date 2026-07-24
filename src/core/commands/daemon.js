@@ -189,6 +189,11 @@ export async function runDaemonInstall(argv, ctx) {
   /** @type {DaemonInstallOptions} */
   const options = {
     binPath,
+    // An explicit --bin is the escape hatch: installDaemon must keep it
+    // verbatim. A default binPath from process.argv[1] under npx points
+    // into the _npx cache, so installDaemon upgrades it to a durable
+    // global bin (LLP 0025: join stays a wrapper over this same path).
+    binExplicit: parsed.binPath !== undefined,
     ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
     ...(homeDir !== undefined ? { homeDir } : {}),
     ...(parsed.platform !== undefined ? { platform: parsed.platform } : {}),

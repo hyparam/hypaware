@@ -3,6 +3,7 @@
 import process from 'node:process'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { ensureDurableBinForNpx, isNpxBinPath } from '../cli/global_install.js'
 
 import {
   LAUNCH_LABEL,
@@ -38,6 +39,7 @@ function defaultLabelFor(platform) {
  *   DaemonUninstallOptions,
  *   DaemonServiceOptions,
  * } from '../../../src/core/daemon/types.js'
+ * @import { DurableBinResult } from '../../../src/core/cli/types.js'
  */
 
 export class DaemonInstallError extends Error {
@@ -151,6 +153,43 @@ function withDaemonOp(op, platform, label, fn, okFields) {
 }
 
 /**
+ * The single choke point that keeps a daemon from ever being pinned to
+ * an ephemeral npx bin. When `npx hypaware` installs the daemon, the
+ * resolved binPath points into npm's `~/.npm/_npx/<hash>/...` cache,
+ * which vanishes the moment npx exits, leaving the host recorded but
+ * with no `hyp` control surface (status/policy/detach/uninstall all
+ * impossible). Every non-dry-run install funnels through `installDaemon`
+ * (walkthrough finale, `hyp daemon install`, and the join/enroll lane),
+ * so upgrading to a durable global bin here makes "a daemon is never
+ * installed against an `_npx` bin" a single invariant instead of a
+ * per-call-site obligation only the walkthrough remembered to honor.
+ *
+ * Escape hatches survive: an explicit `--bin` sets `binExplicit`, and
+ * dry-run never reaches here (it renders through `planDaemonInstall`).
+ *
+ * @param {DaemonInstallOptions} options
+ * @returns {Promise<{ binPath: string, globalInstall: DurableBinResult }>}
+ */
+async function resolveDurableBinPath(options) {
+  const seam = options.durableBin ?? {}
+  const env = seam.env ?? process.env
+  if (options.binExplicit || !isNpxBinPath(options.binPath, env)) {
+    return {
+      binPath: options.binPath,
+      globalInstall: { binPath: options.binPath, installed: false, skipped: true },
+    }
+  }
+  const durable = await ensureDurableBinForNpx({
+    binPath: options.binPath,
+    env,
+    stdout: seam.stdout ?? process.stdout,
+    stderr: seam.stderr ?? process.stderr,
+    ...(seam.runner ? { runner: seam.runner } : {}),
+  })
+  return { binPath: durable.binPath, globalInstall: durable }
+}
+
+/**
  * Install the platform-appropriate persistent service. Wraps the
  * platform-specific call in a `daemon.install` span and emits a
  * structured `daemon.install` log including platform, target path,
@@ -173,9 +212,21 @@ export async function installDaemon(options) {
     'install',
     platform,
     merged.label ?? defaultLabelFor(platform),
+    // @ref LLP 0025#seed-config-mode [implements]: durable-bin upgrade lives here so join/login inherit it, not just the walkthrough
     /** @returns {Promise<DaemonInstallPlan>} */
-    () => platform === 'darwin' ? macos.installLaunchAgent(merged) : linux.installSystemdUnit(merged),
-    (plan) => ({ target_path: plan.targetPath }),
+    async () => {
+      const { binPath, globalInstall } = await resolveDurableBinPath(merged)
+      const withBin = binPath === merged.binPath ? merged : { ...merged, binPath }
+      const plan = platform === 'darwin'
+        ? await macos.installLaunchAgent(withBin)
+        : await linux.installSystemdUnit(withBin)
+      return Object.assign(plan, { globalInstall })
+    },
+    (plan) => ({
+      target_path: plan.targetPath,
+      global_install_installed: plan.globalInstall?.installed ?? false,
+      global_install_skipped: plan.globalInstall?.skipped ?? true,
+    }),
   )
 }
 

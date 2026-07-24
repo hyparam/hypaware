@@ -11,7 +11,6 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
-import { ensureDurableBinForNpx } from './global_install.js'
 import { detectPickerSources } from './detect.js'
 import { multiselect, select, text } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
@@ -817,25 +816,17 @@ export async function runPickerFinale(args) {
       },
       async (span) => {
         const installMod = await import('../daemon/install.js')
-        let binPath = finale.binPath ?? (process.argv[1] ?? '')
-        if (!dryRun && !finale.binPath && binPath) {
-          const durable = await ensureDurableBinForNpx({ binPath, env, stdout, stderr })
-          binPath = durable.binPath
-          summary.globalInstall = {
-            skipped: durable.skipped,
-            installed: durable.installed,
-            binPath: durable.binPath,
-            ...(durable.packageSpec ? { packageSpec: durable.packageSpec } : {}),
-          }
-          if (span && typeof span.setAttribute === 'function') {
-            span.setAttribute('global_install_skipped', durable.skipped)
-            span.setAttribute('global_install_installed', durable.installed)
-          }
-        }
+        const binPath = finale.binPath ?? (process.argv[1] ?? '')
         /** @type {DaemonInstallOptions} */
         const options = {
           binPath,
           configPath,
+          // The npx->durable global-bin upgrade now lives inside
+          // installDaemon so every enrollment path inherits it; the
+          // walkthrough only signals whether binPath came from an
+          // explicit --bin and reads the result back off the plan.
+          binExplicit: finale.binPath !== undefined,
+          durableBin: { env, stdout, stderr },
           ...(homeDir ? { homeDir } : {}),
         }
         if (dryRun) {
@@ -858,10 +849,23 @@ export async function runPickerFinale(args) {
             dryRun: false,
             targetPath: plan.targetPath,
           }
+          const durable = plan.globalInstall
+          if (durable) {
+            summary.globalInstall = {
+              skipped: durable.skipped,
+              installed: durable.installed,
+              binPath: durable.binPath,
+              ...(durable.packageSpec ? { packageSpec: durable.packageSpec } : {}),
+            }
+          }
           if (span && typeof span.setAttribute === 'function') {
             span.setAttribute('target_path', plan.targetPath)
             span.setAttribute('bin_path', plan.binPath)
             span.setAttribute('platform', plan.platform)
+            if (durable) {
+              span.setAttribute('global_install_skipped', durable.skipped)
+              span.setAttribute('global_install_installed', durable.installed)
+            }
           }
         }
       },
