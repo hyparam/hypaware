@@ -18,7 +18,7 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
+import { LOCAL_INSTALL_RETENTION_DAYS, runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
 import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
@@ -127,7 +127,12 @@ export async function runInitWizard(opts) {
     ...(opts.exportOrigin ? { exportOrigin: opts.exportOrigin } : {}),
     ...(opts.force ? { force: opts.force } : {}),
     ...(opts.prompt ? { prompt: opts.prompt } : {}),
-    ...(opts.retentionPrompt ? { retentionPrompt: opts.retentionPrompt } : {}),
+    // Retention is never asked; the pathway decides the default. A local
+    // install keeps the longer 120-day window (the cache is the only copy
+    // of history); team and scoped runs fall through to the pick phase's
+    // 30-day default (the org server holds the durable copy).
+    // @ref LLP 0137#pathway-defaults [implements]: 30-day team / 120-day local retention defaults
+    ...(pathway === 'local' ? { retentionDefault: LOCAL_INSTALL_RETENTION_DAYS } : {}),
     ...(opts.detect ? { detect: opts.detect } : {}),
     ...(opts.confirmOverwrite ? { confirmOverwrite: opts.confirmOverwrite } : {}),
   })

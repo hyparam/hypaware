@@ -4,7 +4,6 @@ import type { PickerDescriptor, PluginCatalog } from '../../types.d.ts'
 import type {
   AsyncBackfillConsentPrompt,
   AsyncPickPrompt,
-  AsyncRetentionPrompt,
   FinaleSummary,
   PickerBackfillRunner,
   PickerExport,
@@ -251,8 +250,12 @@ export interface RunWizardPickOptions {
   exportOrigin?: PickerExportOrigin
   /** Override the source prompt (tests pre-bake answers). */
   prompt?: AsyncPickPrompt
-  /** Override the retention prompt (tests pre-bake answers). */
-  retentionPrompt?: AsyncRetentionPrompt
+  /**
+   * The retention window applied without asking (LLP 0137): the
+   * orchestrator passes the pathway default (120-day local; team and
+   * scoped runs omit it and take the 30-day `DEFAULT_RETENTION_DAYS`).
+   */
+  retentionDefault?: number
   /** Override the system source detector (interactive only). */
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   /** Overwrite an existing local config non-interactively (`--force`). */
@@ -313,7 +316,6 @@ export interface RunInitWizardOptions {
   finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
   /** Pick-phase prompt seams, threaded through unchanged (tests). */
   prompt?: AsyncPickPrompt
-  retentionPrompt?: AsyncRetentionPrompt
   detect?: (opts: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>
   confirmOverwrite?: (targetPath: string) => Promise<boolean>
   backfillConsentPrompt?: AsyncBackfillConsentPrompt

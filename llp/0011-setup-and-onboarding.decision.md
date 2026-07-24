@@ -20,6 +20,10 @@
 > realizing the plugin-contributed picks this document already named. The
 > prose below is rewritten with the implementation.
 
+> **Amended by [LLP 0137](./0137-onboarding-retention-defaults.decision.md)**:
+> the "Cache retention (days)" question is removed; the pathway sets the
+> default instead (30-day team / 120-day local).
+
 ## Interactive walkthrough
 
 The primary way to get a HypAware install on the ground is the interactive
@@ -27,13 +31,15 @@ setup (`npx hypaware`):
 
 ```text
 What do you want to collect?   (Claude / Codex / raw Anthropic+OpenAI / OTEL)
-Where should HypAware export?   (local cache only / local Parquet / central / later)
-Cache retention (days, default 30): 30
 
 ✓ Wrote ~/.hyp/hypaware-config.json
 ✓ Wired Claude Code to use the local proxy
 ✓ Started the HypAware daemon
 ```
+
+Export and retention are not asked: export defaults to local Parquet, and
+the retention window comes from the pathway chosen at the fork
+([LLP 0137](./0137-onboarding-retention-defaults.decision.md#pathway-defaults)).
 
 The walkthrough is the canonical first-run experience. It composes
 **plugin-contributed picks** — each source/client plugin registers what it
@@ -92,7 +98,9 @@ HypAware picks the plugin set. There are no names like "standalone" or
   a source on, never hides one. Raw proxy sources and OTEL are never
   autodetected (no installed tool to find). See [LLP 0012](./0012-sources.spec.md#source-kinds).
 - **Default** is a fixed starting selection not derived from system state:
-  export defaults to local Parquet, retention defaults to 30 days.
+  export defaults to local Parquet; retention defaults by pathway, 30 days
+  on a team install and 120 days on a local-only one
+  ([LLP 0137](./0137-onboarding-retention-defaults.decision.md#pathway-defaults)).
 
 (Canonical definitions live in `CONTEXT.md`.)
 

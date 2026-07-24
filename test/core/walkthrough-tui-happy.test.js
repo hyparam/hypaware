@@ -86,14 +86,10 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
 
     // Sources prompt (PICKER_SOURCES: claude, codex, raw-anthropic,
     // raw-openai, otel). Move down twice to land on raw-anthropic,
-    // toggle, then enter.
+    // toggle, then enter. It is the only prompt: export defaults to
+    // local-parquet and retention is never asked (LLP 0137).
     await settle()
     await feed(io.stdin, ['\x1b[B', '\x1b[B', ' ', '\r'])
-
-    // No export prompt: the picker always defaults to local-parquet now.
-    // Retention prompt: empty buffer + enter accepts the 30-day default.
-    await settle()
-    await feed(io.stdin, ['\r'])
 
     const result = await promise
     assert.equal(result.exitCode, 0)
@@ -177,10 +173,10 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   const input = new PassThrough()
   // Mark BOTH ends as TTYs so the only signal that flips the router is
   // the HYP_NO_TUI escape. This proves the env override wins over the
-  // TTY probe. Answers: source '3' (raw-anthropic), then retention
-  // default: the export question is no longer asked.
+  // TTY probe. One answer: source '3' (raw-anthropic). Neither export
+  // nor retention is asked.
   Object.defineProperty(input, 'isTTY', { value: true })
-  const stdout = answerDrivenOutput(input, ['3\n', '\n'], true)
+  const stdout = answerDrivenOutput(input, ['3\n'], true)
   const stderr = makeBuf()
 
   // HYP_NO_TUI flows through opts.env: the same channel real callers
@@ -214,7 +210,7 @@ function answerDrivenOutput(input, answers, withIsTty = false) {
     write(chunk) {
       const text = String(chunk)
       value += text
-      if (text.includes('select (e.g. 1,3 or "all"): ') || text.includes('Cache retention (days)')) {
+      if (text.includes('select (e.g. 1,3 or "all"): ')) {
         const answer = answers.shift()
         if (answer !== undefined) input.write(answer)
         if (answers.length === 0) input.end()

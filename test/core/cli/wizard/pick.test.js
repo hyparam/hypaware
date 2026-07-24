@@ -118,7 +118,6 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   const { prompt, state } = capturingPrompt(['codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(['codex']),
   }))
   // The codex row came pre-checked from detection.
@@ -129,13 +128,53 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(result.retentionDays, 30)
 })
 
+// --- retention defaults (LLP 0137): never asked, pathway-supplied ---
+// @ref LLP 0137#pathway-defaults [tests]:
+
+test('runWizardPick: interactive runs take the 30-day default without a retention prompt', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+  }))
+  assert.equal(result.retentionDays, 30)
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.query.cache.retention.default_days, 30)
+})
+
+test('runWizardPick: retentionDefault (the local pathway) lands in the composed config', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt } = capturingPrompt(['otel'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    retentionDefault: 120,
+  }))
+  assert.equal(result.retentionDays, 120)
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.query.cache.retention.default_days, 120)
+})
+
+test('runWizardPick: pre-baked picks override retentionDefault', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    retentionDefault: 120,
+    picks: { sources: /** @type {PickerSource[]} */ (['otel']), exportChoice: 'local-parquet', retentionDays: 7 },
+  }))
+  assert.equal(result.retentionDays, 7)
+})
+
 test('runWizardPick: options come from catalog.pickerDescriptors, not a hardcoded table', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(),
   }))
   const ids = state.question.options.map((/** @type {any} */ o) => o.value).sort()
@@ -150,7 +189,6 @@ test('runWizardPick: a locked row renders checked, disabled, and fleet-labeled',
   const { prompt, state } = capturingPrompt(['claude'])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(),
     locked: ['claude'],
   }))
@@ -168,7 +206,6 @@ test('runWizardPick: a locked source is filtered out of the returned picks and c
   const { prompt } = capturingPrompt(['claude', 'codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(),
     locked: ['claude'],
   }))
@@ -188,7 +225,6 @@ test('runWizardPick: an unknown locked id is ignored, not surfaced as a row', as
   const { prompt, state } = capturingPrompt([])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(),
     locked: ['does-not-exist'],
   }))
@@ -205,7 +241,6 @@ test('runWizardPick: on a managed machine, non-locked rows say "stays on this ma
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(['codex']),
     locked: ['claude'],
     managed: true,
@@ -228,7 +263,6 @@ test('runWizardPick: an unmanaged (solo) machine never shows the local-only suff
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
     detect: async () => new Set(['claude']),
   }))
   for (const row of state.question.options) {
