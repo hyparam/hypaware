@@ -75,5 +75,3 @@ hyp query sql "select provider, model, count(*) n from ai_gateway_messages group
 # Sessions and message parts per day, most recent first
 hyp query sql "select date, count(distinct session_id) sessions, count(*) parts from ai_gateway_messages group by 1 order by 1 desc limit 14"
 ```
-
----
