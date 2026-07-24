@@ -14,8 +14,38 @@ import {
 /**
  * @import { HypAwareV2Config, QueryRegistry } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { ExecuteSqlOptions, ExecuteSqlResult } from '../../../../src/core/query/types.js'
  * @import { Contract, ContractRule, GraphRow, RulePredicate } from './types.js'
  */
+
+/** The dedicated projection heap budget when the knob is unset: 3 GiB. */
+const GRAPH_PROJECTION_DEFAULT_MAX_HEAP_BYTES = 3072 * 1024 * 1024
+
+/**
+ * The graph projection's DEDICATED execution heap budget in bytes, from
+ * HYP_GRAPH_PROJECTION_MAX_HEAP_MB (default 3 GiB). The T0 shared scan
+ * materializes the whole source table into memory before the rule loop sees a
+ * row, so it needs headroom the 1 GiB user-query default (LLP 0056, added in
+ * #295) rightly denies interactive traffic. This is a dedicated budget, not an
+ * exemption: passing a finite bound keeps the fail-clean property (over-budget
+ * projection refuses with a typed error the scheduler logs as
+ * `graph_projection.scope_failed`) while leaving the user-query guard untouched.
+ * Never returns 0: 0 disables executeQuerySql's watchdog entirely, risking a
+ * daemon OOM crash-loop that is strictly worse than a stale graph, so a blank,
+ * zero, non-positive, or non-numeric knob falls back to the default rather than
+ * removing the guard. Mirrors resolveHeapBudgetBytes' blank-var handling.
+ *
+ * @returns {number}
+ * @ref LLP 0097 [constrained-by]: reuses the maxHeapBytes option and inherits its fail-clean refusal; deliberately does NOT use the "0 disables" escape the doc exposes
+ */
+export function resolveProjectionMaxHeapBytes() {
+  const raw = process.env.HYP_GRAPH_PROJECTION_MAX_HEAP_MB?.trim()
+  if (raw) {
+    const mb = Number(raw)
+    if (Number.isFinite(mb) && mb > 0) return mb * 1024 * 1024
+  }
+  return GRAPH_PROJECTION_DEFAULT_MAX_HEAP_BYTES
+}
 
 /**
  * Run the T0 deterministic projection: read each registered source contract's
@@ -26,11 +56,16 @@ import {
  * structurally converge for free. Idempotent: a second run with no new source
  * data writes zero rows.
  *
- * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean }} args
+ * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean, __executeSql?: (args: ExecuteSqlOptions) => Promise<ExecuteSqlResult> }} args
  * @returns {Promise<{ nodes: number, edges: number, nodesWritten: number, edgesWritten: number }>}
  * @ref LLP 0023#contract-contribution [implements]: the engine runs every registered contract; adding a source is contributing one
  */
-export async function projectGraph({ query, storage, contracts, config, dryRun = false }) {
+export async function projectGraph({ query, storage, contracts, config, dryRun = false, __executeSql = executeQuerySql }) {
+  // A dedicated finite budget for every projection scan: the shared scan below
+  // fully materializes the source table, so it needs more than the 1 GiB
+  // user-query default without stripping the guard (never 0). Resolved once and
+  // applied at all three scan sites (shared scan, raw-SQL rules, dedup read).
+  const maxHeapBytes = resolveProjectionMaxHeapBytes()
   return withSpan(
     'graph.project',
     {
@@ -96,13 +131,14 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           // enforced when the graph datasets are READ, via their
           // localOnlyContentColumns declaration (datasets.js).
           // @ref LLP 0105#surfaces [constrained-by]: the filter governs read surfaces; derived-cache builds keep full fidelity and the derived dataset carries its own declaration
-          const result = await executeQuerySql({
+          const result = await __executeSql({
             query: `SELECT ${[...columns].sort().join(', ')} FROM ${contract.sourceDataset}`,
             registry: query,
             storage,
             config,
             refresh: 'always',
             includeLocalOnly: true,
+            maxHeapBytes,
           })
           sourceRows += result.rows.length
           scanCount += 1
@@ -125,14 +161,15 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
           else bySql.set(sql, [rule])
         }
         for (const [sql, rules] of bySql) {
-          // Same cache-to-cache bypass as the shared scan above.
-          const result = await executeQuerySql({
+          // Same cache-to-cache bypass and dedicated budget as the shared scan.
+          const result = await __executeSql({
             query: sql,
             registry: query,
             storage,
             config,
             refresh: 'always',
             includeLocalOnly: true,
+            maxHeapBytes,
           })
           sourceRows += result.rows.length
           scanCount += 1
@@ -155,8 +192,8 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
         return { nodes: nodeRows.length, edges: edgeRows.length, nodesWritten: 0, edgesWritten: 0 }
       }
 
-      const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config)
-      const freshEdges = await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config)
+      const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
+      const freshEdges = await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
 
       if (freshNodes.length > 0) {
         await storage.appendRows(graphTablePath(storage, NODE_DATASET), [...NODE_COLUMNS], freshNodes)
@@ -190,24 +227,28 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
  * @param {QueryRegistry} query
  * @param {ExtendedQueryStorageService} storage
  * @param {HypAwareV2Config | undefined} config
+ * @param {number} maxHeapBytes
+ * @param {(args: ExecuteSqlOptions) => Promise<ExecuteSqlResult>} executeSql
  * @returns {Promise<GraphRow[]>}
  * @ref LLP 0023#pre-write-dedup [implements]: only a missing dataset is benign; real failures abort instead of duplicating
  */
-async function dedupExisting(rows, idCol, dataset, query, storage, config) {
+async function dedupExisting(rows, idCol, dataset, query, storage, config, maxHeapBytes, executeSql) {
   if (rows.length === 0) return rows
   /** @type {Set<string>} */
   const seen = new Set()
   try {
     // Dedup must see EVERY committed id (ids are content-addressed hashes,
     // not content): a visibility-filtered id set would re-append rows the
-    // filter hid and corrupt idempotency. Cache-internal, so bypass.
-    const res = await executeQuerySql({
+    // filter hid and corrupt idempotency. Cache-internal, so bypass. Same
+    // dedicated projection budget as the source scans (never the 1 GiB default).
+    const res = await executeSql({
       query: `SELECT ${idCol} FROM ${dataset}`,
       registry: query,
       storage,
       config,
       refresh: 'always',
       includeLocalOnly: true,
+      maxHeapBytes,
     })
     for (const r of res.rows) {
       const v = r[idCol]
