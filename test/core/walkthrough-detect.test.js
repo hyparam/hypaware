@@ -42,7 +42,6 @@ test('picker pre-checks detected sources, labels them, and defaults export to lo
     env: await tmpEnv(),
     detect: async () => new Set(['claude']),
     prompt,
-    retentionPrompt: async (_p, d) => d,
   })
 
   const sources = seen.find((q) => q.pickType === 'sources')
@@ -79,7 +78,6 @@ test('nothing detected → no source pre-checked, export still defaults to local
     env: await tmpEnv(),
     detect: async () => new Set(),
     prompt,
-    retentionPrompt: async (_p, d) => d,
   })
 
   const sources = seen.find((q) => q.pickType === 'sources')

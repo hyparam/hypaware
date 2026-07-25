@@ -12,7 +12,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { isWithinDir } from '../runtime/contribution_names.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
-import { multiselect, select, text } from './tui/index.js'
+import { multiselect, select } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
 import { copyDir } from '../util/fs_copy.js'
@@ -35,7 +35,6 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import {
  *   AsyncBackfillConsentPrompt,
  *   AsyncPickPrompt,
- *   AsyncRetentionPrompt,
  *   BackfillFinaleResult,
  *   PickerBackfillRunner,
  *   PickerSource,
@@ -50,7 +49,14 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * } from '../../../src/core/cli/types.js'
  */
 
+// Onboarding never asks for a retention window; these are the pathway
+// defaults the wizard applies instead. A team (or managed) install keeps
+// the 30-day window because the org server holds the durable copy; a
+// local-only install keeps 120 days because the local cache is the only
+// copy of history. `hyp init --retention-days <n>` remains the override.
+// @ref LLP 0137#pathway-defaults [implements]: no retention question; 30-day team / 120-day local defaults
 export const DEFAULT_RETENTION_DAYS = 30
+export const LOCAL_INSTALL_RETENTION_DAYS = 120
 
 /**
  * Resolve the HYP_HOME root the same way the kernel does (matches
@@ -97,28 +103,6 @@ function legacyNumberedPromptFactory(opts) {
         .map((s) => Number.parseInt(s.trim(), 10))
         .filter((n) => Number.isInteger(n) && n >= 1 && n <= question.options.length)
       return indices.map((n) => question.options[n - 1].value)
-    } finally {
-      rl.close()
-    }
-  }
-}
-
-/**
- * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout'>} opts
- * @returns {AsyncRetentionPrompt}
- */
-function legacyRetentionPromptFactory(opts) {
-  const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
-  const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
-  return async function (prompt, defaultDays) {
-    const rl = readline.createInterface({ input, output, terminal: false })
-    try {
-      const answer = await rl.question(`${prompt} [${defaultDays}]: `)
-      const trimmed = answer.trim()
-      if (!trimmed) return defaultDays
-      const parsed = Number.parseInt(trimmed, 10)
-      if (!Number.isInteger(parsed) || parsed < 0) return defaultDays
-      return parsed
     } finally {
       rl.close()
     }
@@ -178,37 +162,6 @@ function tuiPromptFactory(opts) {
 }
 
 /**
- * Prompt for the cache retention window through the TUI text input.
- * Empty input falls through to the supplied default to match the legacy
- * behavior.
- *
- * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
- * @returns {AsyncRetentionPrompt}
- */
-function tuiRetentionPromptFactory(opts) {
-  return async function (prompt, defaultDays) {
-    const v = await text({
-      title: prompt,
-      default: String(defaultDays),
-      validate: (s) => {
-        if (s.trim() === '') return null
-        const n = Number.parseInt(s.trim(), 10)
-        return Number.isInteger(n) && n >= 0 ? null : 'enter a non-negative integer'
-      },
-      clearOnResolve: true,
-      stdin: opts.stdin ?? process.stdin,
-      stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (opts.stdout)),
-      env: opts.env,
-    })
-    const trimmed = v.trim()
-    if (trimmed === '') return defaultDays
-    const parsed = Number.parseInt(trimmed, 10)
-    if (!Number.isInteger(parsed) || parsed < 0) return defaultDays
-    return parsed
-  }
-}
-
-/**
  * Route between the TUI and legacy prompts. Tests and CI keep getting
  * the legacy numbered list, but only real TTYs without `HYP_NO_TUI=1` see
  * the new interactive multiselect.
@@ -219,15 +172,6 @@ function tuiRetentionPromptFactory(opts) {
 export function defaultPromptFactory(opts) {
   if (shouldUseTui(opts)) return tuiPromptFactory(opts)
   return legacyNumberedPromptFactory(opts)
-}
-
-/**
- * @param {Pick<WalkthroughOptions, 'stdin' | 'stdout' | 'env'>} opts
- * @returns {AsyncRetentionPrompt}
- */
-export function defaultRetentionPromptFactory(opts) {
-  if (shouldUseTui(opts)) return tuiRetentionPromptFactory(opts)
-  return legacyRetentionPromptFactory(opts)
 }
 
 /**
@@ -423,7 +367,6 @@ export async function runPickerWalkthrough(opts) {
     exportOrigin = opts.exportOrigin ?? 'default'
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
-    const retentionAsk = opts.retentionPrompt ?? defaultRetentionPromptFactory(opts)
 
     stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
 
@@ -450,8 +393,10 @@ export async function runPickerWalkthrough(opts) {
       // editing the written config later.
       const exportChoice = /** @type {PickerExport} */ ('local-parquet')
 
-      const retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
-      picks = { sources, exportChoice, retentionDays }
+      // Retention is not asked either (LLP 0137): this legacy surface has
+      // no pathway fork, so it takes the flat default. The wizard applies
+      // the pathway-aware defaults; `--retention-days` overrides via picks.
+      picks = { sources, exportChoice, retentionDays: DEFAULT_RETENTION_DAYS }
     } catch (err) {
       if (isPromptCancelledError(err)) {
         return await cancelledResult(opts)

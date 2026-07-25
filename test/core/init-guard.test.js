@@ -126,7 +126,6 @@ function interactiveOpts(hypHome) {
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
       detect: async () => new Set(),
       prompt: async () => [],
-      retentionPrompt: async () => 30,
     },
   }
 }

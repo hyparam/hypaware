@@ -14,7 +14,6 @@ import type { KernelRuntime } from '../runtime/types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
 
 export type AsyncPickPrompt = (question: WalkthroughQuestion) => Promise<string[]>
-export type AsyncRetentionPrompt = (prompt: string, defaultDays: number) => Promise<number>
 export type AsyncBackfillConsentPrompt = (args: {
   providers: string[]
   retentionDays: number
@@ -82,7 +81,6 @@ export interface WalkthroughOptions {
   env: NodeJS.ProcessEnv
   /** Override prompt resolver (tests pre-bake answers). */
   prompt?: AsyncPickPrompt
-  retentionPrompt?: AsyncRetentionPrompt
 }
 
 export interface WalkthroughResult {
@@ -143,7 +141,6 @@ export interface RunPickerWalkthroughOptions {
    */
   exportOrigin?: PickerExportOrigin
   prompt?: AsyncPickPrompt
-  retentionPrompt?: AsyncRetentionPrompt
   /**
    * Override the system source detector. Defaults to a catalog-backed
    * wrapper around the real filesystem-based `detectPickerSources`.

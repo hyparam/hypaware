@@ -14,7 +14,6 @@ import {
   defaultOverwriteConfirmFactory,
   defaultPickerDetect,
   defaultPromptFactory,
-  defaultRetentionPromptFactory,
   loadPickerDescriptors,
   orderPickerDescriptors,
   resolveHypHome,
@@ -133,7 +132,6 @@ export async function runWizardPick(opts) {
     exportOrigin = opts.exportOrigin ?? 'default'
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
-    const retentionAsk = opts.retentionPrompt ?? defaultRetentionPromptFactory(opts)
 
     opts.stdout.write('Welcome to HypAware - the local logs+telemetry collector.\n\n')
 
@@ -151,7 +149,11 @@ export async function runWizardPick(opts) {
       // Parquet exports so the first run produces durable files out of the
       // box. Other destinations remain available via `hyp init --export`.
       exportChoice = /** @type {PickerExport} */ ('local-parquet')
-      retentionDays = await retentionAsk('Cache retention (days)', DEFAULT_RETENTION_DAYS)
+      // Retention is not asked either: the orchestrator supplies the
+      // pathway default (30-day team / 120-day local), overridable only
+      // via `hyp init --retention-days` on the non-interactive path.
+      // @ref LLP 0137#pathway-defaults [implements]: the retention question is removed from onboarding
+      retentionDays = opts.retentionDefault ?? DEFAULT_RETENTION_DAYS
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err

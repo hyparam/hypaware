@@ -12,9 +12,9 @@ import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
 test('picker prompt prints context under source options and defaults export to local-parquet', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-walkthrough-prompt-'))
   const input = new PassThrough()
-  // Only the source question and the retention prompt are asked; the
-  // export question was removed in favour of the local-parquet default.
-  const stdout = answerDrivenOutput(input, ['3\n', '\n'])
+  // Only the source question is asked; export defaults to local-parquet
+  // and retention takes its default without a prompt (LLP 0137).
+  const stdout = answerDrivenOutput(input, ['3\n'])
   const stderr = makeBuf()
 
   const result = await runPickerWalkthrough({
@@ -37,6 +37,8 @@ test('picker prompt prints context under source options and defaults export to l
   // The export question is no longer rendered.
   assert.doesNotMatch(text, /keep local query cache only/)
   assert.doesNotMatch(text, /Where should HypAware export/)
+  // Neither is the retention question (LLP 0137).
+  assert.doesNotMatch(text, /Cache retention/)
   assert.equal(stderr.text(), '')
 })
 
@@ -50,7 +52,7 @@ function answerDrivenOutput(input, answers) {
     write(chunk) {
       const text = String(chunk)
       value += text
-      if (text.includes('select (e.g. 1,3 or "all"): ') || text.includes('Cache retention (days)')) {
+      if (text.includes('select (e.g. 1,3 or "all"): ')) {
         const answer = answers.shift()
         if (answer !== undefined) input.write(answer)
         if (answers.length === 0) input.end()

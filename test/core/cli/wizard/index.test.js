@@ -152,6 +152,9 @@ test('runInitWizard: local pathway runs pick -> configure -> finale, no join', a
   assert.deepEqual(calls, ['gate', 'fork', 'pick', 'configure', 'finale'])
   assert.equal(result.pathway, 'local')
   assert.equal(opts._pickOpts.managed, undefined)
+  // The local pathway supplies the 120-day retention default without a
+  // prompt (LLP 0137 #pathway-defaults).
+  assert.equal(opts._pickOpts.retentionDefault, 120)
 })
 
 test('runInitWizard: fork quit exits 0 before the pick phase', async () => {
@@ -172,6 +175,9 @@ test('runInitWizard: team pathway threads locked + managed into the pick phase',
   assert.equal(result.pathway, 'team')
   assert.deepEqual(opts._pickOpts.locked, ['claude'])
   assert.equal(opts._pickOpts.managed, true)
+  // The team pathway takes the pick phase's 30-day default: no
+  // retentionDefault override (LLP 0137 #pathway-defaults).
+  assert.equal(opts._pickOpts.retentionDefault, undefined)
 })
 
 test('runInitWizard: a failed join explains and returns to the fork', async () => {

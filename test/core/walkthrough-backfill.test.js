@@ -191,7 +191,6 @@ test('interactive onboarding defaults backfill to enabled (consent yes runs it)'
     env,
     // No `picks` ⇒ interactive: prompts are driven by injected resolvers.
     prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
-    retentionPrompt: async () => 30,
     backfillConsentPrompt: async (args) => {
       consentCalls.push(args)
       return true
@@ -219,7 +218,6 @@ test('interactive onboarding lets the user decline backfill', async () => {
     stderr,
     env,
     prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
-    retentionPrompt: async () => 30,
     backfillConsentPrompt: async () => false,
     backfill,
     finale: { skipDaemon: true },
@@ -243,7 +241,6 @@ test('interactive onboarding maps cancelled backfill consent to the cancel exit 
     stderr,
     env,
     prompt: async (q) => (q.pickType === 'sources' ? ['claude'] : ['keep-local']),
-    retentionPrompt: async () => 30,
     backfillConsentPrompt: async () => {
       throw new PromptCancelledError()
     },
@@ -422,7 +419,6 @@ test('interactive onboarding prompts codex backfill consent and runs it on yes',
     env,
     // No `picks` ⇒ interactive: the source resolver picks codex.
     prompt: async (q) => (q.pickType === 'sources' ? ['codex'] : ['keep-local']),
-    retentionPrompt: async () => 30,
     backfillConsentPrompt: async (args) => {
       consentCalls.push(args)
       return true
