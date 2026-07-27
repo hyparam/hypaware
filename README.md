@@ -58,7 +58,10 @@ On a TTY this launches the interactive walkthrough:
    - OTEL logs / traces / metrics (`otel`)
 2. Pick an **export** strategy: keep the local query cache only, write
    Parquet files under `<HYP_HOME>/exports`, or configure later.
-3. Pick a **retention window** (default `90` days).
+3. The **retention window** is not asked: the pathway sets it, `90` days on
+   a team install and `120` on a local-only one. `hyp init --retention-days
+   <N>` overrides it, and `query.cache.retention` in the written config
+   remains the post-install knob.
 4. HypAware composes a minimal config with only the bundled plugins it
    needs, writes it to `<HYP_HOME>/hypaware-config.json`, installs the
    persistent daemon (launchd on macOS, systemd `--user` on Linux),

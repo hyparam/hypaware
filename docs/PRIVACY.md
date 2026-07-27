@@ -20,7 +20,8 @@ query cache under `~/.hyp` (`HYP_HOME`):
 
 Recording is content-level: conversation rows include the actual message
 text, not just metadata. Rows age out of the local cache after the
-retention window you picked at init (default 30 days).
+retention window init set (90 days on a team install, 120 on a
+local-only one; `hyp init --retention-days <N>` overrides).
 
 ## Where it goes
 
