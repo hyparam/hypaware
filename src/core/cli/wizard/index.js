@@ -20,14 +20,17 @@ import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import { runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
 import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
+import { isTty } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
+import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { runWizardPick } from './pick.js'
 import { runConfigurePhase } from './configure.js'
 
 /**
  * The `hyp init` wizard orchestrator: the fork -> join -> pick ->
- * configure -> finale -> privacy state machine (LLP 0135 #orchestration).
+ * configure -> finale -> first look -> privacy state machine (LLP 0135
+ * #orchestration).
  *
  * Interactive runs front the phases with the returning gate (LLP 0129
  * #returning-gate): a configured solo machine's `Reconfigure` re-enters
@@ -164,6 +167,18 @@ export async function runInitWizard(opts) {
     }
   }
   writeWalkthroughRunSummary({ stdout: opts.stdout, configPath: picked.configPath, finaleSummary })
+
+  // End an attended setup on the user's own rows, not on a command they
+  // still have to type. Attended and non-dry-run only: a scripted `--yes`
+  // install gets no extra output, and a dry run has no writes to look at.
+  // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
+  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
+    await runWizardFirstLook({
+      runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, firstLookNoticeSink(opts.stderr)),
+      stdout: opts.stdout,
+      color: isTty(opts.stdout),
+    })
+  }
 
   // The wizard's last words on the team pathway: when the first upload
   // happens and that nothing has shipped yet (LLP 0100/0101, narration

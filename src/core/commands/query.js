@@ -4,9 +4,11 @@ import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
+import { isTty } from '../cli/stdio.js'
 
 /**
  * @import { CommandRunContext, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
 
 // `measureCacheRoot` / `walkCacheRoot` / `loadRetentionDays` moved into
@@ -76,6 +78,118 @@ export async function runQueryStatus(_argv, ctx) {
     }
   }
   return 0
+}
+
+/**
+ * `hyp query overview [--json] [--sql] [--days <n>]`
+ *
+ * Prints the gateway overview: token volume per provider and model, then
+ * sessions and tokens per day, repos, and tools. The same block the
+ * `hyp init` wizard ends on, so "see that again" is one command rather than
+ * four remembered SQL statements. `--sql` prints those statements above
+ * each table: they are worth learning and hard to guess (token usage lives
+ * inside the `attributes` JSON), but too long to show unasked.
+ *
+ * The window is chosen to fit a row budget and always stated in the
+ * output; `--days <n>` pins it instead, whatever it costs, because an
+ * explicit request outranks the budget.
+ *
+ * Local-only, deliberately. The runner is a seam, so pointing it at a
+ * remote `query_sql` tool is a small change - but against a fleet-sized
+ * server even a bounded window exceeds the gateway timeout (measured: 504
+ * at 60s unbounded, 58s bounded to 7 days, ~10s bounded to 1 day).
+ * `--remote` waits on a server-side summary rather than shipping a flag
+ * that times out.
+ *
+ * Exits 1 when `ai_gateway_messages` is not registered: the user asked for
+ * their AI traffic and there is no source that records it, which is a
+ * result worth a non-zero code (with the fix on stderr), not a silent
+ * empty table.
+ *
+ * @ref LLP 0135#first-look [implements]: the wizard's closing block, re-runnable on demand
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ */
+export async function runQueryOverview(argv, ctx) {
+  const { OVERVIEW_DATASET, collectOverview, overviewRunnerFromCtx, renderOverview } =
+    await import('../query/overview.js')
+  const json = argv.includes('--json')
+  const showSql = argv.includes('--sql')
+  const daysFlag = argv.indexOf('--days')
+  /** @type {number | undefined} */
+  let days
+  if (daysFlag !== -1) {
+    days = Number(argv[daysFlag + 1])
+    if (!Number.isInteger(days) || days < 1) {
+      ctx.stderr.write('hyp query overview: --days takes a whole number of days (1 or more)\n')
+      return 2
+    }
+  }
+  // Same reporting as `hyp query sql`: a withheld-row count is required
+  // disclosure (LLP 0105), a freshness line is advisory. Both to stderr
+  // so stdout stays the block (and stays valid JSON under --json).
+  const runner = overviewRunnerFromCtx(ctx, (notice) => ctx.stderr.write(notice.line))
+  if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) {
+    // Says what is true, then what to do. The absent thing is a dataset
+    // name (`ai_gateway_messages`) that means nothing to the person who
+    // typed the command - naming it explains the tool's internals instead
+    // of their situation. It also reads as breakage when it is really just
+    // "no AI client is set up yet".
+    ctx.stderr.write(
+      'hyp query overview: nothing has been recorded yet - no AI client is connected.\n' +
+      '  Run `hyp init` to start capturing Claude or Codex sessions.\n'
+    )
+    return 1
+  }
+
+  return withSpan(
+    'query.overview',
+    {
+      [Attr.COMPONENT]: 'query',
+      [Attr.OPERATION]: 'query.overview',
+      [Attr.DATASET]: OVERVIEW_DATASET,
+      format: json ? 'json' : 'text',
+      show_sql: showSql,
+      ...(days !== undefined ? { days_requested: days } : {}),
+      status: 'ok',
+    },
+    async (span) => {
+      /** @type {OverviewRows} */
+      let overview
+      try {
+        overview = await collectOverview(runner, { ...(days !== undefined ? { days } : {}) })
+      } catch (err) {
+        span.setAttribute('status', 'error')
+        span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
+        ctx.stderr.write(`hyp query overview: ${err instanceof Error ? err.message : String(err)}\n`)
+        // The kernel's budget refusal advises a WHERE/date filter or a LIMIT
+        // - right for hand-written SQL, useless here: this block already has
+        // a date filter and takes no LIMIT. Name the lever it does have.
+        // @ref LLP 0056 [constrained-by]: the refusal is the kernel's; the actionable next step is this command's to name
+        if (err instanceof Error && err.name === 'QueryExecutionBudgetError') {
+          const shorter = days !== undefined ? Math.max(1, Math.floor(days / 2)) : 7
+          ctx.stderr.write(`  this block's lever is a shorter window: hyp query overview --days ${shorter}\n`)
+        }
+        return 1
+      }
+      span.setAttribute('provider_rows', overview.providerRows.length)
+      span.setAttribute('day_rows', overview.dailyRows.length)
+      if (overview.window) {
+        span.setAttribute('window_days', overview.window.days)
+        span.setAttribute('window_rows', overview.window.rows)
+        span.setAttribute('window_narrowed', overview.window.narrowed)
+      }
+      if (json) {
+        ctx.stdout.write(JSON.stringify(overview, null, 2) + '\n')
+        return 0
+      }
+      ctx.stdout.write(renderOverview({ ...overview, color: isTty(ctx.stdout), showSql }))
+      return 0
+    },
+    { component: 'query' }
+  )
 }
 
 /**

@@ -98,3 +98,65 @@ export interface ExecuteSqlResult {
   freshnessMessages: string[]
   localOnly: LocalOnlyVisibilityReport
 }
+
+/**
+ * The read seam the gateway overview runs through (LLP 0135 #first-look).
+ * Production wiring is `overviewRunnerFromCtx`, which routes to
+ * `executeQuerySql`; tests inject fixed rows.
+ */
+export interface OverviewQueryRunner {
+  /** False when no plugin registered the dataset, so there is nothing to show. */
+  hasDataset(name: string): boolean
+  run(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[] }>
+}
+
+/**
+ * The period the overview's numbers describe, chosen by walking days
+ * newest-first until the scan would exceed the row target. Always stated
+ * in the rendered block: a total whose period is unstated is not an answer.
+ */
+export interface OverviewWindow {
+  /** Inclusive `YYYY-MM-DD` bounds of the window actually queried. */
+  since: string
+  until: string
+  /** Days included, and rows they hold. */
+  days: number
+  rows: number
+  /** Days and rows available in the cache, whether or not included. */
+  totalDays: number
+  totalRows: number
+  /** True when the cache holds more than the window covers. */
+  narrowed: boolean
+  /**
+   * Which cap decided the window: `time` (the measured per-row rate from
+   * the probe), `rows` (the memory backstop), or `requested` (`--days`).
+   * Telemetry only - the rendered line reports the scope and the lever,
+   * never the reason, because the reason is the tool's business.
+   */
+  boundBy: 'time' | 'rows' | 'requested'
+}
+
+/**
+ * The overview's result sets, in display order. A section not requested
+ * from `collectOverview` comes back empty, which renders as absent rather
+ * than as an empty table. `window` and `sql` are absent only when nothing
+ * has been recorded at all.
+ */
+export interface OverviewRows {
+  providerRows: Record<string, unknown>[]
+  dailyRows: Record<string, unknown>[]
+  repoRows: Record<string, unknown>[]
+  toolRows: Record<string, unknown>[]
+  window?: OverviewWindow
+  sql?: { models: string; daily: string; repos: string; tools: string }
+}
+
+/**
+ * Something the overview must say alongside its numbers, tagged by kind so
+ * each caller can route it. `local-only` is required disclosure (LLP 0105);
+ * `freshness` is advisory. `line` is preformatted and newline-terminated.
+ */
+export interface OverviewNotice {
+  kind: 'local-only' | 'freshness'
+  line: string
+}

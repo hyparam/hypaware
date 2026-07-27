@@ -65,16 +65,32 @@ plain `SUM` over assistant rows is correct with no dedup (the one-carrier rule, 
 `input_tokens` is net of cache, so it never double-counts. Report the four types
 separately (cache-read is usually the bulk; output the scarce slice).
 
+**A missing provider field NULLs your arithmetic, it does not zero it.** Not every
+provider emits every usage field - `cache_write_tokens` is Claude-only - and both
+SQL layers turn that into silent loss, not an error:
+
+- *Per row:* `CAST(...cache_read...) + CAST(...cache_write...)` is NULL for every
+  OpenAI row, so `sum()` skips those rows entirely and the provider's whole cache-read
+  total reads 0. COALESCE each term *inside* the addition, not just around the sum.
+- *Per aggregate:* `sum()` over all-NULL returns NULL, so a Codex-scoped slice yields
+  `t_cw: null` and any `t_in + t_cr + t_cw` total is NULL.
+
+Both were measured on a real install: 25,581,312 OpenAI cache-read tokens silently
+became 0. COALESCE every token sum, and every term of every token addition.
+
 ```sql
 SELECT
-  sum(CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens')       AS BIGINT)) t_in,
-  sum(CAST(JSON_EXTRACT(attributes,'$.usage.output_tokens')      AS BIGINT)) t_out,
-  sum(CAST(JSON_EXTRACT(attributes,'$.usage.cache_write_tokens') AS BIGINT)) t_cw,
-  sum(CAST(JSON_EXTRACT(attributes,'$.usage.cache_read_tokens')  AS BIGINT)) t_cr
+  COALESCE(sum(CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens')       AS BIGINT)), 0) t_in,
+  COALESCE(sum(CAST(JSON_EXTRACT(attributes,'$.usage.output_tokens')      AS BIGINT)), 0) t_out,
+  COALESCE(sum(CAST(JSON_EXTRACT(attributes,'$.usage.cache_write_tokens') AS BIGINT)), 0) t_cw,
+  COALESCE(sum(CAST(JSON_EXTRACT(attributes,'$.usage.cache_read_tokens')  AS BIGINT)), 0) t_cr
 FROM ai_gateway_messages
 WHERE date BETWEEN '<start>' AND '<end>'
   AND role='assistant' AND JSON_EXTRACT(attributes,'$.usage') IS NOT NULL;
 -- One carrier row per response (LLP 0035): a plain SUM is correct, no dedup.
+-- COALESCE is NOT decorative: a field a provider never emits (cache_write_tokens
+-- on OpenAI/ChatGPT rows) makes sum() return NULL, and NULL poisons any total
+-- built from it -- t_in + t_cr + t_cw goes NULL and the real cache reads vanish.
 -- Slice by adding gateway_id / model / repo_root / date to SELECT + GROUP BY.
 -- Defensive equivalent: max(...) GROUP BY session_id, message_id -- session_id is the
 -- uniform key; conversation_id is null for Claude and only separates Codex threads.
