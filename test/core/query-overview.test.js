@@ -17,9 +17,13 @@ import {
   describeWindow,
   formatCount,
   overviewRunnerFromCtx,
+  renderDailyActivity,
   renderOverview,
+  renderRepoMix,
 } from '../../src/core/query/overview.js'
 import { runQueryOverview } from '../../src/core/commands/query.js'
+
+/** @import { OverviewWindow } from '../../src/core/query/types.js' */
 
 // The shared gateway overview (LLP 0135 #first-look): the rendered block is
 // a pure function of the rows, the runner is the ordinary query seam, and
@@ -44,7 +48,7 @@ const PROVIDER_ROWS = [
 /**
  * The window a rendered block describes; real runs always have one.
  *
- * @type {import('../../src/core/query/types.js').OverviewWindow}
+ * @type {OverviewWindow}
  */
 const WINDOW = {
   since: '2026-07-23', until: '2026-07-24', days: 2, rows: 5150,
@@ -723,7 +727,12 @@ test('hyp query overview: a withheld row is disclosed on stderr, off the block',
   assert.equal(code, 0)
   assert.match(stderr.text(), /^local-only: withheld \d+ row\(s\)/)
   assert.ok(!stdout.text().includes('local-only:'))
-  assert.match(stdout.text(), /Nothing recorded yet|What HypAware has recorded/)
+  // And the empty state names the real reason. "Nothing recorded yet" is a
+  // claim about the cache, and here it is simply false - every one of those
+  // sessions is recorded, just not visible from this directory.
+  assert.match(stdout.text(), /Every recorded session in this window is marked local-only/)
+  assert.match(stdout.text(), /--include-local-only/)
+  assert.ok(!stdout.text().includes('Nothing recorded yet'))
 
   rmSync(root, { recursive: true, force: true })
 })
@@ -780,4 +789,108 @@ test('formatCount: groups thousands and passes non-numbers through', () => {
   assert.equal(formatCount(15842), '15,842')
   assert.equal(formatCount(1234567), '1,234,567')
   assert.equal(formatCount(null), '(none)')
+})
+
+// --- what the block folds, it counts correctly ---
+
+test('renderRepoMix: the fold count is the real tail, and the repo-less line survives it', () => {
+  // 30 named repos plus a repo-less group. The SQL carries no LIMIT for
+  // exactly this reason: a 20-row cap would report "+ 12 more" (the tail of
+  // what SQL returned) rather than "+ 22 more" (the truth), and the
+  // repo-less group - which sorts by token volume like any other row -
+  // could be pushed off the end, taking its disclosure line with it.
+  /** @type {Record<string, unknown>[]} */
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    repo_root: `/w/r${i}`, sessions: 2, input_tokens: 1000 - i, cached_tokens: 0, output_tokens: 10,
+  }))
+  rows.push({ repo_root: null, sessions: 41, input_tokens: 1, cached_tokens: 0, output_tokens: 1 })
+  const out = renderRepoMix(rows, false)
+  assert.match(out, /\+ 22 more repos/)
+  assert.match(out, /\+ 41 sessions with no repo recorded/)
+  assert.ok(!out.includes('+ 12 more'))
+  // Only MAX_REPO_ROWS are tabled; the rest are the count line.
+  assert.equal((out.match(/^\s+\/w\/r\d+\s/gm) ?? []).length, 8)
+})
+
+test('buildOverviewSql: no LIMIT on the sections whose tails are counted', () => {
+  const sql = buildOverviewSql('2026-07-01')
+  // A LIMIT here would silently become the renderer's idea of the whole
+  // result, and every fold count would be computed against it.
+  assert.ok(!/limit/i.test(sql.repos))
+  assert.ok(!/limit/i.test(sql.daily))
+  assert.ok(!/limit/i.test(sql.models))
+  // tools is the exception: it has no fold line, and "top 10 tools" is the
+  // whole question rather than a truncation of it.
+  assert.match(sql.tools, /limit 10/)
+})
+
+test('renderDailyActivity: a window longer than the table says how many days it folded', () => {
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    date: `2026-07-${String(30 - i).padStart(2, '0')}`,
+    sessions: 2, input_tokens: 100, cached_tokens: 10, output_tokens: 5,
+  }))
+  const out = renderDailyActivity(rows, false)
+  // The header states a 30-day window; the table shows 14. Summing this
+  // column without the fold line silently yields half the period.
+  assert.equal((out.match(/^\s+2026-07-\d\d\s/gm) ?? []).length, 14)
+  assert.match(out, /\+ 16 earlier days in this window/)
+})
+
+test('renderDailyActivity: a window that fits says nothing', () => {
+  const rows = Array.from({ length: 3 }, (_, i) => ({
+    date: `2026-07-0${3 - i}`, sessions: 1, input_tokens: 10, cached_tokens: 1, output_tokens: 1,
+  }))
+  assert.ok(!renderDailyActivity(rows, false).includes('earlier day'))
+})
+
+test('buildOverviewSql: rejects a since that is not a plain date', () => {
+  // `since` is concatenated into five statements and the executor takes no
+  // bind parameters, so the shape is asserted at the seam rather than left
+  // to an invariant maintained in another package.
+  assert.throws(() => buildOverviewSql("2026-07-01' or '1'='1"), /must be YYYY-MM-DD/)
+  assert.throws(() => buildOverviewSql('yesterday'), /must be YYYY-MM-DD/)
+  // The empty string is the no-window case the renderer passes when there
+  // is nothing to scope.
+  assert.doesNotThrow(() => buildOverviewSql(''))
+  assert.doesNotThrow(() => buildOverviewSql('2026-07-01'))
+})
+
+// --- flag parsing goes through the shared codec ---
+
+test('hyp query overview: --days=7 is honored, not silently ignored', async () => {
+  const { ctx, stdout } = ctxWithRows()
+  assert.equal(await runQueryOverview(['--days=1'], ctx), 0)
+  // A pinned window overrides the planner, so the stated period is the one
+  // asked for rather than the one measured.
+  assert.match(stdout.text(), /2026-07-24 to 2026-07-24/)
+})
+
+test('hyp query overview: an unknown flag is refused, not ignored', async () => {
+  const { ctx, stdout, stderr } = ctxWithRows()
+  assert.equal(await runQueryOverview(['--bogus'], ctx), 2)
+  assert.match(stderr.text(), /unknown flag --bogus/)
+  assert.match(stderr.text(), /usage: hyp query overview/)
+  assert.equal(stdout.text(), '')
+})
+
+test('hyp query overview: --days rejects non-positive and non-integer values', async () => {
+  for (const bad of ['0', '-1', 'abc', '3.5']) {
+    const { ctx, stderr } = ctxWithRows()
+    assert.equal(await runQueryOverview(['--days', bad], ctx), 2, `--days ${bad}`)
+    assert.match(stderr.text(), /--days expects a positive integer/)
+  }
+})
+
+test('hyp query overview: --help prints usage and exits 0', async () => {
+  const { ctx, stdout } = ctxWithRows()
+  assert.equal(await runQueryOverview(['--help'], ctx), 0)
+  assert.match(stdout.text(), /^usage: hyp query overview/)
+})
+
+test('hyp query overview: NO_COLOR suppresses ANSI even on a TTY', async () => {
+  const { ctx, stdout } = ctxWithRows()
+  ctx.stdout.isTTY = true
+  ctx.env = { NO_COLOR: '1' }
+  assert.equal(await runQueryOverview([], ctx), 0)
+  assert.ok(!/\x1b\[/.test(stdout.text()))
 })

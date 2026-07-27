@@ -40,14 +40,24 @@ export { overviewRunnerFromCtx as firstLookRunnerFromCtx } from '../../query/ove
  * cannot act on, attached to a block whose backfilled rows were
  * force-flushed anyway. `hyp query overview` prints both.
  *
+ * The sink closes. An expired deadline abandons queries that keep running,
+ * and one of them resolving late must not print a disclosure after the
+ * privacy narration that setup documents as its last words.
+ *
  * @ref LLP 0105 [implements]: withholding is disclosed on every surface, setup included
  * @param {{ write(chunk: string): unknown }} stderr
- * @returns {(notice: OverviewNotice) => void}
+ * @returns {((notice: OverviewNotice) => void) & { close(): void }}
  */
 export function firstLookNoticeSink(stderr) {
-  return (notice) => {
-    if (notice.kind === 'local-only') stderr.write(notice.line)
-  }
+  let open = true
+  const sink = /** @type {((notice: OverviewNotice) => void) & { close(): void }} */ (
+    /** @param {OverviewNotice} notice */
+    (notice) => {
+      if (open && notice.kind === 'local-only') stderr.write(notice.line)
+    }
+  )
+  sink.close = () => { open = false }
+  return sink
 }
 
 /** The wizard's heading for the shared block: this is a setup milestone. */
@@ -133,10 +143,19 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
       // and a fourth in flight is a shorter block, not a blank one.
       const partial = emptyOverview()
       // The whole step is inside one try, not just the queries: rendering
-      // and writing can fail too (an unforeseen row shape, or EPIPE when
-      // stdout is a closed pipe), and an escape from *any* of it would
-      // surface as `hyp: <error>` and a non-zero exit from an install that
-      // had already fully succeeded. Nothing here may fail setup.
+      // and writing can fail too (an unforeseen row shape, or a stream that
+      // throws on write), and an escape from *any* of it would surface as
+      // `hyp: <error>` and a non-zero exit from an install that had already
+      // fully succeeded. Nothing here may fail setup.
+      //
+      // Scope, stated precisely: this contains *synchronous* failures. An
+      // asynchronous stream error - EPIPE on a real pipe arrives as an
+      // 'error' event on the socket, not as a throw - bypasses every
+      // try/catch in the process and is a CLI-wide concern rather than this
+      // step's (see #409). Unreachable here in practice on two counts: the
+      // wizard runs only under `isTty`, and the block is ~4 KB, well inside
+      // a 64 KB pipe buffer, so the write completes before a reader's exit
+      // could matter.
       try {
         // Every section, the same block `hyp query overview` prints. The
         // run is longer for it (~60 lines against ~35), which the privacy
@@ -170,7 +189,13 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
         // `footer: false` because the closing line below is this run's single
         // pointer: setup should teach one command, not two dim lines naming
         // the same one.
-        stdout.write(renderOverview({ ...rows, title: FIRST_LOOK_TITLE, color, footer: false }))
+        stdout.write(renderOverview({
+          ...rows,
+          title: FIRST_LOOK_TITLE,
+          color,
+          footer: false,
+          withheld: runner.sawWithholding?.() ?? false,
+        }))
         if (expired) {
           // Name the missing sections as *unfinished*, not as empty. "no
           // repos" and "the repos section did not finish" are different

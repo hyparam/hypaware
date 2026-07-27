@@ -28,9 +28,9 @@ hyp query sql "<sql>" --format jsonl --output <file>   # full result, lossless
 hyp query refresh <dataset>
 ```
 
-**`hyp query overview` totals are windowed, not all-time.** It probes the cache, times that probe to measure this machine, and picks the widest recent window it can summarize quickly — so on a large cache it silently covers a subset. The line under the title always states the period (`2026-07-24 to 2026-07-27 - showing 3 of 31 active days …`); read it before quoting any number, and pass `--days <n>` to widen (that overrides the budget, whatever it costs). Never report its totals as the full history without checking that line.
+**`hyp query overview` totals are windowed, not all-time.** It probes the cache, times that probe to measure this machine, and picks the widest recent window it can summarize quickly, so on a large cache it silently covers a subset. The line under the title always states the period (`2026-07-24 to 2026-07-27 - showing 3 of 31 active days …`); read it before quoting any number, and pass `--days <n>` to widen (that overrides the budget, whatever it costs). Never report its totals as the full history without checking that line.
 
-These are the only subcommands in the installed CLI (`hyp query`: overview, schema, status, sql, refresh, maintain). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
+These are the only subcommands in the installed CLI (`hyp query`: overview, schema, status, sql, refresh, maintain). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands; answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
 
 ## Remote queries (other HypAware hosts)
 
@@ -79,7 +79,7 @@ Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages
 Key columns:
 
 - `session_id`, `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable identity. `session_id` is the always-present session key (group/scope on it); `conversation_id` is a nullable thread within a session (a Codex thread; null for Claude).
-- `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields. `part_type` is HypAware's own vocabulary, NOT the provider's wire name: `text`, `reasoning`, `tool_call`, `tool_result`, `image`, `fallback`. Tool calls are `part_type='tool_call'` — Anthropic's `tool_use` matches no row and returns a silently empty result. `role` is `user` / `assistant` / `tool` / `system` / `developer`.
+- `provider`, `model`, `role`, `part_type`, `content_text`: normalized provider/message content fields. `part_type` is HypAware's own vocabulary, NOT the provider's wire name: `text`, `reasoning`, `tool_call`, `tool_result`, `image`, `fallback`. Tool calls are `part_type='tool_call'`: Anthropic's `tool_use` matches no row and returns a silently empty result. `role` is `user` / `assistant` / `tool` / `system` / `developer`.
 - `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
 - `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
 

@@ -750,6 +750,35 @@ CLI's closing `process.exit` drops them. Threading the deadline into
 `executeQuerySql`'s existing `signal` (LLP 0054 #signal-threading) would
 make the abandonment a real cancellation, and is the obvious next step.
 
+### Every truncation is counted, and counted honestly {#folds}
+
+Three of the four sections show a head and fold the tail into a count line.
+The count must be computed over the *whole* grouping, which is why the
+`repos` and `daily` statements carry no `LIMIT`: a SQL limit silently
+becomes the renderer's idea of the entire result, so "+ N more repos" would
+report the tail of the limit rather than the tail of the truth (a 20-row
+limit reports 12 hidden when 22 are). Worse for `repos`, where the
+repo-less group sorts by token volume like any other row: past 20 repos it
+falls off the end and takes its own disclosure line with it, so a machine
+with many repos would be told nothing about the Codex sessions that have no
+`repo_root` at all. The grouping is computed in full either way; the
+`LIMIT` only decided how much of it the renderer got to see.
+
+`daily` has the same shape with a sharper edge, because the block states
+its window in the header. A 30-day window rendered as 14 rows under a
+header that says 30 is a table that does not answer the question above it,
+and anyone summing the column gets half the period without being told. The
+renderer shows `MAX_DAY_ROWS` and states how many days it folded.
+
+`tools` keeps its `LIMIT 10` and has no fold line: "the ten most-used
+tools" is the whole question there, not a truncation of a larger one.
+
+An empty result gets the same treatment. "Nothing recorded yet" is a claim
+about the cache, and when the LLP 0105 filter took every row it is false -
+the sessions are recorded, just not visible from here. The runner reports
+whether it withheld anything, and the renderer picks the sentence that is
+true.
+
 ### What the block omits, it says {#disclosure}
 
 The overview runs through the same `executeQuerySql` every other surface

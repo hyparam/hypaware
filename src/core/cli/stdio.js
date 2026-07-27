@@ -6,6 +6,24 @@ export function isTty(stream) {
 }
 
 /**
+ * Whether to emit ANSI on this stream: a TTY, and not vetoed by `NO_COLOR`.
+ *
+ * `isTty` alone is the wrong test. `NO_COLOR` (no-color.org) is set by
+ * people whose terminal is a TTY and who still want plain text - low-vision
+ * users on high-contrast themes, anyone piping through a pager that renders
+ * escapes literally. The TUI already honours it; commands that reach for
+ * `isTty` directly did not, so the same run could be half-coloured.
+ *
+ * @param {unknown} stream
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {boolean}
+ */
+export function useColor(stream, env = process.env) {
+  if (env?.NO_COLOR) return false
+  return isTty(stream)
+}
+
+/**
  * @param {unknown} stdin
  * @returns {Promise<string>}
  */

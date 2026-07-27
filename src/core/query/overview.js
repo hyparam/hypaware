@@ -82,6 +82,15 @@ export const OVERVIEW_PROBE_SQL =
  * @returns {{ models: string, daily: string, repos: string, tools: string }}
  */
 export function buildOverviewSql(since) {
+  // `since` is interpolated, not bound - the executor takes no parameters.
+  // Today it can only be a projector-issued `date` (always
+  // `toISOString().slice(0, 10)`) or the empty string, so nothing hostile
+  // reaches here. But the value round-trips out of the cache, and "some
+  // other package maintains an invariant" is the wrong thing for a string
+  // concatenated into SQL to rest on. Assert the shape at the seam.
+  if (since !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
+    throw new Error(`buildOverviewSql: since must be YYYY-MM-DD (got ${JSON.stringify(since)})`)
+  }
   const window = `where date >= '${since}'`
   return {
     // Which providers and models this machine actually uses, by token volume.
@@ -89,10 +98,14 @@ export function buildOverviewSql(since) {
       `select provider, model,\n  ${SUM_INPUT},\n  ${SUM_CACHED},\n  ${SUM_OUTPUT}\n` +
       `from ai_gateway_messages ${window}\ngroup by 1, 2 order by input_tokens + output_tokens desc`,
 
-    // Sessions and tokens per day, most recent first.
+    // Sessions and tokens per day, most recent first. No LIMIT: the
+    // renderer shows the newest `MAX_DAY_ROWS` and states how many days it
+    // folded, which it can only count from the full result. A LIMIT here
+    // would truncate a 30-day window to 14 rows under a header that says
+    // 30, and the reader summing the column would silently get half.
     daily:
       `select date, count(distinct session_id) sessions,\n  ${SUM_INPUT},\n  ${SUM_CACHED},\n  ${SUM_OUTPUT}\n` +
-      `from ai_gateway_messages ${window}\ngroup by 1 order by 1 desc limit 14`,
+      `from ai_gateway_messages ${window}\ngroup by 1 order by 1 desc`,
 
     // Where the work happens. Grouped by repo alone, not repo + branch:
     // `git_branch` is set on 15 of 431 sessions on the authoring machine
@@ -101,9 +114,17 @@ export function buildOverviewSql(since) {
     // same repo, twice, looking like two places. Sessions with no repo are
     // folded into a count line by the renderer rather than filtered here, so
     // the total stays reconcilable.
+    //
+    // No LIMIT, for that same reason. The renderer's "+ N more repos" is
+    // computed from what this returns, so a LIMIT would cap N rather than
+    // the truth (a 20-row limit reports 12 hidden when 22 are), and the
+    // repo-less group - which sorts by token volume like any other - could
+    // be evicted off the end, taking its disclosure line with it. The
+    // grouping is computed in full either way; the LIMIT only decided how
+    // much of the answer the renderer got to see.
     repos:
       `select repo_root, count(distinct session_id) sessions,\n  ${SUM_INPUT},\n  ${SUM_CACHED},\n  ${SUM_OUTPUT}\n` +
-      `from ai_gateway_messages ${window}\ngroup by 1 order by input_tokens + output_tokens desc limit 20`,
+      `from ai_gateway_messages ${window}\ngroup by 1 order by input_tokens + output_tokens desc`,
 
     // Which tools the models actually reach for. The part type is
     // `tool_call`, not `tool_use`: the projector normalizes every provider's
@@ -217,6 +238,13 @@ const MAX_PROVIDER_ROWS = 8
 /** Repos shown before the tail is folded into a count line. */
 const MAX_REPO_ROWS = 8
 
+/**
+ * Days shown before the older ones are folded into a count line. Two weeks
+ * is enough to read a rhythm off; a 31-day window printed in full would
+ * make the daily table longer than the rest of the block combined.
+ */
+const MAX_DAY_ROWS = 14
+
 /** Bar column width, in cells. */
 const BAR_WIDTH = 18
 
@@ -275,13 +303,19 @@ export function overviewRunnerFromCtx(ctx, onNotice) {
   if (!registry || typeof registry.getDataset !== 'function') return undefined
   /** @type {Set<string>} */
   const said = new Set()
+  // Recorded even when no `onNotice` was supplied: whether rows were
+  // withheld decides which empty state the block renders, which is a
+  // separate question from who wanted to be told about it.
+  let withheld = false
   /** @param {OverviewNotice} notice */
   const say = (notice) => {
+    if (notice.kind === 'local-only') withheld = true
     if (!onNotice || said.has(notice.line)) return
     said.add(notice.line)
     onNotice(notice)
   }
   return {
+    sawWithholding: () => withheld,
     hasDataset(name) {
       try {
         return Boolean(registry.getDataset(name))
@@ -527,6 +561,7 @@ export async function collectOverview(runner, opts = {}) {
  *   color?: boolean,
  *   showSql?: boolean,
  *   footer?: boolean,
+ *   withheld?: boolean,
  * }} args
  * @returns {string}
  */
@@ -541,6 +576,7 @@ export function renderOverview({
   color = false,
   showSql = false,
   footer = true,
+  withheld = false,
 }) {
   const statements = sql ?? buildOverviewSql(win?.since ?? '')
   let out = `\n${paint(title, ANSI.bold, color)}\n`
@@ -548,8 +584,16 @@ export function renderOverview({
   out += `${paint('─'.repeat(40), ANSI.dim, color)}\n`
 
   if (providerRows.length === 0) {
-    out += '\nNothing recorded yet. Start a session in a client you attached,\n'
-    out += 'then run `hyp query overview` again.\n'
+    // "Nothing recorded yet" is a claim about the cache; when the LLP 0105
+    // filter took every row it is a false one, and the withheld-row count
+    // on stderr would be the only sign. Two different situations, two
+    // different sentences, neither of them "start a session" to someone
+    // whose sessions are all sitting there recorded.
+    out += withheld
+      ? '\nEvery recorded session in this window is marked local-only and not visible\n' +
+        'from here. Re-run inside one of those directories, or with --include-local-only.\n'
+      : '\nNothing recorded yet. Start a session in a client you attached,\n' +
+        'then run `hyp query overview` again.\n'
     return out
   }
 
@@ -666,8 +710,9 @@ export function renderProviderMix(rows, color, showSql = false, sql = '') {
  * @returns {string}
  */
 export function renderDailyActivity(rows, color, showSql = false, sql = '') {
-  const max = Math.max(...rows.map((r) => toNumber(r.input_tokens) + toNumber(r.output_tokens)))
-  const body = rows.map((r) => [
+  const shown = rows.slice(0, MAX_DAY_ROWS)
+  const max = Math.max(...shown.map((r) => toNumber(r.input_tokens) + toNumber(r.output_tokens)))
+  const body = shown.map((r) => [
     cell(r.date),
     formatCount(r.sessions),
     formatCount(r.input_tokens),
@@ -676,14 +721,22 @@ export function renderDailyActivity(rows, color, showSql = false, sql = '') {
     tokenBar(toNumber(r.input_tokens), toNumber(r.output_tokens), max, color),
   ])
 
-  const out = renderHeading('Sessions and tokens per day', sql, color, showSql)
-  return out + renderTable(
+  let out = renderHeading('Sessions and tokens per day', sql, color, showSql)
+  out += renderTable(
     ['day', 'sessions', 'input', 'cached', 'output', 'by input+output'],
     body,
     ['left', 'right', 'right', 'right', 'right', 'left'],
     color,
     tokenBarCaption(color)
   )
+  // The header states the window; this table may be shorter than it. Say
+  // so, or someone summing the column gets a fraction of the period they
+  // were just told they were looking at.
+  const older = rows.length - shown.length
+  if (older > 0) {
+    out += paint(`  + ${older} earlier day${older === 1 ? '' : 's'} in this window\n`, ANSI.dim, color)
+  }
+  return out
 }
 
 /**

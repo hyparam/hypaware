@@ -108,6 +108,13 @@ export interface OverviewQueryRunner {
   /** False when no plugin registered the dataset, so there is nothing to show. */
   hasDataset(name: string): boolean
   run(sql: string): Promise<{ columns: string[]; rows: Record<string, unknown>[] }>
+  /**
+   * True once the LLP 0105 filter withheld a row from any statement this
+   * runner issued. An empty result then means "withheld", not "nothing
+   * recorded" - two different sentences for the reader. Optional so test
+   * runners need not implement it.
+   */
+  sawWithholding?(): boolean
 }
 
 /**

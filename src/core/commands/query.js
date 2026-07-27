@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
-import { isTty } from '../cli/stdio.js'
+import { useColor } from '../cli/stdio.js'
 
 /**
  * @import { CommandRunContext, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
@@ -80,6 +80,18 @@ export async function runQueryStatus(_argv, ctx) {
   return 0
 }
 
+const QUERY_OVERVIEW_USAGE = 'usage: hyp query overview [--json] [--sql] [--days <n>]'
+
+/** @type {VerbInputSchema} */
+const QUERY_OVERVIEW_SCHEMA = {
+  type: 'object',
+  properties: {
+    json: { type: 'boolean', default: false },
+    sql: { type: 'boolean', default: false },
+    days: { type: 'integer', minimum: 1 },
+  },
+}
+
 /**
  * `hyp query overview [--json] [--sql] [--days <n>]`
  *
@@ -115,18 +127,25 @@ export async function runQueryStatus(_argv, ctx) {
 export async function runQueryOverview(argv, ctx) {
   const { OVERVIEW_DATASET, collectOverview, overviewRunnerFromCtx, renderOverview } =
     await import('../query/overview.js')
-  const json = argv.includes('--json')
-  const showSql = argv.includes('--sql')
-  const daysFlag = argv.indexOf('--days')
-  /** @type {number | undefined} */
-  let days
-  if (daysFlag !== -1) {
-    days = Number(argv[daysFlag + 1])
-    if (!Number.isInteger(days) || days < 1) {
-      ctx.stderr.write('hyp query overview: --days takes a whole number of days (1 or more)\n')
-      return 2
-    }
+  // Through the shared codec, not a hand-rolled `indexOf('--days')`: that
+  // form silently ignores `--days=7` and accepts unknown flags, so a user
+  // who pinned a window would get the auto-planned one and no indication
+  // that anything was dropped.
+  const parsed = parseCommandArgv(argv, QUERY_OVERVIEW_SCHEMA)
+  if ('help' in parsed) {
+    ctx.stdout.write(`${QUERY_OVERVIEW_USAGE}\n`)
+    return 0
   }
+  if (!parsed.ok) {
+    ctx.stderr.write(`hyp query overview: ${parsed.error}\n${QUERY_OVERVIEW_USAGE}\n`)
+    return 2
+  }
+  const p = /** @type {{ json: boolean, sql: boolean, days?: number }} */ (parsed.params)
+  const json = p.json
+  const showSql = p.sql
+  // `minimum: 1` on the schema does the range check, with the codec's
+  // standard wording ("--days expects a positive integer (got 0)").
+  const days = p.days
   // Same reporting as `hyp query sql`: a withheld-row count is required
   // disclosure (LLP 0105), a freshness line is advisory. Both to stderr
   // so stdout stays the block (and stays valid JSON under --json).
@@ -185,7 +204,12 @@ export async function runQueryOverview(argv, ctx) {
         ctx.stdout.write(JSON.stringify(overview, null, 2) + '\n')
         return 0
       }
-      ctx.stdout.write(renderOverview({ ...overview, color: isTty(ctx.stdout), showSql }))
+      ctx.stdout.write(renderOverview({
+        ...overview,
+        color: useColor(ctx.stdout, ctx.env),
+        showSql,
+        withheld: runner.sawWithholding?.() ?? false,
+      }))
       return 0
     },
     { component: 'query' }

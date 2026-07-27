@@ -20,7 +20,7 @@ import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import { runPickerFinale, writeWalkthroughRunSummary } from '../walkthrough.js'
 import { LOGIN_ORG_SELECTION_MESSAGE } from '../remote_commands.js'
-import { isTty } from '../stdio.js'
+import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
@@ -173,11 +173,17 @@ export async function runInitWizard(opts) {
   // install gets no extra output, and a dry run has no writes to look at.
   // @ref LLP 0135#first-look [implements]: placed after the finale (backfill has landed) and before the privacy narration, which stays the last words
   if (interactive && !cancelled && opts.finale?.dryRun !== true) {
+    const notices = firstLookNoticeSink(opts.stderr)
     await runWizardFirstLook({
-      runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, firstLookNoticeSink(opts.stderr)),
+      runner: opts.firstLook ?? firstLookRunnerFromCtx(opts.ctx, notices),
       stdout: opts.stdout,
-      color: isTty(opts.stdout),
+      color: useColor(opts.stdout, opts.env),
     })
+    // The abandoned queries from an expired deadline keep running and can
+    // still resolve with a withheld-row report. Close the sink so that
+    // report cannot land after the privacy narration below, which is
+    // documented to be the last thing on screen.
+    notices.close()
   }
 
   // The wizard's last words on the team pathway: when the first upload

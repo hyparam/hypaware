@@ -166,11 +166,15 @@ test('runWizardFirstLook: a query failure degrades to a skipped step, not a thro
   assert.equal(stdout.text(), '')
 })
 
-test('runWizardFirstLook: a write failure cannot escape and fail a finished install', async () => {
-  // stdout that throws the way a closed pipe does (`hyp init | head`).
-  // Rendering and writing sit after the queries, so a throw here used to
-  // escape into the wizard and surface as `hyp: EPIPE` with a non-zero exit
-  // from an install that had already succeeded.
+test('runWizardFirstLook: a synchronous write failure cannot escape and fail a finished install', async () => {
+  // A stdout whose `write` throws. Rendering and writing sit after the
+  // queries, so a throw here used to escape into the wizard and surface as
+  // `hyp: <error>` with a non-zero exit from an install that had already
+  // succeeded.
+  //
+  // What this does NOT pin: an async EPIPE from a real pipe, which arrives
+  // as an 'error' event and no try/catch can contain (#409). Asserting that
+  // would need a real pipe, and it is a CLI-wide concern, not this step's.
   const exploding = {
     write() {
       const err = /** @type {Error & { code?: string }} */ (new Error('write EPIPE'))
@@ -218,6 +222,17 @@ test('firstLookNoticeSink: discloses withheld rows, drops the freshness line', a
   // finishing an install can act on. `hyp query overview` prints it.
   sink({ kind: 'freshness', line: 'note: capture may lag by up to 2 minutes\n' })
   assert.equal(stderr.text(), 'local-only: withheld 3 row(s) not visible from this full caller\n')
+})
+
+test('firstLookNoticeSink: a closed sink drops a late disclosure', async () => {
+  // An expired deadline abandons queries that keep running. One resolving
+  // after the step returned must not print over the privacy narration,
+  // which setup documents as its last words.
+  const stderr = makeBuf()
+  const sink = firstLookNoticeSink(stderr)
+  sink.close()
+  sink({ kind: 'local-only', line: 'local-only: withheld 3 row(s)\n' })
+  assert.equal(stderr.text(), '')
 })
 
 test('runWizardFirstLook: no runner (no query registry) skips', async () => {
