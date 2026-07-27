@@ -86,9 +86,11 @@ const PUBLIC_VOCABULARY = {
  * the file (the user needs to know which one to repair) but never calls it
  * "the local-only list" - `LocalOnlyListUnreadableError`'s own message does,
  * which is exactly the internals-leaking vocabulary this verb exists to
- * avoid (LLP 0111 #tokens). Scoped to the `policy` runners only: `hyp status`
- * and the deprecated `hyp ignore`/`hyp unignore` aliases keep the resolver's
- * own wording (LLP 0111 #aliases).
+ * avoid (LLP 0111 #tokens). Scoped to the four `policy` runners only
+ * ({@link runPolicySet}, {@link runPolicyShow}, {@link runPolicyUnset},
+ * {@link runPolicyList}): `hyp status` and the deprecated `hyp
+ * ignore`/`hyp unignore` aliases keep the resolver's own wording (LLP 0111
+ * #aliases).
  *
  * @ref LLP 0111#tokens [implements]: a corrupt store is still "the machine-local policy store", never "the local-only list"
  * @param {CommandRunContext} ctx
@@ -202,6 +204,7 @@ function parsePolicyListArgs(argv) {
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy set` that replaces the `hyp ignore --sync` misnomer for consent-adjacent marking
  * @ref LLP 0111#set [implements]: required path, sync -> full token mapping, delegates to the hoisted marking internal
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: the store, resolver, and class lattice are unchanged; only the verb spelling is new
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -215,7 +218,12 @@ export async function runPolicySet(argv, ctx) {
   }
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), /** @type {string} */ (parsed.path))
   const targetClass = TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
-  return runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set', vocabulary: PUBLIC_VOCABULARY })
+  try {
+    return await runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set', vocabulary: PUBLIC_VOCABULARY })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 }
 
 /**
@@ -269,6 +277,7 @@ export async function runPolicyShow(argv, ctx) {
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy unset`, replacing per-class `hyp unignore` flags as the primary spelling
  * @ref LLP 0111#unset [implements]: class-neutral by default, an optional trailing class token scopes it
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: reuses the shared `isEqualOrDescendant` ancestor predicate; store/resolver unchanged
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -284,13 +293,18 @@ export async function runPolicyUnset(argv, ctx) {
   const targetClass = parsed.token
     ? TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
     : undefined
-  return runUnmarkMachineLocal({
-    targetDir,
-    ctx,
-    targetClass,
-    component: 'cmd-policy-unset',
-    vocabulary: PUBLIC_VOCABULARY,
-  })
+  try {
+    return await runUnmarkMachineLocal({
+      targetDir,
+      ctx,
+      targetClass,
+      component: 'cmd-policy-unset',
+      vocabulary: PUBLIC_VOCABULARY,
+    })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 }
 
 /**

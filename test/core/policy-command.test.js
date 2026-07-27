@@ -584,6 +584,28 @@ test('hyp policy list on a corrupt store fails with the policy-store wording, no
   })
 })
 
+test('hyp policy set on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
+test('hyp policy unset on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy unset', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
 /* ------------------------------ group registration ------------------------------ */
 
 test('hyp policy (bare) renders group help listing set/show/unset/list', async () => {

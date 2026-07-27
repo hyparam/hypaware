@@ -60,9 +60,15 @@ of the `hyp ignore --check --json` shape see identical fields. An unknown
 class token is a usage error (exit 2) that names the three valid tokens.
 
 **The mapping is bidirectional: every human line a `policy` subcommand prints
-renders the stored class back as its token**, and never names the store's
-backing file path. The first cut printed the stored class and the store path
-verbatim, so a successful `policy set <p> sync` confirmed with
+renders the stored class back as its token**, and no `policy` line ever names
+the backing file as "the local-only list" - the store's own error type's
+wording, which is the internals-leaking phrase this verb exists to kill. The
+path itself is still named where the user needs it (a neutral `machine-local
+policy store` label in `list`'s trailing parenthetical and in the corrupt-store
+error, so there is something to repair), just never as "the local-only list"
+and never bare next to the stored class. The first cut printed the stored
+class and the store path verbatim, so a successful `policy set <p> sync`
+confirmed with
 `marked <p> as full (.../usage-policy/local-only.json)`: two internals in one
 line, reading as though `sync` had become `local-only` (issue #393). A verb
 minted to kill exactly that inversion (LLP 0110) cannot reintroduce it in its
