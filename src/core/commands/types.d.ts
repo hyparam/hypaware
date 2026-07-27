@@ -1,3 +1,25 @@
+import type { UsageClass } from '../usage-policy/types.d.ts'
+
+// How the shared machine-local marking writers (`runMarkMachineLocal`,
+// `runUnmarkMachineLocal`, `runIgnoreCheck`) render internal values for a
+// human reader (LLP 0111 #tokens). The `hyp policy` verb passes the public
+// CLI vocabulary, so a `sync` mark confirms as `sync` and the backing store
+// is named rather than pathed; the deprecated `hyp ignore` / `hyp unignore`
+// flag aliases pass nothing and keep their byte-identical legacy output
+// (LLP 0111 #aliases). Machine-readable output (`--json`) never routes
+// through this: it keeps emitting the resolver vocabulary.
+export interface PolicyHumanVocabulary {
+  // Render a stored usage class for a human reader.
+  className(cls: UsageClass): string
+  // Name the source governing a path. `governedBy` equal to `listPath` is the
+  // machine-local store; any other value is a `.hypignore` dotfile, always
+  // named by its real path.
+  governor(governedBy: string, listPath: string): string
+  // Trailing parenthetical naming where a fresh marking landed; the empty
+  // string omits it.
+  storeSuffix(listPath: string): string
+}
+
 export interface BackfillProviderResult {
   provider: string
   plugin: string

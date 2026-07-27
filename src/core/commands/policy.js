@@ -10,6 +10,7 @@ import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './cl
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
@@ -22,7 +23,9 @@ import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './cl
  * keep working as delegating compatibility aliases (see
  * {@link runMarkMachineLocal}, {@link runUnmarkMachineLocal},
  * {@link runIgnoreCheck}). The store format, the shared resolver, and the
- * three-class lattice are untouched (LLP 0103 #cli).
+ * three-class lattice are untouched (LLP 0103 #cli). Every human line these
+ * runners print goes through {@link PUBLIC_VOCABULARY}, so the verb answers
+ * in the vocabulary it teaches; `--json` and the aliases do not.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy` verb surface that retires the `hyp ignore --sync` misnomer
  * @ref LLP 0111#surface [implements]: `policy set` / `show` / `unset` / `list`, registered as a `makeGroupCommand` group
@@ -46,7 +49,35 @@ const CLASS_TOKENS = /** @type {const} */ (['sync', 'local-only', 'ignore'])
 const TOKEN_TO_CLASS = { sync: 'full', 'local-only': 'local-only', ignore: 'ignore' }
 
 /** @type {Record<UsageClass, string>} */
-const CLASS_TO_TOKEN_GLOSS = { full: 'sync', 'local-only': 'local-only', ignore: 'ignore' }
+const CLASS_TO_TOKEN = { full: 'sync', 'local-only': 'local-only', ignore: 'ignore' }
+
+/**
+ * How the machine-local store is named to a human: a policy store, not the
+ * `local-only.json` file that happens to back it. Printing the path verbatim
+ * made a `policy set <path> sync` confirmation read as though the folder had
+ * become local-only (issue #393), which is the exact inversion LLP 0110
+ * minted this verb to kill.
+ */
+const STORE_LABEL = 'machine-local policy store'
+
+/**
+ * The human wording every `policy` subcommand prints: the CLI-edge token
+ * vocabulary the user typed and the hook and the privacy skill teach, never
+ * the stored class or the store's file path. `--json` never routes through
+ * this, so the machine contract keeps emitting the resolver vocabulary and
+ * the real store path; the deprecated `hyp ignore` / `hyp unignore` flag
+ * aliases do not pass it and keep their exact legacy output (LLP 0111
+ * #aliases). A governing `.hypignore` is still named by its real path: it is
+ * a file the user can open and edit, not an internal.
+ *
+ * @ref LLP 0111#tokens [implements]: the class-to-token mapping is a CLI-edge rendering; the store and the JSON keep speaking `full`
+ * @type {PolicyHumanVocabulary}
+ */
+const PUBLIC_VOCABULARY = {
+  className: (cls) => CLASS_TO_TOKEN[cls] ?? cls,
+  governor: (governedBy, listPath) => (governedBy === listPath ? STORE_LABEL : governedBy),
+  storeSuffix: () => '',
+}
 
 const POLICY_SET_USAGE = 'hyp policy set <path> sync|local-only|ignore'
 const POLICY_SHOW_USAGE = 'hyp policy show [path] [--json]'
@@ -163,7 +194,7 @@ export async function runPolicySet(argv, ctx) {
   }
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), /** @type {string} */ (parsed.path))
   const targetClass = TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
-  return runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set' })
+  return runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set', vocabulary: PUBLIC_VOCABULARY })
 }
 
 /**
@@ -192,7 +223,7 @@ export async function runPolicyShow(argv, ctx) {
     return 2
   }
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  return runIgnoreCheck({ targetDir, ctx, json: parsed.json })
+  return runIgnoreCheck({ targetDir, ctx, json: parsed.json, vocabulary: PUBLIC_VOCABULARY })
 }
 
 /**
@@ -226,15 +257,22 @@ export async function runPolicyUnset(argv, ctx) {
   const targetClass = parsed.token
     ? TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
     : undefined
-  return runUnmarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-unset' })
+  return runUnmarkMachineLocal({
+    targetDir,
+    ctx,
+    targetClass,
+    component: 'cmd-policy-unset',
+    vocabulary: PUBLIC_VOCABULARY,
+  })
 }
 
 /**
  * `hyp policy list [--json]`
  *
  * Enumerates the machine-local class-per-entry store (LLP 0103): one line
- * per entry with its `dir` and class (`full` renders with a `sync` gloss for
- * the human reader), plus the store path; `--json` emits
+ * per entry with its `dir` and class rendered in the token vocabulary (a
+ * stored `full` reads `sync`), plus the store path, labelled as the policy
+ * store rather than dumped bare (LLP 0111 #tokens); `--json` emits
  * `{ entries: [{ dir, class }], path }`. This is the store's first
  * enumeration surface (LLP 0111 #list): `policy show` answers "what governs
  * this path", `list` answers "what have I marked on this machine". It
@@ -266,13 +304,12 @@ export async function runPolicyList(argv, ctx) {
   }
 
   if (entries.length === 0) {
-    ctx.stdout.write(`no machine-local entries (${listPath})\n`)
+    ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
     return 0
   }
   for (const entry of entries) {
-    const gloss = entry.class === 'full' ? ` (${CLASS_TO_TOKEN_GLOSS.full})` : ''
-    ctx.stdout.write(`${entry.dir}: ${entry.class}${gloss}\n`)
+    ctx.stdout.write(`${entry.dir}: ${PUBLIC_VOCABULARY.className(entry.class)}\n`)
   }
-  ctx.stdout.write(`(${listPath})\n`)
+  ctx.stdout.write(`(policy store: ${listPath})\n`)
   return 0
 }

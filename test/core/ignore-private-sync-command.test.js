@@ -190,6 +190,33 @@ test('hyp ignore --sync downgrades an existing ignore entry back to full (re-mar
   })
 })
 
+/* ------------------------- deprecated-alias output stability ----------------------- */
+
+// LLP 0111 #aliases: the deprecated flag forms stay output-identical to what
+// they printed before the `hyp policy` verb existed, internal class name and
+// backing store path included. Issue #393 moved the *policy* verb's human
+// output to the public vocabulary; these aliases deliberately did not move, so
+// scripted callers of the old spelling see no change.
+test('hyp ignore --sync keeps its exact deprecated-alias confirmation, internal class and store path included', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('ignore', [root, '--sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.equal(res.stdout, `marked ${root} as full (${localOnlyListPath(stateDirOf(hypHome))})\n`)
+  })
+})
+
+test('hyp ignore --check keeps its exact deprecated-alias human output (resolver class, real store path)', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
+
+    const res = await run('ignore', ['--check'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /^class: full$/m)
+    const listPath = localOnlyListPath(stateDirOf(hypHome))
+    assert.match(res.stdout, new RegExp(`^governed-by: ${listPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
+  })
+})
+
 /* -------------------------------- flag exclusivity --------------------------------- */
 
 test('hyp ignore rejects combining --local-only, --private, and --sync', async () => {
