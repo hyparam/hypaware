@@ -173,8 +173,9 @@ test('runWizardFirstLook: a synchronous write failure cannot escape and fail a f
   // succeeded.
   //
   // What this does NOT pin: an async EPIPE from a real pipe, which arrives
-  // as an 'error' event and no try/catch can contain (#409). Asserting that
-  // would need a real pipe, and it is a CLI-wide concern, not this step's.
+  // as an 'error' event and no try/catch can contain. That is handled at
+  // the process's streams and pinned against a real pipe in
+  // test/core/cli/stream-errors.test.js.
   const exploding = {
     write() {
       const err = /** @type {Error & { code?: string }} */ (new Error('write EPIPE'))

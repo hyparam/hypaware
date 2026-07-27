@@ -109,7 +109,7 @@ function buildCoreCommands(registry) {
     {
       name: 'query overview',
       summary: 'Show recorded AI traffic: tokens per model, activity per day, repos, and tools',
-      usage: 'hyp query overview [--json] [--sql] [--days <n>]',
+      usage: 'hyp query overview [--json] [--sql] [--days <n>] [--include-local-only]',
       run: runQueryOverview,
     },
     {

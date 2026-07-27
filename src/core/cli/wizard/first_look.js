@@ -151,11 +151,10 @@ export async function runWizardFirstLook({ runner, stdout, color = false, budget
       // Scope, stated precisely: this contains *synchronous* failures. An
       // asynchronous stream error - EPIPE on a real pipe arrives as an
       // 'error' event on the socket, not as a throw - bypasses every
-      // try/catch in the process and is a CLI-wide concern rather than this
-      // step's (see #409). Unreachable here in practice on two counts: the
-      // wizard runs only under `isTty`, and the block is ~4 KB, well inside
-      // a 64 KB pipe buffer, so the write completes before a reader's exit
-      // could matter.
+      // try/catch in the process, so it is not this block's to catch and
+      // never could be. `bin/hypaware.js` installs a listener for it
+      // (`cli/stream_errors.js`), which is where it belongs: it is a
+      // property of the process's streams, not of any one command.
       try {
         // Every section, the same block `hyp query overview` prints. The
         // run is longer for it (~60 lines against ~35), which the privacy

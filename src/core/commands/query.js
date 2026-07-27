@@ -80,7 +80,8 @@ export async function runQueryStatus(_argv, ctx) {
   return 0
 }
 
-const QUERY_OVERVIEW_USAGE = 'usage: hyp query overview [--json] [--sql] [--days <n>]'
+const QUERY_OVERVIEW_USAGE =
+  'usage: hyp query overview [--json] [--sql] [--days <n>] [--include-local-only]'
 
 /** @type {VerbInputSchema} */
 const QUERY_OVERVIEW_SCHEMA = {
@@ -89,11 +90,23 @@ const QUERY_OVERVIEW_SCHEMA = {
     json: { type: 'boolean', default: false },
     sql: { type: 'boolean', default: false },
     days: { type: 'integer', minimum: 1 },
+    // The block's own withheld-rows disclosure names this flag as the
+    // remedy, on stderr and again in the empty state. Declaring it is what
+    // makes that advice true: without it the codec refuses the flag, so the
+    // one action the output told the user to take exits 2.
+    // @ref LLP 0105#override [implements]: the informed-consent override, offered wherever the withholding is disclosed
+    'include-local-only': {
+      type: 'boolean',
+      default: false,
+      description:
+        'Include local-only rows even when this context is synced. If this session ' +
+        'is itself captured, their content enters the transcript and can be forwarded.',
+    },
   },
 }
 
 /**
- * `hyp query overview [--json] [--sql] [--days <n>]`
+ * `hyp query overview [--json] [--sql] [--days <n>] [--include-local-only]`
  *
  * Prints the gateway overview: token volume per provider and model, then
  * sessions and tokens per day, repos, and tools. The same block the
@@ -140,7 +153,7 @@ export async function runQueryOverview(argv, ctx) {
     ctx.stderr.write(`hyp query overview: ${parsed.error}\n${QUERY_OVERVIEW_USAGE}\n`)
     return 2
   }
-  const p = /** @type {{ json: boolean, sql: boolean, days?: number }} */ (parsed.params)
+  const p = /** @type {{ json: boolean, sql: boolean, days?: number, 'include-local-only': boolean }} */ (parsed.params)
   const json = p.json
   const showSql = p.sql
   // `minimum: 1` on the schema does the range check, with the codec's
@@ -149,7 +162,11 @@ export async function runQueryOverview(argv, ctx) {
   // Same reporting as `hyp query sql`: a withheld-row count is required
   // disclosure (LLP 0105), a freshness line is advisory. Both to stderr
   // so stdout stays the block (and stays valid JSON under --json).
-  const runner = overviewRunnerFromCtx(ctx, (notice) => ctx.stderr.write(notice.line))
+  const runner = overviewRunnerFromCtx(
+    ctx,
+    (notice) => ctx.stderr.write(notice.line),
+    { includeLocalOnly: p['include-local-only'] === true }
+  )
   if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) {
     // Says what is true, then what to do. The absent thing is a dataset
     // name (`ai_gateway_messages`) that means nothing to the person who

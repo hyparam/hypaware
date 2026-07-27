@@ -38,6 +38,15 @@ if (argv[0] === '__smoke_internal') {
 const { dispatch } = await import('../src/core/cli/dispatch.js')
 const { installObservability } = await import('../src/core/observability/index.js')
 const { flushStream } = await import('../src/core/cli/flush-streams.js')
+const { installStreamErrorHandlers } = await import('../src/core/cli/stream_errors.js')
+
+// Before anything writes: an asynchronous stdout/stderr failure (EPIPE when
+// a reader like `head` walks away mid-write) is delivered as an 'error'
+// event, which bypasses the try/catch below and every one inside the
+// commands. Unlistened, it crashes a run that had already succeeded.
+installStreamErrorHandlers([process.stdout, process.stderr], (message) => {
+  try { process.stderr.write(message) } catch { /* the stream is what failed */ }
+})
 
 const obs = installObservability()
 let exitCode = 1

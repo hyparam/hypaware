@@ -804,6 +804,15 @@ line, which is also why the wording is `renderLocalOnlyNotice` from the
 query verb rather than a second copy - two surfaces phrasing the same
 disclosure differently is how one of them ends up subtly wrong.
 
+The override the disclosure names has to exist. `hyp query overview` takes
+`--include-local-only` for exactly one reason: the withheld-row notice
+names that flag as the remedy, and so does the withheld empty state. A
+block that tells the user to run a flag and then exits 2 on it is worse
+than one that never mentioned it - it turns a disclosure into a dead end.
+The wizard never passes it: nothing in a setup step should quietly widen
+what a captured transcript can carry, and the person reading the notice can
+run the command themselves.
+
 ## Telemetry
 
 Per CLAUDE.md's log-driven-development conventions, each new phase gets its

@@ -894,3 +894,44 @@ test('hyp query overview: NO_COLOR suppresses ANSI even on a TTY', async () => {
   assert.equal(await runQueryOverview([], ctx), 0)
   assert.ok(!/\x1b\[/.test(stdout.text()))
 })
+
+test('hyp query overview: --include-local-only is accepted, and does what the disclosure promises', async () => {
+  // The block's own withheld-rows notice names this flag as the remedy, in
+  // two places. Declaring it on the schema is what makes that advice true:
+  // the codec refuses undeclared flags, so advising one it does not declare
+  // would exit 2 on the single action the output told the user to take.
+  const root = mkdtempSync(path.join(tmpdir(), 'hyp-overview-override-'))
+  const shielded = path.join(root, 'private')
+  const open = path.join(root, 'open')
+  mkdirSync(shielded)
+  mkdirSync(open)
+  writeFileSync(path.join(shielded, '.hypignore'), 'local-only\n')
+  const rows = RAW_ROWS.map((row) => ({ ...row, cwd: shielded }))
+
+  // Without it: withheld, disclosed, and the empty state names the flag.
+  const withoutFlag = ctxWithRows({ rows })
+  withoutFlag.ctx.cwd = open
+  assert.equal(await runQueryOverview([], withoutFlag.ctx), 0)
+  assert.match(withoutFlag.stdout.text(), /--include-local-only/)
+
+  // With it: the rows the disclosure was about actually appear.
+  const withFlag = ctxWithRows({ rows })
+  withFlag.ctx.cwd = open
+  assert.equal(await runQueryOverview(['--include-local-only'], withFlag.ctx), 0)
+  assert.match(withFlag.stdout.text(), /claude-opus-5/)
+  assert.ok(!withFlag.stdout.text().includes('marked local-only'))
+  // Nothing was withheld, so nothing is disclosed.
+  assert.equal(withFlag.stderr.text(), '')
+
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('hyp query overview: the usage line lists every flag the codec accepts', async () => {
+  const { ctx, stdout } = ctxWithRows()
+  await runQueryOverview(['--help'], ctx)
+  // A flag missing here is a flag users cannot discover; a flag listed but
+  // undeclared is one that exits 2 when they try it.
+  for (const flag of ['--json', '--sql', '--days', '--include-local-only']) {
+    assert.match(stdout.text(), new RegExp(flag.replace(/-/g, '\\-')), flag)
+  }
+})

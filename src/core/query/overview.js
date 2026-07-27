@@ -294,11 +294,20 @@ function paint(text, sgr, on) {
  * @ref LLP 0105 [implements]: the overview inherits both halves - the filter and the disclosure that it filtered
  * @ref LLP 0135#disclosure [implements]: which report each caller passes on, and why they differ
  *
+ * `includeLocalOnly` is LLP 0105's informed-consent override, and it is the
+ * caller's to pass, never this module's to assume. `hyp query overview`
+ * exposes it because the disclosure it prints names it as the remedy - a
+ * block that says "rerun with --include-local-only" and then refuses the
+ * flag is worse than one that never mentioned it. The wizard never passes
+ * it: nothing during an unattended-feeling setup step should quietly widen
+ * what a captured transcript can carry.
+ *
  * @param {CommandRunContext} ctx
  * @param {(notice: OverviewNotice) => void} [onNotice]
+ * @param {{ includeLocalOnly?: boolean }} [opts]
  * @returns {OverviewQueryRunner | undefined}
  */
-export function overviewRunnerFromCtx(ctx, onNotice) {
+export function overviewRunnerFromCtx(ctx, onNotice, opts = {}) {
   const registry = /** @type {any} */ (ctx)?.query
   if (!registry || typeof registry.getDataset !== 'function') return undefined
   /** @type {Set<string>} */
@@ -331,6 +340,7 @@ export function overviewRunnerFromCtx(ctx, onNotice) {
         refresh: 'auto',
         config: ctx.config,
         callerCwd: typeof ctx.cwd === 'string' && ctx.cwd.length > 0 ? ctx.cwd : null,
+        includeLocalOnly: opts.includeLocalOnly === true,
       })
       for (const line of result.freshnessMessages ?? []) {
         say({ kind: 'freshness', line: `${line}\n` })
