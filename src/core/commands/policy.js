@@ -5,7 +5,7 @@ import process from 'node:process'
 
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
+import { LocalOnlyListUnreadableError, localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
 import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
 /**
@@ -71,12 +71,33 @@ const STORE_LABEL = 'machine-local policy store'
  * a file the user can open and edit, not an internal.
  *
  * @ref LLP 0111#tokens [implements]: the class-to-token mapping is a CLI-edge rendering; the store and the JSON keep speaking `full`
+ * @ref LLP 0111#set [implements]: `storeSuffix` names `set`'s confirmation as machine-local too, so it is not the one `policy` line that fails to say so
  * @type {PolicyHumanVocabulary}
  */
 const PUBLIC_VOCABULARY = {
   className: (cls) => CLASS_TO_TOKEN[cls] ?? cls,
   governor: (governedBy, listPath) => (governedBy === listPath ? STORE_LABEL : governedBy),
-  storeSuffix: () => '',
+  storeSuffix: () => ` (${STORE_LABEL})`,
+  implicitSuffix: () => ' (implicit default, not yet classified)',
+}
+
+/**
+ * The `policy` edge's wording for a corrupt machine-local store: still names
+ * the file (the user needs to know which one to repair) but never calls it
+ * "the local-only list" - `LocalOnlyListUnreadableError`'s own message does,
+ * which is exactly the internals-leaking vocabulary this verb exists to
+ * avoid (LLP 0111 #tokens). Scoped to the `policy` runners only: `hyp status`
+ * and the deprecated `hyp ignore`/`hyp unignore` aliases keep the resolver's
+ * own wording (LLP 0111 #aliases).
+ *
+ * @ref LLP 0111#tokens [implements]: a corrupt store is still "the machine-local policy store", never "the local-only list"
+ * @param {CommandRunContext} ctx
+ * @param {LocalOnlyListUnreadableError} err
+ * @returns {number}
+ */
+function reportUnreadableStore(ctx, err) {
+  ctx.stderr.write(`error: the machine-local policy store at '${err.filePath}' is unreadable or malformed\n`)
+  return 1
 }
 
 const POLICY_SET_USAGE = 'hyp policy set <path> sync|local-only|ignore'
@@ -211,6 +232,7 @@ export async function runPolicySet(argv, ctx) {
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy show`, the `hyp ignore --check` successor
  * @ref LLP 0111#show [implements]: `--json` stays byte-compatible with today's `--check --json` field set
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: names the governing source (dotfile vs machine-local) and class; store/resolver unchanged
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -223,7 +245,12 @@ export async function runPolicyShow(argv, ctx) {
     return 2
   }
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  return runIgnoreCheck({ targetDir, ctx, json: parsed.json, vocabulary: PUBLIC_VOCABULARY })
+  try {
+    return await runIgnoreCheck({ targetDir, ctx, json: parsed.json, vocabulary: PUBLIC_VOCABULARY })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 }
 
 /**
@@ -283,6 +310,7 @@ export async function runPolicyUnset(argv, ctx) {
  *
  * @ref LLP 0110 [implements]: names the machine-local store's enumeration surface with the class-neutral verb
  * @ref LLP 0111#list [implements]: the store's first enumeration surface; `--json` emits `{ entries, path }`
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: enumerates the version-2 class-per-entry store as-is; no format change
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -296,7 +324,13 @@ export async function runPolicyList(argv, ctx) {
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
-  const entries = await readLocalOnlyEntries({ stateDir })
+  let entries
+  try {
+    entries = await readLocalOnlyEntries({ stateDir })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 
   if (parsed.json) {
     ctx.stdout.write(JSON.stringify({ entries, path: listPath }) + '\n')

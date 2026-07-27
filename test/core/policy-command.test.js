@@ -183,8 +183,19 @@ test('hyp policy set <path> sync confirms in the public vocabulary and never nam
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.equal(res.stdout, `marked ${root} as sync\n`)
+    assert.equal(res.stdout, `marked ${root} as sync (machine-local policy store)\n`)
     assert.doesNotMatch(res.stdout, /local-only\.json/, 'the backing store path is an implementation detail')
+  })
+})
+
+// LLP 0111 #set: `set` was the only `policy` surface that didn't say a
+// marking is machine-local (the no-op and `list` already do), so a bare
+// `marked <p> as sync` gave no confirmation that nothing landed in the repo.
+test('hyp policy set <path> ignore also names the marking as machine-local', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy set', [root, 'ignore'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.equal(res.stdout, `marked ${root} as ignore (machine-local policy store)\n`)
   })
 })
 
@@ -312,6 +323,21 @@ test('hyp policy show names no source when nothing governs (the implicit default
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'full')
     assert.equal(parsed.source, 'none')
+  })
+})
+
+// The privacy skill reads `hyp policy show`'s human `class:` line to decide
+// whether a directory has already been classified. Without a tell, an
+// unmarked directory's implicit `full` default renders through the same
+// `sync` token an explicit machine-local `full` mark would, so it would read
+// as "the user already said sync" and get dropped from a review list even
+// though nothing was ever recorded (review finding on #411).
+test('hyp policy show (human) flags the implicit default so it cannot be mistaken for an explicit sync mark', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy show', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /^class: sync \(implicit default, not yet classified\)$/m)
+    assert.match(res.stdout, /^source: none$/m)
   })
 })
 
@@ -512,11 +538,49 @@ test('hyp policy list (human) renders a full entry as sync and labels the store 
   })
 })
 
-test('hyp policy list (human) on an empty store reports no entries without error', async () => {
+test('hyp policy list (human) on an empty store reports no entries without error, labelling the store path', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy list', [], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /no machine-local entries/)
+    assert.equal(res.stdout, `no machine-local entries (policy store: ${localOnlyListPath(stateDirOf(hypHome))})\n`)
+  })
+})
+
+/* --------------------------- corrupt store, policy edge --------------------------- */
+
+// Review finding on #411: the corrupt-store error propagated from
+// `readLocalOnlyEntries` (`LocalOnlyListUnreadableError`) named the store
+// "the local-only list", the exact internal `policy` exists to stop naming.
+// `policy show` / `policy list` must catch it and speak the same
+// "machine-local policy store" wording every other `policy` line uses, while
+// still naming the real file path so the user knows what to repair.
+/** @param {string} hypHome */
+function corruptStore(hypHome) {
+  const listPath = localOnlyListPath(stateDirOf(hypHome))
+  mkdirSync(path.dirname(listPath), { recursive: true })
+  writeFileSync(listPath, '{ not valid json')
+  return listPath
+}
+
+test('hyp policy show on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy show', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
+test('hyp policy list on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy list', [], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
   })
 })
 

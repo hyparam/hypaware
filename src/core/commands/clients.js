@@ -1105,9 +1105,18 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
     return 0
   }
 
+  // An unmarked directory resolves to the implicit `full` default (matcher.js),
+  // which renders as the identical token a user's explicit `sync` mark would
+  // (LLP 0111 #tokens): `class: sync` alone cannot be told apart from "I asked
+  // and the user said sync". The privacy skill reads this line to decide
+  // whether a directory has already been classified, so the implicit case
+  // must say so; `implicitSuffix` defaults to a no-op so the deprecated
+  // `--check` alias output is untouched (LLP 0111 #aliases).
+  // @ref LLP 0111#show [implements]: the implicit-default class label is unmistakable, never confusable with an explicit user classification
+  const implicitSuffix = result.governedBy ? '' : (vocabulary.implicitSuffix ?? (() => ''))()
   ctx.stdout.write(`path: ${targetDir}\n`)
   ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
-  ctx.stdout.write(`class: ${vocabulary.className(result.class)}\n`)
+  ctx.stdout.write(`class: ${vocabulary.className(result.class)}${implicitSuffix}\n`)
   ctx.stdout.write(`source: ${source}\n`)
   ctx.stdout.write(`governed-by: ${result.governedBy ? vocabulary.governor(result.governedBy, listPath) : '(none)'}\n`)
   ctx.stdout.write(`residual-cached-rows: ${residual === null ? 'unknown' : residual}${purgeHint}\n`)

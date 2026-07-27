@@ -217,6 +217,21 @@ test('hyp ignore --check keeps its exact deprecated-alias human output (resolver
   })
 })
 
+// LLP 0111 #show: `policy show` appends an "(implicit default, not yet
+// classified)" suffix to the class line for an unmarked directory, gated
+// through the vocabulary's optional `implicitSuffix` member. The deprecated
+// `--check` alias passes no vocabulary at all, so it must fall back to the
+// no-op and keep printing the bare resolver class, unchanged from before
+// that member existed.
+test('hyp ignore --check on an unmarked directory keeps its exact bare class line, no implicit-default suffix', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('ignore', ['--check'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /^class: full$/m)
+    assert.doesNotMatch(res.stdout, /implicit default/)
+  })
+})
+
 /* -------------------------------- flag exclusivity --------------------------------- */
 
 test('hyp ignore rejects combining --local-only, --private, and --sync', async () => {

@@ -68,9 +68,15 @@ line, reading as though `sync` had become `local-only` (issue #393). A verb
 minted to kill exactly that inversion (LLP 0110) cannot reintroduce it in its
 own confirmation. So:
 
-- `set` confirms `marked <p> as sync`; the already-marked no-op says
-  `already sync (governed by machine-local policy store)`.
-- `show` prints `class: sync` and `governed-by: machine-local policy store`.
+- `set` confirms `marked <p> as sync (machine-local policy store)`; the
+  already-marked no-op says `already sync (governed by machine-local policy
+  store)`. The parenthetical is the one place `policy set` said less than the
+  no-op and `list` did: without it, `set` was the only surface that didn't
+  say the marking never left the machine (LLP 0111 #set).
+- `show` prints `class: sync` and `governed-by: machine-local policy store`
+  for an explicitly marked directory; an **unmarked** one appends
+  `(implicit default, not yet classified)` to the class label so it cannot be
+  mistaken for a recorded answer (#show has the full rationale).
 - `unset` says `removed 1 sync entry: <p>` / `not sync (...)`, and the
   class-neutral form glosses each removed entry `(sync)`.
 - `list` prints `<dir>: sync` and labels the trailing path
@@ -127,6 +133,23 @@ count with the `hyp purge` hint. Prospective-only reporting, never destructive
 `hyp ignore --check --json` emits today, so the check path is a pure rename
 plus delegation: `runIgnoreCheck` becomes the shared implementation both
 spellings call.
+
+**An unmarked directory is not silently a `sync` directory.** The resolver's
+implicit default for "nothing governs this path" is the `full` class
+(`matcher.js`'s `walk`/`resolve` fallback), which renders through the same
+`#tokens` mapping as an explicit machine-local `full` (`sync`) entry: without
+a tell, `class: sync` on a never-classified directory reads identically to a
+directory a user explicitly marked `sync`. That collision is dangerous
+specifically because the `hypaware-privacy` skill runs `hyp policy show
+<dir>` and treats `class: sync` as "the user already answered, sync it" -
+on an unmarked directory that would be inventing a consent decision that was
+never made. So `show`'s human output appends a suffix whenever
+`governedBy` is null: `class: sync (implicit default, not yet classified)`.
+An explicitly-marked directory (`governedBy` set, whether to a `.hypignore`
+or the machine-local store) never carries the suffix. `--json` is unaffected:
+`class` and `governedBy` already distinguish the two cases machine-readably
+(`governedBy: null` is the implicit case), so only the human line needed the
+tell.
 
 ### `policy unset <path> [class]` {#unset}
 

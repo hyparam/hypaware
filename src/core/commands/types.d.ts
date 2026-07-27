@@ -18,6 +18,12 @@ export interface PolicyHumanVocabulary {
   // Trailing parenthetical naming where a fresh marking landed; the empty
   // string omits it.
   storeSuffix(listPath: string): string
+  // Trailing note appended to the class label when nothing governs the
+  // directory (LLP 0111 #show): the implicit default must not read like an
+  // explicit, user-chosen class. Optional; a vocabulary that omits it (the
+  // aliases' internal wording) gets the empty string, so it stays correct
+  // by omission rather than by remembering to opt in.
+  implicitSuffix?(): string
 }
 
 export interface BackfillProviderResult {
