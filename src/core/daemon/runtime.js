@@ -378,6 +378,14 @@ export async function runDaemon(opts = {}) {
           clientDescriptors: clientSeam.clientDescriptors,
           clients: clientSeam.clients,
           endpoint: clientSeam.endpoint,
+          // The skills and subagents an org-driven attach materializes, from
+          // the same registries `hyp skills install` reads. Bytes come from
+          // locally installed plugin packages, never from org config.
+          // @ref LLP 0107#every-attach [implements]: the reconciler's attach
+          //   installs client assets, so an enrolled machine gets the helper
+          //   skills without anyone re-running login
+          skills: boot.runtime.skills,
+          agents: boot.runtime.agents,
         })
         fileLog.info('daemon.reconcile_pass', {
           hyp_reason: reason,

@@ -484,7 +484,10 @@ test('top-level help collapses subcommands into one row per group', async () => 
   assert.match(out, /^ {2}query\s+Query the local cache/m)
   assert.match(out, /^ {2}daemon\s+Manage the HypAware daemon/m)
   assert.match(out, /^ {2}plugin\s+Manage plugins/m)
-  assert.match(out, /^ {2}agents\s+Manage subagents for AI clients/m)
+  assert.match(out, /^ {2}skills\s+Manage skills and subagents for AI clients/m)
+  // Subagents install through `skills`, so there is no `agents` group
+  // (LLP 0138 #one-command).
+  assert.equal(/^ {2}agents\s/m.test(out), false)
   // Subcommands live in group help, not at the top level.
   assert.equal(out.includes('query sql'), false)
   assert.equal(out.includes('daemon install'), false)

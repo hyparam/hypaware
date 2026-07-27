@@ -251,9 +251,9 @@ function createCapabilitiesFacade(pluginName, registry) {
 
 /**
  * Skill registry. Stores contributions from client-adapter plugins so
- * `hyp skills install` (and the walkthrough finale) can enumerate
- * what each plugin wants materialized into the per-client skill
- * directories.
+ * `hyp skills install`, client attach, and the walkthrough finale can
+ * enumerate what each plugin wants materialized into the per-client
+ * skill directories.
  *
  * @returns {SkillRegistry}
  */
@@ -292,11 +292,11 @@ function createSkillRegistry() {
 }
 
 /**
- * Agent registry. Stores subagent contributions from client-adapter
- * plugins so `hyp agents install` (and the walkthrough finale) can
- * enumerate what each plugin wants materialized into the per-client
- * agent directories. Mirrors the skill registry, but each contribution
- * points at a single markdown definition file rather than a directory.
+ * Agent registry. The skill registry's twin, read by the same callers:
+ * a subagent is the other shape of client asset, differing only in that
+ * each contribution points at a single markdown definition file rather
+ * than a directory (LLP 0138). Kept a separate registry because plugins
+ * register two shapes; only the install surface is unified.
  *
  * @returns {AgentRegistry}
  */

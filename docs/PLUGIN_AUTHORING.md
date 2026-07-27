@@ -225,8 +225,12 @@ ctx.agents.register({
 ```
 
 Only clients whose manifest declares `contributes.client.agent_dir`
-receive agents; targets without one are skipped with a warning by
-`hyp agents install`.
+receive agents; a target without one is skipped.
+
+Skills and agents are both **client assets** and share one install path
+(LLP 0138): attaching a client materializes them, and `hyp skills
+install` re-copies both on demand. There is no separate `agents`
+command.
 
 ### Init presets
 

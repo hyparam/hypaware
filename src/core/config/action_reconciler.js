@@ -93,6 +93,8 @@ export function createActionReconciler(opts) {
       clientDescriptors: input.clientDescriptors,
       clients: input.clients,
       endpoint: input.endpoint,
+      skills: input.skills,
+      agents: input.agents,
       now,
       log,
     }
@@ -212,7 +214,11 @@ export function createActionReconciler(opts) {
             mutated = true
             continue
           }
-          const outcome = await runOutcome(() => reverse(requestKey, ctx))
+          // Hand the marker to `reverse()`: it is the self-describing undo
+          // record `perform()` wrote, and an effect that cannot be re-derived
+          // from disk alone (which files an org-driven attach copied) is only
+          // reversible from what the marker recorded (LLP 0045 §Part 3).
+          const outcome = await runOutcome(() => reverse(requestKey, ctx, marker))
           if (outcome.status === 'done') {
             delete markers[requestKey]
             results.push({ kind, requestKey, outcome: 'reversed' })

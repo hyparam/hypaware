@@ -1,6 +1,7 @@
 // @ts-check
 
 import { Attr } from '../observability/index.js'
+import { materializeClientAssets, removeClientAssets } from '../runtime/client_assets.js'
 import { readAttachPolicy } from './attach_policy.js'
 import { detachClientFromDisk } from './client_detach_disk.js'
 
@@ -163,6 +164,20 @@ export function createAttachHandler(opts = {}) {
         return { status: 'failed', reason: err instanceof Error ? err.message : String(err) }
       }
 
+      // Attach means "wire this client into HypAware", and the client's
+      // registered skills and subagents are part of that wiring: without this
+      // an enrolled machine gets capture but none of the helpers, including the
+      // privacy-review skill the LLP 0100 flow depends on. Bytes come from
+      // locally installed plugin packages, so this makes no server contact and
+      // opens no channel for org config to author skill content.
+      // Non-fatal: the attach itself applied, so a copy failure must not churn
+      // the marker to `failed` and re-attach every pass.
+      // @ref LLP 0107#every-attach [implements]: the reconciler attach
+      //   materializes client assets, the same set a manual attach installs
+      // @ref LLP 0138#one-materializer [implements]: skills and subagents
+      //   through the one shared routine
+      const installedAssets = await materializeAttachedAssets(client, ctx)
+
       const parsed = parseAttachOutput(stdout.text())
       // No throw = the attach applied. Record the endpoint we attached at on the
       // marker regardless of whether the adapter payload parsed: it is the
@@ -177,6 +192,10 @@ export function createAttachHandler(opts = {}) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
       }
+      // The undo record for the copies: reverse() removes exactly these paths,
+      // so a user's own `hyp skills install` (which records no marker) survives
+      // a leave (LLP 0107 §reversal).
+      if (installedAssets.length > 0) detail.installed_assets = installedAssets
       return { status: 'done', detail }
     },
 
@@ -230,12 +249,20 @@ export function createAttachHandler(opts = {}) {
      * so this only fires for a marker applied out-of-band (e.g. manual
      * `hyp attach`, or a pre-fix marker).
      *
+     * The skills and subagents this attach installed come off the marker's
+     * `installed_assets` rather than off the registries: what to remove is what
+     * *this* attach copied, not what the currently-loaded plugin set happens to
+     * contribute now. A marker without the field (a pre-LLP-0138 attach) leaves
+     * the assets alone, which is the same outcome as a manual install.
+     *
      * @param {string} requestKey  The client name whose attach to reverse.
      * @param {ActionContext} ctx
+     * @param {ActionMarker} [marker]  The undo record `perform()` wrote.
      * @returns {Promise<ActionOutcome>}
      * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
+     * @ref LLP 0107#reversal [implements] — org-driven asset copies reverse from the marker; unmarked (manual) ones stay
      */
-    async reverse(requestKey, ctx) {
+    async reverse(requestKey, ctx, marker) {
       const descriptor = ctx.clientDescriptors?.get(requestKey)
       if (!descriptor) {
         // The descriptor normally survives a fleet-drop (only the config entry
@@ -280,6 +307,22 @@ export function createAttachHandler(opts = {}) {
         })
       }
 
+      // Remove the client assets this attach installed, after the settings
+      // undo: a failure here leaves files behind but the client is already
+      // unwired, and re-running the whole reverse is safe (both halves are
+      // idempotent), so keep the marker and retry rather than reporting done.
+      const assets = readInstalledAssets(marker)
+      if (assets.length > 0) {
+        const { failed } = await removeClientAssets(assets)
+        if (failed.length > 0) {
+          const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
+          return {
+            status: 'failed',
+            reason: `client '${descriptor.name}' detached, but ${failed.length} installed asset(s) could not be removed: ${detail}`,
+          }
+        }
+      }
+
       // Idempotent: a no-op (file already clean / marker absent) is still a
       // successful undo — the reconciler drops the marker either way.
       return { status: 'done' }
@@ -300,6 +343,73 @@ export function createAttachHandler(opts = {}) {
 export const attachHandler = createAttachHandler()
 
 /* ------------------------------- Internals ------------------------------- */
+
+/**
+ * Materialize one attached client's registered skills and subagents, returning
+ * the destination paths for the marker. Never throws: the attach it follows has
+ * already applied, and a copy failure is a degraded install (warned in the
+ * daemon log) rather than an attach to redo. Inert when the daemon threaded no
+ * registries or no HOME, which is also what a non-daemon boot looks like.
+ *
+ * @param {string} client
+ * @param {ActionContext} ctx
+ * @returns {Promise<string[]>}
+ */
+async function materializeAttachedAssets(client, ctx) {
+  const descriptors = ctx.clientDescriptors
+  const homeDir = ctx.env.HOME ?? ''
+  if (!descriptors || homeDir.length === 0) return []
+  if (!ctx.skills && !ctx.agents) return []
+
+  const warnings = {
+    /** @param {string} chunk */
+    write(chunk) {
+      ctx.log.warn('client_action.attach_asset_skipped', {
+        [Attr.COMPONENT]: 'action-attach',
+        [Attr.OPERATION]: 'client_action.perform',
+        client,
+        [Attr.STATUS]: 'ok',
+        detail: chunk.trim(),
+      })
+    },
+  }
+
+  try {
+    const installed = await materializeClientAssets({
+      clients: [client],
+      descriptors,
+      homeDir,
+      ...(ctx.skills ? { skills: ctx.skills } : {}),
+      ...(ctx.agents ? { agents: ctx.agents } : {}),
+      stderr: warnings,
+    })
+    return installed.map((asset) => asset.dest)
+  } catch (err) {
+    ctx.log.warn('client_action.attach_assets_failed', {
+      [Attr.COMPONENT]: 'action-attach',
+      [Attr.OPERATION]: 'client_action.perform',
+      client,
+      [Attr.STATUS]: 'ok',
+      [Attr.ERROR_KIND]: 'asset_install_failed',
+      detail: err instanceof Error ? err.message : String(err),
+    })
+    return []
+  }
+}
+
+/**
+ * The `installed_assets` undo record off a marker, defensively: the store is a
+ * JSON file that a pre-LLP-0138 daemon (or a hand edit) may have written
+ * without the field, or with something that is not a list of strings.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {string[]}
+ */
+function readInstalledAssets(marker) {
+  const raw = marker?.installed_assets
+  if (!Array.isArray(raw)) return []
+  return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
+}
 
 /**
  * A capturing `WriteStream` — accumulates every `write(chunk)` so the handler

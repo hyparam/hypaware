@@ -89,10 +89,13 @@ test('skills.register rejects path-traversal names', () => {
   assert.equal(kernel.skills.list().length, 0)
 })
 
-test('hyp agents install copies registered agent files into the client agent dir', async () => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-agents-'))
+test('hyp skills install materializes skills and subagents in one command', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-assets-'))
   const sourceFile = path.join(home, 'src-agent.md')
   await fs.writeFile(sourceFile, '---\nname: test-analyst\n---\nbody\n', 'utf8')
+  const sourceDir = path.join(home, 'src-skill')
+  await fs.mkdir(sourceDir, { recursive: true })
+  await fs.writeFile(path.join(sourceDir, 'SKILL.md'), 'skill body\n', 'utf8')
 
   const { kernel, registry } = agentsKernelAndRegistry()
   kernel.agents.register({
@@ -101,10 +104,16 @@ test('hyp agents install copies registered agent files into the client agent dir
     clients: ['claude'],
     sourceFile,
   })
+  kernel.skills.register({
+    name: 'test-skill',
+    plugin: /** @type {any} */ ('@hypaware/claude'),
+    clients: ['claude'],
+    sourceDir,
+  })
 
   const stdout = makeBuf()
   const stderr = makeBuf()
-  const code = await dispatch(['agents', 'install'], {
+  const code = await dispatch(['skills', 'install'], {
     stdout,
     stderr,
     env: { ...process.env, HOME: home },
@@ -113,15 +122,36 @@ test('hyp agents install copies registered agent files into the client agent dir
   })
 
   assert.equal(code, 0)
-  const dest = path.join(home, '.claude', 'agents', 'test-analyst.md')
-  const installed = await fs.readFile(dest, 'utf8')
-  assert.equal(installed, '---\nname: test-analyst\n---\nbody\n')
+  // One command, both asset kinds: the agent lands as a flat `<name>.md`, the
+  // skill as a directory tree (LLP 0138 #one-command).
+  const agentDest = path.join(home, '.claude', 'agents', 'test-analyst.md')
+  assert.equal(await fs.readFile(agentDest, 'utf8'), '---\nname: test-analyst\n---\nbody\n')
+  const skillDest = path.join(home, '.claude', 'skills', 'test-skill', 'SKILL.md')
+  assert.equal(await fs.readFile(skillDest, 'utf8'), 'skill body\n')
+  assert.match(stdout.text(), /installed skill 'test-skill'/)
   assert.match(stdout.text(), /installed agent 'test-analyst'/)
-  assert.match(stdout.text(), /installed 1 agent copy/)
+  assert.match(stdout.text(), /installed 1 skill copy\(ies\), 1 agent copy\(ies\)/)
 })
 
-test('hyp agents install warns when the target client has no agent dir', async () => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-agents-'))
+test('hyp agents install is gone: agents is not a command', async () => {
+  const { kernel, registry } = agentsKernelAndRegistry()
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['agents', 'install'], {
+    stdout,
+    stderr,
+    env: { ...process.env },
+    registry,
+    kernel,
+  })
+
+  assert.notEqual(code, 0)
+  assert.match(stderr.text(), /unknown command/i)
+})
+
+test('hyp skills install skips a client with no directory for that asset kind', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-assets-'))
   const sourceFile = path.join(home, 'src-agent.md')
   await fs.writeFile(sourceFile, 'body\n', 'utf8')
 
@@ -135,7 +165,7 @@ test('hyp agents install warns when the target client has no agent dir', async (
 
   const stdout = makeBuf()
   const stderr = makeBuf()
-  const code = await dispatch(['agents', 'install'], {
+  const code = await dispatch(['skills', 'install'], {
     stdout,
     stderr,
     env: { ...process.env, HOME: home },
@@ -144,13 +174,43 @@ test('hyp agents install warns when the target client has no agent dir', async (
   })
 
   assert.equal(code, 0)
-  assert.match(stderr.text(), /without an agent directory/)
-  assert.match(stdout.text(), /installed 0 agent copy/)
+  // Codex has skills but no subagent concept, so this is a silent skip, not a
+  // warning the user could act on.
+  assert.equal(stderr.text(), '')
+  assert.match(stdout.text(), /\(nothing to install\)/)
   await assert.rejects(fs.access(path.join(home, '.codex', 'agents')))
 })
 
-test('hyp agents install respects --client filtering', async () => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-agents-'))
+test('hyp skills install warns when a contribution names an unknown client', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-assets-'))
+  const sourceDir = path.join(home, 'src-skill')
+  await fs.mkdir(sourceDir, { recursive: true })
+  await fs.writeFile(path.join(sourceDir, 'SKILL.md'), 'body\n', 'utf8')
+
+  const { kernel, registry } = agentsKernelAndRegistry()
+  kernel.skills.register({
+    name: 'test-skill',
+    plugin: /** @type {any} */ ('@hypaware/nonesuch'),
+    clients: [/** @type {any} */ ('nonesuch')],
+    sourceDir,
+  })
+
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const code = await dispatch(['skills', 'install'], {
+    stdout,
+    stderr,
+    env: { ...process.env, HOME: home },
+    registry,
+    kernel,
+  })
+
+  assert.equal(code, 0)
+  assert.match(stderr.text(), /targets unknown client 'nonesuch'/)
+})
+
+test('hyp skills install respects --client filtering', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-assets-'))
   const sourceFile = path.join(home, 'src-agent.md')
   await fs.writeFile(sourceFile, 'body\n', 'utf8')
 
@@ -164,7 +224,7 @@ test('hyp agents install respects --client filtering', async () => {
 
   const stdout = makeBuf()
   const stderr = makeBuf()
-  const code = await dispatch(['agents', 'install', '--client', 'codex'], {
+  const code = await dispatch(['skills', 'install', '--client', 'codex'], {
     stdout,
     stderr,
     env: { ...process.env, HOME: home },
@@ -173,7 +233,7 @@ test('hyp agents install respects --client filtering', async () => {
   })
 
   assert.equal(code, 0)
-  assert.match(stdout.text(), /installed 0 agent copy/)
+  assert.match(stdout.text(), /\(nothing to install\)/)
   await assert.rejects(fs.access(path.join(home, '.claude', 'agents', 'test-analyst.md')))
 })
 

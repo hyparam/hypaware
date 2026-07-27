@@ -6,6 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0011, LLP 0044, LLP 0045, LLP 0063, LLP 0100, LLP 0106
+**Extended-by:** [LLP 0138](./0138-client-assets-one-install.decision.md) -
+subagents are client assets too, so they ride attach on the same terms; both
+kinds materialize through one routine and install under one command. LLP 0138
+is also where this doc was first implemented.
 
 > Attaching a client installs that client's registered skills (and hooks),
 > whoever triggered the attach: manual `hyp attach` and the org-driven

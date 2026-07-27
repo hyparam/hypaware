@@ -9,13 +9,12 @@ import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
-import { isWithinDir } from '../runtime/contribution_names.js'
+import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
 import { multiselect, select } from './tui/index.js'
 import { isPromptCancelledError } from './tui/runtime.js'
 import { shouldUseTui } from './tui-router.js'
-import { copyDir } from '../util/fs_copy.js'
 
 /**
  * Exit code returned when the user cancels the picker walkthrough
@@ -694,10 +693,10 @@ export function composePickerConfig(args) {
 }
 
 /**
- * Run the picker finale: daemon install, attach, skills install,
- * agents install, daemon restart. Each step emits its own span
- * (`daemon.install`, `client.attach` (via the adapter),
- * `skills.install`, `agents.install`).
+ * Run the picker finale: daemon install, attach, client-asset install
+ * (skills and subagents together, LLP 0138), daemon restart. Each step
+ * emits its own span (`daemon.install`, `client.attach` (via the
+ * adapter), `skills.install`).
  *
  * Exported for the wizard orchestrator (LLP 0135 #finale), which wraps
  * it with the team-pathway skips: `finale.skipDaemonInstall` skips only
@@ -856,7 +855,12 @@ export async function runPickerFinale(args) {
     ? await buildWalkthroughClientDescriptorMap()
     : new Map()
 
-  if (clientsPicked.length > 0 && skills) {
+  if (clientsPicked.length > 0 && (skills || agents)) {
+    // Span name kept from when skills and agents were two steps: this is now
+    // the one client-asset materialization, and it is what the release smoke
+    // battery asserts on.
+    // @ref LLP 0138#one-materializer [implements]: the finale materializes both
+    //   kinds through the shared routine instead of two hand-rolled copy loops.
     await withSpan(
       'skills.install',
       {
@@ -867,83 +871,31 @@ export async function runPickerFinale(args) {
         status: 'ok',
       },
       async (span) => {
-        let printedAny = false
-        for (const skill of skills.list()) {
-          for (const targetClient of skill.clients) {
-            if (!clientsPicked.includes(targetClient)) continue
-            const skillDir = descriptorMap.get(targetClient)?.skillDir
-            if (!skillDir) continue
-            const baseDir = path.join(homeDir, skillDir)
-            const dest = path.join(baseDir, skill.name)
-            // Defense in depth: registration rejects traversal names, but the
-            // skill dir comes from a plugin manifest, so re-check containment.
-            if (!isWithinDir(dest, baseDir)) {
-              stderr.write(`warning: skill '${skill.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
-              continue
-            }
-            // Separate the skills block from the preceding attach output.
-            if (!printedAny) stdout.write('\n')
-            printedAny = true
-            if (dryRun) {
-              stdout.write(`(dry-run) Would install skill '${skill.name}' → ${dest}\n`)
-            } else {
-              await fs.rm(dest, { recursive: true, force: true })
-              await copyDir(skill.sourceDir, dest)
-              stdout.write(`installed skill '${skill.name}' → ${dest}\n`)
-            }
-            summary.skillsInstalled.push({ name: skill.name, client: targetClient, dest, dryRun })
+        const framed = framedStream(stdout)
+        const installed = await materializeClientAssets({
+          clients: clientsPicked,
+          descriptors: descriptorMap,
+          homeDir,
+          ...(skills ? { skills } : {}),
+          ...(agents ? { agents } : {}),
+          dryRun,
+          stdout: framed,
+          stderr,
+        })
+        for (const item of installed) {
+          const entry = {
+            name: item.name,
+            client: /** @type {'claude'|'codex'} */ (item.client),
+            dest: item.dest,
+            dryRun: item.dryRun,
           }
+          if (item.kind === 'skill') summary.skillsInstalled.push(entry)
+          else summary.agentsInstalled.push(entry)
         }
         // Trailing blank line so the next step (backfill prompt) stands apart.
-        if (printedAny) stdout.write('\n')
+        if (framed.wrote()) stdout.write('\n')
         if (span && typeof span.setAttribute === 'function') {
-          span.setAttribute('installed_count', summary.skillsInstalled.length)
-        }
-      },
-      { component: 'walkthrough' }
-    )
-  }
-
-  if (clientsPicked.length > 0 && agents) {
-    await withSpan(
-      'agents.install',
-      {
-        [Attr.COMPONENT]: 'walkthrough',
-        [Attr.OPERATION]: 'agents.install',
-        dry_run: dryRun,
-        client_count: clientsPicked.length,
-        status: 'ok',
-      },
-      async (span) => {
-        let printedAny = false
-        for (const agent of agents.list()) {
-          for (const targetClient of agent.clients) {
-            if (!clientsPicked.includes(targetClient)) continue
-            const agentDir = descriptorMap.get(targetClient)?.agentDir
-            if (!agentDir) continue
-            const baseDir = path.join(homeDir, agentDir)
-            const dest = path.join(baseDir, `${agent.name}.md`)
-            // Defense in depth: registration rejects traversal names, but the
-            // agent dir comes from a plugin manifest, so re-check containment.
-            if (!isWithinDir(dest, baseDir)) {
-              stderr.write(`warning: agent '${agent.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
-              continue
-            }
-            if (!printedAny) stdout.write('\n')
-            printedAny = true
-            if (dryRun) {
-              stdout.write(`(dry-run) Would install agent '${agent.name}' → ${dest}\n`)
-            } else {
-              await fs.mkdir(path.dirname(dest), { recursive: true })
-              await fs.copyFile(agent.sourceFile, dest)
-              stdout.write(`installed agent '${agent.name}' → ${dest}\n`)
-            }
-            summary.agentsInstalled.push({ name: agent.name, client: targetClient, dest, dryRun })
-          }
-        }
-        if (printedAny) stdout.write('\n')
-        if (span && typeof span.setAttribute === 'function') {
-          span.setAttribute('installed_count', summary.agentsInstalled.length)
+          span.setAttribute('installed_count', installed.length)
         }
       },
       { component: 'walkthrough' }
@@ -1190,6 +1142,29 @@ async function buildWalkthroughClientDescriptorMap() {
     }
   } catch { /* discovery failure → empty map */ }
   return map
+}
+
+/**
+ * Wrap a finale stream so the first write is preceded by a blank line,
+ * separating this step's output from the previous step's. A step that turns
+ * out to print nothing (no assets matched the picked clients) leaves no empty
+ * gap behind, which a plain leading `write('\n')` would.
+ *
+ * @param {{ write(chunk: string): unknown }} stdout
+ * @returns {{ write(chunk: string): unknown, wrote(): boolean }}
+ */
+function framedStream(stdout) {
+  let wrote = false
+  return {
+    write(chunk) {
+      if (!wrote) {
+        stdout.write('\n')
+        wrote = true
+      }
+      return stdout.write(chunk)
+    },
+    wrote() { return wrote },
+  }
 }
 
 /**

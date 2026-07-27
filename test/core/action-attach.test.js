@@ -128,6 +128,8 @@ function attachRegistration(name, opts = {}) {
  *   clients?: any,
  *   endpoint?: string | undefined,
  *   env?: NodeJS.ProcessEnv,
+ *   skills?: any,
+ *   agents?: any,
  * }} [opts]
  * @returns {ActionContext}
  */
@@ -138,10 +140,24 @@ function makeCtx(opts = {}) {
     env: opts.env ?? { ...process.env },
     clientDescriptors: opts.descriptors,
     clients: /** @type {any} */ (opts.clients),
+    // Absent unless a test opts in, which is also what a non-daemon boot looks
+    // like: the install half of attach stays inert and never touches real HOME.
+    skills: opts.skills,
+    agents: opts.agents,
     endpoint: 'endpoint' in opts ? opts.endpoint : ENDPOINT,
     now: () => FIXED_NOW,
     log: NOOP_LOG,
   }
+}
+
+/**
+ * A registry stub over a fixed contribution list — the shape
+ * `materializeClientAssets` reads.
+ * @param {any[]} items
+ * @returns {any}
+ */
+function registryOf(items) {
+  return { register() {}, list() { return items } }
 }
 
 /* -------------------------------- shape --------------------------------- */
@@ -384,7 +400,149 @@ test('perform() guards against a missing client name', async () => {
   assert.match(String(outcome.reason), /missing client name/)
 })
 
+/* ------------------------- perform(): client assets ----------------------- */
+
+/**
+ * LLP 0107 §every-attach: an org-driven attach materializes the client's
+ * registered skills and subagents, so an enrolled machine gets the helpers
+ * (including the privacy-review skill) without anyone re-running login. LLP
+ * 0138 folds both asset kinds into the one materializer these assert against.
+ */
+
+/**
+ * A temp HOME holding one skill source tree and one agent source file, plus a
+ * descriptor pointing at asset dirs inside it.
+ * @returns {Promise<{ home: string, descriptor: ClientDescriptor, skills: any, agents: any }>}
+ */
+async function assetFixture() {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-attach-assets-'))
+  const skillSrc = path.join(home, 'src', 'helper-skill')
+  await fs.mkdir(skillSrc, { recursive: true })
+  await fs.writeFile(path.join(skillSrc, 'SKILL.md'), 'skill body\n', 'utf8')
+  const agentSrc = path.join(home, 'src', 'helper-agent.md')
+  await fs.writeFile(agentSrc, 'agent body\n', 'utf8')
+  return {
+    home,
+    descriptor: { ...CLAUDE_DESCRIPTOR, skillDir: '.claude/skills', agentDir: '.claude/agents' },
+    skills: registryOf([{ name: 'helper-skill', plugin: '@hypaware/claude', clients: ['claude'], sourceDir: skillSrc }]),
+    agents: registryOf([{ name: 'helper-agent', plugin: '@hypaware/claude', clients: ['claude'], sourceFile: agentSrc }]),
+  }
+}
+
+test('perform() materializes the client assets and records them as the undo record', async () => {
+  const { home, descriptor, skills, agents } = await assetFixture()
+  const handler = createAttachHandler()
+
+  const outcome = await handler.perform(
+    { requestKey: 'claude', params: { client: 'claude', plugin: '@hypaware/claude' } },
+    makeCtx({
+      descriptors: descriptorMap([descriptor]),
+      clients: clientsWith({ claude: attachRegistration('claude') }),
+      env: { HOME: home },
+      skills,
+      agents,
+    }),
+  )
+
+  const skillDest = path.join(home, '.claude', 'skills', 'helper-skill')
+  const agentDest = path.join(home, '.claude', 'agents', 'helper-agent.md')
+  assert.equal(await fs.readFile(path.join(skillDest, 'SKILL.md'), 'utf8'), 'skill body\n')
+  assert.equal(await fs.readFile(agentDest, 'utf8'), 'agent body\n')
+  assert.equal(outcome.status, 'done')
+  // Recorded on the marker so reverse() removes exactly what this attach wrote.
+  assert.deepEqual(outcome.detail?.installed_assets, [skillDest, agentDest])
+})
+
+test('perform() stays done when an asset copy fails - the attach itself applied', async () => {
+  const { home, descriptor } = await assetFixture()
+  const handler = createAttachHandler()
+
+  const outcome = await handler.perform(
+    { requestKey: 'claude', params: { client: 'claude', plugin: '@hypaware/claude' } },
+    makeCtx({
+      descriptors: descriptorMap([descriptor]),
+      clients: clientsWith({ claude: attachRegistration('claude') }),
+      env: { HOME: home },
+      skills: registryOf([
+        { name: 'gone', plugin: '@hypaware/claude', clients: ['claude'], sourceDir: path.join(home, 'nope') },
+      ]),
+    }),
+  )
+
+  // A failed copy must not churn the marker to `failed`: that would re-attach
+  // every pass over a problem re-attaching cannot fix.
+  assert.equal(outcome.status, 'done')
+  assert.equal(outcome.detail?.installed_assets, undefined)
+})
+
+test('perform() installs no assets when the daemon threaded no registries', async () => {
+  const { home, descriptor } = await assetFixture()
+  const handler = createAttachHandler()
+
+  const outcome = await handler.perform(
+    { requestKey: 'claude', params: { client: 'claude', plugin: '@hypaware/claude' } },
+    makeCtx({
+      descriptors: descriptorMap([descriptor]),
+      clients: clientsWith({ claude: attachRegistration('claude') }),
+      env: { HOME: home },
+    }),
+  )
+
+  assert.equal(outcome.status, 'done')
+  assert.equal(outcome.detail?.installed_assets, undefined)
+  await assert.rejects(fs.access(path.join(home, '.claude', 'skills')))
+})
+
 /* ------------------------------- reverse() ------------------------------- */
+
+test('reverse() removes exactly the assets its own marker recorded', async () => {
+  const { home, descriptor, skills, agents } = await assetFixture()
+  const handler = createAttachHandler({ detach: async () => ({ changed: true }) })
+  const ctx = makeCtx({
+    descriptors: descriptorMap([descriptor]),
+    env: { HOME: home },
+    skills,
+    agents,
+  })
+  const performed = await handler.perform(
+    { requestKey: 'claude', params: { client: 'claude', plugin: '@hypaware/claude' } },
+    { ...ctx, clients: /** @type {any} */ (clientsWith({ claude: attachRegistration('claude') })) },
+  )
+
+  // A skill the user installed themselves: no marker names it, so a leave must
+  // leave it alone (LLP 0107 §reversal).
+  const manual = path.join(home, '.claude', 'skills', 'my-own-skill')
+  await fs.mkdir(manual, { recursive: true })
+  await fs.writeFile(path.join(manual, 'SKILL.md'), 'mine\n', 'utf8')
+
+  const outcome = await reverseOf(handler)('claude', ctx, {
+    status: 'done',
+    request_key: 'claude',
+    ...performed.detail,
+  })
+
+  assert.deepEqual(outcome, { status: 'done' })
+  await assert.rejects(fs.access(path.join(home, '.claude', 'skills', 'helper-skill')))
+  await assert.rejects(fs.access(path.join(home, '.claude', 'agents', 'helper-agent.md')))
+  assert.equal(await fs.readFile(path.join(manual, 'SKILL.md'), 'utf8'), 'mine\n')
+})
+
+test('reverse() of a marker with no installed_assets touches no files', async () => {
+  const { home, descriptor } = await assetFixture()
+  const manual = path.join(home, '.claude', 'skills', 'my-own-skill')
+  await fs.mkdir(manual, { recursive: true })
+  await fs.writeFile(path.join(manual, 'SKILL.md'), 'mine\n', 'utf8')
+
+  const handler = createAttachHandler({ detach: async () => ({ changed: true }) })
+  const outcome = await reverseOf(handler)('claude', makeCtx({
+    descriptors: descriptorMap([descriptor]),
+    env: { HOME: home },
+  }), { status: 'done', request_key: 'claude' })
+
+  // Pre-LLP-0138 markers, and manual attaches, record nothing to undo.
+  assert.deepEqual(outcome, { status: 'done' })
+  assert.equal(await fs.readFile(path.join(manual, 'SKILL.md'), 'utf8'), 'mine\n')
+})
 
 test('reverse() invokes the disk-driven undo once and never consults ctx.clients', async () => {
   /** @type {any[]} */

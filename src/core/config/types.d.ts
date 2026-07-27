@@ -12,6 +12,8 @@ import type {
   PluginLogger,
   JsonObject,
   AiGatewayCapability,
+  AgentRegistry,
+  SkillRegistry,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ClientDescriptor } from '../../../src/core/types.d.ts'
 
@@ -330,6 +332,14 @@ export interface ActionMarker {
    * attach markers (treated as stale → re-attach once).
    */
   endpoint?: string
+  /**
+   * Absolute paths of the skills and subagents this org-driven attach copied
+   * into the client's directories (recorded on a `done` attach marker). It is
+   * the undo record `reverse()` replays on leave: exactly these paths are
+   * removed, so a user's own `hyp skills install` copies - which record no
+   * marker - survive (LLP 0107 §reversal, LLP 0138).
+   */
+  installed_assets?: string[]
   /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
   [extra: string]: unknown
 }
@@ -403,6 +413,14 @@ export interface ActionContext {
    */
   clients?: AiGatewayCapability
   /**
+   * Kernel skill / subagent registries, threaded so an org-driven attach
+   * materializes the same client assets a manual attach does rather than
+   * leaving an enrolled machine with capture but no helpers
+   * (LLP 0107 §every-attach). Daemon-only, like the rest of the client seam.
+   */
+  skills?: SkillRegistry
+  agents?: AgentRegistry
+  /**
    * The local gateway base URL clients attach to, resolved from
    * `gateway.localEndpoint()` with the configured-`listen` fallback the CLI
    * uses. Set whenever `clients` is (LLP 0045 §Part 1).
@@ -433,8 +451,14 @@ export interface ActionHandler {
    * names (leave/detach). Run-once handlers (backfill) omit this — imported
    * data stays and the marker is kept. Reversible handlers (attach, future)
    * implement it.
+   *
+   * `marker` is the persisted record about to be dropped - the self-describing
+   * undo record `perform()` wrote (LLP 0045 §Part 3). A handler whose effect
+   * cannot be re-derived from disk alone reads what it did from here: the
+   * attach handler replays `installed_assets` to remove exactly the skills and
+   * subagents its own install copied.
    */
-  reverse?(requestKey: string, ctx: ActionContext): Promise<ActionOutcome>
+  reverse?(requestKey: string, ctx: ActionContext, marker?: ActionMarker): Promise<ActionOutcome>
   /**
    * Optional freshness predicate for a still-desired action whose marker is
    * already `done`. Return `false` to treat the `done` marker as a forward gap
@@ -470,6 +494,13 @@ export interface ReconcileInput {
    * when the AI gateway plugin is enabled (LLP 0045 §Part 1).
    */
   clients?: AiGatewayCapability
+  /**
+   * Kernel skill / subagent registries, so an org-driven attach materializes
+   * the client's helper assets (LLP 0107 §every-attach). Absent on a plain
+   * CLI boot, which leaves the install half of attach inert.
+   */
+  skills?: SkillRegistry
+  agents?: AgentRegistry
   /**
    * The local gateway base URL clients attach to; set whenever `clients` is
    * (LLP 0045 §Part 1).

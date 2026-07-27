@@ -2,7 +2,6 @@
 
 import fs from 'node:fs/promises'
 import { parseCommandArgv } from '../cli/verb_codec.js'
-import { copyDir } from '../util/fs_copy.js'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -11,7 +10,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
-import { isWithinDir } from '../runtime/contribution_names.js'
+import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
 import { clearClientActionMarker } from '../config/action_reconciler.js'
@@ -303,6 +302,26 @@ async function runClientLifecycle(action, argv, ctx) {
         stderr: ctx.stderr,
         dryRun: parsed.dryRun,
         json: parsed.json,
+      })
+      // Attach wires a client into HypAware, and its registered skills and
+      // subagents are part of that wiring: manual attach skipping them was the
+      // inconsistency, not the norm (the wizard has always treated
+      // attach-plus-skills as one unit). No marker is recorded, so these copies
+      // are the user's own and `hyp detach` leaves them in place.
+      // Under --json the progress lines are suppressed: the adapter's one-line
+      // machine payload stays the only thing on stdout.
+      // @ref LLP 0107#every-attach [implements]: manual attach materializes the
+      //   client's assets, the same set the reconciler's attach installs
+      descriptorMap ??= await buildClientDescriptorMap(ctx)
+      await materializeClientAssets({
+        clients: [name],
+        descriptors: descriptorMap,
+        homeDir: ctx.env.HOME ?? os.homedir(),
+        skills: ctx.skills,
+        agents: ctx.agents,
+        dryRun: parsed.dryRun,
+        ...(parsed.json ? {} : { stdout: ctx.stdout }),
+        stderr: ctx.stderr,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -1057,13 +1076,22 @@ function isUnderDir(p, dir) {
 /**
  * `hyp skills install [--client <name>]`
  *
- * Walks the kernel skill registry and materializes each contribution
- * into the right per-client skill directory. The skill source tree
- * (a directory with `SKILL.md`) is copied recursively; existing
+ * Materializes every registered skill **and subagent** into the right
+ * per-client directories. One command, because a user asking for their
+ * helpers installed is not distinguishing a skill directory from a
+ * subagent file; the two shapes are a detail of the copy
+ * ({@link materializeClientAssets}), not of the request. Existing
  * installations are replaced (idempotent).
+ *
+ * The standalone manual path stays useful after LLP 0107 put the same
+ * materialization on attach: it re-runs the copy without re-attaching,
+ * which is what a user wants after editing or clobbering an installed
+ * skill.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @ref LLP 0138#one-command [implements]: skills and agents install together
+ *   under `hyp skills install`; there is no second command for the agent half.
  */
 export async function runSkillsInstall(argv, ctx) {
   const parsed = parseSkillsArgs(argv)
@@ -1072,114 +1100,30 @@ export async function runSkillsInstall(argv, ctx) {
     return 2
   }
 
-  const skills = ctx.skills.list()
-  if (skills.length === 0) {
-    ctx.stdout.write('(no skills registered)\n')
-    return 0
-  }
-
   const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
   if (!homeDir) {
     ctx.stderr.write('error: HOME is not set; cannot resolve skill install paths\n')
     return 1
   }
 
-  const descriptorMap = await buildClientDescriptorMap(ctx)
+  const descriptors = await buildClientDescriptorMap(ctx)
+  const installed = await materializeClientAssets({
+    clients: parsed.client === 'all' ? 'all' : [parsed.client],
+    descriptors,
+    homeDir,
+    skills: ctx.skills,
+    agents: ctx.agents,
+    stdout: ctx.stdout,
+    stderr: ctx.stderr,
+  })
 
-  let count = 0
-  for (const skill of skills) {
-    for (const targetClient of skill.clients) {
-      if (parsed.client !== 'all' && parsed.client !== targetClient) continue
-      const skillDir = descriptorMap.get(targetClient)?.skillDir
-      if (!skillDir) {
-        ctx.stderr.write(`warning: skill '${skill.name}' targets unknown client '${targetClient}'\n`)
-        continue
-      }
-      const baseDir = path.join(homeDir, skillDir)
-      const dest = path.join(baseDir, skill.name)
-      // Defense in depth: registration rejects traversal names, but the
-      // skill dir comes from a plugin manifest, so re-check containment.
-      if (!isWithinDir(dest, baseDir)) {
-        ctx.stderr.write(`warning: skill '${skill.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
-        continue
-      }
-      try {
-        await fs.rm(dest, { recursive: true, force: true })
-        await copyDir(skill.sourceDir, dest)
-        ctx.stdout.write(`installed skill '${skill.name}' → ${dest}\n`)
-        count += 1
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        ctx.stderr.write(`warning: skill '${skill.name}' for ${targetClient} failed: ${message}\n`)
-      }
-    }
-  }
-  ctx.stdout.write(`installed ${count} skill copy(ies)\n`)
-  return 0
-}
-
-/**
- * `hyp agents install [--client <name>]`
- *
- * Mirrors `hyp skills install` for subagent contributions. Each agent
- * is a single markdown definition file materialized flat into the
- * per-client agent directory as `<agent_dir>/<name>.md`; existing
- * installations are replaced (idempotent). Clients without an
- * `agent_dir` in their manifest are skipped with a warning.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runAgentsInstall(argv, ctx) {
-  const parsed = parseSkillsArgs(argv)
-  if (parsed.error) {
-    ctx.stderr.write(`error: ${parsed.error}\n`)
-    return 2
-  }
-
-  const agents = ctx.agents.list()
-  if (agents.length === 0) {
-    ctx.stdout.write('(no agents registered)\n')
+  if (installed.length === 0) {
+    ctx.stdout.write('(nothing to install)\n')
     return 0
   }
-
-  const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
-  if (!homeDir) {
-    ctx.stderr.write('error: HOME is not set; cannot resolve agent install paths\n')
-    return 1
-  }
-
-  const descriptorMap = await buildClientDescriptorMap(ctx)
-
-  let count = 0
-  for (const agent of agents) {
-    for (const targetClient of agent.clients) {
-      if (parsed.client !== 'all' && parsed.client !== targetClient) continue
-      const agentDir = descriptorMap.get(targetClient)?.agentDir
-      if (!agentDir) {
-        ctx.stderr.write(`warning: agent '${agent.name}' targets client '${targetClient}' without an agent directory\n`)
-        continue
-      }
-      const baseDir = path.join(homeDir, agentDir)
-      const dest = path.join(baseDir, `${agent.name}.md`)
-      // Defense in depth: registration rejects traversal names, but the
-      // agent dir comes from a plugin manifest, so re-check containment.
-      if (!isWithinDir(dest, baseDir)) {
-        ctx.stderr.write(`warning: agent '${agent.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
-        continue
-      }
-      try {
-        await fs.mkdir(path.dirname(dest), { recursive: true })
-        await fs.copyFile(agent.sourceFile, dest)
-        ctx.stdout.write(`installed agent '${agent.name}' → ${dest}\n`)
-        count += 1
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        ctx.stderr.write(`warning: agent '${agent.name}' for ${targetClient} failed: ${message}\n`)
-      }
-    }
-  }
-  ctx.stdout.write(`installed ${count} agent copy(ies)\n`)
+  const skillCount = installed.filter((a) => a.kind === 'skill').length
+  const agentCount = installed.length - skillCount
+  ctx.stdout.write(`installed ${skillCount} skill copy(ies), ${agentCount} agent copy(ies)\n`)
   return 0
 }
 

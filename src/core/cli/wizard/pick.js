@@ -218,15 +218,15 @@ export async function runWizardPick(opts) {
     { component: 'wizard' }
   )
 
-  // clientsPicked drives the finale's per-machine LOCAL work (client attach,
-  // skills install, agents install). That work is not in the central layer, so
+  // clientsPicked drives the finale's per-machine LOCAL work (client attach and
+  // the client-asset install). That work is not in the central layer, so
   // it must still run for org-locked clients on a fleet-managed machine: the
   // central layer supplies the daemon config, but each machine's client
   // settings, skills, and agents are local. Derive it from the pre-filter
   // selection (locked rows included), not the composition-filtered `sources`
   // that (correctly) drops locked ids. Deriving it from `sources` left it empty
   // on a fully managed machine, silently no-op'ing the whole finale (issue #380).
-  // @ref LLP 0135#finale [implements]: skills/agents install iterates clientsPicked, which must include org-locked clients
+  // @ref LLP 0135#finale [implements]: the client-asset install iterates clientsPicked, which must include org-locked clients
   const clientCandidates = new Set([...rawSources, ...lockedSources])
   /** @type {('claude'|'codex')[]} */
   const clientsPicked = []
