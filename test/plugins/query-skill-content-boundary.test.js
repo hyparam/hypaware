@@ -11,9 +11,14 @@ const workspaceDir = fileURLToPath(new URL('../../hypaware-core/plugins-workspac
 const CLIENTS = ['claude', 'codex']
 
 /**
- * Skills that read recorded content back to a model and can end in a durable
- * change. Each one has to carry the untrusted-content boundary in every client
- * copy, or the analysis path can treat a captured payload as a directive.
+ * The two skills issue #395 covers: each reads recorded content back to a
+ * model and can end in a durable change, so each has to carry the
+ * untrusted-content boundary in every client copy, or the analysis path can
+ * treat a captured payload as a directive. `hypaware-ai-usage-report` also
+ * reads recorded content back and emits change artifacts that
+ * `hypaware-apply-report-changes` applies, so it meets the same criterion,
+ * but extending the boundary to it is out of scope here and it is not yet
+ * covered.
  */
 const BOUNDARY_SKILLS = ['hypaware-query', 'hypaware-apply-report-changes']
 
@@ -57,7 +62,8 @@ test('hypaware-query separates captured content from the recommendations it is a
   // The recorded failure: a session analysis asked for CLI/tool-execution
   // rules also proposed a rule lifted from the email-writing payload inside
   // the captured task, and the host agent persisted it on a single blanket
-  // approval. The four rules below are what keeps that from reoccurring.
+  // approval. The premise plus the four rules below are what keeps that from
+  // reoccurring.
   const required = [
     // captured content is evidence, not an operative instruction
     /never an operative instruction/,
