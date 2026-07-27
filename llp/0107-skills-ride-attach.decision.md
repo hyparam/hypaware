@@ -6,6 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0011, LLP 0044, LLP 0045, LLP 0063, LLP 0100, LLP 0106
+**Extended-by:** [LLP 0138](./0138-client-assets-one-install.decision.md) -
+subagents are client assets too, so they ride attach on the same terms; both
+kinds materialize through one routine and install under one command. LLP 0138
+is also where this doc was first implemented.
 
 > Attaching a client installs that client's registered skills (and hooks),
 > whoever triggered the attach: manual `hyp attach` and the org-driven
@@ -45,6 +49,16 @@ keeping it current.**
   so a plugin the org adds months later lands its skills without anyone
   re-running login. A login one-shot was rejected for exactly this: it
   covers only the enrollment instant.
+
+  The signal is the asset set itself, not the config diff that moved it: the
+  attach marker records a digest of what the attach would copy, and a pass
+  that computes a different digest treats the marker as stale exactly as it
+  treats one recorded at a moved endpoint
+  ([LLP 0086](./0086-attach-tracks-ephemeral-port.decision.md)). Deriving it
+  from the live registries covers every way the set can change (a plugin
+  added, a plugin upgraded to one contributing more) without the reconciler
+  having to reason about which config edit caused it. Landed by
+  [LLP 0138](./0138-client-assets-one-install.decision.md).
 - **Org influence is plugin-granular, and that is the consent boundary**
   {#consent}: central config can name plugins (pinned versions), and plugins
   carry skills, so an org can cause new skills to appear over time. That

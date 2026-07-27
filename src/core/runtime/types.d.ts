@@ -228,3 +228,74 @@ export interface ActivatePluginsResult {
   runtime: KernelRuntime
   results: ActivationResult[]
 }
+
+// --- client assets (skills + subagents) ---
+
+/**
+ * The two shapes of plugin-contributed client asset. They differ in the
+ * copy (a directory tree vs a single markdown file) and in the manifest
+ * key naming the destination (`skill_dir` vs `agent_dir`); every other
+ * step of materialization is common (LLP 0138).
+ */
+export type ClientAssetKind = 'skill' | 'agent'
+
+/**
+ * One skill or agent contribution flattened to the fields materialization
+ * needs, so the copy loop is written once over both registries.
+ */
+export interface ResolvedClientAsset {
+  kind: ClientAssetKind
+  name: string
+  /** Target client names; the literal `all` means every client in the run. */
+  clients: string[]
+  /** `sourceDir` for a skill, `sourceFile` for an agent. */
+  source: string
+}
+
+/**
+ * One copy an install would make: a contribution paired with the client it
+ * lands in and where it lands. What the copy loop iterates, and what the
+ * freshness digest is taken over.
+ */
+export interface PlannedClientAsset {
+  asset: ResolvedClientAsset
+  client: string
+  /** Absolute destination path. */
+  dest: string
+}
+
+/** One copy made (or, under `dryRun`, that would be made). */
+export interface ClientAssetInstall {
+  kind: ClientAssetKind
+  name: string
+  client: string
+  /** Absolute destination path; the reversal record for org-driven installs. */
+  dest: string
+  dryRun: boolean
+}
+
+export interface MaterializeClientAssetsOptions {
+  /**
+   * Client names to install for; contributions targeting others are skipped.
+   * `'all'` installs for every client the contributions name, so an unknown
+   * one warns rather than being filtered out silently.
+   */
+  clients: string[] | 'all'
+  /** Where each client's asset directories live, from its plugin manifest. */
+  descriptors: Map<string, ClientDescriptor>
+  /** Home directory the per-client relative asset dirs resolve against. */
+  homeDir: string
+  /**
+   * Read structurally rather than as the kernel `SkillRegistry`/`AgentRegistry`
+   * so the wizard finale (which threads a narrowed registry shape) and tests
+   * (which pass fakes) can call this without constructing a full registry.
+   */
+  skills?: { list(): { name: string; clients: string[]; sourceDir: string }[] }
+  agents?: { list(): { name: string; clients: string[]; sourceFile: string }[] }
+  /** Report what would be copied without touching the filesystem. */
+  dryRun?: boolean
+  /** Progress lines, one per copy. Omitted on non-interactive callers. */
+  stdout?: { write(chunk: string): unknown }
+  /** Per-contribution warnings for the skips that are worth surfacing. */
+  stderr?: { write(chunk: string): unknown }
+}

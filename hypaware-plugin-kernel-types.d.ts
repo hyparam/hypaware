@@ -792,14 +792,15 @@ export interface CommandRunContext {
   storage: QueryStorageService
   /**
    * Skill registry (kernel-owned). Populated by the dispatcher.
-   * `hyp skills install` and the Phase 9 walkthrough enumerate this
-   * to materialize plugin-contributed skills under per-client paths.
+   * `hyp skills install`, client attach, and the walkthrough finale
+   * enumerate this to materialize plugin-contributed skills under
+   * per-client paths.
    */
   skills: SkillRegistry
   /**
-   * Agent registry (kernel-owned). Populated by the dispatcher.
-   * `hyp agents install` and the walkthrough enumerate this to
-   * materialize plugin-contributed subagents under per-client paths.
+   * Agent registry (kernel-owned). Populated by the dispatcher. Read by
+   * the same three callers as `skills`: subagents are the other shape of
+   * client asset, not a separate install surface (LLP 0138).
    */
   agents: AgentRegistry
   /**

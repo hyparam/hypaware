@@ -93,6 +93,8 @@ export function createActionReconciler(opts) {
       clientDescriptors: input.clientDescriptors,
       clients: input.clients,
       endpoint: input.endpoint,
+      skills: input.skills,
+      agents: input.agents,
       now,
       log,
     }
@@ -150,6 +152,22 @@ export function createActionReconciler(opts) {
             ...(typeof outcome.rows === 'number' ? { rows: outcome.rows } : {}),
             ...(outcome.detail ?? {}),
           }
+          // Union the undo record across the rewrite, the same carry-forward
+          // the `failed` path below makes. A re-`perform()` reports what *that*
+          // pass applied, not everything the key has ever applied, and the two
+          // differ the moment the desired set shrinks: an attach re-fired
+          // because the org withdrew a plugin copies only what is left, while
+          // the withdrawn plugin's files are still on disk. Taking the report
+          // as the whole truth would drop them from the only record naming
+          // them, and no later reversal could remove them. Re-recording a path
+          // already gone is harmless: removal re-checks containment and rm is
+          // forced.
+          // @ref LLP 0138#marker-undo [implements]: the record of an applied
+          //   effect outlives any rewrite of the marker carrying it
+          const carried = readInstalledAssets(existing)
+          if (carried.length > 0) {
+            marker.installed_assets = [...new Set([...carried, ...readInstalledAssets(marker)])]
+          }
           markers[action.requestKey] = marker
           results.push({
             kind,
@@ -178,6 +196,14 @@ export function createActionReconciler(opts) {
             reason,
             last_attempt: at,
             attempts,
+            // Carry the undo record across the rewrite. `failed` here does not
+            // mean "nothing was ever applied": a `done` attach the handler
+            // reported stale re-`perform()`s, and a copy already on disk stays
+            // there when that retry fails. Dropping `installed_assets` would
+            // leave those files with nothing naming them, so a later reversal
+            // could not remove them (LLP 0138 #marker-undo). A handler that
+            // reports the field itself still wins, via the detail spread.
+            ...(existing?.installed_assets ? { installed_assets: existing.installed_assets } : {}),
             ...(outcome.detail ?? {}),
           }
           markers[action.requestKey] = marker
@@ -205,14 +231,37 @@ export function createActionReconciler(opts) {
         for (const requestKey of Object.keys(markers)) {
           if (desiredKeys.has(requestKey)) continue
           const marker = markers[requestKey]
-          if (!marker || marker.status === 'failed') {
-            // A failed marker for a no-longer-desired key never applied an
-            // effect, so there is nothing to undo: just drop it.
+          // A failed marker for a no-longer-desired key is dropped rather than
+          // reversed: it never applied an effect, and reversing one whose
+          // handler keeps failing would retain it forever. Unless it recorded
+          // one. An attach that went `done`, re-`perform()`ed unsuccessfully,
+          // and carried `installed_assets` into its `failed` rewrite has copies
+          // on disk that nothing else names, so dropping it here would orphan
+          // them; that marker takes the normal reverse path below.
+          //
+          // Which does re-open the retained-forever case, in one shape: an
+          // `attach` reverse fails deterministically when the descriptor is
+          // gone or declares no `attachProbe` (#212), so such a marker now
+          // retries and error-logs on every pass instead of being dropped
+          // once. That is the lesser harm on purpose. A retained `failed`
+          // marker is visible in `hyp status` and does not block a later
+          // re-attach (#217 turns on a `done` one), whereas dropping it
+          // destroys the only record of files that are really on disk. Only
+          // the asset-removal half degrades to naming-and-releasing
+          // (#refusal-is-not-failure); the settings half cannot, because
+          // nothing else on disk would own the settings it left written.
+          // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
+          //   over an effect it recorded, whichever status it carries
+          if (!marker || (marker.status === 'failed' && readInstalledAssets(marker).length === 0)) {
             delete markers[requestKey]
             mutated = true
             continue
           }
-          const outcome = await runOutcome(() => reverse(requestKey, ctx))
+          // Hand the marker to `reverse()`: it is the self-describing undo
+          // record `perform()` wrote, and an effect that cannot be re-derived
+          // from disk alone (which files an org-driven attach copied) is only
+          // reversible from what the marker recorded (LLP 0045 §Part 3).
+          const outcome = await runOutcome(() => reverse(requestKey, ctx, marker))
           if (outcome.status === 'done') {
             delete markers[requestKey]
             results.push({ kind, requestKey, outcome: 'reversed' })
@@ -335,6 +384,28 @@ function readMarkerStore(markerPath) {
     return {}
   }
   return parsed && typeof parsed === 'object' ? /** @type {ActionMarkerStore} */ (parsed) : {}
+}
+
+/**
+ * The `installed_assets` undo record off a marker, defensively: the store is a
+ * JSON file that a pre-LLP-0138 daemon (or a hand edit) may have written
+ * without the field, or with something that is not a list of strings.
+ *
+ * Lives with the marker store rather than with the one handler that writes the
+ * field, because everything that *drops* a marker has to read it first, and
+ * those droppers (this reconciler, `hyp detach`, `hyp leave`) are not all
+ * handlers. Two readers of one persisted field are two chances to disagree
+ * about what it holds.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {string[]}
+ * @ref LLP 0138#marker-undo [implements]: the marker is the undo record, so
+ *   every path that drops one reads its assets through this one accessor.
+ */
+export function readInstalledAssets(marker) {
+  const raw = marker?.installed_assets
+  if (!Array.isArray(raw)) return []
+  return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
 }
 
 /**

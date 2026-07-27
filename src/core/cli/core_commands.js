@@ -40,7 +40,6 @@ import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
 import { runPurge } from '../commands/purge.js'
 import {
-  runAgentsInstall,
   runAttach,
   runDetach,
   runIgnore,
@@ -340,24 +339,18 @@ function buildCoreCommands(registry) {
     makeGroupCommand({
       registry,
       name: 'skills',
-      summary: 'Manage skills for AI clients',
+      summary: 'Manage skills and subagents for AI clients',
     }),
     {
+      // Subagents install here too. The split into a second `agents install`
+      // was an implementation shape (directory copy vs file copy), not a
+      // distinction a user asking for their helpers makes.
+      // @ref LLP 0138#one-command [implements]: one install command for both
+      //   kinds of client asset; no separate agents verb.
       name: 'skills install',
-      summary: 'Install registered skills into AI client directories',
+      summary: 'Install registered skills and subagents into AI client directories',
       usage: 'hyp skills install [--client <name>]',
       run: runSkillsInstall,
-    },
-    makeGroupCommand({
-      registry,
-      name: 'agents',
-      summary: 'Manage subagents for AI clients',
-    }),
-    {
-      name: 'agents install',
-      summary: 'Install registered subagents into AI client directories',
-      usage: 'hyp agents install [--client <name>]',
-      run: runAgentsInstall,
     },
     makeGroupCommand({
       registry,

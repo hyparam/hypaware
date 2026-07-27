@@ -425,6 +425,56 @@ test('a failed reverse keeps the marker in the store (probe-less attach is never
   }
 })
 
+test('a failed marker that recorded an effect is reversed, not dropped (LLP 0138 marker-undo)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    // A failed marker is normally dropped rather than reversed: it never
+    // applied anything. `installed_assets` is the exception that proves it did
+    // - an attach that went `done`, re-performed unsuccessfully, and carried
+    // the field into its `failed` rewrite. Nothing else on disk names those
+    // copies, so dropping the marker would orphan them.
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      markerPath(stateRoot),
+      JSON.stringify({
+        attach: {
+          'with-assets': {
+            status: 'failed',
+            request_key: 'with-assets',
+            reason: 'a later pass failed',
+            installed_assets: ['/home/u/.claude/skills/helper'],
+          },
+          'no-assets': { status: 'failed', request_key: 'no-assets', reason: 'never applied' },
+        },
+      }, null, 2) + '\n'
+    )
+
+    /** @type {ActionHandler & { reverseCalls: string[] }} */
+    const handler = {
+      kind: 'attach',
+      reverseCalls: [],
+      desired() { return [] },
+      async perform() { return { status: 'done' } },
+      async reverse(requestKey) {
+        handler.reverseCalls.push(requestKey)
+        return { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+    const report = await reconciler.reconcile(INPUT)
+
+    assert.deepEqual(handler.reverseCalls, ['with-assets'], 'only the marker with a recorded effect reverses')
+    assert.deepEqual(
+      report.results.map((r) => [r.requestKey, r.outcome]),
+      [['with-assets', 'reversed']]
+    )
+    // Both are gone from the store, but one of them went through its undo.
+    assert.equal(readClientActionStatus({ stateRoot }).byKind.attach, undefined)
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
 test('a run-once handler never reverses a no-longer-desired done marker', async () => {
   const { tmp, stateRoot } = await makeFixture()
   try {

@@ -404,14 +404,123 @@ test('detach still succeeds when the marker retraction throws (best-effort, not 
       env: { ...process.env, HOME: home, HYP_HOME: home, CLAUDE_HOME: '' },
     })
     // Exit 0 proves the best-effort catch swallowed the real throw; the detach
-    // output (written after the catch) and the reversed settings prove execution
-    // continued past it.
+    // output and the reversed settings prove execution continued past it.
     assert.equal(code, 0, stderr.text())
     const out = JSON.parse(stdout.text())
     assert.equal(out.status, 'ok')
     assert.equal(out.changed, true, 'the settings reversal still landed')
     const afterDetach = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
     assert.equal('_hypaware' in afterDetach, false, 'detach stripped the settings marker despite the marker-store throw')
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Seed an attach marker carrying the `installed_assets` an org-driven attach
+ * records: the only on-disk record of which client-asset copies the fleet made
+ * (LLP 0138 #marker-undo).
+ *
+ * @param {string} stateRoot
+ * @param {string} requestKey
+ * @param {string[]} installedAssets
+ */
+function seedMarkerWithAssets(stateRoot, requestKey, installedAssets) {
+  const dir = path.join(stateRoot, 'config-control')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, 'client-actions.json'),
+    JSON.stringify(
+      { attach: { [requestKey]: { status: 'done', request_key: requestKey, installed_assets: installedAssets } } },
+      null,
+      2
+    ) + '\n'
+  )
+}
+
+test('detach removes the assets its attach marker records, and leaves manual copies alone', async () => {
+  // `hyp detach` clears the attach marker, and that marker is the only record
+  // of what an org-driven attach copied, so it has to remove those copies
+  // first - the same obligation `hyp leave` has, discharged in the same core
+  // undo both verbs route through (LLP 0107 §reversal, LLP 0138 #marker-undo).
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-detach-assets-'))
+  const stateRoot = path.join(home, 'hypaware')
+  try {
+    // Three files under ~/.claude, identical in kind and indistinguishable on
+    // disk. Only the marker says which two the org put there.
+    const orgSkill = path.join(home, '.claude', 'skills', 'hypaware-privacy')
+    await fsp.mkdir(orgSkill, { recursive: true })
+    await fsp.writeFile(path.join(orgSkill, 'SKILL.md'), 'org\n', 'utf8')
+    const orgAgent = path.join(home, '.claude', 'agents', 'hypaware-analyst.md')
+    await fsp.mkdir(path.dirname(orgAgent), { recursive: true })
+    await fsp.writeFile(orgAgent, 'org agent\n', 'utf8')
+    const manualSkill = path.join(home, '.claude', 'skills', 'my-own-skill')
+    await fsp.mkdir(manualSkill, { recursive: true })
+    await fsp.writeFile(path.join(manualSkill, 'SKILL.md'), 'mine\n', 'utf8')
+
+    seedMarkerWithAssets(stateRoot, 'claude', [orgSkill, orgAgent])
+
+    const { registry, kernel } = fakeKernel()
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['detach', 'claude'], {
+      stdout,
+      stderr,
+      registry,
+      kernel,
+      env: { ...process.env, HOME: home, HYP_HOME: home, CLAUDE_HOME: '' },
+    })
+    assert.equal(code, 0, stderr.text())
+
+    // Exactly what the marker named is gone, both asset shapes.
+    await assert.rejects(fsp.stat(orgSkill), 'the org-installed skill is removed')
+    await assert.rejects(fsp.stat(orgAgent), 'the org-installed subagent is removed')
+    // And nothing else: a manual copy records no marker, so a detach that
+    // removed it would be deleting the user's own file.
+    assert.equal(await fsp.readFile(path.join(manualSkill, 'SKILL.md'), 'utf8'), 'mine\n')
+    assert.match(stdout.text(), /Removed 2 org-installed asset\(s\)/)
+    // The marker only drops once its assets are actually gone.
+    assert.equal(readMarkers(stateRoot).attach?.claude, undefined, 'the attach marker is retracted')
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('detach names the assets it refuses to remove, and does not keep the marker for them', async () => {
+  // `installed_assets` is persisted JSON, so a path outside the client's asset
+  // directories is refused, never obeyed. A refusal is deterministic, so it is
+  // not the retryable kind of failure: keeping the marker for it would leave a
+  // `done` attach whose settings are already reversed (the stale marker that
+  // blocks a later re-attach, #217) and no re-run could ever clear it. The
+  // record moves to the operator instead (LLP 0138 #marker-undo).
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-detach-assets-refuse-'))
+  const stateRoot = path.join(home, 'hypaware')
+  try {
+    const outsider = path.join(home, 'precious')
+    await fsp.mkdir(outsider, { recursive: true })
+    await fsp.writeFile(path.join(outsider, 'keep.txt'), 'keep\n', 'utf8')
+    seedMarkerWithAssets(stateRoot, 'claude', [outsider])
+
+    const { registry, kernel } = fakeKernel()
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const code = await dispatch(['detach', 'claude'], {
+      stdout,
+      stderr,
+      registry,
+      kernel,
+      env: { ...process.env, HOME: home, HYP_HOME: home, CLAUDE_HOME: '' },
+    })
+
+    assert.equal(code, 0, 'the settings undo landed and no re-run could do better')
+    assert.match(stderr.text(), /refused and left in place - remove them by hand/)
+    assert.ok(stderr.text().includes(outsider), 'the refused path is named on the way out')
+    assert.equal(await fsp.readFile(path.join(outsider, 'keep.txt'), 'utf8'), 'keep\n')
+    assert.equal(
+      readMarkers(stateRoot).attach?.claude,
+      undefined,
+      'the marker does not outlive a removal that can never succeed'
+    )
   } finally {
     await fsp.rm(home, { recursive: true, force: true })
   }

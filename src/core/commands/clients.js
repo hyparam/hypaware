@@ -2,7 +2,6 @@
 
 import fs from 'node:fs/promises'
 import { parseCommandArgv } from '../cli/verb_codec.js'
-import { copyDir } from '../util/fs_copy.js'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -11,10 +10,15 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
-import { isWithinDir } from '../runtime/contribution_names.js'
+import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
-import { clearClientActionMarker } from '../config/action_reconciler.js'
+import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
+import {
+  clearClientActionMarker,
+  readClientActionStatus,
+  readInstalledAssets,
+} from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
@@ -255,9 +259,19 @@ async function runClientLifecycle(action, argv, ctx) {
               } else {
                 ctx.stdout.write(
                   `${name} is already attached${probe.settingsPath !== undefined ? ` (${probe.settingsPath})` : ''}; ` +
-                  `the daemon manages attach for this install, nothing to do.\n`
+                  `the daemon manages attach for this install, so only its assets are refreshed.\n`
                 )
               }
+              // The settings are already wired, but attach means settings *and*
+              // assets, and this branch is the one an operator on a
+              // daemon-managed install actually reaches. Short-circuiting past
+              // the materialization below would make `hyp attach` install
+              // nothing on exactly the install shape it is most often run on,
+              // reintroducing the split this change removes. Idempotent and
+              // cheap, so running it on a no-op attach costs a stat pass.
+              // @ref LLP 0107#every-attach [implements]: every attach path
+              //   materializes, including the one with nothing left to wire
+              await materializeAttachAssets({ name, descriptorMap, ctx, dryRun: false, json: parsed.json })
               continue
             }
             if (liveEndpoint) {
@@ -304,6 +318,21 @@ async function runClientLifecycle(action, argv, ctx) {
         dryRun: parsed.dryRun,
         json: parsed.json,
       })
+      // Attach wires a client into HypAware, and its registered skills and
+      // subagents are part of that wiring: manual attach skipping them was the
+      // inconsistency, not the norm (the wizard has always treated
+      // attach-plus-skills as one unit). No marker is recorded, so these copies
+      // are the user's own and `hyp detach` leaves them in place.
+      // @ref LLP 0107#every-attach [implements]: manual attach materializes the
+      //   client's assets, the same set the reconciler's attach installs
+      descriptorMap ??= await buildClientDescriptorMap(ctx)
+      await materializeAttachAssets({
+        name,
+        descriptorMap,
+        ctx,
+        dryRun: parsed.dryRun === true,
+        json: parsed.json,
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       ctx.stderr.write(`error: ${action} client '${name}' failed: ${message}\n`)
@@ -314,6 +343,37 @@ async function runClientLifecycle(action, argv, ctx) {
 }
 
 /**
+ * Materialize one manually attached client's skills and subagents. A thin wrap
+ * of {@link materializeClientAssets} with `hyp attach`'s stream conventions,
+ * called from both attach exits - the one that wired the settings and the
+ * daemon-managed one that found nothing left to wire - so neither can quietly
+ * become the path that installs no assets.
+ *
+ * @param {{
+ *   name: string,
+ *   descriptorMap: Map<string, ClientDescriptor>,
+ *   ctx: CommandRunContext,
+ *   dryRun: boolean,
+ *   json: boolean,
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json }) {
+  await materializeClientAssets({
+    clients: [name],
+    descriptors: descriptorMap,
+    homeDir: ctx.env.HOME ?? os.homedir(),
+    skills: ctx.skills,
+    agents: ctx.agents,
+    dryRun,
+    // Under --json the adapter's one-line machine payload stays the only thing
+    // on stdout, so the per-copy progress lines are suppressed.
+    ...(json ? {} : { stdout: ctx.stdout }),
+    stderr: ctx.stderr,
+  })
+}
+
+/**
  * Reverse a client's attach from disk — the single core undo
  * (`detachClientFromDisk`). The manual `hyp detach` command and the
  * daemon reconciler's `reverse()` both route through this one
@@ -321,6 +381,13 @@ async function runClientLifecycle(action, argv, ctx) {
  * plugin + `attach_probe`), so there is no per-adapter detach for the
  * one undo to drift from. Emits a `client.detach` span and the same
  * `done`/`no-op` output shape callers grep.
+ *
+ * Reversing an attach is settings *and* assets: this routine drops the attach
+ * marker, and that marker is the only record of the skills and subagents an
+ * org-driven attach copied, so it removes them before it clears it. Every
+ * caller gets that - the manual `hyp detach` and `hyp leave`'s per-client
+ * reversal alike - because the read-then-remove lives here, next to the clear,
+ * rather than in one caller (LLP 0138 #marker-undo).
  *
  * @param {{
  *   name: string,
@@ -384,6 +451,9 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
             changed: true,
           })
         }
+        writeCoreDetachOutput({ ctx, name, json, result })
+        const stateRoot = readObservabilityEnv(ctx.env).stateDir
+
         // Retract the attach marker so the CLI undo and the marker store stay in
         // sync, mirroring the reconciler's reverse() after its own disk undo,
         // including reverse()'s probe-less exception. `changed:false` is
@@ -400,10 +470,64 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
         // client (#217). Best-effort: a marker we cannot retract is a status
         // blemish, not a detach failure (the settings undo already landed).
         // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
+        //
+        // The skills and subagents an org-driven attach installed come off its
+        // marker, and the retraction below clears that marker, so they have to
+        // be read and removed first: a detach that dropped the marker without
+        // them would strand the files with nothing left on disk naming them.
+        // Removal is marker-driven, never registry-driven, so a user's own
+        // `hyp attach` / `hyp skills install` copy (which records no marker)
+        // survives. Gated on the same `attachProbe` the retraction is: a
+        // probe-less client keeps its marker, and the reconciler's reverse()
+        // likewise refuses to touch assets it cannot un-wire the settings for.
+        // @ref LLP 0107#reversal [implements]: detach removes the assets the org
+        //   installed, exactly as it reverses the settings edits
+        //
+        // A removal that failed and one that was refused are not the same
+        // outcome, so they do not share a resolution. An I/O failure may
+        // succeed next run: keep the marker, fail the command, say so. A
+        // containment refusal is deterministic - the recorded path and the
+        // client's directories are both fixed - so it re-refuses forever, and
+        // keeping the marker for it would make the undo permanently
+        // unfinishable while leaving a `done` marker whose settings effect is
+        // already reversed, the stale marker that blocks a later re-attach
+        // (#217). Refusals print the paths and let the marker go, the same
+        // degradation `hyp leave` already makes when the plugin is gone and
+        // there are no directories to bound a delete.
+        // @ref LLP 0138#refusal-is-not-failure [implements]: keep the marker
+        //   for a removal that can still succeed; name what it leaves when not
+        let assetFailure = ''
         if (descriptor.attachProbe) {
+          const marker = readClientActionStatus({ stateRoot }).byKind.attach?.[name]
+          const installedAssets = readInstalledAssets(marker)
+          if (installedAssets.length > 0) {
+            const { removed, failed } = await removeClientAssets(
+              installedAssets,
+              clientAssetBaseDirs(descriptor, homeDir)
+            )
+            if (removed.length > 0 && !json) {
+              ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
+            }
+            const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
+            if (failed.some((f) => f.retryable)) {
+              assetFailure =
+                `detached '${name}', but ${failed.length} installed asset(s) could not be removed: ${detail}` +
+                ' - kept the attach marker so a re-run can retry them'
+            } else if (failed.length > 0) {
+              // stderr, and unconditionally: this is the last moment these
+              // paths are named anywhere, and under --json stdout is the
+              // machine payload alone.
+              ctx.stderr.write(
+                `warning: ${failed.length} recorded asset(s) refused and left in place - remove them by hand:\n`
+              )
+              for (const f of failed) ctx.stderr.write(`  ${f.dest} (${f.reason})\n`)
+            }
+          }
+        }
+        if (descriptor.attachProbe && assetFailure.length === 0) {
           try {
             clearClientActionMarker({
-              stateRoot: readObservabilityEnv(ctx.env).stateDir,
+              stateRoot,
               kind: 'attach',
               requestKey: name,
             })
@@ -416,7 +540,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
             })
           }
         }
-        writeCoreDetachOutput({ ctx, name, json, result })
+        if (assetFailure.length > 0) throw new Error(assetFailure)
       } catch (err) {
         span.setAttribute('status', 'failed')
         span.setAttribute('restored', false)
@@ -1057,13 +1181,22 @@ function isUnderDir(p, dir) {
 /**
  * `hyp skills install [--client <name>]`
  *
- * Walks the kernel skill registry and materializes each contribution
- * into the right per-client skill directory. The skill source tree
- * (a directory with `SKILL.md`) is copied recursively; existing
+ * Materializes every registered skill **and subagent** into the right
+ * per-client directories. One command, because a user asking for their
+ * helpers installed is not distinguishing a skill directory from a
+ * subagent file; the two shapes are a detail of the copy
+ * ({@link materializeClientAssets}), not of the request. Existing
  * installations are replaced (idempotent).
+ *
+ * The standalone manual path stays useful after LLP 0107 put the same
+ * materialization on attach: it re-runs the copy without re-attaching,
+ * which is what a user wants after editing or clobbering an installed
+ * skill.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @ref LLP 0138#one-command [implements]: skills and agents install together
+ *   under `hyp skills install`; there is no second command for the agent half.
  */
 export async function runSkillsInstall(argv, ctx) {
   const parsed = parseSkillsArgs(argv)
@@ -1072,114 +1205,30 @@ export async function runSkillsInstall(argv, ctx) {
     return 2
   }
 
-  const skills = ctx.skills.list()
-  if (skills.length === 0) {
-    ctx.stdout.write('(no skills registered)\n')
-    return 0
-  }
-
   const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
   if (!homeDir) {
     ctx.stderr.write('error: HOME is not set; cannot resolve skill install paths\n')
     return 1
   }
 
-  const descriptorMap = await buildClientDescriptorMap(ctx)
+  const descriptors = await buildClientDescriptorMap(ctx)
+  const installed = await materializeClientAssets({
+    clients: parsed.client === 'all' ? 'all' : [parsed.client],
+    descriptors,
+    homeDir,
+    skills: ctx.skills,
+    agents: ctx.agents,
+    stdout: ctx.stdout,
+    stderr: ctx.stderr,
+  })
 
-  let count = 0
-  for (const skill of skills) {
-    for (const targetClient of skill.clients) {
-      if (parsed.client !== 'all' && parsed.client !== targetClient) continue
-      const skillDir = descriptorMap.get(targetClient)?.skillDir
-      if (!skillDir) {
-        ctx.stderr.write(`warning: skill '${skill.name}' targets unknown client '${targetClient}'\n`)
-        continue
-      }
-      const baseDir = path.join(homeDir, skillDir)
-      const dest = path.join(baseDir, skill.name)
-      // Defense in depth: registration rejects traversal names, but the
-      // skill dir comes from a plugin manifest, so re-check containment.
-      if (!isWithinDir(dest, baseDir)) {
-        ctx.stderr.write(`warning: skill '${skill.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
-        continue
-      }
-      try {
-        await fs.rm(dest, { recursive: true, force: true })
-        await copyDir(skill.sourceDir, dest)
-        ctx.stdout.write(`installed skill '${skill.name}' → ${dest}\n`)
-        count += 1
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        ctx.stderr.write(`warning: skill '${skill.name}' for ${targetClient} failed: ${message}\n`)
-      }
-    }
-  }
-  ctx.stdout.write(`installed ${count} skill copy(ies)\n`)
-  return 0
-}
-
-/**
- * `hyp agents install [--client <name>]`
- *
- * Mirrors `hyp skills install` for subagent contributions. Each agent
- * is a single markdown definition file materialized flat into the
- * per-client agent directory as `<agent_dir>/<name>.md`; existing
- * installations are replaced (idempotent). Clients without an
- * `agent_dir` in their manifest are skipped with a warning.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runAgentsInstall(argv, ctx) {
-  const parsed = parseSkillsArgs(argv)
-  if (parsed.error) {
-    ctx.stderr.write(`error: ${parsed.error}\n`)
-    return 2
-  }
-
-  const agents = ctx.agents.list()
-  if (agents.length === 0) {
-    ctx.stdout.write('(no agents registered)\n')
+  if (installed.length === 0) {
+    ctx.stdout.write('(nothing to install)\n')
     return 0
   }
-
-  const homeDir = ctx.env.HOME ?? process.env.HOME ?? ''
-  if (!homeDir) {
-    ctx.stderr.write('error: HOME is not set; cannot resolve agent install paths\n')
-    return 1
-  }
-
-  const descriptorMap = await buildClientDescriptorMap(ctx)
-
-  let count = 0
-  for (const agent of agents) {
-    for (const targetClient of agent.clients) {
-      if (parsed.client !== 'all' && parsed.client !== targetClient) continue
-      const agentDir = descriptorMap.get(targetClient)?.agentDir
-      if (!agentDir) {
-        ctx.stderr.write(`warning: agent '${agent.name}' targets client '${targetClient}' without an agent directory\n`)
-        continue
-      }
-      const baseDir = path.join(homeDir, agentDir)
-      const dest = path.join(baseDir, `${agent.name}.md`)
-      // Defense in depth: registration rejects traversal names, but the
-      // agent dir comes from a plugin manifest, so re-check containment.
-      if (!isWithinDir(dest, baseDir)) {
-        ctx.stderr.write(`warning: agent '${agent.name}' for ${targetClient} resolves outside ${baseDir}; skipped\n`)
-        continue
-      }
-      try {
-        await fs.mkdir(path.dirname(dest), { recursive: true })
-        await fs.copyFile(agent.sourceFile, dest)
-        ctx.stdout.write(`installed agent '${agent.name}' → ${dest}\n`)
-        count += 1
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        ctx.stderr.write(`warning: agent '${agent.name}' for ${targetClient} failed: ${message}\n`)
-      }
-    }
-  }
-  ctx.stdout.write(`installed ${count} agent copy(ies)\n`)
+  const skillCount = installed.filter((a) => a.kind === 'skill').length
+  const agentCount = installed.length - skillCount
+  ctx.stdout.write(`installed ${skillCount} skill copy(ies), ${agentCount} agent copy(ies)\n`)
   return 0
 }
 
