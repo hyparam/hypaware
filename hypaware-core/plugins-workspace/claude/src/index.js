@@ -381,7 +381,7 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
     },
     query: {
       cache: {
-        retention: { default_days: 30 },
+        retention: { default_days: 90 },
       },
     },
   }

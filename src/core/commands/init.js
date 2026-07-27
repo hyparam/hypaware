@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
 import { runInitWizard } from '../cli/wizard/index.js'
+import { DEFAULT_RETENTION_DAYS } from '../cli/walkthrough.js'
 import { validateConfig } from '../config/validate.js'
 import { runBackfillProvider } from './backfill.js'
 import { buildKnownPluginsForCtx } from './plugin.js'
@@ -165,7 +166,7 @@ function parseInitFlags(argv) {
     clients: [],
     sources: [],
     exportChoice: undefined,
-    retentionDays: 30,
+    retentionDays: DEFAULT_RETENTION_DAYS,
     force: false,
   }
   const parsed = parseCommandArgv(argv, {
@@ -178,7 +179,7 @@ function parseInitFlags(argv) {
       client: { type: 'array', items: { type: 'string', enum: ['claude', 'codex'] } },
       source: { type: 'array', items: { type: 'string', enum: ['claude', 'codex', 'openclaw', 'hermes', 'raw-anthropic', 'raw-openai', 'otel'] } },
       export: { type: 'string', enum: ['keep-local', 'local-parquet', 'configure-later'] },
-      'retention-days': { type: 'integer', minimum: 0, default: 30 },
+      'retention-days': { type: 'integer', minimum: 0, default: DEFAULT_RETENTION_DAYS },
       'from-file': { type: 'string' },
       bin: { type: 'string' },
     },

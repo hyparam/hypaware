@@ -11,6 +11,7 @@ import { readClientActionStatus } from '../config/action_reconciler.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
+import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
@@ -941,7 +942,7 @@ function readRetention(config) {
   if (typeof days === 'number' && Number.isFinite(days) && days >= 0) {
     return { days, source: 'config' }
   }
-  return { days: 30, source: 'default' }
+  return { days: DEFAULT_RETENTION_DAYS, source: 'default' }
 }
 
 /**

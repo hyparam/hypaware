@@ -34,10 +34,10 @@ it's gone. The cache is recent-data-only by design, and this is the tradeoff to
 surface to users.
 
 ```json
-{ "query": { "cache": { "retention": { "default_days": 30, "datasets": { "logs": 7 } } } } }
+{ "query": { "cache": { "retention": { "default_days": 90, "datasets": { "logs": 7 } } } } }
 ```
 
-Default retention is 30 days. A deployment with no export sink relies entirely
+Default retention is 90 days. A deployment with no export sink relies entirely
 on this window. A deployment that pairs the cache with a **queryable sink**
 (local-fs+parquet, or S3+iceberg) gets recent queries served locally and
 historical queries reaching into the sink, transparently

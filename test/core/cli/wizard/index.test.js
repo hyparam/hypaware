@@ -175,7 +175,7 @@ test('runInitWizard: team pathway threads locked + managed into the pick phase',
   assert.equal(result.pathway, 'team')
   assert.deepEqual(opts._pickOpts.locked, ['claude'])
   assert.equal(opts._pickOpts.managed, true)
-  // The team pathway takes the pick phase's 30-day default: no
+  // The team pathway takes the pick phase's 90-day default: no
   // retentionDefault override (LLP 0137 #pathway-defaults).
   assert.equal(opts._pickOpts.retentionDefault, undefined)
 })

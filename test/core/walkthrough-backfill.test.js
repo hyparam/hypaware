@@ -251,7 +251,7 @@ test('interactive onboarding maps cancelled backfill consent to the cancel exit 
   assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
   assert.deepEqual(result.sourcesPicked, ['claude'])
   assert.deepEqual(result.clientsPicked, ['claude'])
-  assert.equal(result.retentionDays, 30)
+  assert.equal(result.retentionDays, 90)
   assert.equal(backfill.calls.length, 0, 'cancelling consent must skip the backfill run')
   assert.equal(result.finale?.cancelled, true)
   assert.deepEqual(result.finale?.backfill, [])

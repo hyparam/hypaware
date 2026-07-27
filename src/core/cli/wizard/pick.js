@@ -150,7 +150,7 @@ export async function runWizardPick(opts) {
       // box. Other destinations remain available via `hyp init --export`.
       exportChoice = /** @type {PickerExport} */ ('local-parquet')
       // Retention is not asked either: the orchestrator supplies the
-      // pathway default (30-day team / 120-day local), overridable only
+      // pathway default (90-day team / 120-day local), overridable only
       // via `hyp init --retention-days` on the non-interactive path.
       // @ref LLP 0137#pathway-defaults [implements]: the retention question is removed from onboarding
       retentionDays = opts.retentionDefault ?? DEFAULT_RETENTION_DAYS

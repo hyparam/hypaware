@@ -34,7 +34,7 @@ is no mode flag to keep in sync.
     { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
     { "name": "@hypaware/gascity" }
   ],
-  "query": { "cache": { "dir": "~/.hyp/hypaware", "retention": { "default_days": 30 } } }
+  "query": { "cache": { "dir": "~/.hyp/hypaware", "retention": { "default_days": 90 } } }
 }
 ```
 

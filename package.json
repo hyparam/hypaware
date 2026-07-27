@@ -9,14 +9,38 @@
   },
   "types": "./src/core/index.d.ts",
   "exports": {
-    ".": { "types": "./src/core/index.d.ts", "import": "./src/core/index.js" },
-    "./core": { "types": "./src/core/index.d.ts", "import": "./src/core/index.js" },
-    "./core/observability": { "types": "./types/core/observability/index.d.ts", "import": "./src/core/observability/index.js" },
-    "./core/sinks": { "types": "./types/core/sinks/index.d.ts", "import": "./src/core/sinks/index.js" },
-    "./core/query": { "types": "./types/core/query/index.d.ts", "import": "./src/core/query/index.js" },
-    "./core/util": { "types": "./types/core/util/index.d.ts", "import": "./src/core/util/index.js" },
-    "./integration": { "types": "./src/core/cli/integration.d.ts", "import": "./src/core/cli/integration.js" },
-    "./tui": { "types": "./types/core/cli/tui/index.d.ts", "import": "./src/core/cli/tui/index.js" }
+    ".": {
+      "types": "./src/core/index.d.ts",
+      "import": "./src/core/index.js"
+    },
+    "./core": {
+      "types": "./src/core/index.d.ts",
+      "import": "./src/core/index.js"
+    },
+    "./core/observability": {
+      "types": "./types/core/observability/index.d.ts",
+      "import": "./src/core/observability/index.js"
+    },
+    "./core/sinks": {
+      "types": "./types/core/sinks/index.d.ts",
+      "import": "./src/core/sinks/index.js"
+    },
+    "./core/query": {
+      "types": "./types/core/query/index.d.ts",
+      "import": "./src/core/query/index.js"
+    },
+    "./core/util": {
+      "types": "./types/core/util/index.d.ts",
+      "import": "./src/core/util/index.js"
+    },
+    "./integration": {
+      "types": "./src/core/cli/integration.d.ts",
+      "import": "./src/core/cli/integration.js"
+    },
+    "./tui": {
+      "types": "./types/core/cli/tui/index.d.ts",
+      "import": "./src/core/cli/tui/index.js"
+    }
   },
   "imports": {
     "#core/observability": "./src/core/observability/index.js"
@@ -39,8 +63,8 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1094.0",
-    "@aws-sdk/credential-provider-ini": "3.973.5",
+    "@aws-sdk/client-s3": "3.1096.0",
+    "@aws-sdk/credential-provider-ini": "3.973.7",
     "hyparquet": "1.26.2",
     "hyparquet-compressors": "1.1.1",
     "icebird": "0.8.15",
@@ -51,7 +75,7 @@
     "hypvector": "0.2.2"
   },
   "devDependencies": {
-    "@types/node": "26.1.1",
+    "@types/node": "26.1.2",
     "typescript": "6.0.3"
   }
 }

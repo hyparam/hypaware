@@ -58,7 +58,10 @@ On a TTY this launches the interactive walkthrough:
    - OTEL logs / traces / metrics (`otel`)
 2. Pick an **export** strategy: keep the local query cache only, write
    Parquet files under `<HYP_HOME>/exports`, or configure later.
-3. Pick a **retention window** (default `30` days).
+3. The **retention window** is not asked: the pathway sets it, `90` days on
+   a team install and `120` on a local-only one. `hyp init --retention-days
+   <N>` overrides it, and `query.cache.retention` in the written config
+   remains the post-install knob.
 4. HypAware composes a minimal config with only the bundled plugins it
    needs, writes it to `<HYP_HOME>/hypaware-config.json`, installs the
    persistent daemon (launchd on macOS, systemd `--user` on Linux),
@@ -74,7 +77,7 @@ hyp init --yes \
   --source claude --source otel \
   --client claude \
   --export local-parquet \
-  --retention-days 30
+  --retention-days 90
 ```
 
 Other init flags:
@@ -87,7 +90,7 @@ Other init flags:
 | `--client claude\|codex`   | Attach a client (repeatable)                            |
 | `--source <id>`            | Add a capture source (repeatable)                       |
 | `--export <choice>`        | `keep-local`, `local-parquet`, or `configure-later`     |
-| `--retention-days <N>`     | Override the default 30-day retention window            |
+| `--retention-days <N>`     | Override the default 90-day retention window            |
 | `--from-file <config.json>`| Skip the picker and load a known-good config            |
 | `--bin <path>`             | Override the binary path the daemon installer uses      |
 
