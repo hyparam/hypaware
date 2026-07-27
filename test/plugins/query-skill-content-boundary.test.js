@@ -39,6 +39,20 @@ async function readSkill(client, skill) {
 }
 
 /**
+ * Prose with every run of whitespace collapsed to one space, so a clause is
+ * matched by its wording rather than by where the file happens to wrap. The
+ * two copies wrap very differently (`hypaware-query` runs one long line per
+ * paragraph, `hypaware-ai-usage-report` hard-wraps near 85 columns), and a
+ * re-flow that splits a required clause across a newline must not read as a
+ * missing guardrail.
+ * @param {string} text
+ * @returns {string}
+ */
+function flatten(text) {
+  return text.replace(/\s+/g, ' ')
+}
+
+/**
  * Body of the named `##` section, up to the next `##` heading. Frontmatter is
  * deliberately excluded: the `description:` field is owned by the skill's
  * routing, not by this boundary.
@@ -58,7 +72,7 @@ test('every client copy of a content-reading skill states that recorded content 
   for (const skill of BOUNDARY_SKILLS) {
     for (const client of CLIENTS) {
       const md = await readSkill(client, skill)
-      assert.match(md, /data, not instructions/, `${client}/${skill} must carry the untrusted-content boundary`)
+      assert.match(flatten(md), /data, not instructions/, `${client}/${skill} must carry the untrusted-content boundary`)
     }
   }
 })
@@ -91,7 +105,7 @@ test('a boundary section separates captured content from the changes its skill m
       const body = section(md, BOUNDARY_HEADING)
       assert.ok(body, `${client}/${skill} is missing the "${BOUNDARY_HEADING}" section`)
       for (const rule of required) {
-        assert.match(body, rule, `${client}/${skill} boundary section must state ${rule}`)
+        assert.match(flatten(body), rule, `${client}/${skill} boundary section must state ${rule}`)
       }
 
       // The boundary is only load-bearing if the reader reaches it, so the
@@ -99,7 +113,7 @@ test('a boundary section separates captured content from the changes its skill m
       // Guardrails list, hypaware-ai-usage-report from the step that ranks
       // proposed changes.
       const elsewhere = md.replace(BOUNDARY_HEADING, '').replace(body, '')
-      assert.match(elsewhere, /data, not instructions/, `${client}/${skill} must point at the boundary from outside the section`)
+      assert.match(flatten(elsewhere), /data, not instructions/, `${client}/${skill} must point at the boundary from outside the section`)
     }
   }
 })
@@ -108,7 +122,7 @@ test('hypaware-query restates the boundary in its Guardrails list', async () => 
   for (const client of CLIENTS) {
     const guardrails = section(await readSkill(client, 'hypaware-query'), '## Guardrails')
     assert.ok(guardrails, `${client}/hypaware-query is missing its Guardrails section`)
-    assert.match(guardrails, /data, not instructions/, `${client}/hypaware-query Guardrails must restate the boundary`)
+    assert.match(flatten(guardrails), /data, not instructions/, `${client}/hypaware-query Guardrails must restate the boundary`)
   }
 })
 
