@@ -13,7 +13,9 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
-import { clearClientActionMarker } from '../config/action_reconciler.js'
+import { readInstalledAssets } from '../config/action_attach.js'
+import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
+import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
@@ -341,24 +343,24 @@ async function runClientLifecycle(action, argv, ctx) {
  * one undo to drift from. Emits a `client.detach` span and the same
  * `done`/`no-op` output shape callers grep.
  *
- * `clearMarker` defaults to true (the manual `hyp detach` case: no other
- * step owns the marker). `hyp leave` passes false when it could not remove the
- * assets that marker records, because the marker is the only record of what
- * was copied - dropping it there would strand the files with nothing left to
- * name them (LLP 0138 #marker-undo). The marker survives, so a re-run retries.
+ * Reversing an attach is settings *and* assets: this routine drops the attach
+ * marker, and that marker is the only record of the skills and subagents an
+ * org-driven attach copied, so it removes them before it clears it. Every
+ * caller gets that - the manual `hyp detach` and `hyp leave`'s per-client
+ * reversal alike - because the read-then-remove lives here, next to the clear,
+ * rather than in one caller (LLP 0138 #marker-undo).
  *
  * @param {{
  *   name: string,
  *   descriptor: ClientDescriptor | undefined,
  *   dryRun: boolean,
  *   json: boolean,
- *   clearMarker?: boolean,
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<void>}
  * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, clearMarker = true, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -410,6 +412,9 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, clea
             changed: true,
           })
         }
+        writeCoreDetachOutput({ ctx, name, json, result })
+        const stateRoot = readObservabilityEnv(ctx.env).stateDir
+
         // Retract the attach marker so the CLI undo and the marker store stay in
         // sync, mirroring the reconciler's reverse() after its own disk undo,
         // including reverse()'s probe-less exception. `changed:false` is
@@ -426,10 +431,44 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, clea
         // client (#217). Best-effort: a marker we cannot retract is a status
         // blemish, not a detach failure (the settings undo already landed).
         // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
-        if (descriptor.attachProbe && clearMarker) {
+        //
+        // The skills and subagents an org-driven attach installed come off its
+        // marker, and the retraction below clears that marker, so they have to
+        // be read and removed first: a detach that dropped the marker without
+        // them would strand the files with nothing left on disk naming them.
+        // Removal is marker-driven, never registry-driven, so a user's own
+        // `hyp attach` / `hyp skills install` copy (which records no marker)
+        // survives. Gated on the same `attachProbe` the retraction is: a
+        // probe-less client keeps its marker, and the reconciler's reverse()
+        // likewise refuses to touch assets it cannot un-wire the settings for.
+        // @ref LLP 0107#reversal [implements]: detach removes the assets the org
+        //   installed, exactly as it reverses the settings edits
+        // @ref LLP 0138#marker-undo [constrained-by]: the marker is the undo
+        //   record, so keep it when its assets could not be removed
+        let assetFailure = ''
+        if (descriptor.attachProbe) {
+          const marker = readClientActionStatus({ stateRoot }).byKind.attach?.[name]
+          const installedAssets = readInstalledAssets(marker)
+          if (installedAssets.length > 0) {
+            const { removed, failed } = await removeClientAssets(
+              installedAssets,
+              clientAssetBaseDirs(descriptor, homeDir)
+            )
+            if (removed.length > 0 && !json) {
+              ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
+            }
+            if (failed.length > 0) {
+              const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
+              assetFailure =
+                `detached '${name}', but ${failed.length} installed asset(s) could not be removed: ${detail}` +
+                ' - kept the attach marker so a re-run can retry them'
+            }
+          }
+        }
+        if (descriptor.attachProbe && assetFailure.length === 0) {
           try {
             clearClientActionMarker({
-              stateRoot: readObservabilityEnv(ctx.env).stateDir,
+              stateRoot,
               kind: 'attach',
               requestKey: name,
             })
@@ -442,7 +481,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, clea
             })
           }
         }
-        writeCoreDetachOutput({ ctx, name, json, result })
+        if (assetFailure.length > 0) throw new Error(assetFailure)
       } catch (err) {
         span.setAttribute('status', 'failed')
         span.setAttribute('restored', false)

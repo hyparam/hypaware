@@ -78,15 +78,33 @@ every path that installs one installs the other, through one routine.**
   and it must not touch a user's own `hyp skills install` copies, which record
   no marker. `ActionHandler.reverse()` therefore receives the marker it is about
   to drop. The rule is "read the assets before dropping the marker", not "the
-  reconciler reads the assets": `hyp leave` reverses the same markers outside
-  the reconciler, so it reads the same field through the same accessor, removes
-  before it clears, and *keeps* a marker whose assets it could not remove -
-  dropping that one would strand the files with nothing left on disk naming
-  them. And because `installed_assets` is persisted JSON driving a recursive
-  delete, both readers re-check each recorded path against the client's own
-  asset directories first: the write side validates containment even though
+  reconciler reads the assets": the CLI drops the same markers outside the
+  reconciler, so the read-then-remove lives in the one core undo
+  (`detachClientViaCore`) next to the clear, not in a caller. `hyp detach` and
+  `hyp leave` therefore both remove before they clear, both read the field
+  through the same accessor, both resolve the client's directories from the same
+  home-directory fallback the reconciler's `reverse()` uses, and both *keep* a
+  marker whose assets they could not remove - dropping that one would strand the
+  files with nothing left on disk naming them. Where removal is impossible
+  rather than merely failed, the rule degrades to naming: `hyp leave` on a client
+  whose plugin is gone has no descriptor, hence no asset directories to bound a
+  recursive delete, so it prints the recorded paths before dropping the marker
+  instead of destroying the only record of them. And a `perform()` that fails
+  after an earlier one succeeded carries `installed_assets` into the `failed`
+  rewrite: the copies are still on disk, so the record of them has to outlive
+  the status change. One drop still escapes the rule: the reconciler's reverse
+  gap deletes a `failed` marker for a no-longer-desired key without reversing
+  it, which orphans assets carried into that marker. Closing it means choosing
+  between reversing a marker whose handler may keep failing (retained forever)
+  and dropping it, the same open question a reverse that cannot finish raises;
+  it is unresolved, not decided.
+
+  And because `installed_assets` is persisted JSON driving a recursive delete,
+  both readers re-check each recorded path against the client's own asset
+  directories first: the write side validates containment even though
   registration validated the name, and the delete side has the weaker input of
-  the two.
+  the two. A client that resolves *no* asset directories refuses every recorded
+  path, and says so as that rather than as a containment failure.
 
 ## Consequences
 

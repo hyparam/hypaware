@@ -137,7 +137,9 @@ export function clientAssetBaseDirs(descriptor, homeDir) {
  * registration validated the name; the delete side needs it more, because its
  * input is persisted state rather than a live registry. A dest outside every
  * base is reported failed, never removed: the marker then survives for a human
- * to look at instead of the deletion being papered over as done.
+ * to look at instead of the deletion being papered over as done. An empty
+ * `baseDirs` refuses everything too, but says so as "no asset directories
+ * resolved" rather than as a containment failure the caller cannot act on.
  *
  * @param {string[]} dests
  * @param {string[]} baseDirs  The directories a recorded dest must sit beneath
@@ -151,6 +153,13 @@ export async function removeClientAssets(dests, baseDirs) {
   const removed = []
   /** @type {{ dest: string, reason: string }[]} */
   const failed = []
+  // With no base directories nothing can be contained, so every dest would be
+  // refused for "resolving outside" them - naming the wrong cause. The cause is
+  // that this client resolved no asset directories at all: no home directory to
+  // join them onto, or a descriptor declaring neither kind.
+  if (baseDirs.length === 0) {
+    return { removed, failed: dests.map((dest) => ({ dest, reason: NO_BASE_DIRS_REASON })) }
+  }
   for (const dest of dests) {
     if (!isRemovableAsset(dest, baseDirs)) {
       failed.push({ dest, reason: "resolves outside this client's asset directories; refusing to remove" })
@@ -167,6 +176,10 @@ export async function removeClientAssets(dests, baseDirs) {
 }
 
 /* ------------------------------- Internals ------------------------------- */
+
+/** Why a removal is refused when the client has no asset directories at all. */
+const NO_BASE_DIRS_REASON =
+  'no asset directories resolved for this client (no home directory, or none declared); refusing to remove'
 
 /**
  * True when `dest` sits strictly beneath one of `baseDirs`. Strictly: a dest

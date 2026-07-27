@@ -180,6 +180,14 @@ export function createActionReconciler(opts) {
             reason,
             last_attempt: at,
             attempts,
+            // Carry the undo record across the rewrite. `failed` here does not
+            // mean "nothing was ever applied": a `done` attach the handler
+            // reported stale re-`perform()`s, and a copy already on disk stays
+            // there when that retry fails. Dropping `installed_assets` would
+            // leave those files with nothing naming them, so a later reversal
+            // could not remove them (LLP 0138 #marker-undo). A handler that
+            // reports the field itself still wins, via the detail spread.
+            ...(existing?.installed_assets ? { installed_assets: existing.installed_assets } : {}),
             ...(outcome.detail ?? {}),
           }
           markers[action.requestKey] = marker
@@ -208,8 +216,15 @@ export function createActionReconciler(opts) {
           if (desiredKeys.has(requestKey)) continue
           const marker = markers[requestKey]
           if (!marker || marker.status === 'failed') {
-            // A failed marker for a no-longer-desired key never applied an
-            // effect, so there is nothing to undo: just drop it.
+            // A failed marker for a no-longer-desired key is dropped rather
+            // than reversed: the common case never applied an effect, and
+            // reversing one whose handler keeps failing would retain it
+            // forever. The known exception is narrow and deliberately left
+            // open: an attach that went `done`, re-`perform()`ed
+            // unsuccessfully, and carried `installed_assets` into its `failed`
+            // rewrite before the config dropped the client. Dropping that
+            // marker orphans the copies it recorded, because nothing else on
+            // disk names them (LLP 0138 #marker-undo).
             delete markers[requestKey]
             mutated = true
             continue

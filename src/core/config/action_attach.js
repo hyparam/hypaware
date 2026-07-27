@@ -1,5 +1,7 @@
 // @ts-check
 
+import os from 'node:os'
+
 import { Attr } from '../observability/index.js'
 import {
   clientAssetBaseDirs,
@@ -319,7 +321,14 @@ export function createAttachHandler(opts = {}) {
       // idempotent), so keep the marker and retry rather than reporting done.
       const assets = readInstalledAssets(marker)
       if (assets.length > 0) {
-        const baseDirs = clientAssetBaseDirs(descriptor, ctx.env.HOME ?? '')
+        // Same HOME fallback the CLI undo uses (`detachClientViaCore`): two
+        // readers of one field that disagree about where home is would disagree
+        // about which recorded paths are removable, and the removal side is the
+        // one that refuses when it cannot resolve them. The install side stays
+        // deliberately inert without HOME (it writes nothing); the removal side
+        // must not turn a missing HOME into a containment refusal over files
+        // that are really there.
+        const baseDirs = clientAssetBaseDirs(descriptor, ctx.env.HOME ?? os.homedir())
         const { failed } = await removeClientAssets(assets, baseDirs)
         if (failed.length > 0) {
           const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
