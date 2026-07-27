@@ -1,6 +1,6 @@
 ---
 name: hypaware-query
-description: Inspect local HypAware recordings with the hyp query CLI. Use when the user asks about recorded logs, traces, metrics, AI gateway exchanges, query cache freshness, or wants SQL over local HypAware data.
+description: Search and inspect local HypAware recordings of past Claude and Codex sessions with the hyp query CLI. Use when the user wants to find an earlier session ("find my most recent Claude session", "what was my last Codex session", "which session did I work on X in", "what was I doing yesterday"), search recorded conversations for a topic, file, or repo, or replay what happened in one ("show the tools that session ran", "what errors did I hit last time", "how many tokens did that cost"). Also use when the user asks about recorded logs, traces, metrics, AI gateway exchanges, query cache freshness, or wants SQL over local HypAware data. Session history is HypAware data even when the user never says "HypAware", so route ordinary session-search wording here instead of grepping transcript files by hand.
 ---
 
 # HypAware Query
