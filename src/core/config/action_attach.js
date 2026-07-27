@@ -137,11 +137,7 @@ export function createAttachHandler(opts = {}) {
      * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements] — perform() calls attach(json:true), parses the one-line JSON, records the marker detail (settings_path, prev_value)
      */
     async perform(action, ctx) {
-      const params = action.params ?? {}
-      const client =
-        typeof params.client === 'string' && params.client.length > 0
-          ? params.client
-          : action.requestKey
+      const client = attachActionClient(action)
       if (typeof client !== 'string' || client.length === 0) {
         return { status: 'failed', reason: 'attach action missing client name' }
       }
@@ -161,7 +157,7 @@ export function createAttachHandler(opts = {}) {
       ctx.log.info('client_action.attach_perform', {
         [Attr.COMPONENT]: 'action-attach',
         [Attr.OPERATION]: 'client_action.perform',
-        [Attr.PLUGIN]: typeof params.plugin === 'string' ? params.plugin : client,
+        [Attr.PLUGIN]: typeof action.params?.plugin === 'string' ? action.params.plugin : client,
         client,
         endpoint,
         [Attr.STATUS]: 'ok',
@@ -418,9 +414,10 @@ export const attachHandler = createAttachHandler()
 /* ------------------------------- Internals ------------------------------- */
 
 /**
- * The client one attach action names. `perform()` prefers the params over the
- * request key; `isCurrent()` has to resolve it the same way or it would digest
- * a different client's assets than the marker recorded.
+ * The client one attach action names: the params when they carry one, the
+ * request key otherwise. Both hooks resolve it here, because `isCurrent()`
+ * resolving it any differently than `perform()` would digest one client's
+ * assets against another's marker.
  *
  * @param {DesiredAction} action
  * @returns {string}
