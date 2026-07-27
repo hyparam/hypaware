@@ -77,7 +77,16 @@ every path that installs one installs the other, through one routine.**
   describe what the plugin set contributes *now*, not what this attach copied),
   and it must not touch a user's own `hyp skills install` copies, which record
   no marker. `ActionHandler.reverse()` therefore receives the marker it is about
-  to drop.
+  to drop. The rule is "read the assets before dropping the marker", not "the
+  reconciler reads the assets": `hyp leave` reverses the same markers outside
+  the reconciler, so it reads the same field through the same accessor, removes
+  before it clears, and *keeps* a marker whose assets it could not remove -
+  dropping that one would strand the files with nothing left on disk naming
+  them. And because `installed_assets` is persisted JSON driving a recursive
+  delete, both readers re-check each recorded path against the client's own
+  asset directories first: the write side validates containment even though
+  registration validated the name, and the delete side has the weaker input of
+  the two.
 
 ## Consequences
 

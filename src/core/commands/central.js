@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises'
 import { parseCommandArgv } from '../cli/verb_codec.js'
+import os from 'node:os'
 import path from 'node:path'
 
 import { Attr, withSpan } from '../observability/index.js'
@@ -11,6 +12,8 @@ import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } fro
 import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
+import { readInstalledAssets } from '../config/action_attach.js'
+import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
 import { originOf, readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
@@ -442,8 +445,43 @@ export async function runLeave(argv, ctx) {
             ctx.stdout.write(`  '${name}' plugin not installed - dropped its attach marker (settings left as-is; reinstall + 'hyp detach ${name}' to revert)\n`)
             continue
           }
+          // The skills and subagents this org-driven attach installed come off
+          // the marker, and the detach below clears that marker, so they have to
+          // be read and removed first: a leave that dropped the marker without
+          // them would strand the files with nothing left on disk naming them.
+          // Removal is marker-driven, never registry-driven, so a user's own
+          // `hyp skills install` copy (which records no marker) survives.
+          // @ref LLP 0107#reversal [implements]: leave removes the skills the
+          //   org installed, exactly as it reverses the settings edits
+          // @ref LLP 0138#marker-undo [constrained-by]: the marker is the undo
+          //   record, so keep it when its assets could not be removed
+          let assetsRemoved = true
+          const installedAssets = readInstalledAssets(marker)
+          if (installedAssets.length > 0) {
+            const { removed, failed: failedAssets } = await removeClientAssets(
+              installedAssets,
+              clientAssetBaseDirs(descriptor, ctx.env.HOME ?? os.homedir())
+            )
+            if (removed.length > 0) {
+              ctx.stdout.write(`✓ removed ${removed.length} installed asset(s) for '${name}'\n`)
+            }
+            if (failedAssets.length > 0) {
+              assetsRemoved = false
+              failures += 1
+              const detail = failedAssets.map((f) => `${f.dest} (${f.reason})`).join(', ')
+              ctx.stderr.write(`hyp leave: could not remove ${failedAssets.length} installed asset(s) for '${name}': ${detail}\n`)
+              ctx.stderr.write(`  kept the attach marker so a re-run of 'hyp leave' can retry them\n`)
+            }
+          }
           try {
-            await detachClientViaCore({ name, descriptor, dryRun: false, json: false, ctx })
+            await detachClientViaCore({
+              name,
+              descriptor,
+              dryRun: false,
+              json: false,
+              clearMarker: assetsRemoved,
+              ctx,
+            })
           } catch (err) {
             failures += 1
             const message = err instanceof Error ? err.message : String(err)

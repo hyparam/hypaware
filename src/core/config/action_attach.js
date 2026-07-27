@@ -1,7 +1,11 @@
 // @ts-check
 
 import { Attr } from '../observability/index.js'
-import { materializeClientAssets, removeClientAssets } from '../runtime/client_assets.js'
+import {
+  clientAssetBaseDirs,
+  materializeClientAssets,
+  removeClientAssets,
+} from '../runtime/client_assets.js'
 import { readAttachPolicy } from './attach_policy.js'
 import { detachClientFromDisk } from './client_detach_disk.js'
 
@@ -253,14 +257,16 @@ export function createAttachHandler(opts = {}) {
      * `installed_assets` rather than off the registries: what to remove is what
      * *this* attach copied, not what the currently-loaded plugin set happens to
      * contribute now. A marker without the field (a pre-LLP-0138 attach) leaves
-     * the assets alone, which is the same outcome as a manual install.
+     * the assets alone, which is the same outcome as a manual install. Those
+     * paths are persisted JSON, so they are re-checked against the descriptor's
+     * own asset directories before any recursive removal runs.
      *
      * @param {string} requestKey  The client name whose attach to reverse.
      * @param {ActionContext} ctx
      * @param {ActionMarker} [marker]  The undo record `perform()` wrote.
      * @returns {Promise<ActionOutcome>}
      * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
-     * @ref LLP 0107#reversal [implements] — org-driven asset copies reverse from the marker; unmarked (manual) ones stay
+     * @ref LLP 0107#reversal [implements]: org-driven asset copies reverse from the marker; unmarked (manual) ones stay
      */
     async reverse(requestKey, ctx, marker) {
       const descriptor = ctx.clientDescriptors?.get(requestKey)
@@ -313,7 +319,8 @@ export function createAttachHandler(opts = {}) {
       // idempotent), so keep the marker and retry rather than reporting done.
       const assets = readInstalledAssets(marker)
       if (assets.length > 0) {
-        const { failed } = await removeClientAssets(assets)
+        const baseDirs = clientAssetBaseDirs(descriptor, ctx.env.HOME ?? '')
+        const { failed } = await removeClientAssets(assets, baseDirs)
         if (failed.length > 0) {
           const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
           return {
@@ -341,6 +348,26 @@ export function createAttachHandler(opts = {}) {
  * @type {ActionHandler}
  */
 export const attachHandler = createAttachHandler()
+
+/**
+ * The `installed_assets` undo record off a marker, defensively: the store is a
+ * JSON file that a pre-LLP-0138 daemon (or a hand edit) may have written
+ * without the field, or with something that is not a list of strings.
+ *
+ * Exported because `hyp leave` reverses the same markers outside the
+ * reconciler, and two readers of one persisted field are two chances to
+ * disagree about what it holds.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {string[]}
+ * @ref LLP 0138#marker-undo [implements]: the marker is the undo record, so
+ *   every path that drops one reads its assets through this one accessor.
+ */
+export function readInstalledAssets(marker) {
+  const raw = marker?.installed_assets
+  if (!Array.isArray(raw)) return []
+  return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
+}
 
 /* ------------------------------- Internals ------------------------------- */
 
@@ -395,20 +422,6 @@ async function materializeAttachedAssets(client, ctx) {
     })
     return []
   }
-}
-
-/**
- * The `installed_assets` undo record off a marker, defensively: the store is a
- * JSON file that a pre-LLP-0138 daemon (or a hand edit) may have written
- * without the field, or with something that is not a list of strings.
- *
- * @param {ActionMarker} [marker]
- * @returns {string[]}
- */
-function readInstalledAssets(marker) {
-  const raw = marker?.installed_assets
-  if (!Array.isArray(raw)) return []
-  return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
 }
 
 /**

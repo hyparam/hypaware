@@ -30,6 +30,7 @@ import { isWithinDir } from './contribution_names.js'
  *   MaterializeClientAssetsOptions,
  *   ResolvedClientAsset,
  * } from '../../../src/core/runtime/types.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
  */
 
 /**
@@ -101,6 +102,26 @@ export async function materializeClientAssets(options) {
 }
 
 /**
+ * The directories a client's assets are allowed to occupy: `<home>/<skill_dir>`
+ * and, when the client declares one, `<home>/<agent_dir>`. Computed from the
+ * same descriptor fields {@link materializeClientAssets} joins its destinations
+ * from, so it is the removal side's allow-list for the paths a marker claims
+ * were written.
+ *
+ * @param {ClientDescriptor} descriptor
+ * @param {string} homeDir
+ * @returns {string[]}
+ */
+export function clientAssetBaseDirs(descriptor, homeDir) {
+  if (homeDir.length === 0) return []
+  /** @type {string[]} */
+  const dirs = []
+  if (descriptor.skillDir) dirs.push(path.join(homeDir, descriptor.skillDir))
+  if (descriptor.agentDir) dirs.push(path.join(homeDir, descriptor.agentDir))
+  return dirs
+}
+
+/**
  * Remove previously materialized assets by destination path. The reversal half
  * of {@link materializeClientAssets}: the attach handler hands back the `dest`
  * list its own marker recorded, so an org-driven install reverses exactly what
@@ -109,17 +130,32 @@ export async function materializeClientAssets(options) {
  * Best-effort and idempotent - an already-absent path is a successful removal,
  * and a failure on one path never stops the rest.
  *
+ * `baseDirs` is not optional and not a formality. Every dest here came out of
+ * `client-actions.json`, a plain JSON file on disk that a hand edit or a
+ * corrupt write can turn into `"/"` or `"$HOME"`, and the removal is a
+ * recursive force-rm. The write side already re-checks containment even though
+ * registration validated the name; the delete side needs it more, because its
+ * input is persisted state rather than a live registry. A dest outside every
+ * base is reported failed, never removed: the marker then survives for a human
+ * to look at instead of the deletion being papered over as done.
+ *
  * @param {string[]} dests
+ * @param {string[]} baseDirs  The directories a recorded dest must sit beneath
+ *   (see {@link clientAssetBaseDirs}).
  * @returns {Promise<{ removed: string[], failed: { dest: string, reason: string }[] }>}
  * @ref LLP 0107#reversal [implements]: only marker-recorded (org-driven) copies
  *   are removed; a manual install carries no marker and survives detach.
  */
-export async function removeClientAssets(dests) {
+export async function removeClientAssets(dests, baseDirs) {
   /** @type {string[]} */
   const removed = []
   /** @type {{ dest: string, reason: string }[]} */
   const failed = []
   for (const dest of dests) {
+    if (!isRemovableAsset(dest, baseDirs)) {
+      failed.push({ dest, reason: "resolves outside this client's asset directories; refusing to remove" })
+      continue
+    }
     try {
       await fs.rm(dest, { recursive: true, force: true })
       removed.push(dest)
@@ -131,6 +167,23 @@ export async function removeClientAssets(dests) {
 }
 
 /* ------------------------------- Internals ------------------------------- */
+
+/**
+ * True when `dest` sits strictly beneath one of `baseDirs`. Strictly: a dest
+ * equal to a base is the whole skills (or agents) directory, which no write
+ * this module makes can produce, so treating it as removable would only ever
+ * honour a corrupted marker.
+ *
+ * @param {string} dest
+ * @param {string[]} baseDirs
+ * @returns {boolean}
+ */
+function isRemovableAsset(dest, baseDirs) {
+  const resolved = path.resolve(dest)
+  return baseDirs.some(
+    (baseDir) => resolved !== path.resolve(baseDir) && isWithinDir(resolved, baseDir)
+  )
+}
 
 /**
  * Flatten the two registries into one ordered asset list. Skills come first so

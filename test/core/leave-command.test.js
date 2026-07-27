@@ -287,6 +287,73 @@ test('leave still tears down when only a stale attach marker survives a prior pa
   assert.equal(markers.attach, undefined)
 })
 
+test('leave removes the assets its attach marker records, and leaves manual copies alone', async () => {
+  // LLP 0107 §reversal: leave removes the skills the org installed, exactly as
+  // it reverses the settings edits. LLP 0138 #marker-undo makes that
+  // implementable - the marker's `installed_assets` is the only record of what
+  // was copied, so leave must read it before it drops the marker.
+  const { home, stateRoot, opts } = await makeDispatchOpts()
+
+  const settingsPath = path.join(home, '.claude', 'settings.json')
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' },
+        _hypaware: { managed: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4388' }, hooks: [] } },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  // Three files under ~/.claude, identical in kind and indistinguishable on
+  // disk. Only the marker says which two the org put there.
+  const orgSkill = path.join(home, '.claude', 'skills', 'hypaware-privacy')
+  await fs.mkdir(orgSkill, { recursive: true })
+  await fs.writeFile(path.join(orgSkill, 'SKILL.md'), 'org\n', 'utf8')
+  const orgAgent = path.join(home, '.claude', 'agents', 'hypaware-analyst.md')
+  await fs.mkdir(path.dirname(orgAgent), { recursive: true })
+  await fs.writeFile(orgAgent, 'org agent\n', 'utf8')
+  const manualSkill = path.join(home, '.claude', 'skills', 'my-own-skill')
+  await fs.mkdir(manualSkill, { recursive: true })
+  await fs.writeFile(path.join(manualSkill, 'SKILL.md'), 'mine\n', 'utf8')
+
+  const controlDir = path.join(stateRoot, 'config-control')
+  await fs.mkdir(controlDir, { recursive: true })
+  await fs.writeFile(
+    path.join(controlDir, 'client-actions.json'),
+    JSON.stringify(
+      {
+        attach: {
+          claude: {
+            status: 'done',
+            request_key: 'claude',
+            installed_assets: [orgSkill, orgAgent],
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  // Every leave step is best-effort and runs regardless of the ones before it,
+  // so this asserts on what landed on disk rather than on the exit code.
+  await dispatch(['leave'], opts)
+
+  // Exactly what the marker named is gone, both asset shapes.
+  await assert.rejects(fs.stat(orgSkill))
+  await assert.rejects(fs.stat(orgAgent))
+  // And nothing else: a `hyp skills install` copy records no marker, so a leave
+  // that removed it would be deleting the user's own file.
+  assert.equal(await fs.readFile(path.join(manualSkill, 'SKILL.md'), 'utf8'), 'mine\n')
+  // The marker only drops once its assets are actually gone.
+  const markers = JSON.parse(await fs.readFile(path.join(controlDir, 'client-actions.json'), 'utf8'))
+  assert.equal(markers.attach, undefined)
+})
+
 test('leave self-heals an org attach whose plugin is gone: drops the marker, warns, stays clean', async () => {
   const { stateRoot, stdout, opts } = await makeDispatchOpts()
   assert.equal(

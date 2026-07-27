@@ -341,17 +341,24 @@ async function runClientLifecycle(action, argv, ctx) {
  * one undo to drift from. Emits a `client.detach` span and the same
  * `done`/`no-op` output shape callers grep.
  *
+ * `clearMarker` defaults to true (the manual `hyp detach` case: no other
+ * step owns the marker). `hyp leave` passes false when it could not remove the
+ * assets that marker records, because the marker is the only record of what
+ * was copied - dropping it there would strand the files with nothing left to
+ * name them (LLP 0138 #marker-undo). The marker survives, so a re-run retries.
+ *
  * @param {{
  *   name: string,
  *   descriptor: ClientDescriptor | undefined,
  *   dryRun: boolean,
  *   json: boolean,
+ *   clearMarker?: boolean,
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<void>}
  * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
-export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
+export async function detachClientViaCore({ name, descriptor, dryRun, json, clearMarker = true, ctx }) {
   if (!descriptor) {
     throw new Error(`no client descriptor for '${name}'; cannot reverse its attach from disk`)
   }
@@ -419,7 +426,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
         // client (#217). Best-effort: a marker we cannot retract is a status
         // blemish, not a detach failure (the settings undo already landed).
         // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
-        if (descriptor.attachProbe) {
+        if (descriptor.attachProbe && clearMarker) {
           try {
             clearClientActionMarker({
               stateRoot: readObservabilityEnv(ctx.env).stateDir,

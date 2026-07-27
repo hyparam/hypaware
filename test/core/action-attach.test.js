@@ -151,7 +151,7 @@ function makeCtx(opts = {}) {
 }
 
 /**
- * A registry stub over a fixed contribution list — the shape
+ * A registry stub over a fixed contribution list: the shape
  * `materializeClientAssets` reads.
  * @param {any[]} items
  * @returns {any}
@@ -525,6 +525,40 @@ test('reverse() removes exactly the assets its own marker recorded', async () =>
   await assert.rejects(fs.access(path.join(home, '.claude', 'skills', 'helper-skill')))
   await assert.rejects(fs.access(path.join(home, '.claude', 'agents', 'helper-agent.md')))
   assert.equal(await fs.readFile(path.join(manual, 'SKILL.md'), 'utf8'), 'mine\n')
+})
+
+test('reverse() refuses to remove a marker path outside the client asset dirs', async () => {
+  const { home, descriptor } = await assetFixture()
+  // `client-actions.json` is a plain file on disk: a hand edit or a corrupt
+  // write can point `installed_assets` anywhere, and removal is a recursive
+  // force-rm. Containment is re-checked on the delete side, not just the write
+  // side, so an escaping path is reported rather than obeyed.
+  const outsider = path.join(home, 'precious')
+  await fs.mkdir(outsider, { recursive: true })
+  await fs.writeFile(path.join(outsider, 'keep.txt'), 'keep\n', 'utf8')
+  // The skills dir itself is a base, not something beneath one: a marker
+  // naming it must not take every skill in it, the user's own included.
+  const skillsDir = path.join(home, '.claude', 'skills')
+  await fs.mkdir(path.join(skillsDir, 'my-own-skill'), { recursive: true })
+  await fs.writeFile(path.join(skillsDir, 'my-own-skill', 'SKILL.md'), 'mine\n', 'utf8')
+
+  const handler = createAttachHandler({ detach: async () => ({ changed: true }) })
+  const outcome = await reverseOf(handler)('claude', makeCtx({
+    descriptors: descriptorMap([descriptor]),
+    env: { HOME: home },
+  }), {
+    status: 'done',
+    request_key: 'claude',
+    installed_assets: [outsider, skillsDir, '/'],
+  })
+
+  assert.equal(outcome.status, 'failed')
+  assert.match(String(outcome.reason), /3 installed asset\(s\) could not be removed/)
+  // Nothing was deleted: not the escaping dir, not the skills dir itself, and
+  // the marker stays (a failed reverse keeps it) for a human to look at.
+  assert.equal(await fs.readFile(path.join(outsider, 'keep.txt'), 'utf8'), 'keep\n')
+  assert.equal(await fs.readFile(path.join(skillsDir, 'my-own-skill', 'SKILL.md'), 'utf8'), 'mine\n')
+  await fs.stat('/')
 })
 
 test('reverse() of a marker with no installed_assets touches no files', async () => {
