@@ -184,18 +184,27 @@ const FIRST_SYNC_RULE = '─'.repeat(62)
  * phrase stays whole on its own line so the content assertions survive the
  * decoration.
  *
+ * Names the destination by its configured target name, not its URL: terminals
+ * autolink any printed `https://` run, and the server root is a service
+ * endpoint that answers `{"error":"unknown_path"}` in a browser, so a URL here
+ * reads as an invitation to a dead page - in the one message where trust
+ * matters most (#391). The name is what the user typed to reach this server
+ * and what `hyp remote list` maps back to a URL. LLP 0100 R1 asks for the
+ * deadline, the backfill statement, and the skill hint; the destination's
+ * spelling is ours to choose, and `<server>` is already how §flow writes it.
+ *
  * @ref LLP 0100#requirements [implements]: R1 - absolute deadline, backfill statement, skill hint, same on TTY and non-TTY
  * @param {number} deadlineMs
- * @param {string} centralUrl
+ * @param {string} serverName
  * @returns {string}
  */
-export function firstSyncHoldMessage(deadlineMs, centralUrl) {
+export function firstSyncHoldMessage(deadlineMs, serverName) {
   return (
     '\n' +
     `${FIRST_SYNC_RULE}\n` +
     '  PRIVACY - review before first sync\n' +
     '\n' +
-    `  first sync to ${centralUrl} is ${formatFirstSyncDeadline(deadlineMs)}\n` +
+    `  first sync to the '${serverName}' server is ${formatFirstSyncDeadline(deadlineMs)}\n` +
     '  and includes your backfilled history\n' +
     '\n' +
     '  to review what ships before then,\n' +
@@ -614,7 +623,13 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       ctx.stderr.write(`hyp remote login: this machine connected to ${result.connectedElsewhere} during sign-in - not enrolling\n`)
       return 1
     }
-    ctx.stdout.write(`forwarding logs to ${centralUrl}\n`)
+    // Name the server, don't print its URL: every modern terminal autolinks a
+    // bare `https://` run (there is no escape that suppresses it), and this
+    // origin is a service endpoint, so the click lands on `unknown_path`
+    // (#391). `name` is the target the user logged in with; `hyp remote list`
+    // is where name → URL lives. Revisit if the server root ever becomes a
+    // real landing page.
+    ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
     // Print the deadline once, ahead of every exit branch below (--no-daemon,
     // a failed daemon install, or the normal attach-wait path): the hold and
     // its deadline are already committed to disk regardless of how the daemon
@@ -622,7 +637,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
     if (holdDeadline !== null) {
-      ctx.stderr.write(firstSyncHoldMessage(holdDeadline, centralUrl))
+      ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
     // Without the daemon there is nothing to wait on: it is what pulls the org
     // config and runs the attach reconcile. Say what is left to do and stop.

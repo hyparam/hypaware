@@ -198,7 +198,7 @@ test('a gateway credential with no matching central sink provisions one, forward
   // --no-daemon keeps the test off the real launchd/systemd install.
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /forwarding logs to the 'prod' server/)
   // --no-daemon: there is no reconcile to wait on, so no capture line, just the
   // finish-enrolling note. The stale "nothing is captured yet" hint is gone.
   assert.match(out.join(''), /daemon install skipped \(--no-daemon\)/)
@@ -228,7 +228,7 @@ test('an enrolling login waits for the reconcile and reports the clients that ac
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0)
-  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /forwarding logs to the 'prod' server/)
   // Ground truth, not a guess: name the clients that captured.
   assert.match(out.join(''), /capturing @hypaware\/claude, @hypaware\/codex/)
   assert.doesNotMatch(out.join(''), /nothing is captured yet/)
@@ -245,7 +245,7 @@ test('an enrolling login into an org with no config times out the wait and point
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0)
-  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /forwarding logs to the 'prod' server/)
   assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
 })
 
@@ -279,7 +279,7 @@ test('an enrolling login whose attach poll throws still reports the timeout fall
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0) // the throw did not discard the enrollment
-  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /forwarding logs to the 'prod' server/)
   assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
 })
 
@@ -771,7 +771,7 @@ test('a --no-daemon login prints the durable hint and provisions the sink (LLP 0
   assert.equal(code, 0)
   assert.match(err.join(''), /hyp policy set \[path\] local-only/, 'the durable command stays discoverable')
   await fs.access(seedPath) // the sink is still provisioned
-  assert.match(out.join(''), /forwarding logs to https:\/\/hyp\.internal/)
+  assert.match(out.join(''), /forwarding logs to the 'prod' server/)
 })
 
 test('a fresh enroll prints the durable hint and never polls a capture wait (LLP 0102)', async () => {
@@ -883,7 +883,7 @@ test('a fresh enroll on a TTY prints the deadline message on stderr (LLP 0100 R1
   const deadline = await readFirstSyncDeadline({ stateDir })
   assert.ok(typeof deadline === 'number')
   const text = err.join('')
-  assert.match(text, /first sync to https:\/\/hyp\.internal is /)
+  assert.match(text, /first sync to the 'prod' server is /)
   assert.ok(
     text.includes(formatFirstSyncDeadline(/** @type {number} */ (deadline))),
     'the message names the deadline as an absolute local time, using the same formatting hyp status will use'
@@ -907,7 +907,7 @@ test('a fresh enroll on non-TTY stdin prints the same deadline message on stderr
   assert.equal(code, 0)
 
   const text = err.join('')
-  assert.match(text, /first sync to https:\/\/hyp\.internal is /)
+  assert.match(text, /first sync to the 'prod' server is /)
   assert.match(text, /includes your backfilled history/)
   assert.match(text, /open Claude or Codex and run the hypaware-privacy skill/)
 })
@@ -919,8 +919,28 @@ test('--no-daemon still prints the deadline message: the hold is already committ
 
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(err.join(''), /first sync to https:\/\/hyp\.internal is /)
+  assert.match(err.join(''), /first sync to the 'prod' server is /)
   assert.match(err.join(''), /hypaware-privacy skill/)
+})
+
+test('an enrolling login names the server and prints no URL: terminals autolink one, and the server root is not browsable (#391)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+
+  // Both destination surfaces - the forwarding line and the privacy block -
+  // name the configured target instead of its origin. Asserted over the whole
+  // login output, not per line: any new line that reintroduces a bare origin
+  // reintroduces the dead click, wherever it is printed.
+  const text = out.join('') + err.join('')
+  assert.match(text, /forwarding logs to the 'prod' server/)
+  assert.match(text, /first sync to the 'prod' server is /)
+  assert.doesNotMatch(text, /https?:\/\//, 'no printed URL for a terminal to autolink into a dead page')
 })
 
 test('a re-login (already-enrolled) prints no deadline message: there is no first sync to defer', async () => {
