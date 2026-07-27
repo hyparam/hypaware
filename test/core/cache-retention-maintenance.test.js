@@ -50,13 +50,13 @@ function isoDateDaysAgo(daysAgo) {
 
 // --- retention tests ---
 
-test('default retention days is 30', () => {
-  assert.equal(DEFAULT_RETENTION_DAYS, 30)
+test('default retention days is 90', () => {
+  assert.equal(DEFAULT_RETENTION_DAYS, 90)
 })
 
 test('retention normalizeConfig applies defaults', () => {
   const enforcer = createRetentionEnforcer({ cacheRoot: '/tmp/fake', config: undefined })
-  assert.equal(enforcer.config.default_days, 30)
+  assert.equal(enforcer.config.default_days, 90)
   assert.deepEqual(enforcer.config.datasets, {})
 })
 

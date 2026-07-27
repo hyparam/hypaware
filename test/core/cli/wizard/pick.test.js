@@ -125,13 +125,13 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(codexRow.checked, true)
   assert.equal(codexRow.disabled, undefined)
   assert.deepEqual(result.sourcesPicked, ['codex'])
-  assert.equal(result.retentionDays, 30)
+  assert.equal(result.retentionDays, 90)
 })
 
 // --- retention defaults (LLP 0137): never asked, pathway-supplied ---
 // @ref LLP 0137#pathway-defaults [tests]:
 
-test('runWizardPick: interactive runs take the 30-day default without a retention prompt', async () => {
+test('runWizardPick: interactive runs take the 90-day default without a retention prompt', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { prompt } = capturingPrompt(['otel'])
@@ -139,9 +139,9 @@ test('runWizardPick: interactive runs take the 30-day default without a retentio
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(),
   }))
-  assert.equal(result.retentionDays, 30)
+  assert.equal(result.retentionDays, 90)
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
-  assert.equal(written.query.cache.retention.default_days, 30)
+  assert.equal(written.query.cache.retention.default_days, 90)
 })
 
 test('runWizardPick: retentionDefault (the local pathway) lands in the composed config', async () => {

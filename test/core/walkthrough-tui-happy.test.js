@@ -95,7 +95,7 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
     assert.equal(result.exitCode, 0)
     assert.deepEqual(result.sourcesPicked, ['raw-anthropic'])
     assert.equal(result.exportPicked, 'local-parquet')
-    assert.equal(result.retentionDays, 30)
+    assert.equal(result.retentionDays, 90)
     assert.deepEqual(result.clientsPicked, [])
 
     // The config file landed at HYP_HOME and carries the local-parquet

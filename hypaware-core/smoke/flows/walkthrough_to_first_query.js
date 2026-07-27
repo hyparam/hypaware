@@ -191,7 +191,7 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && v.length === 0
     )
     const statusText = statusStdout.text()
-    for (const expected of ['ai-gateway', 'otlp', 'local-fs', 'claude', 'cache retention', '30 days']) {
+    for (const expected of ['ai-gateway', 'otlp', 'local-fs', 'claude', 'cache retention', '90 days']) {
       expect.that(
         `stdout: hyp status mentions '${expected}'`,
         statusText,
@@ -350,7 +350,7 @@ export async function run({ harness, expect }) {
         v.source_count === 2 &&
         v.sink_count === 1 &&
         v.client_count === 1 &&
-        v.retention_days === 30
+        v.retention_days === 90
     )
 
     const startSpans = traces.filter(
@@ -435,7 +435,7 @@ function goldenConfig(hypHome) {
     },
     query: {
       cache: {
-        retention: { default_days: 30 },
+        retention: { default_days: 90 },
       },
     },
   }

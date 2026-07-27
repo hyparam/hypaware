@@ -22,7 +22,7 @@
 
 > **Amended by [LLP 0137](./0137-onboarding-retention-defaults.decision.md)**:
 > the "Cache retention (days)" question is removed; the pathway sets the
-> default instead (30-day team / 120-day local).
+> default instead (90-day team / 120-day local).
 
 ## Interactive walkthrough
 
@@ -60,7 +60,7 @@ HypAware is set up.
   Collecting:  Claude, Codex
   Saving to:   local Parquet files
   Daemon:      running
-  Cache:       65 MB · 30-day retention
+  Cache:       65 MB · 90-day retention
 
 What would you like to do?
     Reconfigure
@@ -98,7 +98,7 @@ HypAware picks the plugin set. There are no names like "standalone" or
   a source on, never hides one. Raw proxy sources and OTEL are never
   autodetected (no installed tool to find). See [LLP 0012](./0012-sources.spec.md#source-kinds).
 - **Default** is a fixed starting selection not derived from system state:
-  export defaults to local Parquet; retention defaults by pathway, 30 days
+  export defaults to local Parquet; retention defaults by pathway, 90 days
   on a team install and 120 days on a local-only one
   ([LLP 0137](./0137-onboarding-retention-defaults.decision.md#pathway-defaults)).
 

@@ -25,7 +25,7 @@ import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/sto
  * @import { Manifest, ManifestEntry, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 
-export const DEFAULT_RETENTION_DAYS = 30
+export const DEFAULT_RETENTION_DAYS = 90
 const DELETE_BATCH_SIZE = 5000
 const DEFAULT_TIMESTAMP_COLUMNS = ['timestamp', 'created_at', 'recorded_at', 'date']
 

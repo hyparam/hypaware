@@ -50,11 +50,11 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 // Onboarding never asks for a retention window; these are the pathway
 // defaults the wizard applies instead. A team (or managed) install keeps
-// the 30-day window because the org server holds the durable copy; a
+// the 90-day window because the org server holds the durable copy; a
 // local-only install keeps 120 days because the local cache is the only
 // copy of history. `hyp init --retention-days <n>` remains the override.
-// @ref LLP 0137#pathway-defaults [implements]: no retention question; 30-day team / 120-day local defaults
-export const DEFAULT_RETENTION_DAYS = 30
+// @ref LLP 0137#pathway-defaults [implements]: no retention question; 90-day team / 120-day local defaults
+export const DEFAULT_RETENTION_DAYS = 90
 export const LOCAL_INSTALL_RETENTION_DAYS = 120
 
 /**

@@ -253,7 +253,7 @@ export interface RunWizardPickOptions {
   /**
    * The retention window applied without asking (LLP 0137): the
    * orchestrator passes the pathway default (120-day local; team and
-   * scoped runs omit it and take the 30-day `DEFAULT_RETENTION_DAYS`).
+   * scoped runs omit it and take the 90-day `DEFAULT_RETENTION_DAYS`).
    */
   retentionDefault?: number
   /** Override the system source detector (interactive only). */

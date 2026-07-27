@@ -46,6 +46,6 @@ is a fixed starting choice that holds regardless of what is on the system.
 
 A fixed starting selection in the wizard that is not derived from system
 state. The export choice defaults to `local-parquet` (pre-checked) and
-retention defaults to 30 days. Defaults hold whether or not any source is
+retention defaults to 90 days. Defaults hold whether or not any source is
 detected, and the user can change them. Contrast [[autodetect]], which is
 driven by what is actually present on the system.
