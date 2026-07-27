@@ -40,9 +40,13 @@ function makeBuf() {
  * adapter's `attach()` records the endpoint it was handed so the test can
  * assert the resolved port.
  *
- * @param {{ home: string, attachCalls: Array<{ name: string, endpoint: string }> }} opts
+ * @param {{
+ *   home: string,
+ *   attachCalls: Array<{ name: string, endpoint: string }>,
+ *   skills?: { name: string, clients: string[], sourceDir: string }[],
+ * }} opts
  */
-function makeCtx({ home, attachCalls }) {
+function makeCtx({ home, attachCalls, skills }) {
   const gateway = {
     localEndpoint() {
       throw new Error('ai-gateway: localEndpoint() called before the gateway started')
@@ -78,6 +82,7 @@ function makeCtx({ home, attachCalls }) {
       has: () => true,
       require: () => gateway,
     },
+    ...(skills ? { skills: { register() {}, list() { return skills } } } : {}),
   })
   return { ctx: /** @type {CommandRunContext} */ (ctx), stdout, stderr }
 }
@@ -180,6 +185,41 @@ test('attach reports already-attached (no-op) when the recorded port matches the
     assert.equal(code, 0)
     assert.deepEqual(attachCalls, [], 'a marker already at the live port is a no-op')
     assert.match(stdout.text(), /already attached/)
+  })
+})
+
+test('attach installs client assets even when the settings are already attached (LLP 0107 every-attach)', async () => {
+  await withTempHome(async (home) => {
+    // The daemon-managed install is the shape an operator most often runs
+    // `hyp attach` on, and it is the one that short-circuits at "already
+    // attached". Short-circuiting past the materialization would make the
+    // command install nothing on exactly that machine.
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555 } })
+    )
+    seedDaemonRun(home, 55555)
+    const source = path.join(home, 'contrib', 'helper')
+    mkdirSync(source, { recursive: true })
+    writeFileSync(path.join(source, 'SKILL.md'), 'helper\n')
+
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout, stderr } = makeCtx({
+      home,
+      attachCalls,
+      skills: [{ name: 'helper', clients: ['claude'], sourceDir: source }],
+    })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.deepEqual(attachCalls, [], 'the settings are still left alone')
+    assert.equal(
+      readFileSync(path.join(home, '.claude', 'skills', 'helper', 'SKILL.md'), 'utf8'),
+      'helper\n',
+      'the assets are installed even though there was nothing to wire'
+    )
+    assert.doesNotMatch(stdout.text(), /nothing to do/)
   })
 })
 

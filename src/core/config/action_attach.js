@@ -5,9 +5,11 @@ import os from 'node:os'
 import { Attr } from '../observability/index.js'
 import {
   clientAssetBaseDirs,
+  clientAssetsKey,
   materializeClientAssets,
   removeClientAssets,
 } from '../runtime/client_assets.js'
+import { readInstalledAssets } from './action_reconciler.js'
 import { readAttachPolicy } from './attach_policy.js'
 import { detachClientFromDisk } from './client_detach_disk.js'
 
@@ -21,6 +23,7 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  *   CreateAttachHandlerOptions,
  *   DesiredAction,
  * } from './types.d.ts'
+ * @import { MaterializeClientAssetsOptions } from '../../../src/core/runtime/types.js'
  * @import { JsonObject } from '../../../hypaware-plugin-kernel-types.d.ts'
  */
 
@@ -202,14 +205,26 @@ export function createAttachHandler(opts = {}) {
       // so a user's own `hyp skills install` (which records no marker) survives
       // a leave (LLP 0107 §reversal).
       if (installedAssets.length > 0) detail.installed_assets = installedAssets
+      // The other freshness key beside the endpoint: what this attach's asset
+      // set was, so a later pass over a changed plugin set re-materializes
+      // (see isCurrent). Recorded from the plan rather than from what landed,
+      // because that is what isCurrent can recompute without touching disk; a
+      // copy that failed is a degraded install to warn about, not a reason to
+      // re-attach every pass (#failure-is-not-fatal).
+      // @ref LLP 0107#currency [implements]: the marker carries the asset set,
+      //   so a plugin the org adds later is a forward gap the reconciler closes
+      const assetsKey = attachedAssetsKey(client, ctx)
+      if (assetsKey !== undefined) detail.assets_key = assetsKey
       return { status: 'done', detail }
     },
 
     /**
-     * Freshness predicate for a `done` attach marker (LLP 0086). Returns
-     * `false` when the recorded endpoint no longer matches the live gateway
-     * endpoint — the daemon rebound to a new ephemeral port and this attach must
-     * re-fire. Two guards keep it from over-firing:
+     * Freshness predicate for a `done` attach marker (LLP 0086). Two things can
+     * go stale, and each is checked against what the marker recorded.
+     *
+     * **The endpoint.** Returns `false` when the recorded endpoint no longer
+     * matches the live gateway endpoint: the daemon rebound to a new ephemeral
+     * port and this attach must re-fire. Two guards keep it from over-firing:
      *
      *  - No live `ctx.endpoint` this pass (the gateway never bound): return
      *    `true` (leave the existing attach in place). Re-performing would only
@@ -222,16 +237,37 @@ export function createAttachHandler(opts = {}) {
      *    which records the endpoint and makes every later pass current. Backward
      *    compatible: an old marker never crashes and self-heals.
      *
+     * **The asset set.** Attach installs the client's skills and subagents, so
+     * an attach whose contributed set has changed is as stale as one at a moved
+     * port. Endpoint alone does not cover it: adding a plugin to central config
+     * restarts the daemon but leaves a pinned (or LLP 0114 well-known) port
+     * exactly where it was, so an endpoint-only check would call every marker
+     * current and the new skills would never land on an already-enrolled
+     * machine. That is the scenario LLP 0107 §currency promises and rejected a
+     * login one-shot for. Re-attaching to close it is cheap: `perform()` is
+     * idempotent in both halves.
+     *
+     * The same two guards apply. No registries threaded this pass (a CLI boot,
+     * where the install half is inert anyway): nothing to compare, stay current.
+     * A pre-LLP-0138 marker recorded no key: stale exactly once, which records
+     * one and self-heals.
+     *
      * @param {ActionMarker} marker
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
      * @returns {boolean}
      * @ref LLP 0086#re-attach-on-drift [implements] — a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
+     * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
+     * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
      */
     isCurrent(marker, action, ctx) {
       const live = ctx.endpoint
       if (typeof live !== 'string' || live.length === 0) return true
-      return marker.endpoint === live
+      if (marker.endpoint !== live) return false
+      const client = attachActionClient(action)
+      const assetsKey = attachedAssetsKey(client, ctx)
+      if (assetsKey === undefined) return true
+      return marker.assets_key === assetsKey
     },
 
     /**
@@ -330,12 +366,33 @@ export function createAttachHandler(opts = {}) {
         // that are really there.
         const baseDirs = clientAssetBaseDirs(descriptor, ctx.env.HOME ?? os.homedir())
         const { failed } = await removeClientAssets(assets, baseDirs)
-        if (failed.length > 0) {
+        const retryable = failed.filter((f) => f.retryable)
+        if (retryable.length > 0) {
           const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
           return {
             status: 'failed',
             reason: `client '${descriptor.name}' detached, but ${failed.length} installed asset(s) could not be removed: ${detail}`,
           }
+        }
+        if (failed.length > 0) {
+          // Every failure is a refusal, and a refusal is deterministic: the
+          // paths and the descriptor's directories are both fixed, so retrying
+          // re-refuses forever. Keeping the marker for it would retain a `done`
+          // attach whose settings are already reversed, which is the stale
+          // marker a later join short-circuits on (#217), and no re-run would
+          // ever clear it. Name the files in the log instead and let the marker
+          // drop: the record moves from disk to the operator, which is the
+          // strongest thing left when removal is not an option.
+          // @ref LLP 0138#refusal-is-not-failure [implements]: a removal that
+          //   can never succeed names what it leaves, and the marker goes
+          ctx.log.warn('client_action.attach_reverse_assets_refused', {
+            [Attr.COMPONENT]: 'action-attach',
+            [Attr.OPERATION]: 'client_action.reverse',
+            client: descriptor.name,
+            [Attr.STATUS]: 'ok',
+            [Attr.ERROR_KIND]: 'asset_removal_refused',
+            detail: `left in place, remove by hand: ${failed.map((f) => `${f.dest} (${f.reason})`).join(', ')}`,
+          })
         }
       }
 
@@ -358,27 +415,58 @@ export function createAttachHandler(opts = {}) {
  */
 export const attachHandler = createAttachHandler()
 
+/* ------------------------------- Internals ------------------------------- */
+
 /**
- * The `installed_assets` undo record off a marker, defensively: the store is a
- * JSON file that a pre-LLP-0138 daemon (or a hand edit) may have written
- * without the field, or with something that is not a list of strings.
+ * The client one attach action names. `perform()` prefers the params over the
+ * request key; `isCurrent()` has to resolve it the same way or it would digest
+ * a different client's assets than the marker recorded.
  *
- * Exported because `hyp leave` reverses the same markers outside the
- * reconciler, and two readers of one persisted field are two chances to
- * disagree about what it holds.
- *
- * @param {ActionMarker} [marker]
- * @returns {string[]}
- * @ref LLP 0138#marker-undo [implements]: the marker is the undo record, so
- *   every path that drops one reads its assets through this one accessor.
+ * @param {DesiredAction} action
+ * @returns {string}
  */
-export function readInstalledAssets(marker) {
-  const raw = marker?.installed_assets
-  if (!Array.isArray(raw)) return []
-  return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
+function attachActionClient(action) {
+  const client = (action.params ?? {}).client
+  return typeof client === 'string' && client.length > 0 ? client : action.requestKey
 }
 
-/* ------------------------------- Internals ------------------------------- */
+/**
+ * The materialization options for one attached client, or `undefined` when this
+ * boot cannot materialize at all (no client catalog, no HOME, or neither
+ * registry threaded - a CLI boot, where the install half of attach is inert by
+ * construction). One builder, so the copy and the freshness digest taken over
+ * it can never be computed from different inputs.
+ *
+ * @param {string} client
+ * @param {ActionContext} ctx
+ * @returns {MaterializeClientAssetsOptions | undefined}
+ */
+function attachedAssetOptions(client, ctx) {
+  const descriptors = ctx.clientDescriptors
+  const homeDir = ctx.env.HOME ?? ''
+  if (!descriptors || homeDir.length === 0) return undefined
+  if (!ctx.skills && !ctx.agents) return undefined
+  return {
+    clients: [client],
+    descriptors,
+    homeDir,
+    ...(ctx.skills ? { skills: ctx.skills } : {}),
+    ...(ctx.agents ? { agents: ctx.agents } : {}),
+  }
+}
+
+/**
+ * The digest of what this client's assets are right now, or `undefined` when
+ * this boot cannot tell. Pure: no disk access, so `isCurrent()` can call it.
+ *
+ * @param {string} client
+ * @param {ActionContext} ctx
+ * @returns {string | undefined}
+ */
+function attachedAssetsKey(client, ctx) {
+  const options = attachedAssetOptions(client, ctx)
+  return options ? clientAssetsKey(options) : undefined
+}
 
 /**
  * Materialize one attached client's registered skills and subagents, returning
@@ -392,10 +480,8 @@ export function readInstalledAssets(marker) {
  * @returns {Promise<string[]>}
  */
 async function materializeAttachedAssets(client, ctx) {
-  const descriptors = ctx.clientDescriptors
-  const homeDir = ctx.env.HOME ?? ''
-  if (!descriptors || homeDir.length === 0) return []
-  if (!ctx.skills && !ctx.agents) return []
+  const options = attachedAssetOptions(client, ctx)
+  if (!options) return []
 
   const warnings = {
     /** @param {string} chunk */
@@ -411,14 +497,7 @@ async function materializeAttachedAssets(client, ctx) {
   }
 
   try {
-    const installed = await materializeClientAssets({
-      clients: [client],
-      descriptors,
-      homeDir,
-      ...(ctx.skills ? { skills: ctx.skills } : {}),
-      ...(ctx.agents ? { agents: ctx.agents } : {}),
-      stderr: warnings,
-    })
+    const installed = await materializeClientAssets({ ...options, stderr: warnings })
     return installed.map((asset) => asset.dest)
   } catch (err) {
     ctx.log.warn('client_action.attach_assets_failed', {

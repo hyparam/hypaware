@@ -486,11 +486,13 @@ test('detach removes the assets its attach marker records, and leaves manual cop
   }
 })
 
-test('detach keeps the attach marker when a recorded asset cannot be removed', async () => {
-  // The undo record is the only thing naming these files, so a detach that
-  // could not remove them must not drop it: the marker survives for the re-run
-  // (LLP 0138 #marker-undo). `installed_assets` is persisted JSON, so a path
-  // outside the client's asset directories is refused, never obeyed.
+test('detach names the assets it refuses to remove, and does not keep the marker for them', async () => {
+  // `installed_assets` is persisted JSON, so a path outside the client's asset
+  // directories is refused, never obeyed. A refusal is deterministic, so it is
+  // not the retryable kind of failure: keeping the marker for it would leave a
+  // `done` attach whose settings are already reversed (the stale marker that
+  // blocks a later re-attach, #217) and no re-run could ever clear it. The
+  // record moves to the operator instead (LLP 0138 #marker-undo).
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-detach-assets-refuse-'))
   const stateRoot = path.join(home, 'hypaware')
   try {
@@ -510,13 +512,14 @@ test('detach keeps the attach marker when a recorded asset cannot be removed', a
       env: { ...process.env, HOME: home, HYP_HOME: home, CLAUDE_HOME: '' },
     })
 
-    assert.equal(code, 1, 'a partial reversal is reported, not swallowed')
-    assert.match(stderr.text(), /could not be removed/)
+    assert.equal(code, 0, 'the settings undo landed and no re-run could do better')
+    assert.match(stderr.text(), /refused and left in place - remove them by hand/)
+    assert.ok(stderr.text().includes(outsider), 'the refused path is named on the way out')
     assert.equal(await fsp.readFile(path.join(outsider, 'keep.txt'), 'utf8'), 'keep\n')
     assert.equal(
-      readMarkers(stateRoot).attach?.claude?.status,
-      'done',
-      'the marker survives so the files it names are still recoverable'
+      readMarkers(stateRoot).attach?.claude,
+      undefined,
+      'the marker does not outlive a removal that can never succeed'
     )
   } finally {
     await fsp.rm(home, { recursive: true, force: true })

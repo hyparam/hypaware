@@ -34,6 +34,25 @@ function reverseOf(handler) {
 /** A quiet logger so tests don't spam stderr. */
 const NOOP_LOG = { debug() {}, info() {}, warn() {}, error() {} }
 
+/**
+ * A logger that records what it was told, for the paths whose only remaining
+ * output is a log line (a removal the handler refuses names its files there).
+ * @returns {{ log: any, warnings: { event: string, attrs: any }[] }}
+ */
+function capturingLog() {
+  /** @type {{ event: string, attrs: any }[]} */
+  const warnings = []
+  return {
+    warnings,
+    log: {
+      debug() {},
+      info() {},
+      warn(event, attrs) { warnings.push({ event, attrs }) },
+      error() {},
+    },
+  }
+}
+
 const FIXED_NOW = Date.parse('2026-06-25T00:00:00.000Z')
 const ENDPOINT = 'http://127.0.0.1:4123'
 
@@ -130,6 +149,7 @@ function attachRegistration(name, opts = {}) {
  *   env?: NodeJS.ProcessEnv,
  *   skills?: any,
  *   agents?: any,
+ *   log?: any,
  * }} [opts]
  * @returns {ActionContext}
  */
@@ -146,7 +166,7 @@ function makeCtx(opts = {}) {
     agents: opts.agents,
     endpoint: 'endpoint' in opts ? opts.endpoint : ENDPOINT,
     now: () => FIXED_NOW,
-    log: NOOP_LOG,
+    log: opts.log ?? NOOP_LOG,
   }
 }
 
@@ -542,23 +562,32 @@ test('reverse() refuses to remove a marker path outside the client asset dirs', 
   await fs.mkdir(path.join(skillsDir, 'my-own-skill'), { recursive: true })
   await fs.writeFile(path.join(skillsDir, 'my-own-skill', 'SKILL.md'), 'mine\n', 'utf8')
 
+  const { log, warnings } = capturingLog()
   const handler = createAttachHandler({ detach: async () => ({ changed: true }) })
   const outcome = await reverseOf(handler)('claude', makeCtx({
     descriptors: descriptorMap([descriptor]),
     env: { HOME: home },
+    log,
   }), {
     status: 'done',
     request_key: 'claude',
     installed_assets: [outsider, skillsDir, '/'],
   })
 
-  assert.equal(outcome.status, 'failed')
-  assert.match(String(outcome.reason), /3 installed asset\(s\) could not be removed/)
-  // Nothing was deleted: not the escaping dir, not the skills dir itself, and
-  // the marker stays (a failed reverse keeps it) for a human to look at.
+  // Nothing was deleted: not the escaping dir, not the skills dir itself.
   assert.equal(await fs.readFile(path.join(outsider, 'keep.txt'), 'utf8'), 'keep\n')
   assert.equal(await fs.readFile(path.join(skillsDir, 'my-own-skill', 'SKILL.md'), 'utf8'), 'mine\n')
   await fs.stat('/')
+  // A refusal is deterministic, so the reverse completes rather than failing
+  // forever over paths it will refuse identically on every future pass. The
+  // record moves from the marker to the log on its way out.
+  assert.equal(outcome.status, 'done')
+  const refusal = warnings.find((w) => w.event === 'client_action.attach_reverse_assets_refused')
+  assert.ok(refusal, 'the refused paths are named before the marker drops')
+  assert.match(String(refusal.attrs.detail), /remove by hand/)
+  for (const dest of [outsider, skillsDir, '/']) {
+    assert.ok(String(refusal.attrs.detail).includes(dest), `${dest} is named`)
+  }
 })
 
 test('reverse() of a marker with no installed_assets touches no files', async () => {

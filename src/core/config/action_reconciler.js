@@ -215,16 +215,19 @@ export function createActionReconciler(opts) {
         for (const requestKey of Object.keys(markers)) {
           if (desiredKeys.has(requestKey)) continue
           const marker = markers[requestKey]
-          if (!marker || marker.status === 'failed') {
-            // A failed marker for a no-longer-desired key is dropped rather
-            // than reversed: the common case never applied an effect, and
-            // reversing one whose handler keeps failing would retain it
-            // forever. The known exception is narrow and deliberately left
-            // open: an attach that went `done`, re-`perform()`ed
-            // unsuccessfully, and carried `installed_assets` into its `failed`
-            // rewrite before the config dropped the client. Dropping that
-            // marker orphans the copies it recorded, because nothing else on
-            // disk names them (LLP 0138 #marker-undo).
+          // A failed marker for a no-longer-desired key is dropped rather than
+          // reversed: it never applied an effect, and reversing one whose
+          // handler keeps failing would retain it forever. Unless it recorded
+          // one. An attach that went `done`, re-`perform()`ed unsuccessfully,
+          // and carried `installed_assets` into its `failed` rewrite has copies
+          // on disk that nothing else names, so dropping it here would orphan
+          // them; that marker takes the normal reverse path below. The
+          // retained-forever worry does not follow it there, because a reverse
+          // that can never succeed now reports `done` after naming what it left
+          // rather than failing forever (LLP 0138 #marker-undo).
+          // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
+          //   over an effect it recorded, whichever status it carries
+          if (!marker || (marker.status === 'failed' && readInstalledAssets(marker).length === 0)) {
             delete markers[requestKey]
             mutated = true
             continue
@@ -356,6 +359,28 @@ function readMarkerStore(markerPath) {
     return {}
   }
   return parsed && typeof parsed === 'object' ? /** @type {ActionMarkerStore} */ (parsed) : {}
+}
+
+/**
+ * The `installed_assets` undo record off a marker, defensively: the store is a
+ * JSON file that a pre-LLP-0138 daemon (or a hand edit) may have written
+ * without the field, or with something that is not a list of strings.
+ *
+ * Lives with the marker store rather than with the one handler that writes the
+ * field, because everything that *drops* a marker has to read it first, and
+ * those droppers (this reconciler, `hyp detach`, `hyp leave`) are not all
+ * handlers. Two readers of one persisted field are two chances to disagree
+ * about what it holds.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {string[]}
+ * @ref LLP 0138#marker-undo [implements]: the marker is the undo record, so
+ *   every path that drops one reads its assets through this one accessor.
+ */
+export function readInstalledAssets(marker) {
+  const raw = marker?.installed_assets
+  if (!Array.isArray(raw)) return []
+  return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
 }
 
 /**

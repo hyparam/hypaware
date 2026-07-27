@@ -13,9 +13,12 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detachClientFromDisk } from '../config/client_detach_disk.js'
-import { readInstalledAssets } from '../config/action_attach.js'
 import { clientAssetBaseDirs, removeClientAssets } from '../runtime/client_assets.js'
-import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
+import {
+  clearClientActionMarker,
+  readClientActionStatus,
+  readInstalledAssets,
+} from '../config/action_reconciler.js'
 import { configuredGatewayEndpoint, portFromEndpoint } from '../config/gateway_endpoint.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
@@ -256,9 +259,19 @@ async function runClientLifecycle(action, argv, ctx) {
               } else {
                 ctx.stdout.write(
                   `${name} is already attached${probe.settingsPath !== undefined ? ` (${probe.settingsPath})` : ''}; ` +
-                  `the daemon manages attach for this install, nothing to do.\n`
+                  `the daemon manages attach for this install, so only its assets are refreshed.\n`
                 )
               }
+              // The settings are already wired, but attach means settings *and*
+              // assets, and this branch is the one an operator on a
+              // daemon-managed install actually reaches. Short-circuiting past
+              // the materialization below would make `hyp attach` install
+              // nothing on exactly the install shape it is most often run on,
+              // reintroducing the split this change removes. Idempotent and
+              // cheap, so running it on a no-op attach costs a stat pass.
+              // @ref LLP 0107#every-attach [implements]: every attach path
+              //   materializes, including the one with nothing left to wire
+              await materializeAttachAssets({ name, descriptorMap, ctx, dryRun: false, json: parsed.json })
               continue
             }
             if (liveEndpoint) {
@@ -310,20 +323,15 @@ async function runClientLifecycle(action, argv, ctx) {
       // inconsistency, not the norm (the wizard has always treated
       // attach-plus-skills as one unit). No marker is recorded, so these copies
       // are the user's own and `hyp detach` leaves them in place.
-      // Under --json the progress lines are suppressed: the adapter's one-line
-      // machine payload stays the only thing on stdout.
       // @ref LLP 0107#every-attach [implements]: manual attach materializes the
       //   client's assets, the same set the reconciler's attach installs
       descriptorMap ??= await buildClientDescriptorMap(ctx)
-      await materializeClientAssets({
-        clients: [name],
-        descriptors: descriptorMap,
-        homeDir: ctx.env.HOME ?? os.homedir(),
-        skills: ctx.skills,
-        agents: ctx.agents,
-        dryRun: parsed.dryRun,
-        ...(parsed.json ? {} : { stdout: ctx.stdout }),
-        stderr: ctx.stderr,
+      await materializeAttachAssets({
+        name,
+        descriptorMap,
+        ctx,
+        dryRun: parsed.dryRun === true,
+        json: parsed.json,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -332,6 +340,37 @@ async function runClientLifecycle(action, argv, ctx) {
     }
   }
   return exitCode
+}
+
+/**
+ * Materialize one manually attached client's skills and subagents. A thin wrap
+ * of {@link materializeClientAssets} with `hyp attach`'s stream conventions,
+ * called from both attach exits - the one that wired the settings and the
+ * daemon-managed one that found nothing left to wire - so neither can quietly
+ * become the path that installs no assets.
+ *
+ * @param {{
+ *   name: string,
+ *   descriptorMap: Map<string, ClientDescriptor>,
+ *   ctx: CommandRunContext,
+ *   dryRun: boolean,
+ *   json: boolean,
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json }) {
+  await materializeClientAssets({
+    clients: [name],
+    descriptors: descriptorMap,
+    homeDir: ctx.env.HOME ?? os.homedir(),
+    skills: ctx.skills,
+    agents: ctx.agents,
+    dryRun,
+    // Under --json the adapter's one-line machine payload stays the only thing
+    // on stdout, so the per-copy progress lines are suppressed.
+    ...(json ? {} : { stdout: ctx.stdout }),
+    stderr: ctx.stderr,
+  })
 }
 
 /**
@@ -443,8 +482,20 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
         // likewise refuses to touch assets it cannot un-wire the settings for.
         // @ref LLP 0107#reversal [implements]: detach removes the assets the org
         //   installed, exactly as it reverses the settings edits
-        // @ref LLP 0138#marker-undo [constrained-by]: the marker is the undo
-        //   record, so keep it when its assets could not be removed
+        //
+        // A removal that failed and one that was refused are not the same
+        // outcome, so they do not share a resolution. An I/O failure may
+        // succeed next run: keep the marker, fail the command, say so. A
+        // containment refusal is deterministic - the recorded path and the
+        // client's directories are both fixed - so it re-refuses forever, and
+        // keeping the marker for it would make the undo permanently
+        // unfinishable while leaving a `done` marker whose settings effect is
+        // already reversed, the stale marker that blocks a later re-attach
+        // (#217). Refusals print the paths and let the marker go, the same
+        // degradation `hyp leave` already makes when the plugin is gone and
+        // there are no directories to bound a delete.
+        // @ref LLP 0138#refusal-is-not-failure [implements]: keep the marker
+        //   for a removal that can still succeed; name what it leaves when not
         let assetFailure = ''
         if (descriptor.attachProbe) {
           const marker = readClientActionStatus({ stateRoot }).byKind.attach?.[name]
@@ -457,11 +508,19 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
             if (removed.length > 0 && !json) {
               ctx.stdout.write(`  Removed ${removed.length} org-installed asset(s)\n`)
             }
-            if (failed.length > 0) {
-              const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
+            const detail = failed.map((f) => `${f.dest} (${f.reason})`).join(', ')
+            if (failed.some((f) => f.retryable)) {
               assetFailure =
                 `detached '${name}', but ${failed.length} installed asset(s) could not be removed: ${detail}` +
                 ' - kept the attach marker so a re-run can retry them'
+            } else if (failed.length > 0) {
+              // stderr, and unconditionally: this is the last moment these
+              // paths are named anywhere, and under --json stdout is the
+              // machine payload alone.
+              ctx.stderr.write(
+                `warning: ${failed.length} recorded asset(s) refused and left in place - remove them by hand:\n`
+              )
+              for (const f of failed) ctx.stderr.write(`  ${f.dest} (${f.reason})\n`)
             }
           }
         }

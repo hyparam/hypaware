@@ -10,8 +10,11 @@ import { defaultConfigPath } from '../config/schema.js'
 import { centralSeedPath, resetCentralLayerToSeed, resolveCentralLayerPath } from '../config/apply.js'
 import { validateConfig } from '../config/validate.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
-import { clearClientActionMarker, readClientActionStatus } from '../config/action_reconciler.js'
-import { readInstalledAssets } from '../config/action_attach.js'
+import {
+  clearClientActionMarker,
+  readClientActionStatus,
+  readInstalledAssets,
+} from '../config/action_reconciler.js'
 import { originOf, readCentralSinkOrigins, seedLoginGateway } from '../remote/gateway_seed.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'

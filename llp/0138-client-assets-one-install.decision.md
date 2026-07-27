@@ -64,7 +64,27 @@ every path that installs one installs the other, through one routine.**
   `hyp attach <client>` and the reconciler's attach both materialize the
   client's assets, so "`hyp remote login` installs the skills" is finally true
   without a login one-shot. The standalone command remains the manual path for
-  re-copying after a local edit, without re-attaching.
+  re-copying after a local edit, without re-attaching. *Every* attach exit
+  materializes, including the one with nothing left to wire: on a
+  daemon-managed install a client already attached at the live port
+  short-circuits its settings write, and stopping there would mean
+  `hyp attach` installs nothing on the install shape it is most often run on.
+  The copy is idempotent, so the no-op attach costs a stat pass.
+- **Currency is the asset set, not the endpoint** {#currency}: a `done` attach
+  marker also records a digest of the assets that attach would copy, and a pass
+  whose live registries produce a different digest treats the marker as stale,
+  exactly as [LLP 0086](./0086-attach-tracks-ephemeral-port.decision.md) treats
+  one recorded at a moved endpoint. Without it
+  [LLP 0107 §currency](./0107-skills-ride-attach.decision.md#currency) does not
+  hold: adding a plugin to central config restarts the daemon but returns a
+  pinned (or LLP 0114 well-known) port unchanged, so an endpoint-only check
+  calls every marker current forever and the org's later plugin never lands its
+  skills on an already-enrolled machine. That is the scenario a login one-shot
+  was rejected for. The digest is taken over the *plan* (kind, name, client,
+  destination), sorted, so plugin load order cannot fake a change and a copy
+  that failed does not re-attach every pass (#failure-is-not-fatal). It is
+  derived from the same loop that does the copying, never from a second
+  reimplementation of it (#one-materializer).
 - **Install failure never fails the attach** {#failure-is-not-fatal}: the
   settings write applied; a copy that fails is a degraded install, warned in
   the daemon log. Marking the action `failed` would re-attach on every pass
@@ -82,22 +102,29 @@ every path that installs one installs the other, through one routine.**
   reconciler, so the read-then-remove lives in the one core undo
   (`detachClientViaCore`) next to the clear, not in a caller. `hyp detach` and
   `hyp leave` therefore both remove before they clear, both read the field
-  through the same accessor, both resolve the client's directories from the same
-  home-directory fallback the reconciler's `reverse()` uses, and both *keep* a
-  marker whose assets they could not remove - dropping that one would strand the
-  files with nothing left on disk naming them. Where removal is impossible
-  rather than merely failed, the rule degrades to naming: `hyp leave` on a client
-  whose plugin is gone has no descriptor, hence no asset directories to bound a
-  recursive delete, so it prints the recorded paths before dropping the marker
-  instead of destroying the only record of them. And a `perform()` that fails
-  after an earlier one succeeded carries `installed_assets` into the `failed`
-  rewrite: the copies are still on disk, so the record of them has to outlive
-  the status change. One drop still escapes the rule: the reconciler's reverse
-  gap deletes a `failed` marker for a no-longer-desired key without reversing
-  it, which orphans assets carried into that marker. Closing it means choosing
-  between reversing a marker whose handler may keep failing (retained forever)
-  and dropping it, the same open question a reverse that cannot finish raises;
-  it is unresolved, not decided.
+  through the same accessor (which lives with the marker store, since not every
+  dropper is a handler), and both resolve the client's directories from the same
+  home-directory fallback the reconciler's `reverse()` uses. And a `perform()`
+  that fails after an earlier one succeeded carries `installed_assets` into the
+  `failed` rewrite: the copies are still on disk, so the record of them has to
+  outlive the status change. Which is also why the reconciler's reverse gap
+  reverses such a marker rather than dropping it: `failed` normally means
+  nothing was applied, and `installed_assets` is the evidence that something
+  was.
+
+  **A removal that failed and one that was refused are different outcomes**
+  {#refusal-is-not-failure}. Keep the marker for the first: an `fs.rm` that hit
+  a lock or a permission may succeed next run, and dropping the record would
+  strand files with nothing naming them. Do not keep it for the second: a
+  containment refusal is pure string math over a recorded path and a fixed set
+  of directories, so it re-refuses identically forever. A marker kept for it is
+  an undo that can never finish, and a `done` attach marker whose settings
+  effect is already reversed is the stale marker that blocks a later re-attach
+  (#217). So the rule degrades to naming rather than to retention: print the
+  paths for a human, then let the marker go. `hyp leave` on a client whose
+  plugin is gone reaches the same place from the other direction (no descriptor,
+  hence no directories to bound a recursive delete), and this is what keeps the
+  reverse gap above from retaining a marker forever.
 
   And because `installed_assets` is persisted JSON driving a recursive delete,
   both readers re-check each recorded path against the client's own asset
@@ -116,7 +143,12 @@ every path that installs one installs the other, through one routine.**
   seam ([LLP 0045 §Part 1](./0045-client-attach.design.md)).
 - A pre-0138 attach marker has no `installed_assets`, so a leave that reverses
   it removes nothing - the same outcome as a manual install. Self-healing: the
-  next attach records the field.
+  next attach records the field. It has no `assets_key` either, which reads as
+  stale and re-attaches it exactly once, recording both.
+- `ActionMarker` gains `assets_key`, and `isCurrent` now has two staleness axes
+  rather than one. Re-attaching on either is safe because both halves of
+  `perform()` are idempotent, but it does mean a plugin-set change costs one
+  extra `attach()` call per affected client on the pass that notices.
 - The finale keeps emitting one `skills.install` span covering both kinds
   (the release smoke battery asserts it); `agents.install` is gone.
 - Behavior gained on the way: a contribution naming the literal client `all`

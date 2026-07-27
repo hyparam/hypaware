@@ -49,6 +49,16 @@ keeping it current.**
   so a plugin the org adds months later lands its skills without anyone
   re-running login. A login one-shot was rejected for exactly this: it
   covers only the enrollment instant.
+
+  The signal is the asset set itself, not the config diff that moved it: the
+  attach marker records a digest of what the attach would copy, and a pass
+  that computes a different digest treats the marker as stale exactly as it
+  treats one recorded at a moved endpoint
+  ([LLP 0086](./0086-attach-tracks-ephemeral-port.decision.md)). Deriving it
+  from the live registries covers every way the set can change (a plugin
+  added, a plugin upgraded to one contributing more) without the reconciler
+  having to reason about which config edit caused it. Landed by
+  [LLP 0138](./0138-client-assets-one-install.decision.md).
 - **Org influence is plugin-granular, and that is the consent boundary**
   {#consent}: central config can name plugins (pinned versions), and plugins
   carry skills, so an org can cause new skills to appear over time. That

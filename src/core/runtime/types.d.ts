@@ -252,6 +252,18 @@ export interface ResolvedClientAsset {
   source: string
 }
 
+/**
+ * One copy an install would make: a contribution paired with the client it
+ * lands in and where it lands. What the copy loop iterates, and what the
+ * freshness digest is taken over.
+ */
+export interface PlannedClientAsset {
+  asset: ResolvedClientAsset
+  client: string
+  /** Absolute destination path. */
+  dest: string
+}
+
 /** One copy made (or, under `dryRun`, that would be made). */
 export interface ClientAssetInstall {
   kind: ClientAssetKind

@@ -340,6 +340,15 @@ export interface ActionMarker {
    * marker - survive (LLP 0107 §reversal, LLP 0138).
    */
   installed_assets?: string[]
+  /**
+   * Digest of the client asset set this attach installed (recorded on a `done`
+   * attach marker). The freshness key beside `endpoint`: a later pass compares
+   * it against what the live registries would contribute now, so a plugin the
+   * org adds months after enrollment re-materializes even though the gateway
+   * endpoint never moved (LLP 0107 §currency). Absent on pre-LLP-0138 attach
+   * markers (treated as stale → re-attach once, which records one).
+   */
+  assets_key?: string
   /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
   [extra: string]: unknown
 }

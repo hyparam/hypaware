@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -28,6 +29,7 @@ import { isWithinDir } from './contribution_names.js'
  * @import {
  *   ClientAssetInstall,
  *   MaterializeClientAssetsOptions,
+ *   PlannedClientAsset,
  *   ResolvedClientAsset,
  * } from '../../../src/core/runtime/types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -46,10 +48,50 @@ import { isWithinDir } from './contribution_names.js'
  *   (or, under `dryRun`, per copy that would be made)
  */
 export async function materializeClientAssets(options) {
-  const { clients, descriptors, homeDir, dryRun = false, stdout, stderr } = options
+  const { dryRun = false, stdout, stderr } = options
   /** @type {ClientAssetInstall[]} */
   const installed = []
-  if (homeDir.length === 0 || (clients !== 'all' && clients.length === 0)) return installed
+  for (const { asset, client, dest } of planClientAssets(options)) {
+    if (dryRun) {
+      stdout?.write(`(dry-run) Would install ${asset.kind} '${asset.name}' → ${dest}\n`)
+    } else {
+      try {
+        await copyAsset(asset, dest)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        stderr?.write(`warning: ${asset.kind} '${asset.name}' for ${client} failed: ${message}\n`)
+        continue
+      }
+      stdout?.write(`installed ${asset.kind} '${asset.name}' → ${dest}\n`)
+    }
+    installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
+  }
+  return installed
+}
+
+/**
+ * The copies {@link materializeClientAssets} would make: every registered asset
+ * resolved against the targeted clients, minus what cannot land (unknown
+ * client, no directory for the kind, a destination escaping it). Synchronous
+ * and, apart from the warnings it writes, side-effect free.
+ *
+ * Split out because the freshness check is not allowed to touch the disk: a
+ * reconciler pass has to answer "would this attach copy a different set than
+ * the marker recorded?" from the live registries alone, and answering it from a
+ * second copy of this loop is exactly the drift {@link materializeClientAssets}
+ * exists to prevent. Plan here, copy there, compare with
+ * {@link clientAssetsKey}.
+ *
+ * @param {MaterializeClientAssetsOptions} options
+ * @returns {PlannedClientAsset[]}
+ * @ref LLP 0138#one-materializer [implements]: what would be copied is derived
+ *   from the one loop, never from a parallel reimplementation of it.
+ */
+export function planClientAssets(options) {
+  const { clients, descriptors, homeDir, stderr } = options
+  /** @type {PlannedClientAsset[]} */
+  const planned = []
+  if (homeDir.length === 0 || (clients !== 'all' && clients.length === 0)) return planned
 
   // `'all'` installs for whatever the contributions name rather than for a
   // fixed list, so a contribution naming a client no manifest declares still
@@ -82,23 +124,36 @@ export async function materializeClientAssets(options) {
         stderr?.write(`warning: ${asset.kind} '${asset.name}' for ${client} resolves outside ${baseDir}; skipped\n`)
         continue
       }
-
-      if (dryRun) {
-        stdout?.write(`(dry-run) Would install ${asset.kind} '${asset.name}' → ${dest}\n`)
-      } else {
-        try {
-          await copyAsset(asset, dest)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          stderr?.write(`warning: ${asset.kind} '${asset.name}' for ${client} failed: ${message}\n`)
-          continue
-        }
-        stdout?.write(`installed ${asset.kind} '${asset.name}' → ${dest}\n`)
-      }
-      installed.push({ kind: asset.kind, name: asset.name, client, dest, dryRun })
+      planned.push({ asset, client, dest })
     }
   }
-  return installed
+  return planned
+}
+
+/**
+ * A digest of the asset set an install would produce right now: kind, name,
+ * client, and destination of every planned copy, order-independent.
+ *
+ * The freshness key for an attach marker. An org adding a plugin months after
+ * enrollment changes what a client's attach would copy but need not change the
+ * gateway endpoint (a pinned port, or the LLP 0114 default, is the same port
+ * across the restart), so an endpoint-only currency check would call that
+ * marker current forever and the new skills would never land. Comparing the
+ * digest makes "the contributed set changed" a forward gap the reconciler
+ * closes on its own, which is what LLP 0107 rejected a login one-shot for.
+ *
+ * Sorted, so plugin load order cannot make an unchanged set look changed.
+ *
+ * @param {MaterializeClientAssetsOptions} options
+ * @returns {string}
+ * @ref LLP 0107#currency [implements]: materialization re-runs when the plugin
+ *   set changes what a client's assets are, not only when the endpoint moves.
+ */
+export function clientAssetsKey(options) {
+  const lines = planClientAssets(options)
+    .map(({ asset, client, dest }) => `${asset.kind}:${asset.name}:${client}:${dest}`)
+    .sort()
+  return createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 16)
 }
 
 /**
@@ -141,35 +196,61 @@ export function clientAssetBaseDirs(descriptor, homeDir) {
  * `baseDirs` refuses everything too, but says so as "no asset directories
  * resolved" rather than as a containment failure the caller cannot act on.
  *
+ * Each failure says whether retrying it could ever help, because the two kinds
+ * are not alike. An `fs.rm` that failed on a locked or permission-denied path
+ * may succeed on the next run, so the caller keeps the undo record. A
+ * containment refusal is pure string math over a recorded path and a
+ * descriptor: it fails identically forever, so a caller that keeps the marker
+ * for it makes the undo permanently unfinishable and leaves behind a `done`
+ * marker whose settings effect is already reversed, which is the stale marker
+ * that blocks a later re-attach (#217). Refusals are for the caller to name and
+ * hand to the user, not to retry.
+ *
  * @param {string[]} dests
  * @param {string[]} baseDirs  The directories a recorded dest must sit beneath
  *   (see {@link clientAssetBaseDirs}).
- * @returns {Promise<{ removed: string[], failed: { dest: string, reason: string }[] }>}
+ * @returns {Promise<{
+ *   removed: string[],
+ *   failed: { dest: string, reason: string, retryable: boolean }[],
+ * }>}
  * @ref LLP 0107#reversal [implements]: only marker-recorded (org-driven) copies
  *   are removed; a manual install carries no marker and survives detach.
+ * @ref LLP 0138#refusal-is-not-failure [implements]: a refusal is reported as
+ *   unretryable so the caller names the files instead of retaining the marker.
  */
 export async function removeClientAssets(dests, baseDirs) {
   /** @type {string[]} */
   const removed = []
-  /** @type {{ dest: string, reason: string }[]} */
+  /** @type {{ dest: string, reason: string, retryable: boolean }[]} */
   const failed = []
   // With no base directories nothing can be contained, so every dest would be
   // refused for "resolving outside" them - naming the wrong cause. The cause is
   // that this client resolved no asset directories at all: no home directory to
   // join them onto, or a descriptor declaring neither kind.
   if (baseDirs.length === 0) {
-    return { removed, failed: dests.map((dest) => ({ dest, reason: NO_BASE_DIRS_REASON })) }
+    return {
+      removed,
+      failed: dests.map((dest) => ({ dest, reason: NO_BASE_DIRS_REASON, retryable: false })),
+    }
   }
   for (const dest of dests) {
     if (!isRemovableAsset(dest, baseDirs)) {
-      failed.push({ dest, reason: "resolves outside this client's asset directories; refusing to remove" })
+      failed.push({
+        dest,
+        reason: "resolves outside this client's asset directories; refusing to remove",
+        retryable: false,
+      })
       continue
     }
     try {
       await fs.rm(dest, { recursive: true, force: true })
       removed.push(dest)
     } catch (err) {
-      failed.push({ dest, reason: err instanceof Error ? err.message : String(err) })
+      failed.push({
+        dest,
+        reason: err instanceof Error ? err.message : String(err),
+        retryable: true,
+      })
     }
   }
   return { removed, failed }
