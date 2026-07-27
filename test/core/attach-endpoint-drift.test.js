@@ -212,6 +212,20 @@ test('a changed asset set re-attaches at an unchanged endpoint (LLP 0107 currenc
     const r4 = await reconciler.reconcile(reconcileInput({ endpoint, clients, home, skills: [skillA, skillB] }))
     assert.deepEqual(r4.results.map((x) => x.outcome), ['skipped'])
     assert.equal(attachCalls.length, 2)
+
+    // The org withdraws the plugin again. The set shrinks, so this re-attach
+    // copies only helper-a - but helper-b is still on disk, and the marker is
+    // the only thing naming it. A rewrite that reported just this pass's copies
+    // would strand it beyond the reach of every reversal.
+    const r5 = await reconciler.reconcile(reconcileInput({ endpoint, clients, home, skills: [skillA] }))
+    assert.deepEqual(r5.results.map((x) => x.outcome), ['done'])
+    const dropped = path.join(home, 'skills', 'claude', 'helper-b')
+    assert.equal(fs.existsSync(dropped), true, 'the withdrawn skill is still on disk')
+    assert.deepEqual(
+      [...readMarkerFile(stateRoot).attach.claude.installed_assets].sort(),
+      [path.join(home, 'skills', 'claude', 'helper-a'), dropped].sort(),
+      'the undo record still names it, so a later leave can remove it'
+    )
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

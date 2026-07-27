@@ -107,10 +107,20 @@ every path that installs one installs the other, through one routine.**
   home-directory fallback the reconciler's `reverse()` uses. And a `perform()`
   that fails after an earlier one succeeded carries `installed_assets` into the
   `failed` rewrite: the copies are still on disk, so the record of them has to
-  outlive the status change. Which is also why the reconciler's reverse gap
-  reverses such a marker rather than dropping it: `failed` normally means
-  nothing was applied, and `installed_assets` is the evidence that something
-  was.
+  outlive the status change, and it has to survive a *`done`* rewrite too: a
+  re-`perform()` reports what that pass applied, which is a shorter list than
+  the key's history the moment the desired set shrinks, so the marker unions
+  rather than replaces. Which is also why the reconciler's reverse gap reverses
+  such a marker rather than dropping it: `failed` normally means nothing was
+  applied, and `installed_assets` is the evidence that something was.
+
+  Closing that gap re-opens the retained-forever case it was left open for, and
+  that is the accepted trade rather than an oversight. An `attach` reverse fails
+  deterministically when the descriptor is gone or declares no `attachProbe`
+  (#212), so a `failed` marker carrying assets for such a client now retries
+  every pass instead of being dropped once. A retained `failed` marker is
+  visible and harmless (only a `done` one blocks re-attach, #217); dropping it
+  destroys the only record of files that are really there.
 
   **A removal that failed and one that was refused are different outcomes**
   {#refusal-is-not-failure}. Keep the marker for the first: an `fs.rm` that hit
@@ -123,8 +133,9 @@ every path that installs one installs the other, through one routine.**
   (#217). So the rule degrades to naming rather than to retention: print the
   paths for a human, then let the marker go. `hyp leave` on a client whose
   plugin is gone reaches the same place from the other direction (no descriptor,
-  hence no directories to bound a recursive delete), and this is what keeps the
-  reverse gap above from retaining a marker forever.
+  hence no directories to bound a recursive delete). Only the asset half
+  degrades this way. A settings reversal cannot: nothing else on disk would own
+  what it left written, so it keeps its marker even when it can never succeed.
 
   And because `installed_assets` is persisted JSON driving a recursive delete,
   both readers re-check each recorded path against the client's own asset
@@ -145,6 +156,14 @@ every path that installs one installs the other, through one routine.**
   it removes nothing - the same outcome as a manual install. Self-healing: the
   next attach records the field. It has no `assets_key` either, which reads as
   stale and re-attaches it exactly once, recording both.
+- The digest covers the asset *set*, not the asset *bytes*: a pinned-version
+  bump that rewrites an existing skill in place without adding or removing one
+  produces the same key, so the reconciler will not re-copy it. Covering bytes
+  would mean hashing every contributed file inside a freshness predicate that
+  must stay synchronous and disk-free. `hyp skills install` remains the way to
+  force a re-copy, which is the role
+  [LLP 0107 §every-attach](./0107-skills-ride-attach.decision.md#every-attach)
+  already gives it.
 - `ActionMarker` gains `assets_key`, and `isCurrent` now has two staleness axes
   rather than one. Re-attaching on either is safe because both halves of
   `perform()` are idempotent, but it does mean a plugin-set change costs one

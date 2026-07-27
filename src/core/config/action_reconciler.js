@@ -152,6 +152,22 @@ export function createActionReconciler(opts) {
             ...(typeof outcome.rows === 'number' ? { rows: outcome.rows } : {}),
             ...(outcome.detail ?? {}),
           }
+          // Union the undo record across the rewrite, the same carry-forward
+          // the `failed` path below makes. A re-`perform()` reports what *that*
+          // pass applied, not everything the key has ever applied, and the two
+          // differ the moment the desired set shrinks: an attach re-fired
+          // because the org withdrew a plugin copies only what is left, while
+          // the withdrawn plugin's files are still on disk. Taking the report
+          // as the whole truth would drop them from the only record naming
+          // them, and no later reversal could remove them. Re-recording a path
+          // already gone is harmless: removal re-checks containment and rm is
+          // forced.
+          // @ref LLP 0138#marker-undo [implements]: the record of an applied
+          //   effect outlives any rewrite of the marker carrying it
+          const carried = readInstalledAssets(existing)
+          if (carried.length > 0) {
+            marker.installed_assets = [...new Set([...carried, ...readInstalledAssets(marker)])]
+          }
           markers[action.requestKey] = marker
           results.push({
             kind,
@@ -221,10 +237,19 @@ export function createActionReconciler(opts) {
           // one. An attach that went `done`, re-`perform()`ed unsuccessfully,
           // and carried `installed_assets` into its `failed` rewrite has copies
           // on disk that nothing else names, so dropping it here would orphan
-          // them; that marker takes the normal reverse path below. The
-          // retained-forever worry does not follow it there, because a reverse
-          // that can never succeed now reports `done` after naming what it left
-          // rather than failing forever (LLP 0138 #marker-undo).
+          // them; that marker takes the normal reverse path below.
+          //
+          // Which does re-open the retained-forever case, in one shape: an
+          // `attach` reverse fails deterministically when the descriptor is
+          // gone or declares no `attachProbe` (#212), so such a marker now
+          // retries and error-logs on every pass instead of being dropped
+          // once. That is the lesser harm on purpose. A retained `failed`
+          // marker is visible in `hyp status` and does not block a later
+          // re-attach (#217 turns on a `done` one), whereas dropping it
+          // destroys the only record of files that are really on disk. Only
+          // the asset-removal half degrades to naming-and-releasing
+          // (#refusal-is-not-failure); the settings half cannot, because
+          // nothing else on disk would own the settings it left written.
           // @ref LLP 0138#marker-undo [implements]: a marker is never dropped
           //   over an effect it recorded, whichever status it carries
           if (!marker || (marker.status === 'failed' && readInstalledAssets(marker).length === 0)) {
