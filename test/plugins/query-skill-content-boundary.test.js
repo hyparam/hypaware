@@ -11,12 +11,12 @@ const workspaceDir = fileURLToPath(new URL('../../hypaware-core/plugins-workspac
 const CLIENTS = ['claude', 'codex']
 
 /**
- * Every skill that reads recorded content back to a model and can end in a
- * durable change, so each has to carry the untrusted-content boundary in every
+ * Every skill that reads recorded content back to a model and can end in
+ * a durable change has to carry the untrusted-content boundary in every
  * client copy, or the analysis path can treat a captured payload as a
- * directive. `hypaware-ai-usage-report` qualifies because it reads recorded
- * content back and emits the change artifacts `hypaware-apply-report-changes`
- * applies.
+ * directive (issues #395, #402). `hypaware-ai-usage-report` qualifies
+ * because it reads recorded content back and emits the change artifacts
+ * `hypaware-apply-report-changes` applies.
  */
 const BOUNDARY_SKILLS = ['hypaware-query', 'hypaware-apply-report-changes', 'hypaware-ai-usage-report']
 
