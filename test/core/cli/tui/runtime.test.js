@@ -12,8 +12,6 @@ import {
 } from '../../../../src/core/cli/tui/index.js'
 import { isPromptCancelledError, countPhysicalRows } from '../../../../src/core/cli/tui/runtime.js'
 
-const ENV = { NO_COLOR: '1' }
-
 /**
  * Parse the cursor-up row count (`\x1b[<n>A`) the runtime emits at the
  * start of a redraw frame. Returns 0 when the chunk has no cursor-up

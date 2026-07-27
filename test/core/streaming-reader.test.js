@@ -7,7 +7,6 @@ import path from 'node:path'
 import os from 'node:os'
 
 import {
-  BATCH_BYTE_LIMIT,
   BATCH_ROW_LIMIT,
   INTERNAL_FIELDS,
   readProgress,
