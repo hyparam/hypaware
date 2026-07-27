@@ -1,7 +1,5 @@
 // @ts-check
 
-import path from 'node:path'
-
 import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'

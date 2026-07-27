@@ -10,7 +10,6 @@ import {
   sanitizePathSegment,
 } from './partition.js'
 import { readRowsFromTable } from './iceberg/store.js'
-import { datasetsRoot } from './paths.js'
 
 /**
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'

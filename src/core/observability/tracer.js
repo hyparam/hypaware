@@ -69,8 +69,3 @@ export function installTracerProvider({ env, resource }) {
 export function getTracer(component) {
   return trace.getTracer(`hypaware.${component}`)
 }
-
-/** @returns {object} */
-export function getActiveProvider() {
-  return trace.getTracerProvider()
-}

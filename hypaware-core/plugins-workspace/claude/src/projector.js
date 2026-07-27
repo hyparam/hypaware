@@ -31,7 +31,6 @@ import {
 } from './transcripts.js'
 import {
   createSessionContextReader,
-  defaultSessionContextFile,
   pickLatestMatching,
 } from './session_context.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'

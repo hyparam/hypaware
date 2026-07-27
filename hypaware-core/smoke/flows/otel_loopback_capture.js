@@ -5,7 +5,7 @@ import net from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
 
-import { Attr, installObservability } from '../../../src/core/observability/index.js'
+import { installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'

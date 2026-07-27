@@ -21,7 +21,6 @@ import { createCommandRegistry } from '../registry/commands.js'
 import {
   V1_BUNDLED_PLUGIN_ALLOWLIST,
   V1_EXCLUDED_FROM_DEFAULT,
-  defaultBundledWorkspaceDir,
   discoverBundledPlugins,
 } from './bundled.js'
 import { discoverInstalledPlugins } from './installed.js'

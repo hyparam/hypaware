@@ -15,8 +15,6 @@ import { readProgress, removeProgress, streamFlushFile, writeProgress } from './
 
 export const SPOOL_DIR = '_hypaware_spool'
 export const DEFAULT_SPOOL_BYTES_THRESHOLD = 512 * 1024 * 1024
-/** @deprecated Superseded by streaming reader batch limits. */
-export const DEFAULT_FLUSH_ROW_CHUNK_SIZE = 1000
 export const QUERY_FLUSH_DEBOUNCE_MS = 2 * 60 * 1000
 
 const ACTIVE_FILE = 'active.jsonl'

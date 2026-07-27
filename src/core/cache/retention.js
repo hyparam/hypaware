@@ -15,7 +15,6 @@ import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stag
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
-import { datasetsRoot } from './paths.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 

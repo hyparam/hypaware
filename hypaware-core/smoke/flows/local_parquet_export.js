@@ -3,7 +3,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
-import { fileURLToPath } from 'node:url'
 
 import { parquetReadObjects } from 'hyparquet'
 
@@ -11,8 +10,6 @@ import { installObservability } from '../../../src/core/observability/index.js'
 import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { runDaemon } from '../../../src/core/daemon/runtime.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
-
-const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 /**
  * Phase 7 smoke: Parquet export through the `@hypaware/local-fs` +
