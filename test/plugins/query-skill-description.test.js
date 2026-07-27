@@ -100,14 +100,16 @@ test('hypaware-query description stays a single-line scalar within budget', () =
   for (const client of CLIENTS) {
     const description = readFrontmatter(client).description
     assert.doesNotMatch(description, /\n/)
-    // Claude Code's actual limit is on the combined skill-listing entry
-    // (description + when_to_use, ~1,536 chars by default, configurable via
-    // skillListingMaxDescChars), and overflow is silently truncated rather
-    // than rejected. 1024 here is our own repo budget, chosen to stay well
-    // inside that listing allowance, not an external hard cap.
+    // 1024 is the documented Agent Skills maximum for the description field.
+    // Claude Code's filesystem loader does not enforce it (this repo ships a
+    // 1091-char description in hypaware-ai-usage-report); what it does instead
+    // is truncate the combined skill-listing entry at ~1,536 chars by default,
+    // configurable via skillListingMaxDescChars. Two different surfaces, both
+    // real. We hold to 1024 to stay spec-portable rather than relying on one
+    // loader's leniency.
     assert.ok(
       description.length <= 1024,
-      `${client}: description is ${description.length} chars, over the repo's 1024-char budget`
+      `${client}: description is ${description.length} chars, over the 1024-char Agent Skills description maximum`
     )
     // Repo style: no em dashes anywhere, including shipped strings.
     assert.doesNotMatch(description, /\u2014/)
