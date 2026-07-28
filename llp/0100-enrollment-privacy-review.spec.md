@@ -124,10 +124,12 @@ Its job, in order:
   the server root becomes a browsable landing page.
 - **R2.** *(amended 2026-07-27, [LLP 0101 #no-release](./0101-first-sync-review-window.decision.md#no-release))*
   No export tick may run before the deadline **except one the user releases
-  through a confirmed `hyp sync`**; the hold MUST be written before
+  through an interactive, unscoped `hyp sync` whose plan named every
+  destination the release unblocks**; the hold MUST be written before
   `enrollCentralSink` so no daemon tick can precede it, and the daemon MUST
-  NOT clear the marker itself. Originally: "No export tick may run before the
-  deadline."
+  NOT clear the marker itself. An instance-scoped run and `--yes` MUST refuse
+  to release, since the hold is driver-wide and their consent is not.
+  Originally: "No export tick may run before the deadline."
 - **R3.** The skill MUST opt its own session out of capture
   ([LLP 0066](./0066-session-opt-out.spec.md)) as its first action and verify
   success; on failure it MUST say so and continue only with explicit user

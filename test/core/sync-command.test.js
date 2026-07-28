@@ -72,9 +72,9 @@ function fakeSink(instanceName, config, result = {}) {
 }
 
 /**
- * @param {{ hypHome: string, sinks: any[], tty?: boolean, answer?: string }} args
+ * @param {{ hypHome: string, sinks: any[], tty?: boolean, answer?: string, remotes?: Record<string, { url: string }> }} args
  */
-function makeCtx({ hypHome, sinks, tty = false, answer }) {
+function makeCtx({ hypHome, sinks, tty = false, answer, remotes }) {
   const stdout = captureStream()
   const stderr = captureStream()
   const stdin = Object.assign(new PassThrough(), { isTTY: tty })
@@ -85,7 +85,7 @@ function makeCtx({ hypHome, sinks, tty = false, answer }) {
     stdin,
     env: { HYP_HOME: hypHome, HYP_CONFIG: '' },
     cwd: '/home/u',
-    config: { version: 2 },
+    config: remotes ? { version: 2, query: { remotes } } : { version: 2 },
     query: { listDatasets: () => [] },
     storage: {
       cacheRoot: path.join(hypHome, 'cache'),
@@ -195,15 +195,95 @@ test('the plan names each destination and whether it leaves the machine', async 
       fakeSink('mystery', {}),
     ],
     tty: true,
+    remotes: { prod: { url: 'https://hypaware.example.com/' } },
   })
 
   await runSync(['--dry-run'], ctx)
 
   const text = stdout.text
-  assert.match(text, /central\s+https:\/\/hypaware\.example\.com\s+\(leaves this machine\)/)
+  // A server is named, never spelled as a URL a terminal would autolink
+  // (LLP 0100 R1a's reason, applied to this surface).
+  assert.match(text, /central\s+the 'prod' server\s+\(leaves this machine\)/)
+  assert.doesNotMatch(text, /https:\/\//)
+  assert.match(text, /\(run 'hyp remote list' to see server URLs\)/)
   assert.match(text, /parquet\s+\/home\/u\/exports\s+\(stays on this machine\)/)
   // An undeclarable destination says nothing rather than guessing either way.
   assert.match(text, /mystery\s+@hypaware\/fake\n/)
+})
+
+test('an unnamed server falls back to its host, still not a linkifiable URL', async () => {
+  const hypHome = await makeHome('unnamed-server')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://elsewhere.example.com/ingest' })],
+    tty: true,
+    remotes: {},
+  })
+
+  await runSync(['--dry-run'], ctx)
+
+  assert.match(stdout.text, /central\s+elsewhere\.example\.com\s+\(leaves this machine\)/)
+  assert.doesNotMatch(stdout.text, /https:\/\//)
+})
+
+test('a named instance cannot release the hold: the plan it showed was not the hold\'s scope', async () => {
+  // The hold is driver-wide (LLP 0101 #hold). A plan built from one handle
+  // omits every other destination, so confirming it would forward them
+  // unseen - the silent first forward the hold exists to prevent.
+  const hypHome = await makeHome('scoped-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const central = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const parquet = fakeSink('parquet', { dir: '/home/u/exports' })
+  const { ctx, stderr } = makeCtx({
+    hypHome,
+    sinks: [central, parquet],
+    tty: true,
+    answer: 'y',
+  })
+
+  const code = await runSync(['parquet'], ctx)
+
+  assert.equal(code, 2)
+  assert.match(stderr.text, /review window is open until /)
+  assert.match(stderr.text, /all-or-nothing/)
+  assert.match(stderr.text, /would forward the others unseen/)
+  assert.ok(await holdExists(hypHome), 'the marker must survive a scoped run')
+  assert.deepEqual(parquet.exported, [], 'nothing exports while the window stands')
+  assert.deepEqual(central.exported, [])
+})
+
+test('--yes cannot release the hold: #no-release licenses an attended confirmation only', async () => {
+  const hypHome = await makeHome('yes-held')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [sink], tty: false })
+
+  const code = await runSync(['--yes'], ctx)
+
+  assert.equal(code, 2)
+  assert.match(stderr.text, /--yes cannot do it/)
+  assert.ok(await holdExists(hypHome), 'a script must not end somebody else\'s review window')
+  assert.deepEqual(sink.exported, [])
+})
+
+test('a hold that cannot be cleared fails loudly instead of exiting 0 with nothing sent', async () => {
+  const hypHome = await makeHome('clear-fails')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const policyDir = path.dirname(firstSyncHoldMarkerPath(stateDir(hypHome)))
+  await fs.chmod(policyDir, 0o500)
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [sink], tty: true, answer: 'y' })
+
+  try {
+    const code = await runSync([], ctx)
+
+    assert.equal(code, 1, 'a held tick that exported nothing is not a success')
+    assert.match(stderr.text, /could not end the review window/)
+    assert.match(stderr.text, /Nothing was sent/)
+    assert.deepEqual(sink.exported, [])
+  } finally {
+    await fs.chmod(policyDir, 0o700)
+  }
 })
 
 test('the plan counts the directories being withheld', async () => {
@@ -253,7 +333,7 @@ test('an unknown instance names the ones that exist', async () => {
   assert.match(stderr.text, /available: central/)
 })
 
-test('an instance argument ticks only that sink', async () => {
+test('an instance argument ticks only that sink (no hold in play)', async () => {
   const hypHome = await makeHome('one-instance')
   const central = fakeSink('central', { url: 'https://hypaware.example.com' })
   const parquet = fakeSink('parquet', { dir: '/home/u/exports' })

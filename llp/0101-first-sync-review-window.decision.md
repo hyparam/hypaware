@@ -71,6 +71,23 @@ deadline; `createSinkDriver.tick` exports nothing while `now < deadline`.**
   same as a user who decided. The daemon never clears the marker, so an
   unattended machine still waits out the full window.
 
+  Two shapes of `hyp sync` cannot release, because the consent they carry is
+  narrower than what the release does:
+
+  - **Instance-scoped** (`hyp sync <instance>`) refuses while a hold is live.
+    The hold is driver-wide (`#hold`), so a plan built from one named handle
+    omits every destination the release would unblock; confirming it would
+    forward the others unseen. Releasing is all-or-nothing because the hold
+    is.
+  - **`--yes`** refuses while a hold is live. "Attended" is the operative
+    word: a provisioning script is not a person, and its destination list
+    scrolls past in a log nobody reads. `--yes` still works for ordinary
+    syncs; what it must not buy is somebody's review window.
+
+  A release that cannot be completed (an unlink failure) is an error, not a
+  quiet no-op: the marker survives, the driver holds the tick, and the
+  command must say so rather than exit 0 having sent nothing.
+
   What the amendment concedes is the third clause of the original: the cost
   is *not* only latency. On an attended onboarding the hold blocks the
   demonstration that the product works at all, and the person running it has

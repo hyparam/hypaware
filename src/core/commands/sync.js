@@ -2,9 +2,12 @@
 
 import { requireConfirmation } from '../cli/confirm.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
+import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
   clearFirstSyncHold,
+  firstSyncHoldMarkerPath,
   formatFirstSyncDeadline,
   readFirstSyncDeadline,
 } from '../usage-policy/first_sync_hold.js'
@@ -41,6 +44,7 @@ const USAGE = 'usage: hyp sync [instance] [--yes] [--dry-run]'
  * @returns {Promise<number>}
  */
 export async function runSync(argv, ctx) {
+  const log = getLogger('sync')
   const parsed = parseCommandArgv(
     argv,
     {
@@ -80,7 +84,49 @@ export async function runSync(argv, ctx) {
 
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const deadline = await readFirstSyncDeadline({ stateDir })
-  const destinations = handles.map((handle) => describeDestination(handle))
+  const remotes = effectiveRemotes(ctx.config)
+  const destinations = handles.map((handle) => describeDestination(handle, remotes))
+
+  // Two refusals, both because the hold is driver-wide (LLP 0101 #hold)
+  // while the consent in front of it would not be. They come before the plan
+  // is rendered: a scoped plan is exactly the misleading artifact the first
+  // refusal exists to prevent, and printing "syncing now ends it early"
+  // ahead of "you cannot end it this way" reads as a contradiction.
+  //
+  // A named instance shows a plan built from that one handle, so confirming
+  // it would release every *other* destination unseen - the silent first
+  // forward the hold exists to prevent. Releasing is all-or-nothing because
+  // the hold is.
+  //
+  // `--yes` skips the plan's whole purpose. `#no-release` licenses release by
+  // "confirmed, attended request" and "an explicit `y`"; a provisioning
+  // script satisfies neither, and its destination list scrolls past in a log
+  // nobody reads. Ordinary (unheld) syncs keep `--yes` - what it must not buy
+  // is somebody's review window.
+  //
+  // `--dry-run` is exempt: it sends nothing, so showing a held machine what
+  // one destination would export is information, not consent.
+  if (deadline !== null && !dryRun) {
+    const held = `hyp sync: the first-sync review window is open until ${formatFirstSyncDeadline(deadline)}.\n`
+    if (instance) {
+      ctx.stderr.write(
+        held +
+        `  Ending it is all-or-nothing: the hold covers every destination, so releasing it\n` +
+        `  from a run that names only '${instance}' would forward the others unseen.\n` +
+        '  Run `hyp sync` with no instance to review every destination and release,\n' +
+        '  or wait for the deadline.\n'
+      )
+      return 2
+    }
+    if (yes) {
+      ctx.stderr.write(
+        held +
+        '  Ending it early takes an interactive confirmation, so --yes cannot do it.\n' +
+        '  Run `hyp sync` from a terminal, or wait for the deadline.\n'
+      )
+      return 2
+    }
+  }
 
   ctx.stdout.write(renderPlan({ destinations, exclusions: await readExclusions(stateDir) }))
   if (deadline !== null) ctx.stdout.write(renderFirstSyncWarning(deadline))
@@ -112,7 +158,35 @@ export async function runSync(argv, ctx) {
   // would otherwise hold the very export just consented to. A failed export
   // leaves the window ended: consent was given, and the retry belongs to the
   // ordinary schedule rather than to a window that has served its purpose.
-  if (deadline !== null) await clearFirstSyncHold({ stateDir })
+  //
+  // A failed unlink must not read as success. The marker survives, the driver
+  // holds the tick, and without this check the command would print nothing
+  // further and exit 0 - the exact "opposite of the truth" output this verb
+  // was written to replace.
+  if (deadline !== null) {
+    const cleared = await clearFirstSyncHold({ stateDir })
+    const stillHeld = await readFirstSyncDeadline({ stateDir })
+    if (!cleared || stillHeld !== null) {
+      ctx.stderr.write(
+        'hyp sync: could not end the review window - the hold marker could not be removed\n' +
+        `  ${firstSyncHoldMarkerPath(stateDir)}\n` +
+        '  Nothing was sent. Check the file\'s permissions and re-run.\n'
+      )
+      return 1
+    }
+    // The one moment a machine's history becomes forwardable ahead of its
+    // deadline, and clearing the marker destroys the only on-disk evidence it
+    // happened. Without this line nothing afterwards distinguishes "the window
+    // expired" from "somebody released it".
+    log.info('sync.first_sync_hold_released', {
+      [Attr.COMPONENT]: 'cmd-sync',
+      [Attr.OPERATION]: 'sync.first_sync_hold_released',
+      hyp_deadline: new Date(deadline).toISOString(),
+      hyp_released_early_ms: deadline - Date.now(),
+      destinations: destinations.length,
+      off_machine_destinations: destinations.filter((d) => d.offMachine === true).length,
+    })
+  }
 
   const { createSinkDriver } = await import('../sinks/driver.js')
   const driver = createSinkDriver({
@@ -126,6 +200,13 @@ export async function runSync(argv, ctx) {
   const tickOpts = { now: new Date(), force: true, source: 'manual' }
   if (instance) tickOpts.sinkInstance = instance
   const report = await driver.tick(tickOpts)
+
+  // A hold that appeared between the check above and the tick (a concurrent
+  // enrolling login) would otherwise print an empty report and exit 0.
+  if (report.held) {
+    ctx.stderr.write(`hyp sync: nothing was sent - the sink driver is holding every tick (${report.held})\n`)
+    return 1
+  }
 
   for (const r of report.sinks) {
     ctx.stdout.write(
@@ -149,20 +230,59 @@ export async function runSync(argv, ctx) {
  * reports `null` and the summary stays silent about it - a confirmation
  * prompt that guesses is worse than one that admits the gap.
  *
+ * A server is named, never spelled as a URL. R1a binds the enrolling login's
+ * surfaces by its own text, but its reason is about terminals, not about
+ * which command printed the line: any `https://` run autolinks with no way
+ * to opt out, and the server root answers `{"error":"unknown_path"}` in a
+ * browser. This prompt appears at the same moment in onboarding and would
+ * collect the same dead-link click. An origin with no configured name falls
+ * back to its host, which is still not a URL a terminal will linkify.
+ *
+ * @ref LLP 0100#requirements [constrained-by]: R1a's reason - name the server, never its URL - applied to the consent prompt R1a's text does not reach
  * @param {ExtendedSinkHandle} handle
+ * @param {Record<string, { url?: string }>} remotes configured targets, name to URL
  * @returns {{ instance: string, text: string, offMachine: boolean | null }}
  */
-function describeDestination(handle) {
+function describeDestination(handle, remotes) {
   const config = /** @type {Record<string, unknown>} */ (handle.config ?? {})
   const url = config.url
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-    return { instance: handle.instanceName, text: url, offMachine: true }
+    return { instance: handle.instanceName, text: nameServer(url, remotes), offMachine: true }
   }
   const dir = config.dir
   if (typeof dir === 'string' && dir.length > 0) {
     return { instance: handle.instanceName, text: dir, offMachine: false }
   }
   return { instance: handle.instanceName, text: handle.plugin ?? 'unknown destination', offMachine: null }
+}
+
+/**
+ * Render a server URL as the name the user configured for it, matching on
+ * origin so a target registered with a trailing path or slash still resolves.
+ *
+ * @param {string} url
+ * @param {Record<string, { url?: string }>} remotes
+ * @returns {string}
+ */
+function nameServer(url, remotes) {
+  /** @param {string} value */
+  const originOf = (value) => {
+    try {
+      return new URL(value).origin
+    } catch {
+      return null
+    }
+  }
+  const origin = originOf(url)
+  if (origin) {
+    for (const [name, target] of Object.entries(remotes ?? {})) {
+      if (typeof target?.url === 'string' && originOf(target.url) === origin) {
+        return `the '${name}' server`
+      }
+    }
+    return new URL(url).host
+  }
+  return url
 }
 
 /**
@@ -209,6 +329,11 @@ function renderPlan({ destinations, exclusions }) {
         ? '  (stays on this machine)'
         : ''
     lines.push(`  ${dest.instance.padEnd(width)}  ${dest.text}${note}\n`)
+  }
+  // Naming a server instead of its URL is only safe if the name stays
+  // auditable: R1a's second half, applied here for the same reason.
+  if (destinations.some((d) => d.offMachine === true)) {
+    lines.push("  (run 'hyp remote list' to see server URLs)\n")
   }
   lines.push('\n')
   if ('error' in exclusions) {
