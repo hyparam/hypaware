@@ -36,7 +36,8 @@ import {
 } from '../commands/daemon.js'
 import { runMcp } from '../commands/mcp.js'
 import { runSmoke, runVersion } from '../commands/misc.js'
-import { runSinkForce, runSinkMaintain } from '../commands/sink.js'
+import { runSinkMaintain } from '../commands/sink.js'
+import { runSync } from '../commands/sync.js'
 import { runInit } from '../commands/init.js'
 import { runJoin, runLeave } from '../commands/central.js'
 import { runPurge } from '../commands/purge.js'
@@ -406,17 +407,17 @@ function buildCoreCommands(registry) {
       usage: 'hyp daemon restart',
       run: runDaemonRestart,
     },
+    {
+      name: 'sync',
+      summary: 'Send captured data to its destinations now, after confirming what leaves',
+      usage: 'hyp sync [instance] [--yes] [--dry-run]',
+      run: runSync,
+    },
     makeGroupCommand({
       registry,
       name: 'sink',
-      summary: 'Manage sink instances (force, maintain)',
+      summary: 'Maintain sink instances (to export now, see `hyp sync`)',
     }),
-    {
-      name: 'sink force',
-      summary: 'Force the sink driver to fire a tick now (optionally for one instance)',
-      usage: 'hyp sink force [instance]',
-      run: runSinkForce,
-    },
     {
       name: 'sink maintain',
       summary: 'Run export maintenance (snapshot expiration; data-file compaction with --compact) on table-format sinks',

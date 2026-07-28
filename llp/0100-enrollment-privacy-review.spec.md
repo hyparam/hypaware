@@ -101,10 +101,12 @@ Its job, in order:
 ## Requirements {#requirements}
 
 - **R1.** An attended enrolling login MUST print the first-sync deadline as an
-  absolute local time and the skill invocation hint, and MUST state that the
-  first sync includes backfilled history. A non-TTY enrolling login gets the
-  same hold and the same message on stderr; nothing prompts
-  ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md#d3)
+  absolute local time **with its time zone**, the skill invocation hint, and
+  the verb that ends the window early (`hyp sync`), and MUST state that the
+  first sync includes backfilled history. A deadline the reader cannot place
+  on a clock, or cannot act on, is a countdown rather than a choice. A non-TTY
+  enrolling login gets the same hold and the same message on stderr; nothing
+  prompts ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md#d3)
   stands).
 - **R1a.** The enrolling login's destination surfaces - the forwarding line and
   the privacy block - MUST name the server by its configured target name and
@@ -120,9 +122,14 @@ Its job, in order:
   paths (`already connected to <origin>`, the replaced-identity note) still
   print origins, where the origin is the fact the user must act on. Revisit if
   the server root becomes a browsable landing page.
-- **R2.** No export tick may run before the deadline
-  ([LLP 0101](./0101-first-sync-review-window.decision.md)); the hold MUST be
-  written before `enrollCentralSink` so no daemon tick can precede it.
+- **R2.** *(amended 2026-07-27, [LLP 0101 #no-release](./0101-first-sync-review-window.decision.md#no-release))*
+  No export tick may run before the deadline **except one the user releases
+  through an interactive, unscoped `hyp sync` whose plan named every
+  destination the release unblocks**; the hold MUST be written before
+  `enrollCentralSink` so no daemon tick can precede it, and the daemon MUST
+  NOT clear the marker itself. An instance-scoped run and `--yes` MUST refuse
+  to release, since the hold is driver-wide and their consent is not.
+  Originally: "No export tick may run before the deadline."
 - **R3.** The skill MUST opt its own session out of capture
   ([LLP 0066](./0066-session-opt-out.spec.md)) as its first action and verify
   success; on failure it MUST say so and continue only with explicit user

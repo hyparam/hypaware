@@ -27,7 +27,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *                  ENOTDIR. The driver then routes the failed batch
  *                  into `<state>/sinks/broken/outbox/<batchId>.json`.
  *
- * The forced tick is driven through `hyp sink force` so the CLI
+ * The forced tick is driven through `hyp sync` so the CLI
  * surface is exercised, not just the in-process driver. Dispatch is
  * handed the daemon's runtime via `opts.kernel` because Phase 7 does
  * not yet wire config-driven sink instantiation. The smoke owns the
@@ -40,7 +40,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *   - The good sink produces a Parquet file decodable by
  *     `parquetReadObjects` containing the captured log row.
  *   - The broken sink's failure lands in the outbox.
- *   - `hyp sink force good` exits 0 and the report mentions the
+ *   - `hyp sync --yes` exits 0 and the report mentions the
  *     instance as `exported`.
  *   - Daemon self-telemetry includes `source.start` (otlp),
  *     `sink.tick`, `sink.export_batch` (status=ok for `good`, !=ok
@@ -144,11 +144,13 @@ export async function run({ harness, expect }) {
     (v) => v !== undefined && v.kind === 'blob',
   )
 
-  // ----- Drive the forced tick through the CLI (`hyp sink force`) -----
+  // ----- Drive the forced tick through the CLI (`hyp sync`) -----
+  // `--yes` because the smoke has no TTY and `hyp sync` always confirms
+  // before exporting (LLP 0101 #no-release).
   const forceStdout = makeBuf()
   const forceStderr = makeBuf()
   const forceCode = await dispatch(
-    ['sink', 'force'],
+    ['sync', '--yes'],
     {
       stdout: forceStdout,
       stderr: forceStderr,
@@ -157,18 +159,18 @@ export async function run({ harness, expect }) {
     },
   )
   expect.that(
-    `dispatch: hyp sink force exited 0 (stderr=${forceStderr.text()})`,
+    `dispatch: hyp sync exited 0 (stderr=${forceStderr.text()})`,
     forceCode,
     (v) => v === 0,
   )
   const forceOut = forceStdout.text()
   expect.that(
-    'stdout: hyp sink force reported the good instance as exported',
+    'stdout: hyp sync reported the good instance as exported',
     forceOut,
     (v) => typeof v === 'string' && /good: exported/.test(v),
   )
   expect.that(
-    'stdout: hyp sink force reported the broken instance as partial (failed mkdir)',
+    'stdout: hyp sync reported the broken instance as partial (failed mkdir)',
     forceOut,
     (v) => typeof v === 'string' && /broken: (partial|failed)/.test(v),
   )

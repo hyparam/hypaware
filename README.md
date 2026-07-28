@@ -119,11 +119,12 @@ hyp query sql "select count(*) from ai_gateway_messages" --remote
 ```
 
 **Privacy review before anything ships.** Nothing is forwarded immediately.
-The first sync (which includes backfilled history) waits until at least
-11:59pm local time on the day you enroll, and the login prints the exact
-deadline. Before then, open Claude or Codex and run the `hypaware-privacy`
-skill to review what will ship, mark directories ignore / local-only / sync,
-and purge anything sensitive.
+The first sync (which includes backfilled history) waits until 11:59pm local
+time on the day you enroll, and the login prints the exact deadline. Before
+then, open Claude or Codex and run the `hypaware-privacy` skill to review what
+will ship, mark directories ignore / local-only / sync, and purge anything
+sensitive. Done reviewing, or want to see data on the server sooner? `hyp sync`
+shows what would leave and sends it once you confirm.
 
 Useful login flags: `--no-forward` signs in for remote queries only (no
 enrollment), `--no-browser` prints the sign-in URL instead of opening one,

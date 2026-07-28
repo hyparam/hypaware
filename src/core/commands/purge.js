@@ -3,8 +3,8 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import process from 'node:process'
-import readline from 'node:readline/promises'
 
+import { askYesNo } from '../cli/confirm.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
@@ -58,7 +58,10 @@ export async function runPurge(argv, ctx) {
       )
       return 2
     }
-    const ok = await confirm(ctx, describeTarget(target))
+    const ok = await askYesNo(
+      ctx,
+      `Permanently delete ${describeTarget(target)} from the local cache? [y/N] `
+    )
     if (!ok) {
       ctx.stdout.write('purge cancelled\n')
       return 0
@@ -177,26 +180,6 @@ function hashTargetToken(target) {
   return createHash('sha256').update(token).digest('hex').slice(0, 16)
 }
 
-/**
- * Interactive y/N confirmation for the destructive verb. Only reached when
- * stdin is a TTY (the non-TTY path requires `--yes`).
- *
- * @param {CommandRunContext} ctx
- * @param {string} what
- * @returns {Promise<boolean>}
- */
-async function confirm(ctx, what) {
-  const rl = readline.createInterface({
-    input: /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin),
-    output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stderr)),
-  })
-  try {
-    const answer = await rl.question(`Permanently delete ${what} from the local cache? [y/N] `)
-    return /^y(es)?$/i.test(answer.trim())
-  } finally {
-    rl.close()
-  }
-}
 
 /**
  * @param {string[]} argv
