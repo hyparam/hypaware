@@ -19,6 +19,10 @@ import {
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
+import {
+  classifyTranscriptEntrypoint,
+  sessionEntrypoint,
+} from '../../../../src/core/backfill/entrypoint_owner.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
@@ -167,6 +171,9 @@ async function* runClaudeBackfill(args) {
   let filesSeen = 0
   let sessionsProjected = 0
   let messagesProjected = 0
+  let sessionsGated = 0
+  /** @type {Map<string, number>} */
+  const unclaimedEntrypoints = new Map()
 
   for (const filePath of walkTranscriptFiles(projectsDir)) {
     if (ctx.signal?.aborted) break
@@ -214,10 +221,41 @@ async function* runClaudeBackfill(args) {
         continue
       }
 
+      // Claude Desktop writes its sessions into THIS transcript tree, tagged
+      // `entrypoint: "claude-desktop"`. Importing them because they happen to
+      // live under `~/.claude/projects` captures a client the user may never
+      // have opted into, and files it under the wrong client. Read the
+      // entrypoint from the whole session, not `windowed`: the field rides
+      // most lines but the window could clip the ones that carry it.
+      // @ref LLP 0140#gate-before-projection [implements]: a session owned by an unconfigured client is skipped before projection, like the usage-policy drop above
+      const entrypoint = sessionEntrypoint(sessionEntries)
+      const owned = classifyTranscriptEntrypoint(entrypoint, ctx.entrypointOwners ?? new Map(), clientName)
+      if (!owned.import) {
+        sessionsGated += 1
+        log.info('claude.backfill.entrypoint_not_configured', {
+          component: 'plugin.claude.backfill',
+          operation: 'entrypoint_gate',
+          session_id: sessionId,
+          entrypoint,
+          owner_client: owned.owner?.client,
+          owner_plugin: owned.owner?.plugin,
+          status: 'ok',
+        })
+        continue
+      }
+      // Unknown entrypoints fail open (see `classifyTranscriptEntrypoint`).
+      // Collected per distinct value and reported once at scan_complete rather
+      // than per session: a value no plugin claims is a property of the install,
+      // not of each conversation, and per-session logging buried the two real
+      // gate decisions under one line per transcript.
+      if (entrypoint && !owned.owner) {
+        unclaimedEntrypoints.set(entrypoint, (unclaimedEntrypoints.get(entrypoint) ?? 0) + 1)
+      }
+
       const exchange = await projectedExchangeFromEntries({
         sessionId,
         entries: windowed,
-        clientName,
+        clientName: owned.clientName,
         record,
         agentMeta,
         deriveRepo: deriveRepoCached,
@@ -235,7 +273,7 @@ async function* runClaudeBackfill(args) {
       })
 
       yield projectedExchangeItem(exchange, {
-        client_name: clientName,
+        client_name: owned.clientName,
         source_path: filePath,
         native_id: sessionId,
       })
@@ -248,6 +286,17 @@ async function* runClaudeBackfill(args) {
     files_seen: filesSeen,
     sessions_projected: sessionsProjected,
     messages_projected: messagesProjected,
+    // How many sessions the entrypoint gate held back, so a run that imports
+    // less than expected says why in its own summary line rather than
+    // requiring a log trawl.
+    sessions_gated: sessionsGated,
+    ...(unclaimedEntrypoints.size > 0
+      ? {
+        unclaimed_entrypoints: [...unclaimedEntrypoints]
+          .map(([value, count]) => `${value}=${count}`)
+          .join(','),
+      }
+      : {}),
     status: 'ok',
   })
 }

@@ -4,7 +4,10 @@ import { randomUUID } from 'node:crypto'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
+import { resolveEntrypointOwners } from '../backfill/entrypoint_owner.js'
+import { loadClientDescriptors } from '../daemon/status.js'
 
 /**
  * Base partition segment for backfilled writes. `storage.appendRows`
@@ -19,6 +22,7 @@ const BACKFILL_PARTITION_SEGMENT = 'backfill'
 /**
  * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
+ * @import { EntrypointOwners } from '../../../src/core/backfill/types.js'
  */
 
 /**
@@ -381,6 +385,16 @@ async function runProvider(args) {
       status: 'ok',
     },
     async () => {
+      // Which client owns which transcript `entrypoint`, and whether that
+      // client is configured. Built here rather than inside a provider because
+      // the answer needs the FULL catalog (a claiming plugin is typically NOT
+      // active, which is exactly the case that closes the gate) plus the
+      // effective plugin list, neither of which the plugin activation context
+      // carries. Best-effort: an empty map means every session imports, i.e.
+      // the pre-gate behavior.
+      // @ref LLP 0140#manifest-declares-ownership [implements]: the runner resolves entrypoint ownership from the catalog and hands providers the resolved map
+      const entrypointOwners = await resolveOwnersForRun(ctx, log)
+
       const runCtx = buildRunContext({
         env: ctx.env,
         storage: ctx.storage,
@@ -389,6 +403,7 @@ async function runProvider(args) {
         until,
         dryRun,
         log,
+        entrypointOwners,
       })
 
       try {
@@ -694,6 +709,7 @@ function handleEvent(args) {
  *   until?: string,
  *   dryRun: boolean,
  *   log: PluginLogger,
+ *   entrypointOwners?: EntrypointOwners,
  * }} args
  * @returns {BackfillRunContext}
  */
@@ -706,8 +722,38 @@ function buildRunContext(args) {
     ...(args.since !== undefined ? { since: args.since } : {}),
     ...(args.until !== undefined ? { until: args.until } : {}),
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
+    ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
     dryRun: args.dryRun,
     log: args.log,
+  }
+}
+
+/**
+ * Resolve the entrypoint-ownership map for one provider run.
+ *
+ * Best-effort by design: catalog discovery already degrades to empty in
+ * `loadClientDescriptors`, and a failure here must not fail a backfill. An
+ * empty map imports everything, which is the behavior that shipped before
+ * the gate existed, so degrading never captures MORE than intended, only
+ * less precisely attributed.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {PluginLogger} log
+ * @returns {Promise<EntrypointOwners>}
+ */
+async function resolveOwnersForRun(ctx, log) {
+  try {
+    const stateDir = readObservabilityEnv(ctx.env).stateDir
+    const descriptors = await loadClientDescriptors({ stateDir })
+    const active = new Set((ctx.plugins ?? []).map((p) => p.name))
+    return resolveEntrypointOwners(descriptors.values(), (plugin) => active.has(plugin))
+  } catch (err) {
+    log.warn('backfill.entrypoint_owners_unavailable', {
+      [Attr.COMPONENT]: 'backfill',
+      [Attr.ERROR_KIND]: 'catalog_unavailable',
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return new Map()
   }
 }
 

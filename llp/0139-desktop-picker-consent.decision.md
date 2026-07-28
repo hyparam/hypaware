@@ -82,6 +82,14 @@ when residue is present, the root-owned plist and its sudo prompt, the
 restart, and how to undo it. A user who reads only that block can predict
 every file that changes.
 
+> **Scope correction ([LLP 0140](./0140-transcript-entrypoint-ownership.decision.md)).**
+> This gate covers the live-capture path only: the credential, the helper,
+> and the managed plist. It is not the sole door Desktop content enters by.
+> Desktop writes its sessions into `~/.claude/projects`, so the
+> `@hypaware/claude` backfill imported them with no Desktop opt-in at all.
+> Read "the picker tick is the consent point" below as scoped to live
+> capture; history is gated separately, by transcript-entrypoint ownership.
+
 This is a better gate than the exclusion list was, for three reasons.
 First, the acquisition of a credential was already attended: step 1 of
 `install` runs `claude-account login` interactively and refuses outright

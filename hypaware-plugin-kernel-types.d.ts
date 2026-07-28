@@ -159,6 +159,24 @@ export interface PluginClientManifest {
   agent_dir?: string
   attach_probe?: PluginAttachProbeManifest
   required_upstreams?: string[]
+  /**
+   * Transcript `entrypoint` values whose sessions belong to this client.
+   *
+   * Some clients write their history into another client's transcript
+   * tree: Claude Desktop's sessions land in `~/.claude/projects` beside
+   * Claude Code's, tagged `entrypoint: "claude-desktop"`. Without this
+   * mapping the `@hypaware/claude` backfill imports them as its own,
+   * so Desktop history enters the cache with no Desktop opt-in and is
+   * attributed to the wrong client.
+   *
+   * A client may claim several values: Desktop's transcripts say
+   * `claude-desktop` while its live third-party-inference route stamps
+   * `claude-desktop-3p` (LLP 0133#attribution).
+   *
+   * Declared here rather than in a core table so adding a client gates
+   * and attributes its entrypoints automatically.
+   */
+  transcript_entrypoints?: string[]
 }
 
 export interface PluginAttachProbeManifest {
@@ -2249,6 +2267,22 @@ export interface BackfillPlanContext {
   retentionDays?: number
   log: PluginLogger
   signal?: AbortSignal
+  /**
+   * Transcript `entrypoint` to owning client, resolved by the runner from
+   * every installed plugin's `contributes.client.transcript_entrypoints`
+   * plus the effective plugin list.
+   *
+   * A provider that scans a shared transcript tree consults this before
+   * importing a session: an entrypoint owned by a client whose plugin is
+   * not configured must be skipped, or the import captures content the
+   * user never opted into. An owned-and-configured entrypoint attributes
+   * the rows to that client rather than to the scanning plugin.
+   *
+   * Absent or empty means "no ownership known", and every session imports
+   * under the scanning client. Providers must treat it as optional: the
+   * runner resolves it best-effort and older hosts do not supply it.
+   */
+  entrypointOwners?: Map<string, { client: string, plugin: PluginName, configured: boolean }>
 }
 
 export interface BackfillRunContext extends BackfillPlanContext {
