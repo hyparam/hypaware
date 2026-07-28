@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import { buildConsentExplanation, confirmInstall } from './consent.js'
 import { resolveInputs } from './inputs.js'
 import { buildManagedProfile, renderManagedPreferencesPlist, shellQuote } from './profile.js'
 
@@ -94,6 +95,14 @@ function formatCommand(command) {
  * prompt converges on re-run without repeating completed work
  * (`@ref LLP 0131#idempotent-rerun`).
  *
+ * A first run explains what it is about to change and asks, defaulting to
+ * no (`@ref LLP 0139#informed-consent`). Because the wizard's configure
+ * phase invokes this same command through `ctx.commands.run`, that gate
+ * covers the wizard too with no second implementation, and a decline lands
+ * on the wizard's existing drop-on-failure path (LLP 0131) which prints the
+ * catch-up command. `--yes` accepts in advance; `--print-commands` skips
+ * the prompt because it applies nothing.
+ *
  * @param {string[]} argv
  * @param {CommandRunContext} cmdCtx
  * @param {{ sectionConfig: Record<string, unknown>, credential: AnthropicCredentialCapability, stateDir: string, spawnSyncImpl?: typeof spawnSync, managedPlistPath?: string }} opts
@@ -101,6 +110,7 @@ function formatCommand(command) {
  */
 export async function runInstall(argv, cmdCtx, opts) {
   const printCommands = argv.includes('--print-commands')
+  const assumeYes = argv.includes('--yes')
   const spawnImpl = opts.spawnSyncImpl ?? spawnSync
   const plistPath = opts.managedPlistPath ?? MANAGED_PLIST_PATH
 
@@ -117,11 +127,33 @@ export async function runInstall(argv, cmdCtx, opts) {
     return 1
   }
 
+  // Consent is asked once, not on every converged re-run: a machine whose
+  // plist already matches AND whose helper is already written has been
+  // through this prompt, and LLP 0131's idempotent re-run has to stay
+  // cheap enough to use as a repair step. `--print-commands` never asks
+  // because it applies nothing.
+  const alreadyConfigured = plistUpToDate(plistPath, computeDesiredPlistContent(inputs))
+    && fs.existsSync(inputs.helperPath)
+  if (!printCommands && !assumeYes && !alreadyConfigured) {
+    const residueDir = residueDirPath(cmdCtx.env)
+    const explanation = buildConsentExplanation({
+      inputs,
+      plistPath,
+      credentialMode: opts.credential.mode,
+      residueDir,
+      residuePresent: fs.existsSync(residueDir),
+    })
+    if (!(await confirmInstall(cmdCtx, explanation))) {
+      cmdCtx.stdout.write("claude-desktop install: nothing changed. Re-run 'hyp claude-desktop install' when you want to.\n")
+      return 1
+    }
+  }
+
   /** @type {InstallStepOutcome[]} */
   const steps = []
 
-  steps.push(await ensureCredentialLogin(cmdCtx, opts.credential))
-  steps.push(await ensureHelperWritten(cmdCtx))
+  steps.push(await ensureCredentialLogin(cmdCtx, opts.credential, printCommands))
+  steps.push(await ensureHelperWritten(cmdCtx, inputs, printCommands))
   steps.push(clearResidue(cmdCtx.env, opts.stateDir))
   steps.push(ensurePlistWritten(cmdCtx, inputs, { printCommands, spawnImpl, plistPath }))
   steps.push(promptRestart(cmdCtx, { printCommands, spawnImpl }))
@@ -149,12 +181,25 @@ export async function runInstall(argv, cmdCtx, opts) {
  * state through `claude-account status` before ever running `login`, so
  * a re-run never re-triggers the browser OAuth flow once signed in.
  *
+ * `--print-commands` prints the sign-in it would run instead of running
+ * it. Without that, the escape hatch was a trap: on a machine that is not
+ * signed in it dropped into an interactive OAuth flow, so the one flag
+ * that exists to avoid unattended side effects was the flag most likely
+ * to hang. Nothing in the install has a side effect under the flag now,
+ * which is also what lets the consent gate skip it.
+ *
+ * @ref LLP 0139#print-commands-applies-nothing [implements]: every step is side-effect-free under --print-commands, including the non-privileged ones
  * @param {CommandRunContext} cmdCtx
  * @param {AnthropicCredentialCapability} credential
+ * @param {boolean} printCommands
  * @returns {Promise<InstallStepOutcome>}
  */
-async function ensureCredentialLogin(cmdCtx, credential) {
+async function ensureCredentialLogin(cmdCtx, credential, printCommands) {
   const step = 'credential login'
+  if (printCommands && credential.mode !== 'org_key') {
+    cmdCtx.stdout.write('hyp claude-account login\n')
+    return { step, status: 'skipped', detail: 'printed only (--print-commands); sign in yourself if not already' }
+  }
   if (credential.mode === 'org_key') {
     return { step, status: 'skipped', detail: 'org_key mode: fleet-provided key, no sign-in needed' }
   }
@@ -183,10 +228,16 @@ async function ensureCredentialLogin(cmdCtx, credential) {
  * the wrapper script.
  *
  * @param {CommandRunContext} cmdCtx
+ * @param {ProfileInputs} inputs
+ * @param {boolean} printCommands
  * @returns {Promise<InstallStepOutcome>}
  */
-async function ensureHelperWritten(cmdCtx) {
+async function ensureHelperWritten(cmdCtx, inputs, printCommands) {
   const step = 'credential helper'
+  if (printCommands) {
+    cmdCtx.stdout.write('hyp claude-desktop install-helper\n')
+    return { step, status: 'skipped', detail: `printed only (--print-commands); would write ${inputs.helperPath}` }
+  }
   const code = await cmdCtx.commands.run('claude-desktop install-helper', [])
   if (code !== 0) {
     return { step, status: 'failed', detail: 'failed to write the credential helper wrapper' }

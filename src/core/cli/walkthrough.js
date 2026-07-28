@@ -599,7 +599,10 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  *     order (so Anthropic precedes OpenAI precedes the ChatGPT
  *     subscription upstream, matching the retired switch's fixed order).
  *   - Each picked descriptor's `plugin` (the adapter plugin instance, e.g.
- *     `@hypaware/claude`, `@hypaware/otel`) is included. A
+ *     `@hypaware/claude`, `@hypaware/otel`) is included, followed by any
+ *     `plugins[]` it composes beside it (the Claude Desktop row composes
+ *     `@hypaware/claude-account` beside its own adapter, whose manifest
+ *     requires the credential capability only that plugin provides). A
  *     gateway-requiring plugin lands after the export sink plugins; a
  *     gateway-independent one before them, preserving the retired switch's
  *     plugin order.
@@ -647,9 +650,21 @@ export function composePickerConfig(args) {
     for (const up of requested) {
       if (!upstreams.some((existing) => existing.name === up.name)) upstreams.push({ ...up })
     }
-    if (compose.plugin) {
-      if (compose.requires_gateway) postExportPlugins.push(compose.plugin)
-      else preExportPlugins.push(compose.plugin)
+    // A row may contribute one plugin (`plugin`) or several (`plugins`), all
+    // under the same gateway-relative placement. Several is what a row needs
+    // when its adapter cannot activate alone: composing only half of a
+    // dependency set writes a config whose own `configure_command` fails to
+    // resolve, which is a dead end rather than an error (issue: the Desktop
+    // row composed nothing and its catch-up command failed identically
+    // forever).
+    // @ref LLP 0139#compose-the-whole-dependency-set [implements]: a picker row composes every plugin its configure_command needs, not just its own adapter
+    const contributed = [
+      ...(compose.plugin ? [compose.plugin] : []),
+      ...(Array.isArray(compose.plugins) ? compose.plugins : []),
+    ]
+    for (const plugin of contributed) {
+      if (compose.requires_gateway) postExportPlugins.push(plugin)
+      else preExportPlugins.push(plugin)
     }
   }
 

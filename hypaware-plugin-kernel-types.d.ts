@@ -245,6 +245,17 @@ export interface PluginPickerCompose {
    */
   plugin?: PluginConfigInstance
   /**
+   * Additional plugin instances added alongside `plugin` when this row is
+   * picked, in array order, under the same gateway-relative placement
+   * rule. A row needs this when its adapter cannot activate alone: the
+   * Claude Desktop row composes `@hypaware/claude-account` beside
+   * `@hypaware/claude-desktop` because the latter's manifest requires the
+   * `hypaware.anthropic-credential` capability only the former provides,
+   * and a row that composes half its dependency set writes a config whose
+   * own `configure_command` cannot resolve.
+   */
+  plugins?: PluginConfigInstance[]
+  /**
    * True when picking this row implies the local AI gateway
    * (`@hypaware/ai-gateway`). The gateway plugin is included once when
    * any picked row sets this.

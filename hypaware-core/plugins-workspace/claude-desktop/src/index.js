@@ -110,12 +110,16 @@ export async function activate(ctx) {
     name: 'claude-desktop install',
     plugin: PLUGIN_NAME,
     summary: 'Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt',
-    usage: 'hyp claude-desktop install [--print-commands]',
-    help: 'Runs the credential login chain (LLP 0117), writes the credential helper (LLP 0116), backs '
+    usage: 'hyp claude-desktop install [--yes] [--print-commands]',
+    help: 'Explains what it will change and asks first, defaulting to no (LLP 0139#informed-consent): '
+      + 'unlike Claude Code and Codex, Desktop cannot present its own credential through a third-party '
+      + 'endpoint, so attaching it makes this machine hold an Anthropic credential. Then runs the '
+      + 'credential login chain (LLP 0117), writes the credential helper (LLP 0116), backs '
       + 'up and clears stale Claude-3p dialog residue, writes the managed-preferences plist via an '
       + 'inline sudo prompt (LLP 0133#solo-sudo), and prompts for a Desktop restart. Refuses up front '
       + 'if the effective gateway listen is ephemeral (127.0.0.1:0, LLP 0114). Every step re-checks its '
-      + 'own already-done state, so a bailed sudo prompt converges on re-run (LLP 0131#idempotent-rerun). '
+      + 'own already-done state, so a bailed sudo prompt converges on re-run (LLP 0131#idempotent-rerun), '
+      + 'and an already-configured machine is not re-prompted. --yes accepts the changes in advance; '
       + '--print-commands prints the privileged commands without running them.',
     run: async (argv, cmdCtx) => runInstall(argv, cmdCtx, { sectionConfig, credential, stateDir }),
   })

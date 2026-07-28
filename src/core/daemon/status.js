@@ -525,11 +525,22 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
     if (configured && !probe.attached) {
+      // The repair is `hyp attach` only for a client whose plugin registers a
+      // runtime adapter the generic reconciler can drive. A client that
+      // declares `contributes.client` for probe/status plumbing but no
+      // adapter (claude-desktop: its plist is placed by an attended command
+      // with its own sudo prompt and consent gate, never by attach-on-join)
+      // has to name its own setup command instead, or the repair we print is
+      // one that answers `unknown client`. The command comes from the same
+      // plugin's picker row, which already declares it as `configure_command`.
+      // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach
+      const configureCommand = catalog?.pickerDescriptors.get(clientName)?.configureCommand
+      const repair = configureCommand ? `hyp ${configureCommand}` : `hyp attach --client ${clientName}`
       diagnostics.push({
         severity: 'warning',
         kind: 'client_attach_missing',
-        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker - run 'hyp attach --client ${clientName}'`,
-        repair: [`hyp attach --client ${clientName}`],
+        message: `'${descriptor.plugin}' is enabled but ${clientName} settings show no HypAware marker - run '${repair}'`,
+        repair: [repair],
       })
     } else if (
       configured &&
