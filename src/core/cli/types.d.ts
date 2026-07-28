@@ -63,6 +63,13 @@ export interface WalkthroughOption {
 export interface WalkthroughQuestion {
   pickType: 'sources' | 'sinks' | 'clients'
   title: string
+  /**
+   * Optional position line shown above the title (LLP 0135 #progress),
+   * e.g. `Step 2 of 3 · Choose what to collect`. Set only by the wizard,
+   * which knows the committed pathway; `runPickerWalkthrough` and every
+   * non-interactive caller leave it unset and print nothing.
+   */
+  progress?: string
   options: WalkthroughOption[]
   bounds?: { min?: number; max?: number }
 }

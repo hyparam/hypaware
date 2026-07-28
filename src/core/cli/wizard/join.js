@@ -79,6 +79,12 @@ export async function runWizardJoin(opts) {
  * @returns {Promise<WizardJoinResult>}
  */
 async function runJoinFlow(opts, span) {
+  // The join lane owns no prompt spec of its own - it narrates, then hands
+  // off to the login lane, which may prompt (org selection) inside. So its
+  // position line is written here, once, above the narration: the whole
+  // lane is one step however many prompts happen inside it.
+  // @ref LLP 0135#progress [implements]: the join lane counts once, and prints its position where it starts
+  if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
   opts.stdout.write('Joining your team...\n')
 
   const runLogin = opts.runLogin ?? (() => defaultRunLogin(opts))

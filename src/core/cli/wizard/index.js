@@ -8,6 +8,7 @@
  *   InitWizardResult,
  *   RunInitWizardOptions,
  *   WizardJoinResult,
+ *   WizardPathway,
  *   WizardPickResult,
  * } from '../../../../src/core/cli/wizard/types.js'
  */
@@ -26,6 +27,7 @@ import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from 
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { runWizardPick } from './pick.js'
 import { runConfigurePhase } from './configure.js'
+import { wizardStepProgress } from './steps.js'
 
 /**
  * The `hyp init` wizard orchestrator: the fork -> join -> pick ->
@@ -55,7 +57,7 @@ export async function runInitWizard(opts) {
   const interactive = !opts.picks
   const catalog = opts.catalog ?? (await loadWizardCatalog())
 
-  /** @type {'team' | 'local' | 'scoped' | undefined} */
+  /** @type {WizardPathway | undefined} */
   let pathway
   /** @type {string[] | undefined} */
   let locked
@@ -97,6 +99,14 @@ export async function runInitWizard(opts) {
         pathway = 'local'
         break
       }
+      // The fork itself carries no counter: the pathway it asks for is what
+      // fixes the total. One line later the answer is `team`, so from here
+      // the itinerary is known and every remaining lane can state its
+      // position. A failed join drops back to the fork, which again states
+      // nothing, so a retry onto a different pathway never contradicts a
+      // total already on screen.
+      // @ref LLP 0135#progress [implements]: the denominator resolves the moment the fork does, not before
+      const joinProgress = wizardStepProgress('team', 'join')
       const joinFn = opts.join ?? runWizardJoin
       const join = await joinFn({
         stdout: opts.stdout,
@@ -105,6 +115,7 @@ export async function runInitWizard(opts) {
         env: opts.env,
         catalog,
         ctx: opts.ctx,
+        ...(joinProgress ? { progress: joinProgress } : {}),
       })
       if (join.status !== 'ok') {
         printJoinFailure(opts, join)
@@ -116,12 +127,21 @@ export async function runInitWizard(opts) {
     }
   }
 
+  // Every remaining lane's position, resolved once. `pathway` is undefined
+  // on non-interactive runs, so these are undefined too and nothing is
+  // threaded: the scripted `--yes` / `--dry-run` / preset / `--from-file`
+  // output is byte-identical to what it was before the breadcrumb existed
+  // (LLP 0131 #attended-only).
+  const pickProgress = wizardStepProgress(pathway, 'pick')
+  const finaleProgress = wizardStepProgress(pathway, 'finale')
+
   const pickFn = opts.pick ?? runWizardPick
   const picked = await pickFn({
     stdout: opts.stdout,
     stderr: opts.stderr,
     ...(opts.stdin ? { stdin: opts.stdin } : {}),
     env: opts.env,
+    ...(pickProgress ? { progress: pickProgress } : {}),
     ...(catalog ? { catalog } : {}),
     ...(locked ? { locked } : {}),
     ...(managed ? { managed } : {}),
@@ -160,7 +180,12 @@ export async function runInitWizard(opts) {
   /** @type {FinaleSummary | undefined} */
   let finaleSummary
   if (opts.finale) {
-    finaleSummary = await runWizardFinale({ opts, picked, joinedAlready: pathway === 'team' })
+    finaleSummary = await runWizardFinale({
+      opts,
+      picked,
+      joinedAlready: pathway === 'team',
+      ...(finaleProgress ? { progress: finaleProgress } : {}),
+    })
   }
 
   const cancelled = finaleSummary?.cancelled === true
@@ -255,10 +280,11 @@ function printJoinFailure(opts, join) {
  *   opts: RunInitWizardOptions,
  *   picked: WizardPickResult,
  *   joinedAlready: boolean,
+ *   progress?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready }) {
+async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   /** @type {Set<string> | undefined} */
   let skipAttachClients
@@ -299,6 +325,7 @@ async function runWizardFinale({ opts, picked, joinedAlready }) {
         ...(opts.backfill ? { backfill: opts.backfill } : {}),
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
         ...(skipAttachClients ? { skipAttachClients } : {}),
+        ...(progress ? { progress } : {}),
       }),
     { component: 'wizard' }
   )
