@@ -5,6 +5,17 @@
  */
 
 /**
+ * The endpoint an unpinned gateway is expected at. Mirrors the ai-gateway
+ * plugin's `DEFAULT_LISTEN`, which core cannot import across the plugin
+ * boundary; `test/core/init-gateway-listen-default.test.js` pins the two
+ * together so they cannot drift.
+ *
+ * @ref LLP 0114#fixed-default-port [implements]: a default install's gateway
+ * binds a known address, so core can name it without probing
+ */
+export const DEFAULT_GATEWAY_ENDPOINT = 'http://127.0.0.1:18521'
+
+/**
  * Resolve the gateway endpoint from the active config's `@hypaware/ai-gateway`
  * `listen` directive, for **manual** callers that need the URL before the
  * gateway source is live in this process (`hyp attach` and the `init`

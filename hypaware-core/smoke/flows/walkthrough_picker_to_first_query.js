@@ -418,16 +418,19 @@ export async function run({ harness, expect }) {
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
+    // The picker writes no `listen`, so the port the client is wired to is the
+    // fixed default the daemon's gateway will bind, not a wizard-pinned one.
+    // @ref LLP 0114#fixed-default-port [tests]: a wizard-created install attaches at the well-known default
     const realClaudeSettings = JSON.parse(await fs.readFile(claudeSettingsPath, 'utf8'))
     expect.that(
-      'real init attach: claude marker uses configured gateway port',
+      'real init attach: claude marker uses the default gateway port',
       realClaudeSettings?._hypaware?.port,
-      (v) => v === 8787
+      (v) => v === 18521
     )
     expect.that(
-      'real init attach: claude base URL uses configured gateway endpoint',
+      'real init attach: claude base URL uses the default gateway endpoint',
       realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
-      (v) => v === 'http://127.0.0.1:8787'
+      (v) => v === 'http://127.0.0.1:18521'
     )
 
     // ----- 7. Span + log assertions -----
@@ -556,7 +559,6 @@ function goldenPickerConfig(hypHome) {
       {
         name: '@hypaware/ai-gateway',
         config: {
-          listen: '127.0.0.1:8787',
           upstreams: [
             { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
             { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },

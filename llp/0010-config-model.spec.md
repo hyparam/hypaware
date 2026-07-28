@@ -30,7 +30,7 @@ is no mode flag to keep in sync.
 {
   "version": 2,
   "plugins": [
-    { "name": "@hypaware/ai-gateway", "config": { "listen": "127.0.0.1:8787", "upstreams": [ /* … */ ] } },
+    { "name": "@hypaware/ai-gateway", "config": { "upstreams": [ /* … */ ] } },
     { "name": "@hypaware/claude", "config": { "proxy": "@hypaware/ai-gateway" } },
     { "name": "@hypaware/gascity" }
   ],

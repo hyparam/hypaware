@@ -76,11 +76,11 @@ export async function run({ harness, expect }) {
     claude: path.join(pluginsRoot, 'claude'),
   }
 
-  // Plugins listen on ephemeral ports for the smoke. The preset's
-  // written config carries the standard defaults (8787, 4318) but the
-  // running test instances use port 0 so multiple smoke runs do not
-  // collide. The golden assertion below checks the written config,
-  // not the bound addresses.
+  // Plugins listen on ephemeral ports for the smoke. The preset's written
+  // config pins no gateway `listen` at all (LLP 0114: the fixed default plus
+  // its EADDRINUSE fallback) and the standard 4318 for OTLP, but the running
+  // test instances use port 0 so multiple smoke runs do not collide. The
+  // golden assertion below checks the written config, not the bound addresses.
   const aiGatewayConfig = {
     listen: '127.0.0.1:0',
     upstreams: [
@@ -402,7 +402,6 @@ function goldenConfig(hypHome) {
       {
         name: '@hypaware/ai-gateway',
         config: {
-          listen: '127.0.0.1:8787',
           upstreams: [
             {
               name: 'anthropic',

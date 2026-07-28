@@ -345,10 +345,13 @@ async function runClaudeAndOtelLocalPreset(argv, ctx) {
   const config = {
     version: 2,
     plugins: [
+      // No `listen`: a preset-written address reads as a stated port
+      // requirement and forfeits the default-only EADDRINUSE fallback
+      // (LLP 0114 #explicit-listen-fails-loudly).
+      // @ref LLP 0114#init-writes-no-listen [implements]: the preset leaves listen unset so the default install keeps its fallback
       {
         name: '@hypaware/ai-gateway',
         config: {
-          listen: '127.0.0.1:8787',
           upstreams: [
             {
               name: 'anthropic',

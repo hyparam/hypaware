@@ -79,6 +79,19 @@ non-degrading: a fallback boot is a working install, so it never flips
   change the port, and pre-0114 installs. This decision extends 0086's
   framing; it does not supersede its machinery.
 - Fleets that already pin `listen` centrally see no behavior change.
+- <a id="init-writes-no-listen"></a>**`hyp init` must not write `listen`.** The
+  config writers (the picker walkthrough and the `claude-and-otel-local`
+  preset) emit the gateway slice with `upstreams` only. A wizard-written
+  address is indistinguishable from a user-stated one at
+  `compileConfig`, so writing it would put every fresh install on the
+  §explicit-listen-fails-loudly branch nobody asked for, defeating both
+  halves of this decision (#431). Corollary: because an unpinned install has
+  no configured endpoint to derive, the walkthrough's pre-restart attach
+  wires clients at the fixed default (`DEFAULT_GATEWAY_ENDPOINT` in
+  `src/core/config/gateway_endpoint.js`) rather than a `:0` placeholder;
+  a fallback boot is corrected by the LLP 0086 drift re-attach. Manual
+  `hyp attach` is unchanged: it still reads the proven port from status.json
+  rather than guessing (LLP 0086 §manual-attach-reads-the-live-port).
 - A fresh default install after this change lands on 18521; an existing
   install's clients re-attach to 18521 on the first daemon restart via the
   normal LLP 0086 drift re-attach.
