@@ -5,11 +5,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 
 import {
   FIRST_SYNC_MIN_LEAD_MS,
   computeFirstSyncDeadline,
   firstSyncHoldMarkerPath,
+  formatFirstSyncDeadline,
   readFirstSyncDeadline,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
@@ -83,6 +85,71 @@ test('the deadline always lands on a local 23:59 and is strictly in the future (
     assert.ok(deadline > now, `hour ${hour}: deadline is in the future`)
     assert.ok(deadline - now >= FIRST_SYNC_MIN_LEAD_MS, `hour ${hour}: deadline clears the 4h floor`)
   }
+})
+
+/* --------------------------------------------------------------------------
+ * Deadline rendering (LLP 0100 R1): the one formatter every consent surface
+ * shares must name the zone. A bare wall-clock time does not tell the reader
+ * how long they have, and the four render sites cannot each be trusted to
+ * re-add it.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Run `fn` with the process time zone pinned, so a render assertion does not
+ * depend on the host's zone. Node re-reads `process.env.TZ` per assignment.
+ *
+ * @template T
+ * @param {string} tz
+ * @param {() => T} fn
+ * @returns {T}
+ */
+function withTimeZone(tz, fn) {
+  const previous = process.env.TZ
+  process.env.TZ = tz
+  try {
+    return fn()
+  } finally {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  }
+}
+
+// @ref LLP 0100#requirements [tests]: R1 - one guard covers four consent surfaces, which all render the deadline through this formatter
+test('the rendered deadline names its time zone, never a bare wall-clock time (LLP 0100 R1)', () => {
+  // A fixed instant: 11:59pm Pacific on 2026-07-23, the deadline a Pacific
+  // afternoon enrollment would get.
+  const deadlineMs = Date.UTC(2026, 6, 24, 6, 59, 0)
+  for (const tz of ['America/Los_Angeles', 'UTC', 'Europe/London', 'Asia/Kolkata', 'Australia/Sydney']) {
+    const rendered = withTimeZone(tz, () => formatFirstSyncDeadline(deadlineMs))
+    const bare = withTimeZone(tz, () => new Date(deadlineMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }))
+    const zone = withTimeZone(tz, () => new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+      .formatToParts(new Date(deadlineMs))
+      .find((part) => part.type === 'timeZoneName')?.value)
+    assert.ok(zone, `${tz}: this runtime names a zone, so the render must carry it`)
+    assert.notEqual(rendered, bare, `${tz}: the deadline must not render as a bare local time`)
+    assert.ok(rendered.includes(zone), `${tz}: rendered "${rendered}" carries the zone "${zone}"`)
+    assert.ok(rendered.startsWith(bare), `${tz}: the zone is appended to the same date/time stamp`)
+  }
+})
+
+test('the rendered deadline reads as a full local date, time and zone in a pinned zone', (t) => {
+  // The formatter renders in the host locale by design, so pin the shape only
+  // where "Jul 23, 2026, 11:59 PM PDT" is what that locale spells.
+  if (!Intl.DateTimeFormat().resolvedOptions().locale.startsWith('en')) {
+    t.skip('host locale is not English; the zone-token case above covers every locale')
+    return
+  }
+  const deadlineMs = Date.UTC(2026, 6, 24, 6, 59, 0)
+  assert.equal(
+    withTimeZone('America/Los_Angeles', () => formatFirstSyncDeadline(deadlineMs)),
+    'Jul 23, 2026, 11:59 PM PDT',
+  )
+  // The same instant on a host left on UTC renders a different wall clock and
+  // says so, which is the ambiguity the zone exists to remove.
+  assert.equal(
+    withTimeZone('UTC', () => formatFirstSyncDeadline(deadlineMs)),
+    'Jul 24, 2026, 6:59 AM UTC',
+  )
 })
 
 /* --------------------------------------------------------------------------
