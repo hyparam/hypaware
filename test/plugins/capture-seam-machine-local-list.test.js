@@ -43,7 +43,6 @@ import {
  *    which is where the export and query seams also read. These fail against the
  *    old `ctx.paths.stateDir` wiring and pass once `activate()` derives the
  *    shared root.
- *
  */
 
 const IGNORED_ROOT = '/work/private-repo'
