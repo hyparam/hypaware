@@ -1,7 +1,6 @@
 import type {
   ActivePlugin,
   BlobStore,
-  CapabilityRegistration,
   CapabilityRegistry,
   PluginActivationContext,
   PluginLogger,

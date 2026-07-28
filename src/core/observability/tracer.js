@@ -7,7 +7,6 @@ import { trace, TracerProvider } from './runtime.js'
 
 /**
  * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
- * @import { Span } from './runtime.js'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
