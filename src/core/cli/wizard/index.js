@@ -328,7 +328,9 @@ async function narratePrivacyIfTeamPath(opts) {
     'Nothing has been uploaded yet - nothing leaves this machine before\n' +
     `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history.\n` +
     'To review or exclude anything before then, run the hypaware-privacy\n' +
-    'skill in Claude or Codex. `hyp status` shows the countdown.\n'
+    'skill in Claude or Codex. `hyp status` shows the countdown.\n' +
+    'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
+    'before sending anything.\n'
   )
 }
 

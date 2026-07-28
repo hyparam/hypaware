@@ -202,7 +202,13 @@ const FIRST_SYNC_RULE = '─'.repeat(62)
  * this block is deliberately self-contained (stderr, while the forwarding line
  * is stdout - redirect either and the other must still stand on its own).
  *
- * @ref LLP 0100#requirements [implements]: R1 - absolute deadline, backfill statement, skill hint, same on TTY and non-TTY
+ * The deadline is the latest the first sync can happen, not the earliest
+ * (LLP 0101 #no-release, as amended), so it reads "no later than" and the
+ * block names the verb that ends the window early. A deadline with no way to
+ * act on it is a countdown, which is how this message read in the onboarding
+ * session that prompted both changes.
+ *
+ * @ref LLP 0100#requirements [implements]: R1 - absolute deadline with its zone, backfill statement, skill hint, release verb, same on TTY and non-TTY
  * @ref LLP 0100#requirements [implements]: R1a - name the server, never its URL, and name the command that maps the name back
  * @param {number} deadlineMs
  * @param {string} serverName
@@ -214,12 +220,15 @@ export function firstSyncHoldMessage(deadlineMs, serverName) {
     `${FIRST_SYNC_RULE}\n` +
     '  PRIVACY - review before first sync\n' +
     '\n' +
-    `  first sync to the '${serverName}' server is ${formatFirstSyncDeadline(deadlineMs)}\n` +
+    `  first sync to the '${serverName}' server is no later than\n` +
+    `  ${formatFirstSyncDeadline(deadlineMs)}\n` +
     '  and includes your backfilled history\n' +
     "  (run 'hyp remote list' to see that server's URL)\n" +
     '\n' +
     '  to review what ships before then,\n' +
     '  open Claude or Codex and run the hypaware-privacy skill\n' +
+    '\n' +
+    '  to send it sooner, run: hyp sync\n' +
     `${FIRST_SYNC_RULE}\n` +
     '\n'
   )

@@ -382,7 +382,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // text output is unchanged.
   if (report.firstSyncHoldDeadline !== null) {
     stdout.write(
-      `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill)\n`
+      `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
     )
   }
 

@@ -1,61 +1,12 @@
 // @ts-check
 
-import { readObservabilityEnv } from '../observability/env.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExportMaintenanceDatasetReport } from '../../../hypaware-core/plugins-workspace/format-iceberg/src/types.js'
  * @import { ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
  */
-
-/**
- * `hyp sink force [instance]`
- *
- * Drives one tick of the sink driver immediately, bypassing each
- * sink's cron schedule. The optional `instance` argument restricts
- * the tick to a single sink (useful when an operator just wants to
- * flush one configured destination without waking the others.
- *
- * The driver writes the same `sink.export_batch` span and outbox
- * artifacts it does on a scheduled tick. The only difference is the
- * trigger.
- *
- * @param {string[]} argv
- * @param {CommandRunContext} ctx
- */
-export async function runSinkForce(argv, ctx) {
-  const instance = argv[0]
-  const obsEnv = readObservabilityEnv(ctx.env)
-  const { createSinkDriver } = await import('../sinks/driver.js')
-  const driver = createSinkDriver({
-    sinkRegistry: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
-    queryRegistry: ctx.query,
-    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
-    stateRoot: obsEnv.stateDir,
-    config: ctx.config,
-  })
-  const tickOpts = { now: new Date(), force: true, source: /** @type {'manual'} */ ('manual') }
-  if (instance) /** @type {any} */ (tickOpts).sinkInstance = instance
-  const report = await driver.tick(tickOpts)
-  if (report.sinks.length === 0) {
-    if (instance) {
-      ctx.stderr.write(`hyp sink force: no sink named '${instance}' was instantiated\n`)
-      return 1
-    }
-    ctx.stdout.write('no sinks instantiated; nothing to do\n')
-    return 0
-  }
-  for (const r of report.sinks) {
-    ctx.stdout.write(
-      `${r.instance}: ${r.status} (partitions=${r.partitionsExported}, bytes=${r.bytesWritten}${
-        r.error ? `, error=${r.error}` : ''
-      })\n`
-    )
-  }
-  return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
-}
 
 /**
  * `hyp sink maintain [instance] [--compact] [--dry-run]`
