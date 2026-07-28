@@ -442,7 +442,7 @@ test('a failure seeding the identity rolls the provisioned seed back so no crede
 
 test('a session without a gateway credential seeds nothing and prints no forwarding output', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out, err } = await makeCtx({
+  const { ctx, out } = await makeCtx({
     hypHome,
     sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
   })
