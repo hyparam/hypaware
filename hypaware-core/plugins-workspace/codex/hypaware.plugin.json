@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "@hypaware/codex",
   "version": "2.0.0",
-  "description": "OpenAI Codex client adapter for HypAware. Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query, hypaware-graph, and hypaware-sensitive-scan helper skills plus the AI report skills and the report-to-html renderer.",
+  "description": "OpenAI Codex client adapter for HypAware, covering both the Codex CLI and Codex Desktop (they share ~/.codex/config.toml and ~/.codex/sessions). Registers the OpenAI-compatible upstream preset on the local AI gateway, configures Codex's config.toml to route through the gateway, and ships the hypaware-query, hypaware-graph, and hypaware-sensitive-scan helper skills plus the AI report skills and the report-to-html renderer.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
@@ -32,8 +32,8 @@
     "picker": [
       {
         "name": "codex",
-        "label": "capture Codex conversations",
-        "summary": "Configures Codex to use the local gateway and records Codex request/response traffic.",
+        "label": "capture Codex conversations (CLI and Desktop)",
+        "summary": "Configures Codex to use the local gateway and records Codex request/response traffic. One pick covers both surfaces: Codex CLI and Codex Desktop share ~/.codex/config.toml, so there is no separate Desktop setup.",
         "detect": { "settings_file": ".codex/config.toml" },
         "compose": {
           "plugin": { "name": "@hypaware/codex", "config": { "proxy": "@hypaware/ai-gateway" } },

@@ -33,7 +33,7 @@ observability.
 Any subset of these can be enabled at `hyp init`:
 
 - `claude` - Claude Code conversations
-- `codex` - Codex conversations
+- `codex` - Codex conversations, from both the Codex CLI and Codex Desktop
 - `raw-anthropic` - raw Anthropic API traffic
 - `raw-openai` - raw OpenAI API traffic
 - `otel` - OpenTelemetry logs / traces / metrics
@@ -76,7 +76,14 @@ The CLI is bound to both `hyp` and `hypaware`. Core commands:
   `@hypaware/context-graph` plugin.
 - `hyp attach` / `hyp detach` - wire a client (`claude`, `codex`) into the
   local gateway, or remove only HypAware-managed settings. Idempotent and
-  reversible. `hyp unattach` is an alias of `detach`.
+  reversible. `hyp unattach` is an alias of `detach`. `hyp attach codex`
+  covers Codex Desktop as well as the Codex CLI: both read the
+  `~/.codex/config.toml` it writes, and both write the `~/.codex/sessions`
+  history `hyp backfill codex` imports. Claude Desktop is the exception that
+  needs its own command (`hyp claude-desktop install`), because it exposes no
+  user-writable settings file. HypAware never parses the opaque
+  `~/Library/Application Support/Codex` app container, but that costs no
+  Codex Desktop history: the live and backfill routes above already carry it.
 - `hyp ignore` / `hyp unignore` - write or remove a `.hypignore` for a folder.
 - `hyp daemon` - lifecycle for the persistent user daemon: `install`, `start`,
   `status`, `restart`, `stop`, `uninstall` (launchd on macOS, systemd `--user`

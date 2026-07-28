@@ -52,7 +52,7 @@ On a TTY this launches the interactive walkthrough:
 
 1. Pick the **sources** to capture. Any subset of:
    - Claude Code conversations (`claude`)
-   - Codex conversations (`codex`)
+   - Codex conversations, CLI and Desktop (`codex`)
    - Raw Anthropic API traffic (`raw-anthropic`)
    - Raw OpenAI API traffic (`raw-openai`)
    - OTEL logs / traces / metrics (`otel`)
@@ -267,6 +267,35 @@ scripting. Claude writes only HypAware-related keys to
 `~/.claude/settings.json`; Codex writes a `hypaware` provider entry to
 `~/.codex/config.toml`. Unrelated keys in either file are preserved.
 
+### Desktop apps
+
+**Codex Desktop needs no separate setup.** `hyp attach codex` covers the
+Codex CLI and Codex Desktop together, because the two share the file it
+writes (`~/.codex/config.toml`, or `$CODEX_HOME/config.toml`) and the
+history it backfills (`~/.codex/sessions/**`). Rows from either surface land
+in `ai_gateway_messages`; the `entrypoint` column carries Codex's
+`originator`, which is what tells a Desktop session from a terminal one.
+
+**Claude Desktop does need its own setup** (`hyp claude-desktop install`).
+That is a difference between the vendors, not a gap in Codex support: Claude
+Desktop exposes no user-writable settings file to amend, so HypAware
+configures it through a root-owned managed-preferences plist and it delegates
+inference to its embedded CLI (rows arrive as `client_name = 'claude'` with
+`entrypoint = 'claude-desktop-3p'`).
+
+What HypAware does **not** do for Codex Desktop: it never parses the app's
+own container at `~/Library/Application Support/Codex`. That store is
+opaque and undocumented, so `hyp backfill codex` flags it as an
+`unsupported_location` and moves on. It is not the only copy of those
+conversations, so nothing is lost: live traffic is captured through the
+gateway, and past sessions come back from `~/.codex/sessions`. The same
+applies to the ChatGPT desktop app and browser storage, which HypAware does
+not capture at all.
+
+See [LLP 0139](llp/0139-codex-desktop-rides-the-codex-adapter.decision.md)
+for the reasoning, and [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) for the
+manual check that Desktop traffic is actually landing.
+
 ## Controlling what is recorded and forwarded
 
 Every directory subtree resolves to a usage class, evaluated gitignore-style
@@ -387,6 +416,7 @@ User-facing guides live under [`docs/`](./docs/):
 - [`docs/TEAM_SETUP.md`](./docs/TEAM_SETUP.md): rolling HypAware out across a team
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md): what HypAware records and how to control it
 - [`docs/PLUGIN_AUTHORING.md`](./docs/PLUGIN_AUTHORING.md): how to write a plugin (`hyp plugin new` / `hyp plugin doctor`)
+- [`docs/ACCEPTANCE.md`](./docs/ACCEPTANCE.md): opt-in, manual pre-release checks that need a real client (e.g. Codex Desktop)
 
 Contributor material (repository layout, release checklist, test model)
 lives in [`AGENTS.md`](./AGENTS.md).

@@ -56,6 +56,11 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  *   - HypAware's gateway cache      excluded (lives under HYP_HOME, not
  *                                   scanned here).
  *
+ * The rollout tree is shared by Codex CLI and Codex Desktop, so this one
+ * provider imports both; `session_meta.originator` is what tells them apart
+ * afterwards. Declining to parse the Desktop app container therefore costs
+ * no Desktop history (@ref LLP 0139#unsupported-boundary).
+ *
  * Parsing is best-effort and version-defensive: a malformed line, a
  * truncated trailing record, or an unreadable file degrades to whatever
  * parsed cleanly rather than aborting the run. Reruns are deterministic:
@@ -84,7 +89,7 @@ const COMPONENT = 'plugin.codex.backfill'
  *   homeDir: string,
  *   codexHome?: string,
  *   sessionsDir?: string,
- *   unsupportedLocations?: Array<{ kind: string, path: string }>,
+ *   unsupportedLocations?: Array<{ kind: string, path: string, coveredBy?: string }>,
  *   clientName?: string,
  *   pluginName?: string,
  *   resolver?: UsagePolicyResolver,
@@ -122,20 +127,43 @@ export function defaultCodexHome(homeDir) {
 }
 
 /**
+ * What HypAware captures live and by backfill when it declines to parse the
+ * Codex Desktop app container. Stated on the event itself because the flag
+ * is otherwise read as a verdict on the client rather than on one directory:
+ * Codex Desktop routes through the same gateway as the CLI and writes the
+ * same rollout tree, so nothing is actually lost by leaving the container
+ * alone.
+ *
+ * @ref LLP 0139#unsupported-boundary [implements]: the boundary is one opaque directory, not a client, and the event has to say so
+ */
+const CODEX_DESKTOP_COVERED_BY =
+  'Codex Desktop is still captured: live through the local gateway (hyp attach codex writes the '
+  + '~/.codex/config.toml both Codex CLI and Codex Desktop read), and by backfill from the shared '
+  + '~/.codex/sessions rollout tree. Only this opaque app container is left unparsed.'
+
+/**
  * Codex/ChatGPT app + browser storage we DETECT but never parse in V1.
  * The desktop apps and browser-based ChatGPT keep conversation state in
  * opaque app containers and browser local storage; recovering canonical
  * rows from them is out of scope, so the provider flags them with an
  * `unsupported_location` event instead of guessing at the format.
  *
+ * A location may carry `coveredBy` when the same conversations reach the
+ * cache by another route. The Codex app container does; the ChatGPT desktop
+ * app's does not, and its flag stays bare on purpose.
+ *
  * @param {string} homeDir
- * @returns {Array<{ kind: string, path: string }>}
+ * @returns {Array<{ kind: string, path: string, coveredBy?: string }>}
  */
 function defaultUnsupportedLocations(homeDir) {
   return [
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, 'Library', 'Application Support', 'ChatGPT') },
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, '.config', 'ChatGPT') },
-    { kind: 'codex_desktop_app', path: path.join(homeDir, 'Library', 'Application Support', 'Codex') },
+    {
+      kind: 'codex_desktop_app',
+      path: path.join(homeDir, 'Library', 'Application Support', 'Codex'),
+      coveredBy: CODEX_DESKTOP_COVERED_BY,
+    },
   ]
 }
 
@@ -150,7 +178,7 @@ function defaultUnsupportedLocations(homeDir) {
  *   ctx: BackfillRunContext,
  *   codexHome: string,
  *   sessionsDir: string,
- *   unsupportedLocations: Array<{ kind: string, path: string }>,
+ *   unsupportedLocations: Array<{ kind: string, path: string, coveredBy?: string }>,
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
  * }} args
@@ -269,7 +297,11 @@ async function* runCodexBackfill(args) {
  * `BackfillEvent` (the kernel's named lifecycle signal) so the runner and a
  * human can see what history was left on the table.
  *
- * @param {{ unsupportedLocations: Array<{ kind: string, path: string }>, log: PluginLogger }} args
+ * A location that IS covered by another route carries `covered_by` on both
+ * signals, so the flag names its own scope instead of reading as "this
+ * client is unsupported".
+ *
+ * @param {{ unsupportedLocations: Array<{ kind: string, path: string, coveredBy?: string }>, log: PluginLogger }} args
  * @returns {AsyncGenerator<BackfillEvent>}
  */
 async function* flagUnsupportedLocations(args) {
@@ -281,6 +313,7 @@ async function* flagUnsupportedLocations(args) {
       location_kind: location.kind,
       source_path: location.path,
       status: 'skipped',
+      ...(location.coveredBy ? { covered_by: location.coveredBy } : {}),
     })
     yield {
       type: 'event',
@@ -289,6 +322,7 @@ async function* flagUnsupportedLocations(args) {
         client_name: 'codex',
         location_kind: location.kind,
         path: location.path,
+        ...(location.coveredBy ? { covered_by: location.coveredBy } : {}),
       },
     }
   }

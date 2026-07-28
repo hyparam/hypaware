@@ -79,9 +79,19 @@ Keep three tiers distinct:
 3. Acceptance smokes: heavier release or manual gates that use the packaged CLI,
    real daemon install/start/stop, real user-home style config, production-ish
    telemetry defaults, client attach behavior, and bounded disk-growth
-   assertions.
+   assertions. Written procedures live in
+   [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md); a human runs them before a
+   release that touched the relevant adapter, and they are never simulated
+   with fixtures.
 
-Good acceptance smoke candidates:
+Written acceptance procedures:
+
+- `codex_desktop_capture`: opt-in/manual, needs Codex Desktop on a real Mac.
+  Proves Desktop traffic reaches `ai_gateway_messages` by both the live
+  gateway route and the `~/.codex/sessions` backfill route, and is
+  attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
+
+Good acceptance smoke candidates (no written procedure yet):
 
 - `installed_daemon_idle_soak`: install/start/status/stop the real daemon path,
   wait briefly while idle, and assert cache growth stays zero or bounded.
