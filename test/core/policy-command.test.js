@@ -1,13 +1,17 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
+import { devTelemetryDir } from '../../src/core/observability/env.js'
+import { installObservability, readObservabilityEnv } from '../../src/core/observability/index.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
+import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import {
   localOnlyListPath,
   readLocalOnlyEntries,
@@ -605,6 +609,75 @@ test('hyp policy unset on a corrupt store fails with the policy-store wording, n
     assert.doesNotMatch(res.stderr, /local-only list/)
   })
 })
+
+// Issue #413: because `reportUnreadableStore` returns an exit code instead of
+// rethrowing, the corrupt-store failure never reaches the dispatcher's generic
+// catch, so it lost the `error_kind` span attribute that catch attaches. The
+// wording and the exit code are correct either way; what has to survive is the
+// diagnostic attribute that lets someone find a corrupt policy store in
+// telemetry rather than only seeing a nonzero exit. Asserted on the real
+// emitted span (the dev-telemetry traces JSONL), through the real dispatcher.
+test('hyp policy on a corrupt store tags the command span with the local_only_list_unreadable error_kind', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'hyp-policy-repo-'))
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'hyp-policy-home-'))
+  const env = {
+    HYP_HOME: hypHome,
+    HYP_DEV_TELEMETRY: '1',
+    DEV_RUN_ID: 'policy-corrupt-store-error-kind',
+  }
+  const obsEnv = readObservabilityEnv(env)
+  const obs = installObservability({ env: obsEnv })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  try {
+    corruptStore(hypHome)
+    const registry = createCommandRegistry()
+    registerCoreCommands(registry)
+    const kernel = createKernelRuntime({ commandRegistry: registry })
+
+    // `list` reports the corrupt store from its own read; `show` reports it
+    // from the catch around a delegated runner. Both shapes must carry it.
+    for (const argv of [['policy', 'list'], ['policy', 'show', root]]) {
+      const code = await dispatch(argv, {
+        stdout: /** @type {any} */ (stdout),
+        stderr: /** @type {any} */ (stderr),
+        env,
+        cwd: root,
+        registry,
+        kernel,
+      })
+      assert.equal(code, 1, `${argv.join(' ')} exits 1`)
+    }
+
+    await obs.shutdown()
+    const traces = readJsonl(path.join(devTelemetryDir(obsEnv.stateDir), `traces-${process.pid}.jsonl`))
+    for (const name of ['policy list', 'policy show']) {
+      const span = traces.find((record) => (
+        record.name === 'command.run' && record.attributes?.hyp_command === name
+      ))
+      assert.ok(span, `${name} command.run span not emitted`)
+      assert.equal(span.attributes.error_kind, 'local_only_list_unreadable', `${name} names the failure`)
+      // The already-correct signals stay exactly as they are.
+      assert.equal(span.attributes.status, 'failed')
+      assert.equal(span.attributes.exit_code, 1)
+    }
+  } finally {
+    await obs.shutdown()
+    rmSync(root, { recursive: true, force: true })
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+/**
+ * @param {string} filePath
+ * @returns {Record<string, any>[]}
+ */
+function readJsonl(filePath) {
+  return readFileSync(filePath, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
 
 /* ------------------------------ group registration ------------------------------ */
 
