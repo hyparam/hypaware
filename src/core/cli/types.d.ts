@@ -1,10 +1,6 @@
 import type {
-  AiGatewayCapability,
   CapabilityRegistry,
   HypAwareV2Config,
-  PluginConfigInstance,
-  CommandRegistration,
-  CommandRunContext,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type {
   ExtendedSinkRegistry,
