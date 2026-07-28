@@ -20,6 +20,7 @@ Use `hyp query` to inspect local HypAware recordings. By default it reads local 
 ## Common Commands
 
 ```bash
+hyp query overview                                     # orientation: tokens per model/day/repo/tool (--sql prints its queries, --json for machine output)
 hyp query status
 hyp query schema <table> --format json
 hyp query sql "<sql>" --format json
@@ -27,7 +28,9 @@ hyp query sql "<sql>" --format jsonl --output <file>   # full result, lossless
 hyp query refresh <dataset>
 ```
 
-These are the only subcommands in the installed CLI (`hyp query`: schema, status, sql, refresh, maintain). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands — answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
+**`hyp query overview` totals are windowed, not all-time.** It probes the cache, times that probe to measure this machine, and picks the widest recent window it can summarize quickly, so on a large cache it silently covers a subset. The line under the title always states the period (`2026-07-24 to 2026-07-27 - showing 3 of 31 active days …`); read it before quoting any number, and pass `--days <n>` to widen (that overrides the budget, whatever it costs). Never report its totals as the full history without checking that line.
+
+These are the only subcommands in the installed CLI (`hyp query`: overview, schema, status, sql, refresh, maintain). There are no high-level `catalog`/`logs`/`traces`/`metrics` query commands; answer questions with `hyp query sql`, and discover datasets from the `hyp query status` output.
 
 ## Remote queries (other HypAware hosts)
 
@@ -76,11 +79,11 @@ Recorded AI-gateway traffic is exposed through one dataset: `ai_gateway_messages
 Key columns:
 
 - `session_id`, `conversation_id`, `message_id`, `message_index`, `part_id`, `part_index` — stable identity. `session_id` is the always-present session key (group/scope on it); `conversation_id` is a nullable thread within a session (a Codex thread; null for Claude).
-- `provider`, `model`, `role`, `part_type`, `content_text` — normalized provider/message content fields.
+- `provider`, `model`, `role`, `part_type`, `content_text`: normalized provider/message content fields. `part_type` is HypAware's own vocabulary, NOT the provider's wire name: `text`, `reasoning`, `tool_call`, `tool_result`, `image`, `fallback`. Tool calls are `part_type='tool_call'`: Anthropic's `tool_use` matches no row and returns a silently empty result. `role` is `user` / `assistant` / `tool` / `system` / `developer`.
 - `tool_name`, `tool_call_id`, `tool_args`, `status` — tool-call/result joins and sparse status such as `finish_reason`.
 - `attributes` (JSON) — request settings, usage, propagated `dev_run_id`, and gateway diagnostics under `attributes.gateway`.
 
-**Token counts** live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`): `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`. Codex (`provider='openai'`) omits `cache_write_tokens` and adds `reasoning_tokens` + `total_tokens`. Extract with `CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens') AS BIGINT)`. Usage rides exactly one row per response (the last assistant part; non-carrier parts are null), so a plain `SUM` over assistant rows is correct with no dedup (the one-carrier rule, LLP 0035). If you prefer a defensive dedup, `max(...) GROUP BY session_id, message_id` returns the same number: key on `session_id` (`conversation_id` is null for Claude, and only separates threads within a Codex session).
+**Token counts** live under `attributes.usage` on `role='assistant'` rows (NOT in `raw_frame`): `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`. Codex (`provider='openai'`) omits `cache_write_tokens` and adds `reasoning_tokens` + `total_tokens`. Extract with `COALESCE(CAST(JSON_EXTRACT(attributes,'$.usage.input_tokens') AS BIGINT), 0)` - **always COALESCE**: a field the provider never emits is NULL, and NULL propagates instead of zeroing. Per row, `CAST(...cache_read...) + CAST(...cache_write...)` is NULL for every OpenAI row, so `sum()` skips them and that provider's whole cache-read total silently reads 0 (measured: 25,581,312 -> 0). Per aggregate, `sum()` over all-NULL returns NULL, so a Codex-scoped `t_in + t_cr + t_cw` total is NULL. COALESCE each term inside an addition, and each sum. Usage rides exactly one row per response (the last assistant part; non-carrier parts are null), so a plain `SUM` over assistant rows is correct with no dedup (the one-carrier rule, LLP 0035). If you prefer a defensive dedup, `max(...) GROUP BY session_id, message_id` returns the same number: key on `session_id` (`conversation_id` is null for Claude, and only separates threads within a Codex session).
 
 Claude transcript enrichment adds `provider_uuid`, `parent_uuid`, `request_id`, `entrypoint`, `client_version`, `user_type`, `permission_mode`, and `hook_event` when the local Claude Code JSONL transcript can be matched.
 

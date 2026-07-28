@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
+import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
 // the fork/join loop, phase threading (locked/managed/scoped), the
@@ -284,7 +285,77 @@ test('runInitWizard: prints the run summary with the written config path', async
   const { opts, stdout } = wizardOpts(await tmpHome())
   await runInitWizard(opts)
   assert.match(stdout.text(), /✓ Wrote \/tmp\/x\/config\.json/)
-  assert.match(stdout.text(), /next: hyp query sql/)
+  // The old `next: hyp query sql 'select count(*) from logs'` hint named a
+  // dataset most installs do not register (LLP 0135 #first-look).
+  assert.ok(!stdout.text().includes('next: hyp query sql'))
+})
+
+// --- first look ---
+
+/**
+ * A first-look runner: the probe answers with one day of history, then one
+ * query per section. Only the two sections this file asserts on are
+ * scripted; the rest come back empty (which renders as absent).
+ */
+function firstLookStub(providerRows, dailyRows) {
+  /** @type {string[]} */
+  const seen = []
+  return {
+    seen,
+    runner: {
+      hasDataset: () => true,
+      /** @param {string} sql */
+      async run(sql) {
+        seen.push(sql)
+        if (sql === OVERVIEW_PROBE_SQL) return { columns: [], rows: [{ date: '2026-07-24', n: 40 }] }
+        if (sql.includes('group by 1, 2')) return { columns: [], rows: providerRows }
+        if (sql.includes('count(distinct session_id) sessions,')) return { columns: [], rows: dailyRows }
+        return { columns: [], rows: [] }
+      },
+    },
+  }
+}
+
+test('runInitWizard: an attended run ends on the first look, before the privacy narration', async () => {
+  const home = await tmpHome()
+  await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+  const stub = firstLookStub(
+    [{ provider: 'anthropic', model: 'claude-opus-5', input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }],
+    [{ date: '2026-07-24', sessions: 3, input_tokens: 400, cached_tokens: 4000, output_tokens: 40 }]
+  )
+  const { opts, stdout } = wizardOpts(home, { fork: async () => 'team', firstLook: stub.runner })
+  await runInitWizard(opts)
+  const text = stdout.text()
+  // The window probe, then one query per section: setup shows the same
+  // block as `hyp query overview`.
+  assert.equal(stub.seen[0], OVERVIEW_PROBE_SQL)
+  assert.equal(stub.seen.length, 5)
+  // Every number in the block is scoped to the window the probe chose.
+  assert.match(text, /2026-07-24 to 2026-07-24 \(1 active day, 40 rows\)/)
+  assert.match(text, /First look at what HypAware has recorded/)
+  assert.match(text, /anthropic\s+claude-opus-5\s+400\s+4,000\s+40/)
+  assert.match(text, /2026-07-24/)
+  // The privacy narration stays the wizard's last words (LLP 0135 #privacy).
+  assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
+})
+
+test('runInitWizard: a non-interactive or dry run skips the first look', async () => {
+  const stub = firstLookStub([{ provider: 'anthropic', model: 'm', input_tokens: 1, cached_tokens: 10, output_tokens: 1 }], [])
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    firstLook: stub.runner,
+  })
+  await runInitWizard(opts)
+  assert.equal(stub.seen.length, 0)
+  assert.ok(!stdout.text().includes('First look'))
+
+  const dry = firstLookStub([{ provider: 'anthropic', model: 'm', input_tokens: 1, cached_tokens: 10, output_tokens: 1 }], [])
+  const { opts: dryOpts } = wizardOpts(await tmpHome(), {
+    finale: { dryRun: true },
+    firstLook: dry.runner,
+  })
+  await runInitWizard(dryOpts)
+  assert.equal(dry.seen.length, 0)
 })
 
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {

@@ -31,12 +31,15 @@
 
 ```
 src/core/cli/wizard/
-  index.js               // runInitWizard(opts): fork -> join -> pick -> configure -> privacy -> finale
+  index.js               // runInitWizard(opts): fork -> join -> pick -> configure -> finale -> first look -> privacy
+  first_look.js           // runWizardFirstLook(opts): when the closing overview runs, and that it never fails setup
   fork.js                 // runWizardFork(opts), the returning-gate split (scoped vs full re-entry)
   join.js                  // runWizardJoin(opts): wraps runRemoteLogin, bounded org-config wait, locked-row set
   pick.js                   // runWizardPick(opts): the picker prompt + composePickerConfig (descriptor-driven, was walkthrough.js)
   configure.js               // runConfigurePhase(picked, ctx): needs_setup loop, drop-on-failure, --print-commands passthrough
   provenance.js               // classifyClientProvenance(name, layered): shared by pick.js, status.js, and the export seam
+src/core/query/overview.js    // the shared block: probe, chooseOverviewWindow, buildOverviewSql, collectOverview, renderOverview
+src/core/commands/query.js    // `hyp query overview [--json] [--sql] [--days <n>]`: the same block on demand
 src/core/cli/detect.js        // detectPickerSources(catalog, env): replaces the hardcoded DETECTABLE_CLIENT_SOURCES table
 src/core/plugin_catalog.js    // buildPluginCatalog gains pickerDescriptors alongside clientDescriptors
 src/core/cache/storage.js     // readRowsSince gains an optional sourceWithholdResolver alongside usagePolicyResolver
@@ -186,6 +189,7 @@ export async function runInitWizard(opts) {
 
   const configured = await runConfigurePhase(picked, opts)  // @ref LLP 0131
   const finale = await runWizardFinale({ picked, configured, joinedAlready: pathway === 'team', opts })
+  await runWizardFirstLook(opts)                             // @ref LLP 0135#first-look, attended runs only
   await narratePrivacyIfTeamPath(opts, pathway)              // @ref LLP 0134#login-lane, unchanged mechanism
   return finale
 }
@@ -459,13 +463,367 @@ requires no new code beyond `claude-desktop`'s manifest declaring
 (per [LLP 0128 Design sketch](./0128-install-experience-overhaul.rfc.md#design-sketch), unchanged): an enrolled machine backfills
 under [LLP 0037](./0037-backfill-on-join.decision.md) default-on doctrine.
 
+## First look {#first-look}
+
+Setup used to end on a hint: `next: hyp query sql 'select count(*) from
+logs'`. That command fails on most installs, because `logs` only exists
+when `@hypaware/otel` is configured, and it asks the user to do the work of
+finding out whether anything was captured. The hint is removed;
+`writeWalkthroughRunSummary` now prints only what the finale did.
+
+In its place, the shared overview (`src/core/query/overview.js`) runs fixed
+read-only queries over `ai_gateway_messages` and renders them as aligned
+tables with proportional bars, in four sections: **models** (input/cached/
+output tokens per provider and model), **daily** (the same three per day
+alongside a session count), **repos** (which checkouts the sessions ran
+in), and **tools** (which tools the models call).
+
+Both callers render all four. The first cut gave the wizard only
+`['models', 'daily']` on the theory that a ~60-line block (against ~35)
+would bury the closing privacy narration; that was over-cautious, since the
+narration is written *after* the block and stays the last thing on screen
+either way (#privacy). `collectOverview` still takes a section list and runs
+only those queries, so the seam for a shorter variant remains if setup
+output ever needs trimming. Two shapes the data forced:
+
+- **A ranked table sorts by exactly what its bar charts.** The models table
+  originally ordered by `output_tokens` while the bar charted
+  `input + output`, so a prompt-heavy row (`gpt-5.5`: 2.3M input, 172k
+  output) drew a longer bar than the row above it. Both ranked token tables
+  now `order by input_tokens + output_tokens desc`, and tools orders by
+  `calls`, the metric it bars. Daily is the deliberate exception: it is
+  chronological, so its bars are a time series rather than a rank and are
+  expected to rise and fall. A test pins each table's sort key against its
+  bar metric.
+- **Repos group by repo alone, not repo + branch.** `git_branch` is set on
+  15 of 431 sessions on the authoring machine (~3%), so a branch column
+  would be almost entirely blank - and grouping by it splits one repo
+  across a null-branch row and a named one, showing the same checkout
+  twice as if it were two places.
+- **Tools filter `part_type = 'tool_call'`.** The projector normalizes
+  every provider's call shape onto one vocabulary (`text` / `reasoning` /
+  `tool_call` / `tool_result` / `image` / `fallback`), so a provider's own
+  wire name (`tool_use`) matches nothing and yields a silently empty
+  section.
+
+Sessions with no repo are folded into a count line rather than dropped or
+drawn as a nameless row: they are 177 of 431 here, so hiding them would
+misstate the split. The line reads "no repo recorded", **not** "outside a
+repo", because the column cannot distinguish those and one of them would
+be a false claim: `repo_root` is populated on 27,342 Claude rows and on
+**zero** Codex rows, even though Codex rows do carry `cwd` (1,248) and
+sometimes `git_branch` (464). Every Codex session therefore lands in that
+count regardless of where it actually ran. The projector asymmetry is a
+`@hypaware/codex` gap worth closing on its own; until it is, the overview
+must not narrate absence of a field as absence of a repo. The block is the wizard's proof
+of life: the run ends on the user's own numbers.
+
+**Tokens, not rows.** A row is one *part* of a message
+(`part_id = <message_id>#<part_index>`, [LLP 0026](./0026-claude-native-granularity.decision.md)), so a `count(*)`
+headline names a unit nobody outside the schema recognizes, and inflates
+wherever a model answers in several content blocks. Tokens are the unit
+users already think in, and they sum honestly:
+[LLP 0035 #one-carrier](./0035-token-usage-normalization.decision.md#one-carrier) puts response-level usage on exactly one row,
+so a plain `SUM` needs no dedup and no `role` filter (non-carrier rows are
+null) - which also keeps `sessions` counting every session, not only those
+with an assistant reply.
+
+**Bars chart input + output, split by shade, and cache is excluded.** On
+real data cached is 99.0-99.9% of every day's total, so a total-token bar
+is a cache-read chart: one long conversation re-reading a large prompt
+outranks a day with 37 sessions, and every other bar flattens against it.
+The bar therefore compares
+`input + output` - the tokens that were actually new - and splits them by
+shade (`▒` input, `█` output) so the mix is readable at a glance. The split
+is encoded twice, shade *and* colour, so it survives a monochrome
+terminal, a pipe, and colour-blind readers; a component that exists is
+never rounded away to nothing.
+
+Each table captions its own bar (`by input+output`, `by sessions`,
+`by calls`) because the sections legitimately chart different things, and
+an unlabelled bar two columns from what it measures gets read as the
+column beside it - which is exactly how the daily bars were first taken
+for session counts. In the token tables the caption's words carry their own
+shades' colours, so the header *is* the key and no legend lookup is needed.
+
+That forces one rendering rule: header cells are painted individually
+rather than as one dim run, because a colour sequence inside a dim run ends
+it early and leaves the remainder of the row undimmed. A test asserts no
+colour start ever follows a dim start without an intervening reset.
+
+**Cache is excluded from the bar but never from the columns.** An earlier
+draft of this section justified the exclusion by calling cache "the
+cheapest token there is" - true per token (reads price at 0.1x input), and
+wrong as a claim about significance. Measured against this repo's own
+history with the published multipliers (read 0.1x, write 1.25x, output
+5x), the split is **cache read 55.8% of cost, output 22.0%, cache write
+20.7%, fresh input 1.5%** - cached is **76.5% of spend** off 98.9% of
+tokens. Cache writes especially: 2.9% of tokens, a fifth of the cost, at
+12.5x a read's price.
+
+So the exclusion is a *charting* decision, not a significance one. A
+cache-dominated bar stops discriminating (every row saturates) and tracks
+context size x turn count rather than work done. Every token table carries
+input, cached and output as columns - including the repos table, which
+would otherwise report ~1.5% of what a repo actually costs.
+
+**Three columns: input, cached, output.** Input is stored net of cache
+([#net-input](./0035-token-usage-normalization.decision.md#net-input)), so each column sums exactly the field it is named
+after and `input + cached` is the whole prompt, with nothing
+double-counted. Folding cache into input would hide where the volume
+actually goes - on this repo's own history, cached runs ~500x net input -
+and would leave the "input" header meaning something narrower elsewhere in
+the schema. `cached` covers reads and writes together; the read/write
+split is a cost question for the usage-report skills, not a first look.
+
+Each cache term carries its own `coalesce`, which is load-bearing rather
+than defensive: `cache_write_tokens` is Claude-only, so an unguarded
+`cache_read_tokens + cache_write_tokens` evaluates to null on every OpenAI
+row and silently drops that provider's cache reads from the sum (25.5M ->
+0 on the authoring machine). A test pins it.
+
+**Zero-token rows: two kinds, two treatments.** A `0  0  0` line reads
+like a bug, so the table shows only measured rows - but whether their
+absence deserves a word depends on what they are.
+
+A group with no model label is not a model: it is the rows no model
+answered (prompts, tool results), which cannot carry usage, because a
+response's tokens are stamped on the response ([#one-carrier](./0035-token-usage-normalization.decision.md#one-carrier)) and the
+prompt's cost is therefore already inside the answering model's `input`
+and `cached`. These are omitted silently - nothing is missing to report.
+The first cut got this wrong and counted them, so 14.5k of the reader's
+own prompts were announced as "+ 2 models whose traffic was recorded
+without token counts": correct arithmetic under a sentence that described
+the reader's messages as something they are not.
+
+A *labelled* model with zero tokens is the other kind: a real model whose
+provider reported no usage. That is a genuine gap in what was recorded, so
+it is still counted out loud. And an unlabelled group that ever does carry
+tokens renders as `(model not recorded)` rather than being filtered, so
+the omission rule can never silently drop a measured token.
+
+The SQL sits behind `--sql`, not inline: the token statements are four
+lines of `json_extract`/`cast` each, and printing both above the tables
+would bury the numbers. A one-line footer names the flag, so the queries
+stay one keystroke away - they are exactly the incantation a user cannot
+guess. Printed with newlines preserved inside `hyp query sql "..."`, which
+a shell pastes back verbatim.
+
+**One block, two callers.** `runWizardFirstLook` (`wizard/first_look.js`)
+owns only the wizard's half of the contract (when the step runs, and that
+it never fails a finished install); `hyp query overview`
+(`commands/query.js`, plus `--json` for scripting and `--sql` for the
+statements) prints the same block on demand, and the wizard's closing line
+names it. A view a user sees once
+during setup and can never summon again is a worse deal than a command
+they learn - so the render, the SQL, and the empty state live in one
+module rather than being reproduced per surface. The two callers differ
+only in heading, and in what an unregistered dataset means: the wizard
+skips silently (nothing was picked that records gateway traffic), while
+the command exits 1 with the fix on stderr (the user asked for AI traffic
+and there is no source recording it).
+
+Constraints that make it safe to run automatically:
+
+- **Attended and non-dry-run only.** `--yes`, presets and `--from-file`
+  produce no extra output (scripted callers keep a clean stdout), and a
+  dry run has no writes to look at.
+- **After the finale, before the privacy narration.** Backfill has already
+  landed by then, so a first install with imported history shows real rows;
+  and the privacy narration stays the wizard's last words (#privacy).
+- **Never a gate.** In the wizard, no dataset (no gateway source picked)
+  skips silently and a failure is recorded on the span and skipped. Setup
+  already succeeded by the time this runs, so nothing here may fail it -
+  and the guarantee is structural, not merely behavioral: `runInitWizard`
+  **discards the step's result**, so it cannot reach the exit code, and the
+  step's `try` wraps the *whole* body rather than just the queries. An
+  earlier version caught only `collectOverview`, leaving rendering and
+  `stdout.write` outside it - an unforeseen row shape, or an `EPIPE` from a
+  closed pipe (`hyp init | head`), would have surfaced as `hyp: <error>`
+  and a non-zero exit from an install that had already fully succeeded.
+  Two tests pin it, one throwing from the writer and one from a row.
+- **Never a hang, and never a blank.** The section queries are full
+  aggregations whose cost is the cache's size (~3s over 48k rows / 158MB,
+  and the step runs right after a backfill that may have imported months
+  into a much bigger one). Rather than run them and hope, the block plans
+  its own scope, described below.
+- **No new visibility surface.** The runner routes through the `query sql`
+  verb operation with the caller's cwd, so the LLP 0105 filter applies
+  exactly as it would to the user typing the query
+  (`@ref LLP 0105 [constrained-by]`).
+
+Zero rows is a first-class state, not a blank: it names what has to happen
+(start a session in an attached client) and repeats the command to run
+afterwards.
+
+### The window is planned, and always stated {#window}
+
+A block whose cost grows without bound has two bad failure modes: it hangs
+on a big cache, or it silently disappears. Instead the block **chooses a
+period it can afford, and says which period that is.**
+
+`collectOverview` first runs a deliberately narrow probe -
+`select date, count(*) from ai_gateway_messages group by 1`, one column and
+no JSON extraction, ~0.27s against the ~0.50s of a single token section.
+Partitions are keyed by `source`, not `date`, so per-day counts cannot come
+from Iceberg metadata; asking the data is the cheap option. From that
+histogram `chooseOverviewWindow` walks days newest-first and takes the
+widest span that satisfies **two** caps. Every section then carries the
+same `date >= since` bound, so the block is one claim about one period
+rather than four differently scoped ones.
+
+**Time, measured rather than assumed.** The probe just read every row, so
+how long *it* took is a fresh per-row rate for this machine, this disk and
+this moment's load. Sections cost ~1.9x the probe per row (0.27s against
+0.50s at 48k rows) - a ratio that is a property of the queries, where the
+rate is a property of the hardware - so the affordable row count is
+`remaining / (perRowMs x 1.9 x sections)`. `remaining` is the 5s budget
+*minus what the probe already spent*: the probe is part of the user's wait,
+and a plan that ignored it would let a slow probe consume the budget before
+planning noticed it was spending anything (on a 20x-slow machine the probe
+alone outlasts it). A floor keeps the newest day payable even then. A row-count target *alone* would bake in the
+author's laptop: the same 150k rows on a machine 10x slower is the same
+plan and ten times the wait, which is precisely the "huge logs, long wait"
+case the window exists to prevent. Verified against this repo's real
+per-day counts (31 active days, 48k rows): at the measured ~270ms probe the
+plan takes all 31 days; simulating 3x, 10x and 50x slower machines narrows
+it to 27, 6 and 2 days respectively, with no change to the data.
+
+**Rows, as a memory backstop** (`OVERVIEW_ROW_TARGET`, 150k). Time says
+nothing about heap, and a fast machine could otherwise pick a window
+approaching the LLP 0056 execution ceiling that LLP 0057 measured at the
+~200k-row scale. The tighter of the two caps wins, and `boundBy` records
+which one did.
+
+Three rules make this honest rather than merely fast:
+
+- **The newest day is always included, even alone, even when it exceeds the
+  target.** A block covering one busy day is a real answer; no block is
+  not. Narrowing replaces skipping.
+- **The window is always printed**, directly under the title. A total whose
+  period is unstated is not an answer, and a smaller number must never be
+  mistaken for less work. A narrowed window reports the scope and the lever
+  - `showing 3 of 31 active days (2,918 of 48,405 rows); widen with --days
+  31` - and never the reason. One wording whatever caused it: the row
+  budget, a slow machine and an explicit `--days` are the tool's business,
+  and a window the user asked for must not arrive with an apology attached.
+  The count is "active days" because the bounds are calendar dates while
+  the count is dates that recorded something.
+- **An explicit `--days <n>` outranks the budget.** The user asking is
+  worth more than the tool's guess about their patience.
+
+### Same plan, different overrun behavior {#overrun}
+
+Both callers plan identically - one budget constant, one probe, one window
+- because "how much history can this machine summarize quickly?" has one
+answer regardless of who asked. They diverge only when the plan turns out
+wrong:
+
+- **`hyp init`** wraps the step in a deadline of `budget + 3s`
+  (`FIRST_LOOK_BUDGET_MS`, derived from the shared constant rather than
+  chosen independently). The gap is deliberate: it fires only when
+  measurement was wrong, never in ordinary operation, and if it starts
+  firing routinely the fix is the planner's calibration rather than a
+  longer deadline. Setup is where a stall does real damage - the last step
+  of an install, after every durable action already succeeded, so a freeze
+  reads as "the install broke" when nothing did.
+
+  **Expiry keeps what finished.** `collectOverview` writes each section into
+  the caller's object as it lands, so an expired deadline renders the
+  completed sections instead of discarding them - three done and a fourth
+  in flight is a shorter block, not a blank one. The unfinished sections are
+  then named as *unfinished* ("the repos and tools sections did not
+  finish"), never silently omitted: "no repos" and "the repos section did
+  not finish" are different claims and only one is true. Only when nothing
+  usable landed - the probe itself outlasting the budget - does the step
+  fall back to skipping entirely (`skip_reason: 'slow'`) with a pointer to
+  `hyp query overview`.
+- **`hyp query overview`** has no deadline. The user asked and is watching;
+  no answer is worse than a slow one, and they hold `--days` either way. At
+  the extreme the LLP 0056 heap ceiling still refuses - and the command
+  catches that refusal to name the lever the kernel's generic advice
+  cannot ("add a WHERE/date filter, a LIMIT" is useless to a block that
+  already has a date filter and takes no LIMIT).
+
+The abandoned queries are in-process CPU work and cannot be cancelled; the
+CLI's closing `process.exit` drops them. Threading the deadline into
+`executeQuerySql`'s existing `signal` (LLP 0054 #signal-threading) would
+make the abandonment a real cancellation, and is the obvious next step.
+
+### Every truncation is counted, and counted honestly {#folds}
+
+Three of the four sections show a head and fold the tail into a count line.
+The count must be computed over the *whole* grouping, which is why the
+`repos` and `daily` statements carry no `LIMIT`: a SQL limit silently
+becomes the renderer's idea of the entire result, so "+ N more repos" would
+report the tail of the limit rather than the tail of the truth (a 20-row
+limit reports 12 hidden when 22 are). Worse for `repos`, where the
+repo-less group sorts by token volume like any other row: past 20 repos it
+falls off the end and takes its own disclosure line with it, so a machine
+with many repos would be told nothing about the Codex sessions that have no
+`repo_root` at all. The grouping is computed in full either way; the
+`LIMIT` only decided how much of it the renderer got to see.
+
+`daily` has the same shape with a sharper edge, because the block states
+its window in the header. A 30-day window rendered as 14 rows under a
+header that says 30 is a table that does not answer the question above it,
+and anyone summing the column gets half the period without being told. The
+renderer shows `MAX_DAY_ROWS` and states how many days it folded.
+
+`tools` keeps its `LIMIT 10` and has no fold line: "the ten most-used
+tools" is the whole question there, not a truncation of a larger one.
+
+An empty result gets the same treatment. "Nothing recorded yet" is a claim
+about the cache, and when the LLP 0105 filter took every row it is false -
+the sessions are recorded, just not visible from here. The runner reports
+whether it withheld anything, and the renderer picks the sentence that is
+true.
+
+### What the block omits, it says {#disclosure}
+
+The overview runs through the same `executeQuerySql` every other surface
+uses, so it inherits that seam's two out-of-band reports: LLP 0105's
+withheld-row count, and the freshness line for a dataset with unflushed
+writes. Neither belongs in the table - both are about the table.
+
+Withheld rows are disclosed on **both** callers, to stderr. A block that
+quietly drops rows and reads as a complete picture is precisely the failure
+LLP 0105 exists to prevent, and it would land harder here than on a
+hand-written query: the user typed no filter and has no reason to suspect
+one. Being mid-install is not an exemption.
+
+Freshness is disclosed by `hyp query overview` and dropped by the wizard
+(`firstLookNoticeSink`). The line is true and actionable for someone asking
+a question of their data; to someone finishing an install it names a
+condition they did not cause and cannot act on, attached to a block whose
+backfilled rows were force-flushed on the way in.
+
+One further wrinkle: the block issues five statements, so a naive pass-
+through would print the same sentence five times. The runner dedups by
+line, which is also why the wording is `renderLocalOnlyNotice` from the
+query verb rather than a second copy - two surfaces phrasing the same
+disclosure differently is how one of them ends up subtly wrong.
+
+The override the disclosure names has to exist. `hyp query overview` takes
+`--include-local-only` for exactly one reason: the withheld-row notice
+names that flag as the remedy, and so does the withheld empty state. A
+block that tells the user to run a flag and then exits 2 on it is worse
+than one that never mentioned it - it turns a disclosure into a dead end.
+The wizard never passes it: nothing in a setup step should quietly widen
+what a captured transcript can carry, and the person reading the notice can
+run the command themselves.
+
 ## Telemetry
 
 Per CLAUDE.md's log-driven-development conventions, each new phase gets its
 own span, `component: 'wizard'`: `wizard.fork`, `wizard.join` (with
 `join_status`, `wait_ms`, `converged: boolean`), `wizard.pick` (superseding
 `walkthrough.pick`), `wizard.configure` (one span per descriptor:
-`descriptor_id`, `status`, `error_kind` on drop), `wizard.finale`. The
+`descriptor_id`, `status`, `error_kind` on drop), `wizard.finale`,
+`wizard.first_look` (`provider_rows`, `day_rows`, or `status: 'skipped'`
+with `skip_reason` when it did not run). `hyp query overview` emits its own
+`query.overview` span (`component: 'query'`, `format`, the same row
+counts). The
 existing `walkthrough.start`/`write_config`/`finish` spans rename to their
 `wizard.*` equivalents in the same change that moves the code, per CLAUDE.md's
 "update or remove the `@ref` if not" rule for the `@ref LLP 0011#interactive-

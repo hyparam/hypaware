@@ -9,6 +9,7 @@ import { makeGroupCommand } from './group_help.js'
 import { runStatus } from '../commands/status.js'
 import {
   runQueryMaintain,
+  runQueryOverview,
   runQueryRefresh,
   runQuerySchema,
   runQueryStatus,
@@ -102,8 +103,14 @@ function buildCoreCommands(registry) {
         '                    cache (bare --remote uses query.default_remote, else the\n' +
         "                    shipped default; manage targets with 'hyp remote').\n" +
         "See 'hyp query <subcommand> --help' for which flags a subcommand supports\n" +
-        '(status/schema/refresh/maintain are local-only and ignore --remote).',
+        '(overview/status/schema/refresh/maintain are local-only and ignore --remote).',
     }),
+    {
+      name: 'query overview',
+      summary: 'Show recorded AI traffic: tokens per model, activity per day, repos, and tools',
+      usage: 'hyp query overview [--json] [--sql] [--days <n>] [--include-local-only]',
+      run: runQueryOverview,
+    },
     {
       name: 'query schema',
       summary: 'Print the schema for a dataset',

@@ -124,21 +124,37 @@ row, so a plain sum is correct:
 
 ```sql
 SELECT
-  SUM(CAST(JSON_EXTRACT(attributes, '$.usage.input_tokens')      AS BIGINT)) AS input,
-  SUM(CAST(JSON_EXTRACT(attributes, '$.usage.output_tokens')     AS BIGINT)) AS output,
-  SUM(CAST(JSON_EXTRACT(attributes, '$.usage.cache_read_tokens') AS BIGINT)) AS cache_read,
-  SUM(CAST(JSON_EXTRACT(attributes, '$.usage.cache_write_tokens')AS BIGINT)) AS cache_write,
-  SUM(CAST(JSON_EXTRACT(attributes, '$.usage.reasoning_tokens')  AS BIGINT)) AS reasoning
+  COALESCE(SUM(CAST(JSON_EXTRACT(attributes, '$.usage.input_tokens')      AS BIGINT)), 0) AS input,
+  COALESCE(SUM(CAST(JSON_EXTRACT(attributes, '$.usage.output_tokens')     AS BIGINT)), 0) AS output,
+  COALESCE(SUM(CAST(JSON_EXTRACT(attributes, '$.usage.cache_read_tokens') AS BIGINT)), 0) AS cache_read,
+  COALESCE(SUM(CAST(JSON_EXTRACT(attributes, '$.usage.cache_write_tokens')AS BIGINT)), 0) AS cache_write,
+  COALESCE(SUM(CAST(JSON_EXTRACT(attributes, '$.usage.reasoning_tokens')  AS BIGINT)), 0) AS reasoning
 FROM ai_gateway_messages
 WHERE role = 'assistant' AND JSON_EXTRACT(attributes, '$.usage') IS NOT NULL
 ```
 
 A defensive `max()`-per-`COALESCE(raw_frame.message_id, message_id)` rollup also
 remains correct (the non-carrier blocks are null and ignored), so it's safe to
-keep in queries written before this decision. Field union across providers:
-Codex carries `reasoning_tokens` and no `cache_write_tokens`; Claude is the
-reverse; `input_tokens` is net for both (#net-input). `COALESCE(..., 0)` the
-union.
+keep in queries written before this decision.
+
+<a id="null-union"></a>**The field union is a null trap, and the nulls are
+silent.** Codex carries `reasoning_tokens` and no `cache_write_tokens`; Claude
+is the reverse; `input_tokens` is net for both (#net-input). A field the
+provider never emits reads NULL, and NULL propagates rather than zeroing, in
+two distinct places:
+
+- *Inside a row's arithmetic.* `CAST(...cache_read...) + CAST(...cache_write...)`
+  is NULL on every OpenAI row, so `SUM` skips the row entirely and that
+  provider's whole cache-read total collapses to 0. Measured on a real install:
+  25,581,312 cache-read tokens became 0, with no error.
+- *At the aggregate.* `SUM` over all-NULL returns NULL, not 0, so an
+  OpenAI-scoped slice yields `cache_write: null` and any
+  `input + cache_read + cache_write` total built from it is NULL.
+
+So: `COALESCE(..., 0)` **every** token sum, and **every term** of every token
+addition. The rule is the same shape as the net/gross normalization this
+document exists for - a cross-provider query must not silently mean different
+things per provider - one layer down, in null handling.
 
 ### Consequences
 

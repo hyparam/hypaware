@@ -540,8 +540,13 @@ export async function runPickerWalkthrough(opts) {
 /**
  * Print the closing run summary: the written config path plus one line
  * per finale action that ran (daemon target, attaches, skills/agents
- * counts) and the first-query hint. Shared by `runPickerWalkthrough` and
- * the wizard orchestrator so both entry points end a run identically.
+ * counts). Shared by `runPickerWalkthrough` and the wizard orchestrator so
+ * both entry points end a run identically.
+ *
+ * No "next: hyp query sql ..." hint: it named the `logs` dataset, which
+ * only exists when `@hypaware/otel` is configured, so most installs ended
+ * on a command that failed. The wizard now runs real queries instead
+ * (LLP 0135 #first-look).
  *
  * @param {{
  *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
@@ -579,7 +584,6 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
     const tag = finaleSummary.agentsInstalled[0].dryRun ? '(dry-run) ' : ''
     stdout.write(`${tag}agents: ${finaleSummary.agentsInstalled.length} copied\n`)
   }
-  stdout.write(`next: hyp query sql 'select count(*) from logs'\n`)
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
+import type { OverviewQueryRunner } from '../../query/types.d.ts'
 import type { PickerDescriptor, PluginCatalog } from '../../types.d.ts'
 import type {
   AsyncBackfillConsentPrompt,
@@ -265,6 +266,16 @@ export interface RunWizardPickOptions {
 }
 
 /**
+ * What the first look did. `shown: false` is a normal outcome, not a
+ * failure: `no-dataset` when no gateway source was picked, `error` when the
+ * query itself failed, `slow` when summarizing the cache would have
+ * outlasted the step's budget (setup had already succeeded in every case).
+ */
+export type FirstLookResult =
+  | { shown: true; providerRows: number; dayRows: number; partial?: true }
+  | { shown: false; reason: 'no-dataset' | 'error' | 'slow' }
+
+/**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
  * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
  * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the
@@ -307,6 +318,11 @@ export interface RunInitWizardOptions {
   runStatus?: () => Promise<number>
   /** Pre-built catalog (tests); defaults to the bundled-plugin catalog. */
   catalog?: PluginCatalog
+  /**
+   * Override the first look's query seam (tests). Defaults to a runner
+   * built from `ctx`; the step is skipped when neither is available.
+   */
+  firstLook?: OverviewQueryRunner
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>

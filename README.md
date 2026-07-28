@@ -67,7 +67,9 @@ On a TTY this launches the interactive walkthrough:
    persistent daemon (launchd on macOS, systemd `--user` on Linux),
    attaches the selected clients, and starts capturing.
 5. The walkthrough finishes by printing the config path, daemon status,
-   per-client attach results, and a first `hyp query` command to run.
+   per-client attach results, and a first look at what was captured: token
+   volume per model, activity per day, which repos the sessions ran in, and
+   which tools got called. Reprint it any time with `hyp query overview`.
 
 For unattended installs (CI, scripted bootstraps, dotfiles) use the
 non-interactive flags:
@@ -180,6 +182,25 @@ installing or restarting the daemon.
 before invoking the CLI or the daemon.
 
 ## Querying captured data
+
+Start with the overview: input, cached and output tokens per provider and
+model, the same per day, which repos the sessions ran in, and which tools
+get called - the same block `hyp init` ends on.
+
+```sh
+hyp query overview            # --json to script it, --sql to print the queries
+hyp query overview --days 90  # widen the window past what fits by default
+```
+
+The block states the period it covers. It picks a window it can summarize
+quickly, so a large cache narrows the period rather than hanging - and the
+line under the title always says which days the numbers describe.
+
+Input is prompt sent fresh and cached is prompt served from (or written
+to) the cache, so `input + cached` is the whole prompt; output is what the
+model generated.
+
+Then query anything directly:
 
 ```sh
 hyp query sql "select count(*) from ai_gateway_messages"
