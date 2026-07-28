@@ -38,6 +38,7 @@ import { pluginStateDir } from './plugin.js'
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
+ * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { ResolveResult, UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
@@ -843,6 +844,22 @@ function repoRootDefaultTarget(base, explicitPath) {
 }
 
 /**
+ * The human wording the deprecated `hyp ignore` / `hyp unignore` flag aliases
+ * print: internals verbatim, which is exactly what they printed before the
+ * `hyp policy` verb existed. Keeping it as the default of the shared writers
+ * is what makes the aliases output-identical by construction (LLP 0111
+ * #aliases) while `policy` renders the public vocabulary (LLP 0111 #tokens).
+ *
+ * @ref LLP 0111#aliases [implements]: the alias spellings keep their exact stdout, internal class name and store path included
+ * @type {PolicyHumanVocabulary}
+ */
+const INTERNAL_VOCABULARY = {
+  className: (cls) => cls,
+  governor: (governedBy) => governedBy,
+  storeSuffix: (listPath) => ` (${listPath})`,
+}
+
+/**
  * `hyp ignore --private [path]` / `hyp ignore --local-only [path]` /
  * `hyp ignore --sync [path]`
  *
@@ -872,11 +889,11 @@ function repoRootDefaultTarget(base, explicitPath) {
  * an unlisted directory is not "already answered", LLP 0103).
  *
  * @ref LLP 0103#cli [implements]: the shared machine-local marking verb behind `--private` / `--local-only` / `--sync`
- * @ref LLP 0111#surface [implements]: also the shared implementation behind `policy set`; only the `component` attribute names the dispatching verb
- * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass, component: string }} args
+ * @ref LLP 0111#surface [implements]: also the shared implementation behind `policy set`; the `component` attribute names the dispatching verb and `vocabulary` picks that verb's human wording
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass, component: string, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}
  */
-export async function runMarkMachineLocal({ targetDir, ctx, targetClass, component }) {
+export async function runMarkMachineLocal({ targetDir, ctx, targetClass, component, vocabulary = INTERNAL_VOCABULARY }) {
   const resolvedTarget = path.resolve(targetDir)
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
@@ -887,7 +904,8 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
       ? existing.governedBy === listPath && existing.class === 'full'
       : CLASS_RANK[existing.class] >= CLASS_RANK[targetClass]
   if (alreadyMarked) {
-    ctx.stdout.write(`already ${existing.class} (governed by ${existing.governedBy ?? '(implicit default)'})\n`)
+    const governor = existing.governedBy ? vocabulary.governor(existing.governedBy, listPath) : '(implicit default)'
+    ctx.stdout.write(`already ${vocabulary.className(existing.class)} (governed by ${governor})\n`)
     return 0
   }
 
@@ -902,7 +920,7 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
   })
   // Same latency caveat as the dotfile write: a running daemon's resolver
   // picks this up within the matcher's cache TTL, not instantly.
-  ctx.stdout.write(`marked ${resolvedTarget} as ${targetClass} (${listPath})\n`)
+  ctx.stdout.write(`marked ${resolvedTarget} as ${vocabulary.className(targetClass)}${vocabulary.storeSuffix(listPath)}\n`)
   return 0
 }
 
@@ -989,10 +1007,10 @@ export async function runUnignore(argv, ctx) {
  *
  * @ref LLP 0103#cli [implements]: symmetric class-scoped removal for `--private` / `--local-only` / `--sync`
  * @ref LLP 0111#unset [implements]: the class-neutral `targetClass === undefined` branch backing `policy unset <path>`
- * @param {{ targetDir: string, ctx: CommandRunContext, targetClass?: UsageClass, component: string }} args
+ * @param {{ targetDir: string, ctx: CommandRunContext, targetClass?: UsageClass, component: string, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}
  */
-export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, component }) {
+export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, component, vocabulary = INTERNAL_VOCABULARY }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const entries = await readLocalOnlyEntries({ stateDir })
   const governing = entries.filter(
@@ -1002,7 +1020,8 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
     if (targetClass === undefined) {
       ctx.stdout.write(`not governed (no machine-local entry governs ${targetDir})\n`)
     } else {
-      ctx.stdout.write(`not ${targetClass} (no machine-local ${targetClass} entry governs ${targetDir})\n`)
+      const label = vocabulary.className(targetClass)
+      ctx.stdout.write(`not ${label} (no machine-local ${label} entry governs ${targetDir})\n`)
     }
     return 0
   }
@@ -1019,11 +1038,13 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
   const entrySuffix = governing.length === 1 ? 'y' : 'ies'
   if (targetClass === undefined) {
     // Class-neutral: name each removed entry's own class since they can differ.
-    const removedDescr = governing.map((entry) => `${entry.dir} (${entry.class})`).join(', ')
+    const removedDescr = governing.map((entry) => `${entry.dir} (${vocabulary.className(entry.class)})`).join(', ')
     ctx.stdout.write(`removed ${governing.length} entr${entrySuffix}: ${removedDescr}\n`)
   } else {
     const removedDirs = governing.map((entry) => entry.dir)
-    ctx.stdout.write(`removed ${governing.length} ${targetClass} entr${entrySuffix}: ${removedDirs.join(', ')}\n`)
+    ctx.stdout.write(
+      `removed ${governing.length} ${vocabulary.className(targetClass)} entr${entrySuffix}: ${removedDirs.join(', ')}\n`
+    )
   }
   return 0
 }
@@ -1051,11 +1072,11 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
  * @ref LLP 0103#cli [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
- * @ref LLP 0111#show [implements]: also the shared implementation behind `policy show`; `--json` stays byte-compatible with the `--check --json` field set
- * @param {{ targetDir: string, ctx: CommandRunContext, json: boolean }} args
+ * @ref LLP 0111#show [implements]: also the shared implementation behind `policy show`; `vocabulary` moves only the human lines, so `--json` stays byte-compatible with the `--check --json` field set
+ * @param {{ targetDir: string, ctx: CommandRunContext, json: boolean, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}
  */
-export async function runIgnoreCheck({ targetDir, ctx, json }) {
+export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERNAL_VOCABULARY }) {
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
   const result = createUsagePolicyResolver({ localOnlyListPath: listPath }).resolve(targetDir)
@@ -1084,11 +1105,20 @@ export async function runIgnoreCheck({ targetDir, ctx, json }) {
     return 0
   }
 
+  // An unmarked directory resolves to the implicit `full` default (matcher.js),
+  // which renders as the identical token a user's explicit `sync` mark would
+  // (LLP 0111 #tokens): `class: sync` alone cannot be told apart from "I asked
+  // and the user said sync". The privacy skill reads this line to decide
+  // whether a directory has already been classified, so the implicit case
+  // must say so; `implicitSuffix` defaults to a no-op so the deprecated
+  // `--check` alias output is untouched (LLP 0111 #aliases).
+  // @ref LLP 0111#show [implements]: the implicit-default class label is unmistakable, never confusable with an explicit user classification
+  const implicitSuffix = result.governedBy ? '' : (vocabulary.implicitSuffix ?? (() => ''))()
   ctx.stdout.write(`path: ${targetDir}\n`)
   ctx.stdout.write(`ignored: ${ignored ? 'yes' : 'no'}\n`)
-  ctx.stdout.write(`class: ${result.class}\n`)
+  ctx.stdout.write(`class: ${vocabulary.className(result.class)}${implicitSuffix}\n`)
   ctx.stdout.write(`source: ${source}\n`)
-  ctx.stdout.write(`governed-by: ${result.governedBy ?? '(none)'}\n`)
+  ctx.stdout.write(`governed-by: ${result.governedBy ? vocabulary.governor(result.governedBy, listPath) : '(none)'}\n`)
   ctx.stdout.write(`residual-cached-rows: ${residual === null ? 'unknown' : residual}${purgeHint}\n`)
   return 0
 }
