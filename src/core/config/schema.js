@@ -13,10 +13,7 @@ import { isPlainObject } from '../util/json_util.js'
 
 /**
  * @import {
- *   ConfigLoadErrorKind,
- *   LoadConfigFailure,
  *   LoadConfigResult,
- *   LoadConfigSuccess,
  *   LocalConfigWriteGuard,
  * } from '../../../src/core/config/types.js'
  */

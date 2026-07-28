@@ -26,7 +26,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
- * @import { ColumnSpec, QueryScope, QueryStorageService, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'

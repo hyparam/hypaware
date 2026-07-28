@@ -3,8 +3,8 @@
 import readline from 'node:readline/promises'
 
 /**
- * @import { PluginLockEntry, PluginManifest, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ConfirmDecision, ConfirmOutcome, StagedArtifact } from '../../../src/core/plugin_install/types.js'
+ * @import { PluginLockEntry, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ConfirmDecision, StagedArtifact } from '../../../src/core/plugin_install/types.js'
  */
 
 /**

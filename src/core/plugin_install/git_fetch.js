@@ -29,11 +29,8 @@ const SKIPPED_DIR_NAMES = new Set([
 
 /**
  * @import {
- *   GitFetchSuccess,
  *   GitFetchFailure,
  *   GitFetchResult,
- *   GitFetchErrorKind,
- *   GitFetchStaged,
  *   BeforeCommitCallback,
  * } from '../../../src/core/plugin_install/types.js'
  */

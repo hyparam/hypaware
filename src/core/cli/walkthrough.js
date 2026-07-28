@@ -25,7 +25,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  */
@@ -34,7 +34,6 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import {
  *   AsyncBackfillConsentPrompt,
  *   AsyncPickPrompt,
- *   BackfillFinaleResult,
  *   PickerBackfillRunner,
  *   PickerSource,
  *   PickerExport,
@@ -43,7 +42,6 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   PickerWalkthroughResult,
  *   RunPickerWalkthroughOptions,
  *   FinaleSummary,
- *   WalkthroughOption,
  *   WalkthroughOptions,
  * } from '../../../src/core/cli/types.js'
  */

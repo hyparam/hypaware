@@ -19,7 +19,7 @@ import { localOnlyListPath } from '../usage-policy/local_only.js'
 import { isSafeContributionName } from './contribution_names.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, CommandRegistry, ConfigControlFacade, ConfigRegistry, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginManifest, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkRegistry, SkillContribution, SkillRegistry, SourceRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */

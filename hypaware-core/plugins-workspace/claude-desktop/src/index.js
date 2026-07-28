@@ -16,7 +16,6 @@ import { runVerify } from './verify.js'
 /**
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AnthropicCredentialCapability } from '../../claude-account/src/types.js'
- * @import { ProfileInputs } from './types.js'
  */
 
 // Re-exported for existing/external callers that imported the wrapper's

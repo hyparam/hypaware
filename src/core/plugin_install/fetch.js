@@ -10,15 +10,12 @@ import { pluginInstallDir } from './paths.js'
 import { sha256Hex } from '../util/json_util.js'
 
 /**
- * @import { PluginManifest, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
  * @import {
- *   FetchSuccess,
- *   FetchFailure,
  *   FetchResult,
- *   FetchErrorKind,
  *   BeforeCommitCallback,
  * } from '../../../src/core/plugin_install/types.js'
  */

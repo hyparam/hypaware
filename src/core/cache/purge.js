@@ -8,7 +8,6 @@ import { deleteMatchingRows, scanRowsFromTable, tableExists } from './iceberg/st
 import { resolveIcebergDir } from './storage.js'
 
 /**
- * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
  */
 

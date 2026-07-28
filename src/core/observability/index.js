@@ -8,7 +8,7 @@ import { installMeterProvider, resetKernelInstruments } from './meter.js'
 
 /**
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
- * @import { ObservabilityEnv, ObservabilityHandle } from '../../../src/core/observability/types.js'
+ * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
 
 /** @type {ReturnType<typeof buildHandle> | null} */

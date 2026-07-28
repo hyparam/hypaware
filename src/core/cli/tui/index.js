@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { State, MultiselectState, SelectState, TextState, MultiSelectOption, MultiSelectSpec, SelectSpecOption, SelectSpec, TextSpec } from '../../../../src/core/cli/tui/types.js'
+ * @import { MultiselectState, SelectState, TextState, MultiSelectSpec, SelectSpec, TextSpec } from '../../../../src/core/cli/tui/types.js'
  */
 
 import process from 'node:process'

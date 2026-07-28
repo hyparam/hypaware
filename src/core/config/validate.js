@@ -3,13 +3,12 @@
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { BlobSinkConfigInstance, CapabilityName, ConfigRegistry, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance, ValidationError } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { BlobSinkConfigInstance, CapabilityName, ConfigRegistry, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, LoadedManifest } from '../../../src/core/types.js'
  */
 
 /**
  * @import {
- *   ConfigValidationErrorKind,
  *   ConfigValidationError,
  *   V1Diagnostic,
  *   PluginMetadata,

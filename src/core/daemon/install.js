@@ -32,8 +32,6 @@ function defaultLabelFor(platform) {
 
 /**
  * @import {
- *   LaunchAgentInstallPlan,
- *   SystemdInstallPlan,
  *   DaemonInstallPlan,
  *   DaemonInstallOptions,
  *   DaemonUninstallOptions,
