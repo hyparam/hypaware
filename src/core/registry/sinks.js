@@ -3,14 +3,12 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { ActivePlugin, BlobStore, PluginLogger, PluginPaths, QueryRegistry, QueryStorageService, Sink, SinkContribution, SinkCreateContext, SinkEncoder, SinkHandle, SinkInstanceConfig, SinkRegistry, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { SinkContribution, SinkCreateContext, SinkEncoder, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
  * @import {
- *   InstantiateBlobArgs,
  *   InstantiateTableFormatArgs,
- *   InstantiateRequestArgs,
  *   InstantiateArgs,
  *   ExtendedSinkHandle,
  *   ExtendedSinkRegistry,

@@ -21,7 +21,7 @@ import {
 } from '../../../../src/core/backfill/scan_util.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillProvenance, BackfillRunContext, JsonObject, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */

@@ -14,8 +14,6 @@
  */
 
 /**
- * @import { PluginActivationContext, PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedSourceRegistry } from '../../../../src/core/registry/types.js'
  * @import { GascityRuntime } from './types.js'
  */
 
@@ -27,13 +25,6 @@ let runtime = null
  */
 export function setGascityRuntime(value) {
   runtime = value
-}
-
-/**
- * @returns {GascityRuntime | null}
- */
-export function getGascityRuntime() {
-  return runtime
 }
 
 /**

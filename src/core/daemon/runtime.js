@@ -39,7 +39,6 @@ import { statusFilePath, writeStatusFile } from './status.js'
 
 /**
  * @import {
- *   DaemonState,
  *   DaemonStatus,
  *   SourceSnapshot,
  *   SinkSnapshot,

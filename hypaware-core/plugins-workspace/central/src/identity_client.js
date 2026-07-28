@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
- * @import { AcquireSource, IdentityResponse, PersistedIdentity } from './types.js'
+ * @import { AcquireSource, PersistedIdentity } from './types.js'
  */
 
 /**

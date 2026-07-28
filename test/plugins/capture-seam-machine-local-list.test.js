@@ -44,7 +44,6 @@ import {
  *    old `ctx.paths.stateDir` wiring and pass once `activate()` derives the
  *    shared root.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
 const IGNORED_ROOT = '/work/private-repo'

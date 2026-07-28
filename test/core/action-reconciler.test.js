@@ -16,11 +16,9 @@ import { createAttachHandler } from '../../src/core/config/action_attach.js'
 
 /**
  * @import {
- *   ActionContext,
  *   ActionHandler,
  *   ActionMarkerStore,
  *   ActionOutcome,
- *   DesiredAction,
  * } from '../../src/core/config/types.d.ts'
  * @import { ClientDescriptor } from '../../src/core/types.js'
  */

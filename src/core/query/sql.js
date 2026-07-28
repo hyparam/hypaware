@@ -16,7 +16,7 @@ import {
 } from './visibility.js'
 
 /**
- * @import { HypAwareV2Config, PluginLogger, QueryRegistry, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExecuteSqlOptions, ExecuteSqlResult, LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'

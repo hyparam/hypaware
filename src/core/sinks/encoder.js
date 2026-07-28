@@ -3,7 +3,7 @@
 import { Attr, withSpan } from '../observability/index.js'
 
 /**
- * @import { ColumnSpec, QueryPartition, QueryRegistry, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { QueryPartition, QueryRegistry, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

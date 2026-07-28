@@ -27,14 +27,12 @@ import { checkForPluginUpdate } from './update_check.js'
 
 /**
  * @import { PluginLockEntry, PluginLockFile, PluginName, PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
- * @import { FetchResult } from './fetch.js'
  */
 
 /**
  * @import {
  *   ConfirmInstall,
  *   ConfirmOutcome,
- *   InstallSuccess,
  *   InstallFailure,
  *   InstallResult,
  * } from '../../../src/core/plugin_install/types.js'

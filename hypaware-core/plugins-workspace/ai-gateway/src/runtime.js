@@ -12,8 +12,6 @@
  */
 
 /**
- * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { GatewayState } from './api.js'
  * @import { AiGatewayRuntime } from './types.js'
  */
 

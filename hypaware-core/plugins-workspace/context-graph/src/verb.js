@@ -4,7 +4,7 @@ import { queryNeighbors } from './query.js'
 import { PLUGIN_NAME } from './datasets.js'
 
 /**
- * @import { VerbRegistration, VerbRenderControls, VerbRenderResult } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { VerbRegistration, VerbRenderResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { LocalOnlyVisibilityReport } from '../../../../src/core/query/types.js'
  * @import { Direction, TraversalOk, TraversalErr } from './types.js'

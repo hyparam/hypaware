@@ -24,7 +24,6 @@ import {
 } from '../../src/core/config/apply.js'
 
 /**
- * @import { PluginConfigInstance } from '../../hypaware-plugin-kernel-types.js'
  * @import { ConfigApplyDeps } from '../../src/core/config/types.js'
  */
 
