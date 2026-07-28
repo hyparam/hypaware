@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
@@ -941,6 +942,34 @@ test('an enrolling login names the server and prints no URL: terminals autolink 
   assert.match(text, /forwarding logs to the 'prod' server/)
   assert.match(text, /first sync to the 'prod' server is /)
   assert.doesNotMatch(text, /https?:\/\//, 'no printed URL for a terminal to autolink into a dead page')
+
+  // Withholding the URL is a readability choice; withholding the way to see it
+  // would make a consent surface unauditable. Each stream carries its own
+  // pointer, because either can be redirected away from the other.
+  assert.match(out.join(''), /\(run 'hyp remote list' to see its URL\)/)
+  assert.match(err.join(''), /\(run 'hyp remote list' to see that server's URL\)/)
+})
+
+test("a bare 'hyp remote login' names the default target it resolved, and that name is still recoverable", async () => {
+  const hypHome = await tmpHome()
+  // No positional target and no query.default_remote: the name comes from
+  // effectiveDefaultRemote (the shipped built-in), so it is a name the user
+  // never typed - the case that makes the lookup pointer load-bearing rather
+  // than decorative.
+  const { ctx, out, err } = await makeCtx({ hypHome, remotes: {} })
+  const login = /** @type {any} */ (async () => gatewaySession())
+  const enroll = /** @type {any} */ (async () => ({ provisioned: true, daemonCode: 0 }))
+  const waitForAttach = /** @type {any} */ (async () => ['@hypaware/claude'])
+
+  const code = await runRemoteLogin([], ctx, { login, enroll, waitForAttach })
+  assert.equal(code, 0)
+
+  const builtin = effectiveDefaultRemote(ctx.config)
+  const text = out.join('') + err.join('')
+  assert.match(text, new RegExp(`forwarding logs to the '${builtin}' server`))
+  assert.match(text, new RegExp(`first sync to the '${builtin}' server is `))
+  assert.doesNotMatch(text, /https?:\/\//)
+  assert.match(out.join(''), /\(run 'hyp remote list' to see its URL\)/)
 })
 
 test('a re-login (already-enrolled) prints no deadline message: there is no first sync to defer', async () => {

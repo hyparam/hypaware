@@ -106,6 +106,20 @@ Its job, in order:
   same hold and the same message on stderr; nothing prompts
   ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md#d3)
   stands).
+- **R1a.** The enrolling login's destination surfaces - the forwarding line and
+  the privacy block - MUST name the server by its configured target name and
+  MUST NOT print its URL, and the privacy block MUST name a command that maps
+  that name back to a URL (`hyp remote list`). Terminals autolink any printed
+  `https://` run with no way to opt out, and the server root is a service
+  endpoint, so a URL here renders as an invitation to a dead page in the one
+  message that exists to earn trust ([#391](https://github.com/hyparam/hypaware/issues/391)).
+  The lookup pointer is not optional: a bare `hyp remote login` resolves its
+  target from `effectiveDefaultRemote`, so the name shown may be one the user
+  never typed, and withholding both the URL and the way to see it would make a
+  consent surface unauditable. This binds the success surfaces only; error
+  paths (`already connected to <origin>`, the replaced-identity note) still
+  print origins, where the origin is the fact the user must act on. Revisit if
+  the server root becomes a browsable landing page.
 - **R2.** No export tick may run before the deadline
   ([LLP 0101](./0101-first-sync-review-window.decision.md)); the hold MUST be
   written before `enrollCentralSink` so no daemon tick can precede it.
@@ -151,5 +165,8 @@ Its job, in order:
 - The hold write in the enrolling login fork and the deadline computation:
   `@ref LLP 0101 [implements]`.
 - The login deadline message: `@ref LLP 0100#requirements [implements]: R1`.
+- The destination surfaces that name the server rather than its URL (the
+  deadline message and the forwarding line):
+  `@ref LLP 0100#requirements [implements]: R1a`.
 - The skill sources (claude/codex plugins): `@ref LLP 0100#skill [implements]`.
 - The sink-driver hold check: `@ref LLP 0101#hold [implements]`.
