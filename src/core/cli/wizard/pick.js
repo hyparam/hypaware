@@ -139,6 +139,11 @@ export async function runWizardPick(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect? (space to toggle, enter to confirm)',
+        // Carried on the question rather than composed into the title, so
+        // the TUI paints it dim on its own line and the legacy numbered
+        // fallback prints the same text as plain text.
+        // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
+        ...(opts.progress ? { progress: opts.progress } : {}),
         options: descriptorList.map((d) => buildPickOption(d, detected, lockedSet, opts.managed === true)),
       })
       rawSources = /** @type {PickerSource[]} */ (

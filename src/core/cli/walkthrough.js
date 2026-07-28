@@ -81,6 +81,10 @@ function legacyNumberedPromptFactory(opts) {
   return async function ask(question) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
+      // The plain-text form of the TUI's dim breadcrumb line: same text,
+      // same position (above the title), no styling.
+      // @ref LLP 0135#progress [implements]: the non-TUI fallback prints the position too
+      if (question.progress) output.write(`\n${question.progress}`)
       output.write(`\n${question.title}\n`)
       question.options.forEach((opt, idx) => {
         // Locked (disabled) rows are shown for context but never selectable
@@ -141,6 +145,7 @@ function tuiPromptFactory(opts) {
   return async function ask(question) {
     const result = await multiselect({
       title: question.title,
+      ...(question.progress ? { progress: question.progress } : {}),
       options: question.options.map((o) => ({
         value: o.value,
         label: o.label,
@@ -728,12 +733,20 @@ export function composePickerConfig(args) {
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   skipAttachClients?: Set<string>,
+ *   progress?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
+  // Like the join lane, the finale is one step made of several actions
+  // (install, attach, assets, backfill consent, restart), so it states its
+  // position once where the lane starts rather than per action. Only the
+  // wizard sets this; `runPickerWalkthrough` and non-interactive runs leave
+  // it unset and the line is not printed.
+  // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
+  if (args.progress) stdout.write(`${args.progress}\n`)
   const homeDir = env.HOME ?? ''
   const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
 

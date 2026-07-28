@@ -38,6 +38,7 @@ src/core/cli/wizard/
   pick.js                   // runWizardPick(opts): the picker prompt + composePickerConfig (descriptor-driven, was walkthrough.js)
   configure.js               // runConfigurePhase(picked, ctx): needs_setup loop, drop-on-failure, --print-commands passthrough
   provenance.js               // classifyClientProvenance(name, layered): shared by pick.js, status.js, and the export seam
+  steps.js                     // wizardItinerary / wizardStepProgress: the counted lanes per pathway (#progress)
 src/core/query/overview.js    // the shared block: probe, chooseOverviewWindow, buildOverviewSql, collectOverview, renderOverview
 src/core/commands/query.js    // `hyp query overview [--json] [--sql] [--days <n>]`: the same block on demand
 src/core/cli/detect.js        // detectPickerSources(catalog, env): replaces the hardcoded DETECTABLE_CLIENT_SOURCES table
@@ -212,6 +213,81 @@ is preset to `'scoped'`, `runWizardPick` renders org rows locked (via
 `configure` only for newly picked `needs_setup` entries, never re-running the
 join lane. A solo machine's `Reconfigure` choice preset nothing: it re-enters
 the loop at the fork exactly as first run does.
+
+## Position indicator {#progress}
+
+The phase machine above is a sequence of standalone screens: each phase
+prints its own title and knows nothing about what came before or after, so
+the user answers a question, another screen appears, and cannot tell whether
+they are halfway through or two prompts from the end (issue #415).
+
+`src/core/cli/wizard/steps.js` adds the missing shared knowledge, as a pure
+data module with no I/O:
+
+```js
+export function wizardItinerary(pathway)          // the counted lanes, in order
+export function wizardStepProgress(pathway, step) // 'Step 2 of 3 · Choose what to collect'
+```
+
+Three rules decide what the counter may say, and each exists to stop the
+denominator from being a lie:
+
+**The denominator resolves after the fork, never before.** The pathway is
+what fixes the total, and the fork is the question that asks for it, so the
+fork carries no counter at all. One line after the fork resolves the
+itinerary is known, and it never moves again. This is why a failed join is
+harmless: it returns to the fork (`#orchestration` above), which states
+nothing, so a retry that lands on `local` simply starts the local count
+rather than contradicting a team total already on screen. The scoped
+re-entry skips the fork entirely and knows its pathway from the gate.
+
+**Steps are prompt lanes, not phases.** The seven-phase list is the wrong
+unit: `configure` is `stdout.write` narration plus a shelled-out command,
+the privacy narration is closing text, and `first look` is a report rather
+than a decision. A counter that advanced while output scrolled past would
+read as broken. `first look` therefore renders with no counter rather than
+inflating the total with a step nobody answers, and `configure` needs no
+breadcrumb work at all.
+
+**A lane counts once, however many prompts it contains.** `join` delegates
+to `runRemoteLogin`, which can prompt for an org, so the team pathway's true
+prompt count is not knowable even at fork resolution; the finale is likewise
+several actions with at most one consent prompt inside. Counting lanes
+rather than prompts is exactly what makes the total fixed from the moment
+the pathway is committed.
+
+The resulting itineraries:
+
+| pathway | counted lanes | fork |
+| --- | --- | --- |
+| `team`   | join, pick, finale | shown, no counter |
+| `local`  | pick, finale       | shown, no counter |
+| `scoped` | pick, finale       | never shown       |
+
+with the display names verb-shaped and short (`Join your team`,
+`Choose what to collect`, `Finish setup`): what the user is about to do,
+not the internal phase name.
+
+**The seam** is an optional `progress` field, *not* text composed into a
+title. `src/core/cli/tui/types.d.ts` grows a `PromptChrome` base carrying
+`title`, `hint` and `progress`, and all six prompt interfaces (the three
+specs and the three reducer states) derive from it, so the field reaches
+every prompt kind and cannot drift between them. `render.js` opens every
+frame with `chromeLines`: the position dim on its own line, the title bold
+below it. Keeping it a separate field is what lets the non-TUI fallbacks
+print a plain-text form of the same text: the legacy numbered picker prompt
+writes it above the question exactly where the TUI paints it.
+
+Lanes that own no prompt spec write the line themselves where the lane
+starts, once: `runWizardJoin` above its `Joining your team...` narration,
+`runPickerFinale` before its first action.
+
+`wizardStepProgress` returns `undefined` whenever no position can be stated
+honestly, and every caller threads that `undefined` straight through as an
+omitted field. Non-interactive runs (`--yes`, `--dry-run`, presets,
+`--from-file`) never commit a pathway, so they emit no breadcrumb and their
+output is byte-identical to what it was before this existed
+(`@ref LLP 0131#attended-only`).
 
 ## Join phase {#join}
 
