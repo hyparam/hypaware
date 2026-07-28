@@ -184,19 +184,39 @@ const FIRST_SYNC_RULE = '─'.repeat(62)
  * phrase stays whole on its own line so the content assertions survive the
  * decoration.
  *
+ * Names the destination by its configured target name, not its URL: terminals
+ * autolink any printed `https://` run, and the server root is a service
+ * endpoint that answers `{"error":"unknown_path"}` in a browser, so a URL here
+ * reads as an invitation to a dead page - in the one message where trust
+ * matters most (#391). R1 asks for the deadline, the backfill statement, and
+ * the skill hint; R1a pins the spelling, and `<server>` is already how §flow
+ * writes it.
+ *
+ * The name alone would be a dead end, so the block names the one command that
+ * maps it back: `hyp remote list`. A bare `hyp remote login` resolves its
+ * target from `effectiveDefaultRemote`, so the user can be shown a name they
+ * never typed - and nothing else this login prints recovers the URL (`hyp
+ * status` names no server, DURABLE_HINT points at `hyp policy set`). Withholding
+ * the URL is a readability choice; withholding the *way to see it* would make a
+ * consent surface unauditable. The pointer lives inside the rule lines because
+ * this block is deliberately self-contained (stderr, while the forwarding line
+ * is stdout - redirect either and the other must still stand on its own).
+ *
  * @ref LLP 0100#requirements [implements]: R1 - absolute deadline, backfill statement, skill hint, same on TTY and non-TTY
+ * @ref LLP 0100#requirements [implements]: R1a - name the server, never its URL, and name the command that maps the name back
  * @param {number} deadlineMs
- * @param {string} centralUrl
+ * @param {string} serverName
  * @returns {string}
  */
-export function firstSyncHoldMessage(deadlineMs, centralUrl) {
+export function firstSyncHoldMessage(deadlineMs, serverName) {
   return (
     '\n' +
     `${FIRST_SYNC_RULE}\n` +
     '  PRIVACY - review before first sync\n' +
     '\n' +
-    `  first sync to ${centralUrl} is ${formatFirstSyncDeadline(deadlineMs)}\n` +
+    `  first sync to the '${serverName}' server is ${formatFirstSyncDeadline(deadlineMs)}\n` +
     '  and includes your backfilled history\n' +
+    "  (run 'hyp remote list' to see that server's URL)\n" +
     '\n' +
     '  to review what ships before then,\n' +
     '  open Claude or Codex and run the hypaware-privacy skill\n' +
@@ -614,7 +634,21 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       ctx.stderr.write(`hyp remote login: this machine connected to ${result.connectedElsewhere} during sign-in - not enrolling\n`)
       return 1
     }
-    ctx.stdout.write(`forwarding logs to ${centralUrl}\n`)
+    // Name the server, don't print its URL: every modern terminal autolinks a
+    // bare `https://` run (there is no escape that suppresses it), and this
+    // origin is a service endpoint, so the click lands on `unknown_path`
+    // (#391). Scope: this rule binds the *success* surfaces - this line and the
+    // privacy block - not the error paths above and below, where the origin is
+    // the fact you need to act on (which server to `hyp leave`) and a label
+    // would not do. Those still print bare origins, and deliberately so.
+    //
+    // Pair the name with its lookup: `name` can come from
+    // `effectiveDefaultRemote` on a bare login, so it is not always something
+    // the user typed, and no other line in this login recovers the URL.
+    // Revisit if the server root ever becomes a real landing page.
+    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
+    ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
+    ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
     // Print the deadline once, ahead of every exit branch below (--no-daemon,
     // a failed daemon install, or the normal attach-wait path): the hold and
     // its deadline are already committed to disk regardless of how the daemon
@@ -622,7 +656,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
     if (holdDeadline !== null) {
-      ctx.stderr.write(firstSyncHoldMessage(holdDeadline, centralUrl))
+      ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
     // Without the daemon there is nothing to wait on: it is what pulls the org
     // config and runs the attach reconcile. Say what is left to do and stop.
