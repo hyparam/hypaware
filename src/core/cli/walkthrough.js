@@ -6,7 +6,7 @@ import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
-import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
@@ -655,9 +655,13 @@ export function composePickerConfig(args) {
   const plugins = []
 
   if (requiresGateway) {
+    // No `listen`: a wizard-written address is indistinguishable from a
+    // user-stated one, and an explicit listen is exactly what forfeits the
+    // default-only EADDRINUSE fallback (LLP 0114 #explicit-listen-fails-loudly).
+    // @ref LLP 0114#init-writes-no-listen [implements]: the picker leaves listen unset so the default install keeps its fallback
     plugins.push({
       name: '@hypaware/ai-gateway',
-      config: { listen: '127.0.0.1:8787', upstreams },
+      config: { upstreams },
     })
   }
 
@@ -832,7 +836,13 @@ export async function runPickerFinale(args) {
         summary.attach.push({ client, dryRun, ok: false })
         continue
       }
-      let endpoint = configuredGatewayEndpoint(config) ?? 'http://127.0.0.1:0'
+      // The walkthrough attaches before the finale restarts the daemon, so the
+      // gateway is usually not bound in this process yet. With no configured
+      // `listen` the daemon's gateway will bind the fixed default, which is a
+      // usable address where the old `:0` placeholder was not; a fallback boot
+      // is corrected by the LLP 0086 drift re-attach on the next start.
+      // @ref LLP 0114#fixed-default-port [implements]: an unpinned install attaches at the known default rather than a port nothing can bind
+      let endpoint = configuredGatewayEndpoint(config) ?? DEFAULT_GATEWAY_ENDPOINT
       try {
         endpoint = gateway.localEndpoint()
       } catch {}
