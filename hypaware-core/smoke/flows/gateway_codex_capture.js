@@ -31,7 +31,7 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * that shape, not that a real Codex Desktop routes through HypAware. The
  * end-to-end claim needs a human and a real app: see the
  * `codex_desktop_capture` procedure in `docs/ACCEPTANCE.md`
- * (@ref LLP 0139#one-adapter).
+ * (@ref LLP 0141#one-adapter).
  *
  * Bead `hy-bbyi` assertions:
  *

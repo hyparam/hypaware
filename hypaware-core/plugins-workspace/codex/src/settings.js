@@ -20,7 +20,7 @@ export { CodexSettingsError } from './errors.js'
  * the Codex CLI and Codex Desktop read, which is why Codex Desktop needs no
  * adapter of its own the way Claude Desktop does (LLP 0133).
  *
- * @ref LLP 0139#one-adapter [implements]: the shared config.toml is the whole reason there is no @hypaware/codex-desktop
+ * @ref LLP 0141#one-adapter [implements]: the shared config.toml is the whole reason there is no @hypaware/codex-desktop
  *
  * @param {CodexAttachOptions} opts
  * @returns {Promise<CodexAttachResult>}

@@ -1,4 +1,4 @@
-# LLP 0139: Codex Desktop rides the ordinary Codex adapter
+# LLP 0141: Codex Desktop rides the ordinary Codex adapter
 
 **Type:** Decision
 **Status:** Active
@@ -26,7 +26,12 @@ routes, neither of which was named anywhere a user looks:
    because it is Desktop that sends it
    ([LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)).
 2. **Backfill.** The rollout tree under `$CODEX_HOME/sessions/**` is written
-   by both surfaces too. `session_meta.originator` rides into the row's
+   by both surfaces too. That half rests on the provider's long-standing
+   assumption (`codex/src/backfill.js`) and on smoke fixtures that synthesize
+   a Desktop `originator`, not on a verified capture from a real Desktop
+   install; step 5 of [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md) is the
+   check that confirms it on real hardware.
+   `session_meta.originator` rides into the row's
    first-class `entrypoint` column and into `attributes.codex.originator`, so
    a Desktop session is distinguishable after import: the terminal client
    reports `codex-tui`, Desktop reports its own value. The live route

@@ -26,7 +26,7 @@ forwarding, or anything on a machine other than the one you ran it on.
 **Requires:** macOS with Codex Desktop installed and signed in, HypAware
 installed from the package under test, and a working `~/.codex`.
 
-**Related:** [LLP 0139](../llp/0139-codex-desktop-rides-the-codex-adapter.decision.md).
+**Related:** [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md).
 
 ### Steps
 
@@ -84,10 +84,15 @@ installed from the package under test, and a working `~/.codex`.
    hyp backfill codex --since "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" --json
    ```
 
-   Pass condition: the newest rollout file's `session_meta` carries the same
-   `originator` you observed in step 4, and the backfill run reports rows for
-   it. Re-running is safe: identity comes from the rollout, so a second import
-   does not duplicate.
+   Pass condition: the newest rollout file's `session_meta.originator`
+   matches what you observed in step 4, and the run reports `items_seen >= 1`
+   with `rows_written + rows_skipped >= 1` for `codex`.
+   **`rows_written: 0` with `rows_skipped >= 1` is a pass, not a failure.**
+   Step 3 already captured this session live, and the live route wrote
+   byte-identical rows, so the materializer's `part_id` dedupe suppresses
+   the duplicate. Zero writes here is the expected result and is what proves
+   the two routes agree. Re-running is likewise safe: identity comes from the
+   rollout, so a second import never duplicates.
 
 6. Confirm the app container is flagged, not silently skipped, and that the
    flag explains itself:
@@ -101,17 +106,27 @@ installed from the package under test, and a working `~/.codex`.
    ```
 
    Pass condition: if `~/Library/Application Support/Codex` exists, a
-   `codex_desktop_app` record carries a `covered_by` string naming the live
-   gateway route and `~/.codex/sessions`. This is the boundary check: HypAware
-   must say what it does *not* parse and what carries those conversations
-   instead. (`--dry-run` scans without writing rows, so this step imports
-   nothing.)
+   `codex_desktop_app` record carries
+   `covered_by: "gateway_live,codex_sessions_rollout"`, the two routes that
+   do capture this client. This is the boundary check: HypAware must say what
+   it does *not* parse and what carries those conversations instead (the
+   prose behind those two tokens is in
+   [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)
+   and the README). (`--dry-run` scans without writing rows, so this step
+   imports nothing.)
 
 7. Detach and confirm the file is left clean:
 
    ```sh
    hyp detach codex
    grep -n 'hypaware' "${CODEX_HOME:-$HOME/.codex}/config.toml" || echo 'clean'
+   ```
+
+   Then, if this is your working machine, re-attach so you do not silently
+   leave Codex capture off:
+
+   ```sh
+   hyp attach codex
    ```
 
 ### If it fails
@@ -125,7 +140,7 @@ installed from the package under test, and a working `~/.codex`.
   on `client_name` alone.
 - Step 5 finds no rollout for the session: Desktop wrote its history
   somewhere other than `$CODEX_HOME/sessions`. That would invalidate
-  [LLP 0139](../llp/0139-codex-desktop-rides-the-codex-adapter.decision.md)'s
+  [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)'s
   backfill half and needs a doc correction, not a code workaround.
 
 ---

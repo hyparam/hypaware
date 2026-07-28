@@ -16,7 +16,7 @@ import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspa
  * the picker copy, and the `unsupported_location` event for the opaque
  * `Application Support/Codex` app container.
  *
- * @ref LLP 0139#one-adapter [tests]: the product surface has to say Desktop is covered, or the separate Claude Desktop setup teaches users it is not
+ * @ref LLP 0141#one-adapter [tests]: the product surface has to say Desktop is covered, or the separate Claude Desktop setup teaches users it is not
  *
  * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
@@ -44,15 +44,16 @@ async function collectEvents(iterable) {
   return events
 }
 
-/** @returns {{ ctx: BackfillRunContext }} */
+/** @returns {{ ctx: BackfillRunContext, entries: Array<{ level: string, message: string, fields?: Record<string, unknown> }> }} */
 function runContext() {
-  /** @type {any} */
-  const log = {
-    debug() {},
-    info() {},
-    warn() {},
-    error() {},
+  /** @type {Array<{ level: string, message: string, fields?: Record<string, unknown> }>} */
+  const entries = []
+  /** @param {string} level */
+  const at = (level) => (/** @type {string} */ message, /** @type {Record<string, unknown>=} */ fields) => {
+    entries.push({ level, message, fields })
   }
+  /** @type {any} */
+  const log = { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') }
   /** @type {BackfillRunContext} */
   const ctx = {
     env: {},
@@ -61,7 +62,7 @@ function runContext() {
     log,
     storage: /** @type {any} */ ({}),
   }
-  return { ctx }
+  return { ctx, entries }
 }
 
 test('the codex picker names Codex Desktop, not just "Codex conversations"', async () => {
@@ -74,7 +75,7 @@ test('the codex picker names Codex Desktop, not just "Codex conversations"', asy
   assert.match(copy, /CLI/, 'picker copy names the CLI, so "Desktop" is not read as Desktop-only')
 })
 
-test('the codex client descriptor and manifest description name both Codex surfaces', async () => {
+test('the codex plugin description names both Codex surfaces', async () => {
   const manifest = await readCodexManifest()
   assert.match(manifest.description, /Desktop/, 'plugin description names Desktop')
 })
@@ -88,7 +89,7 @@ test('the Codex app-container unsupported_location says what IS still captured',
     await fs.writeFile(path.join(appDir, 'state.bin'), 'opaque', 'utf8')
 
     const provider = createCodexBackfillProvider({ homeDir })
-    const { ctx } = runContext()
+    const { ctx, entries: logs } = runContext()
     const events = await collectEvents(provider.run(ctx))
 
     const desktop = events.find(
@@ -96,14 +97,21 @@ test('the Codex app-container unsupported_location says what IS still captured',
     )
     assert.ok(desktop, 'the Codex app container is flagged')
 
-    const covered = desktop?.attributes?.covered_by
+    // Short key-shaped tokens, not prose: the attribute has to stay
+    // queryable, and the explanation lives in LLP 0141 and the README.
     assert.equal(
-      typeof covered,
-      'string',
-      'the event states which Codex Desktop capture routes DO work, so "unsupported" is not read as "Codex Desktop is unsupported"'
+      desktop?.attributes?.covered_by,
+      'gateway_live,codex_sessions_rollout',
+      'the event names which Codex Desktop capture routes DO work, so "unsupported" is not read as "Codex Desktop is unsupported"'
     )
-    assert.match(String(covered), /\.codex\/sessions/)
-    assert.match(String(covered), /gateway/)
+
+    // The structured log carries the same statement; both halves are pinned.
+    const logged = logs.find(
+      (e) => e.message === 'codex.backfill.unsupported_location'
+        && e.fields?.location_kind === 'codex_desktop_app'
+    )
+    assert.ok(logged, 'the Codex app container is logged as well as evented')
+    assert.equal(logged?.fields?.covered_by, 'gateway_live,codex_sessions_rollout')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

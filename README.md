@@ -292,7 +292,7 @@ gateway, and past sessions come back from `~/.codex/sessions`. The same
 applies to the ChatGPT desktop app and browser storage, which HypAware does
 not capture at all.
 
-See [LLP 0139](llp/0139-codex-desktop-rides-the-codex-adapter.decision.md)
+See [LLP 0141](llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)
 for the reasoning, and [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) for the
 manual check that Desktop traffic is actually landing.
 

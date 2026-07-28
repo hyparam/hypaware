@@ -224,3 +224,7 @@ hypaware query sql "select count(*) from traces"
 hypaware query sql "select count(*) from logs"
 hypaware daemon uninstall
 ```
+
+If the release touched a client adapter, run the matching procedure in
+[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
+release notes.
