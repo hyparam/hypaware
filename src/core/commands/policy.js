@@ -4,6 +4,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { parseCommandArgv } from '../cli/verb_codec.js'
+import { Attr, getActiveSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { LocalOnlyListUnreadableError, localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
 import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
@@ -92,12 +93,21 @@ const PUBLIC_VOCABULARY = {
  * ignore`/`hyp unignore` aliases keep the resolver's own wording (LLP 0111
  * #aliases).
  *
+ * Catching here also means the error never reaches the dispatcher's generic
+ * catch, which is what tags the `command.run` span with `error_kind`. So this
+ * carries the error's own kind onto the active span itself (issue #413):
+ * without it a corrupt policy store is the one `policy` failure that leaves
+ * only a nonzero `exit_code` in telemetry, with nothing naming the broken
+ * step. Purely additive - the wording and the exit code are unchanged.
+ *
  * @ref LLP 0111#tokens [implements]: a corrupt store is still "the machine-local policy store", never "the local-only list"
+ * @ref LLP 0021#the-attribute-contract [implements]: a handled failure still owes the span its `error_kind`; the error carries its own kind
  * @param {CommandRunContext} ctx
  * @param {LocalOnlyListUnreadableError} err
  * @returns {number}
  */
 function reportUnreadableStore(ctx, err) {
+  getActiveSpan()?.setAttribute(Attr.ERROR_KIND, err.error_kind)
   ctx.stderr.write(`error: the machine-local policy store at '${err.filePath}' is unreadable or malformed\n`)
   return 1
 }
