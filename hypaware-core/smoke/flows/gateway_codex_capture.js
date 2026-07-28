@@ -24,6 +24,15 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  *     exercises the `is_sse=true` / `stream_event_count>0` columns and
  *     Codex metadata projection.
  *
+ * **What this does NOT prove.** The Desktop-shaped request below (its
+ * `originator`, User-Agent, and `x-codex-turn-metadata` header) is
+ * synthetic: it is issued by this file against a local fake upstream, with
+ * no Codex Desktop involved. It proves the gateway and projector handle
+ * that shape, not that a real Codex Desktop routes through HypAware. The
+ * end-to-end claim needs a human and a real app: see the
+ * `codex_desktop_capture` procedure in `docs/ACCEPTANCE.md`
+ * (@ref LLP 0141#one-adapter).
+ *
  * Bead `hy-bbyi` assertions:
  *
  *   - Four normalized rows land in `ai_gateway_messages` filterable by

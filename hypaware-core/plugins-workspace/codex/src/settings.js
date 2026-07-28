@@ -16,6 +16,12 @@ export { CodexSettingsError } from './errors.js'
  * `model_provider = "hypaware"` root setting plus a provider
  * table pointing at the gateway's OpenAI-compatible endpoint.
  *
+ * One write covers two clients: `$CODEX_HOME/config.toml` is the file both
+ * the Codex CLI and Codex Desktop read, which is why Codex Desktop needs no
+ * adapter of its own the way Claude Desktop does (LLP 0133).
+ *
+ * @ref LLP 0141#one-adapter [implements]: the shared config.toml is the whole reason there is no @hypaware/codex-desktop
+ *
  * @param {CodexAttachOptions} opts
  * @returns {Promise<CodexAttachResult>}
  */

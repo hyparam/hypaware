@@ -13,7 +13,7 @@ query cache under `~/.hyp` (`HYP_HOME`):
 | Source          | What lands in the cache                                                       |
 |-----------------|-------------------------------------------------------------------------------|
 | `claude`        | Claude Code conversations: prompts, responses, tool calls, working directory  |
-| `codex`         | Codex conversations, same shape                                               |
+| `codex`         | Codex conversations, same shape, from both the Codex CLI and Codex Desktop    |
 | `raw-anthropic` | Raw Anthropic API request / response traffic routed through the local gateway |
 | `raw-openai`    | Raw OpenAI API traffic, same shape                                            |
 | `otel`          | OpenTelemetry logs, traces, and metrics sent to the local OTLP listener       |
