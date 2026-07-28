@@ -135,8 +135,8 @@ test('the rendered deadline names its time zone, never a bare wall-clock time (L
 test('the rendered deadline reads as a full local date, time and zone in a pinned zone', (t) => {
   // The formatter renders in the host locale by design, so pin the shape only
   // where "Jul 23, 2026, 11:59 PM PDT" is what that locale spells.
-  if (!Intl.DateTimeFormat().resolvedOptions().locale.startsWith('en')) {
-    t.skip('host locale is not English; the zone-token case above covers every locale')
+  if (Intl.DateTimeFormat().resolvedOptions().locale !== 'en-US') {
+    t.skip('host locale is not en-US; the zone-token case above covers every locale')
     return
   }
   const deadlineMs = Date.UTC(2026, 6, 24, 6, 59, 0)
