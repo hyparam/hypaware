@@ -346,24 +346,6 @@ export async function startLaunchAgent(options) {
 }
 
 /**
- * Stop the installed LaunchAgent via `launchctl bootout`. The plist
- * file is left on disk so a subsequent `daemon start` (kickstart) or
- * `daemon install` re-load can bring it back. To remove the plist,
- * use `uninstallLaunchAgent` instead.
- *
- * @param {{ label?: string, launchctl?: LaunchctlAdapter, userDomain?: string }} options
- * @returns {Promise<void>}
- */
-export async function stopLaunchAgent(options) {
-  const { launchctl, label, target } = resolveTarget(options)
-  const res = await launchctl.bootout([target])
-  // Tolerate an agent that is already unloaded.
-  if (!/No such process|Could not find|not\s*loaded/i.test(res.stderr)) {
-    ensure(res, `bootout ${label}`)
-  }
-}
-
-/**
  * Restart the installed LaunchAgent. Uses `launchctl kickstart -k` so
  * the running process is terminated and then re-started without
  * touching the loaded plist.
