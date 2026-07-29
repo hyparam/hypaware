@@ -252,7 +252,6 @@ export async function activate(ctx) {
     'hypaware-unignore',
     'hypaware-privacy',
     'hypaware-graph',
-    'hypaware-sensitive-scan',
     'hypaware-ai-usage-report',
     'hypaware-report-to-html',
     'hypaware-publish-report',

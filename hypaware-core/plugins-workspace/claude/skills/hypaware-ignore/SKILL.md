@@ -5,6 +5,9 @@ description: Stop HypAware from recording the current Claude session. Use when t
 
 # Stop recording this Claude session
 
+<!-- @ref LLP 0142#user-invoked-only [constrained-by]: stays model-invocable on purpose; LLP 0066 is written around the spoken "don't record this conversation", so a slash-only affordance would lose the discovery the spec exists to serve -->
+
+
 When invoked, immediately tell the local HypAware AI gateway to drop every request from this session before it is written to the cache. Recording stays disabled until the Claude session ends or `/hypaware-unignore` is invoked.
 
 ## What to run

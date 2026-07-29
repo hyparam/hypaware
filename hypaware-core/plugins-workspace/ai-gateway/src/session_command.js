@@ -338,8 +338,19 @@ function writeStatus(ctx, json, report) {
  *
  * A membership answer rests on two claims the verb cannot always prove: that
  * the id is this session's, and that the endpoint is the gateway. An explicit
- * argument or `CLAUDE_CODE_SESSION_ID` states the first; a Codex rollout only
- * INFERS it from disk. A live daemon's `status.json` proves the second; a
+ * argument, or a client-set `CLAUDE_CODE_SESSION_ID`, states the first outright;
+ * every Codex path only INFERS it from a rollout on disk, so both get a note.
+ * `CODEX_THREAD_ID` does not exempt its path: Codex states the **thread**, and
+ * the container the drop keys on still has to be read out of that thread's
+ * rollout (LLP 0067#cli-session-id). What the variable buys is liveness, not the
+ * answer, so the note says which part was stated and which part was read.
+ *
+ * A stated `CLAUDE_CODE_SESSION_ID` has a residual of its own - a process that
+ * OUTLIVES its spawn keeps the variable - but it is far narrower than the mtime
+ * bound, and qualifying it too would train the reader to skip the caveat on the
+ * paths where it is load-bearing.
+ *
+ * A live daemon's `status.json` proves the second; a
  * pinned `listen` only asserts it, and `validateControlResponse` can prove the
  * responder saw our token but not that it is the gateway. Naming the weaker
  * evidence in the output is the only remedy available at this layer, and it is

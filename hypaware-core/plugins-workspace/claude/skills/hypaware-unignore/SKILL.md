@@ -5,7 +5,10 @@ description: Re-enable HypAware recording for the current Claude session after a
 
 # Re-enable recording for this Claude session
 
-Cancel an earlier `/hypaware-ignore` so subsequent Claude requests in this session are recorded again. Does not retroactively recover requests that were dropped while the session was opted out — those are gone for good.
+<!-- @ref LLP 0142#user-invoked-only [constrained-by]: stays model-invocable on purpose, as the reverse of hypaware-ignore; see LLP 0066 -->
+
+
+Cancel an earlier `/hypaware-ignore` so subsequent Claude requests in this session are recorded again. Does not retroactively recover requests that were dropped while the session was opted out; those are gone for good.
 
 ## What to run
 

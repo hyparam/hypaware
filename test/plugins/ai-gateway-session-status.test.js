@@ -564,6 +564,16 @@ test('CODEX_THREAD_ID selects the live rollout without the mtime proxy, then the
   // A blank variable is not a statement: it falls through to the cwd path.
   const blank = resolveSessionIdForCli({ env: { CODEX_HOME: home, CODEX_THREAD_ID: '  ' }, cwd: '/repo/here' })
   assert.equal(blank.ok && blank.sessionId, 'session-dead')
+
+  // Nor is a blank Claude variable beside a real Codex thread AMBIGUITY: the
+  // two-stated-clients refusal must key on what was actually stated, or an
+  // exported-but-empty variable would refuse every Codex invocation.
+  const oneStated = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CLAUDE_CODE_SESSION_ID: '', CODEX_THREAD_ID: 'thread-live' },
+    cwd: '/repo/here',
+  })
+  assert.equal(oneStated.ok && oneStated.sessionId, 'session-live')
+  assert.equal(oneStated.ok && oneStated.source, 'codex_env_rollout')
 })
 
 test('a BLANK session_id is as unusable as an absent one, and refuses the same way', () => {
