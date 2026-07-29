@@ -20,8 +20,9 @@ What stays on the machine and what can leave is drawn under "What is opt-in".
 
 `hyp init` picks any subset of `claude`, `codex`, `raw-anthropic`, `raw-openai`,
 and `otel`. For what is actually recording here, read it rather than infer it:
-`hyp status` marks each client configured/attached and prints a
-`syncing: … local-only: …` line, and `hyp policy list` enumerates folder
+`hyp status` marks each client configured/attached, and on a fleet-managed
+host also splits them into what the fleet forwards and what stays local, so a
+local addition is never invisible. `hyp policy list` enumerates folder
 markings.
 
 The rule neither command states: folder scoping works only for `claude` and
