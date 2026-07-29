@@ -45,6 +45,36 @@ const MANAGED_HOOK_SPECS = [
 ]
 const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+(session-context|classify-cwd)\b/
 
+// Env keys attach adds *beside* the base URL to undo the defaults Claude Code
+// flips when it sees a non-first-party `ANTHROPIC_BASE_URL`. Each entry is only
+// ever added when absent and is removed (never restored) on detach - see
+// `manageEnvAdditions` for the ownership rule.
+//
+// - ENABLE_TOOL_SEARCH: keeps deferred (on-demand) tool loading on. Without it
+//   Claude Code sends every tool schema up front, tens of thousands of tokens of
+//   per-session context bloat.
+// - _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: keeps the model's real context
+//   window. Behind any other host Claude Code assumes 200k even for native-1M
+//   models, so the same session reads as ~18% context instead of ~4% and
+//   warnings/auto-compact fire far too early. The key is underscore-prefixed and
+//   undocumented: re-verify it against the Claude Code release (last verified
+//   2.1.220) if attached sessions start reporting an inflated context percent
+//   again. It is one branch of Claude Code's single is-first-party predicate, so
+//   it gates more than the window: outbound it adds the context-1m beta header,
+//   traceparent propagation and an extended usage-limit header, and it re-enables
+//   the first-party-only side channels (error reporting, org policy limits,
+//   memory-sync eligibility) that call Anthropic directly rather than the
+//   gateway. It does *not* gate credential choice, which follows the oauth
+//   session or the configured API key. All of that is accurate here - the gateway
+//   is a byte-transparent pass-through to api.anthropic.com. That last part is a
+//   precondition, not an invariant: the gateway's anthropic upstream `base_url`
+//   is config, so repointing it elsewhere makes the declaration false. See the
+//   LLP section below for the full gated list and the blast radius.
+const MANAGED_ENV_ADDITIONS = [
+  { key: 'ENABLE_TOOL_SEARCH', value: 'true' },
+  { key: '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', value: '1' },
+]
+
 export class ClaudeSettingsError extends Error {
   /**
    * @param {string} message
@@ -103,30 +133,23 @@ export async function attach(opts) {
   const baseUrl = `http://127.0.0.1:${port}`
   const commands = managedHookCommands(binPath, stateFile)
 
-  // Keep deferred tool loading on through the gateway. Claude Code turns it off
-  // whenever ANTHROPIC_BASE_URL is a non-first-party host - it assumes the proxy
-  // cannot forward `tool_reference` blocks and so sends every tool schema up
-  // front, tens of thousands of tokens of per-session context bloat. Our gateway
-  // is a pure pass-through that does forward them, so re-enable deferred loading
-  // with ENABLE_TOOL_SEARCH=true. Only manage the key when it is ours to manage:
-  // a value the user set themselves (and that a prior marker did not record as
-  // ours) is left untouched so detach never clobbers it, mirroring the
-  // back-up/restore rule for the base URL.
+  // Undo the defaults Claude Code flips because the gateway URL is not
+  // api.anthropic.com: eager tool-schema loading, and a 200k assumed context
+  // window that inflates the reported context percent. See
+  // MANAGED_ENV_ADDITIONS for the per-key rationale.
   // @ref LLP 0045#enable_tool_search-keep-deferred-tool-loading-on-through-the-gateway [implements]: attach sets ENABLE_TOOL_SEARCH=true so the non-first-party base URL doesn't force eager tool-schema loading
+  // @ref LLP 0045#_claude_code_assume_first_party_base_url-keep-the-models-real-context-window [implements]: attach declares the pass-through gateway first-party so the assumed window isn't cut to 200k
   const priorManagedEnv = priorMarker && isPlainObject(priorMarker.managed) && isPlainObject(priorMarker.managed.env)
     ? /** @type {Record<string, unknown>} */ (priorMarker.managed.env)
     : undefined
-  const weOwnToolSearch = priorManagedEnv ? 'ENABLE_TOOL_SEARCH' in priorManagedEnv : false
-  const manageToolSearch = weOwnToolSearch || typeof env.ENABLE_TOOL_SEARCH !== 'string'
+  const managedAdditions = manageEnvAdditions(env, priorManagedEnv)
 
   env.ANTHROPIC_BASE_URL = baseUrl
-  if (manageToolSearch) env.ENABLE_TOOL_SEARCH = 'true'
   installManagedHooks(value, commands)
   // Self-describing undo record: enough for the format-aware core undo
-  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed
-  // ENABLE_TOOL_SEARCH we added, strip the managed hook entries, and delete
-  // the marker without loading this plugin — leaving no orphaned
-  // `hyp claude-hook` entries.
+  // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed env keys
+  // we added, strip the managed hook entries, and delete the marker without
+  // loading this plugin, leaving no orphaned `hyp claude-hook` entries.
   // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
@@ -136,7 +159,7 @@ export async function attach(opts) {
     managed: {
       env: {
         ANTHROPIC_BASE_URL: baseUrl,
-        ...(manageToolSearch ? { ENABLE_TOOL_SEARCH: 'true' } : {}),
+        ...managedAdditions,
       },
       hooks: managedHookEntries(commands),
     },
@@ -149,6 +172,32 @@ export async function attach(opts) {
   const result = { changed: true }
   if (prevBaseUrl !== undefined) result.prevValue = prevBaseUrl
   return result
+}
+
+/**
+ * Write each {@link MANAGED_ENV_ADDITIONS} entry that is ours to manage and
+ * return exactly those keys for the marker's undo record.
+ *
+ * A key is ours when a prior marker recorded it as managed (so a re-attach
+ * keeps owning the value it wrote) or when it is absent from settings. A value
+ * the user set themselves is left untouched and stays out of the undo record,
+ * so detach never clobbers it - the same never-clobber-a-user-value stance the
+ * base URL takes, minus a backup: these keys are only ever *added*.
+ *
+ * @param {Record<string, unknown>} env the live `env` block, mutated in place
+ * @param {Record<string, unknown> | undefined} priorManagedEnv the prior marker's managed env, if any
+ * @returns {Record<string, string>} the keys attach now manages
+ */
+function manageEnvAdditions(env, priorManagedEnv) {
+  /** @type {Record<string, string>} */
+  const managed = {}
+  for (const { key, value } of MANAGED_ENV_ADDITIONS) {
+    const weOwnIt = priorManagedEnv ? key in priorManagedEnv : false
+    if (!weOwnIt && typeof env[key] === 'string') continue
+    env[key] = value
+    managed[key] = value
+  }
+  return managed
 }
 
 /**

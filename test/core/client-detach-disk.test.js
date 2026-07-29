@@ -136,6 +136,29 @@ test('claude undo removes managed ENABLE_TOOL_SEARCH without stamping the restor
   }
 })
 
+test('claude undo removes the managed _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', async () => {
+  const home = await stageHome()
+  try {
+    // Issue #437: attach declares the gateway first-party so Claude Code keeps
+    // the model's real context window. Detach must take that declaration back
+    // out, and never stamp the restored base URL onto it.
+    const original = { env: { ANTHROPIC_BASE_URL: 'https://foreign.example/api' } }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(original, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://foreign.example/api')
+    assert.equal('_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL' in parsed.env, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('claude undo leaves a user-owned ENABLE_TOOL_SEARCH in place', async () => {
   const home = await stageHome()
   try {
