@@ -1,13 +1,17 @@
 ---
 name: hypaware-privacy
-description: Review this machine's captured Claude/Codex history with the user before it first syncs to the org server. Use when the user says "review before sync", "privacy review", "what will ship to the server", after a `hyp remote login` printed a first-sync deadline, or otherwise wants to audit and mark captured directories (ignore / local-only / sync) and purge sensitive rows before the deferred first sync.
+description: Audit what HypAware has captured from Claude/Codex sessions on this machine and act on it: survey the recorded directories, sample them for secrets, credentials, and personal content, mark directories (ignore / local-only / sync), and purge sensitive rows. Runs any time. Use when the user says "privacy review", "did I record anything sensitive", "scan my logs for secrets", "what should I hypignore", or wants to see what was captured here. It is also the standard review before an enrolled machine's first fleet sync: use after `hyp remote login` prints a first-sync deadline, or when the user says "review before sync" or "what will ship to the server". Covers this machine's local cache only, not rows already forwarded to a remote server.
 ---
 
-# HypAware privacy review before the first fleet sync
+# HypAware privacy review: audit what was captured, decide what leaves
 
 <!-- @ref LLP 0100#skill [implements]: the six-step agent-assisted privacy review the deferred first sync directs the user to run (R3-R8) -->
+<!-- @ref LLP 0142#any-time [constrained-by]: the description advertises the audit itself, not the first-sync window; enrolled-ness gates behavior, not presence (LLP 0107#gating) -->
+<!-- @ref LLP 0142#local-cache-scope [constrained-by]: this machine's cache only; scanning an org server's rows is deliberately out of scope, not an oversight -->
 
-When `hyp remote login` enrolls this machine, the first sync to the org server is **held until a printed deadline** rather than run immediately. The whole captured history (backfill included) ships at that deadline unless you refine it first. This skill walks the user through that refinement: it surveys what was captured, explains the choices in plain language, and applies the user's decisions through `hyp` verbs before anything leaves the machine. Doing nothing is a valid choice - at the deadline everything forwards, which is the documented default.
+This skill surveys what HypAware has captured on this machine, explains the choices in plain language, and applies the user's decisions through `hyp` verbs. The six steps run the same way whenever the user asks; only the stakes change.
+
+The one moment they are time-critical is enrollment. When `hyp remote login` enrolls this machine, the first sync to the org server is **held until a printed deadline** rather than run immediately, and the whole captured history (backfill included) ships at that deadline unless you refine it first. Doing nothing is a valid choice there - at the deadline everything forwards, which is the documented default. On a machine that was never enrolled there is no pending export at all, and the same steps simply bound what gets recorded and what stays in the local cache.
 
 Run the six steps below **in order**. Steps 4 and 5 (explain, then confirm) gate every marking: never mark or purge without first explaining the classes and getting per-item confirmation.
 
@@ -85,7 +89,7 @@ hyp status --json          # daemon running? enrolled (a central sink present)?
 hyp query status           # cache state and last refresh
 ```
 
-Then run the enumeration query (Step 3) **twice, a short interval apart** (say ~30-60s). If the per-directory `rows` counts are still climbing, backfill is still landing: **warn the user and offer to wait** until counts stabilize before proposing any markings. Surveying mid-backfill risks marking against an incomplete picture. There is no deadline pressure here - the first-sync hold gives hours. Note the user can also end that window early at any time with `hyp sync` (it prints what would leave and asks first), so if they say they are in a hurry, finishing the review is what unblocks them, not waiting.
+Then run the enumeration query (Step 3) **twice, a short interval apart** (say ~30-60s). If the per-directory `rows` counts are still climbing, backfill is still landing: **warn the user and offer to wait** until counts stabilize before proposing any markings. Surveying mid-backfill risks marking against an incomplete picture. There is no deadline pressure here: on an enrolled machine the first-sync hold gives hours, and on an unenrolled one nothing is waiting to leave. Note that an enrolled user can also end that window early at any time with `hyp sync` (it prints what would leave and asks first), so if they say they are in a hurry, finishing the review is what unblocks them, not waiting.
 
 ## Step 3 - Survey the captured directories, then sample content (R4 applies)
 
@@ -165,6 +169,7 @@ hyp policy set <dir> ignore && hyp purge <dir>
 
 ## After the review
 
-- Nothing you did contacts the server. At the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
+- Nothing you did contacts the server. If this machine is not enrolled, nothing is scheduled to leave it at all, and the markings just bound future capture and what the local cache keeps.
+- On an enrolled machine, at the deadline - or sooner, if the user runs `hyp sync` and confirms the prompt - the hold expires and export begins: `ignore`d data was never recorded (or was purged), `local-only` rows are withheld at the export seam, and everything else - the `sync` directories and anything left at the default - ships, backfill included.
 - Check the pending deadline any time with `hyp status` (it shows the first-sync deadline while the hold is live).
 - Re-running this skill later is safe and idempotent; already-decided directories drop out of the survey.

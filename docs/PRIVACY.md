@@ -114,13 +114,17 @@ Enrollment never ships history silently. When `hyp remote login` (or
 history, is held until at least 11:59pm local time that day, and the exact
 deadline is printed. Before it passes:
 
-1. Open Claude Code or Codex and run the **`hypaware-privacy`** skill. It
-   walks the captured directories with you, marks each one
-   ignore / local-only / sync, and purges anything sensitive before the
-   first byte leaves the machine.
-2. Optionally run the **`hypaware-sensitive-scan`** skill, which scans the
-   recorded rows for secrets, credentials, and PII and recommends markings
-   (it redacts every value it finds; it never echoes a secret).
+open Claude Code or Codex and run the **`hypaware-privacy`** skill. It walks
+the captured directories with you, samples them for credentials, personal
+material, and anything else you would not want on a shared server, marks each
+directory ignore / local-only / sync, and purges anything sensitive before the
+first byte leaves the machine. It redacts every value it reports back to you;
+it never echoes a secret.
+
+The first sync is the moment this matters most, but it is not a precondition:
+run `hypaware-privacy` whenever you want to know what has been captured here,
+enrolled or not. It reviews this machine's local cache; it cannot inspect rows
+already forwarded to a server.
 
 ## Leaving
 

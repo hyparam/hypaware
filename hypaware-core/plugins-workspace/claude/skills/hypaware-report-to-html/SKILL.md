@@ -1,9 +1,13 @@
 ---
 name: hypaware-report-to-html
-description: Render the Markdown HypAware reports under hypaware-reports/ into a static HTML site: enrich the report Markdown with the data-report component vocabulary (metric cards, charts, callouts), run the repo's build.sh (pandoc), and regenerate the top-level landing page. Use when the user says "convert the reports to HTML", "build/render the report site", "rebuild the HTML", "publish the reports", "update the reports landing page / index", or wants to preview or GitHub-Pages the reports. Operates on the ~/hypaware-reports git repo only. Does NOT run any report skill, does NOT touch local HypAware recordings, and does NOT push to the remote unless the user explicitly asks.
+description: Render the Markdown reports under ~/hypaware-reports into the static HTML site
+disable-model-invocation: true
 ---
 
 # Render HypAware reports to HTML
+
+<!-- @ref LLP 0142#user-invoked-only [implements]: user-invoked only because invoking it rewrites a git working tree -->
+
 
 The `~/hypaware-reports/` git repo holds the outputs of the HypAware report skills:
 `hypaware-ai-usage-report` (the merged team review — since 2026-07-15 it also carries
