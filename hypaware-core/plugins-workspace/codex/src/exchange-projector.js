@@ -64,10 +64,12 @@ export function createCodexExchangeProjector(opts = {}) {
       if (isOpenAiChatPath(path)) return true
       if (isOpenAiResponsesPath(path)) return true
       if (isCodexNamespacePath(path)) return true
-      // Codex Desktop tags requests with a `x-codex-turn-metadata`
-      // header even when the path looks generic, so accept the header
-      // as a sufficient match signal.
-      if (readHeader(input.request_headers, 'x-codex-turn-metadata')) return true
+      // Any Codex client tags a turn-metadata-carrying request with
+      // `x-codex-turn-metadata`, even when the path looks generic, so accept the
+      // header as a sufficient match signal. It is NOT a Desktop-only signal.
+      // @ref LLP 0143#real-header-names [constrained-by]: every Codex client
+      // emits it, so the match is client-independent.
+      if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
       return false
     },
 
@@ -636,14 +638,33 @@ function firstPlainObject(...values) {
 // Codex header + workspace metadata
 // ---------------------------------------------------------------------
 
+// The Codex-owned request headers this file may read. `compatibility_headers` in
+// `codex-rs/core/src/responses_metadata.rs` builds exactly four names
+// (`x-codex-window-id`, `x-codex-turn-metadata`, `x-codex-parent-thread-id`,
+// `x-openai-subagent`), and `readHeader` matches a full name, so any other
+// spelling can never match. The other names read in this file (`originator`,
+// `user-agent`, `x-client-request-id`, and the response's `x-oai-request-id`)
+// are real too, from the shared default client and `codex-api`.
+// @ref LLP 0143#real-header-names [constrained-by]: named constants so a
+// fictional header name cannot be reintroduced by a typo.
+const X_CODEX_TURN_METADATA = 'x-codex-turn-metadata'
+const X_CODEX_WINDOW_ID = 'x-codex-window-id'
+const X_CODEX_PARENT_THREAD_ID = 'x-codex-parent-thread-id'
+
 /**
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
  * @param {string} path
+ * @param {Record<string, unknown>} reqBody
  */
 function resolveCodexContext(input, provider, path, reqBody) {
-  if (!isCodexExchange(input, provider, path)) return undefined
-  const metadata = readCodexTurnMetadata(input)
+  if (!isCodexExchange(input, provider, path, reqBody)) return undefined
+  // @ref LLP 0143#body-is-authority [implements]: the flat body map first, the
+  // turn-metadata blob second. Both are projections of one Codex snapshot, so
+  // they agree whenever both are present; the body is preferred because it is
+  // the only one present for every request kind.
+  const clientMetadata = readCodexClientMetadata(reqBody)
+  const metadata = readCodexTurnMetadata(input, clientMetadata)
   const userAgent = readHeader(input.request_headers, 'user-agent')
   const client = codexClientFromUserAgent(userAgent)
   const workspace = selectCodexWorkspace(
@@ -655,21 +676,26 @@ function resolveCodexContext(input, provider, path, reqBody) {
     ? workspaceInfo.associated_remote_urls
     : undefined
   const thread_id = firstString(
+    readStringKey(clientMetadata, 'thread_id'),
     readStringKey(metadata, 'thread_id'),
-    readHeader(input.request_headers, 'thread-id'),
   )
   const session_id = firstString(
+    readStringKey(clientMetadata, 'session_id'),
     readStringKey(metadata, 'session_id'),
-    readHeader(input.request_headers, 'session-id'),
   )
-  const turn_id = readStringKey(metadata, 'turn_id')
+  const turn_id = firstString(
+    readStringKey(clientMetadata, 'turn_id'),
+    readStringKey(metadata, 'turn_id'),
+  )
   const thread_source = readStringKey(metadata, 'thread_source')
-  // Subagent lineage: the parent thread that spawned this one. Codex puts
-  // it in the same turn-metadata blob as thread_id (set for subagent
-  // turns; absent on the root thread).
+  // Subagent lineage: the parent thread that spawned this one. Set for subagent
+  // turns, absent on a root thread. Codex projects it onto all three surfaces
+  // under two different spellings: `x-codex-parent-thread-id` in the body map
+  // and as a header, `parent_thread_id` inside the turn-metadata blob.
   const parent_thread_id = firstString(
+    readStringKey(clientMetadata, X_CODEX_PARENT_THREAD_ID),
     readStringKey(metadata, 'parent_thread_id'),
-    readHeader(input.request_headers, 'parent-thread-id'),
+    readHeader(input.request_headers, X_CODEX_PARENT_THREAD_ID),
   )
   const originator = firstString(
     readHeader(input.request_headers, 'originator'),
@@ -677,7 +703,15 @@ function resolveCodexContext(input, provider, path, reqBody) {
   )
   const sandbox = readStringKey(metadata, 'sandbox')
   const turn_started_at_unix_ms = numberValue(readKey(metadata, 'turn_started_at_unix_ms'))
-  const window_id = readHeader(input.request_headers, 'x-codex-window-id')
+  const window_id = firstString(
+    readHeader(input.request_headers, X_CODEX_WINDOW_ID),
+    readStringKey(clientMetadata, X_CODEX_WINDOW_ID),
+  )
+  // Which surface stated the identity this row is keyed on. Recorded so a
+  // future Codex version that stops sending one of them is visible in a query
+  // instead of showing up as a silent drift in `conversation_id`.
+  // @ref LLP 0143#lineage-source [implements]: make version drift queryable.
+  const lineage_source = lineageSource(clientMetadata, thread_id, session_id)
   // Strip any credential userinfo at ingress, before it reaches the first-class
   // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
   // @ref LLP 0032#remote-redaction
@@ -697,6 +731,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
   setIfString(attributes, 'originator', originator)
   setIfString(attributes, 'window_id', window_id)
   setIfString(attributes, 'sandbox', sandbox)
+  setIfString(attributes, 'lineage_source', lineage_source)
   if (turn_started_at_unix_ms !== undefined) attributes.turn_started_at_unix_ms = turn_started_at_unix_ms
   setIfString(attributes, 'workspace', workspace?.path)
   setIfString(attributes, 'git_origin_url', git_origin_url)
@@ -730,21 +765,79 @@ function resolveCodexContext(input, provider, path, reqBody) {
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
  * @param {string} path
+ * @param {unknown} reqBody
  */
-function isCodexExchange(input, provider, path) {
+function isCodexExchange(input, provider, path, reqBody) {
   if (provider === 'chatgpt') return true
   if (isCodexNamespacePath(path)) return true
-  if (readHeader(input.request_headers, 'x-codex-turn-metadata')) return true
-  if (readHeader(input.request_headers, 'x-codex-window-id')) return true
+  if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
+  if (readHeader(input.request_headers, X_CODEX_WINDOW_ID)) return true
+  // @ref LLP 0143#body-is-a-codex-signal [implements]: the API-key route posts a
+  // generic `/v1/responses` and may carry no Codex-namespaced header at all, so
+  // the body's Codex-owned `client_metadata` is itself a sufficient signal.
+  if (readCodexClientMetadata(reqBody)) return true
   const userAgent = readHeader(input.request_headers, 'user-agent')
   return codexClientFromUserAgent(userAgent).entrypoint !== undefined
 }
 
-/** @param {AiGatewayExchangeInput} input */
-function readCodexTurnMetadata(input) {
-  const raw = readHeader(input.request_headers, 'x-codex-turn-metadata')
+/**
+ * The request body's flat `client_metadata` map: the surface Codex fills for
+ * every Responses request kind, so the one lineage surface always present.
+ *
+ * Declines a map carrying no Codex-owned key, so a `client_metadata` an
+ * unrelated client happens to send cannot masquerade as Codex lineage. Codex
+ * writes `x-codex-installation-id`, `session_id`, `thread_id` and
+ * `x-codex-window-id` on every request, so either accepted signal below is
+ * enough on its own: an `x-codex-` prefixed key (Codex-exclusive), or the flat
+ * `session_id` + `thread_id` pair (the values actually read).
+ * @ref LLP 0143#body-is-authority: the always-present lineage surface.
+ *
+ * @param {unknown} reqBody
+ * @returns {Record<string, unknown> | undefined}
+ */
+function readCodexClientMetadata(reqBody) {
+  const clientMetadata = readKey(reqBody, 'client_metadata')
+  if (!isPlainObject(clientMetadata)) return undefined
+  const hasCodexKey = Object.keys(clientMetadata)
+    .some((key) => key.toLowerCase().startsWith('x-codex-'))
+  const hasFlatIdentity = readStringKey(clientMetadata, 'thread_id') !== undefined &&
+    readStringKey(clientMetadata, 'session_id') !== undefined
+  return hasCodexKey || hasFlatIdentity ? clientMetadata : undefined
+}
+
+/**
+ * The turn-metadata blob. Codex transports it twice per HTTP request: as the
+ * `x-codex-turn-metadata` header, and as the same-named string entry of the
+ * body's `client_metadata` map. The header is read first so already-recorded
+ * rows keep their exact identity (@ref LLP 0143#row-identity); the body entry
+ * is the fallback for a hop that dropped the header. Absent entirely for
+ * request kinds Codex marks as carrying no turn metadata, which is why the flat
+ * body keys, not this blob, are the lineage authority.
+ *
+ * @param {AiGatewayExchangeInput} input
+ * @param {Record<string, unknown> | undefined} clientMetadata
+ */
+function readCodexTurnMetadata(input, clientMetadata) {
+  const raw = readHeader(input.request_headers, X_CODEX_TURN_METADATA)
+    ?? readStringKey(clientMetadata, X_CODEX_TURN_METADATA)
   const parsed = parseMaybeJson(raw)
   return isPlainObject(parsed) ? parsed : undefined
+}
+
+/**
+ * Name the surface that stated this row's identity, or `undefined` when no
+ * surface did (the row then keeps the gateway's content-hash fallback).
+ *
+ * @param {Record<string, unknown> | undefined} clientMetadata
+ * @param {string | undefined} thread_id
+ * @param {string | undefined} session_id
+ * @returns {'body_client_metadata' | 'turn_metadata' | undefined}
+ */
+function lineageSource(clientMetadata, thread_id, session_id) {
+  if (!thread_id && !session_id) return undefined
+  const fromBody = readStringKey(clientMetadata, 'thread_id')
+    ?? readStringKey(clientMetadata, 'session_id')
+  return fromBody ? 'body_client_metadata' : 'turn_metadata'
 }
 
 /**
@@ -789,14 +882,12 @@ function selectCodexWorkspace(metadata, cwd) {
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  */
 function resolveConversationId(reqBody, input, provider, path, codexContext) {
-  if (codexContext) {
-    const codexConversationId = firstString(
-      codexContext.thread_id,
-      readHeader(input.request_headers, 'thread-id'),
-      readHeader(input.request_headers, 'session-id'),
-    )
-    if (codexConversationId) return codexConversationId
-  }
+  // @ref LLP 0143#real-header-names [implements]: the thread comes from the
+  // context's own resolution (body map, then turn-metadata blob) and nowhere
+  // else. The `thread-id` / `session-id` header names that used to be consulted
+  // here are names Codex never emits, so they could only ever have let a
+  // non-Codex hop dictate this row's identity.
+  if (codexContext?.thread_id) return codexContext.thread_id
   const sessionId = readMetadataSessionId(reqBody)
   if (sessionId) return sessionId
   const messages = Array.isArray(reqBody.messages)

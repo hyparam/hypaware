@@ -120,18 +120,26 @@ export async function run({ harness, expect }) {
   const codexThreadId = `thread-${harness.devRunId}`
   const codexSessionId = `session-${harness.devRunId}`
   const codexTurnId = `turn-${harness.devRunId}`
+  // @ref LLP 0143#body-is-authority: Codex states its lineage in the body's flat
+  // `client_metadata` map on every request kind, so the fixture carries it there
+  // and NOT under the `thread-id` / `session-id` header names Codex never emits.
   const responsesBody = JSON.stringify({
     model: 'gpt-5-codex',
     input: [{ role: 'user', content: [{ type: 'input_text', text: 'help refactor' }] }],
     stream: true,
+    client_metadata: {
+      'x-codex-installation-id': `install-${harness.devRunId}`,
+      session_id: codexSessionId,
+      thread_id: codexThreadId,
+      turn_id: codexTurnId,
+      'x-codex-window-id': `window-${harness.devRunId}`,
+    },
   })
   const responsesResp = await postJson(
     `${gatewayUrl}/backend-api/codex/responses`,
     harness.devRunId,
     responsesBody,
     {
-      'thread-id': codexThreadId,
-      'session-id': codexSessionId,
       'x-client-request-id': `client-request-${harness.devRunId}`,
       originator: 'Codex Desktop',
       'user-agent': 'Codex Desktop/0.133.0-alpha.1',
