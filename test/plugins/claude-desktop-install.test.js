@@ -14,6 +14,7 @@ import {
   residueDirPath,
   runInstall,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/install.js'
+import { activate } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
 import { resolveInputs } from '../../hypaware-core/plugins-workspace/claude-desktop/src/inputs.js'
 import { renderManagedPreferencesPlist } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 
@@ -502,4 +503,85 @@ test('computeDesiredPlistContent matches renderManagedPreferencesPlist(buildMana
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
   const { buildManagedProfile } = await import('../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js')
   assert.equal(computeDesiredPlistContent(inputs), renderManagedPreferencesPlist(buildManagedProfile(inputs)))
+})
+
+// The dispatcher defaults `ctx.stdin` to `process.stdin`, so the absent-stdin
+// refusal above is a state production never reaches. A redirected stdin is
+// the state it does reach, and `rl.question` never settles at EOF: the
+// command hung with the escape-hatch hint unprinted. Consent must fail
+// closed with a defined exit code on every non-answer, not only on a `n`.
+// @ref LLP 0139#default-no [tests]: a stdin that ends without an answer declines, with the hint, rather than hanging
+test('install: a stdin that ends without an answer declines instead of hanging', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir, mode: 'subscription', stdin: Readable.from([]),
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await Promise.race([
+    runInstall([], cmdCtx, {
+      sectionConfig, credential, stateDir,
+      managedPlistPath: path.join(stateDir, 'managed.plist'),
+      spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    }),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+  ])
+
+  assert.equal(code, 1, 'declines with a defined exit code rather than hanging')
+  assert.deepEqual(commandCalls, [], 'no credential login and no helper write')
+  assert.equal(spawnCalls.length, 0, 'no sudo')
+  assert.match(bufs.stderr.text(), /--yes/)
+  assert.match(bufs.stderr.text(), /--print-commands/)
+  assert.ok(!fs.existsSync(path.join(stateDir, 'managed.plist')), 'no plist written')
+})
+
+test('install: a piped y still consents, so the EOF guard did not close the answered path', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir, stdin: Readable.from(['y\n']),
+  })
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir,
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.ok(commandCalls.some((c) => c.name === 'claude-desktop install-helper'))
+})
+
+// The registered summary is what `hyp --help` prints once the plugin is
+// active; the manifest summary is what it prints before boot. They drifted
+// the moment the consent step was added to one and not the other, with
+// nothing to catch it.
+test('every registered claude-desktop command summary matches its manifest entry', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const manifest = JSON.parse(fs.readFileSync(
+    new URL('../../hypaware-core/plugins-workspace/claude-desktop/hypaware.plugin.json', import.meta.url),
+    'utf8'
+  ))
+  /** @type {Map<string, any>} */
+  const registered = new Map()
+  await activate(/** @type {any} */ ({
+    config: {},
+    paths: { stateDir },
+    log: { info() {}, warn() {}, error() {}, debug() {} },
+    configRegistry: { registerSection() {} },
+    commands: { register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) } },
+    requireCapability: (/** @type {string} */ name) => (
+      name === 'hypaware.anthropic-credential'
+        ? { mode: 'org_key', helperCommandArgs: ['claude-account', 'credential'] }
+        : {}
+    ),
+  }))
+
+  for (const declared of manifest.contributes.commands) {
+    const cmd = registered.get(declared.name)
+    assert.ok(cmd, `manifest declares '${declared.name}' but activation registers no such command`)
+    assert.equal(
+      cmd.summary,
+      declared.summary,
+      `'${declared.name}': the registered summary and the manifest summary have drifted`
+    )
+  }
+  assert.equal(registered.size, manifest.contributes.commands.length, 'no undeclared commands registered')
 })

@@ -116,6 +116,15 @@ that. A decline is a no-op that exits nonzero, which is what routes the
 wizard onto its existing drop-on-failure path so the catch-up command is
 printed instead of Desktop being reported as attached.
 
+Every non-answer is a no, and says so. A cancel (esc / ctrl-c), an absent
+stdin, and a stdin that ends without a line all decline with the same hint
+naming `--yes` and `--print-commands`. The last case is the one that
+matters in practice: the dispatcher defaults `ctx.stdin` to
+`process.stdin`, so an absent stream never occurs, while a redirected one
+(`hyp claude-desktop install < /dev/null`) does. Waiting on a `readline`
+answer there hung forever with the hint unprinted, which is the same
+unattended-hang class as the `--print-commands` bug below.
+
 Consent is asked once, not on every re-run: a machine whose plist already
 matches and whose helper is already written has been through the prompt,
 and LLP 0131's idempotent re-run has to stay cheap enough to use as the

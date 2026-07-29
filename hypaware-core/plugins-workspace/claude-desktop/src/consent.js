@@ -87,7 +87,16 @@ export function buildConsentExplanation(args) {
  * always has a real stdin, while an unattended fleet places the same plist
  * by MDM and never reaches this command (LLP 0133#one-surface).
  *
- * @ref LLP 0139#default-no [implements]: the Desktop consent prompt defaults to no, unlike the backfill prompt
+ * "Non-interactive" has to include a stdin that exists but carries no
+ * answer. The dispatcher defaults `ctx.stdin` to `process.stdin`, so the
+ * falsy check below never fires in a real invocation, and a redirected
+ * stdin (`hyp claude-desktop install < /dev/null`) reached the `readline`
+ * branch where `question` never settles at EOF: the command hung with the
+ * refusal hint unprinted, which is the same unattended-hang class
+ * LLP 0139#print-commands-applies-nothing closes for that flag. EOF now
+ * resolves to a decline.
+ *
+ * @ref LLP 0139#default-no [implements]: the Desktop consent prompt defaults to no, and every non-answer (cancel, EOF, absent stdin) is a no
  * @param {CommandRunContext} cmdCtx
  * @param {string} explanation
  * @returns {Promise<boolean>}
@@ -102,10 +111,7 @@ export async function confirmInstall(cmdCtx, explanation) {
   }
 
   if (!cmdCtx.stdin) {
-    cmdCtx.stderr.write(
-      'claude-desktop install: needs an interactive terminal to confirm. '
-      + "Re-run with --yes to accept the changes above, or --print-commands to see them without applying.\n",
-    )
+    writeNonInteractiveHint(cmdCtx)
     return false
   }
 
@@ -114,7 +120,7 @@ export async function confirmInstall(cmdCtx, explanation) {
       const choice = await select({
         title: 'Attach Claude Desktop with the changes above?',
         options: [
-          { value: 'no', label: 'No - leave Claude Desktop alone', summary: 'Nothing is changed. Re-run hyp claude-desktop install any time.' },
+          { value: 'no', label: 'No - leave Claude Desktop alone', summary: 'This command changes nothing. Re-run hyp claude-desktop install any time.' },
           { value: 'yes', label: 'Yes - go ahead', summary: 'Runs the steps listed above.' },
         ],
         default: 'no',
@@ -131,7 +137,23 @@ export async function confirmInstall(cmdCtx, explanation) {
       terminal: false,
     })
     try {
-      const answer = await rl.question('Attach Claude Desktop with the changes above? [y/N]: ')
+      cmdCtx.stdout.write('Attach Claude Desktop with the changes above? [y/N]: ')
+      // Deliberately the `line`/`close` events rather than `rl.question`:
+      // that promise never settles when the input reaches EOF without a
+      // line, which is what hung the command on a redirected stdin. One
+      // promise settled by whichever event fires first is decidable, where
+      // racing two promises is not: readline emits `line` for a trailing
+      // partial line before `close`, but the answer would lose a
+      // microtask-ordering race against a stream that ends in the same tick.
+      /** @type {string | undefined} */
+      const answer = await new Promise((resolve) => {
+        rl.once('line', (line) => resolve(line))
+        rl.once('close', () => resolve(undefined))
+      })
+      if (answer === undefined) {
+        writeNonInteractiveHint(cmdCtx)
+        return false
+      }
       const trimmed = answer.trim().toLowerCase()
       return trimmed === 'y' || trimmed === 'yes'
     } finally {
@@ -141,4 +163,18 @@ export async function confirmInstall(cmdCtx, explanation) {
     if (isPromptCancelledError(err)) return false
     throw err
   }
+}
+
+/**
+ * The one refusal message every non-answering stdin path prints, so the
+ * escape hatches are named whether the stream was absent or simply ended
+ * without an answer.
+ *
+ * @param {CommandRunContext} cmdCtx
+ */
+function writeNonInteractiveHint(cmdCtx) {
+  cmdCtx.stderr.write(
+    'claude-desktop install: needs an interactive terminal to confirm. '
+    + "Re-run with --yes to accept the changes above, or --print-commands to see them without applying.\n",
+  )
 }

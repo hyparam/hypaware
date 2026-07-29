@@ -117,7 +117,7 @@ export async function activate(ctx) {
   ctx.commands.register({
     name: 'claude-desktop install',
     plugin: PLUGIN_NAME,
-    summary: 'Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt',
+    summary: 'Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt',
     usage: 'hyp claude-desktop install [--yes] [--print-commands]',
     help: 'Explains what it will change and asks first, defaulting to no (LLP 0139#informed-consent): '
       + 'unlike Claude Code and Codex, Desktop cannot present its own credential through a third-party '

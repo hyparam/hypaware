@@ -58,6 +58,21 @@ The runner resolves it, not the provider, because the answer needs the
 exactly the case that closes the gate) plus the effective plugin list.
 Neither is reachable from `PluginActivationContext`.
 
+"Configured" means **membership of the effective config, read fresh**, not
+membership of this process's activation set. The two differ precisely where
+the opt-in happens: `hyp init` boots the `all-available` profile, which by
+construction omits every `V1_EXCLUDED_FROM_DEFAULT` plugin, and
+`@hypaware/claude-desktop` is on that list because it needs the credential
+capability. The picker cannot change an activation set fixed at process
+start, so an activation-derived answer left the gate permanently closed for
+a user who had just ticked the row and accepted the consent prompt: the
+plist was written and the finale's own backfill then imported none of their
+Desktop history, silently. The runner therefore unions the activation set,
+the boot-resolved `ctx.config`, and a fresh read of the local config
+document, which is the only one of the three that reflects a config written
+after boot. Unioning fails open, matching
+[#fail-open-on-unknown](#fail-open-on-unknown).
+
 Declared in manifests rather than a core table because three hardcoded
 lists in this area have already drifted from the manifests they shadow:
 the picker row that composed nothing (LLP 0139), `PICKER_DISPLAY_ORDER`,
@@ -104,6 +119,9 @@ logging buried the two real gate decisions under 388 lines.
   means import everything under the scanning client, which is exactly the
   behavior that shipped before this decision, so a catalog failure
   degrades toward the old behavior rather than toward dropping history.
+- `hyp backfill plan` resolves the same map as the run and passes it on
+  `BackfillPlanContext`. A plan that estimated over sessions the run then
+  gates out would be wrong in the one direction the gate exists to fix.
 - `@hypaware/claude` claims `cli` and `sdk-cli`. Without that, every
   ordinary Claude Code session took the fail-open path: harmless for
   import, but the gate would be inert for the common case.
