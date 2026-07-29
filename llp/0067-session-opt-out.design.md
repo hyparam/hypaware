@@ -275,6 +275,22 @@ is the same fail-open shape in the more dangerous direction. The mutation verbs
 apply the identical check, so `hyp session ignore` cannot print a success it
 did not get.
 
+**What it still cannot prove, and why no cheap fix exists** (issue #442 item B).
+The check proves the responder saw our token; it cannot prove the responder *is*
+the gateway, so a local listener that deliberately echoes the token back still
+yields a confident answer. A shared-secret fix (the gateway mints a per-boot
+token, writes it beside its bound port, the client requires it) does not help
+against the realistic attacker: any process able to bind that port is running as
+the same user, and therefore able to read the same file. The only signal that
+would actually separate them is **peer-process identity**: `status.json` already
+carries the daemon pid and is already liveness-gated on it, so the client could
+in principle check that the process listening on the resolved port *is* that
+pid. That needs platform-specific machinery with no portable form
+(`/proc/net/tcp` plus `/proc/<pid>/fd` on Linux, `lsof` on macOS, neither on
+Windows), which makes it a separate design decision rather than a hardening
+tweak. Recorded, not adopted; the residual stays mitigated by the
+`endpoint_source` disclosure ([§cli-provenance](#cli-provenance)).
+
 ### Endpoint resolution: disk, then config, never a guess {#cli-endpoint}
 
 The daemon's live bound port from `status.json` wins
@@ -286,11 +302,34 @@ the running daemon knows the proven one.
 
 ### Session-id resolution {#cli-session-id}
 
-An explicit argument wins. Otherwise `CLAUDE_CODE_SESSION_ID`. Otherwise Codex,
-which exposes no equivalent variable: the id lives on disk in
+An explicit argument wins. Otherwise an id **stated** by the client that spawned
+this process: `CLAUDE_CODE_SESSION_ID` (Claude) or `CODEX_THREAD_ID` (Codex).
+Otherwise the id is inferred from disk:
 `$CODEX_HOME/sessions/**/rollout-<ts>-<uuid>.jsonl`, whose first `session_meta`
 line carries `payload.id` and `payload.cwd`. The verb selects the rollout whose
 `payload.cwd` equals the invocation cwd.
+
+**A stated id is a liveness signal; the disk inference is not.** Codex injects
+`CODEX_THREAD_ID` into the environment of every shell/exec tool subprocess, and
+exempts it from `shell_environment_policy.include_only` filtering
+([openai/codex#10096](https://github.com/openai/codex/pull/10096), merged
+2026-02-03, closing
+[openai/codex#8923](https://github.com/openai/codex/issues/8923)). Its presence
+is therefore proof that the session it names is the one running this command:
+a session that has ended cannot have spawned this process. Its value is
+`session.conversation_id`, the thread id, which is the same identifier the
+rollout's `session_meta.payload.id` carries and its filename embeds, so this is
+the same id the disk scan already produced, from a source that states it rather
+than infers it. The disk scan stays as the fallback for a Codex predating the
+variable, and for a hand invocation from a terminal no client spawned.
+
+**Two stated ids refuse.** Environments nest (Codex runs `claude`, or Claude
+runs `codex`) and the child inherits the parent's variable while setting its
+own, so both can be set at once and only one names the session this invocation
+is in. Preferring either is a guess that is wrong half the time, and being
+wrong here opts out a session the user is not in while reporting success. The
+refusal names both candidates and points at the explicit-id escape hatch, the
+same shape as the two-matching-rollouts case below.
 
 **It refuses on ambiguity** - several cwd-matching rollouts, or none - with a
 nonzero exit naming the candidates, rather than taking newest-by-mtime the way
@@ -320,16 +359,36 @@ hatch, exactly like the ambiguous case.
 
 The bound narrows the window; it does not close it. A session that ended a few
 minutes ago is still within it, and mtime is a proxy for liveness rather than
-proof of it. Closing it needs a liveness signal Codex does not expose (a session
-id in the environment, or a terminal record in the rollout); until then the
-residual is handled by making the inference **visible** rather than silent.
+proof of it. **`CODEX_THREAD_ID` closes it for the path that matters** (a `hyp`
+run from inside a Codex tool call, which is how the privacy skills invoke it):
+a stated id is taken first, so the proxy is never consulted. What remains is
+the residual for the disk path only, which is now reached in two cases:
+
+1. A Codex old enough not to set the variable (pre-0.65-era builds).
+2. A hand invocation from a terminal, where no client set anything.
+
+Neither is closable from here: a rollout carries no terminal record to check
+against, and upstream has deliberately moved away from writing one
+([openai/codex#19630](https://github.com/openai/codex/pull/19630),
+"Avoid persisting `ShutdownComplete` after thread shutdown", merged 2026-04-28,
+so shutdown is not a persisted rollout line at all). For those two cases the
+residual stays handled by making the inference **visible** rather than silent.
+
+An identity caveat the stated id does not change: `CODEX_THREAD_ID` is the
+thread, and when a live Codex exchange carries `metadata.session_id` the adapter
+stamps *that* as `session_id` and the thread as `conversation_id`
+([LLP 0030](./0030-session-id-partition-key.decision.md)). The disk scan has
+exactly the same property (it reads the same thread id), so this is unchanged
+by the switch, not introduced by it.
 
 ### The verb reports the provenance of its own inputs {#cli-provenance}
 
 An `ignored: true` rests on two claims the verb cannot always prove: *this is my
-session id*, and *that endpoint is the gateway*. An explicit argument or
-`CLAUDE_CODE_SESSION_ID` **states** the first; a Codex rollout only **infers**
-it. A live daemon's `status.json` proves the second; a pinned `listen` only
+session id*, and *that endpoint is the gateway*. An explicit argument, or a
+client-set `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`, **states** the first; a
+Codex rollout only **infers** it. Only the inference is qualified in the output:
+attaching the caveat to a stated id too would train the reader to skip it on the
+one path where it is load-bearing. A live daemon's `status.json` proves the second; a pinned `listen` only
 asserts it, and [§cli-response-check](#cli-response-check) can prove the
 responder saw our token but not that it is the gateway.
 
@@ -376,7 +435,14 @@ Traditional tests (root `test/`, alongside the existing suites):
   `hyp policy show`; the Codex rollout resolver picks the unique cwd match and
   refuses when several, none, a truncated scan, or a **single stale** match
   (backdated mtime), while the same rollout still resolves under a wider age
-  bound so the refusal is provably about staleness and not the cwd match.
+  bound so the refusal is provably about staleness and not the cwd match. A
+  stated `CODEX_THREAD_ID` is taken ahead of the disk scan and reported as
+  `codex_env` with no `session_id_evidence` and no `INFERRED` line; the
+  fail-open it closes is pinned directly, with a rollout for a session that
+  ended inside the 30-minute bound alongside a `CODEX_THREAD_ID` naming the
+  live one (the disk path resolves the dead id, the stated path the live one);
+  a blank variable falls through rather than resolving to nothing; both
+  variables set at once refuses and names both.
   [§cli-provenance](#cli-provenance): a disk-inferred id reports
   `session_id_source: 'codex_rollout'` plus the rollout filename in `--json`
   and `INFERRED from <rollout>` in the human form, from `status` and `ignore`

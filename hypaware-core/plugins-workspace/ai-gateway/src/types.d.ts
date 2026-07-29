@@ -165,17 +165,18 @@ export interface GatewayState {
  * about. Failure is an explicit variant, never a fallback id: an unresolved
  * session must fail closed rather than act on a guess.
  * `source` is carried through to the verb's output rather than discarded: an
- * `argument` or `claude_env` id is what the caller or client stated, but a
- * `codex_rollout` id was INFERRED from a file on disk, and the user must be
- * able to see which of the two an "ignored" answer rests on. `evidence` names
- * the rollout the inference came from.
+ * `argument`, `claude_env` or `codex_env` id is what the caller or the client
+ * that spawned this process stated, but a `codex_rollout` id was INFERRED from
+ * a file on disk, and the user must be able to see which of the two an
+ * "ignored" answer rests on. `evidence` names the rollout the inference came
+ * from.
  * @ref LLP 0067#cli-session-id
  */
 export type SessionIdResolution =
   | {
       ok: true
       sessionId: string
-      source: 'argument' | 'claude_env' | 'codex_rollout'
+      source: 'argument' | 'claude_env' | 'codex_env' | 'codex_rollout'
       evidence?: string
     }
   | { ok: false; error: string }
@@ -203,7 +204,7 @@ export type SessionEndpointResolution =
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'
   session_id: string | null
-  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | null
+  session_id_source: 'argument' | 'claude_env' | 'codex_env' | 'codex_rollout' | null
   session_id_evidence: string | null
   ignored: boolean | null
   total: number | null
