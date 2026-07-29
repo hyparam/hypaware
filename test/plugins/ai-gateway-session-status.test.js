@@ -293,6 +293,24 @@ test('resolves a Codex session id from the rollout whose payload.cwd matches the
   assert.equal(out.ok && out.source, 'codex_rollout')
 })
 
+test('a first line that is not a session_meta record resolves nothing, however much it looks like one', () => {
+  // Issue #465. The envelope-type guard is one of the three rules the shared
+  // reader states: another rollout record can carry `payload.id` and
+  // `payload.cwd` (a `turn_context` does), and reading it as the header hands
+  // `hyp session ignore` an id that is not the session's. The privacy verb then
+  // reports success for a drop that drops nothing.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'not-the-session-id', cwd: '/repo/here', type: 'turn_context' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false, 'a non-session_meta first line is not evidence of a session id')
+  assert.equal(
+    (out.ok ? '' : out.error).includes('not-the-session-id'),
+    false,
+    'the id off the wrong envelope must not be resolved, nor offered as a candidate'
+  )
+})
+
 test('refuses (never guesses newest) when several Codex rollouts match the cwd', () => {
   const home = tempCodexHome([
     { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-aaa', cwd: '/repo/here' },
@@ -686,14 +704,17 @@ function fakeCtx(args) {
  * `ageMs` backdates the file's mtime, which is how the resolver tells a running
  * session (appended to on every turn) from a finished one.
  *
- * @param {{ file: string, id: string, cwd: string, ageMs?: number }[]} rollouts
+ * `type` overrides the first line's envelope type, so a test can present a
+ * record that carries `id`/`cwd` but is not the session header.
+ *
+ * @param {{ file: string, id: string, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
   const dir = path.join(home, 'sessions', '2026', '01')
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {
-    const meta = JSON.stringify({ type: 'session_meta', payload: { id: r.id, cwd: r.cwd } })
+    const meta = JSON.stringify({ type: r.type ?? 'session_meta', payload: { id: r.id, cwd: r.cwd } })
     const full = path.join(dir, r.file)
     fs.writeFileSync(full, `${meta}\n{"type":"event"}\n`)
     if (r.ageMs) {

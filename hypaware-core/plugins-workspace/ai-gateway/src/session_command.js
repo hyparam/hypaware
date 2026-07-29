@@ -6,6 +6,7 @@ import https from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
 
+import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
 import { configuredGatewayEndpoint } from '../../../../src/core/config/gateway_endpoint.js'
 import { resolveLiveGatewayEndpointFromStatus } from '../../../../src/core/daemon/status.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -625,42 +626,28 @@ function describeAge(ms) {
 }
 
 /**
- * Read `payload.id` / `payload.cwd` off a rollout's first line. Only a bounded
- * prefix is read: a rollout grows without limit, but its `session_meta` header
- * is the first record.
+ * The thread id and cwd a rollout's `session_meta` header states, or
+ * `undefined` when it states neither usably.
+ *
+ * The header read is `readRolloutSessionMeta`, shared with `@hypaware/codex`'s
+ * live cwd resolver, which asks this exact line the same question for the
+ * `.hypignore` match. Both answers gate a privacy control and a wrong one is
+ * silent, and the rules for reading the line drifted apart twice while each
+ * caller kept its own copy (#453, #459).
+ * @ref LLP 0143 [constrained-by]: one reader for `session_meta`, not one per caller
+ *
+ * `meta.sessionId` is deliberately not consulted here: this resolver answers
+ * with the thread id, matching `CODEX_THREAD_ID` and what the gateway stamps
+ * today (LLP 0067#cli-session-id). Moving the verb onto the session container
+ * is issue #453's job, and the field is on the shared reader waiting for it.
  *
  * @param {string} file
  * @returns {{ id: string, cwd: string } | undefined}
  */
 function readRolloutMeta(file) {
-  /** @type {number | undefined} */
-  let fd
-  try {
-    fd = fs.openSync(file, 'r')
-    const buf = Buffer.alloc(64 * 1024)
-    const read = fs.readSync(fd, buf, 0, buf.length, 0)
-    const text = buf.subarray(0, read).toString('utf8')
-    const newline = text.indexOf('\n')
-    const line = newline === -1 ? text : text.slice(0, newline)
-    const parsed = JSON.parse(line)
-    const payload = parsed && typeof parsed === 'object' ? parsed.payload : undefined
-    if (!payload || typeof payload !== 'object') return undefined
-    const id = /** @type {Record<string, unknown>} */ (payload).id
-    const cwd = /** @type {Record<string, unknown>} */ (payload).cwd
-    if (typeof id !== 'string' || id.length === 0) return undefined
-    if (typeof cwd !== 'string' || cwd.length === 0) return undefined
-    return { id, cwd }
-  } catch {
-    return undefined
-  } finally {
-    if (fd !== undefined) {
-      try {
-        fs.closeSync(fd)
-      } catch {
-        /* already closed */
-      }
-    }
-  }
+  const meta = readRolloutSessionMeta(file)
+  if (meta?.threadId === undefined || meta.cwd === undefined) return undefined
+  return { id: meta.threadId, cwd: meta.cwd }
 }
 
 /**

@@ -172,6 +172,39 @@ test('createRolloutCwdResolver returns undefined when the sessions root is missi
 })
 
 // ---------------------------------------------------------------------
+// Issue #465: this resolver and `hyp session`'s id resolution read the same
+// `session_meta` line under the same rules, from one shared reader
+// (`src/core/codex/rollout_session_meta.js`). These pin the rules AT THIS
+// CALLER, so a future change cannot satisfy the other one and quietly loosen
+// this one; the reader's own union suite is
+// `test/core/codex-rollout-session-meta.test.js`.
+// ---------------------------------------------------------------------
+
+test('a rollout whose first line is a different envelope type yields no cwd, even carrying one', () => {
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'turn_context', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '/work/not-the-header' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  // Taking it would evaluate `.hypignore` against a directory the session
+  // header never claimed. No cwd is the honest answer.
+  assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+test('a blank session_meta.cwd is no cwd, not a blank path handed to the policy matcher', () => {
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '   ' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+// ---------------------------------------------------------------------
 // Review round 1, Major 1: a miss (not-yet-written rollout on a session's
 // first exchange, or a transient read error) must NOT be cached as a permanent
 // NULL cwd — that would silently fail `.hypignore` open for the session's whole
