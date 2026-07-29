@@ -15,7 +15,7 @@ const LOCAL_ONLY_LIST_VERSION = 2
 
 const USAGE_CLASSES = new Set(['ignore', 'local-only', 'full'])
 
-/** `error_kind` carried by {@link LocalOnlyListUnreadableError} (LLP 0080 #fail-safe). */
+/** `error_kind` carried by {@link LocalOnlyListUnreadableError} (LLP 0049 #fail-safe). */
 export const LOCAL_ONLY_LIST_UNREADABLE_ERROR_KIND = 'local_only_list_unreadable'
 
 /**
@@ -25,7 +25,12 @@ export const LOCAL_ONLY_LIST_UNREADABLE_ERROR_KIND = 'local_only_list_unreadable
  * silently treated as "no exclusions", so callers (the export-seam resolver,
  * `hyp status`) are expected to let this propagate rather than swallow it.
  *
- * @ref LLP 0080#fail-safe [implements]: a corrupt list fails loudly, naming the file, rather than resolving to empty
+ * The throw-rather-than-empty mechanics were first worked out in LLP 0080
+ * §fail-safe; that document is superseded (LLP 0102 retires its in-login
+ * picker) but its machine-local list substrate lives on, and the invariant the
+ * mechanics rest on is LLP 0049's, cited below.
+ *
+ * @ref LLP 0049#fail-safe [constrained-by]: an uninterpretable privacy signal resolves to "suppress more", never to "no exclusions"
  */
 export class LocalOnlyListUnreadableError extends Error {
   /**

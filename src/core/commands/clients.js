@@ -1071,7 +1071,7 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
  * `policy show`.
  *
  * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
- * @ref LLP 0103#cli [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
+ * @ref LLP 0103#reporting [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
  * @ref LLP 0111#show [implements]: also the shared implementation behind `policy show`; `vocabulary` moves only the human lines, so `--json` stays byte-compatible with the `--check --json` field set
  * @param {{ targetDir: string, ctx: CommandRunContext, json: boolean, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}

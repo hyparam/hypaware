@@ -212,7 +212,7 @@ export function createUsagePolicyResolver({
    * {@link LocalOnlyListUnreadableError}, mirroring `readLocalOnlyEntries`'s
    * async fail-safe so both paths name the same `error_kind`.
    *
-   * @ref LLP 0080#fail-safe [implements]: a corrupt list fails the resolve loudly, never silently to "no exclusions"
+   * @ref LLP 0049#fail-safe [constrained-by]: a corrupt list fails the resolve loudly, never silently to "no exclusions"
    * @ref LLP 0103 [implements]: migrate-on-read for the sync capture-hot-path reader
    * @returns {LocalOnlyEntry[]}
    */
