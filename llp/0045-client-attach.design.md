@@ -323,6 +323,11 @@ none of them swallows it into a plain negative:
 
 - `probeClientAttachFromDescriptor` returns `{ attached: false, error }`, so
   `hyp status` distinguishes a broken manifest from an unmarked settings file.
+  On **both** of its surfaces: `--json` carries the `error` field, and the text
+  renderer prints the message under the client's line and refuses to collapse an
+  errored client into the `clients: (none)` shorthand. A text surface that
+  rendered the same client as a plain `not attached` would have reinstated the
+  indistinguishable wrong negative one layer up from the probe.
 - `hyp detach` (the core undo and its `--dry-run` path) fails loudly: a client
   whose settings file core cannot locate is one core must not claim to have
   reversed.
