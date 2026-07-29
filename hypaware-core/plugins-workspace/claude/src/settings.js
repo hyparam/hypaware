@@ -61,7 +61,10 @@ const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+(session-context|classify-cwd)\b/
 //   2.1.220) if attached sessions start reporting an inflated context percent
 //   again. It also gates other first-party behavior (traceparent propagation,
 //   oauth beta headers), which is accurate here - the gateway is a
-//   byte-transparent pass-through to api.anthropic.com.
+//   byte-transparent pass-through to api.anthropic.com. That last part is a
+//   precondition, not an invariant: the gateway's anthropic upstream `base_url`
+//   is config, so repointing it elsewhere makes the declaration false. See the
+//   LLP section below.
 const MANAGED_ENV_ADDITIONS = [
   { key: 'ENABLE_TOOL_SEARCH', value: 'true' },
   { key: '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', value: '1' },
@@ -141,7 +144,7 @@ export async function attach(opts) {
   // Self-describing undo record: enough for the format-aware core undo
   // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed env keys
   // we added, strip the managed hook entries, and delete the marker without
-  // loading this plugin — leaving no orphaned `hyp claude-hook` entries.
+  // loading this plugin, leaving no orphaned `hyp claude-hook` entries.
   // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),

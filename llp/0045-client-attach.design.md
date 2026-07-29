@@ -287,6 +287,20 @@ absent or already ours; removed, never restored, on detach). The declaration is
 gates other first-party behavior (traceparent propagation, oauth beta headers) is
 therefore fine rather than a side effect we tolerate.
 
+That accuracy is a **precondition, not an invariant**, and it is the one thing
+this key needs that `ENABLE_TOOL_SEARCH` does not. `ENABLE_TOOL_SEARCH` asserts a
+property of the *gateway* (it forwards `tool_reference` untouched), which is
+always true. This key asserts a property of whatever the gateway *forwards to*,
+and that is config: the `anthropic` upstream's `base_url` is an ordinary
+configured string (the `hyp init` preset writes `https://api.anthropic.com`, and
+an operator or org config can repoint it). Attach writes the declaration
+unconditionally because the settings writer has only the local gateway port in
+scope, not the gateway's upstream config, so repointing that upstream at a
+non-Anthropic host makes the declaration false and applies the first-party
+behavior it gates to traffic that never reaches Anthropic. Policing that is out
+of scope for the settings writer; it is recorded here so the assumption is a
+stated one rather than an implicit one.
+
 The honest caveat: the key is underscore-prefixed and undocumented, so a Claude
 Code release may rename or drop it (last verified against 2.1.220). It fails
 *soft* - losing it re-inflates the reported percent but breaks nothing - so the
