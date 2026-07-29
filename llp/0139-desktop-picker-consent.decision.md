@@ -130,6 +130,29 @@ matches and whose helper is already written has been through the prompt,
 and LLP 0131's idempotent re-run has to stay cheap enough to use as the
 documented repair step.
 
+<a id="macos-only"></a>**Before any gate runs, the command refuses on a
+non-macOS platform.** Every surface it touches is macOS-specific: the
+managed plist under `/Library/Managed Preferences`, the `Claude-3p`
+residue under `~/Library/Application Support`, the `cfprefsd` flush. The
+wizard already cannot reach the flow elsewhere (the row's detect probe
+stats `/Applications/Claude.app`), but a direct invocation had no gate,
+and on Linux it would half-succeed: consent, login, and helper write all
+run, then `sudo mkdir -p '/Library/Managed Preferences'` creates
+root-owned junk at the filesystem root while configuring nothing.
+`install` and `verify` now refuse up front, mutating nothing and naming
+the platform: the same loud contract `hyp daemon install` already has for
+an unsupported platform. The refusal gates the applying path only:
+`install --print-commands` passes everywhere, by the same rule that lets
+it skip consent (it applies nothing, #print-commands-applies-nothing).
+(`profile`, `status`, and `install-helper` also stay ungated: rendering
+the MDM payload or staging the helper touches no macOS surface and is
+legitimately useful on a non-Mac admin box preparing a fleet push,
+LLP 0133#one-surface.) Platform reach beyond this is a
+repo-level scope fact, not this adapter's gap: core supports darwin and
+linux only, Claude Desktop has no Linux build, and a Windows port is
+gated on a core service backend plus live-test discovery of the Windows
+policy surface (the method LLP 0133 records for macOS).
+
 <a id="one-gate-two-surfaces"></a>**The gate lives in the command, so the
 wizard inherits it.** The configure phase already invokes
 `claude-desktop install` in-process through `ctx.commands.run`

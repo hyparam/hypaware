@@ -86,6 +86,7 @@ test('install: org_key mode skips the login step and never calls claude-account 
     sectionConfig,
     credential,
     stateDir,
+    platform: 'darwin',
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -106,7 +107,7 @@ test('install: subscription mode already signed in skips login without calling i
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 0)
@@ -124,7 +125,7 @@ test('install: subscription mode not signed in runs login, and a failed login dr
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 1)
@@ -145,7 +146,7 @@ test('install: no stdin in subscription mode fails the login step without attemp
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 1)
@@ -161,7 +162,7 @@ test('install: refuses up front on an ephemeral gateway listen, with no side eff
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 1)
@@ -169,6 +170,49 @@ test('install: refuses up front on an ephemeral gateway listen, with no side eff
   assert.match(bufs.stderr.text(), /ephemeral/)
   assert.equal(commandCalls.length, 0)
   assert.equal(spawnCalls.length, 0)
+})
+
+test('install: refuses up front on a non-macOS platform, with no side effects', async () => {
+  // On Linux the privileged sequence would half-succeed: `sudo mkdir -p
+  // '/Library/Managed Preferences'` creates root-owned junk while
+  // configuring nothing. Off-platform the contract is `hyp daemon
+  // install`'s loud refusal, before consent, login, or any write.
+  // @ref LLP 0139#macos-only [tests]: nothing runs off darwin, and the refusal names the platform
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({ stateDir })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'linux',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 1)
+  assert.match(bufs.stderr.text(), /unsupported platform 'linux'/)
+  assert.equal(commandCalls.length, 0, 'no login, no helper write')
+  assert.equal(spawnCalls.length, 0, 'no sudo, no killall')
+  assert.ok(!fs.existsSync(path.join(stateDir, 'managed.plist')), 'no plist written')
+})
+
+test('install: --print-commands passes the platform gate, because it applies nothing', async () => {
+  // The wizard seam test dispatches the real command with --print-commands
+  // on Linux CI, and inspecting the would-be commands from a non-Mac admin
+  // box is legitimate (LLP 0133#one-surface).
+  // @ref LLP 0139#macos-only [tests]: the refusal gates the applying path only
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall(['--print-commands'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'linux',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.equal(spawnCalls.length, 0)
+  assert.match(bufs.stdout.text(), /sudo cp/)
 })
 
 test('install: residue directory is backed up and cleared when present', async () => {
@@ -180,7 +224,7 @@ test('install: residue directory is backed up and cleared when present', async (
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 0, bufs.stdout.text())
@@ -198,7 +242,7 @@ test('install: a re-run with no residue present is a plain skip, not a failure',
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 0)
@@ -215,7 +259,7 @@ test('install: an already up-to-date managed plist is skipped, no sudo invoked f
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -232,7 +276,7 @@ test('install: a stale managed plist is rewritten via sudo cp with the freshly r
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -252,7 +296,7 @@ test('install: a failed privileged write drops with a re-run hint, not a thrown 
   }
 
   const code = await runInstall(['--yes'], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnImpl),
   })
 
@@ -269,7 +313,7 @@ test('install: --print-commands prints the sudo and killall commands without inv
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--print-commands'], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -294,7 +338,7 @@ test('install: --print-commands applies nothing at all, including the non-privil
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--print-commands'], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
@@ -311,7 +355,7 @@ test('install: --print-commands never asks for consent, because it changes nothi
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
 
   const code = await runInstall(['--print-commands'], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })
@@ -334,7 +378,7 @@ test('install: declining the consent prompt changes nothing and exits nonzero', 
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
@@ -353,7 +397,7 @@ test('install: accepting the consent prompt runs the steps', async () => {
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
@@ -373,7 +417,7 @@ test('install: a bare enter at the consent prompt declines', async () => {
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
@@ -391,7 +435,7 @@ test('install: the consent text names the credential posture and every file it w
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
 
   await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })
 
@@ -415,7 +459,7 @@ test('install: org_key mode consent text promises no sign-in', async () => {
   })
 
   await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })
@@ -431,6 +475,7 @@ test('install: consent names the residue clear only when residue is actually pre
     sectionConfig: withoutResidue.sectionConfig,
     credential: withoutResidue.credential,
     stateDir,
+    platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })
@@ -443,6 +488,7 @@ test('install: consent names the residue clear only when residue is actually pre
     sectionConfig: withResidue.sectionConfig,
     credential: withResidue.credential,
     stateDir: residueState,
+    platform: 'darwin',
     managedPlistPath: path.join(residueState, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })
@@ -457,7 +503,7 @@ test('install: a non-interactive run refuses rather than assuming consent', asyn
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
@@ -481,7 +527,7 @@ test('install: an already-configured machine is not re-prompted', async () => {
   fs.writeFileSync(inputs.helperPath, '#!/bin/sh\n')
 
   const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })
 
@@ -520,7 +566,7 @@ test('install: a stdin that ends without an answer declines instead of hanging',
 
   const code = await Promise.race([
     runInstall([], cmdCtx, {
-      sectionConfig, credential, stateDir,
+      sectionConfig, credential, stateDir, platform: 'darwin',
       managedPlistPath: path.join(stateDir, 'managed.plist'),
       spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
     }),
@@ -541,7 +587,7 @@ test('install: a piped y still consents, so the EOF guard did not close the answ
     stateDir, stdin: Readable.from(['y\n']),
   })
   const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir,
+    sectionConfig, credential, stateDir, platform: 'darwin',
     managedPlistPath: path.join(stateDir, 'managed.plist'),
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
   })

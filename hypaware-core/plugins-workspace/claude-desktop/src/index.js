@@ -125,7 +125,8 @@ export async function activate(ctx) {
       + 'credential login chain (LLP 0117), writes the credential helper (LLP 0116), backs '
       + 'up and clears stale Claude-3p dialog residue, writes the managed-preferences plist via an '
       + 'inline sudo prompt (LLP 0133#solo-sudo), and prompts for a Desktop restart. Refuses up front '
-      + 'if the effective gateway listen is ephemeral (127.0.0.1:0, LLP 0114). Every step re-checks its '
+      + 'on a non-macOS platform (LLP 0139) or if the effective gateway listen is ephemeral '
+      + '(127.0.0.1:0, LLP 0114). Every step re-checks its '
       + 'own already-done state, so a bailed sudo prompt converges on re-run (LLP 0131#idempotent-rerun), '
       + 'and an already-configured machine is not re-prompted. --yes accepts the changes in advance; '
       + '--print-commands prints the privileged commands without running them.',

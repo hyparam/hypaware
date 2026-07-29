@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs'
+import process from 'node:process'
 
 import { MANAGED_PLIST_PATH, computeDesiredPlistContent, plistUpToDate, residueDirPath } from './install.js'
 import { resolveInputs } from './inputs.js'
@@ -45,10 +46,20 @@ export function checkInstallState(opts, cmdCtx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} cmdCtx
- * @param {{ sectionConfig: Record<string, unknown>, credential: AnthropicCredentialCapability, stateDir: string, managedPlistPath?: string }} opts
+ * @param {{ sectionConfig: Record<string, unknown>, credential: AnthropicCredentialCapability, stateDir: string, managedPlistPath?: string, platform?: string }} opts
  * @returns {Promise<number>}
  */
 export async function runVerify(argv, cmdCtx, opts) {
+  // The plist and residue checks answer for macOS paths that mean nothing
+  // elsewhere, so off-platform verify refuses like install rather than
+  // reporting a misleading MISSING.
+  // @ref LLP 0139#macos-only [implements]: verify shares install's platform refusal
+  const platform = opts.platform ?? process.platform
+  if (platform !== 'darwin') {
+    cmdCtx.stderr.write(`claude-desktop verify: refused: unsupported platform '${platform}' (only darwin is supported)\n`)
+    return 1
+  }
+
   /** @type {VerifyResult} */
   let result
   try {

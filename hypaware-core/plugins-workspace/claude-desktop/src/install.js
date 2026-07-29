@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 
 import { buildConsentExplanation, confirmInstall } from './consent.js'
 import { resolveInputs } from './inputs.js'
@@ -105,7 +106,7 @@ function formatCommand(command) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} cmdCtx
- * @param {{ sectionConfig: Record<string, unknown>, credential: AnthropicCredentialCapability, stateDir: string, spawnSyncImpl?: typeof spawnSync, managedPlistPath?: string }} opts
+ * @param {{ sectionConfig: Record<string, unknown>, credential: AnthropicCredentialCapability, stateDir: string, spawnSyncImpl?: typeof spawnSync, managedPlistPath?: string, platform?: string }} opts
  * @returns {Promise<number>}
  */
 export async function runInstall(argv, cmdCtx, opts) {
@@ -113,6 +114,20 @@ export async function runInstall(argv, cmdCtx, opts) {
   const assumeYes = argv.includes('--yes')
   const spawnImpl = opts.spawnSyncImpl ?? spawnSync
   const plistPath = opts.managedPlistPath ?? MANAGED_PLIST_PATH
+
+  // Before any other gate: every surface below is macOS-specific, and on
+  // Linux the privileged sequence would half-succeed (`sudo mkdir -p
+  // '/Library/Managed Preferences'` creates root-owned junk while
+  // configuring nothing), so off-platform the contract is `hyp daemon
+  // install`'s loud refusal. `--print-commands` passes: it applies
+  // nothing (LLP 0139#print-commands-applies-nothing), and printing the
+  // would-be commands is useful off-platform.
+  // @ref LLP 0139#macos-only [implements]: refuse the applying path before consent, mutate nothing, name the platform
+  const platform = opts.platform ?? process.platform
+  if (!printCommands && platform !== 'darwin') {
+    cmdCtx.stderr.write(`claude-desktop install: refused: unsupported platform '${platform}' (only darwin is supported)\n`)
+    return 1
+  }
 
   // Refused up front (@ref LLP 0133#consequences): an ephemeral gateway
   // listen can never back a stable managed profile, so there is no point
