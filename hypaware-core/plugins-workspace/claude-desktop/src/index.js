@@ -41,15 +41,24 @@ export const configSection = {
  * Corrects LLP 0115's "no writable settings file" premise: the live-test
  * findings in LLP 0133 identify the managed-preferences plist
  * (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`) as a
- * real local surface, so the manifest now also declares `contributes.client`
- * and `contributes.picker` (LLP 0130) for the `hyp init` wizard's `needs_setup`
- * row. This does not reinstate generic attach-on-join (LLP 0044): the plugin
- * registers no runtime `ctx.clients` adapter, so the generic reconciler's
- * `desired()` (`action_attach.js`) stays inert for `claude-desktop` and the
- * plist is placed only via the explicit `claude-desktop install` command,
- * attended, with its own sudo prompt and idempotent re-run (LLP 0131).
+ * real local surface, so the manifest also declares `contributes.client`
+ * (for `skill_dir`/`agent_dir`) and `contributes.picker` (LLP 0130) for the
+ * `hyp init` wizard's `needs_setup` row. This does not reinstate generic
+ * attach-on-join (LLP 0044): the plugin registers no runtime `ctx.clients`
+ * adapter, so the generic reconciler's `desired()` (`action_attach.js`) stays
+ * inert for `claude-desktop` and the plist is placed only via the explicit
+ * `claude-desktop install` command, attended, with its own sudo prompt and
+ * idempotent re-run (LLP 0131).
  *
- * @ref LLP 0133#attribution [constrained-by]: the client descriptor and picker row exist for wizard/attach-status plumbing, but captured rows still land under client_name "claude" with entrypoint "claude-desktop-3p"; query and hyp status surfaces key off entrypoint, not this descriptor's name
+ * That surface being real does *not* make it core-reversible, so the client
+ * descriptor deliberately carries **no `attach_probe`**: the plist is XML at
+ * an absolute root-owned system path and holds no self-describing undo
+ * record, none of which the core probe/undo (`json`/`toml`/`json_path`) can
+ * read or replay. Its state surface is `claude-desktop verify` and its undo is
+ * removing the plist with sudo, not `hyp detach` (#444).
+ *
+ * @ref LLP 0115#no-attach-on-join [constrained-by]: no `attach_probe` - the LLP 0044 loop needs a reversible settings-file write, and the managed plist is not one; the probe that was declared here answered "not attached" over a $HOME-re-anchored path that never existed, and would have thrown MALFORMED_JSON over the real XML plist the moment that path was corrected (LLP 0135#no-probe)
+ * @ref LLP 0133#attribution [constrained-by]: the client descriptor and picker row exist for wizard/asset plumbing, but captured rows still land under client_name "claude" with entrypoint "claude-desktop-3p"; query and hyp status surfaces key off entrypoint, not this descriptor's name
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {

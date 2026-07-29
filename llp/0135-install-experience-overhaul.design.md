@@ -429,18 +429,21 @@ New bundled plugin `@hypaware/claude-desktop`
 plugin's shape ([LLP 0122](./0122-hermes-log-forwarding.design.md)) for
 manifest/activation structure, contributing:
 
-- `contributes.client`: `name: "claude-desktop"`, `skill_dir`/`agent_dir` per
-  the existing client-descriptor contract, and an `attach_probe` reflecting
-  the `entrypoint: "claude-desktop-3p"` attribution finding
-  (`@ref LLP 0133#attribution [constrained-by]`: rows land `client_name:
-  "claude"` with `entrypoint: "claude-desktop-3p"`, so `hyp status`/query
-  surfaces query by `entrypoint`, not by a new `client_name`).
+- `contributes.client`: `name: "claude-desktop"` and `skill_dir`/`agent_dir`
+  per the existing client-descriptor contract, and **no `attach_probe`**
+  (`@ref LLP 0115#no-attach-on-join [constrained-by]`). See
+  [no probe for Desktop](#no-probe) below.
 - `contributes.picker`: `label: "Claude Desktop"`, `detect: { app_bundle:
   "/Applications/Claude.app" }`, `needs_setup: true`, `configure_command:
   "claude-desktop install"`.
 - `contributes.commands`: `claude-desktop install` (the same command both the
   wizard's configure phase and a standalone `hyp claude-desktop install`
   invoke) and `claude-desktop verify` for the post-wizard in-app hint.
+
+None of these change attribution
+(`@ref LLP 0133#attribution [constrained-by]`: rows land `client_name:
+"claude"` with `entrypoint: "claude-desktop-3p"`, so `hyp status`/query
+surfaces query by `entrypoint`, not by a new `client_name`).
 
 `src/install.js`'s `run(argv, ctx)` implements, in order
 (`@ref LLP 0133#one-surface`, `@ref LLP 0133#0115-corrections`):
@@ -468,6 +471,57 @@ a bailed sudo prompt converges without re-prompting completed steps
 (`@ref LLP 0131#idempotent-rerun`). A fleet config pinning an ephemeral
 gateway listen (`127.0.0.1:0`) is refused before step 4 runs, unchanged
 (`@ref LLP 0133#consequences`, [LLP 0114](./0114-gateway-default-listen-port-fixed.decision.md)).
+
+### No attach probe for Desktop {#no-probe}
+
+An earlier revision of this section had the client descriptor carry an
+`attach_probe` "reflecting the attribution finding". That was a category
+error: an `attach_probe` is not a label, it is the input to the core
+probe/undo pair (`probeClientAttachFromDescriptor`, `detachClientFromDisk`),
+and declaring one asserts the client's settings file is one core can read
+*and* reverse. Desktop's is neither.
+
+LLP 0133's live-test correction makes the managed-preferences plist a real
+local surface; it does not make it a core-reversible one, and
+[LLP 0115#no-attach-on-join](./0115-claude-desktop-managed-config-attach.decision.md#no-attach-on-join)
+(Accepted) already settled that Desktop registers no probe. Three
+independent reasons, any one sufficient:
+
+1. **Wrong file type.** The plist is XML; every core `json`/`json_path`
+   probe path `JSON.parse`s the settings file. Point the probe at the plist
+   `claude-desktop install` renders and `detachClientFromDisk` throws
+   `MALFORMED_JSON`, with `hyp status` surfacing the same parse failure as a
+   client attach-probe `error`.
+2. **Wrong path.** `settings_file` is `$HOME`-relative by contract
+   (`resolveClientSettingsPath`), so an absolute
+   `/Library/Managed Preferences/...` re-anchors to
+   `~/Library/Managed Preferences/...`: a file `install` never writes, making
+   the probe answer "not attached" for a reason unrelated to the truth.
+   Note the interaction: defect 2 **masked** defect 1 in the field. Because
+   the probed path was never the placed one, a configured machine saw a
+   silently wrong "not attached" rather than the parse error, and the moment
+   anyone fixed the path the probe would have started throwing on exactly the
+   machines where install had succeeded. Neither answer is usable, and the
+   quiet one is the more dangerous of the two.
+3. **No undo record.** The plist carries no `marker_record`, and per
+   [LLP 0045 §Part 3](./0045-client-attach.design.md#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record)
+   a record-less marker is refused, never half-reversed. Nor would adding
+   one help: the file is root-owned, so an unprivileged detach cannot write
+   it back.
+
+Fixing the path alone is therefore not a repair, it is an upgrade from a
+quiet wrong answer to a loud one. Defects 1 and 3 are unfixable inside the
+`attach_probe` contract, which is why the probe goes rather than gets
+corrected. (That `resolveClientSettingsPath` silently re-anchors an absolute
+`settings_file` instead of honouring or rejecting it is a separate trap in
+the shared helper, tracked on its own as #446.)
+
+Desktop's state surface is `claude-desktop verify`, and its undo is removing
+the plist with sudo (plus `killall cfprefsd` and an app restart,
+`@ref LLP 0133#one-surface`) - never `hyp detach`. With no probe declared,
+`detachClientFromDisk` returns `{ changed: false }` at its no-probe guard, so
+`hyp detach --client claude-desktop` is an honest no-op rather than an error
+over a file core can neither read nor reverse.
 
 ## Export-seam source-scoped withholding {#export-seam}
 
