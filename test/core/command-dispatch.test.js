@@ -897,6 +897,91 @@ test('ctx.commands.run dispatches a registered command with the same exit code a
   assert.equal(seamErr.text(), 'seamtarget err\n')
 })
 
+test('ctx.commands.run activates a config-enabled plugin the boot profile skipped, so its command dispatches', async () => {
+  // Reproduces the wizard's configure phase (LLP 0139#seam-fresh-activation):
+  // `hyp init` boots `all-available`, which never activates V1-excluded
+  // plugins, and the picker writes the composed config after boot. The seam
+  // must activate the configure command's plugins from a fresh config read
+  // in dependency order (claude-account provides the credential capability
+  // claude-desktop requires at activation), or `claude-desktop install`
+  // misses dispatch and the consent gate is unreachable from the wizard.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-activate-'))
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway' },
+        { name: '@hypaware/claude-account', config: { mode: 'subscription' } },
+        { name: '@hypaware/claude-desktop' },
+      ],
+    })
+  )
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  registry.register({
+    name: 'seamconfigure',
+    summary: 'Run a configure command through the seam, like the wizard does',
+    usage: 'hyp seamconfigure',
+    async run(argv, ctx) {
+      return ctx.commands.run('claude-desktop install', ['--print-commands'])
+    },
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['seamconfigure'], {
+    stdout,
+    stderr,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    registry,
+    kernel,
+  })
+
+  // `--print-commands` applies nothing, so a clean exit proves the command
+  // dispatched and every step printed instead of exit 2 on a registry miss.
+  assert.equal(code, 0)
+  const out = stdout.text()
+  assert.match(out, /hyp claude-desktop install-helper/)
+  assert.match(out, /claude-desktop install: done\./)
+  assert.equal(stderr.text().includes('not in the active config'), false)
+})
+
+test('ctx.commands.run does not activate a plugin the effective config leaves out', async () => {
+  // The seam's fresh read is the opt-in boundary: a plugin absent from the
+  // effective config stays inactive and the miss path reports as before.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-inactive-'))
+  await fs.writeFile(
+    path.join(hypHome, 'hypaware-config.json'),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/local-fs' }] })
+  )
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  registry.register({
+    name: 'seamconfigure',
+    summary: 'Run a configure command through the seam, like the wizard does',
+    usage: 'hyp seamconfigure',
+    async run(argv, ctx) {
+      return ctx.commands.run('claude-desktop install', ['--print-commands'])
+    },
+  })
+  const kernel = createKernelRuntime({ commandRegistry: registry })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const code = await dispatch(['seamconfigure'], {
+    stdout,
+    stderr,
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    registry,
+    kernel,
+  })
+
+  assert.equal(code, 2)
+  assert.match(stderr.text(), /unknown command 'claude-desktop install/)
+})
+
 function makeBuf() {
   let value = ''
   return {

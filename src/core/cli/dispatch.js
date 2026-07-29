@@ -17,11 +17,13 @@ import {
   ROOT_CONTEXT,
   SpanStatusCode,
 } from '../observability/index.js'
+import { resolveDependencies } from '../dep_graph.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { activatePlugins } from '../runtime/loader.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
@@ -29,9 +31,10 @@ import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synt
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRunContext, HypAwareV2Config, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, CommandRunContext, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
@@ -313,8 +316,18 @@ export async function dispatch(argv, opts = {}) {
     // exit code), never the mutable command registry itself.
     // @ref LLP 0130#configure-command [implements]: the wizard's configure phase runs a picker row's configure_command in-process through this seam
     commands: {
-      run: (name, cmdArgv) =>
-        runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel }),
+      run: async (name, cmdArgv) => {
+        await activateSeamCommandPlugins({
+          name,
+          registry,
+          kernel,
+          discovery: helpDiscovery,
+          stateRoot: obsEnv.stateDir,
+          runId: devRunId ?? `cli-${process.pid}`,
+          activePlugins,
+        })
+        return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
+      },
     },
     verbs: kernel.verbs,
     storage: kernel.storage,
@@ -733,6 +746,126 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
     bootProfile: 'config',
   })
   return { ...selection, layered }
+}
+
+/**
+ * Make `name` dispatchable through the in-process `ctx.commands.run` seam
+ * when its plugin was enabled by a config written AFTER this process booted.
+ *
+ * The activation set is fixed at boot, but the wizard writes its composed
+ * config mid-process: `hyp init` boots `all-available`, which by
+ * construction never activates a `V1_EXCLUDED_FROM_DEFAULT` plugin, so a
+ * picked row whose `configure_command` lives in one (Claude Desktop) missed
+ * dispatch and drop-on-failure ate the consent prompt the command exists to
+ * show. Same staleness class as the entrypoint gate's fix: only a fresh
+ * read of the config reflects a write that happened after boot.
+ *
+ * On a registry miss for `name`, re-read the effective config from disk and,
+ * when a `config`-profile boot of that fresh read would select the plugin
+ * declaring `name`'s head token, activate it into the running kernel along
+ * with its config-selected dependency closure, in dependency order. The
+ * exclusion list still governs defaults: nothing activates that the
+ * effective config does not name. Best-effort by design - on any failure the
+ * normal dispatch miss path still reports unavailable-plus-repair.
+ *
+ * @ref LLP 0139#seam-fresh-activation [implements]: the seam activates a freshly config-enabled command plugin (and its config-selected dependency closure) so the wizard's configure phase can reach the consent prompt
+ * @param {{
+ *   name: string,
+ *   registry: ReturnType<typeof createCommandRegistry>,
+ *   kernel: ReturnType<typeof createKernelRuntime>,
+ *   discovery: { workspaceDir?: string, stateRoot: string, configPath: string },
+ *   stateRoot: string,
+ *   runId: string,
+ *   activePlugins: ActivePlugin[],
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins }) {
+  try {
+    if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
+    if (registry.match([name])) return
+    const head = name.split(' ')[0]
+
+    const selection = await computeBootSelection(discovery)
+    // A shadow collision makes real boot throw; there is no coherent
+    // plugin set to activate from, so leave the miss path to report.
+    if (selection.shadowing.length > 0) return
+    const activeNames = new Set(activePlugins.map((p) => p.name))
+    const inactive = selection.selectedManifests.filter(
+      (m) => !activeNames.has(/** @type {PluginName} */ (m.manifest.name))
+    )
+    const owner = inactive.find((entry) =>
+      (entry.manifest.contributes?.commands ?? []).some(
+        (cmd) => cmd && typeof cmd.name === 'string' && cmd.name.split(' ')[0] === head
+      )
+    )
+    if (!owner) return
+
+    // Dependency closure of the owner among the config-selected inactive
+    // plugins: requires.plugins by name, requires.capabilities through the
+    // manifest-declared provider. Providers that are already active need no
+    // activation (their capabilities are in the runtime registry).
+    const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
+    /** @type {Map<string, string>} */
+    const providerByCap = new Map()
+    for (const m of [...activePlugins.map((p) => p.manifest), ...inactive.map((e) => e.manifest)]) {
+      for (const cap of Object.keys(m.provides?.capabilities ?? {})) providerByCap.set(cap, m.name)
+    }
+    /** @type {Set<string>} */
+    const closure = new Set()
+    const queue = [owner.manifest.name]
+    while (queue.length > 0) {
+      const current = /** @type {string} */ (queue.shift())
+      if (closure.has(current) || activeNames.has(current)) continue
+      const entry = byName.get(current)
+      if (!entry) continue
+      closure.add(current)
+      for (const dep of Object.keys(entry.manifest.requires?.plugins ?? {})) queue.push(dep)
+      for (const cap of Object.keys(entry.manifest.requires?.capabilities ?? {})) {
+        const provider = providerByCap.get(cap)
+        if (provider) queue.push(provider)
+      }
+    }
+
+    // Order the closure the same way boot would: dependency resolution over
+    // the union of active and closure manifests, so capabilities provided by
+    // already-active plugins count as satisfied. A closure plugin the
+    // resolution eliminates stays inactive; the miss path reports it.
+    const resolution = await resolveDependencies([
+      ...activePlugins.map((p) => p.manifest),
+      ...[...closure].map((n) => /** @type {LoadedManifest} */ (byName.get(n)).manifest),
+    ])
+    const orderIndex = new Map(resolution.order.map((n, i) => [n, i]))
+    if (!orderIndex.has(owner.manifest.name)) return
+    const configByName = new Map(
+      (selection.layered.effective?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
+    )
+    const entries = [...closure]
+      .filter((n) => orderIndex.has(n))
+      .sort((a, b) => /** @type {number} */ (orderIndex.get(a)) - /** @type {number} */ (orderIndex.get(b)))
+      .map((n) => /** @type {LoadedManifest} */ (byName.get(n)))
+      .map((entry) => ({
+        manifest: entry.manifest,
+        rootDir: entry.rootDir,
+        config: /** @type {JsonObject} */ (configByName.get(entry.manifest.name) ?? {}),
+      }))
+    if (entries.length === 0) return
+
+    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    for (const r of result.results) {
+      if (r.ok) activePlugins.push(r.plugin)
+    }
+    getLogger('cmd-dispatch').info('dispatch.seam_activate', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      owner_plugin: owner.manifest.name,
+      plugins_activated: result.results.filter((r) => r.ok).length,
+      plugins_failed: result.results.filter((r) => !r.ok).length,
+    })
+  } catch {
+    // Best-effort: the dispatch miss path reports unavailable + repair.
+  }
 }
 
 /**

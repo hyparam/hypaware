@@ -138,6 +138,37 @@ so putting the prompt in the command covers the standalone and wizard
 surfaces with one implementation. This follows LLP 0131's existing rule
 that the wizard adds no second implementation of a configure command.
 
+<a id="seam-fresh-activation"></a>**The seam activates a freshly
+config-enabled command plugin, so the wizard can reach the gate at all.**
+The gate living in the command only covers the wizard if the wizard can
+dispatch the command. It could not: `hyp init` boots the `all-available`
+profile, which by construction never activates a `V1_EXCLUDED_FROM_DEFAULT`
+plugin, and the activation set (with the command registry it populated) is
+fixed at process start, while the picker writes its composed config later
+in that same process. So on a first-run init the configure phase's
+in-process `claude-desktop install` missed dispatch, exited 2, and
+drop-on-failure printed the catch-up hint - the consent prompt was
+unreachable from the surface it was built for, and only the standalone
+re-run ever showed it.
+
+The fix follows the entrypoint gate's rule ([LLP 0140](./0140-transcript-entrypoint-ownership.decision.md)):
+only a fresh read of the config reflects a write that happened after boot.
+On a registry miss, `ctx.commands.run` re-reads the effective config from
+disk and, when a `config`-profile boot of that fresh read would select the
+plugin declaring the missed command's head token, activates it into the
+running kernel together with its config-selected dependency closure, in
+dependency order (for the Desktop row: `@hypaware/claude-account` first,
+which provides the credential capability, then `@hypaware/claude-desktop`;
+the gateway is already active under `all-available`). This is scoped to the
+in-process seam: a shell-invoked `hyp <cmd>` boots with the `config`
+profile, which already activates config-listed plugins before dispatch.
+The exclusion list still governs defaults - nothing activates that the
+effective config does not name, and the config names Desktop's plugins only
+because the row was ticked. Activation is not the gate; the prompt is, and
+it still defaults to no. On any failure the seam stays silent and the
+dispatch miss path reports unavailable-plus-repair exactly as before
+([LLP 0098](./0098-inactive-not-unknown-dispatch-miss.decision.md)).
+
 <a id="print-commands-applies-nothing"></a>**`--print-commands` applies
 nothing, including the non-privileged steps.** It previously honored the
 flag only for the plist write and the restart, still running the credential
