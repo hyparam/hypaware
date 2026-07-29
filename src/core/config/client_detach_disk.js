@@ -179,8 +179,18 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
           if (key === 'ANTHROPIC_BASE_URL') removed = typeof current === 'string' ? current : String(current)
           delete envObj[key]
         }
-      } else if (typeof current === 'string') {
+      } else if (key in envObj) {
         // Overridden externally after we attached - never clobber a user edit.
+        //
+        // Presence, not type, decides that a key was left in place: the same
+        // rule the attach-side ownership guard follows. A user who hand-edited
+        // our `ENABLE_TOOL_SEARCH` to a JSON boolean still has a key sitting on
+        // disk after a detach that reports success, which is exactly the case
+        // this notice exists to tell them about; a type test would swallow it.
+        // A key they deleted outright is absent, so nothing was left in place
+        // and nothing is reported - which is why this is `key in envObj` and
+        // not a bare `else`. The `json_path` undo below already tests presence
+        // (`current !== undefined`) for the same reason.
         warnings.push(`${key} was overridden externally; leaving in place`)
       }
     }

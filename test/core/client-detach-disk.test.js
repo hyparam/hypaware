@@ -684,3 +684,54 @@ test('claude undo reports a single overridden key without the join separator', a
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// Issue #448 finding 1, undo side. The attach guard now decides ownership by
+// presence rather than by JSON type, which makes a hand-written boolean at a
+// managed key a value the tree expects to meet. The undo's override notice was
+// still type-gated (`typeof current === 'string'`), so it stayed silent about
+// exactly that value: the key survived the detach - correctly - but the
+// operator was never told a managed key was left behind on disk.
+test('claude undo reports a managed key the user overrode with a non-string', async () => {
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({}, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    // The user re-points a key attach owns, writing JSON's own `false` rather
+    // than the string Claude Code reads.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'true')
+    attached.env.ENABLE_TOOL_SEARCH = false
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.warning, 'ENABLE_TOOL_SEARCH was overridden externally; leaving in place')
+
+    // Never-clobber is unchanged: the user's `false` survives untouched.
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.ENABLE_TOOL_SEARCH, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The other side of that predicate: presence is the test, so a managed key the
+// user *deleted* is not "left in place" and must not be reported. This is why
+// the notice is gated on the key still being there and not on a bare `else`.
+test('claude undo stays silent about a managed key the user deleted outright', async () => {
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({}, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    delete attached.env.ENABLE_TOOL_SEARCH
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal('warning' in result, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
