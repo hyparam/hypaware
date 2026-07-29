@@ -179,7 +179,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
           if (key === 'ANTHROPIC_BASE_URL') removed = typeof current === 'string' ? current : String(current)
           delete envObj[key]
         }
-      } else if (key in envObj) {
+      } else if (Object.hasOwn(envObj, key)) {
         // Overridden externally after we attached - never clobber a user edit.
         //
         // Presence, not type, decides that a key was left in place: the same
@@ -188,9 +188,15 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
         // disk after a detach that reports success, which is exactly the case
         // this notice exists to tell them about; a type test would swallow it.
         // A key they deleted outright is absent, so nothing was left in place
-        // and nothing is reported - which is why this is `key in envObj` and
-        // not a bare `else`. The `json_path` undo below already tests presence
-        // (`current !== undefined`) for the same reason.
+        // and nothing is reported - which is why this is a presence test and
+        // not a bare `else`.
+        //
+        // `Object.hasOwn`, not `key in`: this loop's keys come off disk, from
+        // whatever `managed.env` a plugin's attach recorded, so an inherited
+        // `Object.prototype` name (`toString`, `constructor`) would satisfy
+        // `in` and report a key that is not on disk at all - the exact false
+        // report the presence test exists to prevent. The attach-side guard
+        // can use `in` because its keys are in-tree literals.
         warnings.push(`${key} was overridden externally; leaving in place`)
       }
     }
@@ -345,7 +351,15 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
       removed = typeof current === 'string' ? current : String(current)
       delete envObj.ANTHROPIC_BASE_URL
-    } else if (typeof current === 'string') {
+    } else if (Object.hasOwn(envObj, 'ANTHROPIC_BASE_URL')) {
+      // Presence, not type - the same rule the record-driven undo above
+      // follows. A legacy marker meets settings this tree never wrote, so the
+      // value at the key is whatever a hand edit left there: `null` or `false`
+      // is a user deliberately switching the base URL off, and it survives the
+      // detach (correctly) but used to survive it silently, because a `typeof
+      // current === 'string'` gate swallowed the notice for exactly the values
+      // most likely to be deliberate. The key absent is still silent - nothing
+      // was left in place to report.
       warning = 'ANTHROPIC_BASE_URL was overridden externally; leaving in place'
     }
     if (Object.keys(envObj).length === 0) delete value.env

@@ -735,3 +735,76 @@ test('claude undo stays silent about a managed key the user deleted outright', a
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// Round 2, third instance of the same bug class, in the legacy (pre-record)
+// branch of this file. `detachLegacyJsonMarker` gated its never-clobber notice
+// on `typeof current === 'string'`, so a legacy marker meeting an
+// ANTHROPIC_BASE_URL the user had switched off with JSON's `false`/`null` left
+// the key on disk - correctly - and said nothing. Legacy markers are reversed
+// by convention rather than by a record, so they are exactly the case that
+// meets settings this tree never wrote.
+test('claude undo of a LEGACY marker reports a base URL the user overrode with a non-string', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: { ANTHROPIC_BASE_URL: false, ANTHROPIC_API_KEY: 'sk-x' }, // user switched it off
+      _hypaware: { version: '0.2.0', port: 4123 }, // legacy shape, no managed record
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.warning, 'ANTHROPIC_BASE_URL was overridden externally; leaving in place')
+
+    // Never-clobber holds: the user's `false` is byte-identical afterwards.
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The other direction on the legacy branch: absent is not "left in place".
+// Pins the predicate against widening to a bare `else`.
+test('claude undo of a LEGACY marker stays silent when the base URL is absent', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: { ANTHROPIC_API_KEY: 'sk-x' }, // no base URL at all
+      _hypaware: { version: '0.2.0', port: 4123 },
+    }
+    await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal('warning' in result, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The record-driven undo reads its key names off disk, so the presence test has
+// to be an *own*-property test. With `key in envObj` a marker recording a
+// managed env key named after an `Object.prototype` member reported it as
+// "left in place" while it was not on disk at all - the false report the
+// presence test exists to prevent. Third-party plugins supply this record; core
+// must not trust its key names.
+test('claude undo does not report an Object.prototype-named managed key that is absent from settings', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: { ANTHROPIC_API_KEY: 'sk-x' },
+      _hypaware: { version: '0.2.0', managed: { env: { toString: 'x', constructor: 'y' } } },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal('warning' in result, false)
+
+    // Nothing was touched on the way past, either.
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.deepEqual(parsed.env, { ANTHROPIC_API_KEY: 'sk-x' })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
