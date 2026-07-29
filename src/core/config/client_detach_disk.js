@@ -155,8 +155,11 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   let removed
   /** @type {string | undefined} */
   let restoredValue
-  /** @type {string | undefined} */
-  let warning
+  // One notice per externally-overridden key: a single reassigned string would
+  // report only the last one, hiding the earlier keys we left in place.
+  // @ref LLP 0045#never-clobber-a-user-edit-report-every-override-not-just-the-last [implements]: accumulate the per-key notices, join them into the one `warning` field
+  /** @type {string[]} */
+  const warnings = []
 
   if (isPlainObject(value.env)) {
     const envObj = /** @type {Record<string, unknown>} */ (value.env)
@@ -177,8 +180,8 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
           delete envObj[key]
         }
       } else if (typeof current === 'string') {
-        // Overridden externally after we attached — never clobber a user edit.
-        warning = `${key} was overridden externally; leaving in place`
+        // Overridden externally after we attached - never clobber a user edit.
+        warnings.push(`${key} was overridden externally; leaving in place`)
       }
     }
     if (Object.keys(envObj).length === 0) delete value.env
@@ -186,12 +189,29 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
 
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
+  const warning = joinWarnings(warnings)
+
   /** @type {DetachFromDiskResult} */
   const result = { changed: true, settingsPath }
   if (removed !== undefined) result.removed = removed
   if (restoredValue !== undefined) result.restoredValue = restoredValue
   if (warning !== undefined) result.warning = warning
   return result
+}
+
+/**
+ * Fold the per-key never-clobber notices into the single
+ * `DetachFromDiskResult.warning` string, `undefined` when there are none.
+ *
+ * The field stays one human-readable string (callers log it as `detail`), but
+ * it now carries every key the undo left in place, not just whichever one the
+ * loop happened to visit last.
+ *
+ * @param {string[]} warnings
+ * @returns {string | undefined}
+ */
+function joinWarnings(warnings) {
+  return warnings.length === 0 ? undefined : warnings.join('; ')
 }
 
 /**
@@ -424,8 +444,11 @@ async function detachJsonPathMarker({ settingsPath, markerPath, recordPath, fs }
   let removed
   /** @type {string | undefined} */
   let restoredValue
-  /** @type {string | undefined} */
-  let warning
+  // Same per-key accumulation the json branch does: a record with two `set`
+  // entries that were both overridden must name both, not just the last.
+  // @ref LLP 0045#never-clobber-a-user-edit-report-every-override-not-just-the-last [implements]: accumulate the per-entry notices, join them into the one `warning` field
+  /** @type {string[]} */
+  const warnings = []
 
   // Managed values are JSON primitives (model-id strings), so strict
   // equality is the "still ours" check, exactly like the json branch's
@@ -444,7 +467,7 @@ async function detachJsonPathMarker({ settingsPath, markerPath, recordPath, fs }
       }
     } else if (current !== undefined) {
       // Overridden externally after we attached - never clobber a user edit.
-      warning = `${entry.path} was overridden externally; leaving in place`
+      warnings.push(`${entry.path} was overridden externally; leaving in place`)
     }
     // An externally-deleted leaf (current undefined) needs no reversal.
   }
@@ -473,6 +496,8 @@ async function detachJsonPathMarker({ settingsPath, markerPath, recordPath, fs }
   }
 
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
+
+  const warning = joinWarnings(warnings)
 
   /** @type {DetachFromDiskResult} */
   const result = { changed: true, settingsPath }

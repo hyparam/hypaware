@@ -647,7 +647,11 @@ export interface DetachFromDiskResult {
   removed?: string
   /** The prior value restored from the undo record. */
   restoredValue?: string
-  /** Set when the managed value was overridden externally and left in place. */
+  /**
+   * Set when a managed value was overridden externally and left in place. One
+   * notice per overridden key, joined with `; ` when the undo left more than
+   * one behind (LLP 0045 §never-clobber-a-user-edit).
+   */
   warning?: string
 }
 

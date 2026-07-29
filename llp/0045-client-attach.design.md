@@ -238,6 +238,27 @@ and how to replay an undo record, not "Claude" vs "Codex". The split is clean: a
 rich *write* (attach) needs the adapter (`ctx.clients`, Part 2); the *undo* is a
 marker-guided removal core does from disk.
 
+#### Never clobber a user edit: report every override, not just the last
+
+The undo only reverses values that are **still the ones we wrote**. A managed
+key whose live value no longer matches the record was re-pointed by the user
+after we attached, so the undo leaves it in place and reports it through
+`DetachFromDiskResult.warning`, which the attach handler logs as
+`client_action.attach_reverse_warning`.
+
+An undo record can carry **several** managed keys (Claude's marker already
+records `ANTHROPIC_BASE_URL` plus each managed env addition; a `json_path`
+record can carry several `set` entries), and they can be overridden
+independently. The notice is therefore **per key**: core accumulates one
+message for each key it left in place and joins them with `; ` into the single
+`warning` field. Reporting only the last key visited would silently hide the
+others, which is exactly the case an operator needs told, since those keys stay
+on disk after a detach that otherwise claims success.
+
+`warning` stays a single human-readable string rather than becoming an array:
+its one consumer logs it as a `detail` attribute, and the field is part of the
+published `DetachFromDiskResult` contract.
+
 #### ENABLE_TOOL_SEARCH: keep deferred tool loading on through the gateway
 
 Pointing Claude Code at the gateway has a hidden cost. When `ANTHROPIC_BASE_URL`

@@ -536,3 +536,54 @@ test('the atomic write unlinks the temp file on a partial write — no orphaned 
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+test('claude undo names EVERY externally-overridden managed key in the warning, not just the last', async () => {
+  const home = await stageHome()
+  try {
+    // Issue #440 finding 2: `warning` was a single reassigned string inside the
+    // per-key loop, so with two managed env keys overridden only the last key's
+    // notice survived and the operator was never told about the first.
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({}, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    // The user re-points both managed keys after we attached.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'true') // attach owns it
+    attached.env.ANTHROPIC_BASE_URL = 'https://someone-else.example'
+    attached.env.ENABLE_TOOL_SEARCH = 'false'
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    const warning = String(result.warning)
+    assert.match(warning, /ANTHROPIC_BASE_URL was overridden externally/)
+    assert.match(warning, /ENABLE_TOOL_SEARCH was overridden externally/)
+
+    // The protection itself is unchanged: both user values survive the undo.
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal('_hypaware' in parsed, false)
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://someone-else.example')
+    assert.equal(parsed.env.ENABLE_TOOL_SEARCH, 'false')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo reports a single overridden key without the join separator', async () => {
+  const home = await stageHome()
+  try {
+    // The one-notice shape is unchanged by the accumulation: no trailing or
+    // leading `; ` when exactly one managed key was overridden.
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({}, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    attached.env.ANTHROPIC_BASE_URL = 'https://someone-else.example'
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.warning, 'ANTHROPIC_BASE_URL was overridden externally; leaving in place')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
