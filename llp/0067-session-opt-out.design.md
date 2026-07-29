@@ -72,6 +72,7 @@ callback. One route in V1:
 
 | Method | Path | Effect |
 |---|---|---|
+| `GET` | `/_hypaware/ignore/session?session_id=<id>` | report membership; mutates nothing |
 | `POST` | `/_hypaware/ignore/session` | add `session_id` to the set |
 | `DELETE` | `/_hypaware/ignore/session` | remove `session_id` from the set |
 
@@ -87,6 +88,22 @@ callback. One route in V1:
   ([LLP 0066 §enforcement](./0066-session-opt-out.spec.md#enforcement)). No
   parsing of provider bodies or headers happens here, so
   [LLP 0050](./0050-ignore-enforced-in-adapters.decision.md) is untouched.
+
+### The read route {#status-endpoint}
+
+`GET` carries the id in the query string rather than a body, because a read has
+no body. `URLSearchParams` on both ends round-trips the token byte-exactly, so
+the R5 raw-token discipline (the route stores and looks up the id **verbatim**,
+never trimmed or normalized) holds for reads exactly as it does for writes.
+A missing or blank `session_id` is a 400; the response shape is the same
+`{ session_id, ignored, total }` all three verbs return, so one client parser
+serves the whole route.
+
+`GET` joins `allow: GET, POST, DELETE` on the 405 path.
+
+@ref LLP 0066#readable [implements]: a privacy control that can only be
+written cannot be verified. Adding the reader is what turns both fail-open
+transitions (restart, changed session id) from silent into detectable.
 
 ## The ignored-session set and its lifetime {#set}
 
@@ -195,6 +212,70 @@ Log shape mirrors Claude: `plugin.codex.usage_policy_drop` with
 customer content — unlike `cwd`, which stays hashed in the `.hypignore` drop
 logs).
 
+## The CLI surface: `hyp session ignore` / `unignore` / `status` {#cli}
+
+The gateway plugin owns `/_hypaware/ignore/session`, so it owns the verbs over
+it ([LLP 0003](./0003-core-vs-plugin-surface.spec.md)):
+
+```
+hyp session ignore   [session-id] [--json]   # POST
+hyp session unignore [session-id] [--json]   # DELETE
+hyp session status   [session-id] [--json]   # GET
+```
+
+Deliberately **not** `hyp ignore --session`:
+[LLP 0110](./0110-hyp-policy-verb.issue.md) diagnosed exactly that shape
+("the verb no longer names the action, it names the store the flag writes to")
+and left bare `hyp ignore <path>` as the honest `.hypignore` dotfile author.
+As a plugin-contributed group, `hyp session` also inherits LLP 0098/0099's
+inactive-plugin `repair:` line when the gateway is not in the active config.
+
+One client-agnostic verb group replaces per-client skill bodies: the Codex
+plugin ships no `hypaware-ignore` skill, so before this verb a Codex user had
+working enforcement and no front door.
+
+### Exit codes make the fail-closed distinction machine-readable {#exit-codes}
+
+`hyp session status` is a gate, not a pretty-printer, so the three answers get
+three codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | confirmed **ignored** - the gateway is dropping this session |
+| `1` | confirmed **not ignored** - this session is being recorded |
+| `2` | usage error |
+| `3` | **unknown** - the check could not be completed |
+
+`--json` reports `status` as one of `ignored`, `not_ignored`, `unknown`, with
+`ignored: true | false | null`. `null` is load-bearing: an unreachable gateway
+must never render as `false`
+([LLP 0066 R10](./0066-session-opt-out.spec.md#requirements)). Every output
+mode also names `hyp policy show` as the folder governor this verb does not
+cover (R11 / R7).
+
+### Endpoint resolution: disk, then config, never a guess {#cli-endpoint}
+
+The daemon's live bound port from `status.json` wins
+([LLP 0086](./0086-attach-tracks-ephemeral-port.decision.md), liveness-gated), a
+pinned `listen` is the fallback, and "nothing resolvable" is an error - not the
+stale hardcoded `http://127.0.0.1:8787` the skill bodies still carry (#431).
+Under LLP 0114 an unpinned gateway may bind an ephemeral fallback port, so only
+the running daemon knows the proven one.
+
+### Session-id resolution {#cli-session-id}
+
+An explicit argument wins. Otherwise `CLAUDE_CODE_SESSION_ID`. Otherwise Codex,
+which exposes no equivalent variable: the id lives on disk in
+`$CODEX_HOME/sessions/**/rollout-<ts>-<uuid>.jsonl`, whose first `session_meta`
+line carries `payload.id` and `payload.cwd`. The verb selects the rollout whose
+`payload.cwd` equals the invocation cwd.
+
+**It refuses on ambiguity** - several cwd-matching rollouts, or none - with a
+nonzero exit naming the candidates, rather than taking newest-by-mtime the way
+the `hypaware-privacy` skill body does. Guessing here would opt out the wrong
+session while telling the user they are covered: the same fail-open shape this
+change exists to remove.
+
 ### What is deliberately not covered
 
 - **Live LLM call untouched (R6):** the drop runs at projection time, after
@@ -217,8 +298,16 @@ Traditional tests (root `test/`, alongside the existing suites):
 
 - `test/plugins/ai-gateway-control-route.test.js` (new): POST adds +
   idempotent re-POST, DELETE removes + idempotent, `.total` correct across a
-  sequence; 400 malformed/missing `session_id`; 405 wrong method; 404 unknown
-  `/_hypaware/*` path; oversized body 413.
+  sequence; 400 malformed/missing `session_id`; 405 wrong method (`allow:
+  GET, POST, DELETE`); 404 unknown `/_hypaware/*` path; oversized body 413.
+- `test/plugins/ai-gateway-session-status.test.js` (new, R9-R11): `GET`
+  reports membership and round-trips the token verbatim; a fresh (restarted)
+  set reports `ignored: false` where before the transition was unobservable;
+  `hyp session status` distinguishes ignored / not_ignored / unknown, reports
+  `ignored: null` and a nonzero exit for an unreachable gateway, an
+  unresolvable endpoint, and an unresolvable session id, and always names
+  `hyp policy show`; the Codex rollout resolver picks the unique cwd match and
+  refuses when several or none match.
 - `test/plugins/ai-gateway-proxy-routing.test.js` (extend): with a catch-all
   (`/`) upstream configured, `/_hypaware/ignore/session` is handled locally
   and never forwarded (R2); no exchange is started for a control request.
@@ -253,6 +342,9 @@ rules.
 |------|-----------|
 | `ai-gateway/src/proxy.js` control short-circuit | `@ref LLP 0066#control-path [implements]` |
 | `ai-gateway/src/control.js` route handler | `@ref LLP 0066#control-path [implements]` |
+| `ai-gateway/src/control.js` `GET` read branch | `@ref LLP 0066#readable [implements]` |
+| `ai-gateway/src/session_command.js` fail-closed CLI reader | `@ref LLP 0066#readable [implements]` / `@ref LLP 0067#cli [implements]` |
+| `ai-gateway/src/index.js` `session` verb group | `@ref LLP 0067#cli [implements]` |
 | `ai-gateway/src/api.js` `ignoredSessions` on `GatewayState` | `@ref LLP 0066#ephemeral` |
 | claude/codex projector session drop | `@ref LLP 0066#enforcement [implements]` (alongside the existing `@ref LLP 0050` at the same seam) |
 | smoke `session_optout_capture_drop` | `@ref LLP 0066#requirements [tests]` |

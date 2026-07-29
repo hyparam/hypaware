@@ -17,6 +17,11 @@
     "sources": [{ "name": "ai-gateway" }],
     "datasets": [{ "name": "ai_gateway_messages", "attribution_column": "client_name" }],
     "config_sections": [{ "section": "ai-gateway" }],
+    "commands": [
+      { "name": "session ignore", "summary": "Stop recording this AI session (in-memory, until the gateway restarts)" },
+      { "name": "session unignore", "summary": "Resume recording this AI session" },
+      { "name": "session status", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
+    ],
     "picker": [
       {
         "name": "raw-anthropic",

@@ -122,6 +122,39 @@ a restart. This is accepted, not a defect: the opt-out is deliberately a
 lightweight session convenience, and the committable, durable mechanism is
 `.hypignore` ([LLP 0049](./0049-hypignore-usage-policy.spec.md)).
 
+## The set MUST be readable, and a read that fails is `unknown` {#readable}
+
+Ephemerality (above) has a consequence the original spec left unhandled: the
+opt-out can stop applying while the user still believes it holds. Two ways:
+
+1. **Gateway restart** drops the set (accepted, above).
+2. **The session id changes under the client.** The drop keys on `session_id`
+   ([scope](#scope)); if the client ever mints a new id for what the user
+   experiences as the same conversation (a resume, a fork), the in-memory entry
+   no longer matches and recording resumes.
+
+Neither is a defect in the *mechanism*. Both were a defect in the *surface*: the
+control route only accepted writes, so there was no way to ask "am I still
+opted out?" A privacy control the user cannot verify fails open silently, which
+matters most where the opt-out is load-bearing
+([LLP 0100](./0100-enrollment-privacy-review.spec.md) R3 opts the session out
+*before* surveying the most sensitive content on the machine).
+
+So the set gains a reader, and the reader is **fail-closed**: a check that
+cannot be completed (gateway unreachable, no endpoint resolvable, no session id
+resolvable) reports **`unknown`**, never "not ignored". Conflating those two is
+the specific defect ([issue #432](https://github.com/hyparam/hypaware/issues/432)):
+"I could not ask" and "I asked, and you are being recorded" are different
+answers, and only one of them is safe to treat as a completed check.
+
+The reader reports **the session set only**. `.hypignore` is an independent
+governor (R7), so the reader must *name* the other governor rather than omit
+it: a user inside a `.hypignore`d repo must not read "not ignored" as "I am
+being recorded."
+
+This is observability of an ephemeral control, not durability. Persisting the
+set remains [non-goal 2](#non-goals).
+
 ## Non-goals {#non-goals}
 
 1. **Per-thread (`conversation_id`) granularity.** Deferred. `conversation_id`
@@ -169,6 +202,15 @@ lightweight session convenience, and the committable, durable mechanism is
 - **R8.** Tests MUST cover Claude (session equals conversation), Codex (whole
   session versus a single thread, documenting the over-drop), and
   restart-drops-state.
+- **R9.** The ignored-session set MUST be readable: a non-mutating read of one
+  `session_id` MUST report current membership, so an opt-out that stopped
+  applying (restart, or a changed session id) is discoverable rather than
+  silent (see [readable](#readable)).
+- **R10.** The read MUST fail closed. When the answer cannot be established,
+  the reported state MUST be `unknown` with a nonzero exit, distinct from a
+  confirmed "not ignored"; it MUST NOT degrade to `ignored: false`.
+- **R11.** The reader MUST name the folder governor (`.hypignore`) it does not
+  cover, since either mechanism independently suppresses (R7).
 
 ## `@ref` annotations code will carry {#refs}
 
@@ -177,3 +219,5 @@ lightweight session convenience, and the committable, durable mechanism is
 - The adapter projector drop keyed on `session_id`:
   `@ref LLP 0066#enforcement [implements]`, alongside the existing
   `@ref LLP 0050` on the same drop site.
+- The read route and the fail-closed CLI reader: `@ref LLP 0066#readable
+  [implements]`.

@@ -160,6 +160,26 @@ export interface GatewayState {
   ignoredSessions: Set<string>
 }
 
+/**
+ * Outcome of resolving which session a `hyp session <verb>` invocation is
+ * about. Failure is an explicit variant, never a fallback id: an unresolved
+ * session must fail closed rather than act on a guess.
+ * @ref LLP 0067#cli
+ */
+export type SessionIdResolution =
+  | { ok: true; sessionId: string; source: 'argument' | 'claude_env' | 'codex_rollout' }
+  | { ok: false; error: string }
+
+/**
+ * Outcome of resolving the local gateway's control endpoint for
+ * `hyp session <verb>`: the daemon's proven bound port, else a pinned
+ * `listen`, else an error. Never a guessed default port.
+ * @ref LLP 0086#endpoint-discovery
+ */
+export type SessionEndpointResolution =
+  | { ok: true; endpoint: string; source: 'daemon_status' | 'config_listen' }
+  | { ok: false; error: string }
+
 export interface AiGatewayRuntime {
   ctx: PluginActivationContext
   state: GatewayState
