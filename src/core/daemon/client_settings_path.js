@@ -51,6 +51,16 @@ export class ClientSettingsPathError extends Error {
  * their own base - `$HOME` normally, `$<CLIENT>_HOME` when the override is
  * set, since the override is exactly a licence to leave `$HOME`.
  *
+ * That containment check is **lexical**, not `realpath`-based: a config home
+ * that is itself a symlink out of `$HOME` (`~/.codex -> /elsewhere`) still
+ * passes. Deliberate, and the boundary of what this guard promises. The field
+ * is resolved before the file has to exist (attach writes it, the picker only
+ * stats its directory), so `realpath` would fail on exactly the paths that
+ * matter most; and planting that symlink already requires write access to
+ * `$HOME`, at which point the settings file is the attacker's anyway. What the
+ * guard stops is a *manifest value* aiming core at a file outside the base -
+ * which is the untrusted input, since `contributes.client` is unvalidated.
+ *
  * Pure (path-only) so both the daemon status attach-probe and the
  * first-run source detector can share it without pulling in either
  * module's heavier import graph.
@@ -81,22 +91,38 @@ export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir
 }
 
 /**
- * Assert that `resolved` did not climb out of `base`, and return it. Compared
- * after `path.resolve` so a `..` that normalizes away (`.codex/../config`) is
- * fine while one that escapes is not. `resolved === base` is left alone: it is
- * the pre-existing reading of an empty `settings_file`, and it points inside
- * the base, not out of it.
+ * Assert that `joined` did not climb out of `base`, and return the resolved
+ * form of it. Compared after `path.resolve` so a `..` that normalizes away
+ * (`.codex/../config`) is fine while one that escapes is not.
+ *
+ * Two things this comparison is careful about:
+ *
+ * - The `root + path.sep` suffix is load-bearing. A bare
+ *   `target.startsWith(root)` admits any sibling whose name merely *starts*
+ *   with the base's (`$HOME` of `/home/u` would accept `/home/username/x`),
+ *   which is the classic way a containment check is silently wrong.
+ * - The **checked** string is the one **returned**. Returning the raw
+ *   `path.join` output instead would hand back a value that was never the one
+ *   validated whenever `base` is relative (`CODEX_HOME=..` yields the relative
+ *   `../config.toml`, resolved against whatever `process.cwd()` happens to be
+ *   at read time rather than at check time). This function's whole contract is
+ *   an absolute path, so return the absolute one.
+ *
+ * `target === root` is left alone: an empty or fully-normalizing-away
+ * `settings_file` points *at* the base, not out of it, which is the
+ * pre-existing reading. It is not silent either - the callers then read a
+ * directory and surface the `EISDIR`.
  *
  * @param {string} clientName
  * @param {string} settingsFile  the declared value, named in the error rather than the resolved path
  * @param {string} base
- * @param {string} resolved
+ * @param {string} joined
  * @returns {string}
- * @throws {ClientSettingsPathError} when `resolved` falls outside `base`
+ * @throws {ClientSettingsPathError} when `joined` falls outside `base`
  */
-function withinBase(clientName, settingsFile, base, resolved) {
+function withinBase(clientName, settingsFile, base, joined) {
   const root = path.resolve(base)
-  const target = path.resolve(resolved)
+  const target = path.resolve(joined)
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new ClientSettingsPathError(
       `client '${clientName}' declares a settings_file '${settingsFile}' that resolves outside ` +
@@ -104,5 +130,5 @@ function withinBase(clientName, settingsFile, base, resolved) {
       { code: 'settings_file_escapes_base' }
     )
   }
-  return resolved
+  return target
 }

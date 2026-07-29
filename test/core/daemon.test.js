@@ -139,6 +139,47 @@ test('resolveClientSettingsPath rejects a settings_file that climbs out of its b
   )
 })
 
+// The containment check compares against `base + sep`, and that suffix is the
+// whole check: a bare `startsWith(base)` admits every sibling whose name merely
+// begins with the base's, which is how this class of guard is usually wrong.
+// Without this case the suffix can be deleted and no test notices.
+// @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: a sibling directory sharing a prefix with the base is outside it
+test('resolveClientSettingsPath does not mistake a prefix-sharing sibling for the base', () => {
+  for (const [home, escaping] of [
+    ['/home/u', '../username/settings.json'],
+    ['/Users/hyp', '../hyp2/.codex/config.toml'],
+    ['/home/hyp', '../hypaware/.codex/config.toml'],
+  ]) {
+    assert.throws(
+      () => resolveClientSettingsPath('codex', escaping, {}, home),
+      (err) => {
+        assert.ok(err instanceof ClientSettingsPathError)
+        assert.equal(err.code, 'settings_file_escapes_base')
+        return true
+      },
+      `expected '${escaping}' to be rejected against base '${home}'`
+    )
+  }
+
+  // Same shape on the override branch, whose base is `$<CLIENT>_HOME`.
+  assert.throws(
+    () => resolveClientSettingsPath('codex', '.codex/../../ch-evil/config.toml', { CODEX_HOME: '/tmp/ch' }, '/Users/hyp'),
+    ClientSettingsPathError
+  )
+})
+
+// What the guard validates must be what it hands back. With a relative
+// `$<CLIENT>_HOME` the join produces a relative path, so returning it unchanged
+// would return a value re-resolved against `process.cwd()` at read time rather
+// than the one checked at call time - and the function's contract is an
+// absolute path.
+// @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: the checked path is the returned path
+test('resolveClientSettingsPath returns the absolute path it checked', () => {
+  const resolved = resolveClientSettingsPath('codex', '.codex/config.toml', { CODEX_HOME: 'relative-home' }, '/Users/hyp')
+  assert.ok(path.isAbsolute(resolved), `expected an absolute path, got '${resolved}'`)
+  assert.equal(resolved, path.resolve('relative-home', 'config.toml'))
+})
+
 // @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: the probe must not answer about a file the manifest never named
 test('probeClientAttachFromDescriptor errors on an absolute settings_file instead of probing $HOME', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-absolute-'))

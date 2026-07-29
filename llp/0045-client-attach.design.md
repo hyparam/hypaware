@@ -338,6 +338,29 @@ override is set, because the override is precisely a licence to leave `$HOME`.
 A `..` that normalizes away (`.codex/sub/../config.toml`) stays legal; the rule
 is about where the path lands, not which characters it contains.
 
+The containment test is **lexical** (`path.resolve` then a `base + separator`
+prefix test), and two properties of that are worth stating rather than
+rediscovering:
+
+- The separator in the prefix test is the check. Without it a sibling whose
+  name merely *starts* with the base's (`/home/username` against a `/home/u`
+  base) reads as contained.
+- The checked path is the returned path. A relative `$<CLIENT>_HOME` makes the
+  join relative, and handing that back would return something re-resolved
+  against `process.cwd()` at read time instead of the value validated at call
+  time. The resolver's contract is an absolute path, so it returns the absolute
+  one.
+
+It is deliberately **not** `realpath`-based, so a config home that is itself a
+symlink out of `$HOME` (`~/.codex -> /elsewhere`) still passes. That is the
+boundary of what the guard promises, and it is the right boundary: the field is
+resolved before the file must exist (attach *creates* it; the picker only stats
+its directory), so `realpath` would fail on precisely the paths that matter
+most, and planting that symlink already requires write access to `$HOME`, at
+which point the settings file is the attacker's regardless. The untrusted input
+here is the *manifest value* - `contributes.client` is unvalidated - and that is
+what the guard contains.
+
 Each caller turns the throw into whatever "observable" means on its surface, and
 none of them swallows it into a plain negative:
 
