@@ -401,6 +401,118 @@ This realizes [LLP 0044 §Conflict](./0044-client-attach-on-join.decision.md#con
 ("back up & override, restore on leave") — the backup is the marker's undo
 record, and "leave" is the config-drop trigger (Part 5).
 
+#### `settings_file` is home-relative, and a violation is loud
+
+`attachProbe.settings_file` is **relative to `$HOME`** (`.codex/config.toml`),
+and its first segment is the client's config home, which a `$<CLIENT>_HOME` env
+override replaces. That was always the contract; it was only ever stated in
+`resolveClientSettingsPath`'s JSDoc, and never enforced.
+
+Unenforced, an **absolute** `settings_file` did not fail: `path.join(homeDir,
+...settingsFile.split('/'))` swallows the leading empty segment and re-anchors
+the path under `$HOME`, so
+`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` silently
+became `$HOME/Library/Managed Preferences/...`. The override branch was wrong
+the same way (`parts.slice(1)` assumes a relative first segment, so it drops the
+leading `/` and grafts the remainder onto `$<CLIENT>_HOME`). The probe then
+answered about a file the manifest never named, and the usual answer was ENOENT,
+which reads exactly like a correct "not attached". A probe reporting on the
+wrong file is worse than a probe that fails: a **wrong negative is
+indistinguishable from a right one**, which is how the Claude Desktop
+`attach_probe` defect (#444) stayed invisible.
+
+So the resolver **rejects** an absolute `settings_file`
+(`ClientSettingsPathError`, `code: 'settings_file_absolute'`) rather than
+honouring it. Rejecting, not honouring, because the `$<CLIENT>_HOME` override
+has no meaning for an absolute path: the override relocates a config *home*,
+which an absolute path does not have, so "honour it" would have to publish a
+second, silently-different resolution rule for the same field. Since this
+resolver is shared by the read side (the attach probe, the picker's
+`settings_file` detect) and the write side (the disk-driven undo above), a value
+core cannot resolve must fail rather than resolve to something else, or attach
+and detach can disagree about which file they own. The picker's absolute-literal
+needs are already served by the sibling `app_bundle` and `path` detect variants
+([LLP 0136](./0136-install-experience-overhaul.plan.md)), so no *picker row*
+loses expressiveness. `attach_probe` is the honest exception: it has only
+`settings_file` and no absolute sibling, so a client whose real settings surface
+is an absolute system path genuinely cannot declare one. That is not an
+oversight to route around, it is the same finding from the other side - such a
+file is not one the core probe/undo can read or replay anyway, which is why
+[#445](https://github.com/hyparam/hypaware/pull/445) deletes Claude Desktop's
+probe rather than respelling it.
+
+A leading `/` is only the spelling that got reported. `../../../etc/passwd` is
+the identical violation - it lands on a file the manifest never named, escapes
+`$HOME` just as completely, and (unlike the absolute case) survives the
+`isAbsolute` check - and it matters more here than in a read-only resolver
+because `detachClientFromDisk` *reads and rewrites* whatever it is handed, and
+`contributes.client` is unvalidated, so the value can arrive from a
+remotely-installed or org-pushed plugin. So the rule is enforced on the
+**resolved** path: it must stay under the base it resolved against
+(`ClientSettingsPathError`, `code: 'settings_file_escapes_base'`). Each branch
+is checked against its own base - `$HOME` normally, `$<CLIENT>_HOME` when the
+override is set, because the override is precisely a licence to leave `$HOME`.
+A `..` that normalizes away (`.codex/sub/../config.toml`) stays legal; the rule
+is about where the path lands, not which characters it contains.
+
+The containment test is **lexical** (`path.resolve` then a `base + separator`
+prefix test), and two properties of that are worth stating rather than
+rediscovering:
+
+- The separator in the prefix test is the check. Without it a sibling whose
+  name merely *starts* with the base's (`/home/username` against a `/home/u`
+  base) reads as contained.
+- The checked path is the returned path. A relative `$<CLIENT>_HOME` makes the
+  join relative, and handing that back would return something re-resolved
+  against `process.cwd()` at read time instead of the value validated at call
+  time. The resolver's contract is an absolute path, so it returns the absolute
+  one.
+
+It is deliberately **not** `realpath`-based, so a config home that is itself a
+symlink out of `$HOME` (`~/.codex -> /elsewhere`) still passes. That is the
+boundary of what the guard promises, and it is the right boundary: the field is
+resolved before the file must exist (attach *creates* it; the picker only stats
+its directory), so `realpath` would fail on precisely the paths that matter
+most, and planting that symlink already requires write access to `$HOME`, at
+which point the settings file is the attacker's regardless. The untrusted input
+here is the *manifest value* - `contributes.client` is unvalidated - and that is
+what the guard contains.
+
+Each caller turns the throw into whatever "observable" means on its surface, and
+none of them swallows it into a plain negative:
+
+- `probeClientAttachFromDescriptor` returns `{ attached: false, error }`, so
+  `hyp status` distinguishes a broken manifest from an unmarked settings file.
+  On **both** of its surfaces: `--json` carries the `error` field, and the text
+  renderer prints the message under the client's line and refuses to collapse an
+  errored client into the `clients: (none)` shorthand. A text surface that
+  rendered the same client as a plain `not attached` would have reinstated the
+  indistinguishable wrong negative one layer up from the probe.
+- `hyp detach` (the core undo and its `--dry-run` path) fails loudly: a client
+  whose settings file core cannot locate is one core must not claim to have
+  reversed.
+- The `hyp init` picker's detect probe keeps its documented best-effort stance
+  and degrades to "not present". Detection only seeds checkbox state, and every
+  user of it can still toggle the box.
+
+One honest caveat on the "one resolver" argument: it holds for everything
+**core** does (probe, picker detect, disk-driven undo), but the per-plugin
+*attach* write side is not routed through it. `@hypaware/openclaw` calls the
+shared resolver; `@hypaware/claude`'s `defaultSettingsPath` hardcodes
+`~/.claude/settings.json` and ignores `$CLAUDE_HOME`, and `@hypaware/codex`
+keeps its own `$CODEX_HOME` copy. So a `$CLAUDE_HOME` set today would already
+make attach and detach disagree, by a different mechanism than this section
+fixes. Not a regression and not addressed here: recorded so the next reader does
+not mistake "core resolves this field for read and write alike" for "every
+writer of this file agrees where it is".
+
+Validating this at **manifest load** would be better still (the plugin author
+learns at install, not at probe time), but `contributes.client` is not validated
+today at all, and a bundled manifest currently violates the rule. That is left
+to follow-up, sequenced after the Desktop manifest is corrected: adding the
+check first would take a shipped plugin out of the catalog to punish a defect
+already fixed elsewhere.
+
 ## Part 4 — Per-plugin `attach` config + status surface
 
 - **Config.** `attach.on_join` (boolean, default **true**) rides the client

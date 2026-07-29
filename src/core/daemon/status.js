@@ -950,13 +950,26 @@ function readRetention(config) {
  * search), and JSON-path (nested marker object lookup) formats.
  * Returns a probe result without importing any client plugin code.
  *
+ * A manifest whose `settings_file` breaks the home-relative contract
+ * resolves to no path at all, so the probe reports `error` rather than the
+ * plain `attached: false` it uses for a genuinely unmarked file. Reading
+ * "not attached" off a path the manifest never named is the one answer a
+ * probe must never give: it looks identical to a correct negative.
+ *
+ * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: an unresolvable settings_file is an error result, not a silent not-attached
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
  * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, error?: string }>}
  */
 export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
   const probe = descriptor.attachProbe
-  const settingsPath = resolveClientSettingsPath(descriptor.name, probe.settings_file, env, homeDir)
+  /** @type {string} */
+  let settingsPath
+  try {
+    settingsPath = resolveClientSettingsPath(descriptor.name, probe.settings_file, env, homeDir)
+  } catch (err) {
+    return { attached: false, error: err instanceof Error ? err.message : String(err) }
+  }
 
   try {
     const raw = await fsp.readFile(settingsPath, 'utf8')
