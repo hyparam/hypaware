@@ -1,48 +1,32 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, which hyp command to run, config and paths, joining a fleet, and the activity graph. Use for product and CLI orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for analyses use the hypaware-ai-*-report skills.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go". For querying recorded data use hypaware-query; for graph questions hypaware-graph; for team token analysis hypaware-ai-usage-report.
 ---
 
 # HypAware Reference
 
-Orientation for questions about HypAware itself: what it is, what it captures,
-how data moves, and which command does what. This is a conceptual map, not a
-flag reference. For the exact flags and behavior on *this* install, run
-`hyp --help` and `hyp <command> --help`; for "is it working right now?" run
-`hyp status` (add `--json` for the stable machine shape). Those live sources
-win over anything summarized here.
-
-Do not answer data questions from this skill. It names no dataset columns, JSON
-paths, or SQL - that all lives in the **hypaware-query** skill, which is the
-single source of truth for the recorded data format.
+What HypAware is, what it captures, where its data goes, and what is local-only
+versus opt-in. Data-format questions - dataset columns, JSON paths, SQL - belong
+to the **hypaware-query** skill, which owns that ground entirely.
 
 ## What HypAware is
 
-A modular logs and telemetry collector with a plugin-kernel architecture. It
-captures conversations and traffic from local AI clients (Claude Code, Codex),
-raw Anthropic / OpenAI API traffic, and OpenTelemetry logs / traces / metrics
-into a local query cache and optional Parquet exports.
-
-It runs fully local by default, with no central server required. A host can
-optionally join a fleet (`hyp join`) to forward its recordings to a central
-HypAware server. HypAware is part of HypStack, an open-source stack for AI
-observability.
+A modular logs and telemetry collector with a plugin-kernel architecture, part
+of HypStack, an open-source stack for AI observability. It captures the sources
+below into a local Iceberg-backed query cache that everything else reads from.
+What stays on the machine and what can leave is drawn under "What is opt-in".
 
 ## What it captures (sources)
 
-Any subset of these can be enabled at `hyp init`:
+`hyp init` picks any subset of `claude`, `codex`, `raw-anthropic`, `raw-openai`,
+and `otel`. For what is actually recording here, read it rather than infer it:
+`hyp status` marks each client configured/attached and prints a
+`syncing: … local-only: …` line, and `hyp policy list` enumerates folder
+markings.
 
-- `claude` - Claude Code conversations
-- `codex` - Codex conversations, from both the Codex CLI and Codex Desktop
-- `raw-anthropic` - raw Anthropic API traffic
-- `raw-openai` - raw OpenAI API traffic
-- `otel` - OpenTelemetry logs / traces / metrics
-
-A `.hypignore` file opts a directory subtree out of recording, but it only
-gates the `claude` and `codex` pathways (they supply a working directory to
-match against). It is a no-op for the `raw-anthropic` / `raw-openai` proxy and
-OTEL sources. Manage it with `hyp ignore` / `hyp unignore` (add `--check` to
-see what governs a path); run `hyp ignore --help` for flags.
+The rule neither command states: folder scoping works only for `claude` and
+`codex`, the sources that carry a working directory. `.hypignore` and `policy`
+markings are a no-op for the raw proxies and OTEL.
 
 ## How data flows (invariants)
 
@@ -57,51 +41,6 @@ see what governs a path); run `hyp ignore --help` for flags.
 - **Config is explicit.** The written config enumerates the chosen plugins;
   there is no implicit "use defaults" mode.
 
-## CLI command map
-
-The CLI is bound to both `hyp` and `hypaware`. Core commands:
-
-- `hyp status` - health snapshot: config path, daemon state, active plugins,
-  sources/sinks, attach state, retention, cache size, recent errors,
-  diagnostics with repair lines. The entry point for any "is it working?"
-  question.
-- `hyp init` - interactive walkthrough (or `--yes` non-interactive) that picks
-  sources, an export strategy, and a retention window, writes the config,
-  installs the daemon, and attaches selected clients.
-- `hyp query` - SQL over the local cache (and remote hosts via `--remote`).
-  Use the **hypaware-query** skill for this.
-- `hyp graph` - build and walk the activity graph: `project` materializes a
-  node/edge graph from captured data, `compact` folds duplicate rows, and
-  `neighbors <node>` walks out from a seed node. Contributed by the default-on
-  `@hypaware/context-graph` plugin.
-- `hyp attach` / `hyp detach` - wire a client (`claude`, `codex`) into the
-  local gateway, or remove only HypAware-managed settings. Idempotent and
-  reversible. `hyp unattach` is an alias of `detach`. `hyp attach codex`
-  covers Codex Desktop as well as the Codex CLI: both read the
-  `~/.codex/config.toml` it writes, and both write the `~/.codex/sessions`
-  history `hyp backfill codex` imports. Claude Desktop is the exception that
-  needs its own command (`hyp claude-desktop install`), because it exposes no
-  user-writable settings file. HypAware never parses the opaque
-  `~/Library/Application Support/Codex` app container, but that costs no
-  Codex Desktop history: the live and backfill routes above already carry it.
-- `hyp ignore` / `hyp unignore` - write or remove a `.hypignore` for a folder.
-- `hyp daemon` - lifecycle for the persistent user daemon: `install`, `start`,
-  `status`, `restart`, `stop`, `uninstall` (launchd on macOS, systemd `--user`
-  on Linux).
-- `hyp join` - enroll the host in a centrally-managed fleet.
-- `hyp remote` - manage remote HypAware query targets (`add`, `login`, `list`).
-- `hyp backfill` - import client history from registered backfill providers.
-- `hyp sink` - manage sink instances (`force`, `maintain`).
-- `hyp config` - inspect or validate the config.
-- `hyp mcp` - serve this host's read verbs as an MCP server over stdio.
-- `hyp smoke` - run a hermetic smoke flow.
-- `hyp version` - print the version.
-
-`logs`, `metrics`, and `traces` commands are contributed by the `@hypaware/otel`
-plugin, so they appear only when it is enabled. Plugin-contributed commands
-vary by install - trust `hyp --help` for the live inventory, and
-`hyp <command> --help` for exact subcommands and flags.
-
 ## Config and paths
 
 `HYP_HOME` defaults to `~/.hyp`; override by exporting it before invoking the
@@ -114,56 +53,43 @@ CLI or daemon.
 - `<HYP_HOME>/hypaware/logs/daemon.{out,err}.log` - daemon stdout / stderr
 - `<HYP_HOME>/exports/` - local Parquet exports (when the local-fs sink is on)
 
-`hyp join` writes a separate central-enrollment layer under `config-control/`
-(mode `0600`), never into the local `hypaware-config.json`, so joining augments
-an existing install rather than replacing it.
+Enrolling writes a separate central layer under `config-control/` (mode `0600`),
+never into the local `hypaware-config.json`, so it augments an existing install
+rather than replacing it.
 
-## Availability
+## What is opt-in
 
-Available on every install (default flow, no extra config):
+A default install keeps everything on the machine. Two deliberate config
+choices change that:
 
-- Local capture for Claude Code, Codex, raw Anthropic API, raw OpenAI API, and
-  OTEL logs / traces / metrics.
-- Local query over captured messages, logs, traces, and metrics.
-- The activity graph: `hyp graph project` builds a node/edge graph from captured
-  data and `hyp graph neighbors` walks it (also queryable via `hyp query`).
-- Local Parquet export.
-- Claude Code and Codex attach (idempotent, reversible).
-- A persistent macOS / Linux user daemon.
+- **Enrolling with a central server** turns on the `@hypaware/central` sink,
+  which forwards cache partitions to it. `hyp remote login` (attended, and what
+  the install wizard wraps) and `hyp join <url> <token>` (unattended / MDM)
+  reach the same enrolled state.
+- **Bundled plugins that are off by default**, several of which send content
+  off-machine: the `s3` sink and the `completion-*` / `embedder-*` enrichment
+  plugins. `hyp plugin list` shows what is active here.
 
-Opt-in (enabled by explicit config, not the default flow):
-
-- **Central forwarding.** `hyp join <url> <token>` enrolls the host and turns on
-  the `@hypaware/central` sink, which forwards cache partitions to a central
-  HypAware server. It is fine to explain how to join a server; the receiving
-  server is a separate deployment the user points the host at.
-- **Additional bundled plugins** (for example an S3 sink and AI-enrichment
-  plugins). Some are opt-in specifically because enabling them lets captured
-  content leave the machine, so they must be a deliberate config choice. Trust
-  `hyp --help` and the written config for the live set on this install.
-
-Not provided by the CLI: there is no first-party plugin registry. Third-party
-plugins can be installed from npm or git, but HypAware does not curate a
-registry.
+Third-party plugins install from npm or git (`hyp plugin install`); there is no
+curated HypAware registry.
 
 ## Hand-offs
 
 - Query or inspect recorded data - use the **hypaware-query** skill.
-- Run an analysis (spend, adoption, security, improvement) - use the
-  **hypaware-ai-spend-report**, **-adoption-report**, **-security-report**, or
-  **-improvement-report** skills.
-- Opt a folder out of recording - `hyp ignore` / `hyp unignore` write or remove
-  a `.hypignore` for the folder subtree (`hyp policy show` reports what
-  governs a path).
-- "Is it working?" or diagnose a problem - `hyp status` (with `--json` for the
-  stable shape); its `diagnostics:` section carries `repair:` lines to run.
+- Team token usage, cost, and improvement analysis - use the
+  **hypaware-ai-usage-report** skill.
+- Review captured history before it first syncs to an org server - use the
+  **hypaware-privacy** skill.
+- Opt a folder out of recording - `hyp ignore <path>` writes a committable
+  `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
+  with no repo breadcrumb.
+- "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
+  stable shape).
 
 ## Guardrails
 
 - Treat `hyp --help`, `hyp <command> --help`, and `hyp status --json` as the
   authoritative source for exact commands, flags, and state on this install.
-  Use the map above for orientation and conceptual answers only.
+  Use this skill for orientation and conceptual answers only.
 - Never invent flags or promise a capability you cannot confirm on this
   install. When unsure, run the relevant `--help` before answering.
-- Do not name dataset columns, JSON paths, or SQL here. Defer every data-format
-  detail to the **hypaware-query** skill.
