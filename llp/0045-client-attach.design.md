@@ -258,8 +258,16 @@ after a detach that otherwise claims success.
 The fold separator is ` | `, deliberately **not** `; `. Each notice already
 reads "`<key>` was overridden externally; leaving in place", so a `; ` join
 would produce four `; `-delimited clauses for two keys and leave a reader
-unable to tell where one notice ends. `|` cannot occur in an env key name or a
-dotted JSON path, so the boundary stays unambiguous.
+unable to tell where one notice ends. No in-tree attach records a managed env
+key or a dotted `set` path containing `|`, so ` | ` reads unambiguously for the
+notices folded here.
+
+That is a **readability** choice, not a promise that the field is splittable.
+`warning` is shared with the `toml` undo, whose single notice interpolates the
+user's live `model_provider` value ("… leaving `<value>` in place"), and a
+`~/.codex/config.toml` reading `model_provider = "acme | prod"` puts ` | `
+inside one notice. **No separator is safe field-wide, and the field must not be
+parsed.**
 
 `warning` stays a single human-readable string rather than becoming an array.
 It is **displayed, never parsed**: `action_attach.js` logs it as a `detail`

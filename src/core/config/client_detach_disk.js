@@ -211,7 +211,13 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
  * The separator is ` | `, NOT `; `: every notice already contains a `; ` of its
  * own ("... overridden externally; leaving in place"), so joining on `; ` would
  * make the notice boundaries indistinguishable from the punctuation inside a
- * notice. A key name and a dotted JSON path can never contain `|`.
+ * notice. No in-tree attach records a managed env key or a dotted set path
+ * containing `|`, so ` | ` reads unambiguously for the notices joined here.
+ *
+ * That is a READABILITY choice, not a parseable framing. The field is shared
+ * with `detachTomlManagedBlock`, whose single notice interpolates the user's
+ * live `model_provider` value and can therefore contain ` | ` itself. Callers
+ * display `warning`; they must not split it. See `DetachFromDiskResult`.
  *
  * @param {string[]} warnings
  * @returns {string | undefined}

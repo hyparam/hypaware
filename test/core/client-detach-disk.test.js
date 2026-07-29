@@ -451,6 +451,34 @@ test('codex undo is a no-op when no managed block is present', async () => {
   }
 })
 
+test('codex undo warning carries the user value verbatim, so `warning` is never splittable', async () => {
+  const home = await stageHome()
+  try {
+    // The `toml` undo shares `DetachFromDiskResult.warning` with the two
+    // ` | `-joined branches, but it emits ONE unjoined notice that interpolates
+    // the live `model_provider` straight from the user's config. That value is
+    // an arbitrary TOML string, so it can contain the ` | ` separator itself.
+    // This pins why the field is documented display-only: no separator is safe
+    // field-wide, and a consumer that split on ` | ` would invent a second
+    // bogus notice out of one user value.
+    const attached = codexPrepareAttach('model_provider = "openai"\n', 4388, '0.2.0')
+    // The user re-points model_provider outside the managed block after we
+    // attached, to an ordinary TOML value that happens to contain a pipe.
+    const configPath = await writeCodexConfig(home, attached.content + 'model_provider = "acme | prod"\n')
+
+    const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal(result.warning, 'model_provider was changed externally; leaving acme | prod in place')
+    // One notice, yet it splits into two - the field is not machine-readable.
+    assert.equal(String(result.warning).split(' | ').length, 2)
+
+    // The protection itself holds: the user value survives the undo untouched.
+    assert.match(await fs.readFile(configPath, 'utf8'), /model_provider = "acme \| prod"/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 /* ----------------------------- shared / dispatch ----------------------------- */
 
 test('undo clears exactly what probeClientAttached detects, for both formats', async () => {

@@ -648,11 +648,19 @@ export interface DetachFromDiskResult {
   /** The prior value restored from the undo record. */
   restoredValue?: string
   /**
-   * Set when a managed value was overridden externally and left in place. One
-   * notice per overridden key, joined with ` | ` when the undo left more than
-   * one behind (LLP 0045 §never-clobber-a-user-edit). For display only - each
-   * notice contains its own `; `, so the field is not safely splittable on
-   * anything but the ` | ` boundary, and nothing in-tree parses it.
+   * Set when a managed value was overridden externally and left in place. The
+   * `json` and `json_path` undos emit one notice per overridden key and join
+   * them with ` | ` when the undo left more than one behind (LLP 0045
+   * §never-clobber-a-user-edit).
+   *
+   * **Display only: do not parse or split this field.** No separator is safe.
+   * Each notice carries its own `; `, and the `toml` undo interpolates the
+   * user's live `model_provider` value into a single unjoined notice, so a
+   * `~/.codex/config.toml` reading `model_provider = "acme | prod"` puts ` | `
+   * inside one notice. Nothing in-tree parses it: `action_attach.js` logs it as
+   * a span `detail` and `hyp detach` prints it and echoes it verbatim into
+   * `--json`. A caller that needs the keys individually should get a new
+   * `warnings: string[]` field, not a split of this one.
    */
   warning?: string
 }
