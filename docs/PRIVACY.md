@@ -121,6 +121,11 @@ directory ignore / local-only / sync, and purges anything sensitive before the
 first byte leaves the machine. It redacts every value it reports back to you;
 it never echoes a secret.
 
+The first sync is the moment this matters most, but it is not a precondition:
+run `hypaware-privacy` whenever you want to know what has been captured here,
+enrolled or not. It reviews this machine's local cache; it cannot inspect rows
+already forwarded to a server.
+
 ## Leaving
 
 `hyp leave` disconnects the machine from its central server: forwarding and

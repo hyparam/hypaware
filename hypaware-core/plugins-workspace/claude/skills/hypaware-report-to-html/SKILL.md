@@ -6,6 +6,9 @@ disable-model-invocation: true
 
 # Render HypAware reports to HTML
 
+<!-- @ref LLP 0142#user-invoked-only [implements]: user-invoked only because invoking it rewrites a git working tree -->
+
+
 The `~/hypaware-reports/` git repo holds the outputs of the HypAware report skills:
 `hypaware-ai-usage-report` (the merged team review — since 2026-07-15 it also carries
 the former adoption / spend / improvement content; since 2026-07-16 its ranked changes

@@ -6,6 +6,9 @@ disable-model-invocation: true
 
 # Apply a report's proposed changes locally
 
+<!-- @ref LLP 0142#user-invoked-only [implements]: user-invoked only because invoking it mutates this machine's config -->
+
+
 The usage-report skill ends every report with a `proposed-changes.md` page (a
 ranked, numbered list) and one `change-<slug>.md` file per change whose final
 section is a ready-to-apply artifact: an AGENTS.md/CLAUDE.md diff, a complete
