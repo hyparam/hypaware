@@ -115,10 +115,10 @@ export function createCodexExchangeProjector(opts = {}) {
       // session_meta.cwd so `.hypignore` coverage is client-independent and live
       // rows carry the same cwd the codex backfill reads. The `??` keeps the
       // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
-      // the codex session id — only a real Codex session has a rollout — so
+      // a Codex thread id (only a real Codex thread has a rollout), so
       // non-codex traffic never scans.
       const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
-        ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
+        ?? resolveRolloutCwd(rolloutCwd, codexContext)
       if (cwd) {
         const policy = resolver.resolve(cwd)
         if (policy.class === 'ignore') {
@@ -206,6 +206,40 @@ export function createCodexExchangeProjector(opts = {}) {
       return stripUndefined(projection)
     },
   }
+}
+
+/**
+ * The rollout cwd fallback's lookup key.
+ *
+ * A Codex rollout is one **thread's** file and its name embeds that thread's id
+ * (`session_meta.payload.id`), NOT the session container (`payload.session_id`)
+ * the row partitions and the session opt-out drops on
+ * (@ref LLP 0030#decision). The two are the same uuid on a root thread, so
+ * handing over the container looked correct: a **subagent** thread inherits its
+ * root's container but mints its own thread id, so the container resolved the
+ * ROOT thread's rollout and the subagent turn was judged against a directory it
+ * never ran in. `.hypignore` is directory-scoped, so that recorded turns that
+ * should have been dropped.
+ * @ref LLP 0083#decision [implements]: the thread is what selects the rollout
+ *
+ * When the client states no thread id the container is still the right key for a
+ * ROOT thread (there the two are one uuid), and that is the common
+ * subscription-route shape (a `session-id` header and nothing else). But the
+ * container is only usable while nothing says otherwise: if the turn announces
+ * subagent lineage without naming its own thread, its rollout is not identifiable
+ * from the wire, and an unknown cwd (LLP 0049 fails open, the row records NULL)
+ * is preferred to confidently stamping and enforcing the root's directory. A
+ * wrong cwd is a false statement about where a turn ran; an absent one is true.
+ *
+ * @param {RolloutCwdResolver | undefined} rolloutCwd
+ * @param {ReturnType<typeof resolveCodexContext>} codexContext
+ * @returns {string | undefined}
+ */
+function resolveRolloutCwd(rolloutCwd, codexContext) {
+  if (!rolloutCwd || !codexContext) return undefined
+  if (codexContext.thread_id) return rolloutCwd.resolve(codexContext.thread_id)
+  if (codexContext.thread_source === 'subagent' || codexContext.parent_thread_id) return undefined
+  return codexContext.session_id ? rolloutCwd.resolve(codexContext.session_id) : undefined
 }
 
 // ---------------------------------------------------------------------

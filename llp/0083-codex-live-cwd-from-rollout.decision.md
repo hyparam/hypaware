@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -58,14 +58,35 @@ Codex now has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
-- **Keyed on the codex session id.** The live path already resolves it
-  (`session-id` header / turn metadata); the rollout filename embeds it, matched
-  via the `sessionIdFromPath` helper shared with the backfill. Only a real Codex
-  session has a rollout, so non-codex traffic never scans.
-- **First line only, cached per session id.** The rollout is written at session
+- **Keyed on the codex thread id, and the rollout must confirm it.** A rollout is
+  one **thread's** file: its name embeds `session_meta.payload.id` (the thread),
+  matched via the `sessionIdFromPath` helper shared with the backfill (a helper
+  whose name predates this distinction). It does **not** embed the session
+  container `payload.session_id`, which is the row's partition key and the session
+  opt-out's key ([LLP 0030](./0030-session-id-partition-key.decision.md#decision)),
+  so the container is not what selects a rollout. The live path resolves the
+  thread from the turn metadata's `thread_id` or the `thread-id` header. Only a
+  real Codex thread has a rollout, so non-codex traffic never scans. The name is a
+  cheap prefilter, not the answer: the located file's `payload.id` is re-checked
+  against the id asked for, read off the **raw** JSONL line so an absent field
+  reads as absent, and a disagreement is a **refusal** (cwd unknown) rather than
+  another thread's cwd deciding this turn. `payload.session_id` is deliberately
+  not consulted here: a rollout too old to carry a container still records a
+  perfectly good cwd for its thread.
+- **When no thread is stated, the container is usable only for a root thread.**
+  The common subscription-route request carries a `session-id` header and nothing
+  else, and for a root thread that value *is* the thread id, so the fallback still
+  works. It is abandoned the moment the turn announces subagent lineage
+  (`thread_source = subagent`, or a `parent_thread_id`) without naming its own
+  thread: that turn's rollout is not identifiable from the wire, and an unknown
+  cwd (fails open per [LLP 0049](./0049-hypignore-usage-policy.spec.md), row
+  records NULL) is preferred to confidently enforcing and stamping the root's
+  directory. A wrong cwd is a false statement about where a turn ran; an absent
+  one is true.
+- **First line only, cached per thread id.** The rollout is written at session
   start, so it exists before the first exchange projects (earlier and more
   reliably than Claude's sidecar, which has a known session-start race). Reading a
-  bounded prefix and caching per session id — including misses — keeps the capture
+  bounded prefix and caching per thread id (including misses) keeps the capture
   hot path free of unbounded fs work ([LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements)).
 - **One resolved `cwd`, used twice.** The same value feeds the `.hypignore` drop
   and the row's stamped `cwd`, so live rows now carry the cwd the backfill reads
@@ -88,6 +109,32 @@ Codex now has the symmetric fallback.
   projector on its existing synchronous seam (the usage-policy resolver it already
   uses is synchronous too).
 
+## Correction: the first cut keyed on the container (issue #459)
+
+As first landed, the resolver was **called** with the session container
+(`metadata.session_id` / the `session-id` header) while it **located** the rollout
+by the thread id in the filename. The two coincide on a root thread, so every
+hand-check passed; they diverge on a **subagent** thread, which inherits its
+root's container and mints its own thread id. So a subagent turn on the
+subscription route resolved the **root's** rollout, and the root's `cwd` then
+decided the `.hypignore` outcome ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md))
+and was stamped on the row.
+
+That is a directory-scoped privacy control silently not applying: a subagent
+running in an `ignore` directory whose root did not was **recorded**. (The mirror
+case, an over-drop, loses data but leaks nothing.) The identifier bug is the same
+root cause as [issue #453](https://github.com/hyparam/hypaware/issues/453) on the
+`hyp session` resolver ([LLP 0067](./0067-session-opt-out.design.md#cli-session-id)),
+on a different call path: there the container had to be read *out of* the thread's
+rollout, here the thread is what selects the rollout in the first place. Both now
+refuse rather than accept an id whose provenance does not check out.
+
+The bullets above state the corrected contract. Two rules carried across from
+that resolver rather than re-derived: parse the **raw** `session_meta` line (Codex
+back-fills `session_id` from `id` in its own deserializer, so a struct-shaped read
+cannot tell a legacy rollout from a root one), and treat an id that cannot be
+confirmed as unresolvable.
+
 ## Consequences
 
 - Code that lands this carries `@ref LLP 0083 [implements]` on the new
@@ -101,6 +148,16 @@ Codex now has the symmetric fallback.
 - No cache schema, export driver, or gateway change: purely a projection-time cwd
   source, exactly like the existing Codex/Claude adapter drops
   ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)).
+- The identity guard's refusal is **logged** (`plugin.codex.rollout_cwd_thread_mismatch`,
+  warn), because its only other trace is a row with `cwd = NULL`, which is
+  indistinguishable from the ordinary not-yet-written rollout. The resolver takes
+  an optional `log` and `index.js` passes `ctx.log`.
+- `codex/src/rollout-cwd.js` and `ai-gateway/src/session_command.js`'s
+  `readRolloutMeta` remain **two readers of the same first line** with different
+  needs (a hot-path cwd lookup per thread versus a one-shot CLI scan that must
+  report the container). They now agree on the discipline (raw line, `session_meta`
+  type guard, absent means refuse). Folding them into one shared reader is a
+  worthwhile follow-up, not a requirement of this correction.
 - **Prospective only.** Like the rest of [LLP 0049](./0049-hypignore-usage-policy.spec.md#prospective-only),
   this gates *future* live recording; rows already written with `cwd = NULL` are
   untouched (a `hyp backfill` re-import, which reads the rollout, is the path to
