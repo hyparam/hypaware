@@ -305,6 +305,44 @@ the rollout that would have made it ambiguous may be one of the files never
 looked at. Truncation is therefore reported and treated as unresolvable rather
 than resolved on partial evidence.
 
+**A single STALE match refuses too.** The ambiguity rule only fires at two or
+more matches, so a cwd where Codex ran exactly once, days ago, has exactly one
+match and would otherwise resolve confidently to a **dead** session id. That is
+the wrong-session failure of [§cli-response-check](#cli-response-check) arriving
+through the other input: `hyp session ignore` would opt out the dead id, print
+"the gateway will drop this session", and the session the user is actually in
+would keep being recorded. A rollout is therefore only usable as "the session I
+am in" when it was written to recently (30 minutes): a running Codex session
+appends on every turn, and the tool call invoking `hyp` is itself preceded by
+rollout writes, so the legitimate case is seconds-to-minutes old. A stale-only
+match is an error naming the file and its age, with the explicit-id escape
+hatch, exactly like the ambiguous case.
+
+The bound narrows the window; it does not close it. A session that ended a few
+minutes ago is still within it, and mtime is a proxy for liveness rather than
+proof of it. Closing it needs a liveness signal Codex does not expose (a session
+id in the environment, or a terminal record in the rollout); until then the
+residual is handled by making the inference **visible** rather than silent.
+
+### The verb reports the provenance of its own inputs {#cli-provenance}
+
+An `ignored: true` rests on two claims the verb cannot always prove: *this is my
+session id*, and *that endpoint is the gateway*. An explicit argument or
+`CLAUDE_CODE_SESSION_ID` **states** the first; a Codex rollout only **infers**
+it. A live daemon's `status.json` proves the second; a pinned `listen` only
+asserts it, and [§cli-response-check](#cli-response-check) can prove the
+responder saw our token but not that it is the gateway.
+
+So the weaker evidence is named next to the answer, in every output mode:
+`--json` carries `session_id_source` / `session_id_evidence` (the rollout
+filename) and `endpoint_source`; the human form prints the id as `INFERRED
+from <rollout>` and flags an endpoint that came from a pinned `listen` rather
+than a live daemon. The write verbs print it too, where "ignored" reads as done.
+
+This is the change's own thesis turned on its weakest inputs: a privacy control
+that can be wrong must at least say where it could be wrong, so a user who is
+handed the wrong session can *see* it instead of discovering it in the cache.
+
 ### What is deliberately not covered
 
 - **Live LLM call untouched (R6):** the drop runs at projection time, after
@@ -329,14 +367,23 @@ Traditional tests (root `test/`, alongside the existing suites):
   idempotent re-POST, DELETE removes + idempotent, `.total` correct across a
   sequence; 400 malformed/missing `session_id`; 405 wrong method (`allow:
   GET, POST, DELETE`); 404 unknown `/_hypaware/*` path; oversized body 413.
-- `test/plugins/ai-gateway-session-status.test.js` (new, R9-R11): `GET`
+- `test/plugins/ai-gateway-session-status.test.js` (new, R9-R12): `GET`
   reports membership and round-trips the token verbatim; a fresh (restarted)
   set reports `ignored: false` where before the transition was unobservable;
   `hyp session status` distinguishes ignored / not_ignored / unknown, reports
   `ignored: null` and a nonzero exit for an unreachable gateway, an
   unresolvable endpoint, and an unresolvable session id, and always names
   `hyp policy show`; the Codex rollout resolver picks the unique cwd match and
-  refuses when several, none, or a truncated scan. A rogue local listener on
+  refuses when several, none, a truncated scan, or a **single stale** match
+  (backdated mtime), while the same rollout still resolves under a wider age
+  bound so the refusal is provably about staleness and not the cwd match.
+  [§cli-provenance](#cli-provenance): a disk-inferred id reports
+  `session_id_source: 'codex_rollout'` plus the rollout filename in `--json`
+  and `INFERRED from <rollout>` in the human form, from `status` and `ignore`
+  alike, and a pinned-`listen` endpoint reports `endpoint_source:
+  'config_listen'`. `--` ends flag parsing, so a session id beginning with `-`
+  is reachable at all. An oversized response is cut off AT the byte bound
+  rather than buffered whole. A rogue local listener on
   the resolved port covers [§cli-response-check](#cli-response-check): a `200`
   with no boolean `ignored`, no numeric `total`, a non-object body, an
   unparseable body, a non-200, and a reply about a different `session_id`
@@ -378,6 +425,8 @@ rules.
 | `ai-gateway/src/control.js` route handler | `@ref LLP 0066#control-path [implements]` |
 | `ai-gateway/src/control.js` `GET` read branch | `@ref LLP 0066#readable [implements]` |
 | `ai-gateway/src/session_command.js` fail-closed CLI reader | `@ref LLP 0066#readable [implements]` / `@ref LLP 0067#cli [implements]` |
+| `ai-gateway/src/session_command.js` `resolveSessionIdForCli` | `@ref LLP 0067#cli-session-id [implements]` (ambiguity, truncation, staleness) |
+| `ai-gateway/src/session_command.js` `provenanceNotes` | `@ref LLP 0066#readable [implements]` / `@ref LLP 0067#cli-provenance [implements]` |
 | `ai-gateway/src/index.js` `session` verb group | `@ref LLP 0067#cli [implements]` |
 | `ai-gateway/src/api.js` `ignoredSessions` on `GatewayState` | `@ref LLP 0066#ephemeral` |
 | claude/codex projector session drop | `@ref LLP 0066#enforcement [implements]` (alongside the existing `@ref LLP 0050` at the same seam) |

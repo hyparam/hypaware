@@ -164,10 +164,20 @@ export interface GatewayState {
  * Outcome of resolving which session a `hyp session <verb>` invocation is
  * about. Failure is an explicit variant, never a fallback id: an unresolved
  * session must fail closed rather than act on a guess.
- * @ref LLP 0067#cli
+ * `source` is carried through to the verb's output rather than discarded: an
+ * `argument` or `claude_env` id is what the caller or client stated, but a
+ * `codex_rollout` id was INFERRED from a file on disk, and the user must be
+ * able to see which of the two an "ignored" answer rests on. `evidence` names
+ * the rollout the inference came from.
+ * @ref LLP 0067#cli-session-id
  */
 export type SessionIdResolution =
-  | { ok: true; sessionId: string; source: 'argument' | 'claude_env' | 'codex_rollout' }
+  | {
+      ok: true
+      sessionId: string
+      source: 'argument' | 'claude_env' | 'codex_rollout'
+      evidence?: string
+    }
   | { ok: false; error: string }
 
 /**
@@ -179,6 +189,28 @@ export type SessionIdResolution =
 export type SessionEndpointResolution =
   | { ok: true; endpoint: string; source: 'daemon_status' | 'config_listen' }
   | { ok: false; error: string }
+
+/**
+ * What `hyp session status` reports, in `--json` field order. It carries the
+ * PROVENANCE of both inputs alongside the answer (`session_id_source` /
+ * `session_id_evidence`, `endpoint_source`) because an `ignored: true` rests on
+ * two separate claims - "this is my session id" and "that endpoint is the
+ * gateway" - and only some of the ways of establishing them are authoritative.
+ * Hiding which one was used is how a confident answer about the wrong session
+ * reads as a confident answer about yours.
+ * @ref LLP 0066#readable
+ */
+export interface SessionStatusReport {
+  status: 'ignored' | 'not_ignored' | 'unknown'
+  session_id: string | null
+  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | null
+  session_id_evidence: string | null
+  ignored: boolean | null
+  total: number | null
+  endpoint: string | null
+  endpoint_source: 'daemon_status' | 'config_listen' | null
+  reason: string | null
+}
 
 export interface AiGatewayRuntime {
   ctx: PluginActivationContext

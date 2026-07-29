@@ -342,6 +342,122 @@ test('a truncated rollout scan refuses rather than claiming a unique cwd match',
   assert.equal(full.ok && full.sessionId, 'codex-aaa')
 })
 
+test('a SINGLE STALE rollout refuses: one cwd match is not evidence the session is live', () => {
+  // The ambiguity refusal only fires at >=2 matches, so a cwd where Codex ran
+  // exactly once, days ago, used to resolve confidently to a DEAD session id.
+  // `hyp session ignore` would then opt out that dead id and report the user
+  // covered while the session they are actually in keeps being recorded: the
+  // same confident-answer-about-the-wrong-session defect as believing an
+  // unvalidated control reply.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-dead', cwd: '/repo/here', ageMs: 3 * 24 * 60 * 60 * 1000 },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false, 'a rollout nothing has written to for days is a finished session')
+  assert.match(out.ok ? '' : out.error, /rollout-2026-01-01-aaa\.jsonl/, 'name the file the refusal is about')
+  assert.match(out.ok ? '' : out.error, /3d ago/, 'show the age so the user can see why')
+  assert.match(out.ok ? '' : out.error, /explicitly/, 'point at the escape hatch')
+})
+
+test('a fresh rollout still resolves, and reports that the id was inferred from disk', () => {
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-02-bbb.jsonl', id: 'codex-live', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok && out.sessionId, 'codex-live')
+  assert.equal(out.ok && out.source, 'codex_rollout')
+  assert.equal(out.ok && out.evidence, 'rollout-2026-01-02-bbb.jsonl', 'the inference must name its evidence')
+})
+
+test('the staleness bound is what refuses, not the cwd match: the same rollout resolves under a wider bound', () => {
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-old', cwd: '/repo/here', ageMs: 2 * 60 * 60 * 1000 },
+  ])
+  assert.equal(resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' }).ok, false)
+  const wide = resolveSessionIdForCli({
+    env: { CODEX_HOME: home },
+    cwd: '/repo/here',
+    maxAgeMs: 24 * 60 * 60 * 1000,
+  })
+  assert.equal(wide.ok && wide.sessionId, 'codex-old')
+})
+
+test('a disk-inferred id is never presented as if the client had stated it', async () => {
+  // The residual risk the staleness bound narrows but cannot close: a session
+  // that ended minutes ago still resolves. The verb must therefore SAY the id
+  // was inferred, so a wrong answer is visible rather than silent - which is
+  // the whole thesis of this change applied to its own weakest input.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-02-bbb.jsonl', id: 'codex-live', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  const set = /** @type {Set<string>} */ (new Set(['codex-live']))
+  await withControlServer(set, async (base) => {
+    const human = fakeCtx({ endpoint: base, env: { CODEX_HOME: home } })
+    assert.equal(await runSessionStatus([], human.ctx), 0)
+    assert.match(human.stdout(), /INFERRED from rollout-2026-01-02-bbb\.jsonl/)
+
+    const json = fakeCtx({ endpoint: base, env: { CODEX_HOME: home } })
+    assert.equal(await runSessionStatus(['--json'], json.ctx), 0)
+    const out = JSON.parse(json.stdout())
+    assert.equal(out.session_id_source, 'codex_rollout')
+    assert.equal(out.session_id_evidence, 'rollout-2026-01-02-bbb.jsonl')
+
+    // `ignore` says it too: "ignored" off an inferred id reads as done.
+    const mut = fakeCtx({ endpoint: base, env: { CODEX_HOME: home } })
+    assert.equal(await runSessionIgnore([], mut.ctx), 0)
+    assert.match(mut.stdout(), /INFERRED from rollout-2026-01-02-bbb\.jsonl/)
+  })
+})
+
+test('an endpoint nothing proved is the gateway is reported as such', async () => {
+  // `validateControlResponse` proves the responder saw our token, not that it
+  // is the gateway. When the port came from a pinned `listen` rather than a
+  // live daemon's status.json, that gap is named next to the answer.
+  const set = /** @type {Set<string>} */ (new Set(['sess-pinned']))
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-pinned' } })
+    assert.equal(await runSessionStatus([], ctx.ctx), 0)
+    assert.match(ctx.stdout(), /pinned `listen`, not a live daemon/)
+
+    const json = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-pinned' } })
+    await runSessionStatus(['--json'], json.ctx)
+    assert.equal(JSON.parse(json.stdout()).endpoint_source, 'config_listen')
+  })
+})
+
+test('`--` ends flag parsing so a session id beginning with `-` is reachable', async () => {
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const ctx = fakeCtx({ endpoint: base, env: {} })
+    assert.equal(await runSessionIgnore(['--', '-dash-id'], ctx.ctx), 0)
+    assert.ok(set.has('-dash-id'), 'without a terminator this id could never be named at all')
+
+    // `--json` after the terminator is a literal id, not a flag, so it is a
+    // second positional and must be a usage error rather than silently eaten.
+    const two = fakeCtx({ endpoint: base, env: {} })
+    assert.equal(await runSessionStatus(['--', '-dash-id', '--json'], two.ctx), 2)
+  })
+})
+
+test('an oversized control response is refused rather than buffered', async () => {
+  await withRogueServer((req, res) => {
+    req.resume()
+    res.writeHead(200, { 'content-type': 'application/json' })
+    const chunk = 'x'.repeat(64 * 1024)
+    for (let i = 0; i < 8; i++) res.write(chunk)
+    res.end()
+  }, async (base) => {
+    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
+    assert.equal(await runSessionStatus(['--json'], ctx.ctx), SESSION_EXIT_UNKNOWN)
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.ignored, null)
+    // Cut off AT the bound, not swallowed whole and only then found
+    // unparseable: whatever owns the port must not be able to grow this
+    // process at will.
+    assert.match(out.reason, /more than \d+ bytes/)
+  })
+})
+
 test('an unresolvable session id fails closed, it does not report not-ignored', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
@@ -459,7 +575,10 @@ function fakeCtx(args) {
  * Build a throwaway `CODEX_HOME` holding `sessions/**\/rollout-*.jsonl` files
  * whose first line is a `session_meta` record.
  *
- * @param {{ file: string, id: string, cwd: string }[]} rollouts
+ * `ageMs` backdates the file's mtime, which is how the resolver tells a running
+ * session (appended to on every turn) from a finished one.
+ *
+ * @param {{ file: string, id: string, cwd: string, ageMs?: number }[]} rollouts
  */
 function tempCodexHome(rollouts) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
@@ -467,7 +586,12 @@ function tempCodexHome(rollouts) {
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {
     const meta = JSON.stringify({ type: 'session_meta', payload: { id: r.id, cwd: r.cwd } })
-    fs.writeFileSync(path.join(dir, r.file), `${meta}\n{"type":"event"}\n`)
+    const full = path.join(dir, r.file)
+    fs.writeFileSync(full, `${meta}\n{"type":"event"}\n`)
+    if (r.ageMs) {
+      const when = new Date(Date.now() - r.ageMs)
+      fs.utimesSync(full, when, when)
+    }
   }
   return home
 }

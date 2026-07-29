@@ -214,6 +214,18 @@ set remains [non-goal 2](#non-goals).
   something on the endpoint is not the same as reaching the gateway, so the
   answer MUST be validated before it is believed (see
   [LLP 0067 §cli-response-check](./0067-session-opt-out.design.md#cli-response-check)).
+  It also includes a session id that could only be **inferred**, and not
+  credibly: a Codex rollout that nothing has written to recently is a finished
+  session, so resolving it would answer confidently about a session the user is
+  not in (see
+  [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
+- **R12.** Where an answer rests on an inference rather than a stated fact, the
+  reader MUST say so alongside the answer: which source the `session_id` came
+  from (and, when inferred, from what), and whether the endpoint was proven
+  bound by a live daemon or merely pinned in config. A control that can be
+  wrong about *which* session it answered for must make that visible rather
+  than let it be discovered in the cache (see
+  [LLP 0067 §cli-provenance](./0067-session-opt-out.design.md#cli-provenance)).
 - **R11.** The reader MUST name the folder governor (`.hypignore`) it does not
   cover, since either mechanism independently suppresses (R7).
 

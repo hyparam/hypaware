@@ -12,7 +12,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 
 /**
  * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { SessionEndpointResolution, SessionIdResolution } from './types.js'
+ * @import { SessionEndpointResolution, SessionIdResolution, SessionStatusReport } from './types.js'
  */
 
 const CONTROL_PATH = '/_hypaware/ignore/session'
@@ -46,6 +46,26 @@ const REQUEST_TIMEOUT_MS = 5000
 
 /** Bound on how many rollout files the Codex resolver will inspect. */
 const MAX_ROLLOUT_SCAN = 5000
+
+/**
+ * Hard cap on a control response body. The route's own answers are a few dozen
+ * bytes; anything larger is not the gateway, and buffering it unbounded lets
+ * whatever owns the port balloon the CLI's memory. Mirrors the server-side
+ * `MAX_BODY_BYTES` in control.js.
+ */
+const MAX_RESPONSE_BYTES = 64 * 1024
+
+/**
+ * How recently a Codex rollout must have been written for its id to be taken
+ * as "the session this invocation is in".
+ *
+ * A live Codex session appends to its rollout on every turn, and the tool call
+ * that runs `hyp session ...` is itself preceded by rollout writes, so the
+ * legitimate case is seconds-to-minutes old. A rollout last written hours ago
+ * is a FINISHED session: resolving it hands the verb a dead id, and the user is
+ * then told a session they are not in is covered.
+ */
+const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
 
 const IGNORE_USAGE = 'usage: hyp session ignore [session-id] [--json]'
 const UNIGNORE_USAGE = 'usage: hyp session unignore [session-id] [--json]'
@@ -103,21 +123,32 @@ export async function runSessionStatus(argv, ctx) {
     return writeStatus(ctx, parsed.json, {
       status: 'unknown',
       session_id: null,
+      session_id_source: null,
+      session_id_evidence: null,
       ignored: null,
       total: null,
       endpoint: null,
+      endpoint_source: null,
       reason: resolvedId.error,
     })
+  }
+
+  /** @type {Pick<SessionStatusReport, 'session_id' | 'session_id_source' | 'session_id_evidence'>} */
+  const who = {
+    session_id: resolvedId.sessionId,
+    session_id_source: resolvedId.source,
+    session_id_evidence: resolvedId.evidence ?? null,
   }
 
   const endpoint = resolveGatewayEndpointForCli(ctx)
   if (!endpoint.ok) {
     return writeStatus(ctx, parsed.json, {
+      ...who,
       status: 'unknown',
-      session_id: resolvedId.sessionId,
       ignored: null,
       total: null,
       endpoint: null,
+      endpoint_source: null,
       reason: endpoint.error,
     })
   }
@@ -129,22 +160,24 @@ export async function runSessionStatus(argv, ctx) {
   })
   if (!result.ok) {
     return writeStatus(ctx, parsed.json, {
+      ...who,
       status: 'unknown',
-      session_id: resolvedId.sessionId,
       ignored: null,
       total: null,
       endpoint: endpoint.endpoint,
+      endpoint_source: endpoint.source,
       reason: result.error,
     })
   }
 
   const ignored = result.body.ignored
   return writeStatus(ctx, parsed.json, {
+    ...who,
     status: ignored ? 'ignored' : 'not_ignored',
-    session_id: resolvedId.sessionId,
     ignored,
     total: result.body.total,
     endpoint: endpoint.endpoint,
+    endpoint_source: endpoint.source,
     reason: null,
   })
 }
@@ -198,9 +231,12 @@ async function runMutation(argv, ctx, method, usage) {
       JSON.stringify({
         status: 'ok',
         session_id: resolvedId.sessionId,
+        session_id_source: resolvedId.source,
+        session_id_evidence: resolvedId.evidence ?? null,
         ignored,
         total,
         endpoint: endpoint.endpoint,
+        endpoint_source: endpoint.source,
       }) + '\n'
     )
     return 0
@@ -213,6 +249,12 @@ async function runMutation(argv, ctx, method, usage) {
   if (ignored) {
     ctx.stdout.write('this opt-out is in-memory only: a gateway restart drops it. Re-check with `hyp session status`.\n')
   }
+  // The write verbs carry the same provenance caveats as the read: "ignored"
+  // printed off an inferred id is a claim about a session the user may not be
+  // in, and that is louder here than in `status` because it reads as done.
+  for (const note of provenanceNotes(resolvedId.source, resolvedId.evidence ?? null, endpoint.source)) {
+    ctx.stdout.write(`${note}\n`)
+  }
   ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   return 0
 }
@@ -222,14 +264,7 @@ async function runMutation(argv, ctx, method, usage) {
  *
  * @param {CommandRunContext} ctx
  * @param {boolean} json
- * @param {{
- *   status: 'ignored' | 'not_ignored' | 'unknown',
- *   session_id: string | null,
- *   ignored: boolean | null,
- *   total: number | null,
- *   endpoint: string | null,
- *   reason: string | null,
- * }} report
+ * @param {SessionStatusReport} report
  * @returns {number}
  */
 function writeStatus(ctx, json, report) {
@@ -244,10 +279,16 @@ function writeStatus(ctx, json, report) {
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write('this opt-out is in-memory only: a gateway restart drops it. Re-check with `hyp session status`.\n')
+    for (const note of provenanceNotes(report.session_id_source, report.session_id_evidence, report.endpoint_source)) {
+      ctx.stdout.write(`${note}\n`)
+    }
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else {
     ctx.stdout.write(`session ${report.session_id}: not ignored - this session IS being recorded\n`)
     ctx.stdout.write('run `hyp session ignore` to opt out.\n')
+    for (const note of provenanceNotes(report.session_id_source, report.session_id_evidence, report.endpoint_source)) {
+      ctx.stdout.write(`${note}\n`)
+    }
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   }
 
@@ -257,21 +298,68 @@ function writeStatus(ctx, json, report) {
 }
 
 /**
- * Parse `[session-id] [--json]`.
+ * Notes qualifying a CONFIRMED answer, printed next to it.
+ *
+ * A membership answer rests on two claims the verb cannot always prove: that
+ * the id is this session's, and that the endpoint is the gateway. An explicit
+ * argument or `CLAUDE_CODE_SESSION_ID` states the first; a Codex rollout only
+ * INFERS it from disk. A live daemon's `status.json` proves the second; a
+ * pinned `listen` only asserts it, and `validateControlResponse` can prove the
+ * responder saw our token but not that it is the gateway. Naming the weaker
+ * evidence in the output is the only remedy available at this layer, and it is
+ * this change's own thesis: a control that can be wrong must at least say so.
+ *
+ * @ref LLP 0066#readable [implements]: R10 - the reader must not present
+ * inferred inputs as if they were confirmed ones.
+ *
+ * @param {SessionStatusReport['session_id_source']} idSource
+ * @param {string | null} idEvidence
+ * @param {SessionStatusReport['endpoint_source']} endpointSource
+ * @returns {string[]}
+ */
+function provenanceNotes(idSource, idEvidence, endpointSource) {
+  /** @type {string[]} */
+  const notes = []
+  if (idSource === 'codex_rollout') {
+    notes.push(
+      `session id: INFERRED from ${idEvidence ?? 'a Codex rollout'} on disk, not stated by the client. If that is not the session you are in, re-run naming it: hyp session status <session-id>.`
+    )
+  }
+  if (endpointSource === 'config_listen') {
+    notes.push(
+      'endpoint:  from the pinned `listen`, not a live daemon - nothing proved the gateway still owns that port.'
+    )
+  }
+  return notes
+}
+
+/**
+ * Parse `[--] [session-id] [--json]`.
+ *
+ * A bare `--` ends flag parsing, so a session id that begins with `-` can still
+ * be named. The id is an opaque provider token (LLP 0066 R5) and the verb never
+ * interprets it, so there is no shape it may be refused for; without a
+ * terminator such an id would be unreachable and the user would have no way to
+ * check or opt out that session at all.
  *
  * @param {string[]} argv
  * @returns {{ ok: true, id: string | null, json: boolean } | { ok: false, error: string }}
  */
 function parseArgv(argv) {
   let json = false
+  let literal = false
   /** @type {string | null} */
   let id = null
   for (const arg of argv) {
-    if (arg === '--json') {
+    if (!literal && arg === '--') {
+      literal = true
+      continue
+    }
+    if (!literal && arg === '--json') {
       json = true
       continue
     }
-    if (arg.startsWith('-')) return { ok: false, error: `hyp session: unknown flag ${arg}` }
+    if (!literal && arg.startsWith('-')) return { ok: false, error: `hyp session: unknown flag ${arg}` }
     if (id !== null) return { ok: false, error: 'hyp session: at most one session id may be given' }
     if (arg.trim().length === 0) return { ok: false, error: 'hyp session: session id must not be empty' }
     id = arg
@@ -326,9 +414,18 @@ export function resolveGatewayEndpointForCli(ctx) {
  * would risk opting out the wrong session while telling the user they are
  * covered, which is the fail-open shape this whole change exists to remove.
  *
- * @param {{ env: NodeJS.ProcessEnv, cwd: string, maxScan?: number }} args
+ * **Refuses on staleness too.** "Exactly one rollout records this cwd" says
+ * nothing about whether that session is still running: a cwd where Codex ran
+ * once last week has exactly one match, and resolving it yields a confident
+ * answer about a DEAD id while the session the user is actually in keeps being
+ * recorded. That is the same wrong-session defect as believing an unvalidated
+ * control reply, so it gets the same treatment - refuse, name the file and its
+ * age, and point at the explicit-id escape hatch.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, cwd: string, maxScan?: number, maxAgeMs?: number, now?: number }} args
  * @returns {SessionIdResolution}
- * @ref LLP 0067#cli [implements]: session-id resolution contract, fail-closed
+ * @ref LLP 0067#cli-session-id [implements]: session-id resolution contract,
+ * fail-closed on ambiguity, truncation, and staleness alike
  */
 export function resolveSessionIdForCli(args) {
   const fromEnv = args.env.CLAUDE_CODE_SESSION_ID
@@ -365,7 +462,24 @@ export function resolveSessionIdForCli(args) {
   }
 
   if (candidates.length === 1) {
-    return { ok: true, sessionId: candidates[0].id, source: 'codex_rollout' }
+    const only = candidates[0]
+    const name = path.basename(only.file)
+    const maxAgeMs =
+      typeof args.maxAgeMs === 'number' && args.maxAgeMs > 0 ? args.maxAgeMs : MAX_ROLLOUT_AGE_MS
+    const ageMs = rolloutAgeMs(only.file, args.now ?? Date.now())
+    if (ageMs === undefined) {
+      return {
+        ok: false,
+        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) could not be stat'd, so there is no evidence it belongs to a running session. Pass the session id explicitly: hyp session status <session-id>.`,
+      }
+    }
+    if (ageMs > maxAgeMs) {
+      return {
+        ok: false,
+        error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) was last written ${describeAge(ageMs)} ago, so it is a finished session rather than this one. Acting on it would report the WRONG session as covered while this one keeps being recorded. Pass the intended session id explicitly: hyp session status <session-id>.`,
+      }
+    }
+    return { ok: true, sessionId: only.id, source: 'codex_rollout', evidence: name }
   }
   if (candidates.length === 0) {
     return {
@@ -413,6 +527,38 @@ function rolloutFiles(root, maxScan) {
     }
   }
   return { files: out, truncated: out.length >= maxScan || stack.length > 0 }
+}
+
+/**
+ * How long ago a rollout was last appended to, or `undefined` when it cannot be
+ * stat'd. `mtime` is the liveness proxy: a running session writes on every turn.
+ *
+ * @param {string} file
+ * @param {number} now
+ * @returns {number | undefined}
+ */
+function rolloutAgeMs(file, now) {
+  try {
+    const age = now - fs.statSync(file).mtimeMs
+    return age < 0 ? 0 : age
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Coarse human age for a refusal message. The point is that the reader can see
+ * at a glance that the rollout is old, not the exact figure.
+ *
+ * @param {number} ms
+ * @returns {string}
+ */
+function describeAge(ms) {
+  const minutes = Math.floor(ms / 60000)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
 }
 
 /**
@@ -505,12 +651,23 @@ function validateControlResponse(parsed, sessionId) {
  */
 function controlRequest(args) {
   return new Promise((resolve) => {
+    let settled = false
+    /** @type {NodeJS.Timeout | undefined} */
+    let deadline
+    /** @param {{ ok: true, body: { session_id: string, ignored: boolean, total: number } } | { ok: false, error: string }} outcome */
+    function finish(outcome) {
+      if (settled) return
+      settled = true
+      if (deadline) clearTimeout(deadline)
+      resolve(outcome)
+    }
+
     /** @type {URL} */
     let url
     try {
       url = new URL(CONTROL_PATH, args.endpoint)
     } catch {
-      resolve({ ok: false, error: `invalid gateway endpoint ${args.endpoint}` })
+      finish({ ok: false, error: `invalid gateway endpoint ${args.endpoint}` })
       return
     }
     if (args.method === 'GET') {
@@ -539,12 +696,23 @@ function controlRequest(args) {
         let raw = ''
         res.setEncoding('utf8')
         res.on('data', (chunk) => {
+          if (settled) return
           raw += chunk
+          // A control answer is a few dozen bytes. Whatever is streaming more
+          // than MAX_RESPONSE_BYTES is not the gateway, and buffering it to the
+          // end would let it grow this process without limit.
+          if (raw.length > MAX_RESPONSE_BYTES) {
+            finish({
+              ok: false,
+              error: `gateway at ${args.endpoint} returned more than ${MAX_RESPONSE_BYTES} bytes for ${CONTROL_PATH} - it is not the HypAware control route`,
+            })
+            req.destroy()
+          }
         })
         res.on('end', () => {
           const status = res.statusCode ?? 0
           if (status !== 200) {
-            resolve({ ok: false, error: `gateway at ${args.endpoint} answered HTTP ${status} for ${CONTROL_PATH}` })
+            finish({ ok: false, error: `gateway at ${args.endpoint} answered HTTP ${status} for ${CONTROL_PATH}` })
             return
           }
           /** @type {unknown} */
@@ -552,23 +720,31 @@ function controlRequest(args) {
           try {
             parsed = JSON.parse(raw)
           } catch {
-            resolve({ ok: false, error: `gateway at ${args.endpoint} returned an unparseable control response` })
+            finish({ ok: false, error: `gateway at ${args.endpoint} returned an unparseable control response` })
             return
           }
           const checked = validateControlResponse(parsed, args.sessionId)
           if (!checked.ok) {
-            resolve({ ok: false, error: `gateway at ${args.endpoint} ${checked.error}` })
+            finish({ ok: false, error: `gateway at ${args.endpoint} ${checked.error}` })
             return
           }
-          resolve({ ok: true, body: checked.body })
+          finish({ ok: true, body: checked.body })
         })
       }
     )
+    // `timeout` is socket INACTIVITY, so a responder that trickles a byte every
+    // few seconds resets it forever. The privacy check needs an answer or a
+    // refusal in bounded time, so the deadline is wall-clock as well.
+    deadline = setTimeout(() => {
+      finish({ ok: false, error: `could not reach the HypAware gateway at ${args.endpoint}: timed out after ${REQUEST_TIMEOUT_MS}ms` })
+      req.destroy()
+    }, REQUEST_TIMEOUT_MS)
+    deadline.unref?.()
     req.on('timeout', () => {
       req.destroy(new Error(`timed out after ${REQUEST_TIMEOUT_MS}ms`))
     })
     req.on('error', (err) => {
-      resolve({ ok: false, error: `could not reach the HypAware gateway at ${args.endpoint}: ${err.message}` })
+      finish({ ok: false, error: `could not reach the HypAware gateway at ${args.endpoint}: ${err.message}` })
     })
     if (body !== undefined) req.write(body)
     req.end()
