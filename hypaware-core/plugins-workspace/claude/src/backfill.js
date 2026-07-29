@@ -3,9 +3,10 @@
 import {
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
+  findDesktop3pProjectsDirs,
   loadAgentMeta,
   loadTranscriptFile,
-  walkTranscriptFiles,
+  walkTranscriptRoots,
   withToolUseResult,
 } from './transcripts.js'
 import { createSessionContextReader, pickLatestMatching } from './session_context.js'
@@ -98,7 +99,12 @@ export function createClaudeBackfillProvider(opts) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Claude Code transcripts into ai_gateway_messages',
     async *run(ctx) {
-      yield* runClaudeBackfill({ ctx, projectsDir, stateFile, clientName, deriveRepo, resolver })
+      // Resolved per run, not at activation: attached-Desktop sessions
+      // accumulate new sandbox homes under the 3p container between runs
+      // (see findDesktop3pProjectsDirs), and each holds its own nested
+      // `.claude/projects` tree outside the primary projectsDir.
+      const desktop3pDirs = findDesktop3pProjectsDirs(opts.homeDir)
+      yield* runClaudeBackfill({ ctx, projectsDir, extraProjectsDirs: desktop3pDirs, stateFile, clientName, deriveRepo, resolver })
     },
   }
 }
@@ -113,6 +119,7 @@ export function createClaudeBackfillProvider(opts) {
  * @param {{
  *   ctx: BackfillRunContext,
  *   projectsDir: string,
+ *   extraProjectsDirs?: string[],
  *   stateFile: string,
  *   clientName: string,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
@@ -121,7 +128,7 @@ export function createClaudeBackfillProvider(opts) {
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, stateFile, clientName, deriveRepo, resolver } = args
+  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and
@@ -144,6 +151,7 @@ async function* runClaudeBackfill(args) {
     component: 'plugin.claude.backfill',
     operation: 'backfill.scan',
     projects_dir: projectsDir,
+    desktop_3p_dirs: extraProjectsDirs?.length ?? 0,
     ...(window.sinceMs !== undefined ? { since: new Date(window.sinceMs).toISOString() } : {}),
     ...(window.untilMs !== undefined ? { until: new Date(window.untilMs).toISOString() } : {}),
     status: 'ok',
@@ -175,7 +183,7 @@ async function* runClaudeBackfill(args) {
   /** @type {Map<string, number>} */
   const unclaimedEntrypoints = new Map()
 
-  for (const filePath of walkTranscriptFiles(projectsDir)) {
+  for (const filePath of walkTranscriptRoots([projectsDir, ...(extraProjectsDirs ?? [])])) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
     /** @type {TranscriptEntry[]} */

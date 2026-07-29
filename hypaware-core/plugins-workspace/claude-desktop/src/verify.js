@@ -84,9 +84,11 @@ export async function runVerify(argv, cmdCtx, opts) {
   cmdCtx.stdout.write('\nin-app check (not verified automatically, LLP 0131#verify-is-a-hint):\n')
   cmdCtx.stdout.write('  1. Quit and reopen Claude Desktop so it picks up the managed profile.\n')
   cmdCtx.stdout.write('  2. Send it a message.\n')
+  // 'local-agent' is what Desktop's 3p mode writes on the current build;
+  // 'claude-desktop-3p' was observed on an earlier one (LLP 0133#attribution).
   cmdCtx.stdout.write(
-    "  3. Confirm capture: rows land under entrypoint 'claude-desktop-3p' in ai_gateway_messages "
-    + "(check via 'hyp status' or 'hyp mcp').\n",
+    "  3. Confirm capture: rows land under entrypoint 'local-agent' (older builds: 'claude-desktop-3p') "
+    + "in ai_gateway_messages (check via 'hyp status' or 'hyp mcp').\n",
   )
 
   if (!result.ok) {

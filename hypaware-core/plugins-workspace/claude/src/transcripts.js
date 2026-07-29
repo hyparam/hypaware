@@ -40,6 +40,81 @@ export function defaultClaudeProjectsDir(homeDir) {
 }
 
 /**
+ * Claude Desktop 3p session roots, most recent layout first. Under the
+ * managed third-party-inference profile Desktop does not write into the
+ * shared `~/.claude/projects`: it boots a separate "Claude-3p" identity
+ * and runs each conversation's embedded CLI in a per-session sandbox
+ * home (`local-agent-mode-sessions/<...>/local_<id>/`), so the
+ * transcript lands in a `.claude/projects` tree nested inside that
+ * sandbox, tagged `entrypoint: "local-agent"`. The container location
+ * has already drifted once between Desktop builds (sibling
+ * `Claude-3p` observed on app 1.13576.0 / CLI 2.1.177; LLP 0133's
+ * live test recorded it nested inside `Claude/`), so both layouts are
+ * scanned and a missing directory is a cheap no-op.
+ *
+ * @ref LLP 0133#attribution [implements]: attached-Desktop transcripts live in the 3p container's sandbox homes, not ~/.claude/projects; these are the roots the claude adapter scans to keep Desktop rows enriched and attributable
+ * @param {string} homeDir
+ * @returns {string[]}
+ */
+export function claudeDesktop3pSessionRoots(homeDir) {
+  return [
+    path.join(homeDir, 'Library', 'Application Support', 'Claude-3p', 'local-agent-mode-sessions'),
+    path.join(homeDir, 'Library', 'Application Support', 'Claude', 'Claude-3p', 'local-agent-mode-sessions'),
+  ]
+}
+
+/**
+ * Sandbox homes nest a few levels below the session root
+ * (`<root>/<bucket>/<seq>/local_<id>/.claude/projects`); the cap only
+ * bounds a runaway walk if the layout drifts again.
+ */
+const DESKTOP_3P_SCAN_DEPTH = 6
+
+/**
+ * Find every `.claude/projects` directory nested under the Desktop 3p
+ * session roots. Best-effort and bounded: a missing root yields
+ * nothing, recursion stops at `.claude` (the projects tree is walked by
+ * the caller) and at {@link DESKTOP_3P_SCAN_DEPTH}.
+ *
+ * @param {string} homeDir
+ * @returns {string[]}
+ */
+export function findDesktop3pProjectsDirs(homeDir) {
+  /** @type {string[]} */
+  const found = []
+  for (const root of claudeDesktop3pSessionRoots(homeDir)) {
+    collectNestedProjectsDirs(root, 0, found)
+  }
+  return found
+}
+
+/**
+ * @param {string} dir
+ * @param {number} depth
+ * @param {string[]} out
+ */
+function collectNestedProjectsDirs(dir, depth, out) {
+  if (depth > DESKTOP_3P_SCAN_DEPTH) return
+  /** @type {fs.Dirent[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const child = path.join(dir, entry.name)
+    if (entry.name === '.claude') {
+      const projects = path.join(child, 'projects')
+      if (fs.existsSync(projects)) out.push(projects)
+      continue
+    }
+    collectNestedProjectsDirs(child, depth + 1, out)
+  }
+}
+
+/**
  * Load the transcript entries for one session.
  *
  * Lookup order:
@@ -50,11 +125,17 @@ export function defaultClaudeProjectsDir(homeDir) {
  *  - Otherwise scan `<projectsDir>/**\/<sessionId>.jsonl` (which also
  *    descends into `<sessionId>/` directories for subagent files) and
  *    concatenate matching files.
+ *  - When that scan finds nothing and `homeDir` is provided, scan the
+ *    Desktop 3p sandbox trees ({@link findDesktop3pProjectsDirs}):
+ *    an attached Desktop writes its transcripts there, not under
+ *    `~/.claude/projects`, and without this fallback every Desktop
+ *    exchange lost transcript identity and its `entrypoint` column.
  *
  * @param {{
  *   projectsDir: string,
  *   sessionId: string,
  *   transcriptPath?: string,
+ *   homeDir?: string,
  * }} opts
  * @returns {Promise<TranscriptEntry[]>}
  */
@@ -78,22 +159,37 @@ export async function loadTranscript(opts) {
     for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
       await readTranscriptFile(filePath, entries)
     }
+    // The 3p roots are only scanned on a primary miss: a session lives in
+    // exactly one tree, and the common CLI case must not pay the extra
+    // container walk.
+    if (entries.length === 0 && opts.homeDir) {
+      for (const projectsDir of findDesktop3pProjectsDirs(opts.homeDir)) {
+        for (const filePath of walkJsonlFiles(projectsDir, opts.sessionId)) {
+          await readTranscriptFile(filePath, entries)
+        }
+        if (entries.length > 0) break
+      }
+    }
   }
   entries.sort(byTimestampAsc)
   return entries
 }
 
 /**
- * Walk every Claude JSONL transcript under `projectsDir`, yielding
- * absolute file paths. `loadTranscript()` targets one live session;
- * the backfill provider needs the full local history, so this exposes
- * the same recursive scan without a session-id filter.
+ * Walk every Claude JSONL transcript under the given roots in order
+ * (the shared projects dir plus any Desktop 3p sandbox trees), yielding
+ * absolute file paths. `loadTranscript()` targets one live session; the
+ * backfill provider needs the full local history, so this exposes the
+ * same recursive scan without a session-id filter. A missing root
+ * yields nothing, so callers can pass the 3p dirs unconditionally.
  *
- * @param {string} projectsDir
+ * @param {string[]} roots
  * @returns {Generator<string>}
  */
-export function* walkTranscriptFiles(projectsDir) {
-  yield* walkJsonlFiles(projectsDir, undefined)
+export function* walkTranscriptRoots(roots) {
+  for (const root of roots) {
+    yield* walkJsonlFiles(root, undefined)
+  }
 }
 
 /**

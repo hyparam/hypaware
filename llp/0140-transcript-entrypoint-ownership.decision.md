@@ -79,9 +79,14 @@ the picker row that composed nothing (LLP 0139), `PICKER_DISPLAY_ORDER`,
 and `init.js`'s `--source` enum. A fourth would rot the same way, and this
 one would rot silently in the direction of over-capture.
 
-A client may claim several values: Desktop's transcripts say
-`claude-desktop` while its live 3P route stamps `claude-desktop-3p`
-(LLP 0133#attribution).
+A client may claim several values: un-attached Desktop's transcripts in
+the shared tree say `claude-desktop`, an earlier attached build stamped
+`claude-desktop-3p`, and the current attached build writes `local-agent`
+into transcripts under sandboxed per-session homes inside the `Claude-3p`
+container, outside `~/.claude/projects` entirely
+(LLP 0133#attribution documents the drift; the claude adapter scans those
+sandbox trees so the gate and enrichment see attached-Desktop sessions at
+all).
 
 <a id="gate-before-projection"></a>**A session whose entrypoint is owned by
 an unconfigured client is skipped before projection**, beside the
@@ -125,9 +130,13 @@ logging buried the two real gate decisions under 388 lines.
 - `@hypaware/claude` claims `cli` and `sdk-cli`. Without that, every
   ordinary Claude Code session took the fail-open path: harmless for
   import, but the gate would be inert for the common case.
-- Not addressed here: the same conversation could in principle arrive
-  twice for Desktop, once live via `claude-desktop-3p` and once by
-  transcript via `claude-desktop`. For Claude Code the two paths dedupe
-  because identity comes from the transcript either way; whether that
-  holds for Desktop is unverified, and should be checked before Desktop
-  live capture is relied upon.
+- The same conversation can arrive twice for attached Desktop: live via
+  the gateway and again by transcript backfill from the 3p sandbox tree.
+  With the claude adapter scanning that tree, identity comes from the
+  transcript on both paths (as for Claude Code), so they dedupe, except
+  for a live exchange projected before its transcript line is written,
+  which keeps a gateway-fallback identity and can then duplicate against
+  the backfill's transcript-identity rows (the same known class as a
+  Claude Code exchange whose hook never reported a transcript path).
+  Rows captured before the sandbox trees were scanned are all in that
+  state.

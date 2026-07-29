@@ -126,11 +126,14 @@ test('sessionEntrypoint takes the first non-empty value across a session', () =>
 // beside Claude Code's, so the `@hypaware/claude` backfill imported them
 // regardless of whether Desktop was ever configured, attributed to `claude`.
 // @ref LLP 0140#manifest-declares-ownership [tests]: the real Desktop manifest claims its transcript entrypoints
-test('the real claude-desktop manifest claims both of its entrypoint values', async () => {
+test('the real claude-desktop manifest claims every observed entrypoint value', async () => {
   const descriptors = await realClientDescriptors()
   const desktop = descriptors.get('claude-desktop')
   assert.ok(desktop, 'claude-desktop client descriptor exists')
-  assert.deepEqual(desktop.transcriptEntrypoints, ['claude-desktop', 'claude-desktop-3p'])
+  // 'claude-desktop' = un-attached Desktop in the shared tree;
+  // 'claude-desktop-3p' = attached, earlier build; 'local-agent' =
+  // attached, current build (LLP 0133#attribution documents the drift).
+  assert.deepEqual(desktop.transcriptEntrypoints, ['claude-desktop', 'claude-desktop-3p', 'local-agent'])
 })
 
 // `cli` must be claimed too, else every ordinary Claude Code session takes
@@ -146,7 +149,7 @@ test('real manifests: Desktop entrypoints gate off when only @hypaware/claude is
   const descriptors = await realClientDescriptors()
   const owners = resolveEntrypointOwners(descriptors.values(), (p) => p === '@hypaware/claude')
 
-  for (const ep of ['claude-desktop', 'claude-desktop-3p']) {
+  for (const ep of ['claude-desktop', 'claude-desktop-3p', 'local-agent']) {
     assert.equal(classifyTranscriptEntrypoint(ep, owners, 'claude').import, false, `${ep} skipped`)
   }
   for (const ep of ['cli', 'sdk-cli']) {
@@ -161,7 +164,7 @@ test('real manifests: Desktop entrypoints import as claude-desktop once it is co
   const configured = new Set(['@hypaware/claude', '@hypaware/claude-desktop'])
   const owners = resolveEntrypointOwners(descriptors.values(), (p) => configured.has(p))
 
-  for (const ep of ['claude-desktop', 'claude-desktop-3p']) {
+  for (const ep of ['claude-desktop', 'claude-desktop-3p', 'local-agent']) {
     const verdict = classifyTranscriptEntrypoint(ep, owners, 'claude')
     assert.equal(verdict.import, true, `${ep} imported`)
     assert.equal(verdict.clientName, 'claude-desktop', `${ep} attributed to claude-desktop`)
@@ -174,7 +177,7 @@ test('real manifests: Desktop entrypoints import as claude-desktop once it is co
 test('every known real-world entrypoint value is claimed by a bundled client', async () => {
   const descriptors = await realClientDescriptors()
   const owners = resolveEntrypointOwners(descriptors.values(), () => true)
-  for (const ep of ['cli', 'sdk-cli', 'claude-desktop']) {
+  for (const ep of ['cli', 'sdk-cli', 'claude-desktop', 'local-agent']) {
     assert.ok(owners.has(ep), `entrypoint '${ep}' is claimed by a bundled client manifest`)
   }
 })
