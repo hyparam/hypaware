@@ -83,6 +83,33 @@ Codex now has the symmetric fallback.
   records NULL) is preferred to confidently enforcing and stamping the root's
   directory. A wrong cwd is a false statement about where a turn ran; an absent
   one is true.
+- **The container fallback leaves a documented residual gap.** {#container-fallback-gap}
+  The lineage the refusal above keys on is only readable when the client
+  volunteers it: `thread_source` comes from `x-codex-turn-metadata` only, and
+  `parent_thread_id` from that header or a `parent-thread-id` header. `codex-tui`
+  sends none of them on the subscription route, which is the very reason this
+  fallback exists, so for that client the refusal **cannot fire** and the
+  container fallback is not a defensive branch but the only path. A `codex-tui`
+  subagent turn would therefore still resolve the root thread's cwd: the #459
+  defect, narrowed to one client shape rather than closed. Whether that shape
+  exists is an open **empirical** question about a client HypAware does not own
+  (does the subscription route ever state the turn's own thread id, and does
+  `codex-tui` spawn subagent threads at all?), and it is exactly the check
+  [issue #459](https://github.com/hyparam/hypaware/issues/459) asked for before
+  option 1 was adopted. It is not answerable from this repo: the only
+  turn-metadata shapes here are synthetic smoke fixtures, and the live Desktop
+  route has never been confirmed against real hardware
+  ([LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)).
+  Removing the fallback is **not** the answer: it returns every `codex-tui` turn,
+  root threads included, to `cwd = NULL` and fails `.hypignore` open for the whole
+  traffic class, the regression this document exists to prevent. The narrower
+  option, deciding ambiguity from disk (refuse the container key when some other
+  rollout in the tree declares `session_id = <container>` with a different `id`,
+  so the container demonstrably holds more than one thread), is decidable locally
+  but costs the newest-first short-circuit: proving uniqueness means visiting
+  every candidate, not returning on the first name match, so it trades
+  [LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements) and is left
+  open rather than taken here.
 - **First line only, cached per thread id.** The rollout is written at session
   start, so it exists before the first exchange projects (earlier and more
   reliably than Claude's sidecar, which has a known session-start race). Reading a
@@ -158,6 +185,15 @@ confirmed as unresolvable.
   report the container). They now agree on the discipline (raw line, `session_meta`
   type guard, absent means refuse). Folding them into one shared reader is a
   worthwhile follow-up, not a requirement of this correction.
+- **One narrow live/backfill divergence the identity guard introduces.** A
+  `session_meta` payload carrying a `cwd` but **no** `id` is tolerated by the
+  backfill (`buildSession` falls back to the id on the filename) and now refused
+  by the live resolver. That is deliberate (an unconfirmable id is unresolvable),
+  and the direction is safe by [LLP 0049](./0049-hypignore-usage-policy.spec.md)'s
+  fail-open rule rather than by fail-closed: refusing means `cwd` unknown, which
+  means the turn is **recorded**. Codex's own `SessionMeta` always writes `id`, so
+  the shape is not expected; it is named here because the parity claim above
+  ("live rows carry the cwd backfill reads") now has this one exception.
 - **Prospective only.** Like the rest of [LLP 0049](./0049-hypignore-usage-policy.spec.md#prospective-only),
   this gates *future* live recording; rows already written with `cwd = NULL` are
   untouched (a `hyp backfill` re-import, which reads the rollout, is the path to

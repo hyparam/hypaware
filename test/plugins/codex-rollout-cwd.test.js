@@ -434,6 +434,88 @@ test('a subagent turn that states lineage but not its own thread id resolves no 
   assert.equal(projection.cwd, undefined, 'an unknown cwd is recorded as unknown, not as the root\'s')
 })
 
+test('a turn whose metadata states thread_source=subagent but no thread id resolves no cwd', async () => {
+  // The other half of the lineage refusal. The test above states lineage via the
+  // `parent-thread-id` HEADER; `thread_source` is readable only out of
+  // `x-codex-turn-metadata`, so without this case the `thread_source` disjunct
+  // could be deleted with the suite still green.
+  const sessionsDir = await writeSubagentPair({
+    rootCwd: '/work/ignored/root',
+    subagentCwd: '/work/clean/sub',
+  })
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'session-id': ROOT_SESSION_ID,
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ROOT_SESSION_ID, thread_source: 'subagent' }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hi' }),
+    response_body: JSON.stringify({ output_text: 'ok' }),
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP)
+  assert.equal(projection.cwd, undefined, 'stated lineage without a thread id must not fall back to the container')
+})
+
+test('a session_meta line with a cwd but no payload.id is refused, not matched by its filename', async () => {
+  // The identity guard reads the RAW line, so an absent `payload.id` is visible
+  // as absent and refuses. Pinned because it is a real divergence from the
+  // backfill, which falls back to the id on the filename (`buildSession`), and
+  // because refusing here means cwd unknown, which LLP 0049 fails OPEN on: the
+  // turn is recorded. Codex always writes `id`, so this pins the rule, not a
+  // shape in the field.
+  const sessionsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  await fs.writeFile(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${ROOT_THREAD_ID}.jsonl`),
+    metaLine({ cwd: '/work/idless', originator: 'codex-tui' }),
+    'utf8'
+  )
+  const log = recordingLog()
+  const resolver = createRolloutCwdResolver({ sessionsDir, log })
+  assert.equal(resolver.resolve(ROOT_THREAD_ID), undefined)
+  assert.deepEqual(log.warns.map((w) => w.message), ['plugin.codex.rollout_cwd_thread_mismatch'])
+  assert.equal(log.warns[0].fields?.rollout_thread_id, null, 'an absent id is reported as absent, not as the wanted id')
+})
+
+test('DOCUMENTED GAP: a codex-tui-shaped subagent turn (container only) still resolves the ROOT cwd', async () => {
+  // @ref LLP 0083#container-fallback-gap [tests]: the container fallback is
+  // bounded by what the wire states, so the residual #459 exposure is asserted
+  // rather than left to be discovered again.
+  //
+  // The refusal above needs the client to VOLUNTEER its lineage, and codex-tui
+  // volunteers nothing on the subscription route (no `x-codex-turn-metadata`, no
+  // `parent-thread-id`) - which is the whole reason the rollout fallback exists.
+  // So for that client the container fallback is the only path, and a subagent
+  // turn is indistinguishable on the wire from its root: it resolves the ROOT's
+  // cwd and is RECORDED even though its own rollout says otherwise. Whether
+  // codex-tui ever produces this shape is an empirical question about a client
+  // this repo cannot observe (issue #459's "needs checking that the route
+  // actually has it"). Deleting the fallback is not the fix: it returns every
+  // codex-tui turn, root threads included, to `cwd = NULL` and fails
+  // `.hypignore` open for the entire traffic class.
+  const sessionsDir = await writeSubagentPair({
+    rootCwd: '/work/clean/root',
+    subagentCwd: '/work/ignored/sub',
+  })
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({ 'session-id': ROOT_SESSION_ID }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret subagent work' }),
+    response_body: JSON.stringify({ output_text: 'ok' }),
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'still recorded: the gap this asserts')
+  assert.equal(projection.cwd, '/work/clean/root', 'still the ROOT thread\'s cwd, not the subagent\'s')
+})
+
 // ---------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------

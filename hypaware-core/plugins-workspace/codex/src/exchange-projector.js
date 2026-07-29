@@ -231,6 +231,23 @@ export function createCodexExchangeProjector(opts = {}) {
  * is preferred to confidently stamping and enforcing the root's directory. A
  * wrong cwd is a false statement about where a turn ran; an absent one is true.
  *
+ * **Known residual gap, not closed by the branch above.** The lineage the refusal
+ * keys on is only readable when the client volunteers it: `thread_source` comes
+ * from `x-codex-turn-metadata` alone, and `parent_thread_id` from that header or
+ * a `parent-thread-id` header. `codex-tui` sends none of them on the subscription
+ * route (that is why this fallback exists at all), so for that client the refusal
+ * cannot fire and the container fallback is not a defensive branch but the ONLY
+ * path. A `codex-tui` subagent turn would therefore still resolve the root's cwd,
+ * which is the #459 defect. Whether that shape exists is an open **empirical**
+ * question about a client HypAware does not own (does the subscription route ever
+ * carry the turn's own thread id, and does `codex-tui` spawn subagent threads?),
+ * and it is the check issue #459 asked for. Dropping the fallback is not the
+ * answer: it would return every `codex-tui` turn, root threads included, to
+ * `cwd = NULL` and fail `.hypignore` open for the whole traffic class, which is
+ * the regression LLP 0083 exists to prevent.
+ * @ref LLP 0083#decision [constrained-by]: the container fallback is bounded by
+ * what the wire states, so its residual gap is documented rather than silent
+ *
  * @param {RolloutCwdResolver | undefined} rolloutCwd
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  * @returns {string | undefined}
