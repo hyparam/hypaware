@@ -315,8 +315,28 @@ resolver is shared by the read side (the attach probe, the picker's
 core cannot resolve must fail rather than resolve to something else, or attach
 and detach can disagree about which file they own. The picker's absolute-literal
 needs are already served by the sibling `app_bundle` and `path` detect variants
-([LLP 0136](./0136-install-experience-overhaul.plan.md)), so no manifest loses
-expressiveness.
+([LLP 0136](./0136-install-experience-overhaul.plan.md)), so no *picker row*
+loses expressiveness. `attach_probe` is the honest exception: it has only
+`settings_file` and no absolute sibling, so a client whose real settings surface
+is an absolute system path genuinely cannot declare one. That is not an
+oversight to route around, it is the same finding from the other side - such a
+file is not one the core probe/undo can read or replay anyway, which is why
+[#445](https://github.com/hyparam/hypaware/pull/445) deletes Claude Desktop's
+probe rather than respelling it.
+
+A leading `/` is only the spelling that got reported. `../../../etc/passwd` is
+the identical violation - it lands on a file the manifest never named, escapes
+`$HOME` just as completely, and (unlike the absolute case) survives the
+`isAbsolute` check - and it matters more here than in a read-only resolver
+because `detachClientFromDisk` *reads and rewrites* whatever it is handed, and
+`contributes.client` is unvalidated, so the value can arrive from a
+remotely-installed or org-pushed plugin. So the rule is enforced on the
+**resolved** path: it must stay under the base it resolved against
+(`ClientSettingsPathError`, `code: 'settings_file_escapes_base'`). Each branch
+is checked against its own base - `$HOME` normally, `$<CLIENT>_HOME` when the
+override is set, because the override is precisely a licence to leave `$HOME`.
+A `..` that normalizes away (`.codex/sub/../config.toml`) stays legal; the rule
+is about where the path lands, not which characters it contains.
 
 Each caller turns the throw into whatever "observable" means on its surface, and
 none of them swallows it into a plain negative:
@@ -334,6 +354,17 @@ none of them swallows it into a plain negative:
 - The `hyp init` picker's detect probe keeps its documented best-effort stance
   and degrades to "not present". Detection only seeds checkbox state, and every
   user of it can still toggle the box.
+
+One honest caveat on the "one resolver" argument: it holds for everything
+**core** does (probe, picker detect, disk-driven undo), but the per-plugin
+*attach* write side is not routed through it. `@hypaware/openclaw` calls the
+shared resolver; `@hypaware/claude`'s `defaultSettingsPath` hardcodes
+`~/.claude/settings.json` and ignores `$CLAUDE_HOME`, and `@hypaware/codex`
+keeps its own `$CODEX_HOME` copy. So a `$CLAUDE_HOME` set today would already
+make attach and detach disagree, by a different mechanism than this section
+fixes. Not a regression and not addressed here: recorded so the next reader does
+not mistake "core resolves this field for read and write alike" for "every
+writer of this file agrees where it is".
 
 Validating this at **manifest load** would be better still (the plugin author
 learns at install, not at probe time), but `contributes.client` is not validated

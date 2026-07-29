@@ -101,6 +101,44 @@ test('resolveClientSettingsPath rejects an absolute settings_file rather than re
   )
 })
 
+// A leading `/` is only the spelling that got reported. `..` walks out of the
+// base just as completely, and this resolver feeds the disk-driven undo, which
+// reads and rewrites whatever it is handed - so the contract is enforced on the
+// resolved path, not on the first character.
+// @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: a relative settings_file that climbs out of its base is rejected too
+test('resolveClientSettingsPath rejects a settings_file that climbs out of its base', () => {
+  for (const escaping of ['../../../etc/passwd', './../../etc/passwd', '..']) {
+    assert.throws(
+      () => resolveClientSettingsPath('codex', escaping, {}, '/Users/hyp'),
+      (err) => {
+        assert.ok(err instanceof ClientSettingsPathError)
+        assert.equal(err.code, 'settings_file_escapes_base')
+        return true
+      },
+      `expected '${escaping}' to be rejected`
+    )
+  }
+
+  // The override branch is checked against `$<CLIENT>_HOME`, the base it
+  // actually resolves against - the override is a licence to leave `$HOME`,
+  // not a licence to leave everything.
+  assert.throws(
+    () => resolveClientSettingsPath('codex', '.codex/../../../etc/passwd', { CODEX_HOME: '/tmp/ch' }, '/Users/hyp'),
+    ClientSettingsPathError
+  )
+
+  // A `..` that normalizes away stays legal: the rule is about where the path
+  // lands, not about which characters it contains.
+  assert.equal(
+    resolveClientSettingsPath('codex', '.codex/sub/../config.toml', {}, '/Users/hyp'),
+    '/Users/hyp/.codex/config.toml'
+  )
+  assert.equal(
+    resolveClientSettingsPath('codex', '.codex/config.toml', { CODEX_HOME: '/tmp/ch' }, '/Users/hyp'),
+    '/tmp/ch/config.toml'
+  )
+})
+
 // @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: the probe must not answer about a file the manifest never named
 test('probeClientAttachFromDescriptor errors on an absolute settings_file instead of probing $HOME', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-absolute-'))
