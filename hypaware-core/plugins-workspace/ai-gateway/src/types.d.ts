@@ -121,7 +121,9 @@ export interface ProxyOptions {
    * proxy short-circuits control requests BEFORE upstream matching (they
    * are never proxied and start no exchange) and delegates the full
    * request lifecycle — body read and response — to this callback. Absent,
-   * the proxy 404s the control request locally. @ref LLP 0066#control-path
+   * the proxy 404s the control request locally.
+   * @ref LLP 0066#control-path: the control prefix is reserved and answered
+   * locally, so an opt-out can never be forwarded upstream as a real request.
    */
   onControlRequest?(req: IncomingMessage, res: ServerResponse, url: URL): void
 }
@@ -155,7 +157,8 @@ export interface GatewayState {
    * activation, NOT per listener) so a config `reload()` — which tears down
    * and relaunches the listener — does not silently re-enable recording
    * mid-session. No file, no cache column: dies with the daemon process.
-   * @ref LLP 0066#ephemeral
+   * @ref LLP 0066#ephemeral [implements]: the set is deliberately process-local,
+   * which is the half of the caveat `EPHEMERAL_NOTE` has to keep telling users.
    */
   ignoredSessions: Set<string>
 }

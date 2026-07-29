@@ -19,9 +19,11 @@ This flow governs **HypAware's own surfaces only** - what the local cache holds 
 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this Codex session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
 
-Codex **states** the current session id in the environment of the shells and exec subprocesses it spawns: **`CODEX_THREAD_ID`**. Prefer it. A stated id needs no inference and carries no staleness bound, because the session that named it is the one that spawned this process.
+Codex **states** the id of the currently running thread in the environment of the shells and exec subprocesses it spawns: **`CODEX_THREAD_ID`**. Prefer it as the *liveness* signal: a finished thread cannot have set it, so it needs no inference and carries no staleness bound.
 
-Only when it is absent (an older Codex, or a shell this session did not spawn) fall back to the rollout Codex writes for the session: `~/.codex/sessions/**/rollout-<ts>-<session-uuid>.jsonl`, whose first line is a `session_meta` record carrying `payload.id` (the session id) and `payload.cwd`.
+**Know what grain it names, though.** `CODEX_THREAD_ID` is a **thread** id, while the gateway's opt-out set is matched against the **session container** (`exchange-projector.js` keys the drop on `metadata.session_id`, falling back to the conversation id). For a **root** thread the two are the same uuid and the distinction never shows. For a **subagent** thread they diverge: it inherits the root's container id but exports its *own* thread id here, so an opt-out taken from inside a subagent tool call names a token the gateway never matches, and the verification below still prints `opt-out confirmed` because the control route treats the id as opaque. Issue #453 corrects this by using the variable as a *selector* (look the rollout up by `payload.id`, then read the container out of `payload.session_id`) rather than as the answer. Until that lands, prefer `hyp session ignore` / `hyp session status` where they can resolve the session, and treat a `confirmed` printed off `CODEX_THREAD_ID` inside a subagent as unproven.
+
+Only when it is absent (an older Codex, or a shell this session did not spawn) fall back to the rollout Codex writes for the session: `~/.codex/sessions/**/rollout-<ts>-<session-uuid>.jsonl`, whose first line is a `session_meta` record carrying `payload.id` (the thread id), `payload.session_id` (the container, on rollouts recent enough to record it) and `payload.cwd`.
 
 **Do not pick the newest rollout by mtime.** Newest-by-mtime is precisely the heuristic that resolves a session the user is not in: it answers confidently off a *finished* session, and marking or purging against a wrong id touches another session's rows while this one keeps being recorded. The fallback must instead
 
@@ -87,8 +89,12 @@ echo "resolved session $SESSION_ID ($ID_SOURCE)"
 # default port. Strip the `/v1` (or `/backend-api/codex`) API suffix.
 BASE="${OPENAI_BASE_URL:-}"
 if [ -z "$BASE" ]; then
+  # `|| true`: under `set -e -o pipefail` a config.toml that is missing, or has
+  # no [model_providers.hypaware] base_url, makes this pipeline exit nonzero and
+  # would abort the script here - silently, since grep's stderr is discarded -
+  # before the default below is ever reached.
   BASE="$(grep -A6 '^\[model_providers.hypaware\]' "$CODEX_HOME/config.toml" 2>/dev/null \
-    | grep -m1 'base_url' | sed -E 's/.*"([^"]+)".*/\1/')"
+    | grep -m1 'base_url' | sed -E 's/.*"([^"]+)".*/\1/' || true)"
 fi
 BASE="${BASE:-http://127.0.0.1:8787}"
 BASE="${BASE%/v1}"; BASE="${BASE%/backend-api/codex}"; BASE="${BASE%/}"
