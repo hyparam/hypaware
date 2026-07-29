@@ -289,7 +289,7 @@ export async function runPolicyShow(argv, ctx) {
  * @ref LLP 0110 [implements]: the class-neutral `policy unset`, replacing per-class `hyp unignore` flags as the primary spelling
  * @ref LLP 0111#unset [implements]: class-neutral by default, an optional trailing class token scopes it
  * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
- * @ref LLP 0103#cli [constrained-by]: reuses the shared `isEqualOrDescendant` ancestor predicate; store/resolver unchanged
+ * @ref LLP 0103#cli [constrained-by]: the symmetric removal `hyp unignore` grew, now spelled class-neutrally; store, resolver, and class lattice unchanged
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
