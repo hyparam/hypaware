@@ -21,6 +21,23 @@ const CONTROL_PATH = '/_hypaware/ignore/session'
 const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp policy show` (this verb reports the session set only)'
 
 /**
+ * Printed next to every confirmed `ignored`, by the writer and the reader
+ * alike, so the two cannot drift apart.
+ *
+ * LLP 0066 §readable lists **two** ways the opt-out stops applying while the
+ * user still believes it holds: the gateway restart that drops the set, and the
+ * client minting a new `session_id` for what the user experiences as one
+ * conversation. Naming only the restart reads as an exhaustive list, so a user
+ * who forks is taught that the other way cannot happen. A fork mints the new id
+ * (`claude --fork-session`, `codex fork`); a plain resume reuses it.
+ *
+ * @ref LLP 0066#readable [implements]: R9 - both ways an opt-out can stop
+ * applying are named, so neither is discovered in the cache instead.
+ */
+const EPHEMERAL_NOTE =
+  'this opt-out is in-memory only: a gateway restart drops it, and a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
+
+/**
  * `hyp session status` exit code for a **confirmed** "this session is NOT
  * being dropped" read. Distinct from `SESSION_EXIT_UNKNOWN` on purpose: the
  * whole point of the verb is that "recording, confirmed" and "could not
@@ -247,7 +264,7 @@ async function runMutation(argv, ctx, method, usage) {
       : `session ${resolvedId.sessionId}: not ignored - recording resumed (${total} ignored)\n`
   )
   if (ignored) {
-    ctx.stdout.write('this opt-out is in-memory only: a gateway restart drops it. Re-check with `hyp session status`.\n')
+    ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
   }
   // The write verbs carry the same provenance caveats as the read: "ignored"
   // printed off an inferred id is a claim about a session the user may not be
@@ -278,7 +295,7 @@ function writeStatus(ctx, json, report) {
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
-    ctx.stdout.write('this opt-out is in-memory only: a gateway restart drops it. Re-check with `hyp session status`.\n')
+    ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
     for (const note of provenanceNotes(report.session_id_source, report.session_id_evidence, report.endpoint_source)) {
       ctx.stdout.write(`${note}\n`)
     }

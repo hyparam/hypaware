@@ -19,7 +19,17 @@ This flow governs **HypAware's own surfaces only** - what the local cache holds 
 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this Codex session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
 
-Codex, unlike Claude, exposes no `CLAUDE_CODE_SESSION_ID`, so the session id must be **discovered** from the rollout Codex writes for this session. Codex records each session as `~/.codex/sessions/**/rollout-<ts>-<session-uuid>.jsonl` whose first line is a `session_meta` record carrying `payload.id` (the session id) and `payload.cwd`. Pick the **newest** rollout, and cross-check its `cwd` against the current directory so a concurrent Codex session in another folder is not confused for this one.
+Codex **states** the current session id in the environment of the shells and exec subprocesses it spawns: **`CODEX_THREAD_ID`**. Prefer it. A stated id needs no inference and carries no staleness bound, because the session that named it is the one that spawned this process.
+
+Only when it is absent (an older Codex, or a shell this session did not spawn) fall back to the rollout Codex writes for the session: `~/.codex/sessions/**/rollout-<ts>-<session-uuid>.jsonl`, whose first line is a `session_meta` record carrying `payload.id` (the session id) and `payload.cwd`.
+
+**Do not pick the newest rollout by mtime.** Newest-by-mtime is precisely the heuristic that resolves a session the user is not in: it answers confidently off a *finished* session, and marking or purging against a wrong id touches another session's rows while this one keeps being recorded. The fallback must instead
+
+- match `payload.cwd` against the invocation directory,
+- **refuse rather than guess** when zero, or more than one, rollout matches, and
+- **refuse on staleness**: a live session appends to its rollout on every turn, so a single match last written more than ~30 minutes ago is a finished session, not this one.
+
+That staleness window is a bound, not a proof: a session that ended a minute ago still resolves inside it. So whenever the id came off disk, say **"inferred from `<rollout file>`"** when you report it, and stop for the user's confirmation if they do not recognize the session.
 
 ```bash
 #!/usr/bin/env bash
@@ -27,25 +37,50 @@ set -euo pipefail
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
-# Newest rollout file by mtime.
-rollout="$(find "$CODEX_HOME/sessions" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null \
-  | xargs -0 ls -t 2>/dev/null | head -1)"
-if [ -z "${rollout:-}" ]; then
-  echo "error: no Codex rollout found under $CODEX_HOME/sessions; cannot resolve session id" >&2
-  exit 1
-fi
+# Preferred: the id Codex states in this subprocess's environment.
+SESSION_ID="${CODEX_THREAD_ID:-}"
+ID_SOURCE="stated by Codex (CODEX_THREAD_ID)"
 
-# Read session id and rollout cwd from the session_meta line.
-read -r SESSION_ID ROLLOUT_CWD < <(head -1 "$rollout" | python3 -c '
-import json, sys
-r = json.load(sys.stdin)
-p = r.get("payload", {})
-print(p.get("id", ""), p.get("cwd", ""))
-')
-echo "resolved session $SESSION_ID (rollout cwd: $ROLLOUT_CWD)"
-# Sanity check: the newest rollout should be THIS session. If ROLLOUT_CWD does
-# not match your working directory, STOP and confirm the session id with the
-# user before opting anything out.
+if [ -z "$SESSION_ID" ]; then
+  # Fallback: infer from disk. Match on payload.cwd; refuse on ambiguity or
+  # staleness rather than resolve a session the user is not in.
+  resolved="$(python3 - "$CODEX_HOME/sessions" "$PWD" <<'PY'
+import json, os, sys, time
+
+root, cwd = sys.argv[1], sys.argv[2]
+matches = []
+for dirpath, _dirs, names in os.walk(root):
+    for name in names:
+        if not (name.startswith('rollout-') and name.endswith('.jsonl')):
+            continue
+        full = os.path.join(dirpath, name)
+        try:
+            with open(full, encoding='utf-8') as fh:
+                payload = json.loads(fh.readline()).get('payload', {})
+        except Exception:
+            continue
+        if payload.get('cwd') != cwd or not payload.get('id'):
+            continue
+        matches.append((payload['id'], full, time.time() - os.stat(full).st_mtime))
+
+if not matches:
+    sys.exit('no Codex rollout under %s records cwd %s' % (root, cwd))
+if len(matches) > 1:
+    sys.exit('%d rollouts record cwd %s (%s): ambiguous, confirm the session id with the user'
+             % (len(matches), cwd, ', '.join(m[0] for m in matches)))
+session_id, full, age = matches[0]
+if age > 30 * 60:
+    sys.exit('the only rollout recording cwd %s was last written %dm ago, so it is a FINISHED '
+             'session rather than this one' % (cwd, age // 60))
+print(session_id, os.path.basename(full))
+PY
+)"
+  read -r SESSION_ID ROLLOUT <<<"$resolved"
+  ID_SOURCE="INFERRED from $ROLLOUT on disk"
+fi
+echo "resolved session $SESSION_ID ($ID_SOURCE)"
+# If the fallback ran and the user does not recognize that session, STOP and
+# confirm the id with them before opting anything out.
 
 # Resolve the local gateway base: prefer OPENAI_BASE_URL, else the base_url the
 # codex adapter wrote under [model_providers.hypaware] in config.toml, else the
@@ -74,7 +109,9 @@ print("opt-out confirmed for session %s (total ignored: %s)" % (r.get("session_i
 '
 ```
 
-If the session id cannot be resolved, the `curl` fails, the rollout `cwd` does not match this session, or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session may still be recorded**. Only proceed if they explicitly accept that risk. This opt-out is held in memory by the running gateway; a gateway restart drops it, so if the review spans a restart, re-run this step.
+If the session id cannot be resolved (the fallback refuses on ambiguity or staleness by design), the `curl` fails, or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session may still be recorded**. Only proceed if they explicitly accept that risk.
+
+The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`codex fork <id>`; a plain `codex resume <id>` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point.
 
 ## Step 2 - Check that backfill has settled (before surveying)
 

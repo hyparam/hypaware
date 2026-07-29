@@ -32,6 +32,14 @@ Decisions already taken (this session):
 3. **Fidelity:** follow the LLP spec as written (metadata headers,
    `NNNN-slug.type.md`, `tombstones/`, relation types, heading-slug anchors).
 
+   *Amended in execution:* heading slugs turned out to be too coarse. A decision
+   section routinely settles several separately-referenced propositions, and one
+   heading yields one slug, so the corpus also uses explicit `{#slug}` heading
+   suffixes and inline `<a id="slug"></a>` anchors, the latter placed mid-section
+   where the proposition actually is. All three are anchors a `@ref` may target
+   and all three must be indexed; treating a doc with no `{#...}` as a doc with
+   no anchors is how a resolvable ref gets reported broken (issue #452).
+
 ## Current state
 
 | Artifact | Size | LLP fate |

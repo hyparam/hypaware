@@ -169,7 +169,8 @@ export interface GatewayState {
  * `codex_rollout` id was INFERRED from a file on disk, and the user must be
  * able to see which of the two an "ignored" answer rests on. `evidence` names
  * the rollout the inference came from.
- * @ref LLP 0067#cli-session-id
+ * @ref LLP 0067#cli-session-id: `source` is the provenance the reader prints, so
+ * an inferred id can never be rendered as one the client stated.
  */
 export type SessionIdResolution =
   | {
@@ -184,7 +185,8 @@ export type SessionIdResolution =
  * Outcome of resolving the local gateway's control endpoint for
  * `hyp session <verb>`: the daemon's proven bound port, else a pinned
  * `listen`, else an error. Never a guessed default port.
- * @ref LLP 0086#endpoint-discovery
+ * @ref LLP 0086#endpoint-discovery [constrained-by]: the live port is read from
+ * `status.json`, so `daemon_status` is the only `source` anything proved bound.
  */
 export type SessionEndpointResolution =
   | { ok: true; endpoint: string; source: 'daemon_status' | 'config_listen' }
@@ -198,7 +200,8 @@ export type SessionEndpointResolution =
  * gateway" - and only some of the ways of establishing them are authoritative.
  * Hiding which one was used is how a confident answer about the wrong session
  * reads as a confident answer about yours.
- * @ref LLP 0066#readable
+ * @ref LLP 0066#readable [implements]: R10 and R12 shape this record - `ignored`
+ * is nullable so an unconfirmable read cannot render as `false`.
  */
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'

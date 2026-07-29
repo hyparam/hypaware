@@ -206,6 +206,13 @@ set remains [non-goal 2](#non-goals).
   `session_id` MUST report current membership, so an opt-out that stopped
   applying (restart, or a changed session id) is discoverable rather than
   silent (see [readable](#readable)).
+  Readability is necessary but not sufficient: the user has to know there is
+  something to re-check. So the ephemerality caveat printed next to a confirmed
+  `ignored` MUST name **both** ways, the restart *and* the session-id change a
+  fork mints, in the writer's confirmation and the reader's own `ignored` line
+  alike. A caveat that names one of the two reads as the exhaustive list and
+  teaches the user the other cannot happen, which is the same "the user still
+  believes it holds" failure [readable](#readable) exists to close.
 - **R10.** The read MUST fail closed. When the answer cannot be established,
   the reported state MUST be `unknown` with a nonzero exit, distinct from a
   confirmed "not ignored"; it MUST NOT degrade to `ignored: false`. "Cannot be

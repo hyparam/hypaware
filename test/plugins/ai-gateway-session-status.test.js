@@ -268,6 +268,40 @@ test('hyp session ignore / unignore round-trip through the control route', async
   })
 })
 
+test('the ephemerality caveat names the fork that mints a new session id, not only a restart', async () => {
+  // Issue #455. LLP 0066 §readable lists TWO ways an opt-out stops applying
+  // while the user still believes it holds: the gateway restart that drops the
+  // set, and the client minting a new `session_id` for what the user
+  // experiences as one conversation (`claude --fork-session`, `codex fork`;
+  // a plain resume reuses the id). The caveat named only the restart, which
+  // reads as the exhaustive list and teaches the user the other cannot happen.
+  //
+  // @ref LLP 0066#readable [tests]: R9 - the caveat next to a confirmed
+  //   `ignored` names both ways, in the writer and the reader alike.
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const env = { CLAUDE_CODE_SESSION_ID: 'sess-fork' }
+
+    const mut = fakeCtx({ endpoint: base, env })
+    assert.equal(await runSessionIgnore([], mut.ctx), 0)
+    assert.match(mut.stdout(), /a gateway restart drops it/, 'the restart half must survive')
+    assert.match(mut.stdout(), /fork/)
+    assert.match(mut.stdout(), /mints a new session id it no longer covers/)
+
+    // `status` prints the same caveat off the same constant, so the writer's
+    // wording and the reader's cannot drift apart.
+    const read = fakeCtx({ endpoint: base, env })
+    assert.equal(await runSessionStatus([], read.ctx), 0)
+    assert.match(read.stdout(), /a gateway restart drops it/)
+    assert.match(read.stdout(), /mints a new session id it no longer covers/)
+
+    // `unignore` has no opt-out to qualify, so it stays silent about both.
+    const off = fakeCtx({ endpoint: base, env })
+    assert.equal(await runSessionUnignore([], off.ctx), 0)
+    assert.doesNotMatch(off.stdout(), /in-memory only/)
+  })
+})
+
 test('an explicit session id argument beats the environment', async () => {
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
