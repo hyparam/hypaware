@@ -253,6 +253,28 @@ must never render as `false`
 mode also names `hyp policy show` as the folder governor this verb does not
 cover (R11 / R7).
 
+### The answer is validated before it is believed {#cli-response-check}
+
+Reaching *something* on the resolved endpoint is not the same as reaching the
+gateway. Both discovery paths below can land on a port another local process
+now owns: a pinned `listen` whose gateway is gone, or a recycled ephemeral
+port. So a `200` is not evidence on its own. The client accepts a control
+response only when
+
+- it is a JSON object (not an array, not a scalar),
+- `ignored` is a real boolean and `total` a real number, and
+- `session_id` comes back **byte-identical** to the token sent - the route
+  echoes it verbatim (R5), so a mismatch means the reply describes a different
+  session.
+
+Anything else is `unknown` ([LLP 0066 R10](./0066-session-opt-out.spec.md#requirements)).
+Without this, `200 {}` from an unrelated listener reads as "`ignored` is
+absent, therefore `false`" - a confident answer nothing established - and
+`200 {"session_id":"other","ignored":true}` reads as "you are covered", which
+is the same fail-open shape in the more dangerous direction. The mutation verbs
+apply the identical check, so `hyp session ignore` cannot print a success it
+did not get.
+
 ### Endpoint resolution: disk, then config, never a guess {#cli-endpoint}
 
 The daemon's live bound port from `status.json` wins
@@ -275,6 +297,13 @@ nonzero exit naming the candidates, rather than taking newest-by-mtime the way
 the `hypaware-privacy` skill body does. Guessing here would opt out the wrong
 session while telling the user they are covered: the same fail-open shape this
 change exists to remove.
+
+The rollout walk is bounded so a very large history cannot turn a privacy check
+into a long directory scan. **A truncated walk also refuses**: "exactly one cwd
+match" over a partial listing is an artefact of the bound, not a fact, since
+the rollout that would have made it ambiguous may be one of the files never
+looked at. Truncation is therefore reported and treated as unresolvable rather
+than resolved on partial evidence.
 
 ### What is deliberately not covered
 
@@ -307,7 +336,12 @@ Traditional tests (root `test/`, alongside the existing suites):
   `ignored: null` and a nonzero exit for an unreachable gateway, an
   unresolvable endpoint, and an unresolvable session id, and always names
   `hyp policy show`; the Codex rollout resolver picks the unique cwd match and
-  refuses when several or none match.
+  refuses when several, none, or a truncated scan. A rogue local listener on
+  the resolved port covers [§cli-response-check](#cli-response-check): a `200`
+  with no boolean `ignored`, no numeric `total`, a non-object body, an
+  unparseable body, a non-200, and a reply about a different `session_id`
+  (including `ignored: true`) all report `unknown`, and `hyp session ignore`
+  against the same responder reports no success.
 - `test/plugins/ai-gateway-proxy-routing.test.js` (extend): with a catch-all
   (`/`) upstream configured, `/_hypaware/ignore/session` is handled locally
   and never forwarded (R2); no exchange is started for a control request.

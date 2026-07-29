@@ -208,7 +208,12 @@ set remains [non-goal 2](#non-goals).
   silent (see [readable](#readable)).
 - **R10.** The read MUST fail closed. When the answer cannot be established,
   the reported state MUST be `unknown` with a nonzero exit, distinct from a
-  confirmed "not ignored"; it MUST NOT degrade to `ignored: false`.
+  confirmed "not ignored"; it MUST NOT degrade to `ignored: false`. "Cannot be
+  established" includes a reply that is not a well-formed control response, and
+  a reply about a **different** `session_id` than the one asked about: reaching
+  something on the endpoint is not the same as reaching the gateway, so the
+  answer MUST be validated before it is believed (see
+  [LLP 0067 §cli-response-check](./0067-session-opt-out.design.md#cli-response-check)).
 - **R11.** The reader MUST name the folder governor (`.hypignore`) it does not
   cover, since either mechanism independently suppresses (R7).
 

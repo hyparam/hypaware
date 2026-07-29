@@ -138,12 +138,12 @@ export async function runSessionStatus(argv, ctx) {
     })
   }
 
-  const ignored = result.body.ignored === true
+  const ignored = result.body.ignored
   return writeStatus(ctx, parsed.json, {
     status: ignored ? 'ignored' : 'not_ignored',
     session_id: resolvedId.sessionId,
     ignored,
-    total: typeof result.body.total === 'number' ? result.body.total : null,
+    total: result.body.total,
     endpoint: endpoint.endpoint,
     reason: null,
   })
@@ -191,8 +191,8 @@ async function runMutation(argv, ctx, method, usage) {
     return SESSION_EXIT_UNKNOWN
   }
 
-  const ignored = result.body.ignored === true
-  const total = typeof result.body.total === 'number' ? result.body.total : null
+  const ignored = result.body.ignored
+  const total = result.body.total
   if (parsed.json) {
     ctx.stdout.write(
       JSON.stringify({
@@ -326,7 +326,7 @@ export function resolveGatewayEndpointForCli(ctx) {
  * would risk opting out the wrong session while telling the user they are
  * covered, which is the fail-open shape this whole change exists to remove.
  *
- * @param {{ env: NodeJS.ProcessEnv, cwd: string }} args
+ * @param {{ env: NodeJS.ProcessEnv, cwd: string, maxScan?: number }} args
  * @returns {SessionIdResolution}
  * @ref LLP 0067#cli [implements]: session-id resolution contract, fail-closed
  */
@@ -342,9 +342,22 @@ export function resolveSessionIdForCli(args) {
       : path.join(args.env.HOME ?? os.homedir(), '.codex')
   const sessionsDir = path.join(codexHome, 'sessions')
 
+  const maxScan = typeof args.maxScan === 'number' && args.maxScan > 0 ? args.maxScan : MAX_ROLLOUT_SCAN
+  const scan = rolloutFiles(sessionsDir, maxScan)
+  // A truncated scan cannot support the uniqueness claim below: the rollout
+  // that would have made the match ambiguous may be one of the ones never
+  // looked at, so "exactly one match" would be an artefact of the bound
+  // rather than a fact. Refuse instead of resolving on partial evidence.
+  if (scan.truncated) {
+    return {
+      ok: false,
+      error: `could not resolve a session id: the Codex rollout scan under ${sessionsDir} hit its ${maxScan}-file bound, so a unique cwd match cannot be established. Pass the session id explicitly: hyp session status <session-id>.`,
+    }
+  }
+
   /** @type {{ id: string, cwd: string, file: string }[]} */
   const candidates = []
-  for (const file of rolloutFiles(sessionsDir)) {
+  for (const file of scan.files) {
     const meta = readRolloutMeta(file)
     if (!meta) continue
     if (meta.cwd !== args.cwd) continue
@@ -370,17 +383,19 @@ export function resolveSessionIdForCli(args) {
 /**
  * Every `rollout-*.jsonl` under a Codex sessions tree (it is nested by date).
  * Bounded so a very large history cannot turn a privacy check into a long
- * directory walk.
+ * directory walk. Reports whether the bound was hit, because a truncated
+ * listing cannot be used to argue a cwd match is unique.
  *
  * @param {string} root
- * @returns {string[]}
+ * @param {number} maxScan
+ * @returns {{ files: string[], truncated: boolean }}
  */
-function rolloutFiles(root) {
+function rolloutFiles(root, maxScan) {
   /** @type {string[]} */
   const out = []
   /** @type {string[]} */
   const stack = [root]
-  while (stack.length > 0 && out.length < MAX_ROLLOUT_SCAN) {
+  while (stack.length > 0 && out.length < maxScan) {
     const dir = /** @type {string} */ (stack.pop())
     /** @type {import('node:fs').Dirent[]} */
     let entries
@@ -397,7 +412,7 @@ function rolloutFiles(root) {
       }
     }
   }
-  return out
+  return { files: out, truncated: out.length >= maxScan || stack.length > 0 }
 }
 
 /**
@@ -440,12 +455,53 @@ function readRolloutMeta(file) {
 }
 
 /**
+ * Accept a control response only when it is the contract's shape AND is about
+ * the session that was asked about.
+ *
+ * A 200 with JSON in it is not evidence: `resolveGatewayEndpointForCli` can
+ * land on a port that some other local process now owns (a pinned `listen`
+ * whose gateway is gone, a recycled ephemeral port), and any such process
+ * answering `200 {}` would otherwise be read as "confirmed: `ignored` is
+ * absent, therefore false". `ignored` must be a real boolean, `total` a real
+ * number, and `session_id` must come back byte-identical to the token sent -
+ * the route echoes it verbatim (R5), so a mismatch means the answer describes
+ * a different session and establishes nothing about this one.
+ *
+ * @ref LLP 0066#readable [implements]: R10 - an answer that does not establish
+ * membership for THIS session is `unknown`, never a confident `ignored` value.
+ *
+ * @param {unknown} parsed
+ * @param {string} sessionId
+ * @returns {{ ok: true, body: { session_id: string, ignored: boolean, total: number } } | { ok: false, error: string }}
+ */
+function validateControlResponse(parsed, sessionId) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'returned a non-object control response' }
+  }
+  const body = /** @type {Record<string, unknown>} */ (parsed)
+  if (typeof body.ignored !== 'boolean') {
+    return { ok: false, error: 'returned a control response with no boolean `ignored` field - it is not the HypAware control route' }
+  }
+  if (typeof body.total !== 'number' || !Number.isFinite(body.total)) {
+    return { ok: false, error: 'returned a control response with no numeric `total` field - it is not the HypAware control route' }
+  }
+  if (body.session_id !== sessionId) {
+    return {
+      ok: false,
+      error: `answered about session ${JSON.stringify(body.session_id)}, not the session that was asked about - the answer establishes nothing about ${sessionId}`,
+    }
+  }
+  return { ok: true, body: { session_id: body.session_id, ignored: body.ignored, total: body.total } }
+}
+
+/**
  * One request to the gateway's local control route. Any transport failure,
- * timeout, or non-200 is reported as an error string the caller turns into
+ * timeout, non-200, or answer that is not a well-formed control response for
+ * THIS session id is reported as an error string the caller turns into
  * `unknown` - never into a membership answer.
  *
  * @param {{ endpoint: string, method: 'GET' | 'POST' | 'DELETE', sessionId: string }} args
- * @returns {Promise<{ ok: true, body: Record<string, unknown> } | { ok: false, error: string }>}
+ * @returns {Promise<{ ok: true, body: { session_id: string, ignored: boolean, total: number } } | { ok: false, error: string }>}
  */
 function controlRequest(args) {
   return new Promise((resolve) => {
@@ -491,16 +547,20 @@ function controlRequest(args) {
             resolve({ ok: false, error: `gateway at ${args.endpoint} answered HTTP ${status} for ${CONTROL_PATH}` })
             return
           }
+          /** @type {unknown} */
+          let parsed
           try {
-            const parsed = JSON.parse(raw)
-            if (!parsed || typeof parsed !== 'object') {
-              resolve({ ok: false, error: `gateway at ${args.endpoint} returned a non-object control response` })
-              return
-            }
-            resolve({ ok: true, body: parsed })
+            parsed = JSON.parse(raw)
           } catch {
             resolve({ ok: false, error: `gateway at ${args.endpoint} returned an unparseable control response` })
+            return
           }
+          const checked = validateControlResponse(parsed, args.sessionId)
+          if (!checked.ok) {
+            resolve({ ok: false, error: `gateway at ${args.endpoint} ${checked.error}` })
+            return
+          }
+          resolve({ ok: true, body: checked.body })
         })
       }
     )

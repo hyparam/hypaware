@@ -157,6 +157,95 @@ test('hyp session status names the folder governor rather than omitting it (R7)'
 })
 
 /* ------------------------------------------------------------------ */
+/* 2b. A 200 is not evidence: the ANSWER has to be about this session  */
+/* ------------------------------------------------------------------ */
+
+// The endpoint is resolved from disk (a live daemon's status.json, else a
+// pinned `listen`). Both can point at a port some other local process now
+// owns: a `listen` pinned for a gateway that is gone, or a recycled ephemeral
+// port. Whatever answers there is not the gateway, so its reply establishes
+// nothing - LLP 0066 R10 says that is `unknown`, not a membership answer.
+
+/**
+ * @param {(req: IncomingMessage, res: ServerResponse) => void} respond
+ * @param {(base: string) => Promise<void>} fn
+ */
+async function withRogueServer(respond, fn) {
+  const server = http.createServer(respond)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)))
+  const addr = server.address()
+  const port = typeof addr === 'object' && addr ? addr.port : 0
+  try {
+    await fn(`http://127.0.0.1:${port}`)
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve(undefined)))
+  }
+}
+
+/** @param {number} status @param {string} payload */
+function respondWith(status, payload) {
+  return (/** @type {IncomingMessage} */ req, /** @type {ServerResponse} */ res) => {
+    req.resume()
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(payload)
+  }
+}
+
+for (const scenario of [
+  { name: 'a 200 with no `ignored` field', payload: JSON.stringify({ ok: true }) },
+  { name: 'a 200 whose `ignored` is a string, not a boolean', payload: JSON.stringify({ session_id: 'sess-real', ignored: 'true', total: 1 }) },
+  { name: 'a 200 with no numeric `total`', payload: JSON.stringify({ session_id: 'sess-real', ignored: false }) },
+  { name: 'a 200 JSON array', payload: '[]' },
+  { name: 'a 200 that is not JSON at all', payload: 'not json' },
+]) {
+  test(`hyp session status fails closed on ${scenario.name}`, async () => {
+    await withRogueServer(respondWith(200, scenario.payload), async (base) => {
+      const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
+      const code = await runSessionStatus(['--json'], ctx.ctx)
+      assert.equal(code, SESSION_EXIT_UNKNOWN)
+      const out = JSON.parse(ctx.stdout())
+      assert.equal(out.status, 'unknown')
+      assert.equal(out.ignored, null, 'a malformed answer MUST NOT become a confident membership answer')
+    })
+  })
+}
+
+test('hyp session status fails closed when the answer is about a DIFFERENT session', async () => {
+  // The worst direction: a foreign responder claiming `ignored: true` would
+  // otherwise tell the user they are covered when nothing confirmed it.
+  const payload = JSON.stringify({ session_id: 'someone-else', ignored: true, total: 9 })
+  await withRogueServer(respondWith(200, payload), async (base) => {
+    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
+    const code = await runSessionStatus(['--json'], ctx.ctx)
+    assert.equal(code, SESSION_EXIT_UNKNOWN, 'an answer about another session confirms nothing')
+    const out = JSON.parse(ctx.stdout())
+    assert.equal(out.status, 'unknown')
+    assert.equal(out.ignored, null)
+    assert.match(out.reason, /someone-else/)
+  })
+})
+
+test('hyp session status fails closed on a non-200 from the endpoint', async () => {
+  await withRogueServer(respondWith(500, '{}'), async (base) => {
+    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
+    assert.equal(await runSessionStatus(['--json'], ctx.ctx), SESSION_EXIT_UNKNOWN)
+    assert.equal(JSON.parse(ctx.stdout()).ignored, null)
+  })
+})
+
+test('hyp session ignore does not report a quiet success against a non-gateway responder', async () => {
+  // The mutation verbs share the same discipline: `ignore` printing "ignored"
+  // off an unvalidated 200 is the same false assurance in a louder place.
+  await withRogueServer(respondWith(200, JSON.stringify({ ok: true })), async (base) => {
+    const ctx = fakeCtx({ endpoint: base, env: { CLAUDE_CODE_SESSION_ID: 'sess-real' } })
+    const code = await runSessionIgnore(['--json'], ctx.ctx)
+    assert.equal(code, SESSION_EXIT_UNKNOWN)
+    assert.equal(ctx.stdout(), '', 'nothing may be reported as opted out')
+    assert.match(ctx.stderr(), /hyp session:/)
+  })
+})
+
+/* ------------------------------------------------------------------ */
 /* 3. `hyp session ignore` / `unignore` are the single front door      */
 /* ------------------------------------------------------------------ */
 
@@ -233,6 +322,24 @@ test('CLAUDE_CODE_SESSION_ID wins over any Codex rollout scan', () => {
   })
   assert.equal(out.ok && out.sessionId, 'claude-1')
   assert.equal(out.ok && out.source, 'claude_env')
+})
+
+test('a truncated rollout scan refuses rather than claiming a unique cwd match', () => {
+  // With the scan bounded, "exactly one match" can be an artefact of the bound
+  // rather than a fact: the rollout that would have made it ambiguous may be
+  // one of the files never looked at. Resolving there would act on the wrong
+  // session while reporting the user covered.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-aaa', cwd: '/repo/here' },
+    { file: 'rollout-2026-01-02-bbb.jsonl', id: 'codex-bbb', cwd: '/repo/elsewhere' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here', maxScan: 1 })
+  assert.equal(out.ok, false, 'a partial listing cannot support a uniqueness claim')
+  assert.match(out.ok ? '' : out.error, /bound/)
+
+  // Unbounded, the same tree resolves: the refusal is about truncation only.
+  const full = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(full.ok && full.sessionId, 'codex-aaa')
 })
 
 test('an unresolvable session id fails closed, it does not report not-ignored', async () => {
