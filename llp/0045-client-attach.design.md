@@ -224,7 +224,8 @@ plugin-agnostic core routine to fully reverse:
 - **Claude (`json`):** the `_hypaware` marker records `prev_base_url` (the restore
   target) plus the managed env keys and hooks it added, so core can
   restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed
-  `ENABLE_TOOL_SEARCH` (see below), strip the managed `SessionStart`/… hook
+  `ENABLE_TOOL_SEARCH` / `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` (see below),
+  strip the managed `SessionStart`/… hook
   entries, and delete the marker — leaving **no orphaned hooks** still pointing at
   `hyp claude-hook`. The backup is preserved idempotently across a re-attach:
   once we own the URL the current value is *our* gateway URL, so a re-attach keeps
@@ -252,7 +253,9 @@ Anthropic's.
 
 So attach also writes `env.ENABLE_TOOL_SEARCH = "true"`, the documented override
 that re-enables deferred loading for proxies that do forward everything (ours
-does). Two rules keep this honest against the undo contract above:
+does). Two rules keep this honest against the undo contract above, and they bind
+**every** env key attach adds beside the base URL (see the next section for the
+second one):
 
 - **Only manage the key when it is ours.** If the user already set
   `ENABLE_TOOL_SEARCH` themselves and no prior marker recorded it as ours, attach
@@ -263,6 +266,38 @@ does). Two rules keep this honest against the undo contract above:
   a backed-up prior. The undo therefore restores `ANTHROPIC_BASE_URL` to
   `prev_base_url` but *removes* any other managed key (like `ENABLE_TOOL_SEARCH`)
   rather than stamping the base URL onto it.
+
+#### _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: keep the model's real context window
+
+The same "not Anthropic's host" test costs a second thing, and this one is pure
+display *and* pure behavior at once. Claude Code grants a native-1M model its 1M
+context window only when the base URL host is `api.anthropic.com`; behind any
+other host it assumes **200k**. Nothing about the session changes, but the
+percentage does: a fresh attached session reports ~18% context where the same
+session direct reports ~4% (measured real usage matches within a thousand
+tokens). The shrunken assumed window is not cosmetic either - context warnings
+and, for users who enable it, auto-compact fire against the wrong denominator, so
+they trigger far too early.
+
+Attach therefore also writes `env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL = "1"`,
+managed by the same two rules as `ENABLE_TOOL_SEARCH` above (only ever added when
+absent or already ours; removed, never restored, on detach). The declaration is
+**accurate**: the gateway is a byte-transparent pass-through to
+`api.anthropic.com`, which is exactly what the flag asserts. That the flag also
+gates other first-party behavior (traceparent propagation, oauth beta headers) is
+therefore fine rather than a side effect we tolerate.
+
+The honest caveat: the key is underscore-prefixed and undocumented, so a Claude
+Code release may rename or drop it (last verified against 2.1.220). It fails
+*soft* - losing it re-inflates the reported percent but breaks nothing - so the
+mitigation is a note at the code, not a runtime probe: if attached sessions start
+reporting an inflated context percent again, re-verify the key against the
+current Claude Code. The alternative considered and rejected was a `[1m]`
+model-name suffix, which restores the window per model only and means rewriting
+user-visible model names.
+
+Upstream tracking for the underlying gap (no supported way to declare a >200k
+window behind a custom base URL): [anthropics/claude-code#68522](https://github.com/anthropics/claude-code/issues/68522).
 
 **There is exactly one undo implementation, and it lives in core.** Both call
 sites use it — the reconciler's `reverse()` *and* the manual `hyp detach` command
