@@ -629,7 +629,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   }
   const names = [...rows.keys()].sort()
 
-  stdout.write('hyp - HypAware kernel CLI\n')
+  stdout.write('hyp - HypAware kernel CLI (also installed as `hypaware`; same binary)\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
@@ -640,6 +640,12 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   }
   stdout.write('\n')
   stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)
+  // Plugin-contributed commands are omitted when their plugin is inactive, so
+  // this list is install-specific. Say so, and point at the miss path that
+  // already names the providing plugin and prints a repair: line (LLP 0098).
+  stdout.write('This list reflects the plugins active in your config; running a command\n')
+  stdout.write('a disabled plugin provides names that plugin and prints how to enable it.\n')
+  stdout.write(`Start with 'hyp status' for whether this install is working.\n`)
 }
 
 /**
