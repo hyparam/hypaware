@@ -15,7 +15,7 @@ const LOCAL_ONLY_LIST_VERSION = 2
 
 const USAGE_CLASSES = new Set(['ignore', 'local-only', 'full'])
 
-/** `error_kind` carried by {@link LocalOnlyListUnreadableError} (LLP 0049 #fail-safe). */
+/** `error_kind` carried by {@link LocalOnlyListUnreadableError} (LLP 0080 #fail-safe). */
 export const LOCAL_ONLY_LIST_UNREADABLE_ERROR_KIND = 'local_only_list_unreadable'
 
 /**
