@@ -10,6 +10,7 @@ import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.j
 import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 import {
   buildManagedProfile,
+  DEFAULT_BUNDLE_ID,
   renderManagedPreferencesPlist,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 
@@ -79,6 +80,7 @@ async function writeManagedPlist(home) {
         authScheme: 'bearer',
         models: ['claude-sonnet-4-5'],
         helperPath: path.join(home, '.hyp', 'bin', 'hyp-claude-desktop-credential'),
+        bundleId: DEFAULT_BUNDLE_ID,
       })
     )
   )
