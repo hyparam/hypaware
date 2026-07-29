@@ -163,6 +163,15 @@ export interface PluginClientManifest {
 
 export interface PluginAttachProbeManifest {
   format: 'json' | 'toml' | 'json_path'
+  /**
+   * The client's settings file, RELATIVE to the user's home (e.g.
+   * `.codex/config.toml`). Its first path segment is the client's config
+   * home, which a `$<CLIENT>_HOME` env override replaces. An absolute
+   * path is rejected, not honored: it has no config home for the
+   * override to relocate, and core resolves this field for the attach
+   * probe and for the disk-driven detach alike, so a value core cannot
+   * resolve must fail rather than resolve to something else.
+   */
   settings_file: string
   marker_key?: string
   marker_header?: string
@@ -273,7 +282,7 @@ export interface PluginPickerGatewayUpstream {
  * detector switches on which key is present.
  */
 export type PickerDetectProbe =
-  | { settings_file: string } // reuses the `contributes.client.attach_probe` settings-file shape
+  | { settings_file: string } // reuses the `contributes.client.attach_probe` settings-file shape, home-relative likewise
   | { app_bundle: string } // stat-exists check on a macOS `.app` bundle path
   | { path: string } // stat-exists check on a directory (honors `$FOO_HOME`-style env overrides)
 

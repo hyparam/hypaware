@@ -284,6 +284,59 @@ This realizes [LLP 0044 §Conflict](./0044-client-attach-on-join.decision.md#con
 ("back up & override, restore on leave") — the backup is the marker's undo
 record, and "leave" is the config-drop trigger (Part 5).
 
+#### `settings_file` is home-relative, and a violation is loud
+
+`attachProbe.settings_file` is **relative to `$HOME`** (`.codex/config.toml`),
+and its first segment is the client's config home, which a `$<CLIENT>_HOME` env
+override replaces. That was always the contract; it was only ever stated in
+`resolveClientSettingsPath`'s JSDoc, and never enforced.
+
+Unenforced, an **absolute** `settings_file` did not fail: `path.join(homeDir,
+...settingsFile.split('/'))` swallows the leading empty segment and re-anchors
+the path under `$HOME`, so
+`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` silently
+became `$HOME/Library/Managed Preferences/...`. The override branch was wrong
+the same way (`parts.slice(1)` assumes a relative first segment, so it drops the
+leading `/` and grafts the remainder onto `$<CLIENT>_HOME`). The probe then
+answered about a file the manifest never named, and the usual answer was ENOENT,
+which reads exactly like a correct "not attached". A probe reporting on the
+wrong file is worse than a probe that fails: a **wrong negative is
+indistinguishable from a right one**, which is how the Claude Desktop
+`attach_probe` defect (#444) stayed invisible.
+
+So the resolver **rejects** an absolute `settings_file`
+(`ClientSettingsPathError`, `code: 'settings_file_absolute'`) rather than
+honouring it. Rejecting, not honouring, because the `$<CLIENT>_HOME` override
+has no meaning for an absolute path: the override relocates a config *home*,
+which an absolute path does not have, so "honour it" would have to publish a
+second, silently-different resolution rule for the same field. Since this
+resolver is shared by the read side (the attach probe, the picker's
+`settings_file` detect) and the write side (the disk-driven undo above), a value
+core cannot resolve must fail rather than resolve to something else, or attach
+and detach can disagree about which file they own. The picker's absolute-literal
+needs are already served by the sibling `app_bundle` and `path` detect variants
+([LLP 0136](./0136-install-experience-overhaul.plan.md)), so no manifest loses
+expressiveness.
+
+Each caller turns the throw into whatever "observable" means on its surface, and
+none of them swallows it into a plain negative:
+
+- `probeClientAttachFromDescriptor` returns `{ attached: false, error }`, so
+  `hyp status` distinguishes a broken manifest from an unmarked settings file.
+- `hyp detach` (the core undo and its `--dry-run` path) fails loudly: a client
+  whose settings file core cannot locate is one core must not claim to have
+  reversed.
+- The `hyp init` picker's detect probe keeps its documented best-effort stance
+  and degrades to "not present". Detection only seeds checkbox state, and every
+  user of it can still toggle the box.
+
+Validating this at **manifest load** would be better still (the plugin author
+learns at install, not at probe time), but `contributes.client` is not validated
+today at all, and a bundled manifest currently violates the rule. That is left
+to follow-up, sequenced after the Desktop manifest is corrected: adding the
+check first would take a shipped plugin out of the catalog to punish a defect
+already fixed elsewhere.
+
 ## Part 4 — Per-plugin `attach` config + status surface
 
 - **Config.** `attach.on_join` (boolean, default **true**) rides the client

@@ -14,7 +14,10 @@ import {
   statusFilePath,
   writeStatusFile,
 } from '../../src/core/daemon/status.js'
-import { resolveClientSettingsPath } from '../../src/core/daemon/client_settings_path.js'
+import {
+  ClientSettingsPathError,
+  resolveClientSettingsPath,
+} from '../../src/core/daemon/client_settings_path.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
@@ -65,6 +68,67 @@ test('resolveClientSettingsPath sanitizes client env override names', () => {
     resolveClientSettingsPath('codex', '.codex/config.toml', {}, '/Users/hyp'),
     '/Users/hyp/.codex/config.toml'
   )
+})
+
+// @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: an absolute settings_file is rejected, never re-anchored under $HOME or grafted onto $<CLIENT>_HOME
+test('resolveClientSettingsPath rejects an absolute settings_file rather than re-anchoring it', () => {
+  const absolute = '/Library/Managed Preferences/com.anthropic.claudefordesktop.plist'
+
+  // No override: `path.join` used to swallow the leading empty segment and
+  // silently return `$HOME/Library/Managed Preferences/...`.
+  assert.throws(
+    () => resolveClientSettingsPath('claude-desktop', absolute, {}, '/Users/hyp'),
+    (err) => {
+      assert.ok(err instanceof ClientSettingsPathError)
+      assert.equal(err.code, 'settings_file_absolute')
+      assert.match(err.message, /absolute settings_file/)
+      assert.doesNotMatch(err.message, /^\/Users\/hyp/)
+      return true
+    }
+  )
+
+  // Override set: the `parts.slice(1)` branch used to drop the leading `/` and
+  // graft the rest onto `$CLAUDE_DESKTOP_HOME`. Same contract, same rejection.
+  assert.throws(
+    () =>
+      resolveClientSettingsPath(
+        'claude-desktop',
+        absolute,
+        { CLAUDE_DESKTOP_HOME: '/tmp/claude-desktop-home' },
+        '/Users/hyp'
+      ),
+    ClientSettingsPathError
+  )
+})
+
+// @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [tests]: the probe must not answer about a file the manifest never named
+test('probeClientAttachFromDescriptor errors on an absolute settings_file instead of probing $HOME', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-absolute-'))
+  // The exact trap: a marked file DOES exist at the re-anchored `$HOME`-relative
+  // location, so the old resolver reported `attached: true` about a file that is
+  // not the one the manifest named. ENOENT would have been the quieter twin of
+  // the same bug, a wrong negative indistinguishable from a right one.
+  const decoy = path.join(tmp, 'Library', 'Managed Preferences', 'com.example.plist')
+  await fs.mkdir(path.dirname(decoy), { recursive: true })
+  await fs.writeFile(decoy, JSON.stringify({ _hypaware: { version: '9.9.9', port: 4388 } }))
+
+  const descriptor = /** @type {ClientDescriptor} */ ({
+    plugin: '@hypaware/claude-desktop',
+    name: 'claude-desktop',
+    skillDir: '.claude/skills',
+    attachProbe: {
+      format: 'json',
+      settings_file: '/Library/Managed Preferences/com.example.plist',
+      marker_key: '_hypaware',
+    },
+  })
+
+  const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir: tmp })
+
+  assert.equal(probe.attached, false)
+  assert.equal(probe.settingsPath, undefined)
+  assert.equal(probe.version, undefined)
+  assert.match(String(probe.error), /absolute settings_file/)
 })
 
 test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
