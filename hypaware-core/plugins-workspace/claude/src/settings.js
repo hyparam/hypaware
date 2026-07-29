@@ -58,7 +58,7 @@ const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+(session-context|classify-cwd)\b/
 //   models, so the same session reads as ~18% context instead of ~4% and
 //   warnings/auto-compact fire far too early. The key is underscore-prefixed and
 //   undocumented: re-verify it against the Claude Code release (last verified
-//   2.1.220) if attached sessions start reporting an inflated context percent
+//   2.1.215) if attached sessions start reporting an inflated context percent
 //   again. It is one branch of Claude Code's single is-first-party predicate, so
 //   it gates more than the window: outbound it adds the context-1m beta header,
 //   traceparent propagation and an extended usage-limit header, and it re-enables
@@ -120,14 +120,31 @@ export async function attach(opts) {
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
   const env = ensureObject(value, 'env')
-  const liveBaseUrl = typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : undefined
+  // Presence, not type - the same ownership rule `manageEnvAdditions` follows,
+  // and the base URL needs it more, not less. The managed additions at least
+  // fall through an ownership guard when they are not ours; this key has no
+  // such `continue`, because attach always repoints it. The backup IS the
+  // guard. So a type test here did not merely skip a notice: a hand-written
+  // `"ANTHROPIC_BASE_URL": null` (a user switching an override back off) or a
+  // stray number read as "nothing to back up", attach wrote no
+  // `prev_base_url`, and the undo - finding a managed key with no prior to
+  // restore - deleted the key outright. The user's value was gone, from a
+  // detach that reported success. Back up whatever is on disk, whatever its
+  // JSON type; coerce only for the human-readable `prevValue` report, exactly
+  // as the core undo does for `removed`. No explicit presence test is needed to
+  // read it: JSON cannot encode `undefined`, so `undefined` here already means
+  // "absent", and the `prevBaseUrl !== undefined` checks below are the presence
+  // test - which is precisely what the discarded type test was standing in for.
+  const liveBaseUrl = env.ANTHROPIC_BASE_URL
   // Preserve the recorded original across a re-attach: once we own the
   // URL the live value is *our* gateway URL, so keep the marker's
   // recorded `prev_base_url` rather than backing up the gateway URL
-  // over it. A first attach backs up whatever was live.
+  // over it. A first attach backs up whatever was live. Presence again:
+  // attach only ever writes the field when there was something to record, so
+  // the field being there is the fact, and `null` is a value we must give back.
   // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by] — the marker IS the backup restored on leave
   const prevBaseUrl = priorMarker
-    ? (typeof priorMarker.prev_base_url === 'string' ? priorMarker.prev_base_url : undefined)
+    ? (Object.hasOwn(priorMarker, 'prev_base_url') ? priorMarker.prev_base_url : undefined)
     : liveBaseUrl
 
   const baseUrl = `http://127.0.0.1:${port}`
@@ -170,7 +187,9 @@ export async function attach(opts) {
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
-  if (prevBaseUrl !== undefined) result.prevValue = prevBaseUrl
+  if (prevBaseUrl !== undefined) {
+    result.prevValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
+  }
   return result
 }
 
@@ -184,6 +203,14 @@ export async function attach(opts) {
  * so detach never clobbers it - the same never-clobber-a-user-value stance the
  * base URL takes, minus a backup: these keys are only ever *added*.
  *
+ * Ownership turns on **presence, not JSON type**. Claude Code reads these keys
+ * as env strings, but settings.json is hand-edited and a user can perfectly well
+ * write `"ENABLE_TOOL_SEARCH": true` as a JSON boolean. Testing the type instead
+ * of the key let a non-string value fall through the guard: attach coerced it,
+ * recorded the key as managed, and detach then deleted the user's own setting.
+ * Anything already at the key is the user's, whatever its type.
+ *
+ * @ref LLP 0045#enable_tool_search-keep-deferred-tool-loading-on-through-the-gateway [implements]: the "only manage the key when it is ours" rule that binds every managed env key
  * @param {Record<string, unknown>} env the live `env` block, mutated in place
  * @param {Record<string, unknown> | undefined} priorManagedEnv the prior marker's managed env, if any
  * @returns {Record<string, string>} the keys attach now manages
@@ -192,8 +219,8 @@ function manageEnvAdditions(env, priorManagedEnv) {
   /** @type {Record<string, string>} */
   const managed = {}
   for (const { key, value } of MANAGED_ENV_ADDITIONS) {
-    const weOwnIt = priorManagedEnv ? key in priorManagedEnv : false
-    if (!weOwnIt && typeof env[key] === 'string') continue
+    const weOwnIt = priorManagedEnv ? Object.hasOwn(priorManagedEnv, key) : false
+    if (!weOwnIt && Object.hasOwn(env, key)) continue
     env[key] = value
     managed[key] = value
   }

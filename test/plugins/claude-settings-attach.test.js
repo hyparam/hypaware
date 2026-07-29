@@ -218,6 +218,43 @@ test('attach leaves a user-owned _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL untouc
   }
 })
 
+// Issue #448 finding 1: ownership is decided by the key being present, not by
+// the type of its value. settings.json is hand-edited, so a JSON boolean, number
+// or null at one of these keys is still a user value. The old guard tested
+// `typeof env[key] === 'string'` and so coerced anything else *and* recorded it
+// as managed, handing detach a licence to delete it. See the round-trip proof in
+// test/core/client-detach-disk.test.js.
+for (const [label, userValue] of [
+  ['boolean', true],
+  ['number', 0],
+  ['null', null],
+]) {
+  test(`attach leaves a user-owned ${label} env value untouched and unmanaged`, async () => {
+    const { dir, settingsPath } = await stage()
+    try {
+      await fs.writeFile(
+        settingsPath,
+        JSON.stringify({ env: { ENABLE_TOOL_SEARCH: userValue } }, null, 2)
+      )
+
+      await attach({ ...ATTACH, settingsPath })
+
+      const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+      assert.equal(attached.env.ENABLE_TOOL_SEARCH, userValue)
+
+      // Absent from the undo record is the load-bearing half: the marker is what
+      // authorizes detach to remove a key.
+      const marker = await readMarker(settingsPath)
+      assert.deepEqual(marker.managed.env, {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '1',
+      })
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+}
+
 test('re-attach keeps managing a _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL it owns', async () => {
   const { dir, settingsPath } = await stage()
   try {
@@ -278,6 +315,50 @@ test('the marker undo record is stable across re-attach (modulo attached_at)', a
     delete first.attached_at
     delete second.attached_at
     assert.deepEqual(second, first)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Round 2, issue #448's bug class on the key it never swept: the base URL. The
+// managed additions have an ownership guard to fall through, so a type test
+// there cost a value that was still on disk. Attach *always* repoints
+// ANTHROPIC_BASE_URL, so here the backup is the only guard, and
+// `typeof env.ANTHROPIC_BASE_URL === 'string'` skipped it for exactly the
+// values a user writes on purpose - `null`/`false` to switch an override back
+// off. Attach then recorded the key as managed with no prior, and the undo
+// deleted it. Assert the backup is taken whatever the JSON type.
+for (const prior of [8080, false, null, { url: 'x' }]) {
+  test(`attach backs up a ${JSON.stringify(prior)} base URL into prev_base_url`, async () => {
+    const { dir, settingsPath } = await stage()
+    try {
+      await fs.writeFile(settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: prior } }, null, 2))
+
+      const result = await attach({ ...ATTACH, settingsPath })
+      assert.equal(result.changed, true)
+
+      const marker = await readMarker(settingsPath)
+      assert.equal('prev_base_url' in marker, true)
+      assert.deepEqual(marker.prev_base_url, prior)
+      // The display field stays a string; the marker keeps the real value.
+      assert.equal(typeof (/** @type {any} */ (result).prevValue), 'string')
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+// The other direction: no base URL on disk means no backup to invent. Pins the
+// predicate against widening to an unconditional read.
+test('attach records no prev_base_url when the base URL is absent, whatever else env holds', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({ env: { ANTHROPIC_API_KEY: 'sk-x' } }, null, 2))
+
+    const result = await attach({ ...ATTACH, settingsPath })
+    assert.equal('prevValue' in result, false)
+    const marker = await readMarker(settingsPath)
+    assert.equal('prev_base_url' in marker, false)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

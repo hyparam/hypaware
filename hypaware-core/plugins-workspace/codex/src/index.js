@@ -43,10 +43,9 @@ export const configSection = { section: CODEX_CONFIG_SECTION, validate: validate
  *
  * Resolves the `hypaware.ai-gateway` capability, registers the
  * OpenAI-compatible upstream preset, wires Codex's config.toml
- * `attach()`, and contributes the `hypaware-query`, `hypaware-graph`,
- * and `hypaware-sensitive-scan` skills plus the AI report skills
- * (usage, plus the superseded adoption/spend, improvement, security)
- * and the report-to-html renderer for Codex installs.
+ * `attach()`, and contributes the `hypaware-query` and `hypaware-graph`
+ * skills plus the AI usage report skill and the report-to-html renderer
+ * for Codex installs.
  *
  * `attach()` emits a `client.attach` span tagged with `hyp_plugin`,
  * `client_name`, `status`, and `restored=true|false`. The reversing
@@ -217,7 +216,6 @@ export async function activate(ctx) {
     'hypaware-reference',
     'hypaware-privacy',
     'hypaware-graph',
-    'hypaware-sensitive-scan',
     'hypaware-ai-usage-report',
     'hypaware-report-to-html',
     'hypaware-publish-report',

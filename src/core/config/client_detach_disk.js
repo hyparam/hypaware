@@ -146,7 +146,12 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   const managed = isPlainObject(marker.managed) ? marker.managed : {}
   const managedEnv = isPlainObject(managed.env) ? managed.env : {}
   const hookEntries = Array.isArray(managed.hooks) ? managed.hooks : []
-  const prevBaseUrl = typeof marker.prev_base_url === 'string' ? marker.prev_base_url : undefined
+  // Presence, not type: the restore half of the attach-side backup. Attach only
+  // ever writes this field when there was a prior value to record, so the field
+  // being there IS the "restore me" fact and its JSON type says nothing. A type
+  // test threw away a backup the marker was holding and fell through to the
+  // delete branch below - the one outcome the backup exists to prevent.
+  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
 
   delete value[markerKey]
   stripManagedHooks(value, hookEntries)
@@ -174,13 +179,29 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
         // would wrongly stamp the base URL onto them.
         if (key === 'ANTHROPIC_BASE_URL' && prevBaseUrl !== undefined) {
           envObj[key] = prevBaseUrl
-          restoredValue = prevBaseUrl
+          restoredValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
         } else {
           if (key === 'ANTHROPIC_BASE_URL') removed = typeof current === 'string' ? current : String(current)
           delete envObj[key]
         }
-      } else if (typeof current === 'string') {
+      } else if (Object.hasOwn(envObj, key)) {
         // Overridden externally after we attached - never clobber a user edit.
+        //
+        // Presence, not type, decides that a key was left in place: the same
+        // rule the attach-side ownership guard follows. A user who hand-edited
+        // our `ENABLE_TOOL_SEARCH` to a JSON boolean still has a key sitting on
+        // disk after a detach that reports success, which is exactly the case
+        // this notice exists to tell them about; a type test would swallow it.
+        // A key they deleted outright is absent, so nothing was left in place
+        // and nothing is reported - which is why this is a presence test and
+        // not a bare `else`.
+        //
+        // `Object.hasOwn`, not `key in`: this loop's keys come off disk, from
+        // whatever `managed.env` a plugin's attach recorded, so an inherited
+        // `Object.prototype` name (`toString`, `constructor`) would satisfy
+        // `in` and report a key that is not on disk at all - the exact false
+        // report the presence test exists to prevent. The attach-side guard
+        // can use `in` because its keys are in-tree literals.
         warnings.push(`${key} was overridden externally; leaving in place`)
       }
     }
@@ -335,7 +356,15 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
       removed = typeof current === 'string' ? current : String(current)
       delete envObj.ANTHROPIC_BASE_URL
-    } else if (typeof current === 'string') {
+    } else if (Object.hasOwn(envObj, 'ANTHROPIC_BASE_URL')) {
+      // Presence, not type - the same rule the record-driven undo above
+      // follows. A legacy marker meets settings this tree never wrote, so the
+      // value at the key is whatever a hand edit left there: `null` or `false`
+      // is a user deliberately switching the base URL off, and it survives the
+      // detach (correctly) but used to survive it silently, because a `typeof
+      // current === 'string'` gate swallowed the notice for exactly the values
+      // most likely to be deliberate. The key absent is still silent - nothing
+      // was left in place to report.
       warning = 'ANTHROPIC_BASE_URL was overridden externally; leaving in place'
     }
     if (Object.keys(envObj).length === 0) delete value.env
