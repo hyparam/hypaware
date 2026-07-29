@@ -79,8 +79,9 @@ curated HypAware registry.
 - Query or inspect recorded data - use the **hypaware-query** skill.
 - Team token usage, cost, and improvement analysis - use the
   **hypaware-ai-usage-report** skill.
-- Review captured history before it first syncs to an org server - use the
-  **hypaware-privacy** skill.
+- See what was captured here, and mark or purge it - use the
+  **hypaware-privacy** skill (also the review before an enrolled machine's
+  first sync).
 - Opt a folder out of recording - `hyp ignore <path>` writes a committable
   `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
   with no repo breadcrumb. To pause only this conversation, `/hypaware-ignore`.
