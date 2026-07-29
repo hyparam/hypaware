@@ -445,6 +445,33 @@ None of these change attribution
 "claude"` with `entrypoint: "claude-desktop-3p"`, so `hyp status`/query
 surfaces query by `entrypoint`, not by a new `client_name`).
 
+`src/install.js`'s `run(argv, ctx)` implements, in order
+(`@ref LLP 0133#one-surface`, `@ref LLP 0133#0115-corrections`):
+
+1. Credential login chain ([LLP 0117](./0117-claude-account-credential-plugin.decision.md)).
+2. Helper write ([LLP 0116](./0116-desktop-credential-client-presented.decision.md)).
+3. **Residue check**: detect a pre-existing `Claude-3p` profile-directory
+   config (`@ref LLP 0133#dialog-residue`), back it up, clear it. Runs on
+   every install, solo and fleet, unconditionally: a silent shadowed plist
+   is a per-machine no-op at fleet scale.
+4. Plist write to `/Library/Managed Preferences/
+   com.anthropic.claudefordesktop.plist` (`@ref LLP 0133#plist-surface`),
+   via an inline `sudo` prompt on the solo path (`@ref LLP 0133#solo-sudo`);
+   the fleet path replaces only this step with an MDM push, steps 1-3 and 5
+   identical.
+5. Desktop restart prompt (`killall cfprefsd` + relaunch hint).
+6. Two-tier verify: the automatic half (plist present, residue cleared)
+   returns in `exitCode`; the in-app half (send a message, confirm capture)
+   is `claude-desktop verify`'s printed hint, never a blocking wizard step
+   (`@ref LLP 0131#verify-is-a-hint`).
+
+Every step re-checks its own already-done state first (residue already
+cleared, plist already correct, helper already written), so re-running after
+a bailed sudo prompt converges without re-prompting completed steps
+(`@ref LLP 0131#idempotent-rerun`). A fleet config pinning an ephemeral
+gateway listen (`127.0.0.1:0`) is refused before step 4 runs, unchanged
+(`@ref LLP 0133#consequences`, [LLP 0114](./0114-gateway-default-listen-port-fixed.decision.md)).
+
 ### No attach probe for Desktop {#no-probe}
 
 An earlier revision of this section had the client descriptor carry an
@@ -487,7 +514,7 @@ quiet wrong answer to a loud one. Defects 1 and 3 are unfixable inside the
 `attach_probe` contract, which is why the probe goes rather than gets
 corrected. (That `resolveClientSettingsPath` silently re-anchors an absolute
 `settings_file` instead of honouring or rejecting it is a separate trap in
-the shared helper, tracked on its own.)
+the shared helper, tracked on its own as #446.)
 
 Desktop's state surface is `claude-desktop verify`, and its undo is removing
 the plist with sudo (plus `killall cfprefsd` and an app restart,
@@ -495,33 +522,6 @@ the plist with sudo (plus `killall cfprefsd` and an app restart,
 `detachClientFromDisk` returns `{ changed: false }` at its no-probe guard, so
 `hyp detach --client claude-desktop` is an honest no-op rather than an error
 over a file core can neither read nor reverse.
-
-`src/install.js`'s `run(argv, ctx)` implements, in order
-(`@ref LLP 0133#one-surface`, `@ref LLP 0133#0115-corrections`):
-
-1. Credential login chain ([LLP 0117](./0117-claude-account-credential-plugin.decision.md)).
-2. Helper write ([LLP 0116](./0116-desktop-credential-client-presented.decision.md)).
-3. **Residue check**: detect a pre-existing `Claude-3p` profile-directory
-   config (`@ref LLP 0133#dialog-residue`), back it up, clear it. Runs on
-   every install, solo and fleet, unconditionally: a silent shadowed plist
-   is a per-machine no-op at fleet scale.
-4. Plist write to `/Library/Managed Preferences/
-   com.anthropic.claudefordesktop.plist` (`@ref LLP 0133#plist-surface`),
-   via an inline `sudo` prompt on the solo path (`@ref LLP 0133#solo-sudo`);
-   the fleet path replaces only this step with an MDM push, steps 1-3 and 5
-   identical.
-5. Desktop restart prompt (`killall cfprefsd` + relaunch hint).
-6. Two-tier verify: the automatic half (plist present, residue cleared)
-   returns in `exitCode`; the in-app half (send a message, confirm capture)
-   is `claude-desktop verify`'s printed hint, never a blocking wizard step
-   (`@ref LLP 0131#verify-is-a-hint`).
-
-Every step re-checks its own already-done state first (residue already
-cleared, plist already correct, helper already written), so re-running after
-a bailed sudo prompt converges without re-prompting completed steps
-(`@ref LLP 0131#idempotent-rerun`). A fleet config pinning an ephemeral
-gateway listen (`127.0.0.1:0`) is refused before step 4 runs, unchanged
-(`@ref LLP 0133#consequences`, [LLP 0114](./0114-gateway-default-listen-port-fixed.decision.md)).
 
 ## Export-seam source-scoped withholding {#export-seam}
 
