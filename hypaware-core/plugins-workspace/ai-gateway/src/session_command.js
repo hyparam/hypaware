@@ -67,6 +67,36 @@ const MAX_RESPONSE_BYTES = 64 * 1024
  */
 const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
 
+/**
+ * Environment variables in which a client **states** the session this process
+ * is running inside. Both are set by the client onto the environment of the
+ * process it spawns for a tool call, so their presence is direct evidence of
+ * provenance where the rollout scan below has only an mtime proxy: a session
+ * that has ended cannot have spawned this process. For a `hyp` run inside a
+ * tool call the client is blocked on, that is liveness. It stops being
+ * liveness for a process that OUTLIVES its spawn (a server or `tmux` pane
+ * started from a tool call inherits the variable), which is a much narrower
+ * residual than the mtime bound but not zero. @ref LLP 0067#cli-session-id
+ *
+ * `CODEX_THREAD_ID` carries Codex's `conversation_id` (the thread), which is
+ * the same identifier the rollout's `session_meta.payload.id` carries and the
+ * same one its filename embeds - so this is the id the disk scan already
+ * produced, obtained from a source that states it rather than infers it. It is
+ * NOT always the id the drop keys on: that is the session container, which
+ * coincides with the thread for a root Codex thread but not for a subagent
+ * one. Pre-existing, shared with the disk scan, and recorded in
+ * LLP 0067#cli-session-id rather than closed here.
+ * Codex injects it for every shell/exec tool call and exempts it from
+ * `shell_environment_policy.include_only` filtering
+ * (openai/codex#10096, merged 2026-02-03).
+ *
+ * @type {{ env: string, source: 'claude_env' | 'codex_env' }[]}
+ */
+const STATED_SESSION_ID_VARS = [
+  { env: 'CLAUDE_CODE_SESSION_ID', source: 'claude_env' },
+  { env: 'CODEX_THREAD_ID', source: 'codex_env' },
+]
+
 const IGNORE_USAGE = 'usage: hyp session ignore [session-id] [--json]'
 const UNIGNORE_USAGE = 'usage: hyp session unignore [session-id] [--json]'
 const STATUS_USAGE = 'usage: hyp session status [session-id] [--json]'
@@ -302,8 +332,14 @@ function writeStatus(ctx, json, report) {
  *
  * A membership answer rests on two claims the verb cannot always prove: that
  * the id is this session's, and that the endpoint is the gateway. An explicit
- * argument or `CLAUDE_CODE_SESSION_ID` states the first; a Codex rollout only
- * INFERS it from disk. A live daemon's `status.json` proves the second; a
+ * argument, or a client-set `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`,
+ * states the first; a Codex rollout only INFERS it from disk. Only the
+ * inference is qualified: a stated id has a residual of its own (a process that
+ * OUTLIVES its spawn keeps the variable, LLP 0067#cli-session-id), but it is far
+ * narrower, and qualifying both would train the reader to skip the caveat on
+ * the one path where it is load-bearing.
+ *
+ * A live daemon's `status.json` proves the second; a
  * pinned `listen` only asserts it, and `validateControlResponse` can prove the
  * responder saw our token but not that it is the gateway. Naming the weaker
  * evidence in the output is the only remedy available at this layer, and it is
@@ -403,18 +439,28 @@ export function resolveGatewayEndpointForCli(ctx) {
 /**
  * Resolve which session this invocation is about.
  *
- * Order: `CLAUDE_CODE_SESSION_ID` when set, otherwise the Codex rollout whose
- * `payload.cwd` matches the invocation cwd. Codex exposes no session-id
- * environment variable, so the id has to come off disk
+ * Order: an id **stated** by the client in this process's environment
+ * (`CLAUDE_CODE_SESSION_ID`, or Codex's `CODEX_THREAD_ID`), otherwise the Codex
+ * rollout whose `payload.cwd` matches the invocation cwd
  * (`$CODEX_HOME/sessions/**\/rollout-<ts>-<uuid>.jsonl`, whose first
- * `session_meta` line carries `payload.id` and `payload.cwd`).
+ * `session_meta` line carries `payload.id` and `payload.cwd`). The disk scan is
+ * the fallback for a Codex old enough not to set the variable, and for a hand
+ * invocation from a terminal no client spawned.
+ *
+ * **Refuses when two clients each state one.** Environments nest (Codex runs
+ * `claude`, or the reverse), so both variables can be set at once and only one
+ * of them names the session this invocation is in. Preferring either would be a
+ * guess, and a wrong guess opts out a session the user is not in while
+ * reporting success.
  *
  * **Refuses on ambiguity** rather than guessing newest-by-mtime: several
  * cwd-matching rollouts, or none, is an error naming the candidates. Guessing
  * would risk opting out the wrong session while telling the user they are
  * covered, which is the fail-open shape this whole change exists to remove.
  *
- * **Refuses on staleness too.** "Exactly one rollout records this cwd" says
+ * **Refuses on staleness too**, on the disk path only: a stated id needs no
+ * staleness bound, because the client that set it is the one running now.
+ * "Exactly one rollout records this cwd" says
  * nothing about whether that session is still running: a cwd where Codex ran
  * once last week has exactly one match, and resolving it yields a confident
  * answer about a DEAD id while the session the user is actually in keeps being
@@ -424,13 +470,30 @@ export function resolveGatewayEndpointForCli(ctx) {
  *
  * @param {{ env: NodeJS.ProcessEnv, cwd: string, maxScan?: number, maxAgeMs?: number, now?: number }} args
  * @returns {SessionIdResolution}
- * @ref LLP 0067#cli-session-id [implements]: session-id resolution contract,
- * fail-closed on ambiguity, truncation, and staleness alike
+ * @ref LLP 0067#cli-session-id [implements]: session-id resolution contract -
+ * a stated id first, then the disk inference, fail-closed on ambiguity
+ * (two stated ids, or two matching rollouts), truncation, and staleness alike
  */
 export function resolveSessionIdForCli(args) {
-  const fromEnv = args.env.CLAUDE_CODE_SESSION_ID
-  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) {
-    return { ok: true, sessionId: fromEnv, source: 'claude_env' }
+  /** @type {{ env: string, source: 'claude_env' | 'codex_env', id: string }[]} */
+  const stated = []
+  for (const candidate of STATED_SESSION_ID_VARS) {
+    const value = args.env[candidate.env]
+    // The id is an opaque provider token (LLP 0066 R5), so the value is passed
+    // on byte-identical; only the emptiness test trims.
+    if (typeof value === 'string' && value.trim().length > 0) {
+      stated.push({ ...candidate, id: value })
+    }
+  }
+  if (stated.length > 1) {
+    const named = stated.map((s) => `${s.env}=${s.id}`).join(', ')
+    return {
+      ok: false,
+      error: `could not resolve a session id: more than one client states one for this invocation - ${named}. Only one of them is the session this command is in, and picking either would act on the wrong one while reporting success. Pass the intended session id explicitly: hyp session status <session-id>.`,
+    }
+  }
+  if (stated.length === 1) {
+    return { ok: true, sessionId: stated[0].id, source: stated[0].source }
   }
 
   const codexHome =
@@ -484,7 +547,7 @@ export function resolveSessionIdForCli(args) {
   if (candidates.length === 0) {
     return {
       ok: false,
-      error: `could not resolve a session id: CLAUDE_CODE_SESSION_ID is not set and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
+      error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
     }
   }
   const named = candidates.map((c) => `${c.id} (${path.basename(c.file)})`).join(', ')

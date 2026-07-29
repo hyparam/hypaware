@@ -129,9 +129,22 @@ opt-out can stop applying while the user still believes it holds. Two ways:
 
 1. **Gateway restart** drops the set (accepted, above).
 2. **The session id changes under the client.** The drop keys on `session_id`
-   ([scope](#scope)); if the client ever mints a new id for what the user
-   experiences as the same conversation (a resume, a fork), the in-memory entry
-   no longer matches and recording resumes.
+   ([scope](#scope)); when the client mints a new id for what the user
+   experiences as the same conversation, the in-memory entry no longer matches
+   and recording resumes.
+
+   **Settled, 2026-07-29 (issue #442 item D): a resume reuses the id, a fork
+   mints a new one.** Claude Code's own flag reference is explicit -
+   `--fork-session`: *"When resuming, create a new session ID instead of reusing
+   the original (use with `--resume` or `--continue`)"* (`claude --help`,
+   2.1.215). The flag exists precisely because `--resume` / `--continue` reuse
+   the id by default. Codex splits the same two behaviours across separate
+   verbs, `codex resume <id>` and `codex fork <id>`. So an opt-out **survives a
+   resume** and is **silently dropped by a fork**, and the fork is the case the
+   reader exists to surface: re-running `hyp session status` inside the fork
+   resolves the *new* id (stated by the client, see
+   [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id))
+   and reports `not_ignored`, which is the true answer for that session.
 
 Neither is a defect in the *mechanism*. Both were a defect in the *surface*: the
 control route only accepted writes, so there was no way to ask "am I still
@@ -219,6 +232,15 @@ set remains [non-goal 2](#non-goals).
   session, so resolving it would answer confidently about a session the user is
   not in (see
   [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
+  An id a client **states** in this process's environment
+  (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) is not an inference and carries
+  no such bound, because there is no timestamp to bound: the session that named
+  it spawned this process. That is liveness for a `hyp` run inside the tool call
+  the client is blocked on, and provenance rather than liveness for a process
+  that outlives its spawn, which is a strictly narrower residual than the mtime
+  bound and is recorded in
+  [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id).
+  Two clients each stating one is ambiguity and MUST refuse like any other.
 - **R12.** Where an answer rests on an inference rather than a stated fact, the
   reader MUST say so alongside the answer: which source the `session_id` came
   from (and, when inferred, from what), and whether the endpoint was proven
