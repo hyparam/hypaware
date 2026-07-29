@@ -611,8 +611,19 @@ export function resolveSessionIdForCli(args) {
  * thread has already told us that would be the wrong one.
  *
  * A truncated scan is only fatal here when the thread was not found. Unlike the
- * cwd path, this match is an identity test on a value the client stated, not a
- * uniqueness claim over the listing, so an unread file cannot invalidate a hit.
+ * cwd path, FINDING the thread is an identity test on a value the client stated,
+ * not a uniqueness claim over the listing, so an unread file cannot invalidate a
+ * hit's identity.
+ *
+ * The agreement check below is the one part that does read on the listing, so be
+ * precise about its limit: on a truncated scan a *disagreeing* rollout for the
+ * same thread may simply never have been reached, and a lone match is then taken
+ * as agreement. That is accepted rather than refused because refusing would
+ * disable auto-resolution for any history past the bound, while the trigger
+ * needs two rollouts whose first line states one `payload.id` under two
+ * containers - which Codex does not produce (a fork copies the parent's
+ * `session_meta` as a LATER line, and only line 1 is read), so it takes
+ * hand-copied history. Named here so the limit is a known one.
  *
  * @param {{ files: string[], truncated: boolean }} scan
  * @param {string} sessionsDir

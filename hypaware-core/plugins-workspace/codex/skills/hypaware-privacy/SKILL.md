@@ -40,13 +40,27 @@ fi
 # Read the session CONTAINER id and rollout cwd from the session_meta line.
 # `session_id` is the key the gateway drops on; `id` is the thread, which a
 # subagent thread mints for itself and which would match nothing.
+#
+# The guards below mirror `readRolloutMeta` in the CLI: only `session_meta`
+# states the container, so a differently-typed first record says nothing about
+# it; and a present-but-unusable value (blank, non-string) is as unresolvable as
+# an absent one, because posting it would report an opt-out the gateway can
+# never match. This script also cannot carry an id containing whitespace (the
+# `read` below would split it), so it refuses rather than POSTing a truncated
+# key - the same wrong-key-reported-as-success failure this step exists to stop.
 read -r SESSION_ID ROLLOUT_CWD < <(head -1 "$rollout" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
-p = r.get("payload", {})
+if not isinstance(r, dict) or r.get("type") != "session_meta":
+    sys.exit("the rollout first line is not a session_meta record, and only that record states the session container; use `hyp session ignore --json` instead")
+p = r.get("payload")
+if not isinstance(p, dict):
+    sys.exit("this rollout session_meta record carries no payload; resolve the session id another way")
 sid = p.get("session_id")
-if not sid:
-    sys.exit("this rollout records no session_id (pre-upgrade Codex); resolve the session id another way rather than using the thread id")
+if not isinstance(sid, str) or not sid.strip():
+    sys.exit("this rollout records no usable session_id (a pre-upgrade Codex, or a blank field); resolve the session id another way rather than using the thread id")
+if sid.split() != [sid]:
+    sys.exit("this session_id contains whitespace and this script cannot post it byte-exactly; use `hyp session ignore --json`, which keeps the token verbatim")
 print(sid, p.get("cwd", ""))
 ')
 echo "resolved session $SESSION_ID (rollout cwd: $ROLLOUT_CWD)"

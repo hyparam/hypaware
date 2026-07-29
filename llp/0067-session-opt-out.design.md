@@ -323,6 +323,32 @@ had, the key wins and the verb refuses - a refusal costs the user a re-run with
 an explicit id, whereas a confident wrong key costs them the recording they
 believed they had stopped.
 
+**No staleness bound on the stated-thread path, deliberately.** The cwd scan
+needs one because a stale rollout matching the cwd is a *different, finished*
+session being mistaken for this one, which is a wrong-identity risk. The stated
+path cannot have that risk: `CODEX_THREAD_ID` names one thread, Codex injects it
+into every exec tool call and it survives `shell_environment_policy` filtering
+(`include_only` and `exclude` are both applied before the injection), so it is
+always the spawning thread's own id, never an inherited stale one. What remains
+is a liveness residue - a process that outlives the thread that spawned it keeps
+the variable - and its cost is one extra entry in an in-memory set covering a
+container that is already the *right* container, i.e. the over-drop direction. An
+age bound would instead false-refuse during a long tool call, when the rollout is
+legitimately untouched for however long the call runs; that pushes the user
+towards giving up, which is the under-drop direction. Both errors are not equal,
+so the bound stays off here and on there.
+
+**Known limit: agreement is checked against a bounded listing.** Finding the
+stated thread is an identity test, so the `MAX_ROLLOUT_SCAN` bound cannot
+invalidate a hit. The check that the matched rollouts *agree* on the container
+does read on the listing, so on a truncated scan a disagreeing rollout may never
+be reached and a lone match is taken as agreement. Refusing on truncation would
+disable auto-resolution for every history past the bound, and the trigger needs
+two rollouts whose **first line** states one `payload.id` under two different
+containers, which Codex does not write (a fork copies the parent `session_meta`
+as a later line, and only line 1 is read) - it takes hand-copied history.
+Recorded as a known limit rather than closed.
+
 #### `session_id` absent is unresolvable, NOT the thread id {#cli-legacy-rollout}
 
 The trap in the same issue. Codex's `SessionMetaLine` has a hand-written
