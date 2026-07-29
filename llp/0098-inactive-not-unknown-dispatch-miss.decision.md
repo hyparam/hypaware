@@ -19,6 +19,7 @@
 
 ## Decision
 
+<a id="unavailable-not-unknown"></a>
 On a top-level dispatch miss (no command and no group prefix matched), before
 emitting the generic unknown-command error, exact-match the first argv token
 against the leading word of every command declared by a plugin that is in the

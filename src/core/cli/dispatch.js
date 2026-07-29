@@ -247,7 +247,7 @@ export async function dispatch(argv, opts = {}) {
     // command is *unavailable*, not unknown: report which plugin provides it
     // and how to enable it, instead of implying the feature does not exist. A
     // genuine typo matches nothing here and still gets the generic message.
-    // @ref LLP 0098#decision [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
+    // @ref LLP 0098#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
     const inactive = await findInactivePluginForCommand(helpDiscovery, argv[0])
     if (inactive) {
       stderr.write(
@@ -641,10 +641,11 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write('\n')
   stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)
   // Plugin-contributed commands are omitted when their plugin is inactive, so
-  // this list is install-specific. Say so, and point at the miss path that
-  // already names the providing plugin and prints a repair: line (LLP 0098).
-  stdout.write('This list reflects the plugins active in your config; running a command\n')
-  stdout.write('a disabled plugin provides names that plugin and prints how to enable it.\n')
+  // this list is install-specific. Say so, and point at the miss path.
+  // @ref LLP 0098#unavailable-not-unknown: the epilogue can promise a named plugin and a repair line only because a miss on an inactive plugin's command reports "unavailable", not "unknown"
+  stdout.write('This list reflects the plugins active in your config. If a command you\n')
+  stdout.write('expect is missing, run it anyway: hyp names the plugin that provides it\n')
+  stdout.write('and prints how to enable it.\n')
   stdout.write(`Start with 'hyp status' for whether this install is working.\n`)
 }
 
