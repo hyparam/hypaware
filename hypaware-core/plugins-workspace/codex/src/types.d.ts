@@ -74,7 +74,7 @@ export interface RolloutCwdResolver {
 }
 
 /**
- * A directory entry as far as the rollout scan needs it — the structural subset
+ * A directory entry as far as the rollout scan needs it: the structural subset
  * of `node:fs`'s `Dirent` the walk touches. Declared so the reader can be
  * injected (and its calls counted) in tests without pulling the whole fs type.
  */

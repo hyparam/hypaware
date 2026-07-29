@@ -20,12 +20,12 @@ import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 // a long, large rollout.
 const FIRST_LINE_MAX_BYTES = 64 * 1024
 
-// A negative resolution (no cwd found — the rollout is not yet written on the
+// A negative resolution (no cwd found: the rollout is not yet written on the
 // session's first exchange, or a momentary read error) is trusted only briefly
 // before it is re-checked, mirroring the usage-policy resolver's 5s TTL. A
 // positive cwd is cached for the session's life. Bounding the miss cache this
 // way stops a session-start race or a transient EMFILE/EIO from recording
-// `cwd = NULL` for a session's whole life — which would silently fail
+// `cwd = NULL` for a session's whole life, which would silently fail
 // `.hypignore` open for that session once the rollout became readable.
 const NEGATIVE_CACHE_TTL_MS = 5_000
 
@@ -33,15 +33,15 @@ const NEGATIVE_CACHE_TTL_MS = 5_000
  * Resolve a Codex **thread's** `cwd` from its rollout file's `session_meta` line.
  *
  * The ChatGPT-subscription route (`provider='chatgpt'`, `/backend-api/codex/*`)
- * carries no in-band cwd — `codex-tui` sends no `x-codex-turn-metadata` header
- * and the subscription protocol has no `metadata.cwd` field — so the live
+ * carries no in-band cwd (`codex-tui` sends no `x-codex-turn-metadata` header
+ * and the subscription protocol has no `metadata.cwd` field), so the live
  * exchange projector would record `cwd = NULL` and `.hypignore` would fail open
  * for the whole traffic class. Codex nonetheless writes `session_meta.cwd` into
  * the rollout (`<sessionsDir>/.../rollout-<ts>-<thread_id>.jsonl`, line 1) at
- * session start, for both auth modes — the same value the codex backfill reads.
+ * session start, for both auth modes: the same value the codex backfill reads.
  * This resolver gives the live projector that fallback, so folder coverage is
  * client-independent and live rows carry the cwd backfill already sees.
- * @ref LLP 0083 [implements] — rollout is the live cwd fallback for Codex
+ * @ref LLP 0083 [implements]: rollout is the live cwd fallback for Codex
  *
  * **The lookup key is the THREAD id, never the session container.** A rollout is
  * one thread's file: its name embeds `session_meta.payload.id` (the thread), not
@@ -80,7 +80,7 @@ export function createRolloutCwdResolver(opts) {
       // A resolved cwd is trusted for the thread's life (Infinity); a miss is
       // trusted only for the TTL, so a transient miss is re-resolved instead of
       // becoming a permanent NULL cwd (which fails `.hypignore` open).
-      // @ref LLP 0083 [constrained-by] — a transient miss must not fix the cwd at NULL for the session's life
+      // @ref LLP 0083 [constrained-by]: a transient miss must not fix the cwd at NULL for the thread's life
       cache.set(threadId, { cwd, expiresAt: cwd === undefined ? now() + ttlMs : Infinity })
       return cwd
     },
@@ -122,11 +122,17 @@ function readRolloutCwd(sessionsDir, threadId, readdirSync, log) {
   // refusal, not a guess
   const rolloutThreadId = stringValue(payload?.id)
   if (rolloutThreadId !== threadId) {
+    // The two refusals have different diagnoses, so they get different
+    // `error_kind`s: `thread_id_absent` is the one rollout shape the backfill
+    // still accepts (`buildSession` falls back to the filename id), so it points
+    // at the live/backfill divergence LLP 0083 records, while
+    // `thread_id_mismatch` points at a renamed or copied file. Same message so
+    // one query finds both.
     log?.warn?.('plugin.codex.rollout_cwd_thread_mismatch', {
       component: 'codex',
       operation: 'rollout_cwd_resolve',
       status: 'refused',
-      error_kind: 'thread_id_mismatch',
+      error_kind: rolloutThreadId === undefined ? 'thread_id_absent' : 'thread_id_mismatch',
       wanted_thread_id: threadId,
       rollout_thread_id: rolloutThreadId ?? null,
       rollout: path.basename(rolloutPath),
@@ -140,7 +146,7 @@ function readRolloutCwd(sessionsDir, threadId, readdirSync, log) {
  * Scan the sessions root for the rollout whose filename embeds `threadId`,
  * newest-first: entries are visited in *descending* name order, so the
  * most-recent date dirs (`…/YYYY/MM/DD`) and rollout files come first. The
- * active session — the common lookup on the capture hot path — lives in the
+ * active session (the common lookup on the capture hot path) lives in the
  * newest date dir, so a typical resolution returns after touching only the
  * newest branch instead of walking the whole history oldest-first. Returns the
  * first match. A missing or unreadable directory contributes nothing rather

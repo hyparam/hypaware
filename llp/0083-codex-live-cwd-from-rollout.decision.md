@@ -9,7 +9,7 @@
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
-> none — the same source the codex backfill already reads. This makes
+> none: the same source the codex backfill already reads. This makes
 > `.hypignore` folder coverage ([LLP 0049](./0049-hypignore-usage-policy.spec.md))
 > client-independent for Codex and stamps a non-null `cwd` on subscription-route
 > rows.
@@ -18,7 +18,7 @@
 
 `.hypignore` enforcement matches an exchange to a scope by its `cwd`
 ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), and the drop lives in
-the client adapter — the only place that resolves a `cwd`
+the client adapter, the only place that resolves a `cwd`
 ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)). The Codex live
 projector resolved `cwd` **only** from the request in flight: the
 `x-codex-turn-metadata` header, then the body `cwd` / `metadata.cwd` /
@@ -30,10 +30,10 @@ carry `cwd` in-band in `metadata`, so no enrichment was ever built. The
 **ChatGPT-subscription** route (`provider='chatgpt'`, `/backend-api/codex/*`)
 has no such field, and `codex-tui` does not send the `x-codex-turn-metadata`
 header on it (that is Codex Desktop behavior). So "cwd is always available at
-projection time" was really "cwd is available when the client volunteers it" —
+projection time" was really "cwd is available when the client volunteers it",
 and for an entire first-class traffic class, it never did:
 
-- `.hypignore` was a silent **no-op** for subscription-mode Codex — the same gap
+- `.hypignore` was a silent **no-op** for subscription-mode Codex, the same gap
   class as raw-proxy/OTEL ([LLP 0049 §non-goals](./0049-hypignore-usage-policy.spec.md#non-goals)),
   except this *is* a supported Codex adapter pathway, not a folder-blind source.
 - The subscription-route rows recorded `cwd = NULL`, so they also escaped the
@@ -41,20 +41,22 @@ and for an entire first-class traffic class, it never did:
   scoping.
 - It diverged from **backfill**: the codex backfill reads `session_meta.cwd` from
   the rollout and *does* skip an ignored session, so the two halves of one policy
-  treated the same session oppositely — recorded live, skipped on backfill.
+  treated the same session oppositely: recorded live, skipped on backfill.
 
 The `cwd` was available locally the whole time: Codex writes `session_meta.cwd`
-into its rollout (`<sessionsDir>/…/rollout-<ts>-<session_id>.jsonl`, line 1) at
+into its rollout (`<sessionsDir>/…/rollout-<ts>-<thread_id>.jsonl`, line 1) at
 session start, for both auth modes. The live projector just never read it.
 
 ## Decision
 
 **When the request carries no in-band `cwd`, the Codex live projector falls back
-to the session rollout's `session_meta.cwd`, keyed on the session id the adapter
-already resolves.** Contrast the `@hypaware/claude` projector, which — because
-Anthropic requests never carry `cwd` — *had* to build enrichment (the
-hook-written `session-context.jsonl` sidecar) and therefore works on every route.
-Codex now has the symmetric fallback.
+to the thread rollout's `session_meta.cwd`, keyed on the Codex thread id the
+adapter already resolves** (the thread, *not* the session container: see the
+keying bullets below and the [correction for issue #459](#correction-the-first-cut-keyed-on-the-container-issue-459)).
+Contrast the `@hypaware/claude` projector, which, because Anthropic requests
+never carry `cwd`, *had* to build enrichment (the hook-written
+`session-context.jsonl` sidecar) and therefore works on every route. Codex now
+has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
@@ -139,12 +141,12 @@ Codex now has the symmetric fallback.
 ## Why not the alternatives
 
 - **Wait for the client to volunteer `cwd`** (an `x-codex-turn-metadata` on the
-  subscription route, or a caller-supplied `X-Hyp-Cwd` header — the future hook
+  subscription route, or a caller-supplied `X-Hyp-Cwd` header, the future hook
   [LLP 0049 non-goal 1](./0049-hypignore-usage-policy.spec.md#non-goals) leaves
   open). This keeps a privacy control's coverage hostage to client behavior we do
   not own, indefinitely. The rollout makes coverage **client-independent** today;
   if a future client *does* send the header, the adapter already parses it
-  route-agnostically and coverage simply resumes via the fast path — no conflict.
+  route-agnostically and coverage simply resumes via the fast path, no conflict.
 - **Accept it as structural folder-blindness** like raw-proxy/OTEL. Those paths
   have no adapter and no local `cwd`; Codex has both. Treating a recoverable leak
   as structural would be a privacy regression dressed as a non-goal.
@@ -195,7 +197,11 @@ confirmed as unresolvable.
 - The identity guard's refusal is **logged** (`plugin.codex.rollout_cwd_thread_mismatch`,
   warn), because its only other trace is a row with `cwd = NULL`, which is
   indistinguishable from the ordinary not-yet-written rollout. The resolver takes
-  an optional `log` and `index.js` passes `ctx.log`.
+  an optional `log` and `index.js` passes `ctx.log`. One message, two
+  `error_kind`s, because the two refusals have different diagnoses:
+  `thread_id_mismatch` (a name that lies: a renamed or copied file) and
+  `thread_id_absent` (the divergence recorded below, which the backfill still
+  accepts).
 - `codex/src/rollout-cwd.js` and `ai-gateway/src/session_command.js`'s
   `readRolloutMeta` remain **two readers of the same first line** with different
   needs (a hot-path cwd lookup per thread versus a one-shot CLI scan that must

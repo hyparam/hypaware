@@ -50,7 +50,7 @@ const SUBSCRIPTION_SESSION_ID = '019e60b5-1111-4222-8333-444455556666'
 
 // ---------------------------------------------------------------------
 // Regression (#257): the ChatGPT-subscription route carries no in-band cwd, so
-// the live projector must fall back to the session rollout's session_meta.cwd —
+// the live projector must fall back to the session rollout's session_meta.cwd,
 // otherwise `.hypignore` fails open for the whole traffic class and the row
 // records cwd = NULL (diverging from backfill, which DOES read the rollout).
 // ---------------------------------------------------------------------
@@ -178,7 +178,7 @@ test('createRolloutCwdResolver returns undefined when the sessions root is missi
 // ---------------------------------------------------------------------
 // Review round 1, Major 1: a miss (not-yet-written rollout on a session's
 // first exchange, or a transient read error) must NOT be cached as a permanent
-// NULL cwd — that would silently fail `.hypignore` open for the session's whole
+// NULL cwd: that would silently fail `.hypignore` open for the session's whole
 // life once the rollout became readable. A resolved cwd stays cached for life.
 // ---------------------------------------------------------------------
 
@@ -197,7 +197,7 @@ test('a missing-then-present rollout is re-resolved after the negative TTL, but 
 
   // A repeat within the TTL window is served from the negative cache: no rescan.
   assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
-  assert.equal(scan.calls.length, scansAfterMiss, 'a miss is cached within its TTL — no re-scan')
+  assert.equal(scan.calls.length, scansAfterMiss, 'a miss is cached within its TTL, no re-scan')
 
   // The rollout appears (the session-start race resolves) and the TTL lapses.
   const rolloutPath = path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`)
@@ -212,7 +212,7 @@ test('a missing-then-present rollout is re-resolved after the negative TTL, but 
   const scansAfterResolve = scan.calls.length
   clock += 1_000_000
   assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), '/work/late')
-  assert.equal(scan.calls.length, scansAfterResolve, 'a resolved cwd is cached for the session life — never re-scanned')
+  assert.equal(scan.calls.length, scansAfterResolve, 'a resolved cwd is cached for the session life, never re-scanned')
 })
 
 test('a transient read error is retried rather than cached as a permanent miss', async () => {
@@ -245,7 +245,7 @@ test('a transient read error is retried rather than cached as a permanent miss',
 // ---------------------------------------------------------------------
 // Review round 1, Major 2: the first lookup walks newest-date dirs first and
 // returns on first match, so the active session's rollout (newest date dir) is
-// found without walking the whole history — while an older/dormant session's
+// found without walking the whole history, while an older/dormant session's
 // rollout (older date dir) still resolves.
 // ---------------------------------------------------------------------
 
@@ -268,7 +268,7 @@ test('a newest-dir rollout is found without descending the older-date branch; an
   )
 
   // The active (newest-date) session resolves after touching only the newest
-  // branch — the older-date branch (…/2026/01) is never even scanned.
+  // branch: the older-date branch (…/2026/01) is never even scanned.
   const scan = countingReaddir()
   const resolver = createRolloutCwdResolver({ sessionsDir, readdirSync: scan.readdirSync })
   assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), '/work/new')
@@ -402,6 +402,9 @@ test('a rollout whose body disagrees with its filename is refused, not silently 
   )
   assert.equal(log.warns[0].fields?.wanted_thread_id, SUBAGENT_THREAD_ID)
   assert.equal(log.warns[0].fields?.rollout_thread_id, ROOT_THREAD_ID)
+  // A name that lies is a different diagnosis from a rollout that states no id,
+  // so the two refusals are distinguishable without re-reading the fields.
+  assert.equal(log.warns[0].fields?.error_kind, 'thread_id_mismatch')
 })
 
 test('a subagent turn that states lineage but not its own thread id resolves no cwd', async () => {
@@ -509,6 +512,9 @@ test('a session_meta line with a cwd but no payload.id is refused, not matched b
   assert.equal(resolver.resolve(ROOT_THREAD_ID), undefined)
   assert.deepEqual(log.warns.map((w) => w.message), ['plugin.codex.rollout_cwd_thread_mismatch'])
   assert.equal(log.warns[0].fields?.rollout_thread_id, null, 'an absent id is reported as absent, not as the wanted id')
+  // The one shape the backfill still accepts, so the log has to say which
+  // refusal this is: it is the live/backfill divergence, not a renamed file.
+  assert.equal(log.warns[0].fields?.error_kind, 'thread_id_absent')
 })
 
 test('DOCUMENTED GAP: a turn stating a container and NO lineage at all is taken as its root thread', async () => {

@@ -922,7 +922,7 @@ function resolveConversationSource(provider) {
  * @param {Record<string, unknown>} reqBody
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  * @param {string | undefined} cwd The cwd the caller already resolved (in-band
- *   fast path, else the rollout fallback). Passed in — not recomputed — so the
+ *   fast path, else the rollout fallback). Passed in (not recomputed) so the
  *   row's stamped cwd is exactly the value the `.hypignore` check used, and so
  *   the subscription route records the rollout cwd instead of NULL.
  *   @ref LLP 0083 [implements]
