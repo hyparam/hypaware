@@ -403,7 +403,7 @@ async function runInitFromFile(flags, ctx) {
  *
  * @type {Set<string>}
  */
-const INIT_FLAG_NAMES = new Set([
+export const INIT_FLAG_NAMES = new Set([
   '--yes', '-y',
   '--no-daemon',
   '--dry-run',
