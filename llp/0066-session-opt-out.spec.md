@@ -234,8 +234,13 @@ set remains [non-goal 2](#non-goals).
   [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
   An id a client **states** in this process's environment
   (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) is not an inference and carries
-  no such bound: only a running session can have spawned the process it is set
-  in. Two clients each stating one is ambiguity and MUST refuse like any other.
+  no such bound, because there is no timestamp to bound: the session that named
+  it spawned this process. That is liveness for a `hyp` run inside the tool call
+  the client is blocked on, and provenance rather than liveness for a process
+  that outlives its spawn, which is a strictly narrower residual than the mtime
+  bound and is recorded in
+  [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id).
+  Two clients each stating one is ambiguity and MUST refuse like any other.
 - **R12.** Where an answer rests on an inference rather than a stated fact, the
   reader MUST say so alongside the answer: which source the `session_id` came
   from (and, when inferred, from what), and whether the endpoint was proven

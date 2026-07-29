@@ -334,8 +334,12 @@ function writeStatus(ctx, json, report) {
  * the id is this session's, and that the endpoint is the gateway. An explicit
  * argument, or a client-set `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`,
  * states the first; a Codex rollout only INFERS it from disk. Only the
- * inference is qualified, because only it can name a session that has already
- * ended. A live daemon's `status.json` proves the second; a
+ * inference is qualified: a stated id has a residual of its own (a process that
+ * OUTLIVES its spawn keeps the variable, LLP 0067#cli-session-id), but it is far
+ * narrower, and qualifying both would train the reader to skip the caveat on
+ * the one path where it is load-bearing.
+ *
+ * A live daemon's `status.json` proves the second; a
  * pinned `listen` only asserts it, and `validateControlResponse` can prove the
  * responder saw our token but not that it is the gateway. Naming the weaker
  * evidence in the output is the only remedy available at this layer, and it is
