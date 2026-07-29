@@ -312,6 +312,21 @@ second one):
   a backed-up prior. The undo therefore restores `ANTHROPIC_BASE_URL` to
   `prev_base_url` but *removes* any other managed key (like `ENABLE_TOOL_SEARCH`)
   rather than stamping the base URL onto it.
+- **The backup is type-blind too, and needs to be more than the guard above.**
+  Presence-not-type binds the base URL as well, by a different route. The
+  managed additions have somewhere safe to land when a key is not ours: attach
+  skips them. `ANTHROPIC_BASE_URL` has nowhere, because attach always repoints
+  it, so `prev_base_url` **is** the never-clobber guard for this key rather than
+  a supplement to one. Deciding whether to take the backup by the live value's
+  JSON type therefore loses the value outright: a hand-written
+  `"ANTHROPIC_BASE_URL": null` (a user switching an override back off) reads as
+  nothing-to-back-up, attach records the key as managed with no prior, and the
+  undo, seeing a managed key with no prior to restore, deletes it. Attach backs
+  up whatever is at the key, the marker carries it at its real JSON type, the
+  undo restores it on the field being **present** rather than on its type, and
+  re-attach carries the recorded prior forward the same way. Only the
+  human-readable `prev_value` / `restoredValue` report coerces to a string;
+  what is on disk is never reshaped to fit it.
 
 #### _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: keep the model's real context window
 

@@ -120,14 +120,31 @@ export async function attach(opts) {
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
   const env = ensureObject(value, 'env')
-  const liveBaseUrl = typeof env.ANTHROPIC_BASE_URL === 'string' ? env.ANTHROPIC_BASE_URL : undefined
+  // Presence, not type - the same ownership rule `manageEnvAdditions` follows,
+  // and the base URL needs it more, not less. The managed additions at least
+  // fall through an ownership guard when they are not ours; this key has no
+  // such `continue`, because attach always repoints it. The backup IS the
+  // guard. So a type test here did not merely skip a notice: a hand-written
+  // `"ANTHROPIC_BASE_URL": null` (a user switching an override back off) or a
+  // stray number read as "nothing to back up", attach wrote no
+  // `prev_base_url`, and the undo - finding a managed key with no prior to
+  // restore - deleted the key outright. The user's value was gone, from a
+  // detach that reported success. Back up whatever is on disk, whatever its
+  // JSON type; coerce only for the human-readable `prevValue` report, exactly
+  // as the core undo does for `removed`. No explicit presence test is needed to
+  // read it: JSON cannot encode `undefined`, so `undefined` here already means
+  // "absent", and the `prevBaseUrl !== undefined` checks below are the presence
+  // test - which is precisely what the discarded type test was standing in for.
+  const liveBaseUrl = env.ANTHROPIC_BASE_URL
   // Preserve the recorded original across a re-attach: once we own the
   // URL the live value is *our* gateway URL, so keep the marker's
   // recorded `prev_base_url` rather than backing up the gateway URL
-  // over it. A first attach backs up whatever was live.
+  // over it. A first attach backs up whatever was live. Presence again:
+  // attach only ever writes the field when there was something to record, so
+  // the field being there is the fact, and `null` is a value we must give back.
   // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by] — the marker IS the backup restored on leave
   const prevBaseUrl = priorMarker
-    ? (typeof priorMarker.prev_base_url === 'string' ? priorMarker.prev_base_url : undefined)
+    ? (Object.hasOwn(priorMarker, 'prev_base_url') ? priorMarker.prev_base_url : undefined)
     : liveBaseUrl
 
   const baseUrl = `http://127.0.0.1:${port}`
@@ -170,7 +187,9 @@ export async function attach(opts) {
 
   /** @type {ClaudeAttachResult} */
   const result = { changed: true }
-  if (prevBaseUrl !== undefined) result.prevValue = prevBaseUrl
+  if (prevBaseUrl !== undefined) {
+    result.prevValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
+  }
   return result
 }
 
@@ -200,8 +219,8 @@ function manageEnvAdditions(env, priorManagedEnv) {
   /** @type {Record<string, string>} */
   const managed = {}
   for (const { key, value } of MANAGED_ENV_ADDITIONS) {
-    const weOwnIt = priorManagedEnv ? key in priorManagedEnv : false
-    if (!weOwnIt && key in env) continue
+    const weOwnIt = priorManagedEnv ? Object.hasOwn(priorManagedEnv, key) : false
+    if (!weOwnIt && Object.hasOwn(env, key)) continue
     env[key] = value
     managed[key] = value
   }

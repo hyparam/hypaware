@@ -808,3 +808,62 @@ test('claude undo does not report an Object.prototype-named managed key that is 
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// The round trip is the assertion that matters for the base-URL backup, the
+// same way it was for the managed additions: the bug needed attach and detach
+// together to destroy the value. Attach skipped the backup on JSON type, so the
+// undo met a managed key with no prior and deleted a setting the user wrote.
+// Byte-for-byte equality of the file is the strongest statement of the fix.
+for (const prior of [8080, false, null]) {
+  test(`claude attach + undo restore a ${JSON.stringify(prior)} base URL byte-for-byte`, async () => {
+    const home = await stageHome()
+    try {
+      const original = { env: { ANTHROPIC_BASE_URL: prior, ANTHROPIC_API_KEY: 'sk-x' } }
+      const originalText = JSON.stringify(original, null, 2) + '\n'
+      const settingsPath = await writeClaudeSettings(home, originalText)
+
+      await claudeAttach({ ...ATTACH, settingsPath })
+      // Attach really did repoint it - the round trip below is not a no-op.
+      const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+      assert.equal(attached.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4123')
+
+      const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+      assert.equal(result.changed, true)
+      assert.equal('removed' in result, false) // restored, never removed
+      assert.equal(result.restoredValue, String(prior)) // display field stays a string
+
+      assert.equal(await fs.readFile(settingsPath, 'utf8'), originalText)
+    } finally {
+      await fs.rm(home, { recursive: true, force: true })
+    }
+  })
+}
+
+// Re-attach is the second half of the base-URL backup rule, and it has its own
+// type gate to get wrong: on re-attach the live value is *our* gateway URL, so
+// the prior must be carried forward out of the existing marker. Reading that
+// field by type dropped a non-string backup on the second attach, and the undo
+// then deleted the user's value exactly as it did before the first fix - one
+// attach later. Two attaches then a detach must still land byte-for-byte.
+test('claude re-attach carries a non-string base URL backup forward, and undo restores it', async () => {
+  const home = await stageHome()
+  try {
+    const original = { env: { ANTHROPIC_BASE_URL: false, ANTHROPIC_API_KEY: 'sk-x' } }
+    const originalText = JSON.stringify(original, null, 2) + '\n'
+    const settingsPath = await writeClaudeSettings(home, originalText)
+
+    await claudeAttach({ ...ATTACH, settingsPath })
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    // The second attach must not have backed up its own gateway URL over the
+    // user's value, nor dropped the record.
+    const marker = JSON.parse(await fs.readFile(settingsPath, 'utf8'))._hypaware
+    assert.equal(marker.prev_base_url, false)
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), originalText)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

@@ -319,3 +319,47 @@ test('the marker undo record is stable across re-attach (modulo attached_at)', a
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
+
+// Round 2, issue #448's bug class on the key it never swept: the base URL. The
+// managed additions have an ownership guard to fall through, so a type test
+// there cost a value that was still on disk. Attach *always* repoints
+// ANTHROPIC_BASE_URL, so here the backup is the only guard, and
+// `typeof env.ANTHROPIC_BASE_URL === 'string'` skipped it for exactly the
+// values a user writes on purpose - `null`/`false` to switch an override back
+// off. Attach then recorded the key as managed with no prior, and the undo
+// deleted it. Assert the backup is taken whatever the JSON type.
+for (const prior of [8080, false, null, { url: 'x' }]) {
+  test(`attach backs up a ${JSON.stringify(prior)} base URL into prev_base_url`, async () => {
+    const { dir, settingsPath } = await stage()
+    try {
+      await fs.writeFile(settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: prior } }, null, 2))
+
+      const result = await attach({ ...ATTACH, settingsPath })
+      assert.equal(result.changed, true)
+
+      const marker = await readMarker(settingsPath)
+      assert.equal('prev_base_url' in marker, true)
+      assert.deepEqual(marker.prev_base_url, prior)
+      // The display field stays a string; the marker keeps the real value.
+      assert.equal(typeof (/** @type {any} */ (result).prevValue), 'string')
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+// The other direction: no base URL on disk means no backup to invent. Pins the
+// predicate against widening to an unconditional read.
+test('attach records no prev_base_url when the base URL is absent, whatever else env holds', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(settingsPath, JSON.stringify({ env: { ANTHROPIC_API_KEY: 'sk-x' } }, null, 2))
+
+    const result = await attach({ ...ATTACH, settingsPath })
+    assert.equal('prevValue' in result, false)
+    const marker = await readMarker(settingsPath)
+    assert.equal('prev_base_url' in marker, false)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})

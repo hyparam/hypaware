@@ -146,7 +146,12 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   const managed = isPlainObject(marker.managed) ? marker.managed : {}
   const managedEnv = isPlainObject(managed.env) ? managed.env : {}
   const hookEntries = Array.isArray(managed.hooks) ? managed.hooks : []
-  const prevBaseUrl = typeof marker.prev_base_url === 'string' ? marker.prev_base_url : undefined
+  // Presence, not type: the restore half of the attach-side backup. Attach only
+  // ever writes this field when there was a prior value to record, so the field
+  // being there IS the "restore me" fact and its JSON type says nothing. A type
+  // test threw away a backup the marker was holding and fell through to the
+  // delete branch below - the one outcome the backup exists to prevent.
+  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
 
   delete value[markerKey]
   stripManagedHooks(value, hookEntries)
@@ -174,7 +179,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
         // would wrongly stamp the base URL onto them.
         if (key === 'ANTHROPIC_BASE_URL' && prevBaseUrl !== undefined) {
           envObj[key] = prevBaseUrl
-          restoredValue = prevBaseUrl
+          restoredValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
         } else {
           if (key === 'ANTHROPIC_BASE_URL') removed = typeof current === 'string' ? current : String(current)
           delete envObj[key]
