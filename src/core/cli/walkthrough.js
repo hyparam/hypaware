@@ -6,7 +6,7 @@ import readline from 'node:readline/promises'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath, prepareLocalConfigWrite } from '../config/schema.js'
-import { configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { materializeClientAssets } from '../runtime/client_assets.js'
@@ -25,7 +25,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions } from '../../../src/core/daemon/types.js'
  */
@@ -34,7 +34,6 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import {
  *   AsyncBackfillConsentPrompt,
  *   AsyncPickPrompt,
- *   BackfillFinaleResult,
  *   PickerBackfillRunner,
  *   PickerSource,
  *   PickerExport,
@@ -43,7 +42,6 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  *   PickerWalkthroughResult,
  *   RunPickerWalkthroughOptions,
  *   FinaleSummary,
- *   WalkthroughOption,
  *   WalkthroughOptions,
  * } from '../../../src/core/cli/types.js'
  */
@@ -83,6 +81,10 @@ function legacyNumberedPromptFactory(opts) {
   return async function ask(question) {
     const rl = readline.createInterface({ input, output, terminal: false })
     try {
+      // The plain-text form of the TUI's dim breadcrumb line: same text,
+      // same position (above the title), no styling.
+      // @ref LLP 0135#progress [implements]: the non-TUI fallback prints the position too
+      if (question.progress) output.write(`\n${question.progress}`)
       output.write(`\n${question.title}\n`)
       question.options.forEach((opt, idx) => {
         // Locked (disabled) rows are shown for context but never selectable
@@ -143,6 +145,7 @@ function tuiPromptFactory(opts) {
   return async function ask(question) {
     const result = await multiselect({
       title: question.title,
+      ...(question.progress ? { progress: question.progress } : {}),
       options: question.options.map((o) => ({
         value: o.value,
         label: o.label,
@@ -672,9 +675,13 @@ export function composePickerConfig(args) {
   const plugins = []
 
   if (requiresGateway) {
+    // No `listen`: a wizard-written address is indistinguishable from a
+    // user-stated one, and an explicit listen is exactly what forfeits the
+    // default-only EADDRINUSE fallback (LLP 0114 #explicit-listen-fails-loudly).
+    // @ref LLP 0114#init-writes-no-listen [implements]: the picker leaves listen unset so the default install keeps its fallback
     plugins.push({
       name: '@hypaware/ai-gateway',
-      config: { listen: '127.0.0.1:8787', upstreams },
+      config: { upstreams },
     })
   }
 
@@ -741,12 +748,20 @@ export function composePickerConfig(args) {
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
  *   skipAttachClients?: Set<string>,
+ *   progress?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
 export async function runPickerFinale(args) {
   const { finale, clientsPicked, capabilities, sources, skills, agents, config, configPath, env, stdout, stderr } = args
   const dryRun = finale.dryRun === true
+  // Like the join lane, the finale is one step made of several actions
+  // (install, attach, assets, backfill consent, restart), so it states its
+  // position once where the lane starts rather than per action. Only the
+  // wizard sets this; `runPickerWalkthrough` and non-interactive runs leave
+  // it unset and the line is not printed.
+  // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
+  if (args.progress) stdout.write(`${args.progress}\n`)
   const homeDir = env.HOME ?? ''
   const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
 
@@ -849,7 +864,13 @@ export async function runPickerFinale(args) {
         summary.attach.push({ client, dryRun, ok: false })
         continue
       }
-      let endpoint = configuredGatewayEndpoint(config) ?? 'http://127.0.0.1:0'
+      // The walkthrough attaches before the finale restarts the daemon, so the
+      // gateway is usually not bound in this process yet. With no configured
+      // `listen` the daemon's gateway will bind the fixed default, which is a
+      // usable address where the old `:0` placeholder was not; a fallback boot
+      // is corrected by the LLP 0086 drift re-attach on the next start.
+      // @ref LLP 0114#fixed-default-port [implements]: an unpinned install attaches at the known default rather than a port nothing can bind
+      let endpoint = configuredGatewayEndpoint(config) ?? DEFAULT_GATEWAY_ENDPOINT
       try {
         endpoint = gateway.localEndpoint()
       } catch {}

@@ -1,13 +1,17 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
+import { dispatch } from '../../src/core/cli/dispatch.js'
+import { devTelemetryDir } from '../../src/core/observability/env.js'
+import { installObservability, readObservabilityEnv } from '../../src/core/observability/index.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
+import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import {
   localOnlyListPath,
   readLocalOnlyEntries,
@@ -38,6 +42,11 @@ function makeBuf() {
       return value
     },
   }
+}
+
+/** @param {string} value */
+function escapeRe(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /** @param {string} name */
@@ -148,7 +157,7 @@ test('hyp policy set <path> sync writes an explicit full entry (the sync -> full
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /marked .* as full/)
+    assert.match(res.stdout, /marked .* as sync/)
 
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(entries, [{ dir: root, class: 'full' }], 'the store keeps speaking `full`; only the CLI token is `sync`')
@@ -159,14 +168,50 @@ test('hyp policy set <path> sync is idempotent against an existing explicit full
   await withSandbox(async ({ root, hypHome }) => {
     const first = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
-    assert.match(first.stdout, /marked .* as full/, 'no entry existed yet, so this must write, not no-op')
+    assert.match(first.stdout, /marked .* as sync/, 'no entry existed yet, so this must write, not no-op')
 
     const second = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(second.code, 0)
-    assert.match(second.stdout, /already full/, 'now an explicit entry exists, so this is idempotent')
+    assert.match(second.stdout, /already sync/, 'now an explicit entry exists, so this is idempotent')
 
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(entries, [{ dir: root, class: 'full' }], 'no duplicate entry')
+  })
+})
+
+// Issue #393: a successful `policy set <path> sync` confirmed with the two
+// internals the public verb exists to hide - the stored class (`full`) and the
+// backing store file (`local-only.json`) - so a sync mark read as though it had
+// become local-only. The human line speaks the CLI-edge vocabulary only.
+test('hyp policy set <path> sync confirms in the public vocabulary and never names the backing store file', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.equal(res.stdout, `marked ${root} as sync (machine-local policy store)\n`)
+    assert.doesNotMatch(res.stdout, /local-only\.json/, 'the backing store path is an implementation detail')
+  })
+})
+
+// LLP 0111 #set: `set` was the only `policy` surface that didn't say a
+// marking is machine-local (the no-op and `list` already do), so a bare
+// `marked <p> as sync` gave no confirmation that nothing landed in the repo.
+test('hyp policy set <path> ignore also names the marking as machine-local', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy set', [root, 'ignore'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.equal(res.stdout, `marked ${root} as ignore (machine-local policy store)\n`)
+  })
+})
+
+test('hyp policy set <path> sync twice reports the existing mark in the public vocabulary, naming the store neutrally', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    await run('policy set', [root, 'sync'], { cwd: root, hypHome })
+
+    const res = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /already sync/)
+    assert.doesNotMatch(res.stdout, /already full/)
+    assert.doesNotMatch(res.stdout, /local-only\.json/)
   })
 })
 
@@ -232,6 +277,49 @@ test('hyp policy show defaults to cwd and names the dotfile source when a .hypig
   })
 })
 
+// Issue #393: the human `policy show` printed the stored class and the store
+// file path verbatim, so a synced folder read `class: full` governed by
+// `local-only.json`. The `--json` shape must NOT move with it.
+test('hyp policy show (human) renders a stored full entry as sync and names the store neutrally', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
+
+    const res = await run('policy show', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /^class: sync$/m)
+    assert.doesNotMatch(res.stdout, /^class: full$/m)
+    assert.match(res.stdout, /^source: machine-local$/m, 'the source line is unchanged')
+    assert.doesNotMatch(res.stdout, /local-only\.json/, 'the backing store path is an implementation detail')
+  })
+})
+
+test('hyp policy show (human) keeps naming a governing dotfile by its real path', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    writeFileSync(path.join(root, '.hypignore'), 'ignore\n')
+
+    const res = await run('policy show', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /^class: ignore$/m)
+    assert.match(res.stdout, new RegExp(`^governed-by: ${escapeRe(path.join(root, '.hypignore'))}$`, 'm'))
+  })
+})
+
+test('hyp policy show --json keeps the stored vocabulary and the store path (unchanged machine contract)', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
+
+    const legacy = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
+    const next = await run('policy show', [root, '--json'], { cwd: root, hypHome })
+    assert.equal(next.code, 0)
+    assert.equal(next.stdout, legacy.stdout, 'byte-compatible with the --check --json shape')
+
+    const parsed = JSON.parse(next.stdout)
+    assert.equal(parsed.class, 'full', 'the JSON keeps emitting the resolver vocabulary')
+    assert.equal(parsed.governedBy, localOnlyListPath(stateDirOf(hypHome)), 'the JSON keeps emitting the store path')
+    assert.equal(parsed.source, 'machine-local')
+  })
+})
+
 test('hyp policy show names no source when nothing governs (the implicit default)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy show', [root, '--json'], { cwd: root, hypHome })
@@ -239,6 +327,21 @@ test('hyp policy show names no source when nothing governs (the implicit default
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'full')
     assert.equal(parsed.source, 'none')
+  })
+})
+
+// The privacy skill reads `hyp policy show`'s human `class:` line to decide
+// whether a directory has already been classified. Without a tell, an
+// unmarked directory's implicit `full` default renders through the same
+// `sync` token an explicit machine-local `full` mark would, so it would read
+// as "the user already said sync" and get dropped from a review list even
+// though nothing was ever recorded (review finding on #411).
+test('hyp policy show (human) flags the implicit default so it cannot be mistaken for an explicit sync mark', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const res = await run('policy show', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /^class: sync \(implicit default, not yet classified\)$/m)
+    assert.match(res.stdout, /^source: none$/m)
   })
 })
 
@@ -275,12 +378,38 @@ test('hyp policy unset <path> sync (scoped) removes an explicit full entry and i
 
     const first = await run('policy unset', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
-    assert.match(first.stdout, /removed 1 full entry/)
+    assert.match(first.stdout, /removed 1 sync entry/)
     assert.deepEqual(await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) }), [])
 
     const second = await run('policy unset', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(second.code, 0)
-    assert.match(second.stdout, /not full/)
+    assert.match(second.stdout, /not sync/)
+  })
+})
+
+// Issue #393: `unset` reported the stored class too.
+test('hyp policy unset <path> sync reports removal and the no-op in the public vocabulary', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
+
+    const first = await run('policy unset', [root, 'sync'], { cwd: root, hypHome })
+    assert.equal(first.code, 0)
+    assert.doesNotMatch(first.stdout, /full/)
+
+    const second = await run('policy unset', [root, 'sync'], { cwd: root, hypHome })
+    assert.equal(second.code, 0)
+    assert.doesNotMatch(second.stdout, /full/)
+  })
+})
+
+test('hyp policy unset <path> (class-neutral) names each removed entry class in the public vocabulary', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
+
+    const res = await run('policy unset', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /\(sync\)/)
+    assert.doesNotMatch(res.stdout, /\(full\)/)
   })
 })
 
@@ -394,23 +523,161 @@ test('hyp policy list --json on an empty store lists zero entries successfully',
   })
 })
 
-test('hyp policy list (human) renders a full entry with a sync gloss', async () => {
+// Issue #393: the human listing rendered the stored class (`full (sync)`) and
+// printed the store path bare. It now speaks the public vocabulary and labels
+// the store; `--json` is unchanged (see the --json tests above).
+test('hyp policy list (human) renders a full entry as sync and labels the store path', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
 
     const res = await run('policy list', [], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /full \(sync\)/)
+    assert.match(res.stdout, new RegExp(`^${escapeRe(root)}: sync$`, 'm'))
+    assert.doesNotMatch(res.stdout, /: full/)
+    assert.match(
+      res.stdout,
+      new RegExp(`^\\(policy store: ${escapeRe(localOnlyListPath(stateDirOf(hypHome)))}\\)$`, 'm'),
+      'the store path is labelled, not dumped bare'
+    )
   })
 })
 
-test('hyp policy list (human) on an empty store reports no entries without error', async () => {
+test('hyp policy list (human) on an empty store reports no entries without error, labelling the store path', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const res = await run('policy list', [], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /no machine-local entries/)
+    assert.equal(res.stdout, `no machine-local entries (policy store: ${localOnlyListPath(stateDirOf(hypHome))})\n`)
   })
 })
+
+/* --------------------------- corrupt store, policy edge --------------------------- */
+
+// Review finding on #411: the corrupt-store error propagated from
+// `readLocalOnlyEntries` (`LocalOnlyListUnreadableError`) named the store
+// "the local-only list", the exact internal `policy` exists to stop naming.
+// `policy show` / `policy list` must catch it and speak the same
+// "machine-local policy store" wording every other `policy` line uses, while
+// still naming the real file path so the user knows what to repair.
+/** @param {string} hypHome */
+function corruptStore(hypHome) {
+  const listPath = localOnlyListPath(stateDirOf(hypHome))
+  mkdirSync(path.dirname(listPath), { recursive: true })
+  writeFileSync(listPath, '{ not valid json')
+  return listPath
+}
+
+test('hyp policy show on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy show', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
+test('hyp policy list on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy list', [], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
+test('hyp policy set on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy set', [root, 'sync'], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
+test('hyp policy unset on a corrupt store fails with the policy-store wording, not "local-only list"', async () => {
+  await withSandbox(async ({ root, hypHome }) => {
+    const listPath = corruptStore(hypHome)
+
+    const res = await run('policy unset', [root], { cwd: root, hypHome })
+    assert.equal(res.code, 1)
+    assert.equal(res.stderr, `error: the machine-local policy store at '${listPath}' is unreadable or malformed\n`)
+    assert.doesNotMatch(res.stderr, /local-only list/)
+  })
+})
+
+// Issue #413: because `reportUnreadableStore` returns an exit code instead of
+// rethrowing, the corrupt-store failure never reaches the dispatcher's generic
+// catch, so it lost the `error_kind` span attribute that catch attaches. The
+// wording and the exit code are correct either way; what has to survive is the
+// diagnostic attribute that lets someone find a corrupt policy store in
+// telemetry rather than only seeing a nonzero exit. Asserted on the real
+// emitted span (the dev-telemetry traces JSONL), through the real dispatcher.
+test('hyp policy on a corrupt store tags the command span with the local_only_list_unreadable error_kind', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'hyp-policy-repo-'))
+  const hypHome = mkdtempSync(path.join(tmpdir(), 'hyp-policy-home-'))
+  const env = {
+    HYP_HOME: hypHome,
+    HYP_DEV_TELEMETRY: '1',
+    DEV_RUN_ID: 'policy-corrupt-store-error-kind',
+  }
+  const obsEnv = readObservabilityEnv(env)
+  const obs = installObservability({ env: obsEnv })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  try {
+    corruptStore(hypHome)
+    const registry = createCommandRegistry()
+    registerCoreCommands(registry)
+    const kernel = createKernelRuntime({ commandRegistry: registry })
+
+    // `list` reports the corrupt store from its own read; `show` reports it
+    // from the catch around a delegated runner. Both shapes must carry it.
+    for (const argv of [['policy', 'list'], ['policy', 'show', root]]) {
+      const code = await dispatch(argv, {
+        stdout: /** @type {any} */ (stdout),
+        stderr: /** @type {any} */ (stderr),
+        env,
+        cwd: root,
+        registry,
+        kernel,
+      })
+      assert.equal(code, 1, `${argv.join(' ')} exits 1`)
+    }
+
+    await obs.shutdown()
+    const traces = readJsonl(path.join(devTelemetryDir(obsEnv.stateDir), `traces-${process.pid}.jsonl`))
+    for (const name of ['policy list', 'policy show']) {
+      const span = traces.find((record) => (
+        record.name === 'command.run' && record.attributes?.hyp_command === name
+      ))
+      assert.ok(span, `${name} command.run span not emitted`)
+      assert.equal(span.attributes.error_kind, 'local_only_list_unreadable', `${name} names the failure`)
+      // The already-correct signals stay exactly as they are.
+      assert.equal(span.attributes.status, 'failed')
+      assert.equal(span.attributes.exit_code, 1)
+    }
+  } finally {
+    await obs.shutdown()
+    rmSync(root, { recursive: true, force: true })
+    rmSync(hypHome, { recursive: true, force: true })
+  }
+})
+
+/**
+ * @param {string} filePath
+ * @returns {Record<string, any>[]}
+ */
+function readJsonl(filePath) {
+  return readFileSync(filePath, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
 
 /* ------------------------------ group registration ------------------------------ */
 

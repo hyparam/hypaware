@@ -59,6 +59,44 @@ resolver vocabulary (`full` / `local-only` / `ignore`) so existing consumers
 of the `hyp ignore --check --json` shape see identical fields. An unknown
 class token is a usage error (exit 2) that names the three valid tokens.
 
+**The mapping is bidirectional: every human line a `policy` subcommand prints
+renders the stored class back as its token**, and no `policy` line ever names
+the backing file as "the local-only list" - the store's own error type's
+wording, which is the internals-leaking phrase this verb exists to kill. The
+path itself is still named where the user needs it (a neutral `machine-local
+policy store` label in `list`'s trailing parenthetical and in the corrupt-store
+error, so there is something to repair), just never as "the local-only list"
+and never bare next to the stored class. The first cut printed the stored
+class and the store path verbatim, so a successful `policy set <p> sync`
+confirmed with
+`marked <p> as full (.../usage-policy/local-only.json)`: two internals in one
+line, reading as though `sync` had become `local-only` (issue #393). A verb
+minted to kill exactly that inversion (LLP 0110) cannot reintroduce it in its
+own confirmation. So:
+
+- `set` confirms `marked <p> as sync (machine-local policy store)`; the
+  already-marked no-op says `already sync (governed by machine-local policy
+  store)`. The parenthetical is the one place `policy set` said less than the
+  no-op and `list` did: without it, `set` was the only surface that didn't
+  say the marking never left the machine (LLP 0111 #set).
+- `show` prints `class: sync` and `governed-by: machine-local policy store`
+  for an explicitly marked directory; an **unmarked** one appends
+  `(implicit default, not yet classified)` to the class label so it cannot be
+  mistaken for a recorded answer (#show has the full rationale).
+- `unset` says `removed 1 sync entry: <p>` / `not sync (...)`, and the
+  class-neutral form glosses each removed entry `(sync)`.
+- `list` prints `<dir>: sync` and labels the trailing path
+  `(policy store: <path>)`.
+
+A governing `.hypignore` is still named by its real path everywhere: it is a
+file the user can open and edit, not an internal. Two boundaries hold this
+in place: `--json` never routes through the rendering (the machine contract
+keeps the resolver vocabulary and the real store path), and the deprecated
+flag aliases do not use it either (#aliases below), so this is a
+human-output change with no compatibility surface. The rendering is a
+`PolicyHumanVocabulary` the `policy` runners pass into the shared writers,
+whose default is the aliases' verbatim-internals wording.
+
 ### `policy set <path> <class>` {#set}
 
 Writes a machine-local marking for `<path>`, delegating to the existing
@@ -93,13 +131,31 @@ call one implementation:
 
 The successor to `hyp ignore --check`, same behavior, class-neutral name:
 resolves `[path]` (default: cwd, preserving `--check`'s ergonomics), prints
-the resolved class, the governing source (`dotfile` vs `machine-local` vs
-`none`), the governing file, and the residual already-cached row count with
-the `hyp purge` hint. Prospective-only reporting, never destructive
+the resolved class (in the token vocabulary, #tokens), the governing source
+(`dotfile` vs `machine-local` vs `none`), the governing file (a dotfile by
+path; the machine-local store by name), and the residual already-cached row
+count with the `hyp purge` hint. Prospective-only reporting, never destructive
 (LLP 0049 #prospective-only). `--json` emits the exact field set
 `hyp ignore --check --json` emits today, so the check path is a pure rename
 plus delegation: `runIgnoreCheck` becomes the shared implementation both
 spellings call.
+
+**An unmarked directory is not silently a `sync` directory.** The resolver's
+implicit default for "nothing governs this path" is the `full` class
+(`matcher.js`'s `walk`/`resolve` fallback), which renders through the same
+`#tokens` mapping as an explicit machine-local `full` (`sync`) entry: without
+a tell, `class: sync` on a never-classified directory reads identically to a
+directory a user explicitly marked `sync`. That collision is dangerous
+specifically because the `hypaware-privacy` skill runs `hyp policy show
+<dir>` and treats `class: sync` as "the user already answered, sync it" -
+on an unmarked directory that would be inventing a consent decision that was
+never made. So `show`'s human output appends a suffix whenever
+`governedBy` is null: `class: sync (implicit default, not yet classified)`.
+An explicitly-marked directory (`governedBy` set, whether to a `.hypignore`
+or the machine-local store) never carries the suffix. `--json` is unaffected:
+`class` and `governedBy` already distinguish the two cases machine-readably
+(`governedBy: null` is the implicit case), so only the human line needed the
+tell.
 
 ### `policy unset <path> [class]` {#unset}
 
@@ -117,8 +173,9 @@ dotfiles (that remains bare `hyp unignore`) and never touches cached rows
 ### `policy list` {#list}
 
 Enumerates the machine-local store: one line per entry, `dir` and class
-(rendering `full` with a `sync` gloss in the human output), plus the store
-path, with `--json` emitting `{ entries: [{ dir, class }], path }`. This is
+(rendered in the token vocabulary, so a stored `full` reads `sync`, #tokens),
+plus the store path, labelled `(policy store: <path>)` rather than dumped
+bare, with `--json` emitting `{ entries: [{ dir, class }], path }`. This is
 the store's first enumeration surface; `show` answers "what governs this
 path", `list` answers "what have I marked on this machine". It deliberately
 lists only the machine-local store: `.hypignore` dotfiles are discovered
@@ -146,7 +203,13 @@ release (LLP 0110 boundary):
 - **Output-identical**: the aliases keep their exact stdout/stderr and exit
   codes, including the optional-path repo-root defaulting the flag forms
   have today, so every existing test passes unchanged (LLP 0110 exit
-  criteria).
+  criteria). This is now a deliberate divergence, not just inertia: the
+  aliases still print the stored class and the store path
+  (`marked <p> as full (.../local-only.json)`) because a scripted caller of
+  the old spelling must see no change, while the `policy` verb prints the
+  token vocabulary (#tokens). One implementation, two renderings, chosen by
+  the caller; the default rendering is the alias one, so an alias can never
+  drift into the new wording by omission.
 - **Deprecation is help-text-only for now**: the `hyp ignore` / `hyp
   unignore` registry help marks the flags "deprecated: use hyp policy ...",
   and no product surface teaches them anymore (see migration below). No

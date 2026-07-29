@@ -259,6 +259,46 @@ test('json_path undo leaves an externally-overridden set value in place with a w
   }
 })
 
+test('json_path undo names EVERY externally-overridden set entry in the warning', async () => {
+  const home = await stageHome()
+  try {
+    // Issue #440 finding 2, the json_path side of the same accumulator: a record
+    // may carry several `set` entries, and they can be overridden independently.
+    // A single reassigned `warning` reported only the last one.
+    const record = undoRecord()
+    record.managed.set.push({
+      path: 'agents.defaults.model.fallback',
+      value: PRIMARY_OURS,
+      prev: PRIMARY_PREV,
+    })
+    const value = attachedSettings(record)
+    value.agents.defaults.model.fallback = PRIMARY_OURS
+    // The user repointed both managed leaves after we attached.
+    value.agents.defaults.model.primary = 'openai/gpt-5'
+    value.agents.defaults.model.fallback = 'openai/gpt-5-mini'
+    const settingsPath = await writeOpenclawSettings(home, value)
+
+    const result = await detachClientFromDisk({ descriptor: OPENCLAW_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    const warning = String(result.warning)
+    assert.match(warning, /agents\.defaults\.model\.primary was overridden externally/)
+    assert.match(warning, /agents\.defaults\.model\.fallback was overridden externally/)
+    // ` | `, not `; `: each notice already ends in "externally; leaving in
+    // place", so a `; ` join would hide where one notice stops.
+    assert.equal(
+      warning,
+      'agents.defaults.model.primary was overridden externally; leaving in place' +
+        ' | agents.defaults.model.fallback was overridden externally; leaving in place'
+    )
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.agents.defaults.model.primary, 'openai/gpt-5') // user values untouched
+    assert.equal(parsed.agents.defaults.model.fallback, 'openai/gpt-5-mini')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('json_path undo deletes a prev-less set leaf and reports it removed', async () => {
   const home = await stageHome()
   try {

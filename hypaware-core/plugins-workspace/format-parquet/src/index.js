@@ -8,7 +8,7 @@ import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
 
 /**
- * @import { ColumnSpec, JsonObject, PluginActivationContext, PluginLogger, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { JsonObject, PluginActivationContext, PluginLogger, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const PLUGIN_NAME = '@hypaware/format-parquet'
@@ -31,7 +31,7 @@ const DEFAULT_MAX_CLUSTER_KEYS = 16
 const DEFAULT_MAX_ROWS_PER_GROUP = 50_000
 // Hard ceiling on how many estimated row bytes accumulate in one in-memory
 // group before it is written out as a row group and freed. This is the knob
-// that bounds peak heap during a sink force: the encoder never holds more than
+// that bounds peak heap during a forced sync: the encoder never holds more than
 // ~one group (plus its columnar copy) at once, instead of materializing the
 // whole partition. Independent of blob size, so a fat-`tools` partition cannot
 // push a group into the gigabytes.
@@ -183,7 +183,7 @@ async function encodePartition(partition, ctx, settings) {
         // Derive a stable schema from the declared column types (not from the
         // data) so we can write row groups incrementally: never holding more
         // than one cluster group of rows (plus its columnar copy) in memory.
-        // This is what stops `hyp sink force` on a large partition from OOMing
+        // This is what stops `hyp sync` on a large partition from OOMing
         // while materializing the whole partition at once.
         const schema = schemaFromColumnData({ columnData: rowsToColumnSources(columns, []) })
         const writer = new ByteWriter()

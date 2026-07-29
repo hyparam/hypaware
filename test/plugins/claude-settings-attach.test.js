@@ -42,12 +42,14 @@ test('attach records the managed env + hook entries into the marker undo record'
     const result = await attach({ ...ATTACH, settingsPath })
     assert.equal(result.changed, true)
 
-    // The gateway base URL is written live, and ENABLE_TOOL_SEARCH=true is set
-    // so the non-first-party base URL doesn't make Claude Code eager-load every
-    // tool schema.
+    // The gateway base URL is written live, ENABLE_TOOL_SEARCH=true is set so
+    // the non-first-party base URL doesn't make Claude Code eager-load every
+    // tool schema, and the base URL is declared first-party so the assumed
+    // context window is not cut to 200k.
     const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
     assert.equal(attached.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4123')
     assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'true')
+    assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
 
     const marker = await readMarker(settingsPath)
     // Managed env values are what we wrote — the core undo matches the live
@@ -55,6 +57,7 @@ test('attach records the managed env + hook entries into the marker undo record'
     assert.deepEqual(marker.managed.env, {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
       ENABLE_TOOL_SEARCH: 'true',
+      _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '1',
     })
 
     // Every managed hook spec is recorded with its command, and the
@@ -113,10 +116,11 @@ test('attach omits prev_base_url when there was no pre-existing base URL', async
     const marker = await readMarker(settingsPath)
     assert.equal('prev_base_url' in marker, false)
     // The managed undo record is still present so the core undo can
-    // remove (not restore) the gateway URL and ENABLE_TOOL_SEARCH.
+    // remove (not restore) the gateway URL and the added env keys.
     assert.deepEqual(marker.managed.env, {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
       ENABLE_TOOL_SEARCH: 'true',
+      _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '1',
     })
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
@@ -139,7 +143,10 @@ test('attach leaves a user-owned ENABLE_TOOL_SEARCH untouched and unmanaged', as
     assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'false')
 
     const marker = await readMarker(settingsPath)
-    assert.deepEqual(marker.managed.env, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' })
+    assert.deepEqual(marker.managed.env, {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+      _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '1',
+    })
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -158,7 +165,67 @@ test('re-attach keeps managing an ENABLE_TOOL_SEARCH it owns', async () => {
     assert.deepEqual(marker.managed.env, {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
       ENABLE_TOOL_SEARCH: 'true',
+      _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '1',
     })
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Issue #437: behind any non-`api.anthropic.com` base URL Claude Code assumes a
+// 200k context window even for native-1M models, so an attached session reports
+// a wildly inflated context percent (and warns/auto-compacts far too early)
+// while the real token count is unchanged. The gateway is a byte-transparent
+// pass-through to api.anthropic.com, so attach declares it first-party.
+test('attach declares the gateway base URL first-party so the assumed context window is not cut', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await attach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
+
+    // Recorded as ours, so the core undo removes exactly what attach added.
+    const marker = await readMarker(settingsPath)
+    assert.equal(marker.managed.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('attach leaves a user-owned _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL untouched and unmanaged', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ env: { _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '0' } }, null, 2)
+    )
+
+    await attach({ ...ATTACH, settingsPath })
+
+    // Same never-clobber-a-user-value rule ENABLE_TOOL_SEARCH follows: the key
+    // is only ever *added* when absent, so detach never removes a user's own.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '0')
+
+    const marker = await readMarker(settingsPath)
+    assert.deepEqual(marker.managed.env, {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+      ENABLE_TOOL_SEARCH: 'true',
+    })
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('re-attach keeps managing a _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL it owns', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    await attach({ ...ATTACH, settingsPath })
+
+    const marker = await readMarker(settingsPath)
+    assert.equal(marker.managed.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

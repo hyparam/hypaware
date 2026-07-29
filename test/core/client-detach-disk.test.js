@@ -136,6 +136,29 @@ test('claude undo removes managed ENABLE_TOOL_SEARCH without stamping the restor
   }
 })
 
+test('claude undo removes the managed _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', async () => {
+  const home = await stageHome()
+  try {
+    // Issue #437: attach declares the gateway first-party so Claude Code keeps
+    // the model's real context window. Detach must take that declaration back
+    // out, and never stamp the restored base URL onto it.
+    const original = { env: { ANTHROPIC_BASE_URL: 'https://foreign.example/api' } }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(original, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, '1')
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://foreign.example/api')
+    assert.equal('_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL' in parsed.env, false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('claude undo leaves a user-owned ENABLE_TOOL_SEARCH in place', async () => {
   const home = await stageHome()
   try {
@@ -451,6 +474,34 @@ test('codex undo is a no-op when no managed block is present', async () => {
   }
 })
 
+test('codex undo warning carries the user value verbatim, so `warning` is never splittable', async () => {
+  const home = await stageHome()
+  try {
+    // The `toml` undo shares `DetachFromDiskResult.warning` with the two
+    // ` | `-joined branches, but it emits ONE unjoined notice that interpolates
+    // the live `model_provider` straight from the user's config. That value is
+    // an arbitrary TOML string, so it can contain the ` | ` separator itself.
+    // This pins why the field is documented display-only: no separator is safe
+    // field-wide, and a consumer that split on ` | ` would invent a second
+    // bogus notice out of one user value.
+    const attached = codexPrepareAttach('model_provider = "openai"\n', 4388, '0.2.0')
+    // The user re-points model_provider outside the managed block after we
+    // attached, to an ordinary TOML value that happens to contain a pipe.
+    const configPath = await writeCodexConfig(home, attached.content + 'model_provider = "acme | prod"\n')
+
+    const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal(result.warning, 'model_provider was changed externally; leaving acme | prod in place')
+    // One notice, yet it splits into two - the field is not machine-readable.
+    assert.equal(String(result.warning).split(' | ').length, 2)
+
+    // The protection itself holds: the user value survives the undo untouched.
+    assert.match(await fs.readFile(configPath, 'utf8'), /model_provider = "acme \| prod"/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 /* ----------------------------- shared / dispatch ----------------------------- */
 
 test('undo clears exactly what probeClientAttached detects, for both formats', async () => {
@@ -532,6 +583,65 @@ test('the atomic write unlinks the temp file on a partial write — no orphaned 
     assert.equal(after.some((e) => e.endsWith('.tmp')), false, `orphaned tmp files: ${after.join(', ')}`)
     // The rename never ran, so the directory is exactly as it was pre-write.
     assert.deepEqual(after, before)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo names EVERY externally-overridden managed key in the warning, not just the last', async () => {
+  const home = await stageHome()
+  try {
+    // Issue #440 finding 2: `warning` was a single reassigned string inside the
+    // per-key loop, so with two managed env keys overridden only the last key's
+    // notice survived and the operator was never told about the first.
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({}, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    // The user re-points both managed keys after we attached.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, 'true') // attach owns it
+    attached.env.ANTHROPIC_BASE_URL = 'https://someone-else.example'
+    attached.env.ENABLE_TOOL_SEARCH = 'false'
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    const warning = String(result.warning)
+    assert.match(warning, /ANTHROPIC_BASE_URL was overridden externally/)
+    assert.match(warning, /ENABLE_TOOL_SEARCH was overridden externally/)
+    // The join separator is part of the contract, not an accident: each notice
+    // carries its own `; `, so only a distinct ` | ` keeps the boundary between
+    // two notices readable. Pin the whole string so the separator cannot drift.
+    assert.equal(
+      warning,
+      'ANTHROPIC_BASE_URL was overridden externally; leaving in place' +
+        ' | ENABLE_TOOL_SEARCH was overridden externally; leaving in place'
+    )
+
+    // The protection itself is unchanged: both user values survive the undo.
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal('_hypaware' in parsed, false)
+    assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://someone-else.example')
+    assert.equal(parsed.env.ENABLE_TOOL_SEARCH, 'false')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo reports a single overridden key without the join separator', async () => {
+  const home = await stageHome()
+  try {
+    // The one-notice shape is unchanged by the accumulation: no trailing or
+    // leading `; ` when exactly one managed key was overridden.
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({}, null, 2) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    attached.env.ANTHROPIC_BASE_URL = 'https://someone-else.example'
+    await fs.writeFile(settingsPath, JSON.stringify(attached, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.warning, 'ANTHROPIC_BASE_URL was overridden externally; leaving in place')
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }

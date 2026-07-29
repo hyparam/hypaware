@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { State, MultiselectState, SelectState, TextState, MultiSelectOption, MultiSelectSpec, SelectSpecOption, SelectSpec, TextSpec } from '../../../../src/core/cli/tui/types.js'
+ * @import { MultiselectState, SelectState, TextState, MultiSelectSpec, SelectSpec, TextSpec } from '../../../../src/core/cli/tui/types.js'
  */
 
 import process from 'node:process'
@@ -33,6 +33,7 @@ export async function multiselect(spec) {
     cursor: 0,
     status: 'active',
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
+    ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
     ...(spec.bounds !== undefined ? { bounds: spec.bounds } : {}),
   }
   const io = resolveIo(spec)
@@ -65,6 +66,7 @@ export async function select(spec) {
     cursor: defaultIdx,
     status: 'active',
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
+    ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
   }
   const io = resolveIo(spec)
   const final = /** @type {SelectState} */ (await run(initial, io))
@@ -88,6 +90,7 @@ export async function text(spec) {
     mask: spec.mask === true,
     status: 'active',
     ...(spec.hint !== undefined ? { hint: spec.hint } : {}),
+    ...(spec.progress !== undefined ? { progress: spec.progress } : {}),
     ...(spec.default !== undefined ? { default: spec.default } : {}),
     ...(spec.validate !== undefined ? { validate: spec.validate } : {}),
   }

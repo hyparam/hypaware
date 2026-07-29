@@ -10,7 +10,7 @@ import { readProgress, removeProgress, streamFlushFile, writeProgress } from './
 
 /**
  * @import { ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
- * @import { CacheSpool, FlushResult, PendingInfo, SpoolAppendResult } from '../../../src/core/cache/types.js'
+ * @import { CacheSpool, FlushResult } from '../../../src/core/cache/types.js'
  */
 
 export const SPOOL_DIR = '_hypaware_spool'

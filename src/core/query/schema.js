@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetSchema, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**

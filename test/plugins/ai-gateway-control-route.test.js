@@ -117,7 +117,10 @@ test('405 on an unsupported method for the ignore route', async () => {
   await withControlServer(set, async (base) => {
     const out = await rawRequest(base, 'PUT', '/_hypaware/ignore/session', JSON.stringify({ session_id: 's' }))
     assert.equal(out.status, 405)
-    assert.equal(out.headers.get('allow'), 'POST, DELETE')
+    // `GET` joined the allow list when the set gained a reader (issue #432 /
+    // LLP 0066#readable): a privacy control that can only be written cannot be
+    // verified, so the opt-out failed open silently.
+    assert.equal(out.headers.get('allow'), 'GET, POST, DELETE')
     assert.equal(set.size, 0)
   })
 })

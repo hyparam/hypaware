@@ -9,7 +9,6 @@ import {
 
 /**
  * @import {
- *   ActivePlugin,
  *   BlobSinkConfigInstance,
  *   BlobStore,
  *   HypAwareV2Config,

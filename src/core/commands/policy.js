@@ -4,12 +4,14 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { parseCommandArgv } from '../cli/verb_codec.js'
+import { Attr, getActiveSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
+import { LocalOnlyListUnreadableError, localOnlyListPath, readLocalOnlyEntries } from '../usage-policy/index.js'
 import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './clients.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PolicyHumanVocabulary } from '../../../src/core/commands/types.js'
  * @import { UsageClass } from '../../../src/core/usage-policy/types.js'
  */
 
@@ -22,7 +24,9 @@ import { runIgnoreCheck, runMarkMachineLocal, runUnmarkMachineLocal } from './cl
  * keep working as delegating compatibility aliases (see
  * {@link runMarkMachineLocal}, {@link runUnmarkMachineLocal},
  * {@link runIgnoreCheck}). The store format, the shared resolver, and the
- * three-class lattice are untouched (LLP 0103 #cli).
+ * three-class lattice are untouched (LLP 0103 #cli). Every human line these
+ * runners print goes through {@link PUBLIC_VOCABULARY}, so the verb answers
+ * in the vocabulary it teaches; `--json` and the aliases do not.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy` verb surface that retires the `hyp ignore --sync` misnomer
  * @ref LLP 0111#surface [implements]: `policy set` / `show` / `unset` / `list`, registered as a `makeGroupCommand` group
@@ -46,7 +50,67 @@ const CLASS_TOKENS = /** @type {const} */ (['sync', 'local-only', 'ignore'])
 const TOKEN_TO_CLASS = { sync: 'full', 'local-only': 'local-only', ignore: 'ignore' }
 
 /** @type {Record<UsageClass, string>} */
-const CLASS_TO_TOKEN_GLOSS = { full: 'sync', 'local-only': 'local-only', ignore: 'ignore' }
+const CLASS_TO_TOKEN = { full: 'sync', 'local-only': 'local-only', ignore: 'ignore' }
+
+/**
+ * How the machine-local store is named to a human: a policy store, not the
+ * `local-only.json` file that happens to back it. Printing the path verbatim
+ * made a `policy set <path> sync` confirmation read as though the folder had
+ * become local-only (issue #393), which is the exact inversion LLP 0110
+ * minted this verb to kill.
+ */
+const STORE_LABEL = 'machine-local policy store'
+
+/**
+ * The human wording every `policy` subcommand prints: the CLI-edge token
+ * vocabulary the user typed and the hook and the privacy skill teach, never
+ * the stored class or the store's file path. `--json` never routes through
+ * this, so the machine contract keeps emitting the resolver vocabulary and
+ * the real store path; the deprecated `hyp ignore` / `hyp unignore` flag
+ * aliases do not pass it and keep their exact legacy output (LLP 0111
+ * #aliases). A governing `.hypignore` is still named by its real path: it is
+ * a file the user can open and edit, not an internal.
+ *
+ * @ref LLP 0111#tokens [implements]: the class-to-token mapping is a CLI-edge rendering; the store and the JSON keep speaking `full`
+ * @ref LLP 0111#set [implements]: `storeSuffix` names `set`'s confirmation as machine-local too, so it is not the one `policy` line that fails to say so
+ * @type {PolicyHumanVocabulary}
+ */
+const PUBLIC_VOCABULARY = {
+  className: (cls) => CLASS_TO_TOKEN[cls] ?? cls,
+  governor: (governedBy, listPath) => (governedBy === listPath ? STORE_LABEL : governedBy),
+  storeSuffix: () => ` (${STORE_LABEL})`,
+  implicitSuffix: () => ' (implicit default, not yet classified)',
+}
+
+/**
+ * The `policy` edge's wording for a corrupt machine-local store: still names
+ * the file (the user needs to know which one to repair) but never calls it
+ * "the local-only list" - `LocalOnlyListUnreadableError`'s own message does,
+ * which is exactly the internals-leaking vocabulary this verb exists to
+ * avoid (LLP 0111 #tokens). Scoped to the four `policy` runners only
+ * ({@link runPolicySet}, {@link runPolicyShow}, {@link runPolicyUnset},
+ * {@link runPolicyList}): `hyp status` and the deprecated `hyp
+ * ignore`/`hyp unignore` aliases keep the resolver's own wording (LLP 0111
+ * #aliases).
+ *
+ * Catching here also means the error never reaches the dispatcher's generic
+ * catch, which is what tags the `command.run` span with `error_kind`. So this
+ * carries the error's own kind onto the active span itself (issue #413):
+ * without it a corrupt policy store is the one `policy` failure that leaves
+ * only a nonzero `exit_code` in telemetry, with nothing naming the broken
+ * step. Purely additive - the wording and the exit code are unchanged.
+ *
+ * @ref LLP 0111#tokens [implements]: a corrupt store is still "the machine-local policy store", never "the local-only list"
+ * @ref LLP 0021#the-attribute-contract [implements]: a handled failure still owes the span its `error_kind`; the error carries its own kind
+ * @param {CommandRunContext} ctx
+ * @param {LocalOnlyListUnreadableError} err
+ * @returns {number}
+ */
+function reportUnreadableStore(ctx, err) {
+  getActiveSpan()?.setAttribute(Attr.ERROR_KIND, err.error_kind)
+  ctx.stderr.write(`error: the machine-local policy store at '${err.filePath}' is unreadable or malformed\n`)
+  return 1
+}
 
 const POLICY_SET_USAGE = 'hyp policy set <path> sync|local-only|ignore'
 const POLICY_SHOW_USAGE = 'hyp policy show [path] [--json]'
@@ -150,6 +214,7 @@ function parsePolicyListArgs(argv) {
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy set` that replaces the `hyp ignore --sync` misnomer for consent-adjacent marking
  * @ref LLP 0111#set [implements]: required path, sync -> full token mapping, delegates to the hoisted marking internal
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: the store, resolver, and class lattice are unchanged; only the verb spelling is new
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -163,7 +228,12 @@ export async function runPolicySet(argv, ctx) {
   }
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), /** @type {string} */ (parsed.path))
   const targetClass = TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
-  return runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set' })
+  try {
+    return await runMarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-set', vocabulary: PUBLIC_VOCABULARY })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 }
 
 /**
@@ -180,6 +250,7 @@ export async function runPolicySet(argv, ctx) {
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy show`, the `hyp ignore --check` successor
  * @ref LLP 0111#show [implements]: `--json` stays byte-compatible with today's `--check --json` field set
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: names the governing source (dotfile vs machine-local) and class; store/resolver unchanged
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -192,7 +263,12 @@ export async function runPolicyShow(argv, ctx) {
     return 2
   }
   const targetDir = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  return runIgnoreCheck({ targetDir, ctx, json: parsed.json })
+  try {
+    return await runIgnoreCheck({ targetDir, ctx, json: parsed.json, vocabulary: PUBLIC_VOCABULARY })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 }
 
 /**
@@ -211,6 +287,7 @@ export async function runPolicyShow(argv, ctx) {
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy unset`, replacing per-class `hyp unignore` flags as the primary spelling
  * @ref LLP 0111#unset [implements]: class-neutral by default, an optional trailing class token scopes it
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: reuses the shared `isEqualOrDescendant` ancestor predicate; store/resolver unchanged
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -226,15 +303,27 @@ export async function runPolicyUnset(argv, ctx) {
   const targetClass = parsed.token
     ? TOKEN_TO_CLASS[/** @type {(typeof CLASS_TOKENS)[number]} */ (parsed.token)]
     : undefined
-  return runUnmarkMachineLocal({ targetDir, ctx, targetClass, component: 'cmd-policy-unset' })
+  try {
+    return await runUnmarkMachineLocal({
+      targetDir,
+      ctx,
+      targetClass,
+      component: 'cmd-policy-unset',
+      vocabulary: PUBLIC_VOCABULARY,
+    })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 }
 
 /**
  * `hyp policy list [--json]`
  *
  * Enumerates the machine-local class-per-entry store (LLP 0103): one line
- * per entry with its `dir` and class (`full` renders with a `sync` gloss for
- * the human reader), plus the store path; `--json` emits
+ * per entry with its `dir` and class rendered in the token vocabulary (a
+ * stored `full` reads `sync`), plus the store path, labelled as the policy
+ * store rather than dumped bare (LLP 0111 #tokens); `--json` emits
  * `{ entries: [{ dir, class }], path }`. This is the store's first
  * enumeration surface (LLP 0111 #list): `policy show` answers "what governs
  * this path", `list` answers "what have I marked on this machine". It
@@ -245,6 +334,7 @@ export async function runPolicyUnset(argv, ctx) {
  *
  * @ref LLP 0110 [implements]: names the machine-local store's enumeration surface with the class-neutral verb
  * @ref LLP 0111#list [implements]: the store's first enumeration surface; `--json` emits `{ entries, path }`
+ * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#cli [constrained-by]: enumerates the version-2 class-per-entry store as-is; no format change
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -258,7 +348,13 @@ export async function runPolicyList(argv, ctx) {
   }
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const listPath = localOnlyListPath(stateDir)
-  const entries = await readLocalOnlyEntries({ stateDir })
+  let entries
+  try {
+    entries = await readLocalOnlyEntries({ stateDir })
+  } catch (err) {
+    if (!(err instanceof LocalOnlyListUnreadableError)) throw err
+    return reportUnreadableStore(ctx, err)
+  }
 
   if (parsed.json) {
     ctx.stdout.write(JSON.stringify({ entries, path: listPath }) + '\n')
@@ -266,13 +362,12 @@ export async function runPolicyList(argv, ctx) {
   }
 
   if (entries.length === 0) {
-    ctx.stdout.write(`no machine-local entries (${listPath})\n`)
+    ctx.stdout.write(`no machine-local entries (policy store: ${listPath})\n`)
     return 0
   }
   for (const entry of entries) {
-    const gloss = entry.class === 'full' ? ` (${CLASS_TO_TOKEN_GLOSS.full})` : ''
-    ctx.stdout.write(`${entry.dir}: ${entry.class}${gloss}\n`)
+    ctx.stdout.write(`${entry.dir}: ${PUBLIC_VOCABULARY.className(entry.class)}\n`)
   }
-  ctx.stdout.write(`(${listPath})\n`)
+  ctx.stdout.write(`(policy store: ${listPath})\n`)
   return 0
 }

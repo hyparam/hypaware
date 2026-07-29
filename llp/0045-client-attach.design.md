@@ -224,7 +224,8 @@ plugin-agnostic core routine to fully reverse:
 - **Claude (`json`):** the `_hypaware` marker records `prev_base_url` (the restore
   target) plus the managed env keys and hooks it added, so core can
   restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed
-  `ENABLE_TOOL_SEARCH` (see below), strip the managed `SessionStart`/… hook
+  `ENABLE_TOOL_SEARCH` / `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` (see below),
+  strip the managed `SessionStart`/… hook
   entries, and delete the marker — leaving **no orphaned hooks** still pointing at
   `hyp claude-hook`. The backup is preserved idempotently across a re-attach:
   once we own the URL the current value is *our* gateway URL, so a re-attach keeps
@@ -237,6 +238,45 @@ Core stays **format-generic, never plugin-specific** — it knows `json` vs `tom
 and how to replay an undo record, not "Claude" vs "Codex". The split is clean: a
 rich *write* (attach) needs the adapter (`ctx.clients`, Part 2); the *undo* is a
 marker-guided removal core does from disk.
+
+#### Never clobber a user edit: report every override, not just the last
+
+The undo only reverses values that are **still the ones we wrote**. A managed
+key whose live value no longer matches the record was re-pointed by the user
+after we attached, so the undo leaves it in place and reports it through
+`DetachFromDiskResult.warning`, which the attach handler logs as
+`client_action.attach_reverse_warning`.
+
+An undo record can carry **several** managed keys (Claude's marker already
+records `ANTHROPIC_BASE_URL` plus each managed env addition; a `json_path`
+record can carry several `set` entries), and they can be overridden
+independently. The notice is therefore **per key**: core accumulates one
+message for each key it left in place and folds them into the single `warning`
+field. Reporting only the last key visited would silently hide the others,
+which is exactly the case an operator needs told, since those keys stay on disk
+after a detach that otherwise claims success.
+
+The fold separator is ` | `, deliberately **not** `; `. Each notice already
+reads "`<key>` was overridden externally; leaving in place", so a `; ` join
+would produce four `; `-delimited clauses for two keys and leave a reader
+unable to tell where one notice ends. No in-tree attach records a managed env
+key or a dotted `set` path containing `|`, so ` | ` reads unambiguously for the
+notices folded here.
+
+That is a **readability** choice, not a promise that the field is splittable.
+`warning` is shared with the `toml` undo, whose single notice interpolates the
+user's live `model_provider` value ("… leaving `<value>` in place"), and a
+`~/.codex/config.toml` reading `model_provider = "acme | prod"` puts ` | `
+inside one notice. **No separator is safe field-wide, and the field must not be
+parsed.**
+
+`warning` stays a single human-readable string rather than becoming an array.
+It is **displayed, never parsed**: `action_attach.js` logs it as a `detail`
+attribute, and `hyp detach` prints it and echoes it verbatim into its `--json`
+payload; nothing in the tree splits it. Keeping the string also keeps the
+published `DetachFromDiskResult` contract and the `hyp detach --json` shape
+unchanged. If a caller ever needs the keys individually, the honest move is a
+new `warnings: string[]` field alongside, not a re-typed `warning`.
 
 #### ENABLE_TOOL_SEARCH: keep deferred tool loading on through the gateway
 
@@ -252,7 +292,9 @@ Anthropic's.
 
 So attach also writes `env.ENABLE_TOOL_SEARCH = "true"`, the documented override
 that re-enables deferred loading for proxies that do forward everything (ours
-does). Two rules keep this honest against the undo contract above:
+does). Two rules keep this honest against the undo contract above, and they bind
+**every** env key attach adds beside the base URL (see the next section for the
+second one):
 
 - **Only manage the key when it is ours.** If the user already set
   `ENABLE_TOOL_SEARCH` themselves and no prior marker recorded it as ours, attach
@@ -263,6 +305,81 @@ does). Two rules keep this honest against the undo contract above:
   a backed-up prior. The undo therefore restores `ANTHROPIC_BASE_URL` to
   `prev_base_url` but *removes* any other managed key (like `ENABLE_TOOL_SEARCH`)
   rather than stamping the base URL onto it.
+
+#### _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: keep the model's real context window
+
+The same "not Anthropic's host" test costs a second thing, and this one is pure
+display *and* pure behavior at once. Claude Code grants a native-1M model its 1M
+context window only when the base URL host is `api.anthropic.com`; behind any
+other host it assumes **200k**. Nothing about the session changes, but the
+percentage does: a fresh attached session reports ~18% context where the same
+session direct reports ~4% (measured real usage matches within a thousand
+tokens). The shrunken assumed window is not cosmetic either - context warnings
+and, for users who enable it, auto-compact fire against the wrong denominator, so
+they trigger far too early.
+
+Attach therefore also writes `env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL = "1"`,
+managed by the same two rules as `ENABLE_TOOL_SEARCH` above (only ever added when
+absent or already ours; removed, never restored, on detach). The declaration is
+**accurate**: the gateway is a byte-transparent pass-through to
+`api.anthropic.com`, which is exactly what the flag asserts. That the flag also
+gates other first-party behavior is therefore fine rather than a side effect we
+tolerate.
+
+What that "other behavior" actually is, read off the shipped Claude Code bundle
+(verified against 2.1.215; the flag is one branch of a single
+`isFirstPartyBaseUrl` predicate that otherwise host-matches
+`ANTHROPIC_BASE_URL` against `api.anthropic.com`):
+
+- **Sent to the upstream:** the `context-1m-2025-08-07` beta header (the window
+  this section is about), `traceparent` propagation, and an
+  `anthropic-usage-limit: extended` request header.
+- **Sent to Anthropic's own API host, not to the gateway upstream:** error
+  reporting, the org policy-limits fetch (which in turn supplies Claude Code's
+  permission defaults), and memory-sync eligibility.
+- **Not gated by it at all: credential choice.** The bearer token and the
+  `oauth-2025-04-20` beta header ride an active OAuth session, and the API-key
+  path rides a configured key; neither consults this predicate. Setting the flag
+  therefore sends no secret anywhere it was not already going, because attach has
+  already pointed `ANTHROPIC_BASE_URL` at the gateway and the gateway already
+  forwards to whatever its upstream config says.
+
+That accuracy is a **precondition, not an invariant**, and it is the one thing
+this key needs that `ENABLE_TOOL_SEARCH` does not. `ENABLE_TOOL_SEARCH` asserts a
+property of the *gateway* (it forwards `tool_reference` untouched), which is
+always true. This key asserts a property of whatever the gateway *forwards to*,
+and that is config: the `anthropic` upstream's `base_url` is an ordinary
+configured string (the `hyp init` preset writes `https://api.anthropic.com`, and
+an operator or org config can repoint it). Attach writes the declaration
+unconditionally because the settings writer has only the local gateway port in
+scope, not the gateway's upstream config, so repointing that upstream at a
+non-Anthropic host makes the declaration false and applies the first-party
+behavior it gates to traffic that never reaches Anthropic. Policing that is out
+of scope for the settings writer; it is recorded here so the assumption is a
+stated one rather than an implicit one.
+
+The blast radius of a false declaration is bounded by the list above, and it is
+**not** a credential problem: what extra reaches a repointed upstream is a
+`traceparent`, a usage-limit header, and a beta header, none of them secrets, and
+the first-party-only side channels aim at Anthropic rather than at that upstream.
+What does break is the window itself, in the *unsafe* direction: a non-Anthropic
+upstream that really is 200k now gets warned about and auto-compacted far too
+late, and an over-long request fails at the upstream. That failure is loud, is
+confined to a configuration the product does not otherwise support, and the only
+code fix is to plumb the gateway's upstream config into a settings writer that
+today takes a port. Hence the stated precondition rather than a check.
+
+The honest caveat: the key is underscore-prefixed and undocumented, so a Claude
+Code release may rename or drop it (last verified against 2.1.220). It fails
+*soft* - losing it re-inflates the reported percent but breaks nothing - so the
+mitigation is a note at the code, not a runtime probe: if attached sessions start
+reporting an inflated context percent again, re-verify the key against the
+current Claude Code. The alternative considered and rejected was a `[1m]`
+model-name suffix, which restores the window per model only and means rewriting
+user-visible model names.
+
+Upstream tracking for the underlying gap (no supported way to declare a >200k
+window behind a custom base URL): [anthropics/claude-code#68522](https://github.com/anthropics/claude-code/issues/68522).
 
 **There is exactly one undo implementation, and it lives in core.** Both call
 sites use it — the reconciler's `reverse()` *and* the manual `hyp detach` command
@@ -283,6 +400,118 @@ it strips by format from the self-describing marker.
 This realizes [LLP 0044 §Conflict](./0044-client-attach-on-join.decision.md#conflict--back-up--override-restore-on-leave)
 ("back up & override, restore on leave") — the backup is the marker's undo
 record, and "leave" is the config-drop trigger (Part 5).
+
+#### `settings_file` is home-relative, and a violation is loud
+
+`attachProbe.settings_file` is **relative to `$HOME`** (`.codex/config.toml`),
+and its first segment is the client's config home, which a `$<CLIENT>_HOME` env
+override replaces. That was always the contract; it was only ever stated in
+`resolveClientSettingsPath`'s JSDoc, and never enforced.
+
+Unenforced, an **absolute** `settings_file` did not fail: `path.join(homeDir,
+...settingsFile.split('/'))` swallows the leading empty segment and re-anchors
+the path under `$HOME`, so
+`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` silently
+became `$HOME/Library/Managed Preferences/...`. The override branch was wrong
+the same way (`parts.slice(1)` assumes a relative first segment, so it drops the
+leading `/` and grafts the remainder onto `$<CLIENT>_HOME`). The probe then
+answered about a file the manifest never named, and the usual answer was ENOENT,
+which reads exactly like a correct "not attached". A probe reporting on the
+wrong file is worse than a probe that fails: a **wrong negative is
+indistinguishable from a right one**, which is how the Claude Desktop
+`attach_probe` defect (#444) stayed invisible.
+
+So the resolver **rejects** an absolute `settings_file`
+(`ClientSettingsPathError`, `code: 'settings_file_absolute'`) rather than
+honouring it. Rejecting, not honouring, because the `$<CLIENT>_HOME` override
+has no meaning for an absolute path: the override relocates a config *home*,
+which an absolute path does not have, so "honour it" would have to publish a
+second, silently-different resolution rule for the same field. Since this
+resolver is shared by the read side (the attach probe, the picker's
+`settings_file` detect) and the write side (the disk-driven undo above), a value
+core cannot resolve must fail rather than resolve to something else, or attach
+and detach can disagree about which file they own. The picker's absolute-literal
+needs are already served by the sibling `app_bundle` and `path` detect variants
+([LLP 0136](./0136-install-experience-overhaul.plan.md)), so no *picker row*
+loses expressiveness. `attach_probe` is the honest exception: it has only
+`settings_file` and no absolute sibling, so a client whose real settings surface
+is an absolute system path genuinely cannot declare one. That is not an
+oversight to route around, it is the same finding from the other side - such a
+file is not one the core probe/undo can read or replay anyway, which is why
+[#445](https://github.com/hyparam/hypaware/pull/445) deletes Claude Desktop's
+probe rather than respelling it.
+
+A leading `/` is only the spelling that got reported. `../../../etc/passwd` is
+the identical violation - it lands on a file the manifest never named, escapes
+`$HOME` just as completely, and (unlike the absolute case) survives the
+`isAbsolute` check - and it matters more here than in a read-only resolver
+because `detachClientFromDisk` *reads and rewrites* whatever it is handed, and
+`contributes.client` is unvalidated, so the value can arrive from a
+remotely-installed or org-pushed plugin. So the rule is enforced on the
+**resolved** path: it must stay under the base it resolved against
+(`ClientSettingsPathError`, `code: 'settings_file_escapes_base'`). Each branch
+is checked against its own base - `$HOME` normally, `$<CLIENT>_HOME` when the
+override is set, because the override is precisely a licence to leave `$HOME`.
+A `..` that normalizes away (`.codex/sub/../config.toml`) stays legal; the rule
+is about where the path lands, not which characters it contains.
+
+The containment test is **lexical** (`path.resolve` then a `base + separator`
+prefix test), and two properties of that are worth stating rather than
+rediscovering:
+
+- The separator in the prefix test is the check. Without it a sibling whose
+  name merely *starts* with the base's (`/home/username` against a `/home/u`
+  base) reads as contained.
+- The checked path is the returned path. A relative `$<CLIENT>_HOME` makes the
+  join relative, and handing that back would return something re-resolved
+  against `process.cwd()` at read time instead of the value validated at call
+  time. The resolver's contract is an absolute path, so it returns the absolute
+  one.
+
+It is deliberately **not** `realpath`-based, so a config home that is itself a
+symlink out of `$HOME` (`~/.codex -> /elsewhere`) still passes. That is the
+boundary of what the guard promises, and it is the right boundary: the field is
+resolved before the file must exist (attach *creates* it; the picker only stats
+its directory), so `realpath` would fail on precisely the paths that matter
+most, and planting that symlink already requires write access to `$HOME`, at
+which point the settings file is the attacker's regardless. The untrusted input
+here is the *manifest value* - `contributes.client` is unvalidated - and that is
+what the guard contains.
+
+Each caller turns the throw into whatever "observable" means on its surface, and
+none of them swallows it into a plain negative:
+
+- `probeClientAttachFromDescriptor` returns `{ attached: false, error }`, so
+  `hyp status` distinguishes a broken manifest from an unmarked settings file.
+  On **both** of its surfaces: `--json` carries the `error` field, and the text
+  renderer prints the message under the client's line and refuses to collapse an
+  errored client into the `clients: (none)` shorthand. A text surface that
+  rendered the same client as a plain `not attached` would have reinstated the
+  indistinguishable wrong negative one layer up from the probe.
+- `hyp detach` (the core undo and its `--dry-run` path) fails loudly: a client
+  whose settings file core cannot locate is one core must not claim to have
+  reversed.
+- The `hyp init` picker's detect probe keeps its documented best-effort stance
+  and degrades to "not present". Detection only seeds checkbox state, and every
+  user of it can still toggle the box.
+
+One honest caveat on the "one resolver" argument: it holds for everything
+**core** does (probe, picker detect, disk-driven undo), but the per-plugin
+*attach* write side is not routed through it. `@hypaware/openclaw` calls the
+shared resolver; `@hypaware/claude`'s `defaultSettingsPath` hardcodes
+`~/.claude/settings.json` and ignores `$CLAUDE_HOME`, and `@hypaware/codex`
+keeps its own `$CODEX_HOME` copy. So a `$CLAUDE_HOME` set today would already
+make attach and detach disagree, by a different mechanism than this section
+fixes. Not a regression and not addressed here: recorded so the next reader does
+not mistake "core resolves this field for read and write alike" for "every
+writer of this file agrees where it is".
+
+Validating this at **manifest load** would be better still (the plugin author
+learns at install, not at probe time), but `contributes.client` is not validated
+today at all, and a bundled manifest currently violates the rule. That is left
+to follow-up, sequenced after the Desktop manifest is corrected: adding the
+check first would take a shipped plugin out of the catalog to punish a defect
+already fixed elsewhere.
 
 ## Part 4 — Per-plugin `attach` config + status surface
 

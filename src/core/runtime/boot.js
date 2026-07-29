@@ -28,7 +28,6 @@ import { discoverInstalledPlugins } from './installed.js'
 /**
  * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { LoadedManifest } from '../../../src/core/types.js'
- * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { ActivationResult } from '../../../src/core/runtime/types.js'
  * @import { BootKernelOptions, BootKernelResult, BootProfile } from '../../../src/core/runtime/types.js'
  * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../../../src/core/config/types.js'

@@ -1,7 +1,6 @@
 // @ts-check
 
 /**
- * @import { AiGatewayRouteInput } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AiGatewayConfig, UpstreamConfig } from './types.js'
  */
 

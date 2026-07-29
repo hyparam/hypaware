@@ -17,6 +17,9 @@ import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 // the exact config shape `composePickerConfig` emitted from the retired
 // hardcoded wantsAnthropic/wantsCodex switch, proving the descriptor fold
 // reproduces it byte-for-byte from the real bundled plugin manifests.
+// One deliberate divergence from that switch: the gateway slice carries no
+// `listen`, so LLP 0114's fixed default and its default-only EADDRINUSE
+// fallback both apply to a wizard-created install.
 
 const HYP_HOME = '/home/tester/.hyp'
 const RETENTION = 30
@@ -56,7 +59,7 @@ test('claude alone composes the gateway + anthropic upstream + claude adapter', 
   assert.deepEqual(compose(d, ['claude']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -71,7 +74,7 @@ test('codex alone composes the gateway + openai + chatgpt upstreams + codex adap
   assert.deepEqual(compose(d, ['codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI, CHATGPT] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
@@ -86,7 +89,7 @@ test('raw-anthropic alone composes only the gateway + anthropic upstream (no ada
   assert.deepEqual(compose(d, ['raw-anthropic']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
     ],
@@ -100,7 +103,7 @@ test('raw-openai alone composes only the gateway + openai upstream (no chatgpt, 
   assert.deepEqual(compose(d, ['raw-openai']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [OPENAI] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [OPENAI] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
     ],
@@ -128,7 +131,7 @@ test('openclaw alone composes the gateway + anthropic upstream + openclaw adapte
   assert.deepEqual(compose(d, ['openclaw']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/openclaw' },
@@ -147,7 +150,7 @@ test('hermes alone composes the gateway (no upstreams) + hermes adapter', async 
   assert.deepEqual(compose(d, ['hermes']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/hermes' },
@@ -162,7 +165,7 @@ test('claude + hermes share the gateway; hermes adds no upstream', async () => {
   assert.deepEqual(compose(d, ['claude', 'hermes']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -178,7 +181,7 @@ test('claude + codex union the anthropic/openai/chatgpt upstreams and both adapt
   assert.deepEqual(compose(d, ['claude', 'codex']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
@@ -194,7 +197,7 @@ test('all five sources dedupe upstreams by name and order otel before the export
   assert.deepEqual(compose(d, ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC, OPENAI, CHATGPT] } },
       { name: '@hypaware/otel', config: { listen_host: '127.0.0.1', listen_port: 4318 } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
@@ -224,7 +227,7 @@ test('keep-local export omits the sink plugins and sinks block', async () => {
   assert.deepEqual(compose(d, ['claude'], 'keep-local'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -236,7 +239,7 @@ test('configure-later export behaves like keep-local (no sinks block)', async ()
   assert.deepEqual(compose(d, ['claude'], 'configure-later'), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
     ],
     query: QUERY,
@@ -297,7 +300,7 @@ test('claude-desktop composes the gateway, the credential plugin, and its own ad
   assert.deepEqual(compose(d, ['claude-desktop']), {
     version: 2,
     plugins: [
-      { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787', upstreams: [ANTHROPIC] } },
+      { name: '@hypaware/ai-gateway', config: { upstreams: [ANTHROPIC] } },
       { name: '@hypaware/local-fs' },
       { name: '@hypaware/format-parquet' },
       { name: '@hypaware/claude-account', config: { mode: 'subscription' } },

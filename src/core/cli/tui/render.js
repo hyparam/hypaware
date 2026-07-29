@@ -35,6 +35,25 @@ function paint(text, sgr, on) {
 }
 
 /**
+ * Open a frame with the prompt's chrome: the optional position line
+ * (dim, LLP 0135 #progress) above the bold title. Every kind renders it
+ * the same way, and a state without one produces exactly the frame it
+ * produced before the field existed.
+ *
+ * @ref LLP 0135#progress [implements]: the breadcrumb is its own dim line above the title, never folded into the title itself
+ *
+ * @param {State} state
+ * @param {RenderOpts} opts
+ * @returns {string[]}
+ */
+function chromeLines(state, opts) {
+  const lines = []
+  if (state.progress) lines.push(paint(state.progress, ANSI.dim, opts.color))
+  lines.push(paint(state.title, ANSI.bold, opts.color))
+  return lines
+}
+
+/**
  * @param {State} state
  * @param {RenderOpts} opts
  * @returns {string}
@@ -58,8 +77,7 @@ const DEFAULT_HINT = {
  * @param {RenderOpts} opts
  */
 function renderMultiselect(state, opts) {
-  const lines = []
-  lines.push(paint(state.title, ANSI.bold, opts.color))
+  const lines = chromeLines(state, opts)
   lines.push(paint(state.hint ?? DEFAULT_HINT.multiselect, ANSI.dim, opts.color))
   lines.push('')
   state.options.forEach((o, i) => {
@@ -93,8 +111,7 @@ function renderMultiselect(state, opts) {
  * @param {RenderOpts} opts
  */
 function renderSelect(state, opts) {
-  const lines = []
-  lines.push(paint(state.title, ANSI.bold, opts.color))
+  const lines = chromeLines(state, opts)
   lines.push(paint(state.hint ?? DEFAULT_HINT.select, ANSI.dim, opts.color))
   lines.push('')
   state.options.forEach((o, i) => {
@@ -114,8 +131,7 @@ function renderSelect(state, opts) {
  * @param {RenderOpts} opts
  */
 function renderText(state, opts) {
-  const lines = []
-  lines.push(paint(state.title, ANSI.bold, opts.color))
+  const lines = chromeLines(state, opts)
   lines.push(paint(state.hint ?? DEFAULT_HINT.text, ANSI.dim, opts.color))
   lines.push('')
   const shown = state.mask ? '*'.repeat(state.value.length) : state.value

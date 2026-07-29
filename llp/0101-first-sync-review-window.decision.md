@@ -9,8 +9,10 @@
 
 > On an attended enrolling login, the sink driver exports nothing until a
 > **printed, absolute deadline**: the next local 11:59pm, rolled to the
-> following day when that is less than four hours away. No early release, no
-> extension. Supersedes the pick-pending marker of
+> following day when that is less than four hours away. The deadline is the
+> latest the first sync can happen, not the earliest: a confirmed `hyp sync`
+> ends the window early (amended 2026-07-27, see [#no-release](#no-release)).
+> No extension. Supersedes the pick-pending marker of
 > [LLP 0093](./0093-pick-pending-export-hold.decision.md), generalizing its
 > enforcement point from a 10-minute picker guard to an hours-long review
 > window.
@@ -60,12 +62,52 @@ deadline; `createSinkDriver.tick` exports nothing while `now < deadline`.**
   fleet rollout by hours would be the surprise in the other direction.
   Re-logins hold nothing: the daemon is already forwarding, so there is no
   "first" sync to defer.
-- **No early release** {#no-release}: rejected a release verb ("sync now")
-  and release-on-review-completion. The hold simply runs to its deadline,
-  even for a user who finished the review in ten minutes. This keeps the
-  printed message unconditionally true, needs no completion signal from the
-  skill, and costs only latency on a machine that was not forwarding
-  yesterday either.
+- **Release only by confirmed, attended request** {#no-release}
+  *(amended 2026-07-27; the original text is kept below it)*: `hyp sync`
+  prints what would leave, warns that the window is open and that sent
+  history cannot be un-sent, and on an explicit `y` clears the marker and
+  exports. Release-on-review-completion stays rejected: it would need a
+  completion signal from the skill, and a skill that finished is not the
+  same as a user who decided. The daemon never clears the marker, so an
+  unattended machine still waits out the full window.
+
+  Two shapes of `hyp sync` cannot release, because the consent they carry is
+  narrower than what the release does:
+
+  - **Instance-scoped** (`hyp sync <instance>`) refuses while a hold is live.
+    The hold is driver-wide (`#hold`), so a plan built from one named handle
+    omits every destination the release would unblock; confirming it would
+    forward the others unseen. Releasing is all-or-nothing because the hold
+    is.
+  - **`--yes`** refuses while a hold is live. "Attended" is the operative
+    word: a provisioning script is not a person, and its destination list
+    scrolls past in a log nobody reads. `--yes` still works for ordinary
+    syncs; what it must not buy is somebody's review window.
+
+  A release that cannot be completed (an unlink failure) is an error, not a
+  quiet no-op: the marker survives, the driver holds the tick, and the
+  command must say so rather than exit 0 having sent nothing.
+
+  What the amendment concedes is the third clause of the original: the cost
+  is *not* only latency. On an attended onboarding the hold blocks the
+  demonstration that the product works at all, and the person running it has
+  no way to say "I have seen enough". Worse, the window is sized for a review
+  (`hypaware-privacy`) too slow to run in the meeting the hold was scoped to
+  (`#which` holds the attended lane and lets unattended `hyp join` forward
+  immediately, which is backwards for exactly this case). Nothing in
+  [LLP 0069](./0069-local-only-dir-selection.spec.md) R6 is given up: R6
+  forbids a *silent* first forward, and an explicit confirmation naming the
+  destination is the consent it exists to obtain.
+
+  The first clause survives with a wording change: the printed message says
+  "no later than <deadline>", so it stays unconditionally true.
+
+  > *Original (2026-07-13):* **No early release**: rejected a release verb
+  > ("sync now") and release-on-review-completion. The hold simply runs to
+  > its deadline, even for a user who finished the review in ten minutes.
+  > This keeps the printed message unconditionally true, needs no completion
+  > signal from the skill, and costs only latency on a machine that was not
+  > forwarding yesterday either.
 - **No extension**: bounded always. A hold that can be pushed out is a kill
   switch with extra steps ([LLP 0093 #bounded](./0093-pick-pending-export-hold.decision.md#bounded)).
 
@@ -77,7 +119,13 @@ deadline; `createSinkDriver.tick` exports nothing while `now < deadline`.**
 - Live capture during the window lands in the cache and ships at the deadline
   unless marked; watermarks ([LLP 0040](./0040-incremental-sink-reads.design.md))
   make the first post-deadline tick a plain catch-up.
-- `hyp status` shows the pending deadline (LLP 0100 R9).
+- `hyp status` shows the pending deadline (LLP 0100 R9), and names `hyp sync`
+  beside it: a countdown the reader cannot act on is where the original
+  decision's cost was hiding.
+- The three surfaces that print the deadline (the login message, the wizard's
+  privacy narration, `hyp status`) all name `hyp sync`, and the formatted
+  deadline carries its time zone - an absolute time is only memorable if the
+  reader knows which clock it is on.
 - LLP 0093's pick-pending semantics retire with the picker
   ([LLP 0102](./0102-skill-replaces-enrollment-picker.decision.md)); its
   driver-side hold machinery is reused, resized, and renamed.

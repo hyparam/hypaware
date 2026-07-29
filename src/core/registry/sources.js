@@ -3,7 +3,7 @@
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 
 /**
- * @import { PluginActivationContext, SourceContribution, SourceRegistry, SourceStatus, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginActivationContext, SourceContribution, SourceStatus, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 

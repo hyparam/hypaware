@@ -4,10 +4,10 @@ import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
-import readline from 'node:readline/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
+import { askYesNo } from './confirm.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveDefaultRemote, effectiveRemotes } from '../remote/builtin_remotes.js'
 import {
@@ -296,7 +296,10 @@ export async function runReportDelete(argv, ctx) {
       ctx.stderr.write('error: refusing to delete without confirmation - pass --yes to delete non-interactively\n')
       return 2
     }
-    const ok = await confirm(ctx, `${kind}/${period}/${id}`)
+    const ok = await askYesNo(
+      ctx,
+      `Delete report ${kind}/${period}/${id} for the whole org? This cannot be undone. [y/N] `
+    )
     if (!ok) {
       ctx.stdout.write('delete cancelled\n')
       return 0
@@ -500,20 +503,3 @@ async function fileExists(p) {
   }
 }
 
-/**
- * @param {CommandRunContext} ctx
- * @param {string} what
- * @returns {Promise<boolean>}
- */
-async function confirm(ctx, what) {
-  const rl = readline.createInterface({
-    input: /** @type {NodeJS.ReadableStream} */ (ctx.stdin ?? process.stdin),
-    output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stderr)),
-  })
-  try {
-    const answer = await rl.question(`Delete report ${what} for the whole org? This cannot be undone. [y/N] `)
-    return /^y(es)?$/i.test(answer.trim())
-  } finally {
-    rl.close()
-  }
-}

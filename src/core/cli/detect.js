@@ -58,7 +58,11 @@ export async function detectPickerSources(catalog, env) {
  *
  * - `settings_file` reuses the existing {@link resolveClientSettingsPath}
  *   check: does the *directory* holding this file (the client's config
- *   home) exist? Unchanged behavior for `claude`/`codex`.
+ *   home) exist? Unchanged behavior for `claude`/`codex`. It is
+ *   home-relative by contract; an absolute one throws and lands in the
+ *   caller's best-effort catch as "not present". A picker row that wants
+ *   an absolute literal declares `app_bundle` or `path` instead - those
+ *   variants exist precisely so `settings_file` never has to be absolute.
  * - `app_bundle` stats the literal path (e.g. `/Applications/Claude.app`).
  * - `path` stats the literal path, honoring the same `$FOO_HOME`-style
  *   env override {@link resolveClientSettingsPath} already applies for

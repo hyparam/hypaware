@@ -6,7 +6,6 @@ import { listEntries } from '../plugin_install/lock.js'
 import { loadManifest } from '../manifest.js'
 
 /**
- * @import { PluginLockEntry, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { FailedManifest, LoadedManifest } from '../../../src/core/types.js'
  * @import { DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  */

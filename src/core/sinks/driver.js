@@ -7,9 +7,9 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
 /**
- * @import { ExportBatch, ExportResult, QueryPartition, QueryRegistry, QueryStorageService } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
- * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
+ * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
  */
 

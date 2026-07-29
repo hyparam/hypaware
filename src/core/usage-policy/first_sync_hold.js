@@ -50,12 +50,25 @@ export function computeFirstSyncDeadline(now = Date.now()) {
  * R1) and `hyp status` (R9) render "the deadline", so the two consent
  * surfaces cannot drift apart on wording.
  *
+ * The zone is named. The deadline is computed in the machine's local time,
+ * but a user reading "11:59 PM" on a printed line has no way to know whether
+ * it means their zone, the server's, or UTC, and the answer decides whether
+ * they wait an hour or a day.
+ *
  * @ref LLP 0100#requirements [implements]: shared formatting keeps R1's login message and R9's status line in sync
  * @param {number} deadlineMs epoch ms
  * @returns {string}
  */
 export function formatFirstSyncDeadline(deadlineMs) {
-  return new Date(deadlineMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  const at = new Date(deadlineMs)
+  const stamp = at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  // ECMA-402 forbids mixing `timeZoneName` with the `dateStyle`/`timeStyle`
+  // shorthands, so the zone comes from a second formatter and is appended.
+  // A runtime that names no zone yields the bare stamp rather than an error.
+  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+    .formatToParts(at)
+    .find((part) => part.type === 'timeZoneName')?.value
+  return zone ? `${stamp} ${zone}` : stamp
 }
 
 /**
@@ -97,6 +110,32 @@ export async function writeFirstSyncHoldMarker({ stateDir, now = Date.now(), fs 
   }
   await atomicWriteJson(filePath, payload, fs ? { fs } : undefined)
   return deadlineMs
+}
+
+/**
+ * Remove the hold marker, ending the review window before its deadline.
+ *
+ * The deadline is a promise about the *latest* moment the first sync can
+ * happen, not the earliest: a user who has finished reviewing (or who never
+ * wanted the wait) can end the window by running `hyp sync` and confirming
+ * an explicit prompt. That confirmation is the consent
+ * [LLP 0069](../../../llp/0069-local-only-dir-selection.spec.md) R6 protects;
+ * what R6 forbids is a *silent* first forward, which nothing here can cause.
+ *
+ * Only ever called behind that prompt. The daemon never clears the marker,
+ * so an unattended machine still waits out the full window.
+ *
+ * @ref LLP 0101#no-release [implements]: the confirmed `hyp sync` is the one path that ends the window early
+ * @param {{ stateDir: string, fs?: typeof fsp }} opts
+ * @returns {Promise<boolean>} true when a marker was removed, false when none was present
+ */
+export async function clearFirstSyncHold({ stateDir, fs = fsp }) {
+  try {
+    await fs.unlink(firstSyncHoldMarkerPath(stateDir))
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**

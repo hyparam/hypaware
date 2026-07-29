@@ -20,6 +20,21 @@ import type {
  */
 export type WizardForkChoice = 'team' | 'local' | 'quit'
 
+/**
+ * A pathway the wizard has committed to. Distinct from
+ * {@link WizardForkChoice}: `quit` is not a pathway, and `scoped` is
+ * reached from the returning gate rather than the fork.
+ */
+export type WizardPathway = 'team' | 'local' | 'scoped'
+
+/**
+ * The wizard lanes that count as a step in the position indicator
+ * (LLP 0135 #progress). One entry per lane that asks the user something,
+ * not one per phase: `configure` and the privacy narration are output, and
+ * `first look` is a closing report rather than a decision.
+ */
+export type WizardStepName = 'join' | 'pick' | 'finale'
+
 export interface RunWizardForkOptions {
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
@@ -205,6 +220,13 @@ export interface RunWizardJoinOptions {
    * layers.
    */
   resolveLayered?: () => Promise<LayeredProvenance>
+  /**
+   * The lane's position line (LLP 0135 #progress), e.g.
+   * `Step 1 of 3 · Join your team`. The join lane owns no prompt spec, so
+   * it prints the line itself above its narration. Absent on runs with no
+   * committed pathway, which then print nothing.
+   */
+  progress?: string
 }
 
 /**
@@ -251,6 +273,14 @@ export interface RunWizardPickOptions {
   exportOrigin?: PickerExportOrigin
   /** Override the source prompt (tests pre-bake answers). */
   prompt?: AsyncPickPrompt
+  /**
+   * The lane's position line (LLP 0135 #progress), e.g.
+   * `Step 2 of 3 · Choose what to collect`. Threaded onto the picker's
+   * prompt spec rather than folded into its title, so the TUI and the
+   * legacy numbered fallback render the same text their own way. Absent on
+   * non-interactive runs, which then prompt nothing and print nothing.
+   */
+  progress?: string
   /**
    * The retention window applied without asking (LLP 0137): the
    * orchestrator passes the pathway default (120-day local; team and

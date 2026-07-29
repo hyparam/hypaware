@@ -3,7 +3,7 @@
 import { normalizeScanColumn } from './scan-column.js'
 
 /**
- * @import { AsyncDataSource, ExprNode, ScanColumnResults } from 'squirreling/src/types.js'
+ * @import { AsyncDataSource, ExprNode } from 'squirreling/src/types.js'
  */
 
 /**

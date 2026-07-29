@@ -327,7 +327,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   }
 
   stdout.write('  clients:\n')
-  if (clientNames.length === 0 && report.clients.every((c) => !c.configured)) {
+  // A probe that could not answer at all carries `error`, and the text surface
+  // is where a human reads status. Collapsing such a client into `(none)`, or
+  // printing it as a bare `not attached`, restores exactly the wrong negative
+  // indistinguishable from a right one that the `error` field exists to end -
+  // and an unresolvable client is typically not `configured`, so the collapse
+  // would otherwise catch it. `--json` already carries the field.
+  // @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: a probe error is loud on the text surface too, not only under --json
+  if (clientNames.length === 0 && report.clients.every((c) => !c.configured && !c.error)) {
     stdout.write('    (none)\n')
   } else {
     // Surface the union of registered clients (from the gateway) and
@@ -340,6 +347,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       state.push(c.configured ? 'configured' : 'not in config')
       state.push(c.attached ? 'attached' : 'not attached')
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
+      if (c.error) stdout.write(`        error: ${c.error}\n`)
     }
     for (const name of clientNames) {
       if (seen.has(name)) continue
@@ -382,7 +390,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // text output is unchanged.
   if (report.firstSyncHoldDeadline !== null) {
     stdout.write(
-      `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill)\n`
+      `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
     )
   }
 

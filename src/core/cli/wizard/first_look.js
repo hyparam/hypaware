@@ -10,7 +10,7 @@
  * runs, and that it can never fail a finished install.
  *
  * @import { FirstLookResult } from '../../../../src/core/cli/wizard/types.js'
- * @import { OverviewNotice, OverviewQueryRunner, OverviewRows } from '../../../../src/core/query/types.js'
+ * @import { OverviewNotice, OverviewQueryRunner } from '../../../../src/core/query/types.js'
  */
 
 import { Attr, withSpan } from '../../observability/index.js'

@@ -18,11 +18,6 @@
       "name": "claude-desktop",
       "skill_dir": ".claude/skills",
       "agent_dir": ".claude/agents",
-      "attach_probe": {
-        "format": "json_path",
-        "settings_file": "/Library/Managed Preferences/com.anthropic.claudefordesktop.plist",
-        "marker_path": "inferenceCredentialHelper"
-      },
       "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"]
     },
     "picker": [
