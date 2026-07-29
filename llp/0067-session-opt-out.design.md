@@ -285,10 +285,12 @@ the same user, and therefore able to read the same file. The only signal that
 would actually separate them is **peer-process identity**: `status.json` already
 carries the daemon pid and is already liveness-gated on it, so the client could
 in principle check that the process listening on the resolved port *is* that
-pid. That needs platform-specific machinery with no portable form
-(`/proc/net/tcp` plus `/proc/<pid>/fd` on Linux, `lsof` on macOS, neither on
-Windows), which makes it a separate design decision rather than a hardening
-tweak. Recorded, not adopted; the residual stays mitigated by the
+pid. That needs platform-specific machinery with no portable form:
+`/proc/net/tcp` plus `/proc/<pid>/fd` on Linux, `lsof` on macOS, and a third
+mechanism again on Windows (`GetExtendedTcpTable`, reachable only through a
+native addon or `netstat -o` scraping). Three implementations and a native
+dependency for one check makes it a separate design decision rather than a
+hardening tweak. Recorded, not adopted; the residual stays mitigated by the
 `endpoint_source` disclosure ([§cli-provenance](#cli-provenance)).
 
 ### Endpoint resolution: disk, then config, never a guess {#cli-endpoint}
@@ -314,14 +316,29 @@ line carries `payload.id` and `payload.cwd`. The verb selects the rollout whose
 exempts it from `shell_environment_policy.include_only` filtering
 ([openai/codex#10096](https://github.com/openai/codex/pull/10096), merged
 2026-02-03, closing
-[openai/codex#8923](https://github.com/openai/codex/issues/8923)). Its presence
-is therefore proof that the session it names is the one running this command:
-a session that has ended cannot have spawned this process. Its value is
-`session.conversation_id`, the thread id, which is the same identifier the
-rollout's `session_meta.payload.id` carries and its filename embeds, so this is
-the same id the disk scan already produced, from a source that states it rather
-than infers it. The disk scan stays as the fallback for a Codex predating the
-variable, and for a hand invocation from a terminal no client spawned.
+[openai/codex#8923](https://github.com/openai/codex/issues/8923); the insert is
+step 6 of `core/src/exec_env.rs`, *after* the `include_only` retain, which is
+what makes the exemption structural rather than a listed exception). Its
+presence proves **provenance**: this process was spawned by the session the
+variable names, and a session that has ended cannot have spawned it.
+
+Provenance is liveness for the invocation that matters, a `hyp` run inside a
+tool call the model is blocked on: the session is still there by construction,
+waiting for the command to return. It is *not* liveness for a process that
+outlives its spawn. A server or `tmux` pane started from a tool call inherits
+the variable and keeps it after the session ends, so a `hyp` run from that
+descendant can still name a finished session. That residual is strictly
+narrower than the mtime bound it replaces (it needs a detached descendant of a
+tool call, not merely a cwd Codex visited within the window), but it is a
+residual rather than zero, and the claim to make is "proof of provenance", not
+"proof of liveness".
+
+Its value is `session.conversation_id`, the thread id, which is the same
+identifier the rollout's `session_meta.payload.id` carries and its filename
+embeds, so this is the same id the disk scan already produced, from a source
+that states it rather than infers it. The disk scan stays as the fallback for a
+Codex predating the variable, and for a hand invocation from a terminal no
+client spawned.
 
 **Two stated ids refuse.** Environments nest (Codex runs `claude`, or Claude
 runs `codex`) and the child inherits the parent's variable while setting its
@@ -374,12 +391,31 @@ against, and upstream has deliberately moved away from writing one
 so shutdown is not a persisted rollout line at all). For those two cases the
 residual stays handled by making the inference **visible** rather than silent.
 
-An identity caveat the stated id does not change: `CODEX_THREAD_ID` is the
-thread, and when a live Codex exchange carries `metadata.session_id` the adapter
-stamps *that* as `session_id` and the thread as `conversation_id`
-([LLP 0030](./0030-session-id-partition-key.decision.md)). The disk scan has
-exactly the same property (it reads the same thread id), so this is unchanged
-by the switch, not introduced by it.
+**The stated id is the thread; the drop keys on the session container.**
+`CODEX_THREAD_ID` is `session.conversation_id`, the thread. The adapter stamps
+`session_id` from `metadata.session_id` and the thread as `conversation_id`
+([LLP 0030](./0030-session-id-partition-key.decision.md)) and the drop matches
+on `session_id` ([LLP 0066 §scope](./0066-session-opt-out.spec.md#scope)), so
+the two only coincide when Codex derives the session id from the thread id.
+It does that for a **root** thread, where `SessionId::from(thread_id)` reuses
+the same uuid, and that is the common case. It does *not* for a **subagent**
+thread, which keeps the root's session id and mints its own thread id. An
+opt-out taken from inside a subagent tool call therefore states an id the drop
+never matches, and the verb reports success for a suppression that suppresses
+nothing. That is the mirror image of the over-drop LLP 0066 §scope already
+records: there an id at session grain suppresses more than the user asked for,
+here an id at thread grain suppresses nothing at all.
+
+The disk scan has exactly the same property, because the rollout's `payload.id`
+is also the thread id, so the switch does not introduce this and does not widen
+it. Two things about it did change, and are recorded here rather than fixed:
+the Codex path is no longer latent (LLP 0066 §scope calls the over-drop latent
+"because the only opt-out skill today is Claude-only"), and it is now
+**closable**, because current Codex writes `session_meta.session_id` beside
+`session_meta.id` in the rollout, so the drop key itself is on disk. Both the
+resolver and `codex/src/backfill.js` (whose "the rollout carries no distinct
+session id" comment predates the field) would have to move together, which is
+more than this change is scoped for. Worth its own issue.
 
 ### The verb reports the provenance of its own inputs {#cli-provenance}
 

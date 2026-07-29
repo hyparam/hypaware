@@ -70,14 +70,22 @@ const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
 /**
  * Environment variables in which a client **states** the session this process
  * is running inside. Both are set by the client onto the environment of the
- * process it spawns for a tool call, so their presence is itself the liveness
- * evidence the rollout scan below has to approximate with an mtime: a dead
- * session cannot have spawned this one.
+ * process it spawns for a tool call, so their presence is direct evidence of
+ * provenance where the rollout scan below has only an mtime proxy: a session
+ * that has ended cannot have spawned this process. For a `hyp` run inside a
+ * tool call the client is blocked on, that is liveness. It stops being
+ * liveness for a process that OUTLIVES its spawn (a server or `tmux` pane
+ * started from a tool call inherits the variable), which is a much narrower
+ * residual than the mtime bound but not zero. @ref LLP 0067#cli-session-id
  *
  * `CODEX_THREAD_ID` carries Codex's `conversation_id` (the thread), which is
  * the same identifier the rollout's `session_meta.payload.id` carries and the
  * same one its filename embeds - so this is the id the disk scan already
- * produced, obtained from a source that states it rather than infers it.
+ * produced, obtained from a source that states it rather than infers it. It is
+ * NOT always the id the drop keys on: that is the session container, which
+ * coincides with the thread for a root Codex thread but not for a subagent
+ * one. Pre-existing, shared with the disk scan, and recorded in
+ * LLP 0067#cli-session-id rather than closed here.
  * Codex injects it for every shell/exec tool call and exempts it from
  * `shell_environment_policy.include_only` filtering
  * (openai/codex#10096, merged 2026-02-03).
