@@ -25,16 +25,19 @@ const MAX_BODY_BYTES = 64 * 1024
  * BEFORE upstream matching, so a control request is never proxied and never
  * starts an exchange).
  *
- * V1 serves one route — `POST` / `DELETE /_hypaware/ignore/session` — over
- * the in-memory `ignoredSessions` set. Both verbs are idempotent by `Set`
- * semantics (re-POSTing an ignored id or DELETEing an unknown id is a 200
- * no-op) and both return `{ session_id, ignored, total }`; the skill reads
+ * One route (`GET` / `POST` / `DELETE /_hypaware/ignore/session`) over
+ * the in-memory `ignoredSessions` set. The mutating verbs are idempotent by
+ * `Set` semantics (re-POSTing an ignored id or DELETEing an unknown id is a
+ * 200 no-op); `GET` mutates nothing and answers the membership question for
+ * one id. All three return `{ session_id, ignored, total }`; the skill reads
  * `.total`. The `session_id` is an opaque token: the gateway never
  * interprets it, keeping the LLP 0050 provider-agnostic boundary exact.
  *
  * @ref LLP 0066#control-path [implements] — the reserved `/_hypaware/`
  * prefix is a local control surface; this handler owns the routes served
  * under it, holding only opaque session-id tokens.
+ * @ref LLP 0066#readable [implements]: the ignored-session set has a reader,
+ * so an opt-out that stopped applying is discoverable rather than silent.
  * @param {{
  *   ignoredSessions: Set<string>,
  *   log?: PluginLogger,
@@ -58,9 +61,33 @@ export function createControlHandler(opts) {
     }
 
     const method = (req.method ?? 'GET').toUpperCase()
+
+    // @ref LLP 0066#readable [implements]: the set is a privacy control, so it
+    // must be readable, not only writable. `GET` answers "is this session
+    // being dropped right now?" without mutating anything, which is what makes
+    // the two fail-open transitions - a gateway restart (LLP 0066#ephemeral)
+    // and a session id that changed under the client - detectable instead of
+    // silent. The id rides the query string rather than a body because a
+    // read has no body; `URLSearchParams` round-trips the token byte-exactly,
+    // so the R5 raw-token discipline below holds for reads too.
+    if (method === 'GET') {
+      req.resume()
+      const raw = url.searchParams.get('session_id')
+      if (typeof raw !== 'string' || raw.trim().length === 0) {
+        sendJson(res, 400, { error: 'session_id is required and must be a non-empty string' })
+        return
+      }
+      sendJson(res, 200, {
+        session_id: raw,
+        ignored: ignoredSessions.has(raw),
+        total: ignoredSessions.size,
+      })
+      return
+    }
+
     if (method !== 'POST' && method !== 'DELETE') {
       req.resume()
-      res.setHeader('allow', 'POST, DELETE')
+      res.setHeader('allow', 'GET, POST, DELETE')
       sendJson(res, 405, { error: 'method not allowed', method })
       return
     }
