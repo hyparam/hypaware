@@ -558,6 +558,14 @@ test('claude undo names EVERY externally-overridden managed key in the warning, 
     const warning = String(result.warning)
     assert.match(warning, /ANTHROPIC_BASE_URL was overridden externally/)
     assert.match(warning, /ENABLE_TOOL_SEARCH was overridden externally/)
+    // The join separator is part of the contract, not an accident: each notice
+    // carries its own `; `, so only a distinct ` | ` keeps the boundary between
+    // two notices readable. Pin the whole string so the separator cannot drift.
+    assert.equal(
+      warning,
+      'ANTHROPIC_BASE_URL was overridden externally; leaving in place' +
+        ' | ENABLE_TOOL_SEARCH was overridden externally; leaving in place'
+    )
 
     // The protection itself is unchanged: both user values survive the undo.
     const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))

@@ -649,8 +649,10 @@ export interface DetachFromDiskResult {
   restoredValue?: string
   /**
    * Set when a managed value was overridden externally and left in place. One
-   * notice per overridden key, joined with `; ` when the undo left more than
-   * one behind (LLP 0045 §never-clobber-a-user-edit).
+   * notice per overridden key, joined with ` | ` when the undo left more than
+   * one behind (LLP 0045 §never-clobber-a-user-edit). For display only - each
+   * notice contains its own `; `, so the field is not safely splittable on
+   * anything but the ` | ` boundary, and nothing in-tree parses it.
    */
   warning?: string
 }

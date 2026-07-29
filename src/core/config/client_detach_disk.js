@@ -203,15 +203,21 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
  * Fold the per-key never-clobber notices into the single
  * `DetachFromDiskResult.warning` string, `undefined` when there are none.
  *
- * The field stays one human-readable string (callers log it as `detail`), but
- * it now carries every key the undo left in place, not just whichever one the
- * loop happened to visit last.
+ * The field stays one human-readable string - it is displayed, never parsed
+ * (`action_attach.js` logs it as a span `detail`; `hyp detach` prints it and
+ * echoes it into the `--json` payload) - but it now carries every key the undo
+ * left in place, not just whichever one the loop happened to visit last.
+ *
+ * The separator is ` | `, NOT `; `: every notice already contains a `; ` of its
+ * own ("... overridden externally; leaving in place"), so joining on `; ` would
+ * make the notice boundaries indistinguishable from the punctuation inside a
+ * notice. A key name and a dotted JSON path can never contain `|`.
  *
  * @param {string[]} warnings
  * @returns {string | undefined}
  */
 function joinWarnings(warnings) {
-  return warnings.length === 0 ? undefined : warnings.join('; ')
+  return warnings.length === 0 ? undefined : warnings.join(' | ')
 }
 
 /**

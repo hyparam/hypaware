@@ -283,6 +283,13 @@ test('json_path undo names EVERY externally-overridden set entry in the warning'
     const warning = String(result.warning)
     assert.match(warning, /agents\.defaults\.model\.primary was overridden externally/)
     assert.match(warning, /agents\.defaults\.model\.fallback was overridden externally/)
+    // ` | `, not `; `: each notice already ends in "externally; leaving in
+    // place", so a `; ` join would hide where one notice stops.
+    assert.equal(
+      warning,
+      'agents.defaults.model.primary was overridden externally; leaving in place' +
+        ' | agents.defaults.model.fallback was overridden externally; leaving in place'
+    )
 
     const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
     assert.equal(parsed.agents.defaults.model.primary, 'openai/gpt-5') // user values untouched
