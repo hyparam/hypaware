@@ -231,22 +231,23 @@ export function createCodexExchangeProjector(opts = {}) {
  * is preferred to confidently stamping and enforcing the root's directory. A
  * wrong cwd is a false statement about where a turn ran; an absent one is true.
  *
- * **Known residual gap, not closed by the branch above.** The lineage the refusal
- * keys on is only readable when the client volunteers it: `thread_source` comes
- * from `x-codex-turn-metadata` alone, and `parent_thread_id` from that header or
- * a `parent-thread-id` header. `codex-tui` sends none of them on the subscription
- * route (that is why this fallback exists at all), so for that client the refusal
- * cannot fire and the container fallback is not a defensive branch but the ONLY
- * path. A `codex-tui` subagent turn would therefore still resolve the root's cwd,
- * which is the #459 defect. Whether that shape exists is an open **empirical**
- * question about a client HypAware does not own (does the subscription route ever
- * carry the turn's own thread id, and does `codex-tui` spawn subagent threads?),
- * and it is the check issue #459 asked for. Dropping the fallback is not the
- * answer: it would return every `codex-tui` turn, root threads included, to
- * `cwd = NULL` and fail `.hypignore` open for the whole traffic class, which is
- * the regression LLP 0083 exists to prevent.
- * @ref LLP 0083#decision [constrained-by]: the container fallback is bounded by
- * what the wire states, so its residual gap is documented rather than silent
+ * **Which lineage counts, and why it cannot be `thread_source` alone.**
+ * `thread_source` and `parent_thread_id` are read out of `x-codex-turn-metadata`,
+ * and that blob also carries `thread_id`, so a turn that states them has already
+ * been answered by the branch above: a refusal keyed only on those can never fire.
+ * The lineage that survives a turn stating no thread id is the lineage Codex sends
+ * as a DIRECT header, gated on nothing else: `x-codex-parent-thread-id` and
+ * `x-openai-subagent` (see `subagent_signal` in `resolveCodexContext`). Those are
+ * what make this refusal reachable, so both are consulted here.
+ *
+ * A turn stating a container, no thread id, and no lineage of any kind is then
+ * taken as the root thread it claims to be. That is a bounded residual: it can
+ * only mis-resolve for a client that both withholds its thread id and withholds
+ * every lineage signal on a subagent turn, and Codex withholds neither together.
+ * Dropping the fallback anyway is worse, not safer: it returns every turn that
+ * states only a container, root threads included, to `cwd = NULL`, which fails
+ * `.hypignore` open for that whole traffic class and is the regression LLP 0083
+ * exists to prevent. @ref LLP 0083#container-fallback-gap [constrained-by]
  *
  * @param {RolloutCwdResolver | undefined} rolloutCwd
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
@@ -255,7 +256,7 @@ export function createCodexExchangeProjector(opts = {}) {
 function resolveRolloutCwd(rolloutCwd, codexContext) {
   if (!rolloutCwd || !codexContext) return undefined
   if (codexContext.thread_id) return rolloutCwd.resolve(codexContext.thread_id)
-  if (codexContext.thread_source === 'subagent' || codexContext.parent_thread_id) return undefined
+  if (codexContext.thread_source === 'subagent' || codexContext.subagent_signal) return undefined
   return codexContext.session_id ? rolloutCwd.resolve(codexContext.session_id) : undefined
 }
 
@@ -722,6 +723,26 @@ function resolveCodexContext(input, provider, path, reqBody) {
     readStringKey(metadata, 'parent_thread_id'),
     readHeader(input.request_headers, 'parent-thread-id'),
   )
+  // Any evidence at all that this turn is a subagent's, in the names Codex's own
+  // source defines rather than only the ones read above. `codex-rs`
+  // `CodexResponsesMetadata::compatibility_headers` emits
+  // `x-codex-parent-thread-id` and `x-openai-subagent` (`review`, `compact`,
+  // `collab_spawn`, `memory_consolidation`) as DIRECT headers, gated only on
+  // their own value and NOT on the turn-metadata blob, so they are the one
+  // lineage signal that survives a turn stating no `thread_id`. That makes them
+  // the only usable guard on the container fallback below: every field read
+  // above travels inside `x-codex-turn-metadata`, which also carries `thread_id`,
+  // so a refusal keyed on those alone can never fire before the thread-id path
+  // has already returned. Deliberately NOT mirrored into `attributes` or the
+  // `parent_thread_id` column: widening what a row records is a separate change
+  // with its own migration story, and this value only has to gate a fallback.
+  // @ref LLP 0083#container-fallback-gap [implements]: the container fallback is
+  // refused on lineage Codex states as a header, not only in the metadata blob
+  const subagent_signal = firstString(
+    parent_thread_id,
+    readHeader(input.request_headers, 'x-codex-parent-thread-id'),
+    readHeader(input.request_headers, 'x-openai-subagent'),
+  )
   const originator = firstString(
     readHeader(input.request_headers, 'originator'),
     client.entrypoint,
@@ -758,6 +779,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
     thread_id,
     session_id,
     parent_thread_id,
+    subagent_signal,
     turn_id,
     thread_source,
     cwd: workspace?.path,

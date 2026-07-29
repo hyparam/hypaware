@@ -83,33 +83,50 @@ Codex now has the symmetric fallback.
   records NULL) is preferred to confidently enforcing and stamping the root's
   directory. A wrong cwd is a false statement about where a turn ran; an absent
   one is true.
-- **The container fallback leaves a documented residual gap.** {#container-fallback-gap}
-  The lineage the refusal above keys on is only readable when the client
-  volunteers it: `thread_source` comes from `x-codex-turn-metadata` only, and
-  `parent_thread_id` from that header or a `parent-thread-id` header. `codex-tui`
-  sends none of them on the subscription route, which is the very reason this
-  fallback exists, so for that client the refusal **cannot fire** and the
-  container fallback is not a defensive branch but the only path. A `codex-tui`
-  subagent turn would therefore still resolve the root thread's cwd: the #459
-  defect, narrowed to one client shape rather than closed. Whether that shape
-  exists is an open **empirical** question about a client HypAware does not own
-  (does the subscription route ever state the turn's own thread id, and does
-  `codex-tui` spawn subagent threads at all?), and it is exactly the check
-  [issue #459](https://github.com/hyparam/hypaware/issues/459) asked for before
-  option 1 was adopted. It is not answerable from this repo: the only
-  turn-metadata shapes here are synthetic smoke fixtures, and the live Desktop
-  route has never been confirmed against real hardware
-  ([LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)).
-  Removing the fallback is **not** the answer: it returns every `codex-tui` turn,
-  root threads included, to `cwd = NULL` and fails `.hypignore` open for the whole
-  traffic class, the regression this document exists to prevent. The narrower
-  option, deciding ambiguity from disk (refuse the container key when some other
-  rollout in the tree declares `session_id = <container>` with a different `id`,
-  so the container demonstrably holds more than one thread), is decidable locally
-  but costs the newest-first short-circuit: proving uniqueness means visiting
-  every candidate, not returning on the first name match, so it trades
+- **The lineage that guards the container fallback has to be a header, not the
+  metadata blob.** {#container-fallback-gap} `thread_source` and
+  `parent_thread_id` are read out of `x-codex-turn-metadata`, and that blob also
+  carries `thread_id`, so a turn stating them has already been resolved by the
+  thread-id key: a refusal keyed only on those can never fire. What survives a
+  turn stating no thread id is the lineage `codex-rs` emits as a **direct**
+  header, gated on its own value and not on the blob
+  (`CodexResponsesMetadata::compatibility_headers`):
+  `x-codex-parent-thread-id`, and `x-openai-subagent` (`review`, `compact`,
+  `collab_spawn`, `memory_consolidation`). Both are therefore consulted, which is
+  what makes the refusal reachable at all. The same source shows the two flat
+  identity keys, `session_id` and `thread_id`, are also always present in the
+  request **body** under `client_metadata`, which the adapter does not read
+  today: reading them would replace this fallback with the turn's own thread id
+  outright, and is the better long-term answer. It is not taken here because it
+  would newly populate `thread_id`, hence `conversation_id`, on rows that record
+  null for it today, which is a recorded-shape change needing its own decision.
+- **What remains after that is bounded, and removing the fallback is worse.** A
+  turn stating a container, no thread id, and no lineage of any kind is taken as
+  the root thread it claims to be. That can only mis-resolve for a client that
+  withholds its thread id **and** withholds every lineage signal on a subagent
+  turn, and Codex withholds neither together. Dropping the fallback instead
+  returns every turn that states only a container, root threads included, to
+  `cwd = NULL`, failing `.hypignore` open for that whole traffic class: the
+  regression this document exists to prevent. The remaining alternative, deciding
+  ambiguity from disk (refuse the container key when another rollout in the tree
+  declares `session_id = <container>` with a different `id`, so the container
+  demonstrably holds more than one thread), is decidable locally but costs the
+  newest-first short-circuit, since proving uniqueness means visiting every
+  candidate rather than returning on the first name match. That trades
   [LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements) and is left
-  open rather than taken here.
+  open rather than taken.
+- **A note on the header names, which are not all Codex's.** `codex-rs` defines
+  `x-codex-turn-metadata`, `x-codex-window-id`, `x-codex-parent-thread-id` and
+  `x-openai-subagent`; the bare `thread-id`, `session-id` and `parent-thread-id`
+  the adapter also reads appear nowhere in it. Those reads are older than this
+  document and are kept (they cost nothing and some traffic shape motivated them),
+  but nothing should be *guarded* by them alone. The same reading says the premise
+  in Context below, that `codex-tui` does not send `x-codex-turn-metadata`, is at
+  best version-specific: the header is emitted from core for every ordinary turn
+  (`request_kind = Turn`), not from Desktop specifically. Confirming the live
+  header set against a real client is the open acceptance check, and it is
+  [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)'s point
+  that no hermetic smoke can supply it.
 - **First line only, cached per thread id.** The rollout is written at session
   start, so it exists before the first exchange projects (earlier and more
   reliably than Claude's sidecar, which has a known session-start race). Reading a

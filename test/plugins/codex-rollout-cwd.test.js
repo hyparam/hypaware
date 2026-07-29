@@ -405,9 +405,7 @@ test('a rollout whose body disagrees with its filename is refused, not silently 
 })
 
 test('a subagent turn that states lineage but not its own thread id resolves no cwd', async () => {
-  // A defensive branch: Codex states `thread_id` in the same metadata as the
-  // lineage, so this shape is not observed in practice. If it ever arrives, the
-  // turn's own rollout is not identifiable from the wire, and the container
+  // The turn's own rollout is not identifiable from the wire, and the container
   // would resolve the ROOT's rollout - the exact defect. Refusing (cwd unknown,
   // which LLP 0049 fails open on, row records NULL) follows the same
   // refuse-rather-than-guess direction PR #458 set for the `hyp session`
@@ -435,9 +433,8 @@ test('a subagent turn that states lineage but not its own thread id resolves no 
 })
 
 test('a turn whose metadata states thread_source=subagent but no thread id resolves no cwd', async () => {
-  // The other half of the lineage refusal. The test above states lineage via the
-  // `parent-thread-id` HEADER; `thread_source` is readable only out of
-  // `x-codex-turn-metadata`, so without this case the `thread_source` disjunct
+  // The other half of the lineage refusal. `thread_source` is readable only out
+  // of `x-codex-turn-metadata`, so without this case the `thread_source` disjunct
   // could be deleted with the suite still green.
   const sessionsDir = await writeSubagentPair({
     rootCwd: '/work/ignored/root',
@@ -461,6 +458,39 @@ test('a turn whose metadata states thread_source=subagent but no thread id resol
   assert.equal(projection.cwd, undefined, 'stated lineage without a thread id must not fall back to the container')
 })
 
+for (const header of ['x-codex-parent-thread-id', 'x-openai-subagent']) {
+  test(`a turn stating lineage only via ${header} resolves no cwd`, async () => {
+    // The lineage names `codex-rs` actually emits as DIRECT headers
+    // (`CodexResponsesMetadata::compatibility_headers`), gated on their own value
+    // and NOT on `x-codex-turn-metadata`. That independence is the whole point:
+    // every field the refusal previously keyed on travels inside the metadata
+    // blob, which also carries `thread_id`, so a refusal keyed only on those can
+    // never fire before the thread-id path has returned. These two are what make
+    // it reachable, so a subagent turn that names no thread of its own resolves
+    // no cwd instead of the root's.
+    const sessionsDir = await writeSubagentPair({
+      rootCwd: '/work/ignored/root',
+      subagentCwd: '/work/clean/sub',
+    })
+    const projector = createCodexExchangeProjector({
+      resolver: ignoringResolver('/work/ignored'),
+      rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+    })
+    const projection = /** @type {any} */ (projector.project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({
+        'session-id': ROOT_SESSION_ID,
+        [header]: header === 'x-openai-subagent' ? 'collab_spawn' : ROOT_THREAD_ID,
+      }),
+      request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hi' }),
+      response_body: JSON.stringify({ output_text: 'ok' }),
+    }), context()))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP)
+    assert.equal(projection.cwd, undefined, `${header} must abandon the container fallback`)
+  })
+}
+
 test('a session_meta line with a cwd but no payload.id is refused, not matched by its filename', async () => {
   // The identity guard reads the RAW line, so an absent `payload.id` is visible
   // as absent and refuses. Pinned because it is a real divergence from the
@@ -481,22 +511,20 @@ test('a session_meta line with a cwd but no payload.id is refused, not matched b
   assert.equal(log.warns[0].fields?.rollout_thread_id, null, 'an absent id is reported as absent, not as the wanted id')
 })
 
-test('DOCUMENTED GAP: a codex-tui-shaped subagent turn (container only) still resolves the ROOT cwd', async () => {
-  // @ref LLP 0083#container-fallback-gap [tests]: the container fallback is
-  // bounded by what the wire states, so the residual #459 exposure is asserted
-  // rather than left to be discovered again.
+test('DOCUMENTED GAP: a turn stating a container and NO lineage at all is taken as its root thread', async () => {
+  // @ref LLP 0083#container-fallback-gap [tests]: what the container fallback
+  // still accepts, asserted rather than left to be rediscovered.
   //
-  // The refusal above needs the client to VOLUNTEER its lineage, and codex-tui
-  // volunteers nothing on the subscription route (no `x-codex-turn-metadata`, no
-  // `parent-thread-id`) - which is the whole reason the rollout fallback exists.
-  // So for that client the container fallback is the only path, and a subagent
-  // turn is indistinguishable on the wire from its root: it resolves the ROOT's
-  // cwd and is RECORDED even though its own rollout says otherwise. Whether
-  // codex-tui ever produces this shape is an empirical question about a client
-  // this repo cannot observe (issue #459's "needs checking that the route
-  // actually has it"). Deleting the fallback is not the fix: it returns every
-  // codex-tui turn, root threads included, to `cwd = NULL` and fails
-  // `.hypignore` open for the entire traffic class.
+  // Every refusal above needs the turn to state SOMETHING - a thread id, a
+  // metadata `thread_source`, or one of the two lineage headers. A turn that
+  // states a container and nothing else is indistinguishable on the wire from the
+  // root thread it claims to be, so it resolves the container's rollout: correct
+  // for a root, the #459 defect for a subagent. It is bounded (it needs a client
+  // that withholds its thread id AND every lineage signal on a subagent turn, and
+  // Codex withholds neither together) and deleting the fallback is worse, since
+  // it returns every container-only turn, root threads included, to `cwd = NULL`
+  // and fails `.hypignore` open for that traffic class. The durable fix is the
+  // body's `client_metadata.thread_id`, which the adapter does not read yet.
   const sessionsDir = await writeSubagentPair({
     rootCwd: '/work/clean/root',
     subagentCwd: '/work/ignored/sub',
