@@ -662,8 +662,10 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
 }
 
 /**
- * The refusal for a rollout with no `session_id` field: a Codex old enough to
- * predate the field, so the container the drop keys on simply is not on disk.
+ * The refusal for a rollout with no usable `session_id`: normally a Codex old
+ * enough to predate the field, so the container the drop keys on simply is not
+ * on disk (a present-but-blank value is the same situation, and reads the same
+ * way to the user - nothing to key on).
  *
  * Falling back to the rollout's thread id here is the exact defect this
  * resolution exists to remove, and it would be invisible: on a root thread the
@@ -675,7 +677,7 @@ function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
  * @returns {string}
  */
 function legacyRolloutError(which, names) {
-  return `could not resolve a session id: the Codex rollout ${which} (${names}) carries no session_id field, so the session container the gateway drops on cannot be read from it. Its thread id is NOT that container - they differ on a subagent thread - so acting on it would report an opt-out that suppresses nothing. Upgrade Codex (current versions write session_meta.session_id) or pass the session id explicitly: hyp session status <session-id>.`
+  return `could not resolve a session id: the Codex rollout ${which} (${names}) carries no session_id field (or a blank one), so the session container the gateway drops on cannot be read from it. Its thread id is NOT that container - they differ on a subagent thread - so acting on it would report an opt-out that suppresses nothing. Upgrade Codex (current versions write session_meta.session_id) or pass the session id explicitly: hyp session status <session-id>.`
 }
 
 /**
@@ -772,9 +774,18 @@ function describeAge(ms) {
  * field is visible as absent, and `sessionId: undefined` is then a refusal at
  * the call site rather than a guess.
  *
+ * Two shape guards keep "read the raw line" from becoming "trust whatever the
+ * line says". The record must be the `session_meta` header (the only record type
+ * that states the container; `codex/src/rollout-cwd.js` type-checks the same
+ * line for the same reason), and a **blank** `session_id` counts as absent, like
+ * a blank environment variable in `statedEnv`. Both mean the container is not
+ * readable from this file, and unreadable is a refusal: a present-but-unusable
+ * key would otherwise be reported as the answer and then match nothing at the
+ * drop, which is the failure mode this whole resolution exists to remove.
+ *
  * @param {string} file
  * @returns {{ threadId: string, sessionId: string | undefined, cwd: string } | undefined}
- * @ref LLP 0067#cli-session-id [implements]: an absent session_id is
+ * @ref LLP 0067#cli-session-id [implements]: an absent or unusable session_id is
  * unresolvable, never the back-filled thread id
  */
 function readRolloutMeta(file) {
@@ -788,7 +799,8 @@ function readRolloutMeta(file) {
     const newline = text.indexOf('\n')
     const line = newline === -1 ? text : text.slice(0, newline)
     const parsed = JSON.parse(line)
-    const payload = parsed && typeof parsed === 'object' ? parsed.payload : undefined
+    if (!parsed || typeof parsed !== 'object' || parsed.type !== 'session_meta') return undefined
+    const payload = parsed.payload
     if (!payload || typeof payload !== 'object') return undefined
     const fields = /** @type {Record<string, unknown>} */ (payload)
     const id = fields.id
@@ -798,7 +810,9 @@ function readRolloutMeta(file) {
     if (typeof cwd !== 'string' || cwd.length === 0) return undefined
     return {
       threadId: id,
-      sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
+      // Returned byte-identical (an opaque provider token, LLP 0066 R5): only
+      // the usability test trims.
+      sessionId: typeof sessionId === 'string' && sessionId.trim().length > 0 ? sessionId : undefined,
       cwd,
     }
   } catch {

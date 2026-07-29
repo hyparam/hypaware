@@ -261,6 +261,10 @@ set remains [non-goal 2](#non-goals).
     `SessionMetaLine` deserializer back-fills that field from the thread id, so a
     reader that trusts the parsed value silently reintroduces exactly the wrong
     key (see [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
+    A field that is **present but unusable** (blank, non-string, or carried on a
+    record that does not state the container) MUST refuse the same way: reported
+    as the answer it would match nothing at the drop, which is the same silent
+    no-op reached by another route.
   - Backfill MUST agree with the live path about which identifier is the
     partition key, so an opt-out names one identifier rather than one per
     ingestion path

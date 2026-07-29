@@ -566,6 +566,90 @@ test('CODEX_THREAD_ID selects the live rollout without the mtime proxy, then the
   assert.equal(blank.ok && blank.sessionId, 'session-dead')
 })
 
+test('a BLANK session_id is as unusable as an absent one, and refuses the same way', () => {
+  // A present field is not the same as a readable key. `statedEnv` already
+  // treats a blank environment value as unstated; a blank `session_id` on disk
+  // is the same situation one layer down, and resolving it would hand the verb a
+  // key the adapter can never stamp - "ignored" printed over a drop that matches
+  // nothing, which is the defect class of #453 rather than a cosmetic nit.
+  const blank = tempCodexHome([
+    { file: 'rollout-2026-01-09-blank.jsonl', id: 'thread-blank', sessionId: '   ', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  for (const env of [
+    { CODEX_HOME: blank, CODEX_THREAD_ID: 'thread-blank' },
+    { CODEX_HOME: blank },
+  ]) {
+    const out = resolveSessionIdForCli({ env, cwd: '/repo/here' })
+    assert.equal(out.ok, false, 'a blank container is unresolvable on both paths')
+    assert.match(out.ok ? '' : out.error, /no session_id field \(or a blank one\)/)
+    assert.match(out.ok ? '' : out.error, /thread id is NOT that container/, 'and never the thread id instead')
+  }
+
+  // Non-string shapes are the same story: nothing usable, so nothing claimed.
+  for (const sessionId of [/** @type {any} */ (12345), /** @type {any} */ (null), /** @type {any} */ ({})]) {
+    const odd = tempCodexHome([
+      { file: 'rollout-2026-01-09-odd.jsonl', id: 'thread-odd', sessionId, cwd: '/repo/here', ageMs: 30 * 1000 },
+    ])
+    const out = resolveSessionIdForCli({ env: { CODEX_HOME: odd, CODEX_THREAD_ID: 'thread-odd' }, cwd: '/repo/here' })
+    assert.equal(out.ok, false, `a ${typeof sessionId} session_id is not a session id`)
+  }
+})
+
+test('the container is read from the session_meta header, not from any first line that carries the fields', () => {
+  // The raw-line read is what makes an absent `session_id` visible, but reading
+  // the line must not become trusting whatever the line says: only the
+  // `session_meta` header states the container, so a differently-typed first
+  // record is not evidence about it. `codex/src/rollout-cwd.js` type-checks the
+  // same line for the same reason.
+  const wrongType = tempCodexHome([
+    {
+      file: 'rollout-2026-01-10-ctx.jsonl',
+      id: 'thread-ctx',
+      sessionId: 'session-ctx',
+      cwd: '/repo/here',
+      type: 'turn_context',
+      ageMs: 30 * 1000,
+    },
+  ])
+  for (const env of [
+    { CODEX_HOME: wrongType, CODEX_THREAD_ID: 'thread-ctx' },
+    { CODEX_HOME: wrongType },
+  ]) {
+    assert.equal(resolveSessionIdForCli({ env, cwd: '/repo/here' }).ok, false)
+  }
+
+  // And the header itself still resolves, so the guard is about the record type.
+  const header = tempCodexHome([
+    { file: 'rollout-2026-01-10-ctx.jsonl', id: 'thread-ctx', sessionId: 'session-ctx', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  const ok = resolveSessionIdForCli({ env: { CODEX_HOME: header, CODEX_THREAD_ID: 'thread-ctx' }, cwd: '/repo/here' })
+  assert.equal(ok.ok && ok.sessionId, 'session-ctx')
+})
+
+test('rollouts that disagree about which session contains a thread refuse, naming both', () => {
+  // The stated-thread match is an identity test, so it can hit more than one
+  // file (a resumed thread, a copied history). Agreeing files are one answer;
+  // disagreeing ones are two candidate keys, and picking either would opt out a
+  // session the user may not be in while reporting success.
+  const disagree = tempCodexHome([
+    { file: 'rollout-2026-01-11-a.jsonl', id: 'thread-dup', sessionId: 'session-a', cwd: '/repo/a', ageMs: 30 * 1000 },
+    { file: 'rollout-2026-01-11-b.jsonl', id: 'thread-dup', sessionId: 'session-b', cwd: '/repo/b', ageMs: 30 * 1000 },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: disagree, CODEX_THREAD_ID: 'thread-dup' }, cwd: '/repo/a' })
+  assert.equal(out.ok, false)
+  assert.match(out.ok ? '' : out.error, /disagree about which session contains it/)
+  assert.match(out.ok ? '' : out.error, /session-a/)
+  assert.match(out.ok ? '' : out.error, /session-b/)
+
+  // Agreement is not ambiguity: two files recording the same container resolve.
+  const agree = tempCodexHome([
+    { file: 'rollout-2026-01-11-a.jsonl', id: 'thread-dup', sessionId: 'session-same', cwd: '/repo/a', ageMs: 30 * 1000 },
+    { file: 'rollout-2026-01-11-b.jsonl', id: 'thread-dup', sessionId: 'session-same', cwd: '/repo/b', ageMs: 30 * 1000 },
+  ])
+  const ok = resolveSessionIdForCli({ env: { CODEX_HOME: agree, CODEX_THREAD_ID: 'thread-dup' }, cwd: '/repo/a' })
+  assert.equal(ok.ok && ok.sessionId, 'session-same')
+})
+
 test('two clients each stating a session refuse rather than picking one', () => {
   // Environments nest (Codex runs `claude`, or the reverse) and the child
   // inherits the parent's variable while setting its own, so both can be set
@@ -839,7 +923,10 @@ function dropContext(ignored) {
  * `ageMs` backdates the file's mtime, which is how the resolver tells a running
  * session (appended to on every turn) from a finished one.
  *
- * @param {{ file: string, id: string, sessionId?: string, legacy?: boolean, cwd: string, ageMs?: number }[]} rollouts
+ * `type` overrides the first record's envelope type, for the case where the
+ * fields are present on a record that does not state the container.
+ *
+ * @param {{ file: string, id: string, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
@@ -848,8 +935,10 @@ function tempCodexHome(rollouts) {
   for (const r of rollouts) {
     /** @type {Record<string, unknown>} */
     const payload = { id: r.id, cwd: r.cwd }
-    if (!r.legacy) payload.session_id = r.sessionId ?? r.id
-    const meta = JSON.stringify({ type: 'session_meta', payload })
+    // `in` rather than `??` so an explicit null survives as a null: a field
+    // present with an unusable value is a distinct case from an absent one.
+    if (!r.legacy) payload.session_id = 'sessionId' in r ? r.sessionId : r.id
+    const meta = JSON.stringify({ type: r.type ?? 'session_meta', payload })
     const full = path.join(dir, r.file)
     fs.writeFileSync(full, `${meta}\n{"type":"event"}\n`)
     if (r.ageMs) {

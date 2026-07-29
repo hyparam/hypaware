@@ -340,6 +340,20 @@ invocation, and the stated thread has already said it would be the wrong one.
 The refusal names the file, says why a thread id will not do, and points at
 `hyp session status <session-id>`.
 
+**Reading the raw line is not trusting the line.** Two shape guards keep the
+same refusal covering the cases where the field is *present* but says nothing
+usable, since a present-but-unusable key would be reported as the answer and then
+match nothing at the drop - the same silent no-op by another route:
+
+- The record must be the `session_meta` **header**. It is the only record type
+  that states the container, so the fields appearing on a differently-typed first
+  record are not evidence about it (`codex/src/rollout-cwd.js` type-checks the
+  same line for the same reason).
+- A **blank** or non-string `session_id` counts as absent, exactly as a blank
+  environment variable is not a stated id. Ids are opaque provider tokens
+  ([LLP 0066](./0066-session-opt-out.spec.md#requirements) R5), so the test
+  trims but the value is passed on byte-identical.
+
 `codex/src/backfill.js` reads the same field for the partition key, so both
 ingestion paths key on one identifier
 ([§backfill-partition-key](#backfill-partition-key)).
@@ -507,7 +521,12 @@ Traditional tests (root `test/`, alongside the existing suites):
   variable falls through; both client variables set at once refuses and names
   both. The grain disclosure reports `thread_id` beside `session_id` in `--json`
   and names the whole-session scope in the human form, from `status` and `ignore`
-  alike.
+  alike. The present-but-unusable cases refuse alongside the absent one: a blank
+  or non-string `session_id`, and the fields carried on a first record that is not
+  the `session_meta` header, with the header itself still resolving so each
+  refusal is provably about its own guard. Rollouts that **disagree** about which
+  session contains a stated thread refuse naming both candidate keys, while
+  rollouts that agree resolve.
 - `test/plugins/ai-gateway-proxy-routing.test.js` (extend): with a catch-all
   (`/`) upstream configured, `/_hypaware/ignore/session` is handled locally
   and never forwarded (R2); no exchange is started for a control request.
