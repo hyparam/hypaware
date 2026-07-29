@@ -1,11 +1,12 @@
 ---
 name: hypaware-unignore
-description: Re-enable HypAware recording for the current Claude session after a previous /hypaware-ignore. Use when the user says "resume recording", "unignore this session", or otherwise asks to opt this conversation back into the local HypAware AI gateway recording.
+description: Resume HypAware recording for the current Claude session
+disable-model-invocation: true
 ---
 
 # Re-enable recording for this Claude session
 
-Cancel an earlier `/hypaware-ignore` so subsequent Claude requests in this session are recorded again. Does not retroactively recover requests that were dropped while the session was opted out — those are gone for good.
+Cancel an earlier `/hypaware-ignore` so subsequent Claude requests in this session are recorded again. Does not retroactively recover requests that were dropped while the session was opted out; those are gone for good.
 
 ## What to run
 

@@ -1,6 +1,7 @@
 ---
 name: hypaware-ignore
-description: Stop HypAware from recording the current Claude session. Use when the user says "don't record this", "ignore this session", "pause logging", or otherwise asks to opt this conversation out of the local HypAware AI gateway recording. Effect lasts for the lifetime of the session and is reversible with /hypaware-unignore.
+description: Stop HypAware from recording the current Claude session
+disable-model-invocation: true
 ---
 
 # Stop recording this Claude session
