@@ -284,8 +284,26 @@ managed by the same two rules as `ENABLE_TOOL_SEARCH` above (only ever added whe
 absent or already ours; removed, never restored, on detach). The declaration is
 **accurate**: the gateway is a byte-transparent pass-through to
 `api.anthropic.com`, which is exactly what the flag asserts. That the flag also
-gates other first-party behavior (traceparent propagation, oauth beta headers) is
-therefore fine rather than a side effect we tolerate.
+gates other first-party behavior is therefore fine rather than a side effect we
+tolerate.
+
+What that "other behavior" actually is, read off the shipped Claude Code bundle
+(verified against 2.1.215; the flag is one branch of a single
+`isFirstPartyBaseUrl` predicate that otherwise host-matches
+`ANTHROPIC_BASE_URL` against `api.anthropic.com`):
+
+- **Sent to the upstream:** the `context-1m-2025-08-07` beta header (the window
+  this section is about), `traceparent` propagation, and an
+  `anthropic-usage-limit: extended` request header.
+- **Sent to Anthropic's own API host, not to the gateway upstream:** error
+  reporting, the org policy-limits fetch (which in turn supplies Claude Code's
+  permission defaults), and memory-sync eligibility.
+- **Not gated by it at all: credential choice.** The bearer token and the
+  `oauth-2025-04-20` beta header ride an active OAuth session, and the API-key
+  path rides a configured key; neither consults this predicate. Setting the flag
+  therefore sends no secret anywhere it was not already going, because attach has
+  already pointed `ANTHROPIC_BASE_URL` at the gateway and the gateway already
+  forwards to whatever its upstream config says.
 
 That accuracy is a **precondition, not an invariant**, and it is the one thing
 this key needs that `ENABLE_TOOL_SEARCH` does not. `ENABLE_TOOL_SEARCH` asserts a
@@ -300,6 +318,17 @@ non-Anthropic host makes the declaration false and applies the first-party
 behavior it gates to traffic that never reaches Anthropic. Policing that is out
 of scope for the settings writer; it is recorded here so the assumption is a
 stated one rather than an implicit one.
+
+The blast radius of a false declaration is bounded by the list above, and it is
+**not** a credential problem: what extra reaches a repointed upstream is a
+`traceparent`, a usage-limit header, and a beta header, none of them secrets, and
+the first-party-only side channels aim at Anthropic rather than at that upstream.
+What does break is the window itself, in the *unsafe* direction: a non-Anthropic
+upstream that really is 200k now gets warned about and auto-compacted far too
+late, and an over-long request fails at the upstream. That failure is loud, is
+confined to a configuration the product does not otherwise support, and the only
+code fix is to plumb the gateway's upstream config into a settings writer that
+today takes a port. Hence the stated precondition rather than a check.
 
 The honest caveat: the key is underscore-prefixed and undocumented, so a Claude
 Code release may rename or drop it (last verified against 2.1.220). It fails

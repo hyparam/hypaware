@@ -59,12 +59,17 @@ const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+(session-context|classify-cwd)\b/
 //   warnings/auto-compact fire far too early. The key is underscore-prefixed and
 //   undocumented: re-verify it against the Claude Code release (last verified
 //   2.1.220) if attached sessions start reporting an inflated context percent
-//   again. It also gates other first-party behavior (traceparent propagation,
-//   oauth beta headers), which is accurate here - the gateway is a
-//   byte-transparent pass-through to api.anthropic.com. That last part is a
+//   again. It is one branch of Claude Code's single is-first-party predicate, so
+//   it gates more than the window: outbound it adds the context-1m beta header,
+//   traceparent propagation and an extended usage-limit header, and it re-enables
+//   the first-party-only side channels (error reporting, org policy limits,
+//   memory-sync eligibility) that call Anthropic directly rather than the
+//   gateway. It does *not* gate credential choice, which follows the oauth
+//   session or the configured API key. All of that is accurate here - the gateway
+//   is a byte-transparent pass-through to api.anthropic.com. That last part is a
 //   precondition, not an invariant: the gateway's anthropic upstream `base_url`
 //   is config, so repointing it elsewhere makes the declaration false. See the
-//   LLP section below.
+//   LLP section below for the full gated list and the blast radius.
 const MANAGED_ENV_ADDITIONS = [
   { key: 'ENABLE_TOOL_SEARCH', value: 'true' },
   { key: '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', value: '1' },
