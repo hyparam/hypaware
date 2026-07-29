@@ -169,14 +169,22 @@ export interface GatewayState {
  * `codex_rollout` id was INFERRED from a file on disk, and the user must be
  * able to see which of the two an "ignored" answer rests on. `evidence` names
  * the rollout the inference came from.
+ *
+ * `sessionId` is always the **session container** the gateway drops on, never a
+ * Codex thread id: the two coincide on a root thread and diverge on a subagent
+ * one, so a thread id here would be an opt-out nothing matches. `threadId` is
+ * carried separately, for provenance and display, where the container was read
+ * out of a rollout (`codex_rollout`, `codex_env_rollout`) - the user needs to
+ * see both the id they are in and the wider id being acted on.
  * @ref LLP 0067#cli-session-id
  */
 export type SessionIdResolution =
   | {
       ok: true
       sessionId: string
-      source: 'argument' | 'claude_env' | 'codex_rollout'
+      source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout'
       evidence?: string
+      threadId?: string
     }
   | { ok: false; error: string }
 
@@ -203,8 +211,15 @@ export type SessionEndpointResolution =
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'
   session_id: string | null
-  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | null
+  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout' | null
   session_id_evidence: string | null
+  /**
+   * The Codex thread the invocation is in, when one was resolved. Distinct from
+   * `session_id` (the container the drop matches): equal for a root thread, and
+   * different for a subagent one, which is precisely the case where reporting
+   * only one of them hid a no-op opt-out.
+   */
+  thread_id: string | null
   ignored: boolean | null
   total: number | null
   endpoint: string | null

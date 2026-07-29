@@ -67,6 +67,20 @@ const MAX_RESPONSE_BYTES = 64 * 1024
  */
 const MAX_ROLLOUT_AGE_MS = 30 * 60 * 1000
 
+/**
+ * The variable in which Codex **states** the thread this process was spawned
+ * from. Codex injects it into the environment of every shell/exec tool call and
+ * exempts it from `shell_environment_policy.include_only` filtering, so its
+ * presence is direct evidence of provenance: the thread that named it spawned
+ * this process, and a thread that has ended cannot have spawned it.
+ *
+ * It carries a **thread** id, which is NOT the key the gateway drops on (that
+ * is the session container). So it is used to identify WHICH rollout is live,
+ * not as the answer: the answer is read out of that rollout.
+ * @ref LLP 0067#cli-session-id
+ */
+const CODEX_THREAD_ENV = 'CODEX_THREAD_ID'
+
 const IGNORE_USAGE = 'usage: hyp session ignore [session-id] [--json]'
 const UNIGNORE_USAGE = 'usage: hyp session unignore [session-id] [--json]'
 const STATUS_USAGE = 'usage: hyp session status [session-id] [--json]'
@@ -125,6 +139,7 @@ export async function runSessionStatus(argv, ctx) {
       session_id: null,
       session_id_source: null,
       session_id_evidence: null,
+      thread_id: null,
       ignored: null,
       total: null,
       endpoint: null,
@@ -133,11 +148,16 @@ export async function runSessionStatus(argv, ctx) {
     })
   }
 
-  /** @type {Pick<SessionStatusReport, 'session_id' | 'session_id_source' | 'session_id_evidence'>} */
+  /** @type {Pick<SessionStatusReport, 'session_id' | 'session_id_source' | 'session_id_evidence' | 'thread_id'>} */
   const who = {
     session_id: resolvedId.sessionId,
     session_id_source: resolvedId.source,
     session_id_evidence: resolvedId.evidence ?? null,
+    // Reported beside the answer rather than folded into it: the thread is what
+    // Codex states and what the user experiences as "this conversation", while
+    // `session_id` is what the drop matches. Reporting only one of the two is
+    // how they got conflated in the first place.
+    thread_id: resolvedId.threadId ?? null,
   }
 
   const endpoint = resolveGatewayEndpointForCli(ctx)
@@ -233,6 +253,7 @@ async function runMutation(argv, ctx, method, usage) {
         session_id: resolvedId.sessionId,
         session_id_source: resolvedId.source,
         session_id_evidence: resolvedId.evidence ?? null,
+        thread_id: resolvedId.threadId ?? null,
         ignored,
         total,
         endpoint: endpoint.endpoint,
@@ -252,7 +273,12 @@ async function runMutation(argv, ctx, method, usage) {
   // The write verbs carry the same provenance caveats as the read: "ignored"
   // printed off an inferred id is a claim about a session the user may not be
   // in, and that is louder here than in `status` because it reads as done.
-  for (const note of provenanceNotes(resolvedId.source, resolvedId.evidence ?? null, endpoint.source)) {
+  for (const note of provenanceNotes({
+    idSource: resolvedId.source,
+    idEvidence: resolvedId.evidence ?? null,
+    threadId: resolvedId.threadId ?? null,
+    endpointSource: endpoint.source,
+  })) {
     ctx.stdout.write(`${note}\n`)
   }
   ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
@@ -279,14 +305,24 @@ function writeStatus(ctx, json, report) {
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write('this opt-out is in-memory only: a gateway restart drops it. Re-check with `hyp session status`.\n')
-    for (const note of provenanceNotes(report.session_id_source, report.session_id_evidence, report.endpoint_source)) {
+    for (const note of provenanceNotes({
+      idSource: report.session_id_source,
+      idEvidence: report.session_id_evidence,
+      threadId: report.thread_id,
+      endpointSource: report.endpoint_source,
+    })) {
       ctx.stdout.write(`${note}\n`)
     }
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else {
     ctx.stdout.write(`session ${report.session_id}: not ignored - this session IS being recorded\n`)
     ctx.stdout.write('run `hyp session ignore` to opt out.\n')
-    for (const note of provenanceNotes(report.session_id_source, report.session_id_evidence, report.endpoint_source)) {
+    for (const note of provenanceNotes({
+      idSource: report.session_id_source,
+      idEvidence: report.session_id_evidence,
+      threadId: report.thread_id,
+      endpointSource: report.endpoint_source,
+    })) {
       ctx.stdout.write(`${note}\n`)
     }
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
@@ -309,20 +345,41 @@ function writeStatus(ctx, json, report) {
  * evidence in the output is the only remedy available at this layer, and it is
  * this change's own thesis: a control that can be wrong must at least say so.
  *
+ * A Codex answer also carries a **grain** disclosure, which is not about weak
+ * evidence but about the key itself: the resolved id is the session container,
+ * so the drop covers sibling threads of the one the user is in (the documented
+ * over-drop, LLP 0066 §scope). A user who asked to stop recording "this
+ * conversation" should see that it stopped more than that, rather than infer it
+ * from a gap in the cache.
+ *
  * @ref LLP 0066#readable [implements]: R10 - the reader must not present
  * inferred inputs as if they were confirmed ones.
  *
- * @param {SessionStatusReport['session_id_source']} idSource
- * @param {string | null} idEvidence
- * @param {SessionStatusReport['endpoint_source']} endpointSource
+ * @param {{
+ *   idSource: SessionStatusReport['session_id_source'],
+ *   idEvidence: string | null,
+ *   threadId: string | null,
+ *   endpointSource: SessionStatusReport['endpoint_source'],
+ * }} args
  * @returns {string[]}
  */
-function provenanceNotes(idSource, idEvidence, endpointSource) {
+function provenanceNotes(args) {
+  const { idSource, idEvidence, threadId, endpointSource } = args
   /** @type {string[]} */
   const notes = []
   if (idSource === 'codex_rollout') {
     notes.push(
       `session id: INFERRED from ${idEvidence ?? 'a Codex rollout'} on disk, not stated by the client. If that is not the session you are in, re-run naming it: hyp session status <session-id>.`
+    )
+  }
+  if (idSource === 'codex_env_rollout') {
+    notes.push(
+      `session id: the session containing the thread ${CODEX_THREAD_ENV} states, read from ${idEvidence ?? 'that rollout'} on disk. Codex states the thread, not the session, so the container had to be read rather than stated.`
+    )
+  }
+  if (threadId) {
+    notes.push(
+      `scope:   the gateway drops by SESSION, so every Codex thread in this session is covered - sibling and subagent threads too, not only thread ${threadId}.`
     )
   }
   if (endpointSource === 'config_listen') {
@@ -401,20 +458,41 @@ export function resolveGatewayEndpointForCli(ctx) {
 }
 
 /**
- * Resolve which session this invocation is about.
+ * Resolve which session this invocation is about, in the identifier the drop
+ * actually matches on.
  *
- * Order: `CLAUDE_CODE_SESSION_ID` when set, otherwise the Codex rollout whose
- * `payload.cwd` matches the invocation cwd. Codex exposes no session-id
- * environment variable, so the id has to come off disk
- * (`$CODEX_HOME/sessions/**\/rollout-<ts>-<uuid>.jsonl`, whose first
- * `session_meta` line carries `payload.id` and `payload.cwd`).
+ * **The answer is the session container, never the thread.** The gateway drops
+ * on the `session_id` the adapter stamps (LLP 0066 R5), and for Codex that is
+ * the session container: `metadata.session_id` live, `session_meta.session_id`
+ * on disk. A Codex **thread** id is a different value whenever the thread is
+ * not the root one, so stating a thread id here would report an opt-out the
+ * gateway never matches - success printed over continued recording.
+ *
+ * Order:
+ *
+ * 1. `CLAUDE_CODE_SESSION_ID`. For Claude the session IS the conversation
+ *    (LLP 0066 §scope), so a stated id is already the drop key.
+ * 2. `CODEX_THREAD_ID`, used as a **selector, not an answer**: it names the
+ *    live thread, so it picks the rollout without the mtime liveness proxy, and
+ *    the session container is then read out of that rollout's `session_meta`.
+ * 3. Otherwise the rollout whose `payload.cwd` matches the invocation cwd
+ *    (`$CODEX_HOME/sessions/**\/rollout-<ts>-<uuid>.jsonl`), with the staleness
+ *    bound below standing in for the liveness the environment would have given.
+ *
+ * **Refuses when two clients each state one.** Environments nest (Codex runs
+ * `claude`, or the reverse), so both variables can be set at once and only one
+ * of them names the session this invocation is in. Preferring either would be a
+ * guess, and a wrong guess opts out a session the user is not in while
+ * reporting success.
  *
  * **Refuses on ambiguity** rather than guessing newest-by-mtime: several
  * cwd-matching rollouts, or none, is an error naming the candidates. Guessing
  * would risk opting out the wrong session while telling the user they are
  * covered, which is the fail-open shape this whole change exists to remove.
  *
- * **Refuses on staleness too.** "Exactly one rollout records this cwd" says
+ * **Refuses on staleness too**, on the cwd path only: a thread stated in the
+ * environment needs no age bound, because the thread that set it is the one
+ * running now. "Exactly one rollout records this cwd" says
  * nothing about whether that session is still running: a cwd where Codex ran
  * once last week has exactly one match, and resolving it yields a confident
  * answer about a DEAD id while the session the user is actually in keeps being
@@ -422,15 +500,29 @@ export function resolveGatewayEndpointForCli(ctx) {
  * control reply, so it gets the same treatment - refuse, name the file and its
  * age, and point at the explicit-id escape hatch.
  *
+ * **Refuses on a legacy rollout** that carries no `session_id` field at all,
+ * rather than falling back to its thread id: see `readRolloutMeta`.
+ *
  * @param {{ env: NodeJS.ProcessEnv, cwd: string, maxScan?: number, maxAgeMs?: number, now?: number }} args
  * @returns {SessionIdResolution}
- * @ref LLP 0067#cli-session-id [implements]: session-id resolution contract,
- * fail-closed on ambiguity, truncation, and staleness alike
+ * @ref LLP 0067#cli-session-id [implements]: session-id resolution contract -
+ * the drop key (never the thread id), fail-closed on ambiguity (two stated
+ * clients, or two matching rollouts), truncation, staleness, and a rollout with
+ * no session container to read
  */
 export function resolveSessionIdForCli(args) {
-  const fromEnv = args.env.CLAUDE_CODE_SESSION_ID
-  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) {
-    return { ok: true, sessionId: fromEnv, source: 'claude_env' }
+  // The id is an opaque provider token (LLP 0066 R5), so a stated value is
+  // passed on byte-identical; only the emptiness test trims.
+  const claudeSessionId = statedEnv(args.env.CLAUDE_CODE_SESSION_ID)
+  const codexThreadId = statedEnv(args.env[CODEX_THREAD_ENV])
+  if (claudeSessionId && codexThreadId) {
+    return {
+      ok: false,
+      error: `could not resolve a session id: more than one client states one for this invocation - CLAUDE_CODE_SESSION_ID=${claudeSessionId}, ${CODEX_THREAD_ENV}=${codexThreadId}. Only one of them is the session this command is in, and picking either would act on the wrong one while reporting success. Pass the intended session id explicitly: hyp session status <session-id>.`,
+    }
+  }
+  if (claudeSessionId) {
+    return { ok: true, sessionId: claudeSessionId, source: 'claude_env' }
   }
 
   const codexHome =
@@ -441,6 +533,9 @@ export function resolveSessionIdForCli(args) {
 
   const maxScan = typeof args.maxScan === 'number' && args.maxScan > 0 ? args.maxScan : MAX_ROLLOUT_SCAN
   const scan = rolloutFiles(sessionsDir, maxScan)
+
+  if (codexThreadId) return resolveFromStatedThread(scan, sessionsDir, codexThreadId, maxScan)
+
   // A truncated scan cannot support the uniqueness claim below: the rollout
   // that would have made the match ambiguous may be one of the ones never
   // looked at, so "exactly one match" would be an artefact of the bound
@@ -452,7 +547,7 @@ export function resolveSessionIdForCli(args) {
     }
   }
 
-  /** @type {{ id: string, cwd: string, file: string }[]} */
+  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string, file: string }[]} */
   const candidates = []
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
@@ -479,19 +574,120 @@ export function resolveSessionIdForCli(args) {
         error: `could not resolve a session id: the only Codex rollout recording cwd ${args.cwd} (${name}) was last written ${describeAge(ageMs)} ago, so it is a finished session rather than this one. Acting on it would report the WRONG session as covered while this one keeps being recorded. Pass the intended session id explicitly: hyp session status <session-id>.`,
       }
     }
-    return { ok: true, sessionId: only.id, source: 'codex_rollout', evidence: name }
+    if (only.sessionId === undefined) {
+      return { ok: false, error: legacyRolloutError(`recording cwd ${args.cwd}`, name) }
+    }
+    return {
+      ok: true,
+      sessionId: only.sessionId,
+      source: 'codex_rollout',
+      evidence: name,
+      threadId: only.threadId,
+    }
   }
   if (candidates.length === 0) {
     return {
       ok: false,
-      error: `could not resolve a session id: CLAUDE_CODE_SESSION_ID is not set and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
+      error: `could not resolve a session id: no client stated one (CLAUDE_CODE_SESSION_ID, ${CODEX_THREAD_ENV}) and no Codex rollout under ${sessionsDir} records cwd ${args.cwd}. Pass the session id explicitly: hyp session status <session-id>.`,
     }
   }
-  const named = candidates.map((c) => `${c.id} (${path.basename(c.file)})`).join(', ')
+  const named = candidates.map((c) => `${c.threadId} (${path.basename(c.file)})`).join(', ')
   return {
     ok: false,
     error: `could not resolve a session id: ${candidates.length} Codex rollouts record cwd ${args.cwd} - ${named}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
   }
+}
+
+/**
+ * Resolve the session container for the thread Codex states in
+ * `CODEX_THREAD_ID`.
+ *
+ * This is the liveness-preserving half of the trade-off: the environment proves
+ * which thread is running (no mtime proxy), and the rollout for that thread
+ * carries the only thing the environment cannot state - the session container
+ * the drop keys on. Both halves are needed, so a rollout that cannot be found
+ * or carries no container is a refusal, NOT a fall back to the cwd scan: that
+ * scan answers about a thread nothing tied to this invocation, and the stated
+ * thread has already told us that would be the wrong one.
+ *
+ * A truncated scan is only fatal here when the thread was not found. Unlike the
+ * cwd path, this match is an identity test on a value the client stated, not a
+ * uniqueness claim over the listing, so an unread file cannot invalidate a hit.
+ *
+ * @param {{ files: string[], truncated: boolean }} scan
+ * @param {string} sessionsDir
+ * @param {string} threadId
+ * @param {number} maxScan
+ * @returns {SessionIdResolution}
+ */
+function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
+  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string, file: string }[]} */
+  const matches = []
+  for (const file of scan.files) {
+    const meta = readRolloutMeta(file)
+    if (!meta) continue
+    if (meta.threadId !== threadId) continue
+    matches.push({ ...meta, file })
+  }
+
+  if (matches.length === 0) {
+    const bound = scan.truncated
+      ? ` The scan hit its ${maxScan}-file bound, so the rollout may simply not have been reached.`
+      : ''
+    return {
+      ok: false,
+      error: `could not resolve a session id: ${CODEX_THREAD_ENV}=${threadId} names the live Codex thread, but no rollout under ${sessionsDir} records that thread, so the session container the gateway drops on cannot be read.${bound} The thread id is NOT that container (they differ on a subagent thread), so it would be wrong to act on. Pass the session id explicitly: hyp session status <session-id>.`,
+    }
+  }
+
+  const names = matches.map((m) => path.basename(m.file)).join(', ')
+  if (matches.some((m) => m.sessionId === undefined)) {
+    return { ok: false, error: legacyRolloutError(`for thread ${threadId}`, names) }
+  }
+  const distinct = [...new Set(matches.map((m) => m.sessionId))]
+  if (distinct.length > 1) {
+    return {
+      ok: false,
+      error: `could not resolve a session id: the rollouts for thread ${threadId} (${names}) disagree about which session contains it - ${distinct.join(', ')}. Pass the intended session id explicitly rather than guessing: hyp session status <session-id>.`,
+    }
+  }
+
+  return {
+    ok: true,
+    sessionId: /** @type {string} */ (distinct[0]),
+    source: 'codex_env_rollout',
+    evidence: names,
+    threadId,
+  }
+}
+
+/**
+ * The refusal for a rollout with no `session_id` field: a Codex old enough to
+ * predate the field, so the container the drop keys on simply is not on disk.
+ *
+ * Falling back to the rollout's thread id here is the exact defect this
+ * resolution exists to remove, and it would be invisible: on a root thread the
+ * two coincide, so the wrong key only shows up on the subagent threads nobody
+ * tests by hand.
+ *
+ * @param {string} which  how the rollout was selected, for the message
+ * @param {string} names  rollout basename(s) the refusal is about
+ * @returns {string}
+ */
+function legacyRolloutError(which, names) {
+  return `could not resolve a session id: the Codex rollout ${which} (${names}) carries no session_id field, so the session container the gateway drops on cannot be read from it. Its thread id is NOT that container - they differ on a subagent thread - so acting on it would report an opt-out that suppresses nothing. Upgrade Codex (current versions write session_meta.session_id) or pass the session id explicitly: hyp session status <session-id>.`
+}
+
+/**
+ * An environment value only counts as **stated** when it is non-blank. Returned
+ * byte-identical (the id is an opaque provider token, LLP 0066 R5): a blank
+ * variable falls through to the next source rather than resolving to nothing.
+ *
+ * @param {string | undefined} value
+ * @returns {string | undefined}
+ */
+function statedEnv(value) {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
 }
 
 /**
@@ -562,12 +758,24 @@ function describeAge(ms) {
 }
 
 /**
- * Read `payload.id` / `payload.cwd` off a rollout's first line. Only a bounded
- * prefix is read: a rollout grows without limit, but its `session_meta` header
- * is the first record.
+ * Read `payload.id` (the thread), `payload.session_id` (the session container
+ * the drop keys on) and `payload.cwd` off a rollout's first line. Only a
+ * bounded prefix is read: a rollout grows without limit, but its `session_meta`
+ * header is the first record.
+ *
+ * **The raw JSON line is what is parsed, deliberately.** Codex's
+ * `SessionMetaLine` has a hand-written `Deserialize` that BACK-FILLS
+ * `session_id` from `id` when the field is absent, so anything reading a
+ * deserialized `session_meta` gets the *thread* id handed back under the name
+ * `session_id` on every legacy rollout - the wrong key, silently, exactly the
+ * defect this resolution exists to remove. Reading the line means an absent
+ * field is visible as absent, and `sessionId: undefined` is then a refusal at
+ * the call site rather than a guess.
  *
  * @param {string} file
- * @returns {{ id: string, cwd: string } | undefined}
+ * @returns {{ threadId: string, sessionId: string | undefined, cwd: string } | undefined}
+ * @ref LLP 0067#cli-session-id [implements]: an absent session_id is
+ * unresolvable, never the back-filled thread id
  */
 function readRolloutMeta(file) {
   /** @type {number | undefined} */
@@ -582,11 +790,17 @@ function readRolloutMeta(file) {
     const parsed = JSON.parse(line)
     const payload = parsed && typeof parsed === 'object' ? parsed.payload : undefined
     if (!payload || typeof payload !== 'object') return undefined
-    const id = /** @type {Record<string, unknown>} */ (payload).id
-    const cwd = /** @type {Record<string, unknown>} */ (payload).cwd
+    const fields = /** @type {Record<string, unknown>} */ (payload)
+    const id = fields.id
+    const cwd = fields.cwd
+    const sessionId = fields.session_id
     if (typeof id !== 'string' || id.length === 0) return undefined
     if (typeof cwd !== 'string' || cwd.length === 0) return undefined
-    return { id, cwd }
+    return {
+      threadId: id,
+      sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
+      cwd,
+    }
   } catch {
     return undefined
   } finally {

@@ -19,7 +19,9 @@ This flow governs **HypAware's own surfaces only** - what the local cache holds 
 
 The review conversation will discuss the most sensitive content on the machine, so it must never itself become a captured, forwardable transcript. **Before surveying anything**, opt this Codex session out of capture and **verify it took effect**. On failure, say so plainly and continue **only** with the user's explicit consent.
 
-Codex, unlike Claude, exposes no `CLAUDE_CODE_SESSION_ID`, so the session id must be **discovered** from the rollout Codex writes for this session. Codex records each session as `~/.codex/sessions/**/rollout-<ts>-<session-uuid>.jsonl` whose first line is a `session_meta` record carrying `payload.id` (the session id) and `payload.cwd`. Pick the **newest** rollout, and cross-check its `cwd` against the current directory so a concurrent Codex session in another folder is not confused for this one.
+Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one step, and refuses rather than guessing. It exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs.
+
+Only if that verb is unavailable, fall back to the script below. Codex, unlike Claude, exposes no `CLAUDE_CODE_SESSION_ID`, so the id must then be **discovered** from the rollout Codex writes for this session: `~/.codex/sessions/**/rollout-<ts>-<uuid>.jsonl`, whose first line is a `session_meta` record. Read **`payload.session_id`**, the session container the gateway drops on - NOT `payload.id`, which is the *thread*. The two are the same uuid on a root thread and different on a subagent one, so an opt-out sent with `payload.id` can be accepted and match nothing. A rollout with no `session_id` field predates the container: stop there rather than substituting the thread id. Pick the **newest** rollout, and cross-check its `cwd` against the current directory so a concurrent Codex session in another folder is not confused for this one.
 
 ```bash
 #!/usr/bin/env bash
@@ -35,12 +37,17 @@ if [ -z "${rollout:-}" ]; then
   exit 1
 fi
 
-# Read session id and rollout cwd from the session_meta line.
+# Read the session CONTAINER id and rollout cwd from the session_meta line.
+# `session_id` is the key the gateway drops on; `id` is the thread, which a
+# subagent thread mints for itself and which would match nothing.
 read -r SESSION_ID ROLLOUT_CWD < <(head -1 "$rollout" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 p = r.get("payload", {})
-print(p.get("id", ""), p.get("cwd", ""))
+sid = p.get("session_id")
+if not sid:
+    sys.exit("this rollout records no session_id (pre-upgrade Codex); resolve the session id another way rather than using the thread id")
+print(sid, p.get("cwd", ""))
 ')
 echo "resolved session $SESSION_ID (rollout cwd: $ROLLOUT_CWD)"
 # Sanity check: the newest rollout should be THIS session. If ROLLOUT_CWD does

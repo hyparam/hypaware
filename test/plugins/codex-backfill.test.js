@@ -607,6 +607,88 @@ test('backfill redacts credential userinfo from the git remote (LLP 0032)', asyn
   }
 })
 
+test('a subagent rollout partitions on session_meta.session_id, with the thread in conversation_id', async () => {
+  // Issue #453: `hyp session ignore` and the live projector both key on the
+  // session CONTAINER, so backfill has to agree about which identifier that is.
+  // A subagent rollout records the root's `session_meta.session_id` beside its
+  // own thread id; taking the thread as the partition key would file a
+  // backfilled subagent turn under a different session from the live rows for
+  // the very same turn, and would disagree with the identifier the opt-out
+  // verb names.
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, '2026/05/26/rollout-subagent.jsonl', {
+      meta: {
+        id: 'thread-subagent',
+        session_id: 'session-root',
+        timestamp: '2026-05-26T10:00:00.000Z',
+        cwd: '/work/sub',
+        thread_source: 'subagent',
+        parent_thread_id: 'thread-root',
+      },
+      items: [
+        {
+          timestamp: '2026-05-26T10:00:01.000Z',
+          payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'subagent turn' }] },
+        },
+      ],
+    })
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    assert.equal(items.length, 1)
+    const item = items[0]
+    assert.ok(item)
+    const exchange = value(item)
+    assert.equal(exchange.session_id, 'session-root', 'the partition key is the container')
+    assert.equal(exchange.conversation_id, 'thread-subagent', 'the thread stays the thread')
+    assert.equal(exchange.attributes.codex.session_id, 'session-root')
+    assert.equal(exchange.attributes.codex.thread_id, 'thread-subagent')
+
+    const rows = await materialize(item)
+    for (const row of rows) {
+      assert.equal(row.session_id, 'session-root')
+      assert.equal(row.conversation_id, 'thread-subagent')
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a rollout with no session_meta.session_id keeps the thread as its partition key', async () => {
+  // The pre-field rollouts. Nothing on disk records a container, so the thread
+  // id is all the partition key can be - which is exactly why the CLI resolver
+  // refuses on these rather than claiming an opt-out it cannot key. Codex's own
+  // deserializer back-fills `session_id` from `id` here, so this case is
+  // indistinguishable from a root thread through a struct-shaped read; the raw
+  // JSONL is what tells them apart.
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, '2026/05/26/rollout-legacy.jsonl', {
+      meta: { id: 'thread-only', timestamp: '2026-05-26T10:00:00.000Z', cwd: '/work/repo' },
+      items: [
+        {
+          timestamp: '2026-05-26T10:00:01.000Z',
+          payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'legacy turn' }] },
+        },
+      ],
+    })
+
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { items } = await collect(provider.run(runContext().ctx))
+    const exchange = value(items[0])
+    assert.equal(exchange.session_id, 'thread-only')
+    assert.equal(exchange.conversation_id, 'thread-only')
+    assert.equal(
+      exchange.attributes.codex.thread_id,
+      undefined,
+      'no divergence to report when the file records none'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('native ids are preserved verbatim; sidechain inferred from thread_source', async () => {
   const env = await stageEnv()
   try {
