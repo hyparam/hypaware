@@ -239,6 +239,45 @@ and how to replay an undo record, not "Claude" vs "Codex". The split is clean: a
 rich *write* (attach) needs the adapter (`ctx.clients`, Part 2); the *undo* is a
 marker-guided removal core does from disk.
 
+#### Never clobber a user edit: report every override, not just the last
+
+The undo only reverses values that are **still the ones we wrote**. A managed
+key whose live value no longer matches the record was re-pointed by the user
+after we attached, so the undo leaves it in place and reports it through
+`DetachFromDiskResult.warning`, which the attach handler logs as
+`client_action.attach_reverse_warning`.
+
+An undo record can carry **several** managed keys (Claude's marker already
+records `ANTHROPIC_BASE_URL` plus each managed env addition; a `json_path`
+record can carry several `set` entries), and they can be overridden
+independently. The notice is therefore **per key**: core accumulates one
+message for each key it left in place and folds them into the single `warning`
+field. Reporting only the last key visited would silently hide the others,
+which is exactly the case an operator needs told, since those keys stay on disk
+after a detach that otherwise claims success.
+
+The fold separator is ` | `, deliberately **not** `; `. Each notice already
+reads "`<key>` was overridden externally; leaving in place", so a `; ` join
+would produce four `; `-delimited clauses for two keys and leave a reader
+unable to tell where one notice ends. No in-tree attach records a managed env
+key or a dotted `set` path containing `|`, so ` | ` reads unambiguously for the
+notices folded here.
+
+That is a **readability** choice, not a promise that the field is splittable.
+`warning` is shared with the `toml` undo, whose single notice interpolates the
+user's live `model_provider` value ("… leaving `<value>` in place"), and a
+`~/.codex/config.toml` reading `model_provider = "acme | prod"` puts ` | `
+inside one notice. **No separator is safe field-wide, and the field must not be
+parsed.**
+
+`warning` stays a single human-readable string rather than becoming an array.
+It is **displayed, never parsed**: `action_attach.js` logs it as a `detail`
+attribute, and `hyp detach` prints it and echoes it verbatim into its `--json`
+payload; nothing in the tree splits it. Keeping the string also keeps the
+published `DetachFromDiskResult` contract and the `hyp detach --json` shape
+unchanged. If a caller ever needs the keys individually, the honest move is a
+new `warnings: string[]` field alongside, not a re-typed `warning`.
+
 #### ENABLE_TOOL_SEARCH: keep deferred tool loading on through the gateway
 
 Pointing Claude Code at the gateway has a hidden cost. When `ANTHROPIC_BASE_URL`
