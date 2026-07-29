@@ -300,7 +300,14 @@ second one):
   `ENABLE_TOOL_SEARCH` themselves and no prior marker recorded it as ours, attach
   leaves their value untouched and does **not** record it in `managed.env`. This
   is the same never-clobber-a-user-value stance the base URL takes, minus a
-  backup: we only ever *add* the key when it was absent.
+  backup: we only ever *add* the key when it was absent. **Ownership turns on the
+  key being present, not on the type of its value.** Claude Code reads these keys
+  as env strings, so it is tempting to treat a non-string as not-really-a-setting
+  and overwrite it; that is wrong. settings.json is hand-edited JSON and
+  `"ENABLE_TOOL_SEARCH": true` is a perfectly natural thing to write. A type test
+  here is worse than no guard at all: attach coerces the value *and* records the
+  key as managed, so the undo record now claims a key the user owns and detach
+  deletes their setting outright. Presence is the whole test.
 - **`prev_base_url` restores the base URL only.** It is the sole managed key with
   a backed-up prior. The undo therefore restores `ANTHROPIC_BASE_URL` to
   `prev_base_url` but *removes* any other managed key (like `ENABLE_TOOL_SEARCH`)
@@ -370,8 +377,10 @@ code fix is to plumb the gateway's upstream config into a settings writer that
 today takes a port. Hence the stated precondition rather than a check.
 
 The honest caveat: the key is underscore-prefixed and undocumented, so a Claude
-Code release may rename or drop it (last verified against 2.1.220). It fails
-*soft* - losing it re-inflates the reported percent but breaks nothing - so the
+Code release may rename or drop it (last verified against 2.1.215, the same
+release the predicate above was read off; that one version is the baseline every
+stamp in the tree carries, code comment included). It fails *soft* - losing it
+re-inflates the reported percent but breaks nothing - so the
 mitigation is a note at the code, not a runtime probe: if attached sessions start
 reporting an inflated context percent again, re-verify the key against the
 current Claude Code. The alternative considered and rejected was a `[1m]`

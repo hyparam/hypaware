@@ -58,7 +58,7 @@ const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+(session-context|classify-cwd)\b/
 //   models, so the same session reads as ~18% context instead of ~4% and
 //   warnings/auto-compact fire far too early. The key is underscore-prefixed and
 //   undocumented: re-verify it against the Claude Code release (last verified
-//   2.1.220) if attached sessions start reporting an inflated context percent
+//   2.1.215) if attached sessions start reporting an inflated context percent
 //   again. It is one branch of Claude Code's single is-first-party predicate, so
 //   it gates more than the window: outbound it adds the context-1m beta header,
 //   traceparent propagation and an extended usage-limit header, and it re-enables
@@ -184,6 +184,14 @@ export async function attach(opts) {
  * so detach never clobbers it - the same never-clobber-a-user-value stance the
  * base URL takes, minus a backup: these keys are only ever *added*.
  *
+ * Ownership turns on **presence, not JSON type**. Claude Code reads these keys
+ * as env strings, but settings.json is hand-edited and a user can perfectly well
+ * write `"ENABLE_TOOL_SEARCH": true` as a JSON boolean. Testing the type instead
+ * of the key let a non-string value fall through the guard: attach coerced it,
+ * recorded the key as managed, and detach then deleted the user's own setting.
+ * Anything already at the key is the user's, whatever its type.
+ *
+ * @ref LLP 0045#enable_tool_search-keep-deferred-tool-loading-on-through-the-gateway [implements]: the "only manage the key when it is ours" rule that binds every managed env key
  * @param {Record<string, unknown>} env the live `env` block, mutated in place
  * @param {Record<string, unknown> | undefined} priorManagedEnv the prior marker's managed env, if any
  * @returns {Record<string, string>} the keys attach now manages
@@ -193,7 +201,7 @@ function manageEnvAdditions(env, priorManagedEnv) {
   const managed = {}
   for (const { key, value } of MANAGED_ENV_ADDITIONS) {
     const weOwnIt = priorManagedEnv ? key in priorManagedEnv : false
-    if (!weOwnIt && typeof env[key] === 'string') continue
+    if (!weOwnIt && key in env) continue
     env[key] = value
     managed[key] = value
   }

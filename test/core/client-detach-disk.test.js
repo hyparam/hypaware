@@ -136,6 +136,44 @@ test('claude undo removes managed ENABLE_TOOL_SEARCH without stamping the restor
   }
 })
 
+// Issue #448 finding 1: the ownership guard used to test the *type* of the
+// existing value, so a hand-written JSON boolean/number fell through it. Attach
+// coerced the value and recorded the key in `managed.env`, and this undo - doing
+// exactly what the record told it - then deleted a setting the user owned. The
+// round trip is the assertion that matters: the bug needed attach and detach
+// together to destroy data, so the test exercises both.
+test('claude attach + undo leave a non-string user-owned env value byte-for-byte intact', async () => {
+  const home = await stageHome()
+  try {
+    // Both managed keys, hand-written as non-strings. `0` is the sharper of the
+    // two: it is the user deliberately turning the flag *off*, so coercing it to
+    // '1' reverses their intent before the delete even happens.
+    const original = {
+      env: { ENABLE_TOOL_SEARCH: true, _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: 0 },
+    }
+    const originalText = JSON.stringify(original, null, 2) + '\n'
+    const settingsPath = await writeClaudeSettings(home, originalText)
+
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    // Attach must not coerce a user value, and must not claim it in the undo
+    // record - the marker is what authorizes the undo to delete a key.
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached.env.ENABLE_TOOL_SEARCH, true)
+    assert.equal(attached.env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL, 0)
+    assert.deepEqual(attached._hypaware.managed.env, {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+    })
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+
+    // Nothing of the user's survived-by-luck: the file is exactly what they wrote.
+    assert.equal(await fs.readFile(settingsPath, 'utf8'), originalText)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('claude undo removes the managed _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL', async () => {
   const home = await stageHome()
   try {

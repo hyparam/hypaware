@@ -218,6 +218,43 @@ test('attach leaves a user-owned _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL untouc
   }
 })
 
+// Issue #448 finding 1: ownership is decided by the key being present, not by
+// the type of its value. settings.json is hand-edited, so a JSON boolean, number
+// or null at one of these keys is still a user value. The old guard tested
+// `typeof env[key] === 'string'` and so coerced anything else *and* recorded it
+// as managed, handing detach a licence to delete it. See the round-trip proof in
+// test/core/client-detach-disk.test.js.
+for (const [label, userValue] of [
+  ['boolean', true],
+  ['number', 0],
+  ['null', null],
+]) {
+  test(`attach leaves a user-owned ${label} env value untouched and unmanaged`, async () => {
+    const { dir, settingsPath } = await stage()
+    try {
+      await fs.writeFile(
+        settingsPath,
+        JSON.stringify({ env: { ENABLE_TOOL_SEARCH: userValue } }, null, 2)
+      )
+
+      await attach({ ...ATTACH, settingsPath })
+
+      const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+      assert.equal(attached.env.ENABLE_TOOL_SEARCH, userValue)
+
+      // Absent from the undo record is the load-bearing half: the marker is what
+      // authorizes detach to remove a key.
+      const marker = await readMarker(settingsPath)
+      assert.deepEqual(marker.managed.env, {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL: '1',
+      })
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+}
+
 test('re-attach keeps managing a _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL it owns', async () => {
   const { dir, settingsPath } = await stage()
   try {
