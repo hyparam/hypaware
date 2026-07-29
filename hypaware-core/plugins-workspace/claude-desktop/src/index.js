@@ -57,7 +57,7 @@ export const configSection = {
  * read or replay. Its state surface is `claude-desktop verify` and its undo is
  * removing the plist with sudo, not `hyp detach` (#444).
  *
- * @ref LLP 0115#no-attach-on-join [constrained-by]: no `attach_probe` - the LLP 0044 loop needs a reversible settings-file write, and the managed plist is not one; a probe here made `hyp detach --client claude-desktop` fail on the very machines where install had succeeded
+ * @ref LLP 0115#no-attach-on-join [constrained-by]: no `attach_probe` - the LLP 0044 loop needs a reversible settings-file write, and the managed plist is not one; the probe that was declared here answered "not attached" over a $HOME-re-anchored path that never existed, and would have thrown MALFORMED_JSON over the real XML plist the moment that path was corrected (LLP 0135#no-probe)
  * @ref LLP 0133#attribution [constrained-by]: the client descriptor and picker row exist for wizard/asset plumbing, but captured rows still land under client_name "claude" with entrypoint "claude-desktop-3p"; query and hyp status surfaces key off entrypoint, not this descriptor's name
  * @param {PluginActivationContext} ctx
  */

@@ -461,20 +461,33 @@ local surface; it does not make it a core-reversible one, and
 independent reasons, any one sufficient:
 
 1. **Wrong file type.** The plist is XML; every core `json`/`json_path`
-   probe path `JSON.parse`s the settings file. On a machine where install
-   had succeeded, `hyp detach --client claude-desktop` therefore raised
-   `MALFORMED_JSON` and `hyp status` surfaced the parse failure as a client
-   probe `error`.
+   probe path `JSON.parse`s the settings file. Point the probe at the plist
+   `claude-desktop install` renders and `detachClientFromDisk` throws
+   `MALFORMED_JSON`, with `hyp status` surfacing the same parse failure as a
+   client attach-probe `error`.
 2. **Wrong path.** `settings_file` is `$HOME`-relative by contract
    (`resolveClientSettingsPath`), so an absolute
    `/Library/Managed Preferences/...` re-anchors to
-   `~/Library/Managed Preferences/...`: a file that does not exist, making
+   `~/Library/Managed Preferences/...`: a file `install` never writes, making
    the probe answer "not attached" for a reason unrelated to the truth.
+   Note the interaction: defect 2 **masked** defect 1 in the field. Because
+   the probed path was never the placed one, a configured machine saw a
+   silently wrong "not attached" rather than the parse error, and the moment
+   anyone fixed the path the probe would have started throwing on exactly the
+   machines where install had succeeded. Neither answer is usable, and the
+   quiet one is the more dangerous of the two.
 3. **No undo record.** The plist carries no `marker_record`, and per
    [LLP 0045 §Part 3](./0045-client-attach.design.md#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record)
    a record-less marker is refused, never half-reversed. Nor would adding
    one help: the file is root-owned, so an unprivileged detach cannot write
    it back.
+
+Fixing the path alone is therefore not a repair, it is an upgrade from a
+quiet wrong answer to a loud one. Defects 1 and 3 are unfixable inside the
+`attach_probe` contract, which is why the probe goes rather than gets
+corrected. (That `resolveClientSettingsPath` silently re-anchors an absolute
+`settings_file` instead of honouring or rejecting it is a separate trap in
+the shared helper, tracked on its own.)
 
 Desktop's state surface is `claude-desktop verify`, and its undo is removing
 the plist with sudo (plus `killall cfprefsd` and an app restart,
