@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,7 +10,12 @@ import { asyncRow } from 'squirreling'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
-import { localOnlyListPath, readLocalOnlyDirs, writeLocalOnlyDirs } from '../../src/core/usage-policy/local_only.js'
+import {
+  localOnlyListPath,
+  readLocalOnlyDirs,
+  readLocalOnlyEntries,
+  writeLocalOnlyDirs,
+} from '../../src/core/usage-policy/local_only.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -236,6 +241,51 @@ test('hyp unignore --local-only does not remove a sibling that merely shares a s
     assert.equal(res.code, 0)
     assert.match(res.stdout, /not local-only/)
     assert.deepEqual(await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) }), [sibling])
+  })
+})
+
+// The CLI's view of the machine-local store has to agree with the resolver's,
+// or a user can be told a directory is unmarked while the gate is enforcing a
+// mark on it (or end up with two entries governing one directory at different
+// classes). Real `symlink(2)`, because the defect these guard is that
+// `path.resolve` is lexical.
+//
+// @ref LLP 0050#canonicalization [tests]: marking and unmarking identify a directory, not a spelling
+
+test('hyp ignore --private on the real path upgrades an entry declared by its symlink spelling, not duplicating it', async () => {
+  await withSandbox(async ({ root: sandbox, hypHome }) => {
+    const root = realpathSync(sandbox)
+    const real = path.join(root, 'real', 'proj')
+    mkdirSync(real, { recursive: true })
+    const link = path.join(root, 'link')
+    symlinkSync(real, link)
+    await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link] })
+
+    const res = await run('ignore', ['--private', real], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
+    assert.deepEqual(entries, [{ dir: real, class: 'ignore' }], 'the one entry for that directory now says ignore')
+  })
+})
+
+test('hyp unignore --local-only by symlink spelling removes an entry declared canonically', async () => {
+  await withSandbox(async ({ root: sandbox, hypHome }) => {
+    const root = realpathSync(sandbox)
+    const real = path.join(root, 'real', 'proj')
+    mkdirSync(real, { recursive: true })
+    const link = path.join(root, 'link')
+    symlinkSync(real, link)
+    const unrelated = path.join(root, 'other')
+    mkdirSync(unrelated)
+    await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [real, unrelated] })
+
+    const res = await run('unignore', ['--local-only', link], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.deepEqual(
+      await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) }),
+      [unrelated],
+      'the entry governing that directory is gone; the unrelated one survives'
+    )
   })
 })
 

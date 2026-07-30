@@ -62,6 +62,12 @@ governs. Because V1 has only `ignore` and no "un-ignore" directive
 mechanism is not repo-bound: a `.hypignore` anywhere in the ancestor chain
 (including outside any git repo) governs its subtree.
 
+**Extended-by: [LLP 0050 §canonicalization](./0050-ignore-enforced-in-adapters.decision.md#canonicalization)**:
+"the ancestor chain" is over **real** paths, not lexical ones. A `cwd` is
+matched over the set of spellings that denote it (as-given plus
+symlink-resolved), and the most restrictive verdict any spelling produces wins,
+so a `.hypignore` cannot be escaped by reaching its subtree through a symlink.
+
 ## Classes {#classes}
 
 | Class | V1 | Meaning |
