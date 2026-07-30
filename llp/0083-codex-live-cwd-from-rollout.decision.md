@@ -84,22 +84,31 @@ Codex now has the symmetric fallback.
   Consequence: for a session running in a *subdirectory* of its workspace the
   row now stamps the subdirectory rather than the workspace root, which is the
   directory the policy is actually scoped to.
-  Two limits, stated rather than implied. The key still outranks the **rollout**
-  fallback (it resolves before the `??`), so a subscription-route session that
-  declares a `workspaces` map never consults `session_meta.cwd` and a first-key
-  guess can still decide its verdict; ranking the guess below the rollout is a
-  separate call, not taken in the lines PRs #467/#474 rewrite. And because the
-  key keeps enriching, a row recorded where it used to drop (clean in-band `cwd`,
-  ignored declared workspace) carries that workspace's identity even though the
+  Three limits, stated rather than implied, and each one filed so it does not
+  live only here. The key still outranks the **rollout** fallback (it resolves
+  before the `??`), so a subscription-route session that declares a `workspaces`
+  map never consults `session_meta.cwd` and a first-key guess can still decide
+  its verdict (#480). That one is pre-existing, verified byte-identical before
+  and after this amendment; ranking the guess below the rollout is a separate
+  call, not taken in the lines PRs #467/#474 rewrite. Because the key keeps
+  enriching, a row recorded where it used to drop (clean in-band `cwd`, ignored
+  declared workspace) carries that workspace's identity even though the
   directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
   ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), not by enrichment
-  source. A third limit, and a trade rather than a strict gain: the gate does not
-  canonicalize paths, so when the client states a *non-canonical* spelling (a
-  symlink) of an ignored directory while the key holds the canonical one, the
-  honest spelling now reaches the gate, its ancestor walk misses the `.hypignore`,
-  and the exchange is recorded where the key's spelling used to drop it by luck.
-  Canonicalizing belongs in the shared matcher
-  ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)), not here.
+  source (#481). And the gate does not canonicalize paths, so *which spelling*
+  reaches it decides the verdict: a symlinked spelling of an ignored directory
+  escapes its `.hypignore`, because the ancestor walk climbs the symlink's own
+  parents and never meets the governing file. That is a property of the shared
+  matcher rather than of this amendment (#479, and it is also why `pathsEqual`
+  misses symlinked spellings here). What this amendment changes is which of two
+  symmetric spellings trips it, by taking the client's honest `cwd` over the
+  key's: it closes the case where the *key* held the non-canonical spelling and
+  opens the case where the *request* does. The widest case is untouched, a
+  declared symlinked key on a subscription-route request that states no `cwd` at
+  all, which leaks the same before and after. Canonicalizing belongs in the
+  shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)),
+  where it must also canonicalize the `local-only` list entries or it un-governs
+  an entry a user marked by its symlink spelling.
 
 ## Why not the alternatives
 
