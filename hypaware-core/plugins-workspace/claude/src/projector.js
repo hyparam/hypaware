@@ -223,6 +223,9 @@ export function createClaudeExchangeProjector(opts) {
           projectsDir,
           sessionId,
           transcriptPath: sessionContextRecord?.transcript_path,
+          // Fallback roots for attached-Desktop sessions, whose sandboxed
+          // transcripts live outside projectsDir (see loadTranscript).
+          homeDir: opts.homeDir,
         }, logger)
         : []
       const transcriptIndex = indexTranscriptEntries(transcriptEntries)
@@ -640,7 +643,7 @@ export function anthropicUpstreamPreset() {
 }
 
 /**
- * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string }} opts
+ * @param {{ projectsDir: string, sessionId: string, transcriptPath?: string, homeDir?: string }} opts
  * @param {{ warn(m: string, f?: Record<string, unknown>): void } | undefined} logger
  */
 async function loadTranscriptSafe(opts, logger) {

@@ -1,13 +1,13 @@
-# LLP 0099: The dispatch-miss repair line branches on *why* a plugin is inactive
+# LLP 0154: The dispatch-miss repair line branches on *why* a plugin is inactive
 
 **Type:** decision
 **Status:** Accepted
 **Systems:** CLI
 **Generated-by:** neutral
 **Date:** 2026-07-10
-**Related:** LLP 0098, LLP 0031
+**Related:** LLP 0153, LLP 0031
 
-> LLP 0098 settled that a dispatch miss on a known-but-inactive plugin command
+> LLP 0153 settled that a dispatch miss on a known-but-inactive plugin command
 > reports "unavailable + repair" rather than "unknown", with a single repair
 > line: `add {"name": "<plugin>"} to plugins[]`. That advice is correct only
 > when the plugin is *absent* from `plugins[]` (issue #294's scope). When the
@@ -15,19 +15,19 @@
 > the entry lands in the boot pool but not the selected set, the miss path
 > still fires, and the "add it" advice is wrong: the entry already exists
 > ([issue #297](https://github.com/hyparam/hypaware/issues/297)). This decision
-> extends LLP 0098's repair wording so it depends on *why* the plugin is
+> extends LLP 0153's repair wording so it depends on *why* the plugin is
 > inactive.
 
 ## Decision
 
-This **extends** LLP 0098 (@ref LLP 0098 [constrained-by] - the first output
+This **extends** LLP 0153 (@ref LLP 0153 [constrained-by] - the first output
 line and the exact-match, inactive-only, boot-selection-reuse constraints are
 unchanged). Only the second (`repair:`) line changes: the miss path now
 classifies the inactive plugin into one of three states and emits the matching
 repair.
 
 - **`absent`** - the plugin does not appear in the effective `plugins[]`. This
-  is LLP 0098's original case and its wording is preserved **byte-identical**:
+  is LLP 0153's original case and its wording is preserved **byte-identical**:
 
   ```
     repair: add {"name": "@hypaware/context-graph"} to plugins[] in ~/.hyp/hypaware-config.json
@@ -62,12 +62,12 @@ repair.
   `centralConfig.plugins` is therefore an exact discriminator - no separate
   provenance tracking is needed (@ref LLP 0031#merge-model [constrained-by]).
 - **No extra I/O.** The miss path already resolves the layered config via the
-  same `computeBootSelection` that `--help` synthesis and LLP 0098's lookup
+  same `computeBootSelection` that `--help` synthesis and LLP 0153's lookup
   use; classification reads the effective and central documents that resolution
   already returns.
 - **`absent` stays the default.** Any state that is not a present-with-
   `enabled: false` entry (missing entry, or an entry not disabled) falls back
-  to `absent`, so a plugin the config simply omits keeps LLP 0098's output.
+  to `absent`, so a plugin the config simply omits keeps LLP 0153's output.
 
 ## Not a broken repair, only misleading wording
 

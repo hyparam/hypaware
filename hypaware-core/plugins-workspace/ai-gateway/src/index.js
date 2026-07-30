@@ -58,7 +58,7 @@ export async function activate(ctx) {
   // @ref LLP 0067#cli [implements]: the gateway owns `/_hypaware/ignore/session`,
   // so it owns the verbs over it (LLP 0003). One client-agnostic verb group
   // serves Claude and Codex alike, and as a plugin-contributed group it
-  // inherits the inactive-plugin `repair:` line (LLP 0098/0099) for free.
+  // inherits the inactive-plugin `repair:` line (LLP 0153/0154) for free.
   // Deliberately NOT `hyp ignore --session`: LLP 0110 diagnosed that shape.
   ctx.commands.register({
     name: 'session ignore',

@@ -121,6 +121,36 @@ test('purge subtree is segment-aware: /home/u/repoA does not match /home/u/repoA
   }
 })
 
+// @ref LLP 0050#canonicalization [tests]: purge matches the directory, not the spelling the row happened to record
+test('purge subtree matches a row recorded under a symlink spelling of the target', async () => {
+  const cacheRoot = await makeTmpDir('symlink')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-projects-'))
+  try {
+    const root = await fs.realpath(projects)
+    const real = path.join(root, 'real', 'proj')
+    await fs.mkdir(real, { recursive: true })
+    const link = path.join(root, 'link')
+    await fs.symlink(real, link)
+    await seed(cacheRoot, [
+      // The capture seam recorded the `cwd` the client reported: the symlink.
+      { session_id: 's1', cwd: path.join(link, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: path.join(root, 'real', 'projx'), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    // The user purges by the real path.
+    const summary = await purgeCache({ cacheRoot, target: { kind: 'subtree', path: real } })
+    assert.equal(summary.rowsDeleted, 1, 'the symlink-spelled row is in the purged subtree')
+    const rows = await remainingRows(cacheRoot)
+    assert.deepEqual(
+      rows.map((r) => r.part_id),
+      ['m2#0'],
+      'the sibling-prefix directory is still not a descendant'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
 test('purge --session deletes only that session', async () => {
   const cacheRoot = await makeTmpDir('session')
   try {

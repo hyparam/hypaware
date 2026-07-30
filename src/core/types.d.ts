@@ -25,6 +25,13 @@ export interface ClientDescriptor {
   agentDir?: string
   attachProbe?: PluginAttachProbeManifest
   requiredUpstreams?: string[]
+  /**
+   * Transcript `entrypoint` values whose sessions belong to this client,
+   * from `contributes.client.transcript_entrypoints`. Read by
+   * `resolveEntrypointOwners` to gate and attribute backfilled sessions
+   * that live in another client's transcript tree.
+   */
+  transcriptEntrypoints?: string[]
 }
 
 /**
@@ -82,10 +89,6 @@ export interface DepGraphResolution {
   registry: CapabilityRegistryHandle
 }
 
-export interface ResolveDependenciesOptions {
-  registry?: CapabilityRegistryHandle
-}
-
 // --- manifest ---
 
 export type ManifestErrorKind = 'manifest_invalid'
@@ -104,5 +107,3 @@ export interface FailedManifest {
   manifestPath: string
   rootDir: string
 }
-
-export type ManifestLoadResult = LoadedManifest | FailedManifest

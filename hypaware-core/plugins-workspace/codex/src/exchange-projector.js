@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isAbsolute } from 'node:path'
+
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
@@ -64,17 +66,30 @@ export function createCodexExchangeProjector(opts = {}) {
       if (isOpenAiChatPath(path)) return true
       if (isOpenAiResponsesPath(path)) return true
       if (isCodexNamespacePath(path)) return true
-      // Codex Desktop tags requests with a `x-codex-turn-metadata`
-      // header even when the path looks generic, so accept the header
-      // as a sufficient match signal.
-      if (readHeader(input.request_headers, 'x-codex-turn-metadata')) return true
+      // Any Codex client tags a turn-metadata-carrying request with
+      // `x-codex-turn-metadata`, even when the path looks generic, so accept the
+      // header as a sufficient match signal. It is NOT a Desktop-only signal.
+      // @ref LLP 0151#real-header-names [constrained-by]: every Codex client
+      // emits it, so the match is client-independent.
+      if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
+      // NOTE this gate deliberately does not consult the body, while
+      // `resolveCodexContext` treats a Codex-owned `client_metadata` as a
+      // sufficient Codex signal. The two only stay consistent because the path
+      // set above covers every route Codex posts to, so a body-only Codex
+      // request is always matched here first. A test pins that: see
+      // `test/plugins/codex-exchange-projector.test.js` ("every route Codex
+      // posts to is matched..."). Widen the path set, do not start reading the
+      // body here, if Codex adds a route.
       return false
     },
 
     /**
      * @param {AiGatewayExchangeInput} input
      * @param {{
-     *   log?: { info?: (m: string, f?: Record<string, unknown>) => void },
+     *   log?: {
+     *     info?: (m: string, f?: Record<string, unknown>) => void,
+     *     warn?: (m: string, f?: Record<string, unknown>) => void,
+     *   },
      *   isSessionIgnored?: (sessionId: string) => boolean,
      * }} [ctx]
      */
@@ -117,8 +132,21 @@ export function createCodexExchangeProjector(opts = {}) {
       // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
       // the codex session id — only a real Codex session has a rollout — so
       // non-codex traffic never scans.
-      const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
+      const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
+      // @ref LLP 0083#decision [implements]: a refused workspace substitution is
+      // observable, not silent - it means the gate is measuring a different
+      // directory than it would have. Paths are hashed: this seam sees LLM traffic.
+      if (codexContext?.refused_workspace_cwd) {
+        ctx?.log?.warn?.('plugin.codex.usage_policy_workspace_cwd_refused', {
+          component: 'codex',
+          operation: 'usage_policy_workspace_cwd_refused',
+          error_kind: 'workspace_cwd_mismatch',
+          workspace_sha256: sha256Hex(codexContext.refused_workspace_cwd).slice(0, 16),
+          cwd_sha256: cwd ? sha256Hex(cwd).slice(0, 16) : undefined,
+          exchange_id: input.exchange_id,
+        })
+      }
       if (cwd) {
         const policy = resolver.resolve(cwd)
         if (policy.class === 'ignore') {
@@ -636,40 +664,68 @@ function firstPlainObject(...values) {
 // Codex header + workspace metadata
 // ---------------------------------------------------------------------
 
+// The Codex-owned request headers this file may read. `compatibility_headers` in
+// `codex-rs/core/src/responses_metadata.rs` builds exactly four names
+// (`x-codex-window-id`, `x-codex-turn-metadata`, `x-codex-parent-thread-id`,
+// `x-openai-subagent`), and `readHeader` matches a full name, so any other
+// spelling can never match. The other names read in this file (`originator`,
+// `user-agent`, `x-client-request-id`, and the response's `x-oai-request-id`)
+// are real too, from the shared default client and `codex-api`.
+// @ref LLP 0151#real-header-names [constrained-by]: named constants so a
+// fictional header name cannot be reintroduced by a typo.
+const X_CODEX_TURN_METADATA = 'x-codex-turn-metadata'
+const X_CODEX_WINDOW_ID = 'x-codex-window-id'
+const X_CODEX_PARENT_THREAD_ID = 'x-codex-parent-thread-id'
+
 /**
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
  * @param {string} path
+ * @param {Record<string, unknown>} reqBody
  */
 function resolveCodexContext(input, provider, path, reqBody) {
-  if (!isCodexExchange(input, provider, path)) return undefined
-  const metadata = readCodexTurnMetadata(input)
+  // @ref LLP 0151#body-is-a-codex-signal [implements]: a Codex-owned body map
+  // identifies the exchange on its own, so the API-key route's generic
+  // `/v1/responses` resolves with no Codex header at all. The transport signal is
+  // resolved first because it is also what corroborates the body's ambiguous
+  // flat identity pair (see `readCodexClientMetadata`).
+  const transportIsCodex = hasCodexTransportSignal(input, provider, path)
+  // @ref LLP 0151#body-is-authority [implements]: the flat body map first, the
+  // turn-metadata blob second. Both are projections of one Codex snapshot, so
+  // they agree whenever both are present; the body is preferred because it is
+  // the only one present for every request kind.
+  const clientMetadata = readCodexClientMetadata(reqBody, transportIsCodex)
+  if (!transportIsCodex && clientMetadata === undefined) return undefined
+  const metadata = readCodexTurnMetadata(input, clientMetadata)
   const userAgent = readHeader(input.request_headers, 'user-agent')
   const client = codexClientFromUserAgent(userAgent)
-  const workspace = selectCodexWorkspace(
-    metadata,
-    firstString(readRecordedCwd(reqBody), readStringKey(metadata, 'cwd'))
-  )
+  const inBandCwd = firstString(readRecordedCwd(reqBody), readStringKey(metadata, 'cwd'))
+  const workspace = selectCodexWorkspace(metadata, inBandCwd)
   const workspaceInfo = workspace?.info
   const remoteUrls = isPlainObject(workspaceInfo?.associated_remote_urls)
     ? workspaceInfo.associated_remote_urls
     : undefined
   const thread_id = firstString(
+    readStringKey(clientMetadata, 'thread_id'),
     readStringKey(metadata, 'thread_id'),
-    readHeader(input.request_headers, 'thread-id'),
   )
   const session_id = firstString(
+    readStringKey(clientMetadata, 'session_id'),
     readStringKey(metadata, 'session_id'),
-    readHeader(input.request_headers, 'session-id'),
   )
-  const turn_id = readStringKey(metadata, 'turn_id')
+  const turn_id = firstString(
+    readStringKey(clientMetadata, 'turn_id'),
+    readStringKey(metadata, 'turn_id'),
+  )
   const thread_source = readStringKey(metadata, 'thread_source')
-  // Subagent lineage: the parent thread that spawned this one. Codex puts
-  // it in the same turn-metadata blob as thread_id (set for subagent
-  // turns; absent on the root thread).
+  // Subagent lineage: the parent thread that spawned this one. Set for subagent
+  // turns, absent on a root thread. Codex projects it onto all three surfaces
+  // under two different spellings: `x-codex-parent-thread-id` in the body map
+  // and as a header, `parent_thread_id` inside the turn-metadata blob.
   const parent_thread_id = firstString(
+    readStringKey(clientMetadata, X_CODEX_PARENT_THREAD_ID),
     readStringKey(metadata, 'parent_thread_id'),
-    readHeader(input.request_headers, 'parent-thread-id'),
+    readHeader(input.request_headers, X_CODEX_PARENT_THREAD_ID),
   )
   const originator = firstString(
     readHeader(input.request_headers, 'originator'),
@@ -677,7 +733,19 @@ function resolveCodexContext(input, provider, path, reqBody) {
   )
   const sandbox = readStringKey(metadata, 'sandbox')
   const turn_started_at_unix_ms = numberValue(readKey(metadata, 'turn_started_at_unix_ms'))
-  const window_id = readHeader(input.request_headers, 'x-codex-window-id')
+  const window_id = firstString(
+    readHeader(input.request_headers, X_CODEX_WINDOW_ID),
+    readStringKey(clientMetadata, X_CODEX_WINDOW_ID),
+  )
+  // Which surface stated the identity this row is keyed on. Recorded so a
+  // future Codex version that stops sending one of them is visible in a query
+  // instead of showing up as a silent drift in `conversation_id`.
+  // @ref LLP 0151#lineage-source [implements]: make version drift queryable.
+  const lineage_source = lineageSource(clientMetadata, metadata)
+  // The precedence above trusts the two surfaces to agree. Nothing here can
+  // verify that, so when they do not, say so on the row.
+  // @ref LLP 0151#lineage-conflict [implements]: the tie-break leaves evidence.
+  const lineage_conflict = lineageConflict(clientMetadata, metadata)
   // Strip any credential userinfo at ingress, before it reaches the first-class
   // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
   // @ref LLP 0032#remote-redaction
@@ -697,6 +765,8 @@ function resolveCodexContext(input, provider, path, reqBody) {
   setIfString(attributes, 'originator', originator)
   setIfString(attributes, 'window_id', window_id)
   setIfString(attributes, 'sandbox', sandbox)
+  setIfString(attributes, 'lineage_source', lineage_source)
+  setIfString(attributes, 'lineage_conflict', lineage_conflict)
   if (turn_started_at_unix_ms !== undefined) attributes.turn_started_at_unix_ms = turn_started_at_unix_ms
   setIfString(attributes, 'workspace', workspace?.path)
   setIfString(attributes, 'git_origin_url', git_origin_url)
@@ -709,7 +779,19 @@ function resolveCodexContext(input, provider, path, reqBody) {
     parent_thread_id,
     turn_id,
     thread_source,
-    cwd: workspace?.path,
+    // @ref LLP 0083#decision [implements]: an explicit in-band cwd outranks the
+    // workspace key for the ONE resolved cwd (gate + stamp). `selectCodexWorkspace`
+    // substitutes the first `workspaces` key when none matches, which is a guess
+    // about a directory the session may never have run in, so it must not decide
+    // a `.hypignore` verdict. The key still enriches (`attributes.codex.workspace`,
+    // git_*) and still supplies the cwd on the subscription route, where the
+    // request states none and the key is the only in-band source there is.
+    cwd: firstString(inBandCwd, workspace?.path),
+    // Set only when the substitution was refused, so the caller can log it
+    // rather than let a discarded guess vanish.
+    refused_workspace_cwd: workspace && inBandCwd && !pathsEqual(workspace.path, inBandCwd)
+      ? workspace.path
+      : undefined,
     client_version: client.version,
     entrypoint: originator,
     sandbox,
@@ -727,24 +809,148 @@ function resolveCodexContext(input, provider, path, reqBody) {
 }
 
 /**
+ * Whether the transport alone identifies this exchange as Codex, before any part
+ * of the request body is consulted: the ChatGPT upstream, the Codex route
+ * namespace, a Codex-namespaced compatibility header, or a Codex user-agent
+ * product. Every one of these is a name only a Codex client produces.
+ *
+ * Kept separate from the body signal because it is also what corroborates a
+ * `client_metadata` map carrying no Codex-owned key of its own.
+ * @ref LLP 0151#body-is-a-codex-signal [implements]
+ *
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
  * @param {string} path
  */
-function isCodexExchange(input, provider, path) {
+function hasCodexTransportSignal(input, provider, path) {
   if (provider === 'chatgpt') return true
   if (isCodexNamespacePath(path)) return true
-  if (readHeader(input.request_headers, 'x-codex-turn-metadata')) return true
-  if (readHeader(input.request_headers, 'x-codex-window-id')) return true
+  if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
+  if (readHeader(input.request_headers, X_CODEX_WINDOW_ID)) return true
   const userAgent = readHeader(input.request_headers, 'user-agent')
   return codexClientFromUserAgent(userAgent).entrypoint !== undefined
 }
 
-/** @param {AiGatewayExchangeInput} input */
-function readCodexTurnMetadata(input) {
-  const raw = readHeader(input.request_headers, 'x-codex-turn-metadata')
+/**
+ * The request body's flat `client_metadata` map: the surface Codex fills for
+ * every Responses request kind, so the one lineage surface always present.
+ *
+ * Declines a map carrying no Codex-owned key, so a `client_metadata` an
+ * unrelated client happens to send cannot masquerade as Codex lineage. An
+ * `x-codex-` prefixed key is Codex-exclusive and is accepted on its own; Codex
+ * writes `x-codex-installation-id` and `x-codex-window-id` into this map on
+ * every request, so that branch alone covers every request real Codex makes.
+ *
+ * The flat `session_id` + `thread_id` pair is NOT Codex-exclusive: those are
+ * ordinary names any agent framework may put in a `client_metadata` map, and the
+ * matched path set includes the generic `/v1/responses` and
+ * `/v1/chat/completions`. Honouring the pair on its own would therefore let an
+ * unrelated client be stamped `client_name: 'codex'` and dictate this row's
+ * `conversation_id` and `session_id`, which is the same defect class as the
+ * fictional `thread-id` header this document removed, only through the body. So
+ * the pair is trusted only once `corroborated` says the transport already
+ * identified the exchange as Codex, where it adds lineage detail to a client
+ * that is already known rather than naming the client.
+ * @ref LLP 0151#body-is-authority: the always-present lineage surface.
+ * @ref LLP 0151#body-is-a-codex-signal [constrained-by]: which keys of the map
+ * are evidence of Codex, and which only carry detail.
+ *
+ * @param {unknown} reqBody
+ * @param {boolean} corroborated Whether the transport (upstream, route, Codex
+ *   header, or Codex user-agent) already identified this exchange as Codex.
+ * @returns {Record<string, unknown> | undefined}
+ */
+function readCodexClientMetadata(reqBody, corroborated) {
+  const clientMetadata = readKey(reqBody, 'client_metadata')
+  if (!isPlainObject(clientMetadata)) return undefined
+  const hasCodexKey = Object.keys(clientMetadata)
+    .some((key) => key.toLowerCase().startsWith('x-codex-'))
+  if (hasCodexKey) return clientMetadata
+  if (!corroborated) return undefined
+  const hasFlatIdentity = readStringKey(clientMetadata, 'thread_id') !== undefined &&
+    readStringKey(clientMetadata, 'session_id') !== undefined
+  return hasFlatIdentity ? clientMetadata : undefined
+}
+
+/**
+ * The turn-metadata blob. Codex transports it twice per HTTP request: as the
+ * `x-codex-turn-metadata` header, and as the same-named string entry of the
+ * body's `client_metadata` map. The header is read first so already-recorded
+ * rows keep their exact identity (@ref LLP 0151#row-identity); the body entry
+ * is the fallback for a hop that dropped the header. Absent entirely for
+ * request kinds Codex marks as carrying no turn metadata, which is why the flat
+ * body keys, not this blob, are the lineage authority.
+ *
+ * @param {AiGatewayExchangeInput} input
+ * @param {Record<string, unknown> | undefined} clientMetadata
+ */
+function readCodexTurnMetadata(input, clientMetadata) {
+  const raw = readHeader(input.request_headers, X_CODEX_TURN_METADATA)
+    ?? readStringKey(clientMetadata, X_CODEX_TURN_METADATA)
   const parsed = parseMaybeJson(raw)
   return isPlainObject(parsed) ? parsed : undefined
+}
+
+// The lineage fields that both surfaces carry, as each surface spells them: the
+// flat body-map key first, the turn-metadata blob key second.
+const LINEAGE_SPELLINGS = [
+  ['thread_id', 'thread_id'],
+  ['session_id', 'session_id'],
+  ['turn_id', 'turn_id'],
+  [X_CODEX_PARENT_THREAD_ID, 'parent_thread_id'],
+]
+
+/**
+ * Name the surface that stated this row's identity, or `undefined` when no
+ * surface did (the row then keeps the gateway's content-hash fallback).
+ *
+ * The checks walk `thread_id` before `session_id` and body before blob, which is
+ * the same order the values above resolve in, so the recorded name is the
+ * surface the identity actually came from. Answering from "did the body state
+ * anything at all" would mislabel a turn whose `thread_id` (what
+ * `conversation_id` keys on) came from the blob while only its `session_id` came
+ * from the body.
+ *
+ * @param {Record<string, unknown> | undefined} clientMetadata
+ * @param {Record<string, unknown> | undefined} metadata
+ * @returns {'body_client_metadata' | 'turn_metadata' | undefined}
+ */
+function lineageSource(clientMetadata, metadata) {
+  for (const key of ['thread_id', 'session_id']) {
+    if (readStringKey(clientMetadata, key) !== undefined) return 'body_client_metadata'
+    if (readStringKey(metadata, key) !== undefined) return 'turn_metadata'
+  }
+  return undefined
+}
+
+/**
+ * Name every lineage field the two surfaces state differently, comma-joined in
+ * turn-metadata spelling, or `undefined` when they agree or only one spoke.
+ *
+ * The precedence rests on Codex projecting one metadata snapshot onto both
+ * surfaces, so that a body value and a blob value for the same field are always
+ * equal. That is a claim about another program's internals which this code
+ * cannot check, and the body-wins tie-break would otherwise discard the
+ * counter-evidence without trace. Recording it makes a Codex version that began
+ * filling the two surfaces from different state a queryable fact rather than a
+ * silent preference. The row still keys on the body, so this adds a signal and
+ * changes no identity.
+ * @ref LLP 0151#lineage-conflict [implements]: an unverifiable agreement
+ * assumption gets a recorded signal.
+ *
+ * @param {Record<string, unknown> | undefined} clientMetadata
+ * @param {Record<string, unknown> | undefined} metadata
+ * @returns {string | undefined}
+ */
+function lineageConflict(clientMetadata, metadata) {
+  const disagreed = LINEAGE_SPELLINGS
+    .filter(([bodyKey, blobKey]) => {
+      const fromBody = readStringKey(clientMetadata, bodyKey)
+      const fromBlob = readStringKey(metadata, blobKey)
+      return fromBody !== undefined && fromBlob !== undefined && fromBody !== fromBlob
+    })
+    .map(([, blobKey]) => blobKey)
+  return disagreed.length > 0 ? disagreed.join(',') : undefined
 }
 
 /**
@@ -789,14 +995,12 @@ function selectCodexWorkspace(metadata, cwd) {
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  */
 function resolveConversationId(reqBody, input, provider, path, codexContext) {
-  if (codexContext) {
-    const codexConversationId = firstString(
-      codexContext.thread_id,
-      readHeader(input.request_headers, 'thread-id'),
-      readHeader(input.request_headers, 'session-id'),
-    )
-    if (codexConversationId) return codexConversationId
-  }
+  // @ref LLP 0151#real-header-names [implements]: the thread comes from the
+  // context's own resolution (body map, then turn-metadata blob) and nowhere
+  // else. The `thread-id` / `session-id` header names that used to be consulted
+  // here are names Codex never emits, so they could only ever have let a
+  // non-Codex hop dictate this row's identity.
+  if (codexContext?.thread_id) return codexContext.thread_id
   const sessionId = readMetadataSessionId(reqBody)
   if (sessionId) return sessionId
   const messages = Array.isArray(reqBody.messages)
@@ -885,6 +1089,87 @@ function readRecordedCwd(reqBody) {
     readStringKey(meta, 'cwd'),
     readStringKey(userIdMeta, 'cwd'),
   )
+}
+
+/**
+ * The in-band cwd, or `undefined` when what the client sent is not a directory
+ * this process can find. A `cwd` is not merely a non-empty string here: it is
+ * the input to the `.hypignore` gate, whose first act is `path.resolve(cwd)`
+ * (`src/core/usage-policy/matcher.js`). For a relative value that silently
+ * supplies the **daemon's** process cwd as the base, so a session that said
+ * `sub` gets a confident verdict governed by whatever sits under wherever the
+ * daemon was started. Nothing in the request says what the value is relative to,
+ * so the base would have to be guessed, and guessing is wrong in both directions
+ * at once: it can drop a session no `.hypignore` covers, and it can record a
+ * session whose real directory *is* ignored, because the verdict was computed
+ * for some other directory entirely. It also stamps that bogus value on the row.
+ *
+ * Refusing costs the ordinary "no cwd" fail-open: the caller's `if (cwd)` skips
+ * the check and the row records `cwd = NULL` (LLP 0049 R1 as extended by
+ * LLP 0085), a state the system already models. It does NOT make this path fail
+ * closed; whether an unconfirmable cwd should drop is a separate, larger call.
+ *
+ * That fail-open is not free, so state the one case it costs: when the daemon's
+ * own process cwd sits under an ignoring `.hypignore` (a foreground start from a
+ * project dir, or a `--user` unit that renders no `WorkingDirectory=` and so
+ * inherits `$HOME`), guessing happened to reach the right verdict, and refusing
+ * now records where accepting dropped. It was still a guess - the same base also
+ * produced false drops for every session that ran elsewhere - so refusing is the
+ * right call, but it is a real narrowing of coverage, not a strict improvement.
+ * A drop that only holds while the daemon runs from the right directory is what
+ * fail-closed would have to replace, and that is the larger call above.
+ *
+ * The same two checks guard the rollout-stated cwd as `sessionMetaCwd`
+ * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`). They are
+ * restated here rather than borrowed from there: LLP 0150 scopes the in-band path
+ * out of its own mandate (in-band is a separate source, and its value is also
+ * stamped on the row), and the `error_kind` split below needs the two conjuncts
+ * apart, which that predicate's single answer does not give.
+ *
+ * One thing this does NOT reach, so nobody reads it as the whole gate: on the
+ * Codex route the value passed in is usually not the request's `cwd` but the
+ * workspace key `selectCodexWorkspace` picked for it, and that falls back to the
+ * first workspace when none matches, which is absolute and so accepted here even
+ * when the session ran elsewhere (#476). The rollout fallback at the call site
+ * sits outside this call, but it is not unguarded: `rollout-cwd.js` reads it
+ * through `readRolloutSessionMeta`, which applies `sessionMetaCwd`.
+ *
+ * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
+ * so the rollout fallback still gets its turn
+ * @param {string | undefined} cwd
+ * @param {{
+ *   log?: {
+ *     info?: (m: string, f?: Record<string, unknown>) => void,
+ *     warn?: (m: string, f?: Record<string, unknown>) => void,
+ *   },
+ * }} [ctx]
+ * @returns {string | undefined}
+ */
+function usableInBandCwd(cwd, ctx) {
+  if (cwd === undefined) return undefined
+  // Byte-identical when it passes: the trim is only the emptiness test, and a
+  // path is not ours to normalize. The trim gates nothing on its own - a blank
+  // string is never absolute on either platform, so `isAbsolute` already refuses
+  // it - it is here to split `error_kind` below, which is the only thing that
+  // tells blank apart from relative. Keep both conjuncts or that split dies.
+  if (cwd.trim().length > 0 && isAbsolute(cwd)) return cwd
+  // Never silently: a refused cwd means this exchange reached the gate with
+  // nothing to match, which is indistinguishable from "no cwd at all" in the
+  // row. Hash it - a cwd is user data (LLP 0049), and the drop log above uses
+  // the same digest so the two are correlatable.
+  // One gap, deliberate: a `cwd` of exactly `''` never arrives, because
+  // `readStringKey` and `firstString` both require a non-empty string, so it is
+  // refused upstream with no log. Same outcome (absent cwd, NULL column, and it
+  // was already absent before this predicate existed), no diagnostic. Closing it
+  // means loosening a helper with 16 other callers here, which is not worth it.
+  ctx?.log?.warn?.('plugin.codex.usage_policy_cwd_unusable', {
+    component: 'codex',
+    operation: 'usage_policy_cwd',
+    status: 'refused',
+    error_kind: cwd.trim().length === 0 ? 'cwd_blank' : 'cwd_not_absolute',
+    cwd_sha256: sha256Hex(cwd).slice(0, 16),
+  })
+  return undefined
 }
 
 /** @param {AiGatewayExchangeInput} input */

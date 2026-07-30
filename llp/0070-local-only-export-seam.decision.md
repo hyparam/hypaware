@@ -27,9 +27,9 @@
 > results returned into synced contexts, closing the transcript leak around
 > this seam.
 >
-> @ref LLP 0051#local-only [implements] — realizes the deferred class.
-> @ref LLP 0069 [implements] — the export-seam half of the login directory picker.
-> @ref LLP 0050#shared-matcher-in-core [constrained-by] — one shared resolver, extended not duplicated.
+> @ref LLP 0051#local-only [implements]: realizes the deferred class.
+> @ref LLP 0069 [implements]: the export-seam half of the login directory picker.
+> @ref LLP 0050#shared-matcher-in-core [constrained-by]: one shared resolver, extended not duplicated.
 
 ## Context
 

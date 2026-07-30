@@ -33,7 +33,7 @@ const MAX_BODY_BYTES = 64 * 1024
  * `.total`. The `session_id` is an opaque token: the gateway never
  * interprets it, keeping the LLP 0050 provider-agnostic boundary exact.
  *
- * @ref LLP 0066#control-path [implements] — the reserved `/_hypaware/`
+ * @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`
  * prefix is a local control surface; this handler owns the routes served
  * under it, holding only opaque session-id tokens.
  * @ref LLP 0066#readable [implements]: the ignored-session set has a reader,
@@ -143,7 +143,7 @@ export function createControlHandler(opts) {
  * whitespace-padded `session_id` would be stored trimmed but looked up raw,
  * so `ignoredSessions.has()` would miss and the exchange would be RECORDED
  * despite the opt-out — the privacy-relevant failure direction.
- * @ref LLP 0066#requirements — R5: the match key MUST be the session_id the
+ * @ref LLP 0066#requirements: R5: the match key MUST be the session_id the
  * adapter resolves and stamps, verbatim.
  *
  * @param {unknown} body

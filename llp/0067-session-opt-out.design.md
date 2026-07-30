@@ -8,9 +8,9 @@
 **Related:** LLP 0066, LLP 0049, LLP 0050, LLP 0051, LLP 0052
 
 > Buildable design for the ephemeral per-session opt-out.
-> @ref LLP 0066 [implements] — realizes the session-opt-out spec (control route + session_id drop).
-> @ref LLP 0050 [constrained-by] — the drop lives in the client adapters; the gateway stays provider-agnostic.
-> @ref LLP 0051 [constrained-by] — promotes the deferred session-opt-out sketch into a built design.
+> @ref LLP 0066 [implements]: realizes the session-opt-out spec (control route + session_id drop).
+> @ref LLP 0050 [constrained-by]: the drop lives in the client adapters; the gateway stays provider-agnostic.
+> @ref LLP 0051 [constrained-by]: promotes the deferred session-opt-out sketch into a built design.
 >
 > Satisfies [issue #220](https://github.com/hyparam/hypaware/issues/220): the
 > `hypaware-ignore` skill's endpoint is finally served. The skill
@@ -43,7 +43,7 @@ provider. So the control check must run **before** upstream matching (R2).
 `proxy.js handleRequest` gains a short-circuit at the top:
 
 ```js
-// @ref LLP 0066#control-path [implements] — the reserved /_hypaware/ prefix is
+// @ref LLP 0066#control-path [implements]: the reserved /_hypaware/ prefix is
 // a LOCAL control surface: handled in-process, never matched against upstreams,
 // never proxied. Checked BEFORE matchUpstream so a catch-all upstream cannot
 // leak a control request to a provider.
@@ -109,7 +109,7 @@ transitions (restart, changed session id) from silent into detectable.
 
 ```js
 // api.js createGatewayState() — one per plugin activation (index.js activate())
-// @ref LLP 0066#ephemeral — in-memory only: no file, no cache column; dies with
+// @ref LLP 0066#ephemeral: in-memory only: no file, no cache column; dies with
 // the daemon process. Lives on GatewayState (NOT per-listener) so a config
 // reload() — which tears down and relaunches the listener (source.js) — does
 // not silently re-enable recording mid-session.
@@ -167,12 +167,12 @@ exchange does no fs work:
 
 ```js
 const sessionId = resolveClaudeSessionId(reqBody, headers)
-// @ref LLP 0066#enforcement [implements] — session opt-out drop, keyed on the
+// @ref LLP 0066#enforcement [implements]: session opt-out drop, keyed on the
 // SAME resolved session_id the row is stamped with (R5): when present,
 // resolveAnthropicConversationId returns exactly this value as the session_id
 // column, and the hash fallback it uses otherwise can never be in the set (the
 // skill only ever submits a real CLAUDE_CODE_SESSION_ID).
-// @ref LLP 0050 — second match key, same adapter seam as the .hypignore drop.
+// @ref LLP 0050: second match key, same adapter seam as the .hypignore drop.
 if (sessionId && ctx.isSessionIgnored?.(sessionId)) {
   ctx.log.info('plugin.claude.usage_policy_drop', {
     component: 'claude',
@@ -199,7 +199,7 @@ so the `conversationId` / `sessionId` resolution **hoists above**
 stamped with (R5), next to the existing cwd check:
 
 ```js
-// @ref LLP 0066#enforcement [implements] — session opt-out drop. Keyed on the
+// @ref LLP 0066#enforcement [implements]: session opt-out drop. Keyed on the
 // stamped session_id (metadata.session_id ?? thread id). NOTE the documented
 // over-drop (LLP 0066#scope): one Codex session_id contains multiple
 // conversation_id threads, so an ignored session suppresses ALL of them.
@@ -227,7 +227,7 @@ Deliberately **not** `hyp ignore --session`:
 [LLP 0110](./0110-hyp-policy-verb.issue.md) diagnosed exactly that shape
 ("the verb no longer names the action, it names the store the flag writes to")
 and left bare `hyp ignore <path>` as the honest `.hypignore` dotfile author.
-As a plugin-contributed group, `hyp session` also inherits LLP 0098/0099's
+As a plugin-contributed group, `hyp session` also inherits LLP 0153/0154's
 inactive-plugin `repair:` line when the gateway is not in the active config.
 
 One client-agnostic verb group replaces per-client skill bodies: the Codex
@@ -304,12 +304,109 @@ the running daemon knows the proven one.
 
 ### Session-id resolution {#cli-session-id}
 
-An explicit argument wins. Otherwise an id **stated** by the client that spawned
-this process: `CLAUDE_CODE_SESSION_ID` (Claude) or `CODEX_THREAD_ID` (Codex).
-Otherwise the id is inferred from disk:
-`$CODEX_HOME/sessions/**/rollout-<ts>-<uuid>.jsonl`, whose first `session_meta`
-line carries `payload.id` and `payload.cwd`. The verb selects the rollout whose
-`payload.cwd` equals the invocation cwd.
+An explicit argument wins. Otherwise `CLAUDE_CODE_SESSION_ID` (for Claude the
+session *is* the conversation, so a stated id is already the drop key).
+Otherwise Codex, where the answer has to be assembled from two sources because
+neither one carries it alone:
+
+| source | states | does not state |
+|---|---|---|
+| `CODEX_THREAD_ID` in the environment | which **thread** is running now | the session containing it |
+| the rollout's first `session_meta` line | `payload.session_id` (the **container**), `payload.id` (the thread), `payload.cwd` | whether that session is still live |
+
+So `CODEX_THREAD_ID` is used as a **selector, not an answer**: it names the live
+thread, the rollout recording that thread is looked up by `payload.id`, and the
+container is read out of it. Absent the variable (an old Codex, or a hand
+invocation from a terminal), the rollout is selected by matching `payload.cwd`
+against the invocation cwd instead, and the staleness bound below stands in for
+the liveness the environment would have given.
+
+#### The answer is the container, never the thread {#cli-drop-key}
+
+Settled by [issue #453](https://github.com/hyparam/hypaware/issues/453). The
+drop matches the `session_id` the adapter stamps
+([LLP 0066 §scope](./0066-session-opt-out.spec.md#scope), R5), which for Codex is
+the session container. A thread id is the same uuid on a **root** thread and a
+different one on a **subagent** thread, so resolving to a thread id is a control
+that works everywhere it is casually tested and silently does nothing where it
+matters: `hyp session ignore` from inside a subagent tool call printed "the
+gateway will drop this session" for an id the gateway never sees.
+
+**Liveness versus the correct key.** `CODEX_THREAD_ID` is the better *liveness*
+signal (Codex sets it on the process it spawns for a tool call, so a finished
+thread cannot have set it, where mtime is only a proxy), but it is the *wrong
+grain*. The resolution keeps both by splitting their jobs, as above: the variable
+picks the rollout, the rollout supplies the key. Where only one of the two can be
+had, the key wins and the verb refuses - a refusal costs the user a re-run with
+an explicit id, whereas a confident wrong key costs them the recording they
+believed they had stopped.
+
+**No staleness bound on the stated-thread path, deliberately.** The cwd scan
+needs one because a stale rollout matching the cwd is a *different, finished*
+session being mistaken for this one, which is a wrong-identity risk. The stated
+path cannot have that risk: `CODEX_THREAD_ID` names one thread, Codex injects it
+into every exec tool call and it survives `shell_environment_policy` filtering
+(`include_only` and `exclude` are both applied before the injection), so it is
+always the spawning thread's own id, never an inherited stale one. What remains
+is a liveness residue - a process that outlives the thread that spawned it keeps
+the variable - and its cost is one extra entry in an in-memory set covering a
+container that is already the *right* container, i.e. the over-drop direction. An
+age bound would instead false-refuse during a long tool call, when the rollout is
+legitimately untouched for however long the call runs; that pushes the user
+towards giving up, which is the under-drop direction. Both errors are not equal,
+so the bound stays off here and on there.
+
+**Known limit: agreement is checked against a bounded listing.** Finding the
+stated thread is an identity test, so the `MAX_ROLLOUT_SCAN` bound cannot
+invalidate a hit. The check that the matched rollouts *agree* on the container
+does read on the listing, so on a truncated scan a disagreeing rollout may never
+be reached and a lone match is taken as agreement. Refusing on truncation would
+disable auto-resolution for every history past the bound, and the trigger needs
+two rollouts whose **first line** states one `payload.id` under two different
+containers, which Codex does not write (a fork copies the parent `session_meta`
+as a later line, and only line 1 is read) - it takes hand-copied history.
+Recorded as a known limit rather than closed.
+
+#### `session_id` absent is unresolvable, NOT the thread id {#cli-legacy-rollout}
+
+The trap in the same issue. Codex's `SessionMetaLine` has a hand-written
+`Deserialize` that **back-fills `session_id` from `id`** when the field is
+absent, so a pre-field rollout parses cleanly and hands back the *thread* id
+under the name `session_id`. Any reader that trusts a deserialized
+`session_meta` therefore reintroduces the wrong key on exactly the files where
+nothing else would reveal it.
+
+The resolver reads the **raw JSONL line** for this reason: an absent field is
+visible as absent, and absent means **refuse** (R13). It does not fall back to
+the thread id, and it does not fall back to the cwd scan when a stated thread's
+rollout cannot be read - that scan answers about a thread nothing tied to this
+invocation, and the stated thread has already said it would be the wrong one.
+The refusal names the file, says why a thread id will not do, and points at
+`hyp session status <session-id>`.
+
+**Reading the raw line is not trusting the line.** Two shape guards keep the
+same refusal covering the cases where the field is *present* but says nothing
+usable, since a present-but-unusable key would be reported as the answer and then
+match nothing at the drop - the same silent no-op by another route:
+
+- The record must be the `session_meta` **header**. It is the only record type
+  that states the container, so the fields appearing on a differently-typed first
+  record are not evidence about it (`codex/src/rollout-cwd.js` type-checks the
+  same line for the same reason).
+- A **blank** or non-string `session_id` counts as absent, exactly as a blank
+  environment variable is not a stated id. Ids are opaque provider tokens
+  ([LLP 0066](./0066-session-opt-out.spec.md#requirements) R5), so the test
+  trims but the value is passed on byte-identical.
+
+`codex/src/backfill.js` reads the same field for the partition key, so both
+ingestion paths key on one identifier
+([§backfill-partition-key](#backfill-partition-key)).
+
+**Two clients each stating one refuses.** Environments nest (Codex runs
+`claude`, or the reverse) and the child inherits the parent's variable while
+setting its own, so `CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID` can both be
+set at once while only one names the session this invocation is in. Preferring
+either is a guess that is wrong half the time.
 
 **A stated id is a liveness signal; the disk inference is not.** Codex injects
 `CODEX_THREAD_ID` into the environment of every shell/exec tool subprocess, and
@@ -359,9 +456,14 @@ into a long directory scan. **A truncated walk also refuses**: "exactly one cwd
 match" over a partial listing is an artefact of the bound, not a fact, since
 the rollout that would have made it ambiguous may be one of the files never
 looked at. Truncation is therefore reported and treated as unresolvable rather
-than resolved on partial evidence.
+than resolved on partial evidence. It is *not* fatal on the stated-thread path
+when the thread was found: that match is an identity test on a value the client
+stated, not a uniqueness claim over the listing, so a file never read cannot
+invalidate a hit.
 
-**A single STALE match refuses too.** The ambiguity rule only fires at two or
+**A single STALE match refuses too**, on the cwd path only - a stated thread
+needs no age bound, because the thread that set the variable is the one running
+now. The ambiguity rule only fires at two or
 more matches, so a cwd where Codex ran exactly once, days ago, has exactly one
 match and would otherwise resolve confidently to a **dead** session id. That is
 the wrong-session failure of [§cli-response-check](#cli-response-check) arriving
@@ -376,46 +478,15 @@ hatch, exactly like the ambiguous case.
 
 The bound narrows the window; it does not close it. A session that ended a few
 minutes ago is still within it, and mtime is a proxy for liveness rather than
-proof of it. **`CODEX_THREAD_ID` closes it for the path that matters** (a `hyp`
-run from inside a Codex tool call, which is how the privacy skills invoke it):
-a stated id is taken first, so the proxy is never consulted. What remains is
-the residual for the disk path only, which is now reached in two cases:
-
-1. A Codex old enough not to set the variable (pre-0.65-era builds).
-2. A hand invocation from a terminal, where no client set anything.
-
-Neither is closable from here: a rollout carries no terminal record to check
-against, and upstream has deliberately moved away from writing one
-([openai/codex#19630](https://github.com/openai/codex/pull/19630),
-"Avoid persisting `ShutdownComplete` after thread shutdown", merged 2026-04-28,
-so shutdown is not a persisted rollout line at all). For those two cases the
-residual stays handled by making the inference **visible** rather than silent.
-
-**The stated id is the thread; the drop keys on the session container.**
-`CODEX_THREAD_ID` is `session.conversation_id`, the thread. The adapter stamps
-`session_id` from `metadata.session_id` and the thread as `conversation_id`
-([LLP 0030](./0030-session-id-partition-key.decision.md)) and the drop matches
-on `session_id` ([LLP 0066 §scope](./0066-session-opt-out.spec.md#scope)), so
-the two only coincide when Codex derives the session id from the thread id.
-It does that for a **root** thread, where `SessionId::from(thread_id)` reuses
-the same uuid, and that is the common case. It does *not* for a **subagent**
-thread, which keeps the root's session id and mints its own thread id. An
-opt-out taken from inside a subagent tool call therefore states an id the drop
-never matches, and the verb reports success for a suppression that suppresses
-nothing. That is the mirror image of the over-drop LLP 0066 §scope already
-records: there an id at session grain suppresses more than the user asked for,
-here an id at thread grain suppresses nothing at all.
-
-The disk scan has exactly the same property, because the rollout's `payload.id`
-is also the thread id, so the switch does not introduce this and does not widen
-it. Two things about it did change, and are recorded here rather than fixed:
-the Codex path is no longer latent (LLP 0066 §scope calls the over-drop latent
-"because the only opt-out skill today is Claude-only"), and it is now
-**closable**, because current Codex writes `session_meta.session_id` beside
-`session_meta.id` in the rollout, so the drop key itself is on disk. Both the
-resolver and `codex/src/backfill.js` (whose "the rollout carries no distinct
-session id" comment predates the field) would have to move together, which is
-more than this change is scoped for. Worth its own issue.
+proof of it. `CODEX_THREAD_ID` closes it for the path that matters (a `hyp` run
+from inside a Codex tool call, which is how the privacy skills invoke it): a
+stated thread is selected first, so the proxy is never consulted. What remains is
+the residual for the cwd path only - an old Codex, or a hand invocation from a
+terminal - and it stays handled by making the inference **visible** rather than
+silent. The stated path has a narrower residual of its own: a process that
+OUTLIVES its spawn (a server or `tmux` pane started from a tool call) inherits
+the variable and keeps it after the thread ends, so the claim to make there is
+"proof of provenance", not "proof of liveness".
 
 ### The verb reports the provenance of its own inputs {#cli-provenance}
 
@@ -437,6 +508,40 @@ than a live daemon. The write verbs print it too, where "ignored" reads as done.
 This is the change's own thesis turned on its weakest inputs: a privacy control
 that can be wrong must at least say where it could be wrong, so a user who is
 handed the wrong session can *see* it instead of discovering it in the cache.
+
+**The Codex answer also discloses its grain, and both ids.** The id acted on is
+the session container, which is coarser than the thread the user is in
+([§cli-drop-key](#cli-drop-key)), so `--json` reports `thread_id` beside
+`session_id` and the human form says the drop covers every thread in the session,
+sibling and subagent threads included. Two reasons, both learned from #453:
+reporting one id and calling it "the session" is how the two got conflated in the
+first place, and a user who asked to stop recording "this conversation" is owed
+the fact that it stopped more than that. The `codex_env_rollout` source names the
+split explicitly - Codex stated the thread, the container had to be read from
+that thread's rollout - so nobody has to guess which half came from where.
+
+### Backfill keys on the same identifier {#backfill-partition-key}
+
+`codex/src/backfill.js` used to stamp `session_id` and `conversation_id` from the
+one value it had, the rollout id, on the premise that "the rollout carries no
+distinct session id". Current Codex writes `session_meta.session_id` beside
+`session_meta.id`, so the premise expired: backfill reads the container for
+`session_id` and keeps the thread in `conversation_id`, matching what the live
+projector stamps from `metadata.session_id`
+([LLP 0030](./0030-session-id-partition-key.decision.md) decision 1).
+
+This is a correctness requirement for the opt-out, not tidiness (R13): if the two
+paths disagreed, "the session id" would name two different things depending on
+how a row arrived, and the id `hyp session ignore` reports would be right for one
+of them and wrong for the other. A rollout with no container recorded still falls
+back to the thread id, which is all such a file can support - and is why the CLI
+resolver refuses on those rather than acting on a key it cannot establish
+([§cli-legacy-rollout](#cli-legacy-rollout)).
+
+Row identity is untouched: the fallback-hash and prior-message scope is
+`conversation_id ?? session_id` (LLP 0030 decision 3), and `conversation_id`
+still holds the thread, so backfilled `part_id`s are unchanged and keep deduping
+against live rows.
 
 ### What is deliberately not covered
 
@@ -472,13 +577,14 @@ Traditional tests (root `test/`, alongside the existing suites):
   refuses when several, none, a truncated scan, or a **single stale** match
   (backdated mtime), while the same rollout still resolves under a wider age
   bound so the refusal is provably about staleness and not the cwd match. A
-  stated `CODEX_THREAD_ID` is taken ahead of the disk scan and reported as
-  `codex_env` with no `session_id_evidence` and no `INFERRED` line; the
-  fail-open it closes is pinned directly, with a rollout for a session that
-  ended inside the 30-minute bound alongside a `CODEX_THREAD_ID` naming the
-  live one (the disk path resolves the dead id, the stated path the live one);
-  a blank variable falls through rather than resolving to nothing; both
-  variables set at once refuses and names both.
+  stated `CODEX_THREAD_ID` selects the rollout ahead of the cwd match, and the
+  fail-open that closes is pinned directly: a rollout for a session that ended
+  inside the 30-minute bound sits alongside a `CODEX_THREAD_ID` naming the live
+  one, and the cwd path resolves the dead container where the stated-thread path
+  resolves the live one. Because the container is still READ from that rollout,
+  the answer reports `codex_env_rollout` with the rollout named in
+  `session_id_evidence` - the variable buys liveness, not the key, so this path
+  is qualified rather than presented as stated outright.
   [§cli-provenance](#cli-provenance): a disk-inferred id reports
   `session_id_source: 'codex_rollout'` plus the rollout filename in `--json`
   and `INFERRED from <rollout>` in the human form, from `status` and `ignore`
@@ -491,6 +597,27 @@ Traditional tests (root `test/`, alongside the existing suites):
   unparseable body, a non-200, and a reply about a different `session_id`
   (including `ignored: true`) all report `unknown`, and `hyp session ignore`
   against the same responder reports no success.
+  [§cli-drop-key](#cli-drop-key) (R13, issue #453) is pinned against the code
+  that performs the drop, not against a restated string: a **subagent-shaped**
+  rollout (root `session_id` != own `payload.id`) resolves the container on both
+  the stated-thread and cwd paths, that id makes
+  `codex/src/exchange-projector.js` return `USAGE_POLICY_DROP` for a subagent
+  turn, and the thread id it used to state does **not** - the silent no-op, held
+  in the test so it cannot come back. A **legacy** rollout with no `session_id`
+  field refuses on both paths ([§cli-legacy-rollout](#cli-legacy-rollout)) while
+  the same thread in a rollout that records a container resolves, so the refusal
+  is provably about the absent field; `hyp session ignore` on it prints nothing
+  that reads as done, exits `unknown`, and adds nothing to the set. A stated
+  thread with no rollout refuses instead of falling back to the cwd scan; a blank
+  variable falls through; both client variables set at once refuses and names
+  both. The grain disclosure reports `thread_id` beside `session_id` in `--json`
+  and names the whole-session scope in the human form, from `status` and `ignore`
+  alike. The present-but-unusable cases refuse alongside the absent one: a blank
+  or non-string `session_id`, and the fields carried on a first record that is not
+  the `session_meta` header, with the header itself still resolving so each
+  refusal is provably about its own guard. Rollouts that **disagree** about which
+  session contains a stated thread refuse naming both candidate keys, while
+  rollouts that agree resolve.
 - `test/plugins/ai-gateway-proxy-routing.test.js` (extend): with a catch-all
   (`/`) upstream configured, `/_hypaware/ignore/session` is handled locally
   and never forwarded (R2); no exchange is started for a control request.
@@ -504,6 +631,12 @@ Traditional tests (root `test/`, alongside the existing suites):
   `conversation_id` threads under one ignored `session_id` → **both** dropped
   (documents the over-drop, R8); a different session in the same run is
   unaffected.
+- `test/plugins/codex-backfill.test.js` (extend,
+  [§backfill-partition-key](#backfill-partition-key)): a subagent rollout
+  partitions on `session_meta.session_id` with the thread in
+  `conversation_id`, through the real materializer to the row columns; a rollout
+  with no `session_id` field keeps the thread as its partition key, since that is
+  all such a file records.
 - Independence matrix (R7): `.hypignore`d cwd + session not in set → drop;
   clean cwd + session in set → drop; both → drop; neither → rows.
 - Restart/reload semantics (R3): a fresh `GatewayState` starts empty
@@ -527,7 +660,9 @@ rules.
 | `ai-gateway/src/control.js` route handler | `@ref LLP 0066#control-path [implements]` |
 | `ai-gateway/src/control.js` `GET` read branch | `@ref LLP 0066#readable [implements]` |
 | `ai-gateway/src/session_command.js` fail-closed CLI reader | `@ref LLP 0066#readable [implements]` / `@ref LLP 0067#cli [implements]` |
-| `ai-gateway/src/session_command.js` `resolveSessionIdForCli` | `@ref LLP 0067#cli-session-id [implements]` (ambiguity, truncation, staleness) |
+| `ai-gateway/src/session_command.js` `resolveSessionIdForCli` | `@ref LLP 0067#cli-session-id [implements]` (the drop key, ambiguity, truncation, staleness) |
+| `ai-gateway/src/session_command.js` `readRolloutMeta` | `@ref LLP 0067#cli-session-id [implements]` (raw line, so an absent `session_id` is not the back-filled thread id) |
+| `codex/src/backfill.js` `buildSession` / `projectedExchangeFromSession` | `@ref LLP 0030#decision [implements]` (container in `session_id`, thread in `conversation_id`) |
 | `ai-gateway/src/session_command.js` `provenanceNotes` | `@ref LLP 0066#readable [implements]` / `@ref LLP 0067#cli-provenance [implements]` |
 | `ai-gateway/src/session_command.js` `EPHEMERAL_NOTE` (one caveat string, printed by the writer and the reader) | `@ref LLP 0066#readable [implements]` (R9: name both ways an opt-out stops applying, not only the restart) |
 | `ai-gateway/src/index.js` `session` verb group | `@ref LLP 0067#cli [implements]` |

@@ -305,7 +305,7 @@ edits with the code" rule:
   `@ref LLP 0031#central-layer-is-sacrosanct [implements]`.
 - `runJoin` central-seed write (`core_commands.js`) →
   `@ref LLP 0031#physical-layout [implements]` (the existing
-  `@ref LLP 0025#seed-config-mode` on the function still holds — `join` remains
+  `@ref LLP 0025#seed-config-mode` on the function still holds; `join` remains
   a wrapper over write-seed + install).
 - Active-slot pointer relocation + seed retirement (`apply.js`) →
   `@ref LLP 0031#physical-layout [constrained-by]` / `[implements]`.

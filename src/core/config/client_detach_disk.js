@@ -32,8 +32,8 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
  * strip and prior-`model_provider` restore. The managed-block convention is
  * therefore a **core-understood format contract**, not a codex-private detail.
  *
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — one core/disk-driven undo, format-aware (json marker-key / toml managed-block), plugin-agnostic, reusing resolveClientSettingsPath + the probeClientAttached format dispatch
- * @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by] — the marker is the backup; reverse restores it (or removes the managed value) on leave
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: one core/disk-driven undo, format-aware (json marker-key / toml managed-block), plugin-agnostic, reusing resolveClientSettingsPath + the probeClientAttached format dispatch
+ * @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker is the backup; reverse restores it (or removes the managed value) on leave
  */
 
 const TOML_MANAGED_BEGIN = '# BEGIN hypaware'
@@ -131,7 +131,7 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   // instead of just deleting the marker — otherwise env.ANTHROPIC_BASE_URL and
   // the `hyp claude-hook session-context` entries it wrote would orphan, and the
   // detach is non-retryable once the marker is gone.
-  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — legacy markers predate the undo record; fall back to the convention attach used before it
+  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: legacy markers predate the undo record; fall back to the convention attach used before it
   if (!isPlainObject(marker.managed)) {
     return await detachLegacyJsonMarker({
       settingsPath,

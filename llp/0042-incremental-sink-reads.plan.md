@@ -16,7 +16,7 @@
 > watermark keyed by the **logical** partition path — decomposes cleanly along the
 > producer → read-API → persistence → consumer seam.
 
-@ref LLP 0040 — incremental sink reads design
+@ref LLP 0040: incremental sink reads design
 
 ## How the work splits
 

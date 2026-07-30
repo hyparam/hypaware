@@ -130,7 +130,7 @@ const REPORTS_PATH = '/v1/reports'
  *
  * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
  * @returns {string}
- * @ref LLP 0111#endpoint [implements]: reports endpoint derives from the registered base; no second URL is configured
+ * @ref LLP 0155#endpoint [implements]: reports endpoint derives from the registered base; no second URL is configured
  */
 export function deriveReportsEndpoint(url) {
   /** @type {URL} */

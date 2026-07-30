@@ -59,7 +59,7 @@ const MIN_TICK_INTERVAL_MS = 25
  * import. Exported so the ordering is a unit-testable invariant.
  *
  * @type {ActionHandler[]}
- * @ref LLP 0045#module--seam-breakdown-independently-mergeable-tasks [implements] — register [attachHandler, backfillHandler], attach first so live capture leads the backfill subprocess
+ * @ref LLP 0045#module--seam-breakdown-independently-mergeable-tasks [implements]: register [attachHandler, backfillHandler], attach first so live capture leads the backfill subprocess
  */
 export const DEFAULT_ACTION_HANDLERS = [attachHandler, backfillHandler]
 
@@ -305,7 +305,7 @@ export async function runDaemon(opts = {}) {
   // (LLP 0045) and the run-once backfill-on-join (LLP 0037). Constructed only
   // after boot because a pass needs the effective config + the kernel backfill
   // registry, and the attach seam reads the gateway capability the boot bound.
-  // @ref LLP 0041#the-reconciler-component [implements] — construct the reconciler in the daemon
+  // @ref LLP 0041#the-reconciler-component [implements]: construct the reconciler in the daemon
   const actionReconciler =
     opts.actionReconciler ??
     createActionReconciler({
@@ -315,7 +315,7 @@ export async function runDaemon(opts = {}) {
       // handlers serially and `backfillHandler.perform()` awaits its child, so
       // attach-first avoids stranding live capture behind the historical import
       // (data is order-insensitive — this is purely the latency ordering).
-      // @ref LLP 0045#module--seam-breakdown-independently-mergeable-tasks [implements] — register [attachHandler, backfillHandler], attach first
+      // @ref LLP 0045#module--seam-breakdown-independently-mergeable-tasks [implements]: register [attachHandler, backfillHandler], attach first
       handlers: DEFAULT_ACTION_HANDLERS,
       log: getLogger('action-reconciler'),
     })
@@ -339,7 +339,7 @@ export async function runDaemon(opts = {}) {
   // observe a half-resolved seam (e.g. a transiently-empty `clients`); the
   // attach handler's `desired()` always reads the fully-resolved-at-boot value,
   // and reversal can never over-fire on a momentary `clients` gap.
-  // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — daemon resolves clientDescriptors from the catalog, clients/endpoint from boot.runtime.capabilities when the gateway is enabled
+  // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements]: daemon resolves clientDescriptors from the catalog, clients/endpoint from boot.runtime.capabilities when the gateway is enabled
   const clientSeam = resolveClientActionSeam({ boot, fileLog })
 
   /**
@@ -828,7 +828,7 @@ export function createReconcilePassScheduler({ run, log }) {
  *
  * @param {{ boot: BootKernelResult, fileLog: ReturnType<typeof openDaemonLog> }} args
  * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: AiGatewayCapability | undefined, endpoint: string | undefined }}
- * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability; daemon endpoint requires a proven-bound localEndpoint() (no configured-listen fallback — that's the manual path's)
+ * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements]: clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability; daemon endpoint requires a proven-bound localEndpoint() (no configured-listen fallback; that's the manual path's)
  */
 function resolveClientActionSeam({ boot, fileLog }) {
   const clientDescriptors = boot.clientDescriptors

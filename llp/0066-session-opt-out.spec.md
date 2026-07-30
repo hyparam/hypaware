@@ -59,8 +59,29 @@ For **Claude**, `session_id == the conversation`, so the drop is exact. For
 **Codex**, `session_id` is a container of multiple `conversation_id` threads, so
 a `session_id` drop is broader than "this conversation": it suppresses every
 thread in the session. Per-thread (`conversation_id`) granularity is a
-[non-goal](#non-goals); the over-drop is latent, not live, because the only
-opt-out skill today is Claude-only and Claude has no `conversation_id`.
+[non-goal](#non-goals).
+
+**The over-drop is live, not latent** (revised, [issue #453](https://github.com/hyparam/hypaware/issues/453)).
+The original text called it latent "because the only opt-out skill today is
+Claude-only"; `hyp session ignore` ([readable](#readable)) is client-agnostic, so
+a Codex user reaches the key directly.
+
+**And the mirror-image failure is the dangerous one.** Codex has a *second*
+identifier at a finer grain, the **thread id**, and it is easy to reach and easy
+to mistake for the key:
+
+- A **root** thread takes `session_id = SessionId::from(thread_id)`, the same
+  uuid, so the two coincide and nothing looks wrong.
+- A **subagent** thread inherits the root's `session_id` and mints its own
+  `thread_id`; its shell tool calls export that thread id as `CODEX_THREAD_ID`.
+
+An opt-out stated against a thread id therefore matches **nothing**: not now, and
+not later either, since the "latent" reading of a stored id assumes something
+will eventually match it. Where the over-drop suppresses more than the user
+asked, this suppresses nothing at all while reporting success, which is the worse
+direction for a privacy control. So the key is not merely *documented* as the
+container: anything that names a session to the control route MUST name the
+container or refuse (R13).
 
 ## Enforcement: control route in the gateway, drop in the adapter {#enforcement}
 
@@ -239,15 +260,20 @@ set remains [non-goal 2](#non-goals).
   session, so resolving it would answer confidently about a session the user is
   not in (see
   [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
-  An id a client **states** in this process's environment
-  (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) is not an inference and carries
-  no such bound, because there is no timestamp to bound: the session that named
-  it spawned this process. That is liveness for a `hyp` run inside the tool call
-  the client is blocked on, and provenance rather than liveness for a process
-  that outlives its spawn, which is a strictly narrower residual than the mtime
-  bound and is recorded in
+  What a client **states** in this process's environment
+  (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) carries no such bound, because
+  there is no timestamp to bound: whatever named it spawned this process. That is
+  liveness for a `hyp` run inside the tool call the client is blocked on, and
+  provenance rather than liveness for a process that outlives its spawn, which is
+  a strictly narrower residual than the mtime bound and is recorded in
   [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id).
-  Two clients each stating one is ambiguity and MUST refuse like any other.
+  The two variables state different **grains**, and only the Claude one states
+  the drop key: `CODEX_THREAD_ID` names a thread, so under R13 it may only
+  **select** the rollout the container is then read out of. Removing the age
+  bound on that path is therefore about liveness alone and does not make the
+  resolved container a stated fact - it stays an inference, and R12 still applies
+  to it. Two clients each stating one is ambiguity and MUST refuse like any
+  other.
 - **R12.** Where an answer rests on an inference rather than a stated fact, the
   reader MUST say so alongside the answer: which source the `session_id` came
   from (and, when inferred, from what), and whether the endpoint was proven
@@ -257,6 +283,29 @@ set remains [non-goal 2](#non-goals).
   [LLP 0067 §cli-provenance](./0067-session-opt-out.design.md#cli-provenance)).
 - **R11.** The reader MUST name the folder governor (`.hypignore`) it does not
   cover, since either mechanism independently suppresses (R7).
+- **R13.** Every surface that names a session to the control route MUST name the
+  **session container** the drop matches (R5), never a finer-grained client
+  identifier that happens to be easier to obtain. Specifically, a Codex
+  **thread** id MUST NOT be stated as a session id: it coincides with the
+  container on a root thread and diverges on a subagent one, so stating it
+  reports an opt-out that suppresses nothing (see [scope](#scope)).
+  - Where the container cannot be established, the surface MUST **refuse**
+    (`unknown`, nonzero) rather than substitute the thread id. This includes a
+    rollout that records no `session_id` field at all: Codex's own
+    `SessionMetaLine` deserializer back-fills that field from the thread id, so a
+    reader that trusts the parsed value silently reintroduces exactly the wrong
+    key (see [LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
+    A field that is **present but unusable** (blank, non-string, or carried on a
+    record that does not state the container) MUST refuse the same way: reported
+    as the answer it would match nothing at the drop, which is the same silent
+    no-op reached by another route.
+  - Backfill MUST agree with the live path about which identifier is the
+    partition key, so an opt-out names one identifier rather than one per
+    ingestion path
+    ([LLP 0030](./0030-session-id-partition-key.decision.md) decision 1).
+  - Because the acted-on key is coarser than the thread the user is in, the
+    surface MUST disclose that grain alongside the answer (R12): "ignored" means
+    the whole session, sibling threads included.
 
 ## `@ref` annotations code will carry {#refs}
 

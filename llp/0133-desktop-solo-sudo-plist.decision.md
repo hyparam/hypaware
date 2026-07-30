@@ -57,10 +57,43 @@ the dialog) stands, reinforced:
    restarted to pick up the plist.
 3. <a id="attribution"></a>**Attribution rides `entrypoint`, not the
    User-Agent.** Desktop delegates inference to its embedded CLI, so rows
-   land `client_name: "claude"` with `entrypoint: "claude-desktop-3p"`;
+   land `client_name: "claude"` with a Desktop-owned `entrypoint`;
    0115's `Claude-Desktop/<version>` UA stamping path never fires. Query
    Desktop activity by entrypoint; the UA-stamping projector branch is
    dead code for this route.
+
+   The entrypoint value and the transcript location have both drifted
+   between Desktop builds, once within a single week, so treat them as a
+   set to re-verify per release, not constants:
+
+   - The first live test (2026-07-22) observed `claude-desktop-3p` and a
+     3p config directory nested inside the main container
+     (`~/Library/Application Support/Claude/Claude-3p`, the residue path
+     above).
+   - Desktop app 1.13576.0 / embedded CLI 2.1.177 (2026-07-29) boots a
+     sibling container (`~/Library/Application Support/Claude-3p`) and
+     runs each conversation's CLI in a per-session sandbox home
+     (`local-agent-mode-sessions/<...>/local_<id>/`), so the transcript
+     lands in a `.claude/projects` tree nested inside that sandbox,
+     tagged `entrypoint: "local-agent"`, and the shared
+     `~/.claude/projects` receives nothing. Un-attached Desktop is the
+     inverse: it writes `entrypoint: "claude-desktop"` into the shared
+     tree (LLP 0140's motivating case).
+
+   The claude adapter therefore scans both 3p container layouts for
+   transcripts (`claudeDesktop3pSessionRoots`), live and in backfill. The
+   Desktop manifest claims the two shared-tree values (`claude-desktop`,
+   `claude-desktop-3p`); container values like `local-agent` are
+   deliberately unclaimed, because container sessions are owned by their
+   root, not their tag (LLP 0140#container-root-owns). On the live path,
+   root discovery is TTL-cached with a forced re-sweep on a lookup miss
+   (`createDesktop3pDirsCache`): every attached-Desktop exchange is a
+   shared-tree miss by construction, and the container's per-session
+   sandbox homes grow with every conversation, so an uncached per-exchange
+   walk grew without bound while the cache stays invisible to correctness.
+   Note the sibling `Claude-3p` container holds the attached Desktop's
+   live session data: it is NOT the dialog residue this decision's
+   install step clears, and must never be deleted by it.
 
 ## Consequences
 

@@ -30,7 +30,7 @@
  *
  * @param {PluginConfigInstance | undefined} entry
  * @returns {{ onJoin: boolean | undefined }}
- * @ref LLP 0044#where-attach-is-declared [constrained-by] — attach policy (`on_join`) is owned by the client plugin; the kernel only reads it
+ * @ref LLP 0044#where-attach-is-declared [constrained-by]: attach policy (`on_join`) is owned by the client plugin; the kernel only reads it
  */
 export function readAttachPolicy(entry) {
   const config = entry?.config

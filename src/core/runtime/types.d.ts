@@ -13,14 +13,13 @@ import type {
   PluginLockEntry,
   PluginManifest,
   PluginName,
-  PluginPaths,
   QueryRegistry,
   SkillRegistry,
   VerbRegistry,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
-import type { ExtendedQueryStorageService, SourceWithholdResolver } from '../cache/types.d.ts'
+import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
 import type { ClientDescriptor, LoadedManifest, FailedManifest } from '../types.d.ts'
 import type {
   CapabilityRegistryHandle,
@@ -161,39 +160,6 @@ export interface KernelRuntime {
   configControl?: ConfigControlFacade
 }
 
-export interface CreateKernelRuntimeArgs {
-  capabilityRegistry?: CapabilityRegistryHandle
-  commandRegistry?: CommandRegistry
-  queryRegistry?: QueryRegistry
-  verbRegistry?: VerbRegistry
-  sourceRegistry?: ExtendedSourceRegistry
-  sinkRegistry?: ExtendedSinkRegistry
-  backfillRegistry?: BackfillRegistry
-  backfillMaterializerRegistry?: BackfillMaterializerRegistry
-  storage?: ExtendedQueryStorageService
-  cacheRoot?: string
-  configControl?: ConfigControlFacade
-  sourceWithholdResolver?: SourceWithholdResolver
-}
-
-export interface CreateActivationContextArgs {
-  runtime: KernelRuntime
-  plugin: ActivePlugin
-  paths: PluginPaths
-  config?: JsonObject
-  env?: NodeJS.ProcessEnv
-}
-
-// --- paths ---
-
-export interface CreatePluginPathsArgs {
-  pluginName: PluginName
-  rootDir: string
-  stateRoot: string
-  runId: string
-  tmpRoot?: string
-}
-
 // --- loader ---
 
 export interface PluginActivationEntry {
@@ -215,19 +181,6 @@ export interface ActivationFailure {
 }
 
 export type ActivationResult = ActivationSuccess | ActivationFailure
-
-export interface ActivatePluginsArgs {
-  plugins: PluginActivationEntry[]
-  stateRoot: string
-  runId: string
-  runtime?: KernelRuntime
-  tmpRoot?: string
-}
-
-export interface ActivatePluginsResult {
-  runtime: KernelRuntime
-  results: ActivationResult[]
-}
 
 // --- client assets (skills + subagents) ---
 

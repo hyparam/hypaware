@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0150, LLP 0151
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -28,10 +28,15 @@ failing **open**.
 That was a latent assumption. The **API-key** route (Responses API) happens to
 carry `cwd` in-band in `metadata`, so no enrichment was ever built. The
 **ChatGPT-subscription** route (`provider='chatgpt'`, `/backend-api/codex/*`)
-has no such field, and `codex-tui` does not send the `x-codex-turn-metadata`
-header on it (that is Codex Desktop behavior). So "cwd is always available at
-projection time" was really "cwd is available when the client volunteers it" —
-and for an entire first-class traffic class, it never did:
+has no such field, and a turn whose request kind carries no turn metadata sends
+no `x-codex-turn-metadata` and therefore no `workspaces`. (This paragraph
+previously said `codex-tui` never sends that header and that it is Codex Desktop
+behavior. That is false: Codex's `compatibility_headers` emits it for every turn
+regardless of client. See
+[LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#context).)
+So "cwd is always available at projection time" was really "cwd is available when
+the client volunteers it" - and for an entire first-class traffic class, it
+often did not:
 
 - `.hypignore` was a silent **no-op** for subscription-mode Codex — the same gap
   class as raw-proxy/OTEL ([LLP 0049 §non-goals](./0049-hypignore-usage-policy.spec.md#non-goals)),
@@ -58,10 +63,33 @@ Codex now has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
-- **Keyed on the codex session id.** The live path already resolves it
-  (`session-id` header / turn metadata); the rollout filename embeds it, matched
-  via the `sessionIdFromPath` helper shared with the backfill. Only a real Codex
-  session has a rollout, so non-codex traffic never scans.
+- **An unusable in-band `cwd` is a miss, not a path.** A relative or blank
+  in-band value is refused before the gate sees it: the matcher would resolve it
+  against the **daemon's** own process cwd and return a confident verdict for an
+  unrelated directory (#471). The rollout fallback then still gets its turn, and
+  when nothing usable is found the row records `cwd = NULL` exactly as before, so
+  refusing does not make this path fail closed. The rollout-stated `cwd` is held
+  to the same two checks, by a different owner: core's `sessionMetaCwd` refuses a
+  blank or relative `session_meta.cwd`
+  ([LLP 0150 §usable-cwd](./0150-one-reader-for-codex-session-meta.decision.md#usable-cwd)),
+  and `rollout-cwd.js` reads through it, so a refused in-band value falls through
+  to an already-predicated source. That predicate is **not** borrowed for the
+  in-band value, and this bullet is not a consequence of LLP 0150: 0150 scopes the
+  in-band path out of its own mandate, because in-band is a separate source with
+  its own trust story whose value is also stamped on the row for workspace/git
+  enrichment. So the two checks are restated locally, in `usableInBandCwd`. One
+  limit of the rule, stated rather than implied: on the Codex route the value the
+  predicate sees is usually not the request's `cwd` but the workspace key
+  `selectCodexWorkspace` selected for it, which substitutes the first workspace
+  when none matches, so an absolute-but-unrelated directory can still reach the
+  gate (#476).
+- **Keyed on the codex session id.** The live path already resolves it: the
+  body's `client_metadata.session_id`, else the turn-metadata blob
+  ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);
+  it was never a `session-id` header, a name Codex does not emit). The rollout
+  filename embeds it, matched via the `sessionIdFromPath` helper shared with the
+  backfill. Only a real Codex session has a rollout, so non-codex traffic never
+  scans.
 - **First line only, cached per session id.** The rollout is written at session
   start, so it exists before the first exchange projects (earlier and more
   reliably than Claude's sidecar, which has a known session-start race). Reading a
@@ -70,6 +98,45 @@ Codex now has the symmetric fallback.
 - **One resolved `cwd`, used twice.** The same value feeds the `.hypignore` drop
   and the row's stamped `cwd`, so live rows now carry the cwd the backfill reads
   and the two halves of the policy agree (closes the live/backfill inconsistency).
+- **A substituted workspace key never decides the verdict** (amended, #476). The
+  Codex projector picks a `workspaces` turn-metadata key for enrichment, falling
+  back to the *first* key when none matches the request's `cwd`. That substituted
+  key is a guess about a directory the session may never have run in, so it does
+  not supply the one resolved `cwd`: an explicit in-band `cwd` outranks it for
+  both the gate and the stamp, and the refusal is reported as
+  `plugin.codex.usage_policy_workspace_cwd_refused`
+  (`error_kind: workspace_cwd_mismatch`, paths hashed). The key keeps its
+  enrichment role (`attributes.codex.workspace`, `git_remote`, `git_commit`,
+  `has_changes`) and still supplies the `cwd` on the subscription route, where
+  the request states none and the key is the only in-band source there is.
+  Consequence: for a session running in a *subdirectory* of its workspace the
+  row now stamps the subdirectory rather than the workspace root, which is the
+  directory the policy is actually scoped to.
+  Three limits, stated rather than implied, and each one filed so it does not
+  live only here. The key still outranks the **rollout** fallback (it resolves
+  before the `??`), so a subscription-route session that declares a `workspaces`
+  map never consults `session_meta.cwd` and a first-key guess can still decide
+  its verdict (#480). That one is pre-existing, verified byte-identical before
+  and after this amendment; ranking the guess below the rollout is a separate
+  call, not taken in the lines PRs #467/#474 rewrite. Because the key keeps
+  enriching, a row recorded where it used to drop (clean in-band `cwd`, ignored
+  declared workspace) carries that workspace's identity even though the
+  directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
+  ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), not by enrichment
+  source (#481). And the gate does not canonicalize paths, so *which spelling*
+  reaches it decides the verdict: a symlinked spelling of an ignored directory
+  escapes its `.hypignore`, because the ancestor walk climbs the symlink's own
+  parents and never meets the governing file. That is a property of the shared
+  matcher rather than of this amendment (#479, and it is also why `pathsEqual`
+  misses symlinked spellings here). What this amendment changes is which of two
+  symmetric spellings trips it, by taking the client's honest `cwd` over the
+  key's: it closes the case where the *key* held the non-canonical spelling and
+  opens the case where the *request* does. The widest case is untouched, a
+  declared symlinked key on a subscription-route request that states no `cwd` at
+  all, which leaks the same before and after. Canonicalizing belongs in the
+  shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)),
+  where it must also canonicalize the `local-only` list entries or it un-governs
+  an entry a user marked by its symlink spelling.
 
 ## Why not the alternatives
 

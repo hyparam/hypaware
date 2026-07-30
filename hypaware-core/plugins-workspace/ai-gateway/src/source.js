@@ -53,7 +53,7 @@ export function createStartSource(state) {
             upstreams: readConfiguredUpstreamNames(ctx),
             registered_presets: Array.from(state.presets.keys()),
             projectors: state.projectors.map((p) => p.name),
-            // @ref LLP 0066#ephemeral — surface the live opt-out count so an
+            // @ref LLP 0066#ephemeral: surface the live opt-out count so an
             // operator can see an active session drop without grepping logs.
             ignored_sessions: state.ignoredSessions.size,
             // @ref LLP 0114#fallback-is-visible [implements]: a fallback boot is

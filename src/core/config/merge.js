@@ -27,7 +27,7 @@
  * @param {HypAwareV2Config | null} central
  * @param {HypAwareV2Config | null} local
  * @returns {ConfigMergeResult}
- * @ref LLP 0031#merge-model [implements] — union keyed per section; central wins and locks; local contributes only the keys central omits
+ * @ref LLP 0031#merge-model [implements]: union keyed per section; central wins and locks; local contributes only the keys central omits
  */
 export function mergeConfigLayers(central, local) {
   /** @type {ConfigLayerDrop[]} */
@@ -115,7 +115,7 @@ export function mergeConfigLayers(central, local) {
  *   validate: (config: HypAwareV2Config) => ConfigValidationError[],
  * }} args
  * @returns {ConfigMergeResult}
- * @ref LLP 0031#central-layer-is-sacrosanct [implements] — drop local entries that invalidate the merge; central always boots
+ * @ref LLP 0031#central-layer-is-sacrosanct [implements]: drop local entries that invalidate the merge; central always boots
  */
 export function resolveLayeredConfig({ central, local, validate }) {
   const base = mergeConfigLayers(central, local)
