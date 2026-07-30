@@ -102,5 +102,5 @@ the budget backstops whatever still buffers.
   The icebird change is upstream; coordinate the kernel version bump in
   [LLP 0057](./0057-bounded-query-execution.plan.md).
 
-The code sites — icebird's source factory, `union-source.js`, and ai-gateway's
-`withSchemaColumns` — carry an `@ref` to this decision when implemented.
+The code sites (icebird's source factory, `union-source.js`, and ai-gateway's
+`withSchemaColumns`) carry an `@ref` to this decision when implemented.

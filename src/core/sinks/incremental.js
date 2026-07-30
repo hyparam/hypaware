@@ -32,7 +32,7 @@ const INSTANCE_DIR = 'sink-instances'
  * it scopes the store here, satisfying `watermarks.js`'s documented precondition
  * that the `stateDir` it receives is already instance-scoped.
  *
- * @ref LLP 0040#watermark-contract [implements] — one watermark per (sink instance, partition)
+ * @ref LLP 0040#watermark-contract [implements]: one watermark per (sink instance, partition)
  * @param {{ paths: PluginPaths, instanceName: string }} opts
  * @returns {SinkWatermarkStore}
  */
@@ -107,8 +107,8 @@ export function watermarkKeyFor(watermarks, storage, partition) {
  * therefore means "no PAYLOAD row to encode": it is decided by peeking past any
  * leading drops to the first real row.
  *
- * @ref LLP 0040#storage-api-extension [implements] — feed readRowsSince into the unchanged encoder; empty new-row set ⇒ no blob
- * @ref LLP 0070#incremental [constrained-by] — skip drop-only rows in the encoded stream, advance the cursor across them, and expose `droppedRowCount` so an empty-but-dropped tick still checkpoints
+ * @ref LLP 0040#storage-api-extension [implements]: feed readRowsSince into the unchanged encoder; empty new-row set ⇒ no blob
+ * @ref LLP 0070#incremental [constrained-by]: skip drop-only rows in the encoded stream, advance the cursor across them, and expose `droppedRowCount` so an empty-but-dropped tick still checkpoints
  * @param {QueryStorageService} storage
  * @param {QueryPartition} partition
  * @param {SinkContinuation | undefined} since
@@ -123,7 +123,7 @@ export async function openIncrementalRows(storage, partition, since) {
     lastAfter: since ?? { v: 1, seq: sinceSeq },
   }
 
-  // @ref LLP 0040#storage-api-extension [implements] — pre-upgrade null-seq rows
+  // @ref LLP 0040#storage-api-extension [implements]: pre-upgrade null-seq rows
   // are "new" only on a sink with no durable watermark (export the backlog once);
   // once a watermark exists (`since` set) they are already shipped, so exclude
   // them and the legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
@@ -208,7 +208,7 @@ export async function openIncrementalRows(storage, partition, since) {
  * thus the same object key — an idempotent overwrite. This is the blob sink's
  * stand-in for the central sink's server-side idempotency ledger.
  *
- * @ref LLP 0040#applying-it-to-both-sinks [implements] — [sinceSeq,lastSeq] filename ⇒ idempotent re-PUT
+ * @ref LLP 0040#applying-it-to-both-sinks [implements]: [sinceSeq,lastSeq] filename ⇒ idempotent re-PUT
  * @param {string} filename
  * @param {string} sinceSeq
  * @param {string} lastSeq

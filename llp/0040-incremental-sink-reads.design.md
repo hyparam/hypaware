@@ -14,7 +14,7 @@
 > successful export, surviving both retention front-prunes and compaction
 > generation swaps.
 
-@ref LLP 0039 — incremental sink reads requirement
+@ref LLP 0039: incremental sink reads requirement
 
 ## Ground truth this design is built on
 

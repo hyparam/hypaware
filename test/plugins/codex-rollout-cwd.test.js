@@ -43,6 +43,23 @@ function fakeRolloutCwd(bySession) {
 
 // A realistic subscription-route session id: a UUID the rollout filename embeds.
 const SUBSCRIPTION_SESSION_ID = '019e60b5-1111-4222-8333-444455556666'
+const SUBSCRIPTION_THREAD_ID = '019e60b5-9999-4aaa-8bbb-ccccddddeeee'
+
+/**
+ * The body's flat `client_metadata` map as Codex writes it on a turn that states
+ * its identity but no workspace: session and thread present, no cwd anywhere.
+ * That is the shape these tests need, because the rollout fallback only runs
+ * when the request states a session id and no in-band cwd.
+ * @ref LLP 0151#body-is-authority [tests]: keyed on the surface Codex really
+ *   fills, not on a `session-id` header Codex never emits.
+ */
+function subscriptionClientMetadata() {
+  return {
+    'x-codex-installation-id': 'install-sub',
+    session_id: SUBSCRIPTION_SESSION_ID,
+    thread_id: SUBSCRIPTION_THREAD_ID,
+  }
+}
 
 // ---------------------------------------------------------------------
 // Regression (#257): the ChatGPT-subscription route carries no in-band cwd, so
@@ -59,10 +76,14 @@ test('subscription-route Codex with no in-band cwd is .hypignore-dropped via the
   const projection = projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    // codex-tui does NOT send x-codex-turn-metadata on the subscription route;
-    // it does carry a session-id header, which the adapter already resolves.
-    request_headers: JSON.stringify({ 'session-id': SUBSCRIPTION_SESSION_ID }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret work' }),
+    // A turn that states its session but no workspace: the flat body
+    // `client_metadata` map carries the session id, nothing carries a cwd.
+    request_headers: JSON.stringify({}),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'secret work',
+      client_metadata: subscriptionClientMetadata(),
+    }),
     response_body: JSON.stringify({ output_text: 'ok' }),
   }), context())
   // The rollout cwd (`/work/ignored/proj`) is covered by `/work/ignored/.hypignore`,
@@ -78,8 +99,12 @@ test('subscription-route Codex records the rollout cwd on the row (live/backfill
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    request_headers: JSON.stringify({ 'session-id': SUBSCRIPTION_SESSION_ID }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hello' }),
+    request_headers: JSON.stringify({}),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'hello',
+      client_metadata: subscriptionClientMetadata(),
+    }),
     response_body: JSON.stringify({ output_text: 'hi' }),
   }), context()))
   assert.ok(projection && projection !== USAGE_POLICY_DROP)
@@ -102,7 +127,6 @@ test('an in-band cwd stays the fast path and short-circuits the rollout lookup',
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
     request_headers: JSON.stringify({
-      'session-id': SUBSCRIPTION_SESSION_ID,
       'x-codex-turn-metadata': JSON.stringify({
         session_id: SUBSCRIPTION_SESSION_ID,
         workspaces: { '/work/in-band': {} },
@@ -169,6 +193,65 @@ test('createRolloutCwdResolver caches per session id (bounded fs on the hot path
 test('createRolloutCwdResolver returns undefined when the sessions root is missing', () => {
   const resolver = createRolloutCwdResolver({ sessionsDir: '/no/such/sessions/root' })
   assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+// ---------------------------------------------------------------------
+// Issue #465: this resolver and `hyp session`'s id resolution read the same
+// `session_meta` line under the same rules, from one shared reader
+// (`src/core/codex/rollout_session_meta.js`). These pin the rules AT THIS
+// CALLER, so a future change cannot satisfy the other one and quietly loosen
+// this one; the reader's own union suite is
+// `test/core/codex-rollout-session-meta.test.js`.
+// ---------------------------------------------------------------------
+
+test('a rollout whose first line is a different envelope type yields no cwd, even carrying one', () => {
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'turn_context', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '/work/not-the-header' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  // Taking it would evaluate `.hypignore` against a directory the session
+  // header never claimed. No cwd is the honest answer.
+  assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+test('a blank session_meta.cwd is no cwd, not a blank path handed to the policy matcher', () => {
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '   ' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+test('a relative session_meta.cwd is no cwd: the matcher would resolve it against the daemon', () => {
+  // Passed on, the matcher's `path.resolve` supplies the DAEMON's process cwd as
+  // the base, so this session's `.hypignore` verdict would be governed by a file
+  // under wherever the daemon was started. Proven here by making the process cwd
+  // the thing the relative path would land in.
+  // @ref LLP 0150#usable-cwd [tests]: refuse rather than guess a base
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '../elsewhere' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  const cwd = resolver.resolve(SUBSCRIPTION_SESSION_ID)
+  assert.equal(cwd, undefined)
+
+  // And the fail-open it falls back to is the documented "no cwd" one (LLP 0083,
+  // LLP 0049 R1 as extended by LLP 0085), not a verdict about another directory:
+  // had the value been passed on, this resolver would have named a governor.
+  const wouldHaveBeen = createUsagePolicyResolver({
+    existsSync: (p) => p === path.resolve('../elsewhere', '.hypignore'),
+    readFileSync: () => 'ignore\n',
+  })
+  assert.equal(wouldHaveBeen.resolve('../elsewhere').class, 'ignore', 'the wrong-directory verdict is real, not hypothetical')
 })
 
 // ---------------------------------------------------------------------

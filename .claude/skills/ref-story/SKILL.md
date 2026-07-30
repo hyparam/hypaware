@@ -1,13 +1,13 @@
 ---
 name: ref-story
-description: Generate a "rationale-order" view of a source file organized by design intent rather than compiler order. Groups code by the @ref annotations pointing to LLP sections, producing a literate-programming-style narrative of why the file exists in the form it does. This is LLP's killer feature — the thing that makes readers actually want to adopt LLP.
+description: Generate a "rationale-order" view of a source file organized by design intent rather than compiler order. Groups code by the @ref annotations pointing to LLP sections, producing a literate-programming-style narrative of why the file exists in the form it does. This is LLP's killer feature, the thing that makes readers actually want to adopt LLP.
 ---
 
 # ref-story
 
 Use this skill to generate a literate-programming view of a source file. Where the normal view of a file is ordered by language syntax (imports at the top, function definitions in whatever order the author chose), the rationale-order view is ordered by **why** — grouped by the LLP sections that explain each construct, with the relevant prose interleaved between the code fragments.
 
-This is the capability LLP 0000 describes as "annotated source generation" and the README calls "the killer feature." It realizes the promise of literate programming (Knuth) without the maintenance burden of interleaving prose and code in the source file itself — because the prose lives in LLP documents and the code lives in source files, and `@ref` annotations are the bridge.
+This is the capability LLP 0000 describes as "annotated source generation" and the README calls "the killer feature." It realizes the promise of literate programming (Knuth) without the maintenance burden of interleaving prose and code in the source file itself, because the prose lives in LLP documents and the code lives in source files, and `@ref` annotations are the bridge.
 
 Invoke as:
 
@@ -18,7 +18,7 @@ Invoke as:
 
 ## Ground rules
 
-- Requires `@ref` annotations in the source file. A file without any annotations produces a view that is mostly the "Unreferenced" section at the bottom — which is a useful signal in itself but not interesting to publish.
+- Requires `@ref` annotations in the source file. A file without any annotations produces a view that is mostly the "Unreferenced" section at the bottom, which is a useful signal in itself but not interesting to publish.
 - Depends on `ref-check` for validation: broken references are highlighted in the output so the user knows something is out of sync.
 - LLP section anchors are resolved to heading text from the target LLP. The skill reads both the source file and the LLPs it references.
 
@@ -74,6 +74,8 @@ For each group:
 
 Example output (markdown format):
 
+<!-- ref-check:ignore-start illustrative view of a fictional file, not live annotations -->
+
 ```markdown
 # Rationale-order view: src/auth/tokens.rs
 
@@ -98,7 +100,7 @@ order.
 
 ```rust
 pub fn escalate_privilege(session: &Session) -> Result<Session> {
-    // @ref LLP 0042#token-strategy — Session tokens must be rotated on privilege escalation
+    // @ref LLP 0042#token-strategy: Session tokens must be rotated on privilege escalation
     let new_token = Token::fresh();
     db.transaction(|tx| {
         tx.invalidate(session.token)?;
@@ -113,7 +115,7 @@ pub fn escalate_privilege(session: &Session) -> Result<Session> {
 
 ```rust
 pub fn rotate_token_on_grant(session: &Session, grant: Grant) -> Result<Session> {
-    // @ref LLP 0042#token-strategy — Same rotation on capability grant
+    // @ref LLP 0042#token-strategy: Same rotation on capability grant
     ...
 }
 ```
@@ -132,7 +134,7 @@ pub fn rotate_token_on_grant(session: &Session, grant: Grant) -> Result<Session>
 
 ```rust
 impl Modal {
-    // @ref LLP 0074#focus-management — trap focus while modal is presented
+    // @ref LLP 0074#focus-management: trap focus while modal is presented
     pub fn present(&mut self) -> Result<FocusState> {
         ...
     }
@@ -174,6 +176,8 @@ fn internal_helper() {
 - 3 LLP sections cover the referenced constructs
 - 0 broken references (ref-check clean)
 ```
+
+<!-- ref-check:ignore-end -->
 
 ### 6. Flag broken references
 

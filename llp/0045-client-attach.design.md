@@ -26,8 +26,8 @@ operator-only); this design is constrained by it and must not relitigate it.
 Where it makes a fresh choice (the reconcile-context seam, the adapter marker
 field), that choice is called out.
 
-`@ref LLP 0044 — client attach on join (the decision this designs)`
-`@ref LLP 0041 — the seam + backfill design this mirrors`
+`@ref LLP 0044: client attach on join (the decision this designs)`
+`@ref LLP 0041: the seam + backfill design this mirrors`
 
 ## What the code already gives us
 

@@ -60,7 +60,7 @@ the sensitive thing.
   The implicit default for unlisted directories remains `full`: enrollment,
   backfill, and the first sync keep meaning "everything you did not opt out
   ships".
-- **CLI**: `hyp ignore <path>` keeps its [LLP 0049 §cli](./0049-hypignore-usage-policy.spec.md#cli)
+- **CLI** {#cli}: `hyp ignore <path>` keeps its [LLP 0049 §cli](./0049-hypignore-usage-policy.spec.md#cli)
   dotfile meaning unchanged (repurposing a settled verb silently would be
   worse than a new flag). Machine-local writes get flags on the same verb:
   the existing `--local-only`, a new `--private` for a machine-local
@@ -85,7 +85,8 @@ the sensitive thing.
   ([LLP 0049 R1](./0049-hypignore-usage-policy.spec.md#requirements) applies
   to the new source unchanged); already-cached rows are
   [`hyp purge`](./0104-hyp-purge.decision.md)'s job.
-- `hyp ignore --check` and `hyp status` reporting must name which source
-  governs (dotfile vs machine-local entry) or debugging gets harder.
+- **Reporting names the governing source** {#reporting}: `hyp ignore --check`
+  and `hyp status` reporting must name which source governs (dotfile vs
+  machine-local entry) or debugging gets harder.
 - The store keeps every LLP 0071 property: never forwarded, never merged with
   config, survives cache rebuilds, untouched by `hyp leave`.

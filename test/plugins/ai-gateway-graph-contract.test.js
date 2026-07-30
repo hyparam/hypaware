@@ -469,7 +469,7 @@ test('Skill node from a slash command keys on the de-slashed name', () => {
   assert.equal(row.natural_key, 'hypaware-query')
 })
 
-// @ref LLP 0075#decision [tests]: Codex's own surface — a path-pattern match
+// @ref LLP 0075#decision [tests]: Codex's own surface, a path-pattern match
 // on the exec_command SKILL.md read, not any Claude signal.
 test('Skill node from a Codex exec_command read keys on the .codex/skills/<name>/SKILL.md path', () => {
   const row = rule('node', 'Skill', SKILL_CODEX).toRow({ session_id: 'sess-1', tool_args: CODEX_READ_ARGS, message_created_at: TS })

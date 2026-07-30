@@ -104,7 +104,7 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
  *
  * @param {{ stateDir: string, configPath: string | null }} args
  * @returns {Promise<string[]>}
- * @ref LLP 0063#d4 [implements]: one enrollment per machine — the central-layer sink origins are the gate; a local sink is the user's own, not an enrollment
+ * @ref LLP 0063#d4 [implements]: one enrollment per machine; the central-layer sink origins are the gate, and a local sink is the user's own, not an enrollment
  */
 export async function readCentralSinkOrigins({ stateDir, configPath }) {
   const { centralConfig } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })

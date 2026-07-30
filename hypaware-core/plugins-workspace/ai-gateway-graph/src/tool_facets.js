@@ -21,7 +21,7 @@ import path from 'node:path'
 /**
  * The `Program` validity gate: a lowercased basename bounded to look like an
  * installed binary. All-numeric tokens are rejected separately (a bare number is
- * never a program). @ref LLP 0073#boundedness-contract [constrained-by] — a
+ * never a program). @ref LLP 0073#boundedness-contract [constrained-by]: a
  * tool_args facet may key a node only if deterministically bounded; fail closed.
  */
 export const PROGRAM_RE = /^[a-z0-9][a-z0-9._+-]{0,63}$/
@@ -93,7 +93,7 @@ const CODEX_SKILL_READ_RE = /[/~]\.codex\/skills\/([^/\s'"]+)\/SKILL\.md/
 /**
  * Read-like `argv[0]` programs whose `exec_command` naming a `.codex/skills/
  * <name>/SKILL.md` path counts as the "activation ≡ read" signal (LLP 0075
- * §read-is-activation). @ref LLP 0075#decision [constrained-by] — MINOR 1
+ * §read-is-activation). @ref LLP 0075#decision [constrained-by]: MINOR 1
  * fix: the path pattern alone is command-agnostic, so `echo` or `rm` naming
  * the same path minted a spurious activation; gating on a read tool's argv[0]
  * (reusing `programFrom`, the one command-string recipe) keeps non-read
@@ -118,7 +118,7 @@ const NUMERICISH_RE = /^\d+(\.\d+)?[A-Za-z]?$/
 
 /**
  * Per-wrapper flags known to take a SEPARATE argument token (`-u root`, not
- * `-uroot`). @ref LLP 0073#program-derivation [constrained-by] — MAJOR 2 fix:
+ * `-uroot`). @ref LLP 0073#program-derivation [constrained-by]: MAJOR 2 fix:
  * the wrapper skip previously treated every flag as no-arg, so an
  * option-with-arg's *value* (`root` in `sudo -u root git status`) was mis-read
  * as argv[0]. Enumerating each wrapper's common option-with-arg forms lets the
@@ -273,7 +273,7 @@ export function skillFromSlash(contentText) {
  * `{"cmd": …}`, `command` as fallback), not raw `tool_args`, so the caller
  * shares the one command-string recipe with `programFrom`.
  *
- * @ref LLP 0075#decision [implements] — path-pattern match on the
+ * @ref LLP 0075#decision [implements]: path-pattern match on the
  * `exec_command` SKILL.md read; read ≡ activation is an accepted ambiguity
  * (LLP 0075 §read-is-activation), which is why the caller stamps the
  * distinct `dispatch_shell_read` flag rather than one of Claude's richer
@@ -316,7 +316,7 @@ function gateSkill(name) {
  * and fail-closed: any step that cannot cleanly resolve a bounded token returns
  * `null` (mint nothing rather than mis-key).
  *
- * @ref LLP 0073#program-derivation [implements] — first-segment argv[0]
+ * @ref LLP 0073#program-derivation [implements]: first-segment argv[0]
  * extraction; the quote-blind connector split is safe because only the head of
  * the first segment is consumed, so a connector inside quotes can at worst
  * truncate the discarded tail, never corrupt argv[0].
@@ -414,7 +414,7 @@ export function programFrom(command, depth = 0) {
 
 /**
  * Apply the `Program` validity gate: reject empty, all-numeric, and
- * out-of-domain tokens. @ref LLP 0073#boundedness-contract [constrained-by] —
+ * out-of-domain tokens. @ref LLP 0073#boundedness-contract [constrained-by]:
  * the gate (not a threshold) is the cardinality bound, so extraction stays a
  * pure per-row function.
  *

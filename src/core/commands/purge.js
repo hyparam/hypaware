@@ -34,7 +34,7 @@ import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/in
  * purge-then-re-record is idempotent server-side and never resurrects rows via
  * a stale watermark.
  *
- * @ref LLP 0104 [implements]: the `hyp purge` verb — targeted, cache-only, confirmed, non-destructive marking left intact
+ * @ref LLP 0104 [implements]: the `hyp purge` verb (targeted, cache-only, confirmed), with non-destructive marking left intact
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
