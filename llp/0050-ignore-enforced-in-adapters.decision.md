@@ -178,8 +178,23 @@ nearest-governs.
 The per-`cwd` memo is keyed on the **lexical** path and consulted **before** any
 folding, so a cache hit costs exactly what it did before. Entry spellings and
 the per-volume case verdict are computed once per list parse, inside the TTL
-window LLP 0049 R6 already bounds. `String.prototype.normalize('NFC')` is
-roughly 60 ns on a pure-ASCII path.
+window LLP 0049 R6 already bounds.
+
+`String.prototype.normalize('NFC')` is roughly 60 ns on a pure-ASCII path, but
+that is the case where the fold does nothing, so it is the wrong number to plan
+against. When the string is **already** composed, normalize verifies and
+returns: about 60 ns for a short ASCII path and about 90 ns for a 114-character
+path with accented segments. When it is genuinely decomposed, which is exactly
+the macOS case this section exists for, it has to recompose: about **550 ns**
+for a 134-character NFD path, roughly 9x the ASCII figure, and it scales with
+length (about 9.6 us for a pathological 1000-character all-decomposed path).
+
+That is affordable only because of where it sits. Folding is on the cache-**miss**
+path (once per `cwd` per TTL window) and on the list parse (once per entry per
+window), never per exchange. A miss over a 20-entry list with a long NFD `cwd`
+measures about 8.2 us before this change and 9.7 us after. A caller that ever
+moves the fold onto a per-row or per-exchange path has to re-measure with a
+decomposed path, not an ASCII one.
 
 ### Relationship to the symlink class
 
@@ -195,10 +210,33 @@ two, since running the argmax guard twice buys nothing.
 The fold is applied at the **gate** (`resolve` / list membership). The one-shot
 CLI membership sites (`hyp ignore --check`, `policy show`, `policy unset`) and
 `hyp purge --subtree` still compare lexically, so on a case-insensitive or
-NFD-carrying volume the CLI can still name a different governor than the gate
-used. Those sites are exactly what #482 reroutes through a single shared
-spelling-aware predicate; they should adopt the fold there, once, rather than
-grow a second copy of the rule.
+NFD-carrying volume they can disagree with the gate. Those sites are exactly
+what #482 reroutes through a single shared spelling-aware predicate; they should
+adopt the fold there, once, rather than grow a second copy of the rule.
+
+The disagreement is bounded in one direction and not in the other, and the
+difference matters enough to name each site:
+
+- **The CLI can never promise more protection than the gate delivers.** The
+  lexical predicate matches a subset of what the folded one does, and the gate's
+  class is `max(declared, folded)`, so any entry the CLI finds the gate also
+  found. There is no spelling on which `--check` reports a directory protected
+  while the gate forwards it.
+- **`hyp ignore --check` / `policy show` report the right class and can name the
+  wrong scope.** The class comes from `resolve()`, so it is folded and correct.
+  Only `resolveCheckScopeDir`'s "which listed directory governs this?" lookup is
+  lexical, so when the entry reaches `cwd` only by folding it falls back to the
+  queried path. The class is right; the governing directory shown, and the
+  residual row count scoped to it, are narrower than the truth.
+- **`policy unset` / `unignore --local-only` can refuse to remove an entry the
+  gate is enforcing**, when the user spells the path the other way. It reports
+  "not governed" and exits 0. That fails toward privacy: the opt-out stays on.
+- **`hyp purge --subtree` can fail to purge rows it reports as purged**, when the
+  rows were recorded under a different spelling of the target. This is the one
+  site that fails **away** from privacy: the user asked for data to be deleted,
+  the command succeeds, and the rows remain. It is unchanged from the pre-fold
+  behaviour rather than introduced here, but it is the reason this seam should
+  not stay open for long.
 
 ## Consequences
 

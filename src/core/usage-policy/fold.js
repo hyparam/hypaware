@@ -121,12 +121,17 @@ function flipCase(p) {
  * Create a memoized per-volume case-sensitivity probe.
  *
  * The verdict is a property of the mounted volume, so it is memoized by the
- * volume's `dev` number rather than by path: one pair of `stat` calls per
- * distinct volume for the life of the resolver, not one per directory and not
- * one per TTL window. That is strictly under the per-`cwd`-per-window bound
- * LLP 0049 R6 already sets for the ancestor walk. A volume cannot change its
- * case-sensitivity without being unmounted and reformatted, at which point its
- * `dev` changes too, so there is nothing for a TTL to refresh.
+ * volume's `dev` number rather than by path. The memo is keyed on `dev`, which
+ * has to be *learned* before it can be consulted, so the cost is not zero on a
+ * hit: every call `stat`s `dir` itself (one `stat` per directory), and only the
+ * second, case-flipped `stat` is saved by the memo. So a list of `n` entries
+ * costs `n` stats plus one extra per distinct volume, per TTL window, rather
+ * than `2n`. That is still within the per-`cwd`-per-window bound LLP 0049 R6
+ * sets for the ancestor walk, which already stats every ancestor. A volume
+ * cannot change its case-sensitivity without being unmounted and reformatted,
+ * at which point its `dev` changes too, so there is nothing for a TTL to
+ * refresh, and the flipped-spelling probe genuinely runs once per volume for
+ * the life of the resolver.
  *
  * **Inert off darwin.** On any other platform the probe returns `false`
  * immediately and issues **no syscall at all**, because no shipping

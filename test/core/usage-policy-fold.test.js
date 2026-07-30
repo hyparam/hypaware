@@ -33,12 +33,15 @@ import { createVolumeCaseProbe, foldPath, PATH_CASE_PROBE_ERROR_KIND } from '../
  * @import { UsageClass, UsagePolicyResolver } from '../../src/core/usage-policy/types.js'
  */
 
-// The same four characters, composed and decomposed. Spelled as escapes so the
-// file cannot be silently re-normalized by an editor, a merge tool, or a
-// `git` filter, which would turn both constants into the same string and make
-// every test below pass vacuously.
-const NFC = 'café'
-const NFD = 'café'
+// The same four characters, composed and decomposed. Spelled as \u escapes, so
+// the source file is pure ASCII and an editor, a merge tool, or a `git` filter
+// cannot silently re-normalize it. Re-normalizing raw literals would collapse
+// both constants to the same string and make every test below pass vacuously;
+// escaping makes that unrepresentable rather than merely detectable, and the
+// tripwire immediately below still asserts the premise for anyone who
+// reintroduces raw characters.
+const NFC = 'caf\u00e9'
+const NFD = 'cafe\u0301'
 
 // The premise the whole file rests on. If this ever fails, nothing after it
 // means anything.
@@ -151,7 +154,7 @@ test('resolve: nearest-governs is measured on the folded spelling, not on the de
   // composed descendant and invert nearest-governs. Five accented characters
   // is enough: the outer entry is 16 code units decomposed against the inner
   // entry's 14 composed, but 11 against 14 once both are folded.
-  const outer = 'ééééé'
+  const outer = '\u00e9\u00e9\u00e9\u00e9\u00e9'
   const outerNfd = outer.normalize('NFD')
   assert.ok(`/root/${outerNfd}`.length > `/root/${outer}/ab`.length)
   const r = resolverOver([
@@ -308,6 +311,37 @@ test('createVolumeCaseProbe does not memoize an undetermined answer as the volum
   })
   assert.equal(probe('/vol/123'), false)
   assert.equal(probe('/vol/Proj'), true)
+})
+
+test('createVolumeCaseProbe does not memoize a non-ENOENT failure of the flipped stat', () => {
+  // The other undetermined branch, and the one that actually bites on a real
+  // volume: the directory itself stats fine, but the case-flipped spelling
+  // fails with something that is *not* `ENOENT` (`EACCES` on a directory the
+  // daemon may not traverse, `EIO` on a flaky mount). `ENOENT` would be
+  // informative, since it means the flipped spelling does not resolve and the
+  // volume is therefore case-sensitive. Any other errno says nothing at all, so
+  // caching it would let one transient error disable case folding for every
+  // path on that disk for the life of the resolver, silently reopening the gap
+  // this module exists to close.
+  let flippedFails = true
+  const probe = createVolumeCaseProbe({
+    platform: 'darwin',
+    statSync: (p) => {
+      if (p === '/vol/Proj' || p === '/vol/Other') return { dev: 7, ino: 42 }
+      if (flippedFails) {
+        const err = /** @type {Error & { code: string }} */ (new Error('EACCES'))
+        err.code = 'EACCES'
+        throw err
+      }
+      return { dev: 7, ino: 42 }
+    },
+    logSkip: () => {},
+  })
+  assert.equal(probe('/vol/Proj'), false)
+  // The volume verdict must still be open, so a later probe of the same `dev`
+  // that *can* reach an answer is believed rather than served the stale `false`.
+  flippedFails = false
+  assert.equal(probe('/vol/Other'), true)
 })
 
 test('createVolumeCaseProbe reports case-sensitive when the flipped spelling does not exist', () => {
