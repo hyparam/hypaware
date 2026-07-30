@@ -1277,6 +1277,93 @@ test('body client_metadata wins over the turn-metadata blob when the two disagre
   assert.equal(projection.conversation_id, 'thread-body')
   assert.equal(projection.session_id, 'session-body')
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+  // @ref LLP 0144#lineage-conflict [tests]: the tie-break leaves evidence, so
+  // the disagreement the body silently won is on the row and countable.
+  assert.equal(projection.attributes.codex.lineage_conflict, 'thread_id,session_id')
+})
+
+// @ref LLP 0144#lineage-conflict [tests]: the signal must be absent, not merely
+// falsy, for the agreeing traffic that is every turn Codex is known to send, or
+// a nonzero conflict count stops being evidence of anything.
+test('agreeing lineage surfaces record no lineage_conflict', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-agree',
+        thread_id: 'thread-agree',
+        turn_id: 'turn-agree',
+        parent_thread_id: 'parent-agree',
+      }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: {
+        session_id: 'session-agree',
+        thread_id: 'thread-agree',
+        turn_id: 'turn-agree',
+        'x-codex-parent-thread-id': 'parent-agree',
+      },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-agree')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+  assert.ok(!('lineage_conflict' in projection.attributes.codex))
+})
+
+// @ref LLP 0144#lineage-conflict [tests]: only a real disagreement counts. A
+// field one surface omits is the normal per-request-kind shape, not a conflict.
+test('a lineage field only one surface states is not a conflict', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ thread_source: 'user' }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: { session_id: 'session-solo', thread_id: 'thread-solo' },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-solo')
+  assert.ok(!('lineage_conflict' in projection.attributes.codex))
+})
+
+// @ref LLP 0144#lineage-source [tests]: the recorded name is the surface the
+// identity came from. Here the body states only `session_id`, so `thread_id`,
+// which is what `conversation_id` keys on, comes from the blob.
+test('lineage_source names the surface the thread actually came from', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ thread_id: 'thread-from-blob' }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: {
+        'x-codex-installation-id': 'install-mixed',
+        session_id: 'session-from-body',
+      },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-from-blob')
+  assert.equal(projection.attributes.codex.session_id, 'session-from-body')
+  assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
+  assert.ok(!('lineage_conflict' in projection.attributes.codex))
 })
 
 // @ref LLP 0144#row-identity [tests]: already-recorded shapes must not re-key.

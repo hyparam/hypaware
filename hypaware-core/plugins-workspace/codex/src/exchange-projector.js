@@ -711,7 +711,11 @@ function resolveCodexContext(input, provider, path, reqBody) {
   // future Codex version that stops sending one of them is visible in a query
   // instead of showing up as a silent drift in `conversation_id`.
   // @ref LLP 0144#lineage-source [implements]: make version drift queryable.
-  const lineage_source = lineageSource(clientMetadata, thread_id, session_id)
+  const lineage_source = lineageSource(clientMetadata, metadata)
+  // The precedence above trusts the two surfaces to agree. Nothing here can
+  // verify that, so when they do not, say so on the row.
+  // @ref LLP 0144#lineage-conflict [implements]: the tie-break leaves evidence.
+  const lineage_conflict = lineageConflict(clientMetadata, metadata)
   // Strip any credential userinfo at ingress, before it reaches the first-class
   // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
   // @ref LLP 0032#remote-redaction
@@ -732,6 +736,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
   setIfString(attributes, 'window_id', window_id)
   setIfString(attributes, 'sandbox', sandbox)
   setIfString(attributes, 'lineage_source', lineage_source)
+  setIfString(attributes, 'lineage_conflict', lineage_conflict)
   if (turn_started_at_unix_ms !== undefined) attributes.turn_started_at_unix_ms = turn_started_at_unix_ms
   setIfString(attributes, 'workspace', workspace?.path)
   setIfString(attributes, 'git_origin_url', git_origin_url)
@@ -824,20 +829,66 @@ function readCodexTurnMetadata(input, clientMetadata) {
   return isPlainObject(parsed) ? parsed : undefined
 }
 
+// The lineage fields that both surfaces carry, as each surface spells them: the
+// flat body-map key first, the turn-metadata blob key second.
+const LINEAGE_SPELLINGS = [
+  ['thread_id', 'thread_id'],
+  ['session_id', 'session_id'],
+  ['turn_id', 'turn_id'],
+  [X_CODEX_PARENT_THREAD_ID, 'parent_thread_id'],
+]
+
 /**
  * Name the surface that stated this row's identity, or `undefined` when no
  * surface did (the row then keeps the gateway's content-hash fallback).
  *
+ * The checks walk `thread_id` before `session_id` and body before blob, which is
+ * the same order the values above resolve in, so the recorded name is the
+ * surface the identity actually came from. Answering from "did the body state
+ * anything at all" would mislabel a turn whose `thread_id` (what
+ * `conversation_id` keys on) came from the blob while only its `session_id` came
+ * from the body.
+ *
  * @param {Record<string, unknown> | undefined} clientMetadata
- * @param {string | undefined} thread_id
- * @param {string | undefined} session_id
+ * @param {Record<string, unknown> | undefined} metadata
  * @returns {'body_client_metadata' | 'turn_metadata' | undefined}
  */
-function lineageSource(clientMetadata, thread_id, session_id) {
-  if (!thread_id && !session_id) return undefined
-  const fromBody = readStringKey(clientMetadata, 'thread_id')
-    ?? readStringKey(clientMetadata, 'session_id')
-  return fromBody ? 'body_client_metadata' : 'turn_metadata'
+function lineageSource(clientMetadata, metadata) {
+  for (const key of ['thread_id', 'session_id']) {
+    if (readStringKey(clientMetadata, key) !== undefined) return 'body_client_metadata'
+    if (readStringKey(metadata, key) !== undefined) return 'turn_metadata'
+  }
+  return undefined
+}
+
+/**
+ * Name every lineage field the two surfaces state differently, comma-joined in
+ * turn-metadata spelling, or `undefined` when they agree or only one spoke.
+ *
+ * The precedence rests on Codex projecting one metadata snapshot onto both
+ * surfaces, so that a body value and a blob value for the same field are always
+ * equal. That is a claim about another program's internals which this code
+ * cannot check, and the body-wins tie-break would otherwise discard the
+ * counter-evidence without trace. Recording it makes a Codex version that began
+ * filling the two surfaces from different state a queryable fact rather than a
+ * silent preference. The row still keys on the body, so this adds a signal and
+ * changes no identity.
+ * @ref LLP 0144#lineage-conflict [implements]: an unverifiable agreement
+ * assumption gets a recorded signal.
+ *
+ * @param {Record<string, unknown> | undefined} clientMetadata
+ * @param {Record<string, unknown> | undefined} metadata
+ * @returns {string | undefined}
+ */
+function lineageConflict(clientMetadata, metadata) {
+  const disagreed = LINEAGE_SPELLINGS
+    .filter(([bodyKey, blobKey]) => {
+      const fromBody = readStringKey(clientMetadata, bodyKey)
+      const fromBlob = readStringKey(metadata, blobKey)
+      return fromBody !== undefined && fromBlob !== undefined && fromBody !== fromBlob
+    })
+    .map(([, blobKey]) => blobKey)
+  return disagreed.length > 0 ? disagreed.join(',') : undefined
 }
 
 /**

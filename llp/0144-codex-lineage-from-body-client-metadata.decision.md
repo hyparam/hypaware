@@ -101,7 +101,29 @@ in the blob and unread, would need a column.
 as `attributes.codex.lineage_source` (`body_client_metadata` |
 `turn_metadata`, absent when nothing stated one). A future Codex version that
 stops filling a surface then shows up as a queryable shift rather than as a
-silent drift in `conversation_id`.
+silent drift in `conversation_id`. It names the surface the identity actually
+came from, resolved in the same order as the values themselves (`thread_id`
+before `session_id`, body before blob), so a turn whose `thread_id` came from
+the blob is not labelled `body_client_metadata` merely because its `session_id`
+came from the body.
+
+<a id="lineage-conflict"></a>**A disagreement between the two surfaces is
+recorded, not just resolved.** [#body-is-authority](#body-is-authority) rests on
+Codex projecting one snapshot onto both surfaces, so equal values whenever both
+are present. HypAware cannot verify a claim about another program's internals,
+and the body-wins tie-break would otherwise discard the counter-evidence without
+trace: the row would look exactly like a row whose surfaces agreed. So when a
+lineage field (`thread_id`, `session_id`, `turn_id`, `parent_thread_id`) is
+stated differently by the body map and the turn-metadata blob, the disagreeing
+field names are recorded as `attributes.codex.lineage_conflict`.
+
+The row still keys on the body, so this is a signal and not a second
+precedence: nothing about row identity depends on it, and the attribute is
+absent for every agreeing turn, which is all of them in traffic HypAware has
+seen. Its value is diagnostic. A nonzero count for
+`attributes.codex.lineage_conflict` is the evidence that would retire the
+agreement assumption, and until one appears the assumption is being checked
+continuously rather than asserted once in this document.
 
 <a id="row-identity"></a>**Already-recorded rows are left alone. No backfill.**
 Nothing re-keys, because for every shape HypAware already resolved an identity
@@ -139,14 +161,16 @@ rollout tree, keyed on the rollout's session id.
   so a turn with no blob records a parent with `is_sidechain` unset. Tightening
   that needs the `x-openai-subagent` decision above.
 - The Codex-source facts here are a snapshot of an upstream HypAware does not
-  control. The mitigation is `lineage_source` plus the acceptance check in
+  control. The mitigation is `lineage_source` and `lineage_conflict`
+  ([#lineage-conflict](#lineage-conflict)) plus the acceptance check in
   [`docs/ACCEPTANCE.md`](../docs/ACCEPTANCE.md), not a pinned literal.
 
 ## References
 
 - Code: `hypaware-core/plugins-workspace/codex/src/exchange-projector.js`
   (`readCodexClientMetadata`, `readCodexTurnMetadata`, `resolveCodexContext`,
-  `resolveConversationId`, `isCodexExchange`).
+  `resolveConversationId`, `isCodexExchange`, `lineageSource`,
+  `lineageConflict`).
 - Tests: `test/plugins/codex-exchange-projector.test.js` (lineage surfaces),
   `test/plugins/codex-rollout-cwd.test.js` (subscription-route fixtures).
 - Fixture: `hypaware-core/smoke/flows/gateway_codex_capture.js`.
