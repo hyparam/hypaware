@@ -251,31 +251,40 @@ export function createCodexExchangeProjector(opts = {}) {
  * @ref LLP 0083#decision [implements]: the thread is what selects the rollout
  *
  * When the client states no thread id the container is still the right key for a
- * ROOT thread (there the two are one uuid), and that is the common
- * subscription-route shape (a `session-id` header and nothing else). But the
- * container is only usable while nothing says otherwise: if the turn announces
- * subagent lineage without naming its own thread, its rollout is not identifiable
- * from the wire, and an unknown cwd (LLP 0049 fails open, the row records NULL)
- * is preferred to confidently stamping and enforcing the root's directory. A
- * wrong cwd is a false statement about where a turn ran; an absent one is true.
+ * ROOT thread (there the two are one uuid). That was once the common
+ * subscription-route shape, a bare `session-id` header; it is not any more, and
+ * that header name is not one Codex emits or this file reads
+ * (@ref LLP 0151#real-header-names). Since the adapter began reading the body's
+ * flat `client_metadata` map, which Codex fills with BOTH ids on every request
+ * (@ref LLP 0151#body-is-authority), an ordinary Codex turn states its thread and
+ * is answered by the branch above. What is left for the two lines below is a turn
+ * that names a container on a Codex-owned surface while naming no `thread_id` on
+ * any of them, which no `codex-rs` surface is known to produce.
  *
  * **Which lineage counts, and why it cannot be `thread_source` alone.**
  * `thread_source` and `parent_thread_id` are read out of `x-codex-turn-metadata`,
- * and that blob also carries `thread_id`, so a turn that states them has already
- * been answered by the branch above: a refusal keyed only on those can never fire.
- * The lineage that survives a turn stating no thread id is the lineage Codex sends
- * as a DIRECT header, gated on nothing else: `x-codex-parent-thread-id` and
+ * and that blob states `thread_id` whenever it states any turn identity at all,
+ * so a turn stating them has already been answered by the branch above: a refusal
+ * keyed only on those can never fire for a real Codex turn. The lineage that
+ * would survive a turn stating no thread id is the lineage Codex sends as a
+ * DIRECT header, gated on nothing else: `x-codex-parent-thread-id` and
  * `x-openai-subagent` (see `subagent_signal` in `resolveCodexContext`). Those are
- * what make this refusal reachable, so both are consulted here.
+ * what make this refusal reachable at all, so both are consulted here.
  *
  * A turn stating a container, no thread id, and no lineage of any kind is then
  * taken as the root thread it claims to be. That is a bounded residual: it can
  * only mis-resolve for a client that both withholds its thread id and withholds
  * every lineage signal on a subagent turn, and Codex withholds neither together.
- * Dropping the fallback anyway is worse, not safer: it returns every turn that
- * states only a container, root threads included, to `cwd = NULL`, which fails
- * `.hypignore` open for that whole traffic class and is the regression LLP 0083
- * exists to prevent. @ref LLP 0083#container-fallback-gap [constrained-by]
+ * The mirror residual is the refusal itself: `subagent_signal` is value-blind, so
+ * `review`, `compact` and `memory_consolidation` (same-workspace sub-threads,
+ * where the root's cwd is the correct answer) refuse a container the root would
+ * have resolved, and LLP 0049 then fails OPEN and records the turn. Both residuals
+ * need the same unobserved shape (a container with no thread id anywhere), so
+ * neither is reachable from Codex traffic as `codex-rs` is documented to emit it.
+ * Dropping the fallback is not the safer half of that trade: it returns every turn
+ * that states only a container, root threads included, to `cwd = NULL`, which
+ * fails `.hypignore` open for that whole traffic class and is the regression
+ * LLP 0083 exists to prevent. @ref LLP 0083#container-fallback-gap [constrained-by]
  *
  * @param {RolloutCwdResolver | undefined} rolloutCwd
  * @param {ReturnType<typeof resolveCodexContext>} codexContext

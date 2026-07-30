@@ -603,6 +603,66 @@ for (const header of ['x-codex-parent-thread-id', 'x-openai-subagent']) {
   })
 }
 
+// `x-openai-subagent`'s real values are `review`, `compact`, `collab_spawn` and
+// `memory_consolidation`. Three of the four are sub-threads of the ROOT's own
+// workspace, so the root's cwd is the CORRECT answer for them, and the guard
+// refuses anyway because it is value-blind. These two loops pin both halves of
+// that trade, because only the pair of them says how far it reaches.
+for (const value of ['review', 'compact', 'memory_consolidation']) {
+  test(`DOCUMENTED MIRROR: x-openai-subagent=${value} with no thread id refuses a container the root would have resolved`, async () => {
+    // @ref LLP 0083#container-fallback-gap [tests]: the cost of the value-blind
+    // grain, asserted rather than left to be rediscovered. The root ran in an
+    // IGNORED directory and this is a sub-thread of the root's own workspace, so
+    // the container fallback would have dropped the turn. The refusal makes the
+    // cwd unknown instead, LLP 0049 fails OPEN, and the turn is RECORDED. That is
+    // the same leak direction #459 closes, in the guard that bounds the fix.
+    const sessionsDir = await writeSubagentPair({
+      rootCwd: '/work/ignored/root',
+      subagentCwd: '/work/clean/sub',
+    })
+    const projector = createCodexExchangeProjector({
+      resolver: ignoringResolver('/work/ignored'),
+      rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+    })
+    const projection = /** @type {any} */ (projector.project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({ 'x-openai-subagent': value }),
+      request_body: codexLineageBody({ session_id: ROOT_SESSION_ID }),
+      response_body: JSON.stringify({ output_text: 'ok' }),
+    }), context()))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP, 'recorded, not dropped: the cost this asserts')
+    assert.equal(projection.cwd, undefined)
+  })
+
+  test(`x-openai-subagent=${value} does NOT cost anything once the turn states its thread`, async () => {
+    // The bound on the loop above. Codex fills the body's `client_metadata` map
+    // with `thread_id` on every request (@ref LLP 0151#body-is-authority), so a
+    // real turn carrying this header carries a thread id too, the thread-id key
+    // answers first, and the value-blind refusal is never consulted. Same header,
+    // same ignored root, opposite outcome: the drop is restored.
+    const sessionsDir = await writeSubagentPair({
+      rootCwd: '/work/ignored/root',
+      subagentCwd: '/work/clean/sub',
+    })
+    const projector = createCodexExchangeProjector({
+      resolver: ignoringResolver('/work/ignored'),
+      rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+    })
+    const projection = projector.project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({ 'x-openai-subagent': value }),
+      request_body: codexLineageBody({
+        session_id: ROOT_SESSION_ID,
+        thread_id: ROOT_THREAD_ID,
+      }),
+      response_body: JSON.stringify({ output_text: 'ok' }),
+    }), context())
+    assert.equal(projection, USAGE_POLICY_DROP, 'a turn that states its thread is judged by its own rollout')
+  })
+}
+
 test('a session_meta line with a cwd but no payload.id is refused, not matched by its filename', async () => {
   // The identity guard reads the RAW line, so an absent `payload.id` is visible
   // as absent and refuses. Pinned because it is a real divergence from the

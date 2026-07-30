@@ -138,14 +138,30 @@ has the symmetric fallback.
   ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority)),
   which settles the recorded-shape question there rather than here. The
   consequence for this document: a turn now reaches the container fallback at all
-  only when it carries **neither** a Codex-owned `client_metadata` map **nor** a
-  turn-metadata blob, because either one states the thread id and the thread-id
-  key answers first. The refusal below is therefore much harder to reach than it
-  was, but it is not dead, and nothing about the trade it encodes changed. The
-  guard is deliberately value-blind (any `x-openai-subagent` value refuses, not
-  only the ones that name a different workspace); whether that is the right grain
-  is an open question on the PR that introduced it, recorded there rather than
-  settled here.
+  only when **no surface it carries states a `thread_id`**. That is stricter than
+  "carries neither surface", and the difference is the whole reachable set: the
+  body map and the turn-metadata blob each state a `thread_id` whenever they state
+  any identity at all (the map on every request, the blob whenever the request
+  kind has turn identity), so a turn reaches the fallback only by naming a
+  container on a Codex-owned surface while naming no thread on any of them. No
+  `codex-rs` surface is documented to produce that.
+
+  **The value-blind grain, and what it costs.** The guard refuses on any
+  `x-openai-subagent` value, not only the ones that name a different workspace, so
+  `review`, `compact` and `memory_consolidation` (same-workspace sub-threads,
+  where the root's `cwd` is the correct answer) refuse a container that would have
+  resolved correctly, and [LLP 0049](./0049-hypignore-usage-policy.spec.md) then
+  fails **open** and records the turn. That is the same leak direction this
+  document exists to close, and it is accepted here only because it needs the same
+  unobserved request shape the fallback itself now needs: verified by executing
+  the real projector over every surface combination, the refusal and the
+  container fallback are entered by exactly the same shapes, so neither the
+  residual nor its mirror is reachable from Codex traffic as `codex-rs` is
+  documented to emit it. The narrowing rests on that documented emission and not
+  on anything this repo can assert hermetically
+  ([LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)), which is
+  why the guard is kept rather than deleted: it is the cheap half of a trade whose
+  premise is another program's source.
 - **What remains after that is bounded, and removing the fallback is worse.** A
   turn stating a container, no thread id, and no lineage of any kind is taken as
   the root thread it claims to be. That can only mis-resolve for a client that
