@@ -126,13 +126,26 @@ more restrictive of the two answers wins, the declared one breaking a class tie
 because it is the spelling the user typed. Widening an entry's reach can then
 only add restriction.
 
-The visible cost is that a nested loosening does not cross spellings: an
-explicit `sync`/`full` carve-out declared under one spelling does not loosen a
-broader restrictive entry declared under the other, and a user who wants the
-carve-out has to declare it under the same spelling as the entry it carves out
-of (`hyp policy show` on the path reports the class actually in force, so the
-situation is diagnosable). That is the privacy-safe direction of the trade, and
-it is the same direction the `cwd` side already takes.
+The visible cost is that a nested loosening does not cross spellings *when the
+broader restrictive entry is one the declared pass already found*: an explicit
+`sync`/`full` carve-out declared under one spelling does not loosen a broader
+restrictive entry that matches the `cwd` by its own declared spelling, and a
+user who wants that carve-out has to declare it under the same spelling as the
+entry it carves out of (`hyp policy show` on the path reports the class actually
+in force, so the situation is diagnosable). That is the privacy-safe direction
+of the trade, and it is the same direction the `cwd` side already takes.
+
+That condition is load-bearing and the rule should not be read without it,
+because the two-pass guard can only preserve a verdict the declared pass
+actually produced. When the broader restrictive entry reaches the `cwd` *only*
+through canonicalization, the declared pass matches nothing, there is no lexical
+verdict to preserve, and ordinary nearest-governs decides among entries that are
+all in the canonical namespace: a deeper carve-out does then win. That is not a
+hole in the invariant above. The lexical matcher matched neither entry in that
+shape, so `full` is exactly what it returned as well, and the outcome is the one
+the user would have got by declaring both entries canonically in the first
+place. Pinned by `resolve: between two entries that both reach only by
+canonicalization, the deeper carve-out governs`.
 
 Three consequences worth stating outright, because they are what a reader of the
 privacy gate will ask:

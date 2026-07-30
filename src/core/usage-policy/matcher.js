@@ -400,8 +400,15 @@ function deepestMatch(cwd, scopes, spellingLimit) {
  * - and the more restrictive of the two answers wins, the declared one breaking
  * a class tie because it is the spelling the user typed. Widening an entry's
  * reach can then only ever add restriction, never remove it, which is the
- * fail-toward-privacy property LLP 0050 §canonicalization claims and the reason
- * a nested loosening deliberately does not cross spellings.
+ * fail-toward-privacy property LLP 0050 §canonicalization claims.
+ *
+ * Note the exact reach of the guard: it preserves a verdict the **declared**
+ * pass produced, so it blocks a cross-spelling loosening only when the broader
+ * restrictive entry matches `cwd` by its own declared spelling. If that entry
+ * reaches `cwd` only through canonicalization, the declared pass matches
+ * nothing and plain nearest-governs picks between entries that are all in the
+ * canonical namespace, so a deeper carve-out wins. That is still never a
+ * demotion: the lexical matcher matched neither entry in that shape either.
  *
  * @ref LLP 0050#canonicalization [implements]: canonicalization only ever moves the gate toward more restrictive, entry side included
  * @ref LLP 0049#fail-safe [constrained-by]: a widened reach must resolve to "suppress more", never to "starts forwarding"

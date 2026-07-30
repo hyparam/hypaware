@@ -199,6 +199,56 @@ test('resolve: a carve-out that gains reach by canonicalization does not punch a
   assert.equal(resolver2.resolve(path.join(real, 'proj', 'sub')).class, 'full', 'a same-spelling carve-out is honored')
 })
 
+// The exact reach of the two-pass guard, pinned because the obvious reading of
+// "a nested loosening does not cross spellings" is too strong. The guard
+// compares the declared-spelling answer with the widened one, so it can only
+// preserve a restrictive verdict the *declared* pass actually produced. When
+// the broader restrictive entry reaches this `cwd` only through
+// canonicalization, the declared pass finds nothing to preserve and ordinary
+// nearest-governs decides between two entries that are both in the canonical
+// namespace: the deeper carve-out wins. That is the same verdict the lexical
+// matcher gave (neither entry matched it at all), so it is never a demotion,
+// and it is the same verdict the user would get by declaring both entries
+// canonically. Documented so a reader does not mistake it for the leak the
+// test above closes.
+//
+// @ref LLP 0050#canonicalization [tests]: the loosening block is conditioned on the restrictive entry matching by its declared spelling
+
+test('resolve: between two entries that both reach only by canonicalization, the deeper carve-out governs', () => {
+  const root = tempRoot()
+  const real = path.join(root, 'real')
+  fs.mkdirSync(path.join(real, 'r', 'p', 'q', 'x'), { recursive: true })
+  // Two *different* symlink spellings, nested one inside the other's target.
+  // Neither declared spelling lexically contains the real `cwd` below.
+  const outer = path.join(root, 'l1')
+  const inner = path.join(root, 'l2')
+  fs.symlinkSync(path.join(real, 'r', 'p'), outer)
+  fs.symlinkSync(path.join(real, 'r', 'p', 'q'), inner)
+  const listPath = path.join(root, 'state', 'usage-policy', 'local-only.json')
+  writeList(root, listPath, [
+    { dir: outer, class: 'ignore' },
+    { dir: inner, class: 'full' },
+  ])
+
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: listPath })
+  const deep = path.join(real, 'r', 'p', 'q', 'x')
+  assert.equal(
+    resolver.resolve(deep).class,
+    'full',
+    'nearest-governs applies normally when both entries are in the canonical namespace'
+  )
+  // Never a demotion: the lexical matcher matched neither entry, so `full` is
+  // exactly what it returned here too.
+  const lexicalOnly = createUsagePolicyResolver({
+    localOnlyListPath: listPath,
+    realpathSync: (p) => p,
+  })
+  assert.equal(lexicalOnly.resolve(deep).class, 'full', 'the lexical matcher said full here as well')
+  // Outside the carve-out the widened `ignore` entry still governs, which is
+  // the reach canonicalization added.
+  assert.equal(resolver.resolve(path.join(real, 'r', 'p')).class, 'ignore')
+})
+
 test('governingListEntry names the entry whose verdict the gate used, not the longest declared string', () => {
   const root = tempRoot()
   fs.mkdirSync(path.join(root, 'r', 'p', 'deep'), { recursive: true })
