@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0144
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0151
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -33,7 +33,7 @@ no `x-codex-turn-metadata` and therefore no `workspaces`. (This paragraph
 previously said `codex-tui` never sends that header and that it is Codex Desktop
 behavior. That is false: Codex's `compatibility_headers` emits it for every turn
 regardless of client. See
-[LLP 0144](./0144-codex-lineage-from-body-client-metadata.decision.md#context).)
+[LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#context).)
 So "cwd is always available at projection time" was really "cwd is available when
 the client volunteers it" - and for an entire first-class traffic class, it
 often did not:
@@ -65,7 +65,7 @@ Codex now has the symmetric fallback.
   filesystem work; the rollout is consulted **only** on a miss.
 - **Keyed on the codex session id.** The live path already resolves it: the
   body's `client_metadata.session_id`, else the turn-metadata blob
-  ([LLP 0144](./0144-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);
+  ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);
   it was never a `session-id` header, a name Codex does not emit). The rollout
   filename embeds it, matched via the `sessionIdFromPath` helper shared with the
   backfill. Only a real Codex session has a rollout, so non-codex traffic never

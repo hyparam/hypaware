@@ -1110,10 +1110,10 @@ test('conversation_id falls back to a stable hash when no codex metadata or sess
 })
 
 // ---------------------------------------------------------------------
-// Lineage surfaces (LLP 0144)
+// Lineage surfaces (LLP 0151)
 // ---------------------------------------------------------------------
 
-// @ref LLP 0144#body-is-authority [tests]: the flat body `client_metadata` map
+// @ref LLP 0151#body-is-authority [tests]: the flat body `client_metadata` map
 // is the only lineage surface Codex fills for every request kind, so a turn
 // that carries no Codex header at all must still resolve its thread, session,
 // turn and parent thread.
@@ -1148,7 +1148,7 @@ test('Codex lineage resolves from the durable body client_metadata when no linea
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 
-// @ref LLP 0144#body-is-a-codex-signal [tests]: the API-key route posts to a
+// @ref LLP 0151#body-is-a-codex-signal [tests]: the API-key route posts to a
 // generic `/v1/responses` with no Codex-namespaced header, so the body map is
 // also what identifies the exchange as Codex at all.
 test('body client_metadata alone identifies a Codex exchange on a generic responses path', () => {
@@ -1189,7 +1189,7 @@ test('body client_metadata alone identifies a Codex exchange on a generic respon
   assert.equal(projection.cwd, '/work/api')
 })
 
-// @ref LLP 0144#real-header-names [tests]: the compatibility headers Codex
+// @ref LLP 0151#real-header-names [tests]: the compatibility headers Codex
 // really emits keep working, including `x-codex-parent-thread-id` (the name the
 // projector previously got wrong).
 test('Codex lineage resolves from the compatibility headers Codex actually sends', () => {
@@ -1222,7 +1222,7 @@ test('Codex lineage resolves from the compatibility headers Codex actually sends
   assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
 })
 
-// @ref LLP 0144#real-header-names [tests]: `thread-id`, `session-id` and
+// @ref LLP 0151#real-header-names [tests]: `thread-id`, `session-id` and
 // `parent-thread-id` are names Codex never emits. Reading them let an
 // unrelated proxy hop or a hand-rolled client dictate `conversation_id`, which
 // is the partition-adjacent row identity, so they must resolve to nothing.
@@ -1251,7 +1251,7 @@ test('a bare lineage header name Codex never sends resolves to nothing, not a wr
   assert.equal(projection.session_id, projection.conversation_id)
 })
 
-// @ref LLP 0144#body-is-authority [tests]: body and blob are two projections of
+// @ref LLP 0151#body-is-authority [tests]: body and blob are two projections of
 // one Codex snapshot and cannot disagree in real traffic; pin which one wins so
 // the tie-break is a decision rather than an accident of argument order.
 test('body client_metadata wins over the turn-metadata blob when the two disagree', () => {
@@ -1277,12 +1277,12 @@ test('body client_metadata wins over the turn-metadata blob when the two disagre
   assert.equal(projection.conversation_id, 'thread-body')
   assert.equal(projection.session_id, 'session-body')
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
-  // @ref LLP 0144#lineage-conflict [tests]: the tie-break leaves evidence, so
+  // @ref LLP 0151#lineage-conflict [tests]: the tie-break leaves evidence, so
   // the disagreement the body silently won is on the row and countable.
   assert.equal(projection.attributes.codex.lineage_conflict, 'thread_id,session_id')
 })
 
-// @ref LLP 0144#lineage-conflict [tests]: the signal must be absent, not merely
+// @ref LLP 0151#lineage-conflict [tests]: the signal must be absent, not merely
 // falsy, for the agreeing traffic that is every turn Codex is known to send, or
 // a nonzero conflict count stops being evidence of anything.
 test('agreeing lineage surfaces record no lineage_conflict', () => {
@@ -1316,7 +1316,7 @@ test('agreeing lineage surfaces record no lineage_conflict', () => {
   assert.ok(!('lineage_conflict' in projection.attributes.codex))
 })
 
-// @ref LLP 0144#lineage-conflict [tests]: only a real disagreement counts. A
+// @ref LLP 0151#lineage-conflict [tests]: only a real disagreement counts. A
 // field one surface omits is the normal per-request-kind shape, not a conflict.
 test('a lineage field only one surface states is not a conflict', () => {
   const projector = createCodexExchangeProjector()
@@ -1338,7 +1338,7 @@ test('a lineage field only one surface states is not a conflict', () => {
   assert.ok(!('lineage_conflict' in projection.attributes.codex))
 })
 
-// @ref LLP 0144#lineage-source [tests]: the recorded name is the surface the
+// @ref LLP 0151#lineage-source [tests]: the recorded name is the surface the
 // identity came from. Here the body states only `session_id`, so `thread_id`,
 // which is what `conversation_id` keys on, comes from the blob.
 test('lineage_source names the surface the thread actually came from', () => {
@@ -1366,7 +1366,7 @@ test('lineage_source names the surface the thread actually came from', () => {
   assert.ok(!('lineage_conflict' in projection.attributes.codex))
 })
 
-// @ref LLP 0144#body-is-a-codex-signal [tests]: a flat `session_id` +
+// @ref LLP 0151#body-is-a-codex-signal [tests]: a flat `session_id` +
 // `thread_id` pair is not a Codex-exclusive shape, and `/v1/responses` and
 // `/v1/chat/completions` are generic matched paths that any OpenAI-compatible
 // client posts to. Honouring the pair as evidence of Codex would reopen through
@@ -1415,7 +1415,7 @@ test('a non-Codex client sending only a flat client_metadata identity pair is no
   }
 })
 
-// @ref LLP 0144#body-is-a-codex-signal [tests]: corroboration is what makes the
+// @ref LLP 0151#body-is-a-codex-signal [tests]: corroboration is what makes the
 // flat pair readable, not the pair itself, so the guard above must narrow only
 // WHO may be called Codex and not WHAT a known Codex client's map carries. A
 // Codex user-agent is corroboration on its own, so a Codex turn whose map states
@@ -1439,7 +1439,7 @@ test('a transport-corroborated Codex request still resolves lineage from a flat-
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 
-// @ref LLP 0144#body-is-a-codex-signal [tests]: `match` gates on the path (plus
+// @ref LLP 0151#body-is-a-codex-signal [tests]: `match` gates on the path (plus
 // the turn-metadata header) and never reads the body, while codex-context
 // resolution accepts a Codex-owned body map on its own. The two only stay
 // consistent because the matched path set covers every route Codex posts to: a
@@ -1472,7 +1472,7 @@ test('every route Codex posts to is matched, so a body-only Codex request is nev
   }
 })
 
-// @ref LLP 0144#row-identity [tests]: already-recorded shapes must not re-key.
+// @ref LLP 0151#row-identity [tests]: already-recorded shapes must not re-key.
 // These literals were captured from the pre-change projector, so a drift in
 // `conversation_id` resolution for a shape HypAware already recorded shows up
 // here as a changed `message_id` / `part_id`.

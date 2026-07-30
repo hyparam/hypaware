@@ -67,7 +67,7 @@ export function createCodexExchangeProjector(opts = {}) {
       // Any Codex client tags a turn-metadata-carrying request with
       // `x-codex-turn-metadata`, even when the path looks generic, so accept the
       // header as a sufficient match signal. It is NOT a Desktop-only signal.
-      // @ref LLP 0144#real-header-names [constrained-by]: every Codex client
+      // @ref LLP 0151#real-header-names [constrained-by]: every Codex client
       // emits it, so the match is client-independent.
       if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
       // NOTE this gate deliberately does not consult the body, while
@@ -653,7 +653,7 @@ function firstPlainObject(...values) {
 // spelling can never match. The other names read in this file (`originator`,
 // `user-agent`, `x-client-request-id`, and the response's `x-oai-request-id`)
 // are real too, from the shared default client and `codex-api`.
-// @ref LLP 0144#real-header-names [constrained-by]: named constants so a
+// @ref LLP 0151#real-header-names [constrained-by]: named constants so a
 // fictional header name cannot be reintroduced by a typo.
 const X_CODEX_TURN_METADATA = 'x-codex-turn-metadata'
 const X_CODEX_WINDOW_ID = 'x-codex-window-id'
@@ -666,13 +666,13 @@ const X_CODEX_PARENT_THREAD_ID = 'x-codex-parent-thread-id'
  * @param {Record<string, unknown>} reqBody
  */
 function resolveCodexContext(input, provider, path, reqBody) {
-  // @ref LLP 0144#body-is-a-codex-signal [implements]: a Codex-owned body map
+  // @ref LLP 0151#body-is-a-codex-signal [implements]: a Codex-owned body map
   // identifies the exchange on its own, so the API-key route's generic
   // `/v1/responses` resolves with no Codex header at all. The transport signal is
   // resolved first because it is also what corroborates the body's ambiguous
   // flat identity pair (see `readCodexClientMetadata`).
   const transportIsCodex = hasCodexTransportSignal(input, provider, path)
-  // @ref LLP 0144#body-is-authority [implements]: the flat body map first, the
+  // @ref LLP 0151#body-is-authority [implements]: the flat body map first, the
   // turn-metadata blob second. Both are projections of one Codex snapshot, so
   // they agree whenever both are present; the body is preferred because it is
   // the only one present for every request kind.
@@ -724,11 +724,11 @@ function resolveCodexContext(input, provider, path, reqBody) {
   // Which surface stated the identity this row is keyed on. Recorded so a
   // future Codex version that stops sending one of them is visible in a query
   // instead of showing up as a silent drift in `conversation_id`.
-  // @ref LLP 0144#lineage-source [implements]: make version drift queryable.
+  // @ref LLP 0151#lineage-source [implements]: make version drift queryable.
   const lineage_source = lineageSource(clientMetadata, metadata)
   // The precedence above trusts the two surfaces to agree. Nothing here can
   // verify that, so when they do not, say so on the row.
-  // @ref LLP 0144#lineage-conflict [implements]: the tie-break leaves evidence.
+  // @ref LLP 0151#lineage-conflict [implements]: the tie-break leaves evidence.
   const lineage_conflict = lineageConflict(clientMetadata, metadata)
   // Strip any credential userinfo at ingress, before it reaches the first-class
   // `git_remote` field or the `attributes.codex.git_origin_url` mirror.
@@ -788,7 +788,7 @@ function resolveCodexContext(input, provider, path, reqBody) {
  *
  * Kept separate from the body signal because it is also what corroborates a
  * `client_metadata` map carrying no Codex-owned key of its own.
- * @ref LLP 0144#body-is-a-codex-signal [implements]
+ * @ref LLP 0151#body-is-a-codex-signal [implements]
  *
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
@@ -823,8 +823,8 @@ function hasCodexTransportSignal(input, provider, path) {
  * the pair is trusted only once `corroborated` says the transport already
  * identified the exchange as Codex, where it adds lineage detail to a client
  * that is already known rather than naming the client.
- * @ref LLP 0144#body-is-authority: the always-present lineage surface.
- * @ref LLP 0144#body-is-a-codex-signal [constrained-by]: which keys of the map
+ * @ref LLP 0151#body-is-authority: the always-present lineage surface.
+ * @ref LLP 0151#body-is-a-codex-signal [constrained-by]: which keys of the map
  * are evidence of Codex, and which only carry detail.
  *
  * @param {unknown} reqBody
@@ -848,7 +848,7 @@ function readCodexClientMetadata(reqBody, corroborated) {
  * The turn-metadata blob. Codex transports it twice per HTTP request: as the
  * `x-codex-turn-metadata` header, and as the same-named string entry of the
  * body's `client_metadata` map. The header is read first so already-recorded
- * rows keep their exact identity (@ref LLP 0144#row-identity); the body entry
+ * rows keep their exact identity (@ref LLP 0151#row-identity); the body entry
  * is the fallback for a hop that dropped the header. Absent entirely for
  * request kinds Codex marks as carrying no turn metadata, which is why the flat
  * body keys, not this blob, are the lineage authority.
@@ -907,7 +907,7 @@ function lineageSource(clientMetadata, metadata) {
  * filling the two surfaces from different state a queryable fact rather than a
  * silent preference. The row still keys on the body, so this adds a signal and
  * changes no identity.
- * @ref LLP 0144#lineage-conflict [implements]: an unverifiable agreement
+ * @ref LLP 0151#lineage-conflict [implements]: an unverifiable agreement
  * assumption gets a recorded signal.
  *
  * @param {Record<string, unknown> | undefined} clientMetadata
@@ -967,7 +967,7 @@ function selectCodexWorkspace(metadata, cwd) {
  * @param {ReturnType<typeof resolveCodexContext>} codexContext
  */
 function resolveConversationId(reqBody, input, provider, path, codexContext) {
-  // @ref LLP 0144#real-header-names [implements]: the thread comes from the
+  // @ref LLP 0151#real-header-names [implements]: the thread comes from the
   // context's own resolution (body map, then turn-metadata blob) and nowhere
   // else. The `thread-id` / `session-id` header names that used to be consulted
   // here are names Codex never emits, so they could only ever have let a

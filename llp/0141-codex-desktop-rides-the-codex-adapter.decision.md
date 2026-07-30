@@ -5,7 +5,7 @@
 **Systems:** Plugins, Sources, Onboarding
 **Author:** Kenny / Claude
 **Date:** 2026-07-28
-**Related:** LLP 0012, LLP 0083, LLP 0115, LLP 0130, LLP 0133, LLP 0144
+**Related:** LLP 0012, LLP 0083, LLP 0115, LLP 0130, LLP 0133, LLP 0151
 
 > Names a coverage fact that was already true in code and nowhere in the
 > product surface. Nothing about capture changes here; the picker copy, the
@@ -26,7 +26,7 @@ routes, neither of which was named anywhere a user looks:
    Codex client sends it on a turn that carries turn metadata - Desktop
    included. (This bullet previously said Desktop is what sends it; that is
    false, and nothing in the coverage claim depends on it. See
-   [LLP 0144](./0144-codex-lineage-from-body-client-metadata.decision.md#real-header-names).)
+   [LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#real-header-names).)
 2. **Backfill.** The rollout tree under `$CODEX_HOME/sessions/**` is written
    by both surfaces too. That half rests on the provider's long-standing
    assumption (`codex/src/backfill.js`) and on smoke fixtures that synthesize

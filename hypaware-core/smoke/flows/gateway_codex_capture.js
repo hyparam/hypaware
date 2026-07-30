@@ -120,7 +120,7 @@ export async function run({ harness, expect }) {
   const codexThreadId = `thread-${harness.devRunId}`
   const codexSessionId = `session-${harness.devRunId}`
   const codexTurnId = `turn-${harness.devRunId}`
-  // @ref LLP 0144#body-is-authority: Codex states its lineage in the body's flat
+  // @ref LLP 0151#body-is-authority: Codex states its lineage in the body's flat
   // `client_metadata` map on every request kind, so the fixture carries it there
   // and NOT under the `thread-id` / `session-id` header names Codex never emits.
   const responsesBody = JSON.stringify({
