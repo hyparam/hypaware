@@ -58,6 +58,13 @@ Codex now has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
+- **An unusable in-band `cwd` is a miss, not a path.** A relative or blank
+  in-band value is refused before the gate sees it: the matcher would resolve it
+  against the **daemon's** own process cwd and return a confident verdict for an
+  unrelated directory (#471). The rollout fallback then still gets its turn, and
+  when nothing usable is found the row records `cwd = NULL` exactly as before, so
+  refusing does not make this path fail closed. The rollout-stated `cwd` is held
+  to the same rule.
 - **Keyed on the codex session id.** The live path already resolves it
   (`session-id` header / turn metadata); the rollout filename embeds it, matched
   via the `sessionIdFromPath` helper shared with the backfill. Only a real Codex
