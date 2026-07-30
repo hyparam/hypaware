@@ -1,16 +1,16 @@
 # LLP 0149: Uncapturable turns pass through and warn
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Observability
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0142 (plugin-steered shadow providers), LLP 0145 (borrowed credentials), LLP 0146 (deferred providers), LLP 0147 (CLI backends)
+**Related:** LLP 0152 (plugin-steered shadow providers), LLP 0145 (borrowed credentials), LLP 0146 (deferred providers), LLP 0147 (CLI backends)
 
 > When the plugin cannot capture a turn, the turn still runs — direct to the
 > vendor, uncaptured, with a warning that makes the gap visible. One rule
 > for every cause. This was previously an open question duplicated across
-> LLP 0142 and LLP 0145; both now cite this decision.
+> LLP 0152 and LLP 0145; both now cite this decision.
 
 ## Context
 
@@ -43,7 +43,7 @@ and the knob is easy to add later without breaking anything.
 - Steering decisions are made per turn, so a provider that becomes
   capturable (credential added, preset registered) is picked up on the next
   turn with no restart.
-- LLP 0142's and LLP 0145's former open questions on this point are closed
+- LLP 0152's and LLP 0145's former open questions on this point are closed
   by this decision.
 
 ## Consequences
@@ -57,4 +57,4 @@ and the knob is easy to add later without breaking anything.
 
 ## References
 
-- LLP 0142, 0144, 0145, 0146, 0147
+- LLP 0152, 0144, 0145, 0146, 0147

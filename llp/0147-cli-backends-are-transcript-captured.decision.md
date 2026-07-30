@@ -1,17 +1,17 @@
 # LLP 0147: OpenClaw CLI backends are transcript-captured, never proxied
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Sources, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0026 (Claude native granularity), LLP 0027 (cache settlement), LLP 0109 (OpenClaw client adapter), LLP 0141 (Codex Desktop rides the Codex adapter), LLP 0142 (plugin-steered shadow providers)
+**Related:** LLP 0026 (Claude native granularity), LLP 0027 (cache settlement), LLP 0109 (OpenClaw client adapter), LLP 0141 (Codex Desktop rides the Codex adapter), LLP 0152 (plugin-steered shadow providers)
 
 > OpenClaw can delegate a turn to the `claude` or `codex` binary as a child
 > process. Those turns never touch OpenClaw's provider layer, so no amount
 > of shadow steering or in-process hooking sees them. They are captured by
 > the existing transcript adapters or not at all. Name the seam so nobody
-> later reads LLP 0142 as total coverage.
+> later reads LLP 0152 as total coverage.
 
 ## Context
 
@@ -40,7 +40,7 @@ Consequences that matter here, all verified against OpenClaw source:
   tool executions, approvals, routing and queueing are absent from that
   transcript by design.
 
-None of LLP 0142's steering applies: the child process resolves its own
+None of LLP 0152's steering applies: the child process resolves its own
 credentials, makes its own HTTP calls, and never consults OpenClaw's
 provider catalog.
 
@@ -56,7 +56,7 @@ the coverage fact legible rather than adding capture.
    badly, and OpenClaw deliberately strips `ANTHROPIC_API_KEY` from the
    child environment to avoid shadowing subscription auth. Fighting that is
    asking for a support burden.
-2. **Say nothing and let LLP 0142 read as total coverage.** Rejected. This
+2. **Say nothing and let LLP 0152 read as total coverage.** Rejected. This
    is the failure mode the whole revision exists to remove; leaving an
    unstated hole is the same defect in a new place.
 3. **Declare the seam, and let the existing Claude/Codex transcript
@@ -75,14 +75,14 @@ the coverage fact legible rather than adding capture.
   here, by design, captured over there if the sibling adapter is on.
 - HypAware does not attempt to correlate an OpenClaw session with the child
   CLI session it spawned. OpenClaw passes the child a `--session-id` it
-  generates, so a correlation key does exist in principle; whether it is
-  observable from either adapter is **[inferred]** and left to the open
-  question below.
+  generates, so a correlation key exists in principle; whether either
+  adapter can observe it has not been investigated, and the decision not to
+  correlate stands regardless — see the open question below.
 
 ## Consequences
 
 - The honest coverage statement for OpenClaw becomes: every bearer-token,
-  in-process provider turn (LLP 0142, 0144, 0145, 0146), plus CLI-backend
+  in-process provider turn (LLP 0152, 0144, 0145, 0146), plus CLI-backend
   turns via the sibling adapters, and nothing else. That is a sentence the
   product can defend.
 - A machine with OpenClaw on `claude-cli` and no Claude adapter enabled has
