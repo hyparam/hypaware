@@ -81,8 +81,16 @@ the dialog) stands, reinforced:
      tree (LLP 0140's motivating case).
 
    The claude adapter therefore scans both 3p container layouts for
-   transcripts (`claudeDesktop3pSessionRoots`), live and in backfill, and
-   the Desktop manifest claims all three observed entrypoint values.
+   transcripts (`claudeDesktop3pSessionRoots`), live and in backfill. The
+   Desktop manifest claims the two shared-tree values (`claude-desktop`,
+   `claude-desktop-3p`); container values like `local-agent` are
+   deliberately unclaimed, because container sessions are owned by their
+   root, not their tag (LLP 0140#container-root-owns). On the live path,
+   root discovery is TTL-cached with a forced re-sweep on a lookup miss
+   (`createDesktop3pDirsCache`): every attached-Desktop exchange is a
+   shared-tree miss by construction, and the container's per-session
+   sandbox homes grow with every conversation, so an uncached per-exchange
+   walk grew without bound while the cache stays invisible to correctness.
    Note the sibling `Claude-3p` container holds the attached Desktop's
    live session data: it is NOT the dialog residue this decision's
    install step clears, and must never be deleted by it.

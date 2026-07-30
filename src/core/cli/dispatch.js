@@ -808,8 +808,14 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
     /** @type {Map<string, string>} */
     const providerByCap = new Map()
+    // First declaration wins, with active manifests listed first: three
+    // bundled capabilities have two providers, and preferring an already-
+    // active one keeps the closure from activating a second provider whose
+    // only qualification is iterating later.
     for (const m of [...activePlugins.map((p) => p.manifest), ...inactive.map((e) => e.manifest)]) {
-      for (const cap of Object.keys(m.provides?.capabilities ?? {})) providerByCap.set(cap, m.name)
+      for (const cap of Object.keys(m.provides?.capabilities ?? {})) {
+        if (!providerByCap.has(cap)) providerByCap.set(cap, m.name)
+      }
     }
     /** @type {Set<string>} */
     const closure = new Set()
@@ -863,8 +869,17 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
       plugins_activated: result.results.filter((r) => r.ok).length,
       plugins_failed: result.results.filter((r) => !r.ok).length,
     })
-  } catch {
-    // Best-effort: the dispatch miss path reports unavailable + repair.
+  } catch (err) {
+    // Best-effort: the dispatch miss path reports unavailable + repair. But
+    // say the attempt happened: without this line a throwing activation
+    // leaves the user at "unknown command" with no record that the seam ran.
+    getLogger('cmd-dispatch').warn('dispatch.seam_activate_failed', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      [Attr.ERROR_KIND]: 'seam_activation_failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 

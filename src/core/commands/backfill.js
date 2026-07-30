@@ -22,7 +22,7 @@ import { loadClientDescriptors } from '../daemon/status.js'
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
  * @import { EntrypointOwners } from '../../../src/core/backfill/types.js'
  */
@@ -235,26 +235,27 @@ export async function runBackfillPlan(argv, ctx) {
     async () => {
       /** @type {Array<{ provider: string, plugin: string, datasets: string[], plan: BackfillPlan | undefined }>} */
       const results = []
-      // The same ownership map the run gets. `entrypointOwners` is declared on
-      // `BackfillPlanContext`, so a provider that consults it while planning
-      // must see what the run will see, or `hyp backfill plan` estimates over
-      // sessions the run then gates out. Resolved once, and only when some
-      // selected provider actually plans.
-      /** @type {EntrypointOwners | undefined} */
-      let entrypointOwners
+      // The same ownership map and configured-plugin predicate the run gets.
+      // Both are declared on `BackfillPlanContext`, so a provider that
+      // consults them while planning must see what the run will see, or
+      // `hyp backfill plan` estimates over sessions the run then gates out.
+      // Resolved once, and only when some selected provider actually plans.
+      /** @type {Awaited<ReturnType<typeof resolveOwnersForRun>> | undefined} */
+      let owners
       for (const provider of selected.providers) {
         if (typeof provider.plan !== 'function') {
           results.push({ provider: provider.name, plugin: provider.plugin, datasets: provider.datasets, plan: undefined })
           continue
         }
-        if (entrypointOwners === undefined) {
-          entrypointOwners = await resolveOwnersForRun(ctx, getLogger('backfill'))
+        if (owners === undefined) {
+          owners = await resolveOwnersForRun(ctx, getLogger('backfill'))
         }
         const planCtx = buildPlanContext({
           env: ctx.env,
           storage: ctx.storage,
           retentionDays,
-          entrypointOwners,
+          entrypointOwners: owners.entrypointOwners,
+          isPluginConfigured: owners.isPluginConfigured,
         })
         try {
           const plan = await provider.plan(planCtx)
@@ -406,7 +407,7 @@ async function runProvider(args) {
       // carries. Best-effort: an empty map means every session imports, i.e.
       // the pre-gate behavior.
       // @ref LLP 0140#manifest-declares-ownership [implements]: the runner resolves entrypoint ownership from the catalog and hands providers the resolved map
-      const entrypointOwners = await resolveOwnersForRun(ctx, log)
+      const owners = await resolveOwnersForRun(ctx, log)
 
       const runCtx = buildRunContext({
         env: ctx.env,
@@ -416,7 +417,8 @@ async function runProvider(args) {
         until,
         dryRun,
         log,
-        entrypointOwners,
+        entrypointOwners: owners.entrypointOwners,
+        isPluginConfigured: owners.isPluginConfigured,
       })
 
       try {
@@ -723,6 +725,7 @@ function handleEvent(args) {
  *   dryRun: boolean,
  *   log: PluginLogger,
  *   entrypointOwners?: EntrypointOwners,
+ *   isPluginConfigured?: (plugin: PluginName) => boolean,
  * }} args
  * @returns {BackfillRunContext}
  */
@@ -736,37 +739,50 @@ function buildRunContext(args) {
     ...(args.until !== undefined ? { until: args.until } : {}),
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
+    ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
     dryRun: args.dryRun,
     log: args.log,
   }
 }
 
 /**
- * Resolve the entrypoint-ownership map for one provider run or plan.
+ * Resolve the entrypoint-ownership map for one provider run or plan, plus
+ * the configured-plugin predicate it was built with. The predicate travels
+ * separately because container-root admission keys on it alone: an owners
+ * map only has entries for plugins that declare `transcript_entrypoints`
+ * values, and a container-owning plugin must not need any value claim to
+ * import its own container (LLP 0140#container-root-owns).
  *
  * Best-effort by design: catalog discovery already degrades to empty in
  * `loadClientDescriptors`, and a failure here must not fail a backfill. An
- * empty map imports everything, which is the behavior that shipped before
- * the gate existed, so degrading never captures MORE than intended, only
- * less precisely attributed.
+ * empty map imports everything from the scanning client's own tree, which
+ * is the behavior that shipped before the gate existed, and the absent
+ * predicate closes the container gate, which is the behavior before the
+ * container was scanned at all. Degrading never captures MORE than
+ * intended.
  *
  * @param {CommandRunContext} ctx
  * @param {PluginLogger} log
- * @returns {Promise<EntrypointOwners>}
+ * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean }>}
  */
 async function resolveOwnersForRun(ctx, log) {
   try {
     const { stateDir, hypHome } = readObservabilityEnv(ctx.env)
     const descriptors = await loadClientDescriptors({ stateDir })
     const configured = await resolveConfiguredPlugins(ctx, hypHome)
-    return resolveEntrypointOwners(descriptors.values(), (plugin) => configured.has(plugin))
+    /** @param {PluginName} plugin */
+    const isPluginConfigured = (plugin) => configured.has(plugin)
+    return {
+      entrypointOwners: resolveEntrypointOwners(descriptors.values(), isPluginConfigured),
+      isPluginConfigured,
+    }
   } catch (err) {
     log.warn('backfill.entrypoint_owners_unavailable', {
       [Attr.COMPONENT]: 'backfill',
       [Attr.ERROR_KIND]: 'catalog_unavailable',
       error: err instanceof Error ? err.message : String(err),
     })
-    return new Map()
+    return { entrypointOwners: new Map() }
   }
 }
 
@@ -843,6 +859,7 @@ function addEnabledPluginNames(names, config) {
  *   storage: CommandRunContext['storage'],
  *   retentionDays?: number,
  *   entrypointOwners?: EntrypointOwners,
+ *   isPluginConfigured?: (plugin: PluginName) => boolean,
  * }} args
  * @returns {BackfillPlanContext}
  */
@@ -853,6 +870,7 @@ function buildPlanContext(args) {
     cacheRoot: args.storage.cacheRoot,
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
+    ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
     log: noopProviderLogger(),
   }
 }

@@ -120,23 +120,47 @@ test('classifyTranscriptEntrypoint with an empty owner map imports everything (p
 // wrong over another client's private directory.
 // @ref LLP 0140#container-root-owns [tests]: container admission keys on the owning plugin's config membership, not the entrypoint value
 test('classifyContainerSession imports as the owner when its plugin is configured', () => {
-  const owners = resolveEntrypointOwners([client('desk', '@hypaware/desk', ['dk'])], () => true)
-  const verdict = classifyContainerSession(owners, { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') })
+  const verdict = classifyContainerSession(
+    { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') },
+    () => true
+  )
   assert.equal(verdict.import, true)
   assert.equal(verdict.clientName, 'desk')
 })
 
 test('classifyContainerSession gates when the owning plugin is unconfigured', () => {
-  const owners = resolveEntrypointOwners([client('desk', '@hypaware/desk', ['dk'])], () => false)
-  const verdict = classifyContainerSession(owners, { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') })
+  const verdict = classifyContainerSession(
+    { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') },
+    () => false
+  )
   assert.equal(verdict.import, false)
   assert.equal(verdict.owner.client, 'desk')
 })
 
-test('classifyContainerSession gates on an empty owners map, unlike the value classifier', () => {
-  const verdict = classifyContainerSession(new Map(), { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') })
+test('classifyContainerSession gates without a predicate, unlike the value classifier', () => {
+  const verdict = classifyContainerSession(
+    { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') },
+    undefined
+  )
   assert.equal(verdict.import, false)
   assert.equal(verdict.owner.configured, false, 'owner is synthesized for the gate log')
+})
+
+// Container admission must not depend on the owning plugin declaring any
+// `transcript_entrypoints` value: the owners map has entries only for
+// declaring plugins, and LLP 0140 says values decide nothing for container
+// sessions. A future maintainer dropping Desktop's (container-vestigial)
+// value claims must not silently switch off Desktop's own backfill.
+// @ref LLP 0140#container-root-owns [tests]: a configured owner declaring no entrypoint values still imports its container
+test('classifyContainerSession is independent of entrypoint value declarations', () => {
+  const configured = new Set(['@hypaware/desk'])
+  const verdict = classifyContainerSession(
+    { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') },
+    (p) => configured.has(p)
+  )
+  assert.equal(verdict.import, true, 'no owners-map entry needed for container admission')
+  assert.equal(verdict.clientName, 'desk')
+  assert.equal(verdict.owner.configured, true)
 })
 
 test('sessionEntrypoint takes the first non-empty value across a session', () => {
@@ -198,16 +222,13 @@ test('real manifests: Desktop entrypoints import as claude-desktop once it is co
   }
 })
 
-test('real manifests: the 3p container gates off until claude-desktop is configured, whatever the tag', async () => {
-  const descriptors = await realClientDescriptors()
+test('the 3p container gates off until claude-desktop is configured, whatever the tag', () => {
   const containerOwner = { client: 'claude-desktop', plugin: /** @type {any} */ ('@hypaware/claude-desktop') }
 
-  const cliOnly = resolveEntrypointOwners(descriptors.values(), (p) => p === '@hypaware/claude')
-  assert.equal(classifyContainerSession(cliOnly, containerOwner).import, false)
+  assert.equal(classifyContainerSession(containerOwner, (p) => p === '@hypaware/claude').import, false)
 
   const both = new Set(['@hypaware/claude', '@hypaware/claude-desktop'])
-  const configured = resolveEntrypointOwners(descriptors.values(), (p) => both.has(p))
-  const verdict = classifyContainerSession(configured, containerOwner)
+  const verdict = classifyContainerSession(containerOwner, (p) => both.has(p))
   assert.equal(verdict.import, true)
   assert.equal(verdict.clientName, 'claude-desktop')
 })

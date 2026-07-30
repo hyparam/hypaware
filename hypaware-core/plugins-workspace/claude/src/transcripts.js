@@ -105,6 +105,55 @@ export function findDesktop3pProjectsDirs(homeDir) {
 }
 
 /**
+ * How long a discovered container-root list stays fresh in
+ * {@link createDesktop3pDirsCache}. Long enough that an attached Desktop
+ * streaming exchanges does not sweep the container per exchange, short
+ * enough that a new sandbox home is picked up between conversations even
+ * without the refresh-on-miss path.
+ */
+const DESKTOP_3P_DIRS_TTL_MS = 30_000
+
+/**
+ * TTL cache over {@link findDesktop3pProjectsDirs}, keyed by home dir.
+ *
+ * The live projector resolves the 3p roots on every primary-tree miss,
+ * and for an attached Desktop every exchange is a primary miss by
+ * construction, so the uncached sweep re-walked a container whose
+ * per-session sandbox homes grow monotonically with conversations. The
+ * cache bounds that to one sweep per TTL; callers that miss inside the
+ * cached list can force a `refresh` so a sandbox home created after the
+ * last sweep is still found (see `loadTranscript`).
+ *
+ * `ttlMs` and `now` are injectable for tests only.
+ *
+ * @param {{ ttlMs?: number, now?: () => number }} [opts]
+ */
+export function createDesktop3pDirsCache(opts) {
+  const ttlMs = opts?.ttlMs ?? DESKTOP_3P_DIRS_TTL_MS
+  const now = opts?.now ?? Date.now
+  /** @type {Map<string, { atMs: number, dirs: string[] }>} */
+  const byHome = new Map()
+  return {
+    /**
+     * @param {string} homeDir
+     * @param {{ refresh?: boolean }} [get]
+     * @returns {{ dirs: string[], cached: boolean }}
+     */
+    get(homeDir, get) {
+      const atMs = now()
+      const hit = byHome.get(homeDir)
+      if (!get?.refresh && hit && atMs - hit.atMs < ttlMs) return { dirs: hit.dirs, cached: true }
+      const dirs = findDesktop3pProjectsDirs(homeDir)
+      byHome.set(homeDir, { atMs, dirs })
+      return { dirs, cached: false }
+    },
+  }
+}
+
+/** Shared instance for the live path; keyed by home dir, so one is enough. */
+const desktop3pDirsCache = createDesktop3pDirsCache()
+
+/**
  * @param {string} dir
  * @param {number} depth
  * @param {string[]} out
@@ -177,18 +226,42 @@ export async function loadTranscript(opts) {
     }
     // The 3p roots are only scanned on a primary miss: a session lives in
     // exactly one tree, and the common CLI case must not pay the extra
-    // container walk.
+    // container walk. Root discovery is TTL-cached: for an attached Desktop
+    // every exchange is a primary miss, and the uncached sweep re-walked
+    // the whole container per exchange.
     if (entries.length === 0 && opts.homeDir) {
-      for (const projectsDir of findDesktop3pProjectsDirs(opts.homeDir)) {
-        for (const filePath of walkJsonlFiles(projectsDir, opts.sessionId)) {
-          await readTranscriptFile(filePath, entries)
-        }
-        if (entries.length > 0) break
+      const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
+      await readSessionFromDirs(dirs, opts.sessionId, entries)
+      // A new sandbox home appears exactly when a session starts, so a
+      // cached list cannot contain the newest session's root. One forced
+      // re-sweep on a miss keeps the cache invisible to correctness: the
+      // cached path never finds less than the uncached walk did.
+      if (entries.length === 0 && cached) {
+        const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
+        await readSessionFromDirs(refreshed.dirs, opts.sessionId, entries)
       }
     }
   }
   entries.sort(byTimestampAsc)
   return entries
+}
+
+/**
+ * Read `<sessionId>` transcript files under each projects dir into
+ * `entries`, stopping at the first dir that matches (a session lives in
+ * exactly one sandbox home).
+ *
+ * @param {string[]} projectsDirs
+ * @param {string} sessionId
+ * @param {TranscriptEntry[]} entries
+ */
+async function readSessionFromDirs(projectsDirs, sessionId, entries) {
+  for (const projectsDir of projectsDirs) {
+    for (const filePath of walkJsonlFiles(projectsDir, sessionId)) {
+      await readTranscriptFile(filePath, entries)
+    }
+    if (entries.length > 0) return
+  }
 }
 
 /**

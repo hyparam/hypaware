@@ -86,26 +86,31 @@ export function classifyTranscriptEntrypoint(entrypoint, owners, scanningClient)
  * entrypoint value inside it. The value cannot carry consent for a foreign
  * container: it has already drifted between Desktop builds within a week,
  * and attachment and summary records omit the field entirely, so a value
- * test here fails open exactly where consent is at stake. The gate closes
- * whenever the container's owning plugin is not configured, including when
- * it is not installed and the owners map has no entry for it: unlike the
- * scanning client's own tree, failing closed drops no history the user
- * opted into, it declines to read another client's private directory.
+ * test here fails open exactly where consent is at stake.
  *
- * @ref LLP 0140#container-root-owns [implements]: a foreign container's sessions belong to the container's client whatever their entrypoint says
- * @param {EntrypointOwners} owners
+ * `configured` comes from the runner's plugin-list predicate, NOT from the
+ * entrypoint-owners map: that map only has entries for plugins declaring
+ * `transcript_entrypoints` values, and LLP 0140 says values decide nothing
+ * for container sessions, so looking `configured` up there made container
+ * admission silently depend on a declaration the doc calls irrelevant (a
+ * configured Desktop that dropped its now-vestigial value claims would
+ * have stopped importing its own container). The gate closes whenever the
+ * predicate does not answer true, including when no predicate was supplied
+ * at all: unlike the scanning client's own tree, failing closed drops no
+ * history the user opted into, it declines to read another client's
+ * private directory.
+ *
+ * @ref LLP 0140#container-root-owns [implements]: a foreign container's sessions belong to the container's client whatever their entrypoint says; admission keys on the owning plugin's config membership alone
  * @param {{ client: string, plugin: PluginName }} containerOwner
+ * @param {((plugin: PluginName) => boolean) | undefined} isPluginConfigured
  * @returns {{ import: boolean, clientName: string, owner: EntrypointOwner }}
  */
-export function classifyContainerSession(owners, containerOwner) {
-  for (const owner of owners.values()) {
-    if (owner.plugin !== containerOwner.plugin) continue
-    return { import: owner.configured, clientName: owner.client, owner }
-  }
-  // The owning plugin declared nothing (or is not installed): synthesize an
-  // unconfigured owner so the gate log still names who the sessions belong to.
-  const owner = { client: containerOwner.client, plugin: containerOwner.plugin, configured: false }
-  return { import: false, clientName: owner.client, owner }
+export function classifyContainerSession(containerOwner, isPluginConfigured) {
+  const configured = isPluginConfigured?.(containerOwner.plugin) === true
+  // The owner is synthesized (not read from any map) so the gate log always
+  // names who the sessions belong to, installed or not.
+  const owner = { client: containerOwner.client, plugin: containerOwner.plugin, configured }
+  return { import: configured, clientName: owner.client, owner }
 }
 
 /**

@@ -172,11 +172,20 @@ async function* runClaudeBackfill(args) {
       error: errMessage(err),
     })
   })()
-  // Subagent → spawning tool call: one scan of the projects tree builds
+  // Subagent → spawning tool call: one scan per transcript root builds
   // the agent-id → toolUseId map from the `agent-<id>.meta.json` sidecars,
   // so backfilled subagent rows carry the same `spawned_by_tool_use_id`
-  // provenance live capture stamps.
+  // provenance live capture stamps. The Desktop 3p sandbox trees are
+  // scanned too: their sidecars live beside their transcripts, and a
+  // container session's subagent rows deserve the same provenance as any
+  // other backfilled session. Agent ids are unique, so a plain merge is
+  // safe; the primary tree wins a collision.
   const agentMeta = loadAgentMeta({ projectsDir })
+  for (const extraDir of extraProjectsDirs ?? []) {
+    for (const [agentId, meta] of loadAgentMeta({ projectsDir: extraDir })) {
+      if (!agentMeta.has(agentId)) agentMeta.set(agentId, meta)
+    }
+  }
 
   let filesSeen = 0
   let sessionsProjected = 0
@@ -240,11 +249,14 @@ async function* runClaudeBackfill(args) {
       // A session from the 3p container is Desktop's by ROOT, whatever its
       // tag says: the value classifier fails open on an absent or drifted
       // value, which over a foreign container is the wrong direction.
+      // Container admission takes the runner's plugin-list predicate, not
+      // the owners map, so it works whether or not Desktop declares any
+      // entrypoint value.
       // @ref LLP 0140#gate-before-projection [implements]: a session owned by an unconfigured client is skipped before projection, like the usage-policy drop above
       const entrypoint = sessionEntrypoint(sessionEntries)
       const owners = ctx.entrypointOwners ?? new Map()
       const owned = inContainer
-        ? classifyContainerSession(owners, DESKTOP_3P_CONTAINER_OWNER)
+        ? classifyContainerSession(DESKTOP_3P_CONTAINER_OWNER, ctx.isPluginConfigured)
         : classifyTranscriptEntrypoint(entrypoint, owners, clientName)
       if (!owned.import) {
         sessionsGated += 1

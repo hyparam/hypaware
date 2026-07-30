@@ -2292,6 +2292,18 @@ export interface BackfillPlanContext {
    * runner resolves it best-effort and older hosts do not supply it.
    */
   entrypointOwners?: Map<string, { client: string, plugin: PluginName, configured: boolean }>
+  /**
+   * Whether a plugin is in the effective config, resolved by the runner
+   * with the same sources as `entrypointOwners`. Container-root admission
+   * (a session found inside another client's private container) uses this
+   * directly, so root ownership never depends on the owning plugin
+   * declaring any `transcript_entrypoints` value.
+   *
+   * Optional like `entrypointOwners`. Absent means container roots fail
+   * CLOSED (the pre-scan behavior read nothing from a foreign container),
+   * while the shared-tree gate keeps its own fail-open rules.
+   */
+  isPluginConfigured?: (plugin: PluginName) => boolean
 }
 
 export interface BackfillRunContext extends BackfillPlanContext {

@@ -99,12 +99,20 @@ not from the value found inside it: the value has already drifted between
 Desktop builds, `attachment` and summary records omit the field, and a
 value test over a foreign container therefore fails open exactly where
 consent is at stake. The container's owner is fixed beside the code that
-hardcodes its paths (`DESKTOP_3P_CONTAINER_OWNER`); `configured` is looked
-up in the same owners map by plugin. When the owning plugin is
-unconfigured, or not installed at all, the gate closes: unlike the scanning
-client's own tree, failing closed here drops no history the user opted
-into, it declines to read another client's private directory, which
-`master` never read either.
+hardcodes its paths (`DESKTOP_3P_CONTAINER_OWNER`); `configured` comes from
+the runner's configured-plugin predicate
+(`BackfillRunContext.isPluginConfigured`), resolved from the same effective
+plugin list as the owners map, but deliberately NOT read out of that map:
+the map only has entries for plugins that declare
+`transcript_entrypoints` values, and this section says values decide
+nothing for container sessions, so a map lookup would have made container
+admission silently depend on a declaration that is otherwise vestigial for
+it (a configured Desktop dropping its value claims would have stopped
+importing its own container). When the predicate does not answer true for
+the owning plugin, or no predicate was supplied at all, the gate closes:
+unlike the scanning client's own tree, failing closed here drops no
+history the user opted into, it declines to read another client's private
+directory, which `master` never read either.
 
 <a id="gate-before-projection"></a>**A session whose entrypoint is owned by
 an unconfigured client is skipped before projection**, beside the
@@ -142,13 +150,14 @@ logging buried the two real gate decisions under 388 lines.
 - Attaching Desktop makes its history importable, and it lands as
   `client_name: "claude-desktop"`. Existing rows imported before this
   change keep `client_name: "claude"`; nothing rewrites them.
-- Providers must treat `entrypointOwners` as optional. For the scanning
-  client's own tree, absent or empty means import everything under the
-  scanning client, which is exactly the behavior that shipped before this
-  decision, so a catalog failure degrades toward the old behavior rather
-  than toward dropping history. Container roots degrade the same way, and
-  for them the old behavior is the opposite: `master` never read the
-  `Claude-3p` container, so an absent map closes that gate.
+- Providers must treat `entrypointOwners` and `isPluginConfigured` as
+  optional. For the scanning client's own tree, an absent or empty map
+  means import everything under the scanning client, which is exactly the
+  behavior that shipped before this decision, so a catalog failure
+  degrades toward the old behavior rather than toward dropping history.
+  Container roots degrade the same way, and for them the old behavior is
+  the opposite: `master` never read the `Claude-3p` container, so an
+  absent predicate closes that gate.
 - Sessions under the 3p container gate on Desktop's config membership
   whatever their entrypoint value: absent, drifted, or unclaimed values
   change the attribution log line, never the admission decision.
