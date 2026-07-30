@@ -1366,6 +1366,112 @@ test('lineage_source names the surface the thread actually came from', () => {
   assert.ok(!('lineage_conflict' in projection.attributes.codex))
 })
 
+// @ref LLP 0144#body-is-a-codex-signal [tests]: a flat `session_id` +
+// `thread_id` pair is not a Codex-exclusive shape, and `/v1/responses` and
+// `/v1/chat/completions` are generic matched paths that any OpenAI-compatible
+// client posts to. Honouring the pair as evidence of Codex would reopen through
+// the body exactly what removing the `thread-id` header closed: an unrelated
+// client stamped `client_name: 'codex'` and dictating this row's
+// `conversation_id` and `session_id` (the partition key, LLP 0030). So the row
+// must come out exactly as if the map had not been sent at all.
+test('a non-Codex client sending only a flat client_metadata identity pair is not treated as Codex', () => {
+  const projector = createCodexExchangeProjector()
+  const flatPair = { session_id: 'foreign-session', thread_id: 'foreign-thread' }
+  const shapes = [
+    {
+      path: '/v1/responses',
+      body: { model: 'gpt-5', input: 'go' },
+      response_body: JSON.stringify({ output_text: 'done' }),
+    },
+    {
+      path: '/v1/chat/completions',
+      body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+      response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    },
+  ]
+  for (const shape of shapes) {
+    /** @param {Record<string, unknown>} body */
+    const project = (body) => /** @type {any} */ (projector.project(exchange({
+      path: shape.path,
+      // A user-agent no Codex build produces, and no Codex-namespaced header.
+      request_headers: JSON.stringify({ 'user-agent': 'some-agent-framework/2.1' }),
+      request_body: JSON.stringify(body),
+      response_body: shape.response_body,
+    }), context()))
+
+    const projection = project({ ...shape.body, client_metadata: flatPair })
+    assert.equal(projection.client_name, undefined, `${shape.path}: must not be stamped codex`)
+    assert.notEqual(projection.conversation_id, 'foreign-thread')
+    assert.notEqual(projection.session_id, 'foreign-session')
+    // `identity_source` is stamped for every row; no lineage attribute is.
+    assert.equal(projection.attributes.codex.thread_id, undefined)
+    assert.equal(projection.attributes.codex.session_id, undefined)
+    assert.equal(projection.attributes.codex.lineage_source, undefined)
+    // Strongest form: the ambiguous map contributes nothing, so the row is
+    // byte-identical to the same request without it.
+    const control = project(shape.body)
+    assert.equal(projection.conversation_id, control.conversation_id)
+    assert.equal(projection.session_id, control.session_id)
+  }
+})
+
+// @ref LLP 0144#body-is-a-codex-signal [tests]: corroboration is what makes the
+// flat pair readable, not the pair itself, so the guard above must narrow only
+// WHO may be called Codex and not WHAT a known Codex client's map carries. A
+// Codex user-agent is corroboration on its own, so a Codex turn whose map states
+// only the flat pair still resolves its lineage from the body.
+test('a transport-corroborated Codex request still resolves lineage from a flat-only client_metadata', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_headers: JSON.stringify({ 'user-agent': 'codex_cli_rs/0.55.0' }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: { session_id: 'session-ua', thread_id: 'thread-ua' },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.client_name, 'codex')
+  assert.equal(projection.conversation_id, 'thread-ua')
+  assert.equal(projection.session_id, 'session-ua')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+})
+
+// @ref LLP 0144#body-is-a-codex-signal [tests]: `match` gates on the path (plus
+// the turn-metadata header) and never reads the body, while codex-context
+// resolution accepts a Codex-owned body map on its own. The two only stay
+// consistent because the matched path set covers every route Codex posts to: a
+// body-only Codex request on an unmatched path would be rejected at the gate
+// before the body was read. Pin that covering assumption rather than widen
+// `match` on a hypothetical, so a Codex route the set does not cover fails here
+// instead of silently going unrecorded.
+test('every route Codex posts to is matched, so a body-only Codex request is never dropped at the gate', () => {
+  const projector = createCodexExchangeProjector()
+  // The ChatGPT-subscription namespace and the API-key Responses path.
+  for (const path of ['/backend-api/codex/responses', '/v1/responses']) {
+    const input = exchange({
+      path,
+      request_headers: JSON.stringify({}),
+      request_body: JSON.stringify({
+        model: 'gpt-5-codex',
+        input: 'go',
+        client_metadata: {
+          'x-codex-installation-id': 'install-gate',
+          session_id: 'session-gate',
+          thread_id: 'thread-gate',
+        },
+      }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    })
+    assert.equal(projector.match(input), true, `${path} must pass the match gate`)
+    const projection = /** @type {any} */ (projector.project(input, context()))
+    assert.equal(projection.client_name, 'codex', `${path} must resolve a codex context`)
+    assert.equal(projection.conversation_id, 'thread-gate')
+  }
+})
+
 // @ref LLP 0144#row-identity [tests]: already-recorded shapes must not re-key.
 // These literals were captured from the pre-change projector, so a drift in
 // `conversation_id` resolution for a shape HypAware already recorded shows up

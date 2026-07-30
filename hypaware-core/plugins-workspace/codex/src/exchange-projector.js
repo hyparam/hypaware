@@ -70,6 +70,14 @@ export function createCodexExchangeProjector(opts = {}) {
       // @ref LLP 0144#real-header-names [constrained-by]: every Codex client
       // emits it, so the match is client-independent.
       if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
+      // NOTE this gate deliberately does not consult the body, while
+      // `resolveCodexContext` treats a Codex-owned `client_metadata` as a
+      // sufficient Codex signal. The two only stay consistent because the path
+      // set above covers every route Codex posts to, so a body-only Codex
+      // request is always matched here first. A test pins that: see
+      // `test/plugins/codex-exchange-projector.test.js` ("every route Codex
+      // posts to is matched..."). Widen the path set, do not start reading the
+      // body here, if Codex adds a route.
       return false
     },
 
@@ -658,12 +666,18 @@ const X_CODEX_PARENT_THREAD_ID = 'x-codex-parent-thread-id'
  * @param {Record<string, unknown>} reqBody
  */
 function resolveCodexContext(input, provider, path, reqBody) {
-  if (!isCodexExchange(input, provider, path, reqBody)) return undefined
+  // @ref LLP 0144#body-is-a-codex-signal [implements]: a Codex-owned body map
+  // identifies the exchange on its own, so the API-key route's generic
+  // `/v1/responses` resolves with no Codex header at all. The transport signal is
+  // resolved first because it is also what corroborates the body's ambiguous
+  // flat identity pair (see `readCodexClientMetadata`).
+  const transportIsCodex = hasCodexTransportSignal(input, provider, path)
   // @ref LLP 0144#body-is-authority [implements]: the flat body map first, the
   // turn-metadata blob second. Both are projections of one Codex snapshot, so
   // they agree whenever both are present; the body is preferred because it is
   // the only one present for every request kind.
-  const clientMetadata = readCodexClientMetadata(reqBody)
+  const clientMetadata = readCodexClientMetadata(reqBody, transportIsCodex)
+  if (!transportIsCodex && clientMetadata === undefined) return undefined
   const metadata = readCodexTurnMetadata(input, clientMetadata)
   const userAgent = readHeader(input.request_headers, 'user-agent')
   const client = codexClientFromUserAgent(userAgent)
@@ -767,20 +781,24 @@ function resolveCodexContext(input, provider, path, reqBody) {
 }
 
 /**
+ * Whether the transport alone identifies this exchange as Codex, before any part
+ * of the request body is consulted: the ChatGPT upstream, the Codex route
+ * namespace, a Codex-namespaced compatibility header, or a Codex user-agent
+ * product. Every one of these is a name only a Codex client produces.
+ *
+ * Kept separate from the body signal because it is also what corroborates a
+ * `client_metadata` map carrying no Codex-owned key of its own.
+ * @ref LLP 0144#body-is-a-codex-signal [implements]
+ *
  * @param {AiGatewayExchangeInput} input
  * @param {string} provider
  * @param {string} path
- * @param {unknown} reqBody
  */
-function isCodexExchange(input, provider, path, reqBody) {
+function hasCodexTransportSignal(input, provider, path) {
   if (provider === 'chatgpt') return true
   if (isCodexNamespacePath(path)) return true
   if (readHeader(input.request_headers, X_CODEX_TURN_METADATA)) return true
   if (readHeader(input.request_headers, X_CODEX_WINDOW_ID)) return true
-  // @ref LLP 0144#body-is-a-codex-signal [implements]: the API-key route posts a
-  // generic `/v1/responses` and may carry no Codex-namespaced header at all, so
-  // the body's Codex-owned `client_metadata` is itself a sufficient signal.
-  if (readCodexClientMetadata(reqBody)) return true
   const userAgent = readHeader(input.request_headers, 'user-agent')
   return codexClientFromUserAgent(userAgent).entrypoint !== undefined
 }
@@ -790,24 +808,40 @@ function isCodexExchange(input, provider, path, reqBody) {
  * every Responses request kind, so the one lineage surface always present.
  *
  * Declines a map carrying no Codex-owned key, so a `client_metadata` an
- * unrelated client happens to send cannot masquerade as Codex lineage. Codex
- * writes `x-codex-installation-id`, `session_id`, `thread_id` and
- * `x-codex-window-id` on every request, so either accepted signal below is
- * enough on its own: an `x-codex-` prefixed key (Codex-exclusive), or the flat
- * `session_id` + `thread_id` pair (the values actually read).
+ * unrelated client happens to send cannot masquerade as Codex lineage. An
+ * `x-codex-` prefixed key is Codex-exclusive and is accepted on its own; Codex
+ * writes `x-codex-installation-id` and `x-codex-window-id` into this map on
+ * every request, so that branch alone covers every request real Codex makes.
+ *
+ * The flat `session_id` + `thread_id` pair is NOT Codex-exclusive: those are
+ * ordinary names any agent framework may put in a `client_metadata` map, and the
+ * matched path set includes the generic `/v1/responses` and
+ * `/v1/chat/completions`. Honouring the pair on its own would therefore let an
+ * unrelated client be stamped `client_name: 'codex'` and dictate this row's
+ * `conversation_id` and `session_id`, which is the same defect class as the
+ * fictional `thread-id` header this document removed, only through the body. So
+ * the pair is trusted only once `corroborated` says the transport already
+ * identified the exchange as Codex, where it adds lineage detail to a client
+ * that is already known rather than naming the client.
  * @ref LLP 0144#body-is-authority: the always-present lineage surface.
+ * @ref LLP 0144#body-is-a-codex-signal [constrained-by]: which keys of the map
+ * are evidence of Codex, and which only carry detail.
  *
  * @param {unknown} reqBody
+ * @param {boolean} corroborated Whether the transport (upstream, route, Codex
+ *   header, or Codex user-agent) already identified this exchange as Codex.
  * @returns {Record<string, unknown> | undefined}
  */
-function readCodexClientMetadata(reqBody) {
+function readCodexClientMetadata(reqBody, corroborated) {
   const clientMetadata = readKey(reqBody, 'client_metadata')
   if (!isPlainObject(clientMetadata)) return undefined
   const hasCodexKey = Object.keys(clientMetadata)
     .some((key) => key.toLowerCase().startsWith('x-codex-'))
+  if (hasCodexKey) return clientMetadata
+  if (!corroborated) return undefined
   const hasFlatIdentity = readStringKey(clientMetadata, 'thread_id') !== undefined &&
     readStringKey(clientMetadata, 'session_id') !== undefined
-  return hasCodexKey || hasFlatIdentity ? clientMetadata : undefined
+  return hasFlatIdentity ? clientMetadata : undefined
 }
 
 /**

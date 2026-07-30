@@ -62,9 +62,10 @@ lineage authority; the turn-metadata blob is the fallback.** `thread_id`,
 `session_id`, `turn_id` and the parent thread resolve body-map-first,
 blob-second. The two are projections of one snapshot, so they cannot disagree in
 real traffic; the body wins because it is the surface that is always there. The
-map is only trusted when it carries a Codex-owned key (an `x-codex-*` entry, or
-both `session_id` and `thread_id`), so a `client_metadata` from an unrelated
-client cannot masquerade as Codex lineage.
+map is only trusted when it carries a Codex-owned `x-codex-*` entry, or when the
+transport has already identified the client as Codex, so a `client_metadata` from
+an unrelated client cannot masquerade as Codex lineage
+([#body-is-a-codex-signal](#body-is-a-codex-signal)).
 
 The turn-metadata **blob** is still read from the header first and from the body
 map second. Both spellings of the blob are byte-equal but for Code Mode tool
@@ -76,6 +77,38 @@ itself sufficient evidence that an exchange is Codex.** The API-key route posts
 a generic `/v1/responses` and can carry no Codex-namespaced header, so gating
 codex-context resolution on headers would have left the body unread exactly
 where it matters most.
+
+**The Codex-owned key is what makes the map evidence. The flat identity pair is
+not.** Only an `x-codex-*` prefixed entry names the client. `session_id` and
+`thread_id` are ordinary names any agent framework may write into a
+`client_metadata` map, and the projector's matched path set includes the fully
+generic `/v1/responses` and `/v1/chat/completions`, which every
+OpenAI-compatible client posts to. Accepting the bare pair as evidence would
+therefore stamp an unrelated client `client_name: 'codex'` and let it dictate
+this row's `conversation_id` and `session_id`, the latter being the partition key
+([LLP 0030](./0030-session-id-partition-key.decision.md)). That is the same
+defect class as the fictional `thread-id` header
+([#real-header-names](#real-header-names)), reached through the body instead of a
+header, and in a capture product a misfiled client is a privacy question and not
+a cosmetic one.
+
+So the pair is honoured only once the transport has already identified the
+exchange as Codex independently of the body: the `chatgpt` upstream, the
+`/backend-api/codex/` namespace, an `x-codex-*` compatibility header, or a
+`codex`-prefixed user-agent product (`hasCodexTransportSignal`). Real Codex
+loses nothing, because `client_metadata` carries `x-codex-installation-id` and
+`x-codex-window-id` on every request (the table in [#context](#context)), so the
+strict branch alone already covers every request Codex is known to make. The
+corroborated pair is the fallback for a build that stopped writing them, which is
+exactly the version drift this document is guarding against, so it is kept rather
+than deleted.
+
+The outer `match` gate deliberately still reads only the path and the
+`x-codex-turn-metadata` header, never the body, so it and the body signal agree
+only because the matched path set covers every route Codex posts to. That
+covering assumption is pinned by a test rather than removed by teaching `match`
+to read the body, which would widen the projector's claim over arbitrary paths
+for no request Codex is known to make.
 
 <a id="real-header-names"></a>**Only header names Codex actually emits are
 read.** The audit of every header this file reads:
@@ -169,7 +202,7 @@ rollout tree, keyed on the rollout's session id.
 
 - Code: `hypaware-core/plugins-workspace/codex/src/exchange-projector.js`
   (`readCodexClientMetadata`, `readCodexTurnMetadata`, `resolveCodexContext`,
-  `resolveConversationId`, `isCodexExchange`, `lineageSource`,
+  `resolveConversationId`, `hasCodexTransportSignal`, `lineageSource`,
   `lineageConflict`).
 - Tests: `test/plugins/codex-exchange-projector.test.js` (lineage surfaces),
   `test/plugins/codex-rollout-cwd.test.js` (subscription-route fixtures).
