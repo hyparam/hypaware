@@ -2,7 +2,7 @@
 
 **Type:** Decision
 **Status:** Active
-**Systems:** Plugins, Gateway, Sources, Config
+**Systems:** Core, Plugins, Gateway, Sources, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-29
 **Related:** LLP 0003, LLP 0049, LLP 0066, LLP 0067, LLP 0083
