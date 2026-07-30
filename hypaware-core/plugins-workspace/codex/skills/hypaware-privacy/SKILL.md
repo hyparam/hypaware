@@ -78,7 +78,7 @@ if not matches:
     sys.exit('no Codex rollout under %s records cwd %s' % (root, cwd))
 if len(matches) > 1:
     sys.exit('%d rollouts record cwd %s (%s): ambiguous, confirm the session id with the user'
-             % (len(matches), cwd, ', '.join(m[0] or m[1] for m in matches)))
+             % (len(matches), cwd, ', '.join(str(m[0] or m[1]) for m in matches)))
 session_id, thread_id, full, age = matches[0]
 if age > 30 * 60:
     sys.exit('the only rollout recording cwd %s was last written %dm ago, so it is a FINISHED '
