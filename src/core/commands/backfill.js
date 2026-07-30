@@ -1,10 +1,15 @@
 // @ts-check
 
 import { randomUUID } from 'node:crypto'
+import fsp from 'node:fs/promises'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
+import { resolveEntrypointOwners } from '../backfill/entrypoint_owner.js'
+import { resolveConfigPath } from '../runtime/boot.js'
+import { loadClientDescriptors } from '../daemon/status.js'
 
 /**
  * Base partition segment for backfilled writes. `storage.appendRows`
@@ -17,8 +22,9 @@ import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
 const BACKFILL_PARTITION_SEGMENT = 'backfill'
 
 /**
- * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillItem, BackfillEvent, BackfillMaterializerContribution, BackfillPlan, BackfillPlanContext, BackfillRunContext, CommandRunContext, PluginLogger, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BackfillProviderResult } from '../../../src/core/commands/types.js'
+ * @import { EntrypointOwners } from '../../../src/core/backfill/types.js'
  */
 
 /**
@@ -229,15 +235,27 @@ export async function runBackfillPlan(argv, ctx) {
     async () => {
       /** @type {Array<{ provider: string, plugin: string, datasets: string[], plan: BackfillPlan | undefined }>} */
       const results = []
+      // The same ownership map and configured-plugin predicate the run gets.
+      // Both are declared on `BackfillPlanContext`, so a provider that
+      // consults them while planning must see what the run will see, or
+      // `hyp backfill plan` estimates over sessions the run then gates out.
+      // Resolved once, and only when some selected provider actually plans.
+      /** @type {Awaited<ReturnType<typeof resolveOwnersForRun>> | undefined} */
+      let owners
       for (const provider of selected.providers) {
         if (typeof provider.plan !== 'function') {
           results.push({ provider: provider.name, plugin: provider.plugin, datasets: provider.datasets, plan: undefined })
           continue
         }
+        if (owners === undefined) {
+          owners = await resolveOwnersForRun(ctx, getLogger('backfill'))
+        }
         const planCtx = buildPlanContext({
           env: ctx.env,
           storage: ctx.storage,
           retentionDays,
+          entrypointOwners: owners.entrypointOwners,
+          isPluginConfigured: owners.isPluginConfigured,
         })
         try {
           const plan = await provider.plan(planCtx)
@@ -381,6 +399,16 @@ async function runProvider(args) {
       status: 'ok',
     },
     async () => {
+      // Which client owns which transcript `entrypoint`, and whether that
+      // client is configured. Built here rather than inside a provider because
+      // the answer needs the FULL catalog (a claiming plugin is typically NOT
+      // active, which is exactly the case that closes the gate) plus the
+      // effective plugin list, neither of which the plugin activation context
+      // carries. Best-effort: an empty map means every session imports, i.e.
+      // the pre-gate behavior.
+      // @ref LLP 0140#manifest-declares-ownership [implements]: the runner resolves entrypoint ownership from the catalog and hands providers the resolved map
+      const owners = await resolveOwnersForRun(ctx, log)
+
       const runCtx = buildRunContext({
         env: ctx.env,
         storage: ctx.storage,
@@ -389,6 +417,8 @@ async function runProvider(args) {
         until,
         dryRun,
         log,
+        entrypointOwners: owners.entrypointOwners,
+        isPluginConfigured: owners.isPluginConfigured,
       })
 
       try {
@@ -694,6 +724,8 @@ function handleEvent(args) {
  *   until?: string,
  *   dryRun: boolean,
  *   log: PluginLogger,
+ *   entrypointOwners?: EntrypointOwners,
+ *   isPluginConfigured?: (plugin: PluginName) => boolean,
  * }} args
  * @returns {BackfillRunContext}
  */
@@ -706,8 +738,118 @@ function buildRunContext(args) {
     ...(args.since !== undefined ? { since: args.since } : {}),
     ...(args.until !== undefined ? { until: args.until } : {}),
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
+    ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
+    ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
     dryRun: args.dryRun,
     log: args.log,
+  }
+}
+
+/**
+ * Resolve the entrypoint-ownership map for one provider run or plan, plus
+ * the configured-plugin predicate it was built with. The predicate travels
+ * separately because container-root admission keys on it alone: an owners
+ * map only has entries for plugins that declare `transcript_entrypoints`
+ * values, and a container-owning plugin must not need any value claim to
+ * import its own container (LLP 0140#container-root-owns).
+ *
+ * Best-effort by design: catalog discovery already degrades to empty in
+ * `loadClientDescriptors`, and a failure here must not fail a backfill. An
+ * empty map imports everything from the scanning client's own tree, which
+ * is the behavior that shipped before the gate existed, and the absent
+ * predicate closes the container gate, which is the behavior before the
+ * container was scanned at all. Degrading never captures MORE than
+ * intended.
+ *
+ * @param {CommandRunContext} ctx
+ * @param {PluginLogger} log
+ * @returns {Promise<{ entrypointOwners: EntrypointOwners, isPluginConfigured?: (plugin: PluginName) => boolean }>}
+ */
+async function resolveOwnersForRun(ctx, log) {
+  try {
+    const { stateDir, hypHome } = readObservabilityEnv(ctx.env)
+    const descriptors = await loadClientDescriptors({ stateDir })
+    const configured = await resolveConfiguredPlugins(ctx, hypHome)
+    /** @param {PluginName} plugin */
+    const isPluginConfigured = (plugin) => configured.has(plugin)
+    return {
+      entrypointOwners: resolveEntrypointOwners(descriptors.values(), isPluginConfigured),
+      isPluginConfigured,
+    }
+  } catch (err) {
+    log.warn('backfill.entrypoint_owners_unavailable', {
+      [Attr.COMPONENT]: 'backfill',
+      [Attr.ERROR_KIND]: 'catalog_unavailable',
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return { entrypointOwners: new Map() }
+  }
+}
+
+/**
+ * The plugin names that count as "configured" for the entrypoint gate.
+ *
+ * The durable record of a client opt-in is the config document, not this
+ * process's activation set. Reading only `ctx.plugins` made the gate
+ * permanently closed on the one path where the opt-in actually happens:
+ * `hyp init` boots the `all-available` profile, which by construction
+ * omits every `V1_EXCLUDED_FROM_DEFAULT` plugin (`@hypaware/claude-desktop`
+ * among them), and the picker cannot change an activation set that was
+ * fixed at process start. So a user who ticked Claude Desktop, read the
+ * consent explanation and accepted it got the plist written and then had
+ * their Desktop history silently gated out of the finale's own backfill.
+ * That contradicts LLP 0139's "works end to end" and
+ * LLP 0140#manifest-declares-ownership, which says the *effective plugin
+ * list*, not the activated one.
+ *
+ * Three sources, unioned, because each covers a case the others miss:
+ * the activation set (an injected kernel whose config lives in memory),
+ * `ctx.config` (a fleet host, where the central layer is already merged),
+ * and a fresh read of the local document (the picker wrote it after boot).
+ * Unioning fails open, which is the direction LLP 0140#fail-open-on-unknown
+ * already chose for an ambiguous ownership answer.
+ *
+ * The local read is deliberately not `loadConfigFile`: this is a
+ * membership probe, and a host with no config document is an ordinary
+ * state for it, not the `config.load_failed` error row that helper emits.
+ *
+ * @ref LLP 0140#manifest-declares-ownership [implements]: "configured" is membership of the effective config, read fresh, not of the boot profile's activation set
+ * @param {CommandRunContext} ctx
+ * @param {string} hypHome
+ * @returns {Promise<Set<string>>}
+ */
+async function resolveConfiguredPlugins(ctx, hypHome) {
+  /** @type {Set<string>} */
+  const names = new Set()
+  for (const active of ctx.plugins ?? []) names.add(active.name)
+  addEnabledPluginNames(names, ctx.config)
+  try {
+    const raw = await fsp.readFile(resolveConfigPath({ env: ctx.env, hypHome }), 'utf8')
+    addEnabledPluginNames(names, JSON.parse(raw))
+  } catch {
+    // No readable local document (never written, or mid-write). The other
+    // two sources still answer; an unreadable file must not widen or
+    // narrow the gate on its own.
+  }
+  return names
+}
+
+/**
+ * Add every `enabled !== false` plugin name in a config document to `names`.
+ * Tolerant of an arbitrary parsed object: the local document is read raw
+ * here, so it has not been through the schema validator.
+ *
+ * @param {Set<string>} names
+ * @param {unknown} config
+ */
+function addEnabledPluginNames(names, config) {
+  const plugins = /** @type {{ plugins?: unknown }} */ (config ?? {})?.plugins
+  if (!Array.isArray(plugins)) return
+  for (const entry of plugins) {
+    if (!entry || typeof entry !== 'object') continue
+    const { name, enabled } = /** @type {{ name?: unknown, enabled?: unknown }} */ (entry)
+    if (typeof name !== 'string' || name.length === 0 || enabled === false) continue
+    names.add(name)
   }
 }
 
@@ -716,6 +858,8 @@ function buildRunContext(args) {
  *   env: NodeJS.ProcessEnv,
  *   storage: CommandRunContext['storage'],
  *   retentionDays?: number,
+ *   entrypointOwners?: EntrypointOwners,
+ *   isPluginConfigured?: (plugin: PluginName) => boolean,
  * }} args
  * @returns {BackfillPlanContext}
  */
@@ -725,6 +869,8 @@ function buildPlanContext(args) {
     env: args.env,
     cacheRoot: args.storage.cacheRoot,
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
+    ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
+    ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
     log: noopProviderLogger(),
   }
 }

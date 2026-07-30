@@ -79,7 +79,7 @@ test('dispatch miss on an inactive bundled plugin command reports unavailable + 
     stderr.text(),
     /^hyp: 'graph' is provided by @hypaware\/context-graph, which is not in the active config$/m
   )
-  // Byte-exact: the repair line is the LLP 0098-pinned wording (issue #294),
+  // Byte-exact: the repair line is the LLP 0153-pinned wording (issue #294),
   // so any drift in the exact phrasing must fail this test rather than slip
   // past a prefix/regex match.
   const repairLine = stderr

@@ -1,13 +1,13 @@
 # LLP 0143: OpenClaw registers no attach_probe, and json_path retires
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Config, CLI
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0044 (client attach on join), LLP 0045 (client attach design), LLP 0109 (OpenClaw client adapter), LLP 0115 (Claude Desktop managed-config attach), LLP 0142 (plugin-steered shadow providers)
+**Related:** LLP 0044 (client attach on join), LLP 0045 (client attach design), LLP 0109 (OpenClaw client adapter), LLP 0115 (Claude Desktop managed-config attach), LLP 0152 (plugin-steered shadow providers)
 
-> Once LLP 0142 stops writing to `openclaw.json`, there is no reversible
+> Once LLP 0152 stops writing to `openclaw.json`, there is no reversible
 > settings-file write for the LLP 0044 loop to reverse. Follow the precedent
 > already set for Claude Desktop: register no `attach_probe`, let
 > `detachClientFromDisk` be an honest no-op. The `json_path` probe format
@@ -25,7 +25,7 @@ LLP 0109 satisfied that precondition by inventing a third probe format,
 `_hypaware` key would stop the OpenClaw gateway from starting — so the undo
 record had to ride inside the injected provider's free-form `headers` map.
 
-LLP 0142 removes the write. There is nothing left on disk to reverse.
+LLP 0152 removes the write. There is nothing left on disk to reverse.
 
 The corpus has already faced this exact shape and settled it.
 LLP 0115#no-attach-on-join established that Claude Desktop registers no

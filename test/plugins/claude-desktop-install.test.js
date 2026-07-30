@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 
 import {
   MANAGED_PLIST_PATH,
@@ -13,6 +14,7 @@ import {
   residueDirPath,
   runInstall,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/install.js'
+import { activate } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
 import { resolveInputs } from '../../hypaware-core/plugins-workspace/claude-desktop/src/inputs.js'
 import { renderManagedPreferencesPlist } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 
@@ -80,10 +82,11 @@ test('install: org_key mode skips the login step and never calls claude-account 
   /** @type {string[]} */
   const spawnCalls = []
 
-  const code = await runInstall([], cmdCtx, {
+  const code = await runInstall(['--yes'], cmdCtx, {
     sectionConfig,
     credential,
     stateDir,
+    platform: 'darwin',
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -103,8 +106,8 @@ test('install: subscription mode already signed in skips login without calling i
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 0)
@@ -121,8 +124,8 @@ test('install: subscription mode not signed in runs login, and a failed login dr
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 1)
@@ -142,8 +145,8 @@ test('install: no stdin in subscription mode fails the login step without attemp
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 1)
@@ -158,8 +161,8 @@ test('install: refuses up front on an ephemeral gateway listen, with no side eff
   })
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 1)
@@ -167,6 +170,49 @@ test('install: refuses up front on an ephemeral gateway listen, with no side eff
   assert.match(bufs.stderr.text(), /ephemeral/)
   assert.equal(commandCalls.length, 0)
   assert.equal(spawnCalls.length, 0)
+})
+
+test('install: refuses up front on a non-macOS platform, with no side effects', async () => {
+  // On Linux the privileged sequence would half-succeed: `sudo mkdir -p
+  // '/Library/Managed Preferences'` creates root-owned junk while
+  // configuring nothing. Off-platform the contract is `hyp daemon
+  // install`'s loud refusal, before consent, login, or any write.
+  // @ref LLP 0139#macos-only [tests]: nothing runs off darwin, and the refusal names the platform
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({ stateDir })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'linux',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 1)
+  assert.match(bufs.stderr.text(), /unsupported platform 'linux'/)
+  assert.equal(commandCalls.length, 0, 'no login, no helper write')
+  assert.equal(spawnCalls.length, 0, 'no sudo, no killall')
+  assert.ok(!fs.existsSync(path.join(stateDir, 'managed.plist')), 'no plist written')
+})
+
+test('install: --print-commands passes the platform gate, because it applies nothing', async () => {
+  // The wizard seam test dispatches the real command with --print-commands
+  // on Linux CI, and inspecting the would-be commands from a non-Mac admin
+  // box is legitimate (LLP 0133#one-surface).
+  // @ref LLP 0139#macos-only [tests]: the refusal gates the applying path only
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall(['--print-commands'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'linux',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.equal(spawnCalls.length, 0)
+  assert.match(bufs.stdout.text(), /sudo cp/)
 })
 
 test('install: residue directory is backed up and cleared when present', async () => {
@@ -177,8 +223,8 @@ test('install: residue directory is backed up and cleared when present', async (
   fs.writeFileSync(path.join(residueDir, 'config.json'), '{"stale":true}')
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 0, bufs.stdout.text())
@@ -195,8 +241,8 @@ test('install: a re-run with no residue present is a plain skip, not a failure',
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
   assert.equal(code, 0)
@@ -212,8 +258,8 @@ test('install: an already up-to-date managed plist is skipped, no sudo invoked f
   fs.writeFileSync(managedPlistPath, desired)
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -229,8 +275,8 @@ test('install: a stale managed plist is rewritten via sudo cp with the freshly r
   fs.writeFileSync(managedPlistPath, 'stale content')
   const spawnCalls = /** @type {string[]} */ ([])
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -249,8 +295,8 @@ test('install: a failed privileged write drops with a re-run hint, not a thrown 
     return { status: 0, signal: null, error: undefined, stdout: '', stderr: '', pid: 0, output: [] }
   }
 
-  const code = await runInstall([], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+  const code = await runInstall(['--yes'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnImpl),
   })
 
@@ -267,7 +313,7 @@ test('install: --print-commands prints the sudo and killall commands without inv
   const spawnCalls = /** @type {string[]} */ ([])
 
   const code = await runInstall(['--print-commands'], cmdCtx, {
-    sectionConfig, credential, stateDir, managedPlistPath,
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
     spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
   })
 
@@ -276,6 +322,219 @@ test('install: --print-commands prints the sudo and killall commands without inv
   assert.match(bufs.stdout.text(), /sudo mkdir -p/)
   assert.match(bufs.stdout.text(), /sudo cp/)
   assert.match(bufs.stdout.text(), /killall cfprefsd/)
+})
+
+test('install: --print-commands applies nothing at all, including the non-privileged steps', async () => {
+  // The flag used to run steps 1 and 2 for real, so on a machine that was
+  // not signed in the escape hatch dropped into an interactive OAuth flow
+  // and hung. Nothing may have a side effect under the flag.
+  // @ref LLP 0139#print-commands-applies-nothing [tests]: the login and helper steps are printed, never executed
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir,
+    mode: 'subscription',
+    commandRuns: { 'claude-account status': 1 },
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall(['--print-commands'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.deepEqual(commandCalls, [], 'no sub-command invoked, not even claude-account status')
+  assert.equal(spawnCalls.length, 0)
+  assert.match(bufs.stdout.text(), /hyp claude-account login/)
+  assert.match(bufs.stdout.text(), /hyp claude-desktop install-helper/)
+})
+
+test('install: --print-commands never asks for consent, because it changes nothing', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+
+  const code = await runInstall(['--print-commands'], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+
+  assert.equal(code, 0)
+  assert.doesNotMatch(bufs.stdout.text(), /Attach Claude Desktop with the changes above/)
+})
+
+// --- consent gate (LLP 0139) ---
+
+test('install: declining the consent prompt changes nothing and exits nonzero', async () => {
+  // Nonzero on decline is load-bearing: it is what routes the wizard's
+  // configure phase onto its drop-on-failure path (LLP 0131), which prints
+  // the catch-up command instead of pretending Desktop was attached.
+  // @ref LLP 0139#informed-consent [tests]: a decline is a no-op with no credential, no helper, and no sudo
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir, mode: 'subscription', stdin: Readable.from(['n\n']),
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 1)
+  assert.deepEqual(commandCalls, [], 'no sign-in or helper write attempted')
+  assert.equal(spawnCalls.length, 0, 'no sudo, no killall')
+  assert.match(bufs.stdout.text(), /nothing changed/)
+})
+
+test('install: accepting the consent prompt runs the steps', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({
+    stateDir, stdin: Readable.from(['y\n']),
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.ok(spawnCalls.some((c) => c.startsWith('sudo cp')))
+})
+
+test('install: a bare enter at the consent prompt declines', async () => {
+  // Opposite default from the backfill consent prompt: this one acquires a
+  // credential and escalates to root, so an accidental enter must not.
+  // @ref LLP 0139#default-no [tests]: empty input is a decline
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, credential, sectionConfig } = fixture({
+    stateDir, stdin: Readable.from(['\n']),
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 1)
+  assert.equal(spawnCalls.length, 0)
+})
+
+test('install: the consent text names the credential posture and every file it will touch', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({
+    stateDir, mode: 'subscription', stdin: Readable.from(['n\n']),
+  })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+
+  await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+
+  const text = bufs.stdout.text()
+  // The distinction that justifies the gate: unlike claude/codex, this
+  // machine ends up holding the credential.
+  assert.match(text, /Claude Code and Codex/)
+  assert.match(text, /hold an Anthropic credential/)
+  // Every durable side effect is named by path.
+  assert.ok(text.includes(inputs.baseUrl), 'names the gateway endpoint')
+  assert.ok(text.includes(inputs.helperPath), 'names the helper path')
+  assert.ok(text.includes(managedPlistPath), 'names the managed plist path')
+  assert.match(text, /sudo/)
+  assert.match(text, /logout/, 'says how to undo it')
+})
+
+test('install: org_key mode consent text promises no sign-in', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({
+    stateDir, mode: 'org_key', stdin: Readable.from(['n\n']),
+  })
+
+  await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+
+  assert.match(bufs.stdout.text(), /org API key from your fleet config/)
+  assert.doesNotMatch(bufs.stdout.text(), /sign you in to your Claude account/)
+})
+
+test('install: consent names the residue clear only when residue is actually present', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const withoutResidue = fixture({ stateDir, stdin: Readable.from(['n\n']) })
+  await runInstall([], withoutResidue.cmdCtx, {
+    sectionConfig: withoutResidue.sectionConfig,
+    credential: withoutResidue.credential,
+    stateDir,
+    platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+  assert.doesNotMatch(withoutResidue.bufs.stdout.text(), /back up and clear/)
+
+  const residueState = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const withResidue = fixture({ stateDir: residueState, stdin: Readable.from(['n\n']) })
+  fs.mkdirSync(residueDirPath(withResidue.cmdCtx.env), { recursive: true })
+  await runInstall([], withResidue.cmdCtx, {
+    sectionConfig: withResidue.sectionConfig,
+    credential: withResidue.credential,
+    stateDir: residueState,
+    platform: 'darwin',
+    managedPlistPath: path.join(residueState, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+  assert.match(withResidue.bufs.stdout.text(), /back up and clear/)
+})
+
+test('install: a non-interactive run refuses rather than assuming consent', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir, stdin: undefined,
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+  })
+
+  assert.equal(code, 1)
+  assert.deepEqual(commandCalls, [])
+  assert.equal(spawnCalls.length, 0)
+  assert.match(bufs.stderr.text(), /--yes/)
+  assert.match(bufs.stderr.text(), /--print-commands/)
+})
+
+test('install: an already-configured machine is not re-prompted', async () => {
+  // LLP 0131 makes the re-run the documented repair step, so it has to stay
+  // cheap. Consent is asked once, not on every converged re-run.
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir, stdin: undefined })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  fs.mkdirSync(path.dirname(inputs.helperPath), { recursive: true })
+  fs.writeFileSync(inputs.helperPath, '#!/bin/sh\n')
+
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin', managedPlistPath,
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+
+  // No prompt, no refusal, despite there being no stdin to prompt on.
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.doesNotMatch(bufs.stdout.text(), /Attach Claude Desktop with the changes above/)
+  assert.match(bufs.stdout.text(), /already up to date/)
 })
 
 test('buildPlistWriteCommands renders mkdir, cp, and chmod against the target path', () => {
@@ -290,4 +549,85 @@ test('computeDesiredPlistContent matches renderManagedPreferencesPlist(buildMana
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
   const { buildManagedProfile } = await import('../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js')
   assert.equal(computeDesiredPlistContent(inputs), renderManagedPreferencesPlist(buildManagedProfile(inputs)))
+})
+
+// The dispatcher defaults `ctx.stdin` to `process.stdin`, so the absent-stdin
+// refusal above is a state production never reaches. A redirected stdin is
+// the state it does reach, and `rl.question` never settles at EOF: the
+// command hung with the escape-hatch hint unprinted. Consent must fail
+// closed with a defined exit code on every non-answer, not only on a `n`.
+// @ref LLP 0139#default-no [tests]: a stdin that ends without an answer declines, with the hint, rather than hanging
+test('install: a stdin that ends without an answer declines instead of hanging', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir, mode: 'subscription', stdin: Readable.from([]),
+  })
+  const spawnCalls = /** @type {string[]} */ ([])
+
+  const code = await Promise.race([
+    runInstall([], cmdCtx, {
+      sectionConfig, credential, stateDir, platform: 'darwin',
+      managedPlistPath: path.join(stateDir, 'managed.plist'),
+      spawnSyncImpl: /** @type {any} */ (spawnSyncSpy(spawnCalls)),
+    }),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 5000)),
+  ])
+
+  assert.equal(code, 1, 'declines with a defined exit code rather than hanging')
+  assert.deepEqual(commandCalls, [], 'no credential login and no helper write')
+  assert.equal(spawnCalls.length, 0, 'no sudo')
+  assert.match(bufs.stderr.text(), /--yes/)
+  assert.match(bufs.stderr.text(), /--print-commands/)
+  assert.ok(!fs.existsSync(path.join(stateDir, 'managed.plist')), 'no plist written')
+})
+
+test('install: a piped y still consents, so the EOF guard did not close the answered path', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const { cmdCtx, bufs, commandCalls, credential, sectionConfig } = fixture({
+    stateDir, stdin: Readable.from(['y\n']),
+  })
+  const code = await runInstall([], cmdCtx, {
+    sectionConfig, credential, stateDir, platform: 'darwin',
+    managedPlistPath: path.join(stateDir, 'managed.plist'),
+    spawnSyncImpl: /** @type {any} */ (spawnSyncSpy([])),
+  })
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.ok(commandCalls.some((c) => c.name === 'claude-desktop install-helper'))
+})
+
+// The registered summary is what `hyp --help` prints once the plugin is
+// active; the manifest summary is what it prints before boot. They drifted
+// the moment the consent step was added to one and not the other, with
+// nothing to catch it.
+test('every registered claude-desktop command summary matches its manifest entry', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-install-'))
+  const manifest = JSON.parse(fs.readFileSync(
+    new URL('../../hypaware-core/plugins-workspace/claude-desktop/hypaware.plugin.json', import.meta.url),
+    'utf8'
+  ))
+  /** @type {Map<string, any>} */
+  const registered = new Map()
+  await activate(/** @type {any} */ ({
+    config: {},
+    paths: { stateDir },
+    log: { info() {}, warn() {}, error() {}, debug() {} },
+    configRegistry: { registerSection() {} },
+    commands: { register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) } },
+    requireCapability: (/** @type {string} */ name) => (
+      name === 'hypaware.anthropic-credential'
+        ? { mode: 'org_key', helperCommandArgs: ['claude-account', 'credential'] }
+        : {}
+    ),
+  }))
+
+  for (const declared of manifest.contributes.commands) {
+    const cmd = registered.get(declared.name)
+    assert.ok(cmd, `manifest declares '${declared.name}' but activation registers no such command`)
+    assert.equal(
+      cmd.summary,
+      declared.summary,
+      `'${declared.name}': the registered summary and the manifest summary have drifted`
+    )
+  }
+  assert.equal(registered.size, manifest.contributes.commands.length, 'no undeclared commands registered')
 })

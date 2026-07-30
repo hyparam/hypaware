@@ -1,4 +1,4 @@
-# LLP 0098: A dispatch miss on a known-but-inactive plugin command is "unavailable", not "unknown"
+# LLP 0153: A dispatch miss on a known-but-inactive plugin command is "unavailable", not "unknown"
 
 **Type:** decision
 **Status:** Accepted
@@ -6,7 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-10
 **Related:** LLP 0009, LLP 0031
-**Extended-by:** LLP 0099 (the `repair:` line now branches on *why* the plugin is inactive: absent vs disabled-local vs disabled-central)
+**Extended-by:** LLP 0154 (the `repair:` line now branches on *why* the plugin is inactive: absent vs disabled-local vs disabled-central)
 
 > When `hyp <cmd>` names a command that a bundled/installed plugin declares
 > but the effective config does not activate, the dispatcher used to print

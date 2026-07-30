@@ -25,6 +25,13 @@ export interface ClientDescriptor {
   agentDir?: string
   attachProbe?: PluginAttachProbeManifest
   requiredUpstreams?: string[]
+  /**
+   * Transcript `entrypoint` values whose sessions belong to this client,
+   * from `contributes.client.transcript_entrypoints`. Read by
+   * `resolveEntrypointOwners` to gate and attribute backfilled sessions
+   * that live in another client's transcript tree.
+   */
+  transcriptEntrypoints?: string[]
 }
 
 /**

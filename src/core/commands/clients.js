@@ -26,8 +26,10 @@ import {
   CLASS_RANK,
   createUsagePolicyResolver,
   findRepoRoot,
-  isEqualOrDescendant,
+  governingListEntry,
   localOnlyListPath,
+  sameDirectory,
+  scopeGoverns,
   readLocalOnlyEntries,
   writeLocalOnlyEntries,
 } from '../usage-policy/index.js'
@@ -910,7 +912,13 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
   }
 
   const entries = await readLocalOnlyEntries({ stateDir })
-  const withoutTarget = entries.filter((entry) => entry.dir !== resolvedTarget)
+  // Upsert identity is "denotes the same directory", not "is the same string":
+  // re-marking a directory through a different spelling must update its class,
+  // not append a second entry that governs the same directory at a different
+  // class (which would make the resolver's nearest-governs tie-break decide the
+  // user's privacy for them).
+  // @ref LLP 0050#canonicalization [implements]: one stored entry per directory, whichever spelling declared it
+  const withoutTarget = entries.filter((entry) => !sameDirectory(entry.dir, resolvedTarget))
   await writeLocalOnlyEntries({ stateDir, entries: [...withoutTarget, { dir: resolvedTarget, class: targetClass }] })
   getLogger('usage-policy').info('usage_policy.mark', {
     [Attr.COMPONENT]: component,
@@ -990,7 +998,7 @@ export async function runUnignore(argv, ctx) {
  *
  * Removes every machine-local entry that governs `targetDir`, equal to it,
  * or an ancestor of it (the same segment-aware rule the shared resolver
- * applies, reused here via {@link isEqualOrDescendant} rather than
+ * applies, reused here via {@link scopeGoverns} rather than
  * re-derived, R8), mirroring dotfile `unignore`'s "remove the governing
  * thing" semantics. When `targetClass` is given, removal is scoped to that
  * one class and entries of a different class are left alone (LLP 0104
@@ -1014,7 +1022,9 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   const entries = await readLocalOnlyEntries({ stateDir })
   const governing = entries.filter(
-    (entry) => (targetClass === undefined || entry.class === targetClass) && isEqualOrDescendant(targetDir, entry.dir)
+    (entry) =>
+      (targetClass === undefined || entry.class === targetClass) &&
+      scopeGoverns(targetDir, entry.dir, { component })
   )
   if (governing.length === 0) {
     if (targetClass === undefined) {
@@ -1128,12 +1138,16 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
  * should count: the directory containing the governing `.hypignore` when
  * governed by a dotfile (unchanged from before the machine-local list
  * existed), or — when governed by the machine-local store
- * (`result.governedBy === listPath`) — the most specific (longest) entry
- * that actually matches `base`, found via the shared
- * {@link isEqualOrDescendant} predicate rather than a second copy of path
- * logic (R8). The `resolve()` call already decided *whether* something
- * governs; this only identifies *which* listed directory did, for display
- * and scoping the residual count.
+ * (`result.governedBy === listPath`), the entry the gate itself used, from
+ * the shared {@link governingListEntry} selector rather than a second copy of
+ * the selection rule (R8). The `resolve()` call already decided *whether*
+ * something governs; this only identifies *which* listed directory did, for
+ * display and scoping the residual count - so it has to make the same choice
+ * the resolver made. Re-deriving it from `scopeGoverns` plus "longest declared
+ * string" does not: once an entry can match through its canonical spelling,
+ * the longest declared string and the deepest matching spelling are different
+ * entries, and `--check` would scope its residual count to one while
+ * reporting the other's class.
  *
  * @param {{ result: ResolveResult, base: string, stateDir: string, listPath: string }} args
  * @returns {Promise<string>}
@@ -1142,9 +1156,8 @@ async function resolveCheckScopeDir({ result, base, stateDir, listPath }) {
   if (!result.governedBy) return base
   if (result.governedBy !== listPath) return path.dirname(result.governedBy)
   const entries = await readLocalOnlyEntries({ stateDir })
-  const matches = entries.filter((entry) => isEqualOrDescendant(base, entry.dir))
-  if (matches.length === 0) return base
-  return matches.reduce((best, entry) => (entry.dir.length > best.dir.length ? entry : best)).dir
+  const governing = governingListEntry(base, entries, { component: 'cmd-ignore-check' })
+  return governing === null ? base : governing.dir
 }
 
 /**

@@ -1,11 +1,11 @@
 # LLP 0146: Host-signed providers are deferred, not solved
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0142 (plugin-steered shadow providers), LLP 0144 (shadow provider per API shape), LLP 0145 (shadow providers borrow the shadowed credential)
+**Related:** LLP 0152 (plugin-steered shadow providers), LLP 0144 (shadow provider per API shape), LLP 0145 (shadow providers borrow the shadowed credential)
 
 > Bedrock and Vertex are out of scope for the first cut of shadow steering.
 > This is a scope choice, not a technical verdict: we are not shipping them
@@ -92,7 +92,7 @@ The scope choice stands on its own.
 
 ## References
 
-- LLP 0142, 0144, 0145
+- LLP 0152, 0144, 0145
 - `openclaw` repo: `extensions/amazon-bedrock/`,
   `extensions/anthropic-vertex/provider-catalog.ts`
 - https://docs.openclaw.ai/concepts/model-providers

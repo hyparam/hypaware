@@ -61,17 +61,31 @@ export interface LocalOnlyEntry {
   class: UsageClass
 }
 
-// A machine-local list entry paired with the precomputed folded spelling of
-// its declared `dir` and the case-sensitivity verdict for the volume that
-// directory lives on (LLP 0050 §normalization). Computed once per list parse
-// per TTL window, so resolving many `cwd`s in one window folds each entry once
-// rather than once per `cwd`. `foldedDir` is `foldPath(entry.dir, {
-// caseInsensitive })`; `caseInsensitive` is false on every non-darwin host and
-// on any volume whose probe was undetermined.
+// A machine-local list entry paired with every spelling of its declared `dir`
+// that the gate compares through, and the case-sensitivity verdict for the
+// volume that directory lives on. Computed once per list parse per TTL window,
+// so resolving many `cwd`s in one window canonicalizes and folds each entry
+// once rather than once per `cwd`.
+//
+// The two spelling sets are what the matcher's two passes compare against.
+// `declaredSpellings` is the single spelling the user declared, unfolded: the
+// rule the matcher applied before either widening existed. `widenedSpellings`
+// is `canonicalSpellings(dir)` (as-given plus symlink-resolved, LLP 0050
+// §canonicalization), folded when `folded` is set (LLP 0050 §normalization).
+//
+// `folded` is true for the gate's scopes and false for the one-shot CLI
+// helpers', because unconditional NFC folding is sound only where widening is
+// free, which is the gate and not a deletion or disclosure predicate.
+// `caseInsensitive` is false on every non-darwin host, on any volume whose probe
+// was undetermined, and on every unfolded scope; it is carried because the `cwd`
+// side has to be folded through the *same* verdict for the comparison to mean
+// anything.
 export interface ListScope {
   entry: LocalOnlyEntry
+  folded: boolean
   caseInsensitive: boolean
-  foldedDir: string
+  declaredSpellings: string[]
+  widenedSpellings: string[]
 }
 
 // Version-2 on-disk shape of the machine-local list (LLP 0103): the

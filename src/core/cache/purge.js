@@ -2,7 +2,7 @@
 
 import path from 'node:path'
 
-import { isEqualOrDescendant } from '../usage-policy/matcher.js'
+import { scopeGoverns } from '../usage-policy/matcher.js'
 import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { deleteMatchingRows, scanRowsFromTable, tableExists } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
@@ -22,9 +22,10 @@ import { resolveIcebergDir } from './storage.js'
  * Four target shapes (LLP 0104 decision):
  *
  *  - `{ kind: 'subtree', path }` — rows whose `cwd` equals or descends from
- *    `path` (the LLP 0049 §scope ancestor rule via {@link isEqualOrDescendant}),
- *    regardless of the path's usage class: an explicit purge may remove any
- *    data, `local-only` and synced included.
+ *    `path` (the LLP 0049 §scope ancestor rule via {@link scopeGoverns}, so a
+ *    row recorded under one spelling of a directory is still purged when the
+ *    target names the other), regardless of the path's usage class: an explicit
+ *    purge may remove any data, `local-only` and synced included.
  *  - `{ kind: 'session', id }` — one session's rows. `session_id` is the
  *    partition key (LLP 0030); the predicate still scans every partition
  *    because the on-disk cache is partitioned by source, not session.
@@ -87,11 +88,24 @@ function buildPredicate(target, purgedCwds) {
   switch (target.kind) {
     case 'subtree': {
       const base = path.resolve(target.path)
+      // `scopeGoverns` canonicalizes both sides, which costs a `realpath`; the
+      // predicate runs per row, and a cache holds many rows per distinct `cwd`,
+      // so memoize the verdict per `cwd` for the lifetime of this one purge run
+      // (short-lived by construction, so staleness is not a concern).
+      // @ref LLP 0050#canonicalization [implements]: canonical-aware subtree purge, one `realpath` per distinct row `cwd`
+      /** @type {Map<string, boolean>} */
+      const inScope = new Map()
       return {
         columns: ['cwd'],
         predicate: (row) => {
           if (typeof row.cwd !== 'string' || row.cwd === '') return false
-          if (!isEqualOrDescendant(path.resolve(row.cwd), base)) return false
+          const cwd = path.resolve(row.cwd)
+          let governed = inScope.get(cwd)
+          if (governed === undefined) {
+            governed = scopeGoverns(cwd, base, { component: 'cache-purge' })
+            inScope.set(cwd, governed)
+          }
+          if (!governed) return false
           noteCwd(row)
           return true
         },

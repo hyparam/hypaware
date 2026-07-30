@@ -227,7 +227,7 @@ Deliberately **not** `hyp ignore --session`:
 [LLP 0110](./0110-hyp-policy-verb.issue.md) diagnosed exactly that shape
 ("the verb no longer names the action, it names the store the flag writes to")
 and left bare `hyp ignore <path>` as the honest `.hypignore` dotfile author.
-As a plugin-contributed group, `hyp session` also inherits LLP 0098/0099's
+As a plugin-contributed group, `hyp session` also inherits LLP 0153/0154's
 inactive-plugin `repair:` line when the gateway is not in the active config.
 
 One client-agnostic verb group replaces per-client skill bodies: the Codex

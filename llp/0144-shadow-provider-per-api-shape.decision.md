@@ -1,11 +1,11 @@
 # LLP 0144: One shadow provider per API shape, not per vendor
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0016 (ai-gateway), LLP 0109 (OpenClaw client adapter), LLP 0142 (plugin-steered shadow providers), LLP 0146 (host-signed providers out of scope)
+**Related:** LLP 0016 (ai-gateway), LLP 0109 (OpenClaw client adapter), LLP 0152 (plugin-steered shadow providers), LLP 0146 (host-signed providers out of scope)
 
 > LLP 0109 captured Anthropic only. OpenClaw speaks exactly two model API
 > shapes, so two shadow providers cover the whole catalog — OpenRouter,
@@ -53,7 +53,7 @@ The plugin contributes exactly two shadow providers:
 - `hypaware-anthropic` — `api: "anthropic-messages"`
 - `hypaware-openai` — `api: "openai-completions"`
 
-`before_model_resolve` (LLP 0142) maps the resolved provider to whichever
+`before_model_resolve` (LLP 0152) maps the resolved provider to whichever
 shadow matches its declared `api`, and the real upstream identity travels
 to the gateway as request metadata alongside the existing
 `x-hypaware-client: openclaw` header, so the gateway routes to the right

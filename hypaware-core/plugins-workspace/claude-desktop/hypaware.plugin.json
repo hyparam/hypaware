@@ -17,23 +17,37 @@
     "client": {
       "name": "claude-desktop",
       "skill_dir": ".claude/skills",
-      "agent_dir": ".claude/agents"
+      "agent_dir": ".claude/agents",
+      "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"]
     },
     "picker": [
       {
         "name": "claude-desktop",
         "label": "Claude Desktop",
-        "summary": "The Claude Mac app",
+        "summary": "The Claude Mac app. Needs a Claude sign-in and your admin password; asks before changing anything.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
         "needs_setup": true,
-        "configure_command": "claude-desktop install"
+        "configure_command": "claude-desktop install",
+        "compose": {
+          "requires_gateway": true,
+          "gateway_upstream": {
+            "name": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "path_prefix": "/v1/messages",
+            "provider": "anthropic"
+          },
+          "plugins": [
+            { "name": "@hypaware/claude-account", "config": { "mode": "subscription" } },
+            { "name": "@hypaware/claude-desktop" }
+          ]
+        }
       }
     ],
     "commands": [
       { "name": "claude-desktop profile", "summary": "Render the managed 3P-inference profile for Claude Desktop" },
       { "name": "claude-desktop install-helper", "summary": "Write the no-arg credential wrapper the Desktop profile points at" },
       { "name": "claude-desktop status", "summary": "Show the resolved Desktop profile inputs (endpoint, mode, helper)" },
-      { "name": "claude-desktop install", "summary": "Configure Claude Desktop end to end: login, helper write, residue clear, managed plist write, restart prompt" },
+      { "name": "claude-desktop install", "summary": "Configure Claude Desktop end to end: explain and confirm, login, helper write, residue clear, managed plist write, restart prompt" },
       { "name": "claude-desktop verify", "summary": "Verify the Desktop plist install and print the in-app capture-check hint" }
     ],
     "config_sections": [
