@@ -1,11 +1,11 @@
 # LLP 0148: Wire parity is enforced in the plugin; the gateway stays a recorder
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0016 (ai-gateway), LLP 0142 (plugin-steered shadow providers), LLP 0144 (shadow provider per API shape), LLP 0145 (borrowed credentials)
+**Related:** LLP 0016 (ai-gateway), LLP 0152 (plugin-steered shadow providers), LLP 0144 (shadow provider per API shape), LLP 0145 (borrowed credentials)
 
 > Steering a turn onto a shadow provider must not change what the model
 > receives or returns. OpenClaw applies its Anthropic-only request shaping
@@ -73,7 +73,7 @@ OpenClaw's Anthropic plugin uses, available to us for our providers.
   drift when OpenClaw changes its shaping. The release checklist for the
   plugin must include diffing `extensions/anthropic/stream-wrappers.ts`
   against the mirror. Drift risk is the price of the rename-based steering
-  design (LLP 0142) and is accepted.
+  design (LLP 0152) and is accepted.
 - The gateway remains vendor-neutral and dumb, which keeps LLP 0016's
   boundary intact: adapters own client-specific behavior.
 

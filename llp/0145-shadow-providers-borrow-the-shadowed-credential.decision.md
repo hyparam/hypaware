@@ -1,11 +1,11 @@
 # LLP 0145: Shadow providers borrow the shadowed provider's credential
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway, Config
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0109 (OpenClaw client adapter), LLP 0142 (plugin-steered shadow providers), LLP 0144 (shadow provider per API shape)
+**Related:** LLP 0109 (OpenClaw client adapter), LLP 0152 (plugin-steered shadow providers), LLP 0144 (shadow provider per API shape)
 
 > LLP 0109's injected provider authenticated with `${ANTHROPIC_API_KEY}`,
 > which excludes exactly the users OpenClaw's Anthropic documentation steers
@@ -90,7 +90,7 @@ must happen inside `prepareRuntimeAuth`, not through the profile store.
 ## Consequences
 
 - Subscription and keychain OpenClaw users become capturable, which is the
-  single largest coverage gain in this set after LLP 0142.
+  single largest coverage gain in this set after LLP 0152.
 - The plugin becomes a credential-handling component, which raises its
   review bar: it holds vendor credentials in memory for the duration of a
   request. This is materially different from LLP 0109's posture, where the
