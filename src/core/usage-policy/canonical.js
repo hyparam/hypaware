@@ -100,6 +100,13 @@ export function canonicalizeDirSync(abs, { realpathSync = nodeFs.realpathSync } 
  * so canonicalization can only ever move the gate toward more restrictive,
  * never toward `full`.
  *
+ * Producing a set of spellings is necessary but not sufficient for that
+ * invariant: a consumer that picks *one* of the matching spellings (the
+ * machine-local list's nearest-governs argmax) can still lose a restrictive
+ * verdict, so it also has to evaluate its rule over the declared spellings
+ * alone and keep the more restrictive of the two answers. See
+ * `selectGoverning` in `matcher.js`.
+ *
  * A failure is reported as a `debug` aggregate (routine: a deleted or
  * not-yet-created directory), escalating to `warn` only for `resolved: 'none'`,
  * which means the filesystem itself refused every ancestor. Paths are hashed.

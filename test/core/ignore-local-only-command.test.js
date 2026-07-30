@@ -366,6 +366,34 @@ test('hyp ignore --check on a clean path with a populated-but-non-matching list 
   })
 })
 
+test('hyp ignore --check scopes the residual count to the entry the gate used, not the longest declared string', async () => {
+  await withSandbox(async ({ root: sandbox, hypHome }) => {
+    const root = realpathSync(sandbox)
+    const scope = path.join(root, 'r')
+    const deep = path.join(scope, 'p', 'deep')
+    mkdirSync(deep, { recursive: true })
+    // The link's *declared* spelling is the longest string in the store, but
+    // the entry the resolver's verdict came from is `<root>/r`. Scoping the
+    // residual count by "longest declared string" counts rows under the link
+    // path, which nothing was ever recorded under, and reports 0.
+    const link = path.join(root, 'a-very-long-link-name')
+    symlinkSync(path.join(scope, 'p'), link)
+    await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link, scope] })
+
+    const { query, storage } = makeAiGatewayCache([
+      { cwd: deep, repo_root: scope },
+      { cwd: path.join(scope, 'src'), repo_root: scope },
+      { cwd: '/elsewhere', repo_root: '/elsewhere' },
+    ])
+
+    const res = await run('ignore', ['--check', '--json'], { cwd: deep, hypHome, query, storage })
+    assert.equal(res.code, 0)
+    const parsed = JSON.parse(res.stdout)
+    assert.equal(parsed.class, 'local-only')
+    assert.equal(parsed.residualCachedRows, 2, 'both rows under the governing entry are counted')
+  })
+})
+
 /* -------------------------------- helpers -------------------------------- */
 
 /**

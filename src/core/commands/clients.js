@@ -26,6 +26,7 @@ import {
   CLASS_RANK,
   createUsagePolicyResolver,
   findRepoRoot,
+  governingListEntry,
   localOnlyListPath,
   sameDirectory,
   scopeGoverns,
@@ -1137,14 +1138,16 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
  * should count: the directory containing the governing `.hypignore` when
  * governed by a dotfile (unchanged from before the machine-local list
  * existed), or — when governed by the machine-local store
- * (`result.governedBy === listPath`) — the most specific (longest) entry
- * that actually matches `base`, found via the shared
- * {@link scopeGoverns} predicate rather than a second copy of path
- * logic (R8). The `resolve()` call already decided *whether* something
- * governs; this only identifies *which* listed directory did, for display
- * and scoping the residual count - so it has to be the same
- * spelling-agnostic predicate the resolver used, or `--check` would report
- * "governed by machine-local" and then fail to name the entry.
+ * (`result.governedBy === listPath`), the entry the gate itself used, from
+ * the shared {@link governingListEntry} selector rather than a second copy of
+ * the selection rule (R8). The `resolve()` call already decided *whether*
+ * something governs; this only identifies *which* listed directory did, for
+ * display and scoping the residual count - so it has to make the same choice
+ * the resolver made. Re-deriving it from `scopeGoverns` plus "longest declared
+ * string" does not: once an entry can match through its canonical spelling,
+ * the longest declared string and the deepest matching spelling are different
+ * entries, and `--check` would scope its residual count to one while
+ * reporting the other's class.
  *
  * @param {{ result: ResolveResult, base: string, stateDir: string, listPath: string }} args
  * @returns {Promise<string>}
@@ -1153,9 +1156,8 @@ async function resolveCheckScopeDir({ result, base, stateDir, listPath }) {
   if (!result.governedBy) return base
   if (result.governedBy !== listPath) return path.dirname(result.governedBy)
   const entries = await readLocalOnlyEntries({ stateDir })
-  const matches = entries.filter((entry) => scopeGoverns(base, entry.dir, { component: 'cmd-ignore-check' }))
-  if (matches.length === 0) return base
-  return matches.reduce((best, entry) => (entry.dir.length > best.dir.length ? entry : best)).dir
+  const governing = governingListEntry(base, entries, { component: 'cmd-ignore-check' })
+  return governing === null ? base : governing.dir
 }
 
 /**

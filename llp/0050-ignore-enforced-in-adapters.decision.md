@@ -109,9 +109,30 @@ drops from `local-only` to `full` and that directory **starts forwarding**. That
 trades a capture leak for a forwarding leak. Taking the most restrictive verdict
 across both spellings closes the first without opening the second, and makes the
 fail-safe structural rather than a special case: a `realpath` that fails removes
-a *candidate* spelling, never a verdict some other spelling already produced, so
-canonicalization can only ever move the gate toward more restrictive, never
-toward `full`.
+a *candidate* spelling, never a verdict some other spelling already produced.
+
+**The invariant is that canonicalization only ever moves the gate toward more
+restrictive, never toward `full`**, and one step needs explicit care to hold it.
+Merging verdicts across spellings is monotone, but the machine-local list's
+*nearest-governs* step is an argmax over match depth, and an argmax discards
+verdicts instead of merging them. A less restrictive entry (an explicit `sync`
+carve-out, say) that gains reach through its canonical spelling can therefore
+become the deepest match and displace a broader restrictive entry that already
+governed - which would punch a hole in a private tree declared under the other
+spelling and start that directory recording and forwarding. So the
+nearest-governs rule is evaluated **twice**, once over the declared spellings
+alone (what the lexical matcher decided) and once over the widened set, and the
+more restrictive of the two answers wins, the declared one breaking a class tie
+because it is the spelling the user typed. Widening an entry's reach can then
+only add restriction.
+
+The visible cost is that a nested loosening does not cross spellings: an
+explicit `sync`/`full` carve-out declared under one spelling does not loosen a
+broader restrictive entry declared under the other, and a user who wants the
+carve-out has to declare it under the same spelling as the entry it carves out
+of (`hyp policy show` on the path reports the class actually in force, so the
+situation is diagnosable). That is the privacy-safe direction of the trade, and
+it is the same direction the `cwd` side already takes.
 
 Three consequences worth stating outright, because they are what a reader of the
 privacy gate will ask:

@@ -201,6 +201,8 @@ export function createUsagePolicyResolver({
    * governs the real directory and vice versa. Specificity is measured on the
    * spelling that actually matched, so nested entries still resolve
    * nearest-governs regardless of which spelling each was declared with.
+   * Widening an entry's reach must not *loosen* the list, which is what
+   * {@link selectGoverning} guarantees.
    *
    * @ref LLP 0071 [implements]: segment-aware equal-or-descendant list membership, second resolver source
    * @ref LLP 0050#canonicalization [implements]: an entry governs through any spelling of its declared directory
@@ -210,24 +212,12 @@ export function createUsagePolicyResolver({
    * @returns {ResolveResult | null} `null` when nothing in the list governs `cwd`
    */
   function matchList(cwd, at) {
-    /** @type {{ class: LocalOnlyEntry['class'], depth: number } | null} */
-    let governing = null
-    for (const { entry, spellings } of getListScopes(at)) {
-      const depth = matchDepth(cwd, spellings)
-      if (depth === null) continue
-      if (
-        governing === null ||
-        depth > governing.depth ||
-        (depth === governing.depth && CLASS_RANK[entry.class] > CLASS_RANK[governing.class])
-      ) {
-        governing = { class: entry.class, depth }
-      }
-    }
+    const governing = selectGoverning(cwd, getListScopes(at))
     if (governing === null) return null
     return {
-      class: governing.class,
+      class: governing.entry.class,
       governedBy: /** @type {string} */ (localOnlyListPath),
-      declared: governing.class,
+      declared: governing.entry.class,
     }
   }
 
@@ -361,6 +351,104 @@ function matchDepth(cwd, dirSpellings) {
     if (isEqualOrDescendant(cwd, dir)) return dir.length
   }
   return null
+}
+
+/**
+ * The nearest-governs winner over `scopes`: the entry whose matched spelling is
+ * the longest, ties broken by the more restrictive class. `spellingLimit` caps
+ * how many of each entry's spellings may match, so the same rule can be run
+ * over the declared spellings alone or over the widened set.
+ *
+ * @param {string} cwd absolute, already `path.resolve`d
+ * @param {readonly { entry: LocalOnlyEntry, spellings: readonly string[] }[]} scopes
+ * @param {number} spellingLimit
+ * @returns {{ entry: LocalOnlyEntry, depth: number } | null}
+ */
+function deepestMatch(cwd, scopes, spellingLimit) {
+  /** @type {{ entry: LocalOnlyEntry, depth: number } | null} */
+  let best = null
+  for (const { entry, spellings } of scopes) {
+    const depth = matchDepth(cwd, spellingLimit >= spellings.length ? spellings : spellings.slice(0, spellingLimit))
+    if (depth === null) continue
+    if (
+      best === null ||
+      depth > best.depth ||
+      (depth === best.depth && CLASS_RANK[entry.class] > CLASS_RANK[best.entry.class])
+    ) {
+      best = { entry, depth }
+    }
+  }
+  return best
+}
+
+/**
+ * The machine-local entry that governs `cwd`, over precomputed spellings.
+ *
+ * Nearest-governs alone is *not* monotone in the set of spellings, which is the
+ * one place canonicalization could have made the gate **less** restrictive than
+ * the lexical matcher it replaced. An explicit `full` (or merely less
+ * restrictive) entry that gains reach through its canonical spelling can become
+ * the deepest match and so displace a broader restrictive entry that already
+ * governed: a carve-out declared under one spelling would punch a hole in a
+ * private tree declared under the other, and the directory would start
+ * recording and forwarding. Nothing about "resolve over a set of spellings"
+ * prevents that on its own, because the argmax-over-depth step in the middle
+ * discards verdicts rather than merging them.
+ *
+ * So the rule is run twice - once over the declared spellings alone (exactly
+ * what the pre-canonicalization matcher decided) and once over the widened set
+ * - and the more restrictive of the two answers wins, the declared one breaking
+ * a class tie because it is the spelling the user typed. Widening an entry's
+ * reach can then only ever add restriction, never remove it, which is the
+ * fail-toward-privacy property LLP 0050 §canonicalization claims and the reason
+ * a nested loosening deliberately does not cross spellings.
+ *
+ * @ref LLP 0050#canonicalization [implements]: canonicalization only ever moves the gate toward more restrictive, entry side included
+ * @ref LLP 0049#fail-safe [constrained-by]: a widened reach must resolve to "suppress more", never to "starts forwarding"
+ * @param {string} cwd absolute, already `path.resolve`d
+ * @param {readonly { entry: LocalOnlyEntry, spellings: readonly string[] }[]} scopes
+ * @returns {{ entry: LocalOnlyEntry, depth: number } | null}
+ */
+function selectGoverning(cwd, scopes) {
+  const asDeclared = deepestMatch(cwd, scopes, 1)
+  const widened = deepestMatch(cwd, scopes, Number.POSITIVE_INFINITY)
+  if (asDeclared === null) return widened
+  if (widened === null) return asDeclared
+  return CLASS_RANK[widened.entry.class] > CLASS_RANK[asDeclared.entry.class] ? widened : asDeclared
+}
+
+/**
+ * Which stored machine-local entry governs `dir`, by the identical rule
+ * `resolve()` applies (spelling-agnostic membership, nearest-governs,
+ * most-restrictive-wins across both the declared and the widened reach, then
+ * across the spellings of `dir` itself), or `null` when none does.
+ *
+ * Exported because a CLI verb that has already been told "the machine-local
+ * store governs this" still has to name *which* entry, for display and for
+ * scoping the residual row count. Re-deriving that choice at the call site is
+ * how `--check` / `policy show` ends up naming an entry the gate did not use
+ * (R8: one shared thing, not a second copy of the selection rule).
+ *
+ * Does up to two `realpath` calls per entry plus two for `dir`, so it is for
+ * one-shot CLI use, not a per-row loop.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the governing-entry choice is shared, not re-derived per call site
+ * @ref LLP 0050#canonicalization [implements]: the CLI names the entry the gate actually used
+ * @param {string} dir
+ * @param {readonly LocalOnlyEntry[]} entries
+ * @param {{ realpathSync?: (p: string) => string, component?: string }} [deps]
+ * @returns {LocalOnlyEntry | null}
+ */
+export function governingListEntry(dir, entries, deps = {}) {
+  const scopes = entries.map((entry) => ({ entry, spellings: canonicalSpellings(entry.dir, deps) }))
+  /** @type {{ entry: LocalOnlyEntry, depth: number } | null} */
+  let best = null
+  for (const spelling of canonicalSpellings(dir, deps)) {
+    const found = selectGoverning(spelling, scopes)
+    if (found === null) continue
+    if (best === null || CLASS_RANK[found.entry.class] > CLASS_RANK[best.entry.class]) best = found
+  }
+  return best === null ? null : best.entry
 }
 
 /**

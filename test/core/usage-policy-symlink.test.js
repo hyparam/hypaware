@@ -16,6 +16,7 @@ import path from 'node:path'
 import {
   canonicalizeDirSync,
   createUsagePolicyResolver,
+  governingListEntry,
   sameDirectory,
   scopeGoverns,
 } from '../../src/core/usage-policy/index.js'
@@ -150,6 +151,103 @@ test('resolve: nested entries keep nearest-governs when the outer one matched by
   // loosening declared under one spelling never loosens the other. Documented
   // as a consequence of most-restrictive-wins, not an accident.
   assert.equal(resolver.resolve(path.join(link, 'public', 'deep')).class, 'local-only')
+})
+
+// The one direction canonicalization must never move the gate: less
+// restrictive than the lexical matcher it replaced. Resolving over a *set* of
+// spellings is monotone only where verdicts are merged; the machine-local
+// list's nearest-governs step is an argmax over depth, so a less restrictive
+// entry that gains reach through its canonical spelling could otherwise become
+// the deepest match and displace a broader restrictive entry that already
+// governed.
+//
+// @ref LLP 0050#canonicalization [tests]: a widened entry reach only ever adds restriction
+
+test('resolve: a carve-out that gains reach by canonicalization does not punch a hole in a broader restrictive entry', () => {
+  const root = tempRoot()
+  const real = path.join(root, 'real')
+  fs.mkdirSync(path.join(real, 'proj', 'sub'), { recursive: true })
+  fs.mkdirSync(path.join(real, 'other'), { recursive: true })
+  // `link` lives outside the ignored tree but denotes a directory inside it,
+  // and it is declared `full`: its canonical spelling is strictly deeper than
+  // the `ignore` entry's, so nearest-governs alone would hand it the verdict.
+  const link = path.join(root, 'link')
+  fs.symlinkSync(path.join(real, 'proj'), link)
+  const listPath = path.join(root, 'state', 'usage-policy', 'local-only.json')
+  writeList(root, listPath, [
+    { dir: real, class: 'ignore' },
+    { dir: link, class: 'full' },
+  ])
+
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: listPath })
+  assert.equal(
+    resolver.resolve(path.join(real, 'proj', 'sub')).class,
+    'ignore',
+    'the lexical matcher said ignore here; canonicalization must not demote it to full'
+  )
+  assert.equal(resolver.resolve(path.join(real, 'proj')).class, 'ignore')
+  assert.equal(resolver.resolve(path.join(link, 'sub')).class, 'ignore')
+  assert.equal(resolver.resolve(path.join(real, 'other')).class, 'ignore', 'untouched by the carve-out either way')
+  // The carve-out still works where it was declared *under the same spelling*
+  // as the entry it carves out of, which is the supported way to write one.
+  const listPath2 = path.join(root, 'state', 'usage-policy', 'same-spelling.json')
+  writeList(root, listPath2, [
+    { dir: real, class: 'ignore' },
+    { dir: path.join(real, 'proj'), class: 'full' },
+  ])
+  const resolver2 = createUsagePolicyResolver({ localOnlyListPath: listPath2 })
+  assert.equal(resolver2.resolve(path.join(real, 'proj', 'sub')).class, 'full', 'a same-spelling carve-out is honored')
+})
+
+test('governingListEntry names the entry whose verdict the gate used, not the longest declared string', () => {
+  const root = tempRoot()
+  fs.mkdirSync(path.join(root, 'r', 'p', 'deep'), { recursive: true })
+  // Declared spelling deliberately longer than the entry that actually
+  // governs, so "longest declared string" and "the gate's choice" differ.
+  const link = path.join(root, 'a-very-long-link-name')
+  fs.symlinkSync(path.join(root, 'r', 'p'), link)
+  const entries = /** @type {const} */ ([
+    { dir: link, class: 'local-only' },
+    { dir: path.join(root, 'r'), class: 'local-only' },
+  ])
+
+  assert.equal(governingListEntry(path.join(root, 'r', 'p', 'deep'), entries)?.dir, path.join(root, 'r'))
+  assert.equal(governingListEntry(path.join(root, 'r'), entries)?.dir, path.join(root, 'r'))
+  assert.equal(governingListEntry(path.join(root, 'unrelated'), entries), null)
+})
+
+test('resolve: a cwd reached through a dangling symlink keeps the class its as-given spelling produces', () => {
+  const root = tempRoot()
+  // A link whose target has been deleted: `realpath` throws and the partial
+  // walk can recover no more than the link's own parent, so no canonical reach
+  // is gained. The as-given verdict must still stand, in both directions.
+  fs.mkdirSync(path.join(root, 'ignored', 'target'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'ignored', '.hypignore'), 'ignore\n')
+  const inside = path.join(root, 'ignored', 'dangling')
+  fs.symlinkSync(path.join(root, 'ignored', 'target'), inside)
+  const outside = path.join(root, 'outside-dangling')
+  fs.symlinkSync(path.join(root, 'ignored', 'target'), outside)
+  fs.rmSync(path.join(root, 'ignored', 'target'), { recursive: true, force: true })
+
+  const listPath = path.join(root, 'state', 'usage-policy', 'local-only.json')
+  writeList(root, listPath, [{ dir: outside, class: 'local-only' }])
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: listPath })
+
+  assert.equal(resolver.resolve(inside).class, 'ignore', 'the dangling link is itself under an ignored tree')
+  assert.equal(resolver.resolve(path.join(inside, 'child')).class, 'ignore')
+  assert.equal(
+    resolver.resolve(outside).class,
+    'local-only',
+    'an entry declared as a now-dangling link keeps governing its declared spelling'
+  )
+  assert.equal(resolver.resolve(path.join(outside, 'child')).class, 'local-only')
+  // A failed canonicalization loses reach it would have added; it never throws
+  // and never demotes.
+  const outcome = canonicalizeDirSync(outside)
+  assert.equal(outcome.path, outside, 'nothing beyond the link itself could be resolved')
+  assert.equal(outcome.resolved, 'partial')
+  assert.equal(outcome.errno, 'enoent')
+  assert.equal(scopeGoverns(path.join(outside, 'child'), outside), true)
 })
 
 test('resolve: a symlinked cwd is still not matched by a mere string-prefix sibling (segment-aware after canonicalization)', () => {
