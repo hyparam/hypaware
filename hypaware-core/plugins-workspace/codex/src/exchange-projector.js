@@ -263,9 +263,14 @@ export function createCodexExchangeProjector(opts = {}) {
  *
  * **Which lineage counts, and why it cannot be `thread_source` alone.**
  * `thread_source` and `parent_thread_id` are read out of `x-codex-turn-metadata`,
- * and that blob states `thread_id` whenever it states any turn identity at all,
- * so a turn stating them has already been answered by the branch above: a refusal
- * keyed only on those can never fire for a real Codex turn. The lineage that
+ * and that blob states `session_id` and `thread_id` as a pair or not at all (both
+ * gated on the same `has_turn_identity`), so it can never supply the container
+ * this fallback needs while withholding the thread that pre-empts it. Note the
+ * blob is NOT what answers such a turn: for the one kind with no turn identity
+ * (memory consolidation) the blob states the lineage and neither id, and the turn
+ * is answered by the body map, which carries both ids ungated. A refusal keyed
+ * only on those blob fields therefore cannot fire for a real Codex turn, but the
+ * reason is the map, not the blob. The lineage that
  * would survive a turn stating no thread id is the lineage Codex sends as a
  * DIRECT header, gated on nothing else: `x-codex-parent-thread-id` and
  * `x-openai-subagent` (see `subagent_signal` in `resolveCodexContext`). Those are

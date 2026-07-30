@@ -139,12 +139,33 @@ has the symmetric fallback.
   which settles the recorded-shape question there rather than here. The
   consequence for this document: a turn now reaches the container fallback at all
   only when **no surface it carries states a `thread_id`**. That is stricter than
-  "carries neither surface", and the difference is the whole reachable set: the
-  body map and the turn-metadata blob each state a `thread_id` whenever they state
-  any identity at all (the map on every request, the blob whenever the request
-  kind has turn identity), so a turn reaches the fallback only by naming a
-  container on a Codex-owned surface while naming no thread on any of them. No
-  `codex-rs` surface is documented to produce that.
+  "carries neither surface", and the difference is the whole reachable set: a turn
+  reaches the fallback only by naming a container on a Codex-owned surface while
+  naming no thread on any of them.
+
+  The invariant that makes that unreachable is not "each surface states a
+  `thread_id`", which is false of the blob. It is that **on both surfaces the two
+  ids are emitted as a pair, never one without the other**, so no surface can
+  supply the container the fallback needs while withholding the thread that would
+  pre-empt it. Verified by reading the emitting source rather than inferred
+  (`openai/codex`, `codex-rs/core/src/responses_metadata.rs`, commit `1def0a8`,
+  2026-07-28):
+
+  - `CodexResponsesMetadata::client_metadata` inserts `session_id` and `thread_id`
+    into the same map literal, unconditionally and ungated, from two non-`Option`
+    `String` fields. Every `/responses` request carries this map
+    (`client.rs`, `client_metadata: Some(responses_metadata.client_metadata())`).
+  - `turn_metadata_payload` gates `session_id` and `thread_id` on the **same**
+    `has_turn_identity` boolean, so the blob states both or neither.
+
+  The blob's `has_turn_identity` is false for exactly one request kind,
+  `CodexResponsesRequestKind::Memory`, and that kind still emits the lineage this
+  refusal keys on (`thread_source`, `parent_thread_id`, and an
+  `x-openai-subagent: memory_consolidation` header) with **no** id pair in the
+  blob. So memory consolidation is the closest real Codex shape to the refusal's
+  trigger, and what keeps it out is the flat body map alone, not the blob. That is
+  pinned by a test rather than left as prose, because the surface doing the work
+  is not the one the argument reads as naming.
 
   **The value-blind grain, and what it costs.** The guard refuses on any
   `x-openai-subagent` value, not only the ones that name a different workspace, so
@@ -156,10 +177,16 @@ has the symmetric fallback.
   unobserved request shape the fallback itself now needs: verified by executing
   the real projector over every surface combination, the refusal and the
   container fallback are entered by exactly the same shapes, so neither the
-  residual nor its mirror is reachable from Codex traffic as `codex-rs` is
-  documented to emit it. The narrowing rests on that documented emission and not
-  on anything this repo can assert hermetically
-  ([LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)), which is
+  residual nor its mirror is reachable from Codex traffic as `codex-rs` emits it.
+
+  That last clause is a claim about a program this repo does not build, so it is
+  worth being exact about its standing. It has been checked against `codex-rs`
+  source directly (the pair invariant above), which is stronger than the earlier
+  "documented to emit" phrasing, but it is still a **snapshot of an upstream
+  `main`**, not a pinned release, and it is a claim about emitting code rather
+  than about captured traffic: no hermetic smoke in this repo can supply it
+  ([LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)). Re-check
+  it at the two functions named above if the guard's cost ever matters. That is
   why the guard is kept rather than deleted: it is the cheap half of a trade whose
   premise is another program's source.
 - **What remains after that is bounded, and removing the fallback is worse.** A

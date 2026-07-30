@@ -663,6 +663,53 @@ for (const value of ['review', 'compact', 'memory_consolidation']) {
   })
 }
 
+test('a memory-consolidation turn is answered by the body map, whose id pair the blob withholds', async () => {
+  // @ref LLP 0083#container-fallback-gap [tests]: which surface actually keeps
+  // the real subagent-flavoured request kind out of the value-blind refusal.
+  //
+  // `CodexResponsesRequestKind::Memory` is the one kind `codex-rs` marks
+  // `has_turn_identity() == false`, so `turn_metadata_payload` omits BOTH
+  // `session_id` and `thread_id` from the blob while still emitting the lineage
+  // that trips the refusal (`thread_source`, `parent_thread_id`, and the
+  // `x-openai-subagent: memory_consolidation` compatibility header). So this is
+  // the closest real Codex shape to the refusal's trigger, and what keeps it out
+  // is the FLAT BODY MAP: `client_metadata()` inserts the id pair
+  // unconditionally, ungated by `has_turn_identity`.
+  //
+  // Stated as a test because the reasoning is easy to get backwards: the blob is
+  // NOT what answers this turn, so a future change that stopped reading the body
+  // map would send precisely this shape into the refusal and fail `.hypignore`
+  // OPEN on it. The assertion below is what would catch that.
+  const sessionsDir = await writeSubagentPair({
+    rootCwd: '/work/ignored/root',
+    subagentCwd: '/work/clean/sub',
+  })
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+    rolloutCwd: createRolloutCwdResolver({ sessionsDir }),
+  })
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-openai-subagent': 'memory_consolidation',
+      // The blob as the Memory kind serialises it: lineage, no id pair.
+      'x-codex-turn-metadata': JSON.stringify({
+        request_kind: 'memory',
+        thread_source: 'subagent',
+        parent_thread_id: ROOT_THREAD_ID,
+      }),
+    }),
+    // The body map, which states both ids regardless of the request kind.
+    request_body: codexLineageBody({
+      session_id: ROOT_SESSION_ID,
+      thread_id: ROOT_THREAD_ID,
+    }),
+    response_body: JSON.stringify({ output_text: 'ok' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the body map names the thread, so the refusal is never consulted')
+})
+
 test('a session_meta line with a cwd but no payload.id is refused, not matched by its filename', async () => {
   // The identity guard reads the RAW line, so an absent `payload.id` is visible
   // as absent and refuses. Pinned because it is a real divergence from the
