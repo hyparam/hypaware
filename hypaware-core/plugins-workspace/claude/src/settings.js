@@ -23,6 +23,12 @@ import { ConcurrentEditError, atomicWriteFile, errCode, isPlainObject } from 'hy
  * a format-aware but plugin-agnostic core routine can reverse the
  * attach from disk alone — with the plugin unloaded. See LLP 0045
  * Part 3.
+ *
+ * The same record carries `prev_malformed`: any `env` / `hooks` block
+ * that was present on disk with the wrong JSON type and had to be
+ * rebuilt before attach could write into it. Attach repairs rather than
+ * refuses, and the marker is what makes the repair reversible and
+ * reportable instead of destructive. See LLP 0163.
  */
 
 /**
@@ -119,7 +125,27 @@ export async function attach(opts) {
   const { value, mtimeMs } = await readSettings(settingsPath)
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
-  const env = ensureObject(value, 'env')
+  // The backup half of back-up-then-repair. Every block attach has to rebuild
+  // because what was on disk was present but the wrong JSON type lands here,
+  // keyed by its dotted path: the value goes into the marker (which is already
+  // where everything else attach displaces is kept) and the path becomes a
+  // warning the caller prints. Attach keeps succeeding; what it destroyed
+  // silently before is now both reported and reversible.
+  // @ref LLP 0163#back-up-then-repair-not-refuse [implements]: collect displaced malformed blocks for the marker and the caller
+  /** @type {Record<string, unknown>} */
+  const displaced = {}
+  /** @type {string[]} */
+  const warnings = []
+  /** @type {(dottedPath: string, prior: unknown, expected: 'object' | 'array') => void} */
+  const recordDisplaced = (dottedPath, prior, expected) => {
+    displaced[dottedPath] = prior
+    warnings.push(
+      `${dottedPath} was not a JSON ${expected}; ` +
+      `its previous value is backed up in ${MARKER_KEY}.prev_malformed and hyp detach restores it`
+    )
+  }
+
+  const env = ensureObject(value, 'env', recordDisplaced)
   // Presence, not type - the same ownership rule `manageEnvAdditions` follows,
   // and the base URL needs it more, not less. The managed additions at least
   // fall through an ownership guard when they are not ours; this key has no
@@ -162,7 +188,20 @@ export async function attach(opts) {
   const managedAdditions = manageEnvAdditions(env, priorManagedEnv)
 
   env.ANTHROPIC_BASE_URL = baseUrl
-  installManagedHooks(value, commands)
+  installManagedHooks(value, commands, recordDisplaced)
+
+  // Preserve a prior backup across a re-attach, for the same reason
+  // `prev_base_url` is preserved: once attach has repaired the block the live
+  // value is *ours*, so the second attach finds nothing malformed and must not
+  // let the record of what the first one displaced fall off the marker. A prior
+  // entry wins over anything found this run at the same path - the earliest
+  // backup is the one holding the user's own content.
+  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, so it must survive re-attach
+  const priorMalformed = priorMarker && isPlainObject(priorMarker.prev_malformed)
+    ? priorMarker.prev_malformed
+    : undefined
+  const prevMalformed = { ...displaced, ...priorMalformed }
+
   // Self-describing undo record: enough for the format-aware core undo
   // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed env keys
   // we added, strip the managed hook entries, and delete the marker without
@@ -181,6 +220,7 @@ export async function attach(opts) {
       hooks: managedHookEntries(commands),
     },
     ...(prevBaseUrl !== undefined ? { prev_base_url: prevBaseUrl } : {}),
+    ...(Object.keys(prevMalformed).length > 0 ? { prev_malformed: prevMalformed } : {}),
   }
 
   await writeAtomic(settingsPath, value, mtimeMs)
@@ -190,6 +230,10 @@ export async function attach(opts) {
   if (prevBaseUrl !== undefined) {
     result.prevValue = typeof prevBaseUrl === 'string' ? prevBaseUrl : String(prevBaseUrl)
   }
+  // Only what *this* run displaced. A re-attach carries the prior backup on the
+  // marker but has nothing new to tell the user about, so it warns about
+  // nothing.
+  if (warnings.length > 0) result.warnings = warnings
   return result
 }
 
@@ -296,13 +340,33 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
 }
 
 /**
+ * Get-or-create `value[key]` as an object, handing whatever **present but
+ * non-object** value it displaces to `record` first.
+ *
+ * A hand-edited `"env": "ANTHROPIC_API_KEY=sk-x"` is still something the user
+ * wrote and meant. Replacing it with `{}` and returning success destroyed it
+ * with nothing on disk to recover it from, and nothing told them. Attach still
+ * repairs the block (it has to write into it, and refusing would turn a
+ * one-key typo into a failed enrollment), but the displaced value goes into the
+ * marker's `prev_malformed` backup, `hyp detach` puts it back, and the caller
+ * gets a warning to print.
+ *
+ * Absent is not malformed: a key that was never there displaces nothing and
+ * records nothing, which is the ordinary first-attach path.
+ *
+ * @ref LLP 0163#back-up-then-repair-not-refuse [implements]: the displaced value is recorded into the marker, not discarded
  * @param {Record<string, unknown>} value
  * @param {string} key
+ * @param {(dottedPath: string, prior: unknown, expected: 'object' | 'array') => void} [record]
  * @returns {Record<string, unknown>}
  */
-function ensureObject(value, key) {
+function ensureObject(value, key, record) {
   const existing = value[key]
   if (isPlainObject(existing)) return existing
+  // Presence, not type, separates "absent" from "malformed": JSON cannot encode
+  // `undefined`, so `hasOwn` is the whole test, and a hand-written `null` is a
+  // value the user put there rather than a missing key.
+  if (record && Object.hasOwn(value, key)) record(key, existing, 'object')
   /** @type {Record<string, unknown>} */
   const fresh = {}
   value[key] = fresh
@@ -315,14 +379,24 @@ function ensureObject(value, key) {
  * event carries (`session-context`, and on session-start events `classify-cwd`
  * too). A group is `{ matcher?, hooks: [{ type, command }] }`.
  *
+ * A present-but-non-array `hooks.<event>` is the same case {@link ensureObject}
+ * handles one level up, and takes the same answer: back the value up through
+ * `record`, then rebuild the list. Rebuilding is unavoidable here (there is no
+ * meaningful way to append a hook group to a string), so the only question is
+ * whether the displaced value is recoverable afterwards.
+ *
  * @param {Record<string, unknown>} value
  * @param {Record<string, string>} commands map from hook kind to its command string
+ * @param {(dottedPath: string, prior: unknown, expected: 'object' | 'array') => void} [record]
  */
-function installManagedHooks(value, commands) {
-  const hooksRoot = ensureObject(value, 'hooks')
+function installManagedHooks(value, commands, record) {
+  const hooksRoot = ensureObject(value, 'hooks', record)
   for (const spec of MANAGED_HOOK_SPECS) {
     const { event } = spec
     const existing = hooksRoot[event]
+    if (record && !Array.isArray(existing) && Object.hasOwn(hooksRoot, event)) {
+      record(`hooks.${event}`, existing, 'array')
+    }
     const groups = Array.isArray(existing)
       ? existing.filter((group) => !isManagedHookGroup(group)).map(removeManagedHandlers)
       : []

@@ -208,6 +208,32 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
     if (Object.keys(envObj).length === 0) delete value.env
   }
 
+  // Put back the blocks attach had to rebuild because what was on disk was
+  // present with the wrong JSON type. `prev_malformed` is path-keyed
+  // (`env`, `hooks`, `hooks.<event>`), so the replay is the same format-generic
+  // shape as the rest of the record: core never learns that `hooks.SessionStart`
+  // means anything to Claude.
+  //
+  // Same never-clobber rule the managed env keys follow, expressed as a
+  // presence test: the backup only goes back into a slot that is now *empty*,
+  // which is exactly the case where everything attach put there has just been
+  // stripped. Anything still sitting at the path arrived after we attached, so
+  // it is left alone and reported instead.
+  // @ref LLP 0163#detach-restores-the-backup [implements]: replay prev_malformed shallowest-first, restoring only into a slot the strip emptied
+  /** @type {Record<string, unknown>} */
+  const prevMalformed = isPlainObject(marker.prev_malformed) ? marker.prev_malformed : {}
+  // Shallowest first: a restored `hooks` root has to exist as an object before
+  // a `hooks.<event>` backup can be written into it.
+  for (const dotted of Object.keys(prevMalformed).sort((a, b) => pathDepth(a) - pathDepth(b))) {
+    if (getAtDottedPath(value, dotted) !== undefined) {
+      warnings.push(`${dotted} is in use again; leaving it in place rather than restoring the backed-up value`)
+      continue
+    }
+    if (!restoreAtDottedPath(value, dotted, prevMalformed[dotted])) {
+      warnings.push(`${dotted} could not be restored; a parent on its path is no longer a JSON object`)
+    }
+  }
+
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
   const warning = joinWarnings(warnings)
@@ -595,6 +621,46 @@ function setAtDottedPath(root, dottedPath, newValue) {
   if (leaf === undefined) return
   const parent = segments.length === 0 ? root : getAtDottedPath(root, segments.join('.'))
   if (isPlainObject(parent)) parent[leaf] = newValue
+}
+
+/**
+ * Write a backed-up value at a dotted path, creating any **missing** object
+ * parent on the way. Unlike {@link setAtDottedPath} this cannot assume the
+ * chain survives: the undo has just deleted the containers it emptied, so
+ * restoring a `hooks.<event>` backup routinely has to recreate the `hooks`
+ * root the strip removed a few lines earlier.
+ *
+ * Returns false when a parent is present as a **non**-object, which is the one
+ * case with nowhere honest to put the value: something else now owns that path
+ * and overwriting it would repeat the destruction the backup exists to undo.
+ * The caller reports it rather than forcing the write.
+ *
+ * @ref LLP 0163#detach-restores-the-backup [implements]: recreate emptied parents, refuse to overwrite a parent someone else owns
+ * @param {Record<string, unknown>} root
+ * @param {string} dottedPath
+ * @param {unknown} newValue
+ * @returns {boolean}
+ */
+function restoreAtDottedPath(root, dottedPath, newValue) {
+  const segments = dottedPath.split('.')
+  const leaf = segments.pop()
+  if (leaf === undefined) return false
+  /** @type {Record<string, unknown>} */
+  let parent = root
+  for (const segment of segments) {
+    const next = parent[segment]
+    if (next === undefined) {
+      /** @type {Record<string, unknown>} */
+      const fresh = {}
+      parent[segment] = fresh
+      parent = fresh
+      continue
+    }
+    if (!isPlainObject(next)) return false
+    parent = next
+  }
+  parent[leaf] = newValue
+  return true
 }
 
 /**
