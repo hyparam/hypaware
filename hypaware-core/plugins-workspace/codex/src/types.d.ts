@@ -7,8 +7,18 @@ import type { JsonObject } from '../../../../hypaware-plugin-kernel-types.d.ts'
  * into this shape so the projector is format-agnostic.
  */
 export interface CodexRolloutSession {
-  /** Native session id (`session_meta.id` / legacy `session.id`), or a deterministic path-derived fallback. */
+  /**
+   * The session CONTAINER id, i.e. the `session_id` partition key
+   * (`session_meta.session_id`), falling back to `threadId` on a rollout too
+   * old to record one. @ref LLP 0030#decision
+   */
   sessionId: string
+  /**
+   * The thread this rollout records (`session_meta.id` / legacy `session.id`),
+   * or a deterministic path-derived fallback. Equal to `sessionId` for a root
+   * thread; distinct for a subagent one.
+   */
+  threadId: string
   /** Conversation start in epoch millis, when recoverable. */
   startedAtMs?: number
   /** Workspace directory recorded for the session/turns. */

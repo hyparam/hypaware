@@ -3,11 +3,16 @@
 import nodeFs from 'node:fs'
 import path from 'node:path'
 
+import { Attr } from '../observability/attrs.js'
+import { getLogger } from '../observability/logger.js'
+
+import { canonicalSpellings } from './canonical.js'
+import { createVolumeCaseProbe, foldPath, hashPath } from './fold.js'
 import { parseHypignore } from './format.js'
 import { LocalOnlyListUnreadableError } from './local_only.js'
 
 /**
- * @import { LocalOnlyEntry, ResolveResult, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
+ * @import { ListScope, LocalOnlyEntry, ResolveResult, UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  */
 
 const HYPIGNORE_FILENAME = '.hypignore'
@@ -71,37 +76,73 @@ const LOCAL_ONLY_LIST_VERSION_V2 = 2
  * collapsing the apply latency from "within the TTL" to zero. Until that path
  * exists, the TTL is the leak bound.
  *
+ * Both sides of every comparison are resolved over the *set* of spellings that
+ * denote a directory, never over one chosen spelling. A filesystem hands out
+ * those spellings by two independent mechanisms, and the resolver folds both:
+ * symlinks, resolved by {@link canonicalSpellings} into a set of strings (see
+ * there for why the set, not the canonical form alone, is the privacy-preserving
+ * choice), and Unicode normalization plus per-volume case, resolved by
+ * {@link foldPath} into one folded image of each of those strings. Neither can
+ * remove a spelling the other produced, and the merge across spellings takes the
+ * most restrictive verdict, so the composition can only ever move the gate
+ * toward more restrictive.
+ *
  * fs, the clock, and the TTL are injected for tests; fs defaults to `node:fs`,
  * the clock to `Date.now`, and the TTL to `CACHE_TTL_MS`.
  *
  * @ref LLP 0050 [implements]: the single shared matcher for all four adapter call sites; no per-adapter copies
+ * @ref LLP 0050#canonicalization [implements]: one `realpath` per cache miss, inside the existing TTL, on both sides of the comparison
  * @ref LLP 0049#scope [implements]: gitignore-style ancestor walk from cwd, nearest .hypignore wins; per-cwd cache (R6)
  * @ref LLP 0052#matcher [implements]: bounded-TTL staleness so a mid-run .hypignore is honored without a daemon restart
  * @ref LLP 0070#resolver [implements]: one shared resolver, two sources, most-restrictive class wins
  * @ref LLP 0071 [implements]: the machine-local list is the second source
+ * @ref LLP 0050#normalization [implements]: list membership compares folded spellings, so an NFC/NFD divergence between two processes does not open the gate
  * @param {object} [deps]
  * @param {(path: string, encoding: 'utf8') => string} [deps.readFileSync]
  * @param {(path: string) => boolean} [deps.existsSync]
+ * @param {(path: string) => string} [deps.realpathSync] symlink canonicalizer;
+ *   defaults to `node:fs`. Failure is expected and handled (see
+ *   `canonicalizeDirSync`), so an injected fs need not supply one.
  * @param {() => number} [deps.now] injectable clock in ms; defaults to Date.now
  * @param {number} [deps.ttlMs] cache entry lifetime in ms; defaults to CACHE_TTL_MS
  * @param {string} [deps.localOnlyListPath] absolute path of the machine-local
  *   `local-only` list (`localOnlyListPath(stateDir)`, LLP 0071); omitted =>
  *   the resolver behaves exactly as it did before the list existed
+ * @param {(dir: string) => boolean} [deps.caseInsensitiveVolume] per-volume
+ *   case-sensitivity verdict for an entry's directory; defaults to
+ *   {@link createVolumeCaseProbe}, which is inert (constant `false`, no
+ *   syscall) off darwin. Injected so the folding logic can be exercised for a
+ *   case-insensitive volume on a host that has none
+ * @param {(name: string, fields?: Record<string, unknown>) => void} [deps.logEvent]
  * @returns {UsagePolicyResolver}
  */
 export function createUsagePolicyResolver({
   readFileSync = nodeFs.readFileSync,
   existsSync = nodeFs.existsSync,
+  realpathSync = nodeFs.realpathSync,
   now = Date.now,
   ttlMs = CACHE_TTL_MS,
   localOnlyListPath,
+  caseInsensitiveVolume,
+  logEvent,
 } = {}) {
   /** @type {Map<string, { result: ResolveResult, expiresAt: number }>} */
   const cache = new Map()
-  /** @type {{ entries: LocalOnlyEntry[], expiresAt: number } | null} */
+  /** @type {{ scopes: ListScope[], expiresAt: number } | null} */
   let listCache = null
+  const emit = logEvent ?? emitDebug
+  const probeVolume = caseInsensitiveVolume ?? createVolumeCaseProbe({ logSkip: emit })
 
   /**
+   * Resolve `cwd` over every spelling that denotes it, returning the most
+   * restrictive verdict any spelling produces.
+   *
+   * The cache is keyed on the *lexical* path and consulted before any
+   * canonicalization or folding, so a hit costs exactly what it did before
+   * either existed: the `realpath` syscall and the fold happen once per distinct
+   * `cwd` per TTL window, the same bound LLP 0049 R6 already sets for the
+   * ancestor walk, not once per recorded exchange.
+   *
    * @param {string} cwd
    * @returns {ResolveResult}
    */
@@ -110,11 +151,16 @@ export function createUsagePolicyResolver({
     const at = now()
     const cached = cache.get(key)
     if (cached && cached.expiresAt > at) return cached.result
-    const dotfileResult = walk(key)
-    const listResult = localOnlyListPath ? matchList(key, at) : null
-    const result = mostRestrictive(dotfileResult, listResult)
-    cache.set(key, { result, expiresAt: at + ttlMs })
-    return result
+    /** @type {ResolveResult | null} */
+    let result = null
+    for (const spelling of canonicalSpellings(key, { realpathSync })) {
+      const dotfileResult = walk(spelling)
+      const listResult = localOnlyListPath ? matchList(spelling, at) : null
+      const merged = mostRestrictive(dotfileResult, listResult)
+      result = result === null ? merged : mostRestrictive(result, merged)
+    }
+    cache.set(key, { result: /** @type {ResolveResult} */ (result), expiresAt: at + ttlMs })
+    return /** @type {ResolveResult} */ (result)
   }
 
   /**
@@ -165,44 +211,79 @@ export function createUsagePolicyResolver({
    * re-reading and re-parsing the list file at most once per `ttlMs` window
    * (independent of how many distinct `cwd`s are resolved in that window). A
    * missing file is "no exclusions" (`[]`); a present-but-unparseable file
-   * throws — the same fail-safe the store (`local_only.js`) applies, so a
+   * throws, matching the fail-safe the store (`local_only.js`) applies, so a
    * corrupt list fails the caller loudly rather than silently resolving to
    * "nothing excluded" (LLP 0080 #fail-safe). When more than one entry
    * governs `cwd` (nested entries), the most specific (longest `dir`) wins,
    * mirroring the `.hypignore` walk's nearest-governs rule; a tie is broken
    * by the more restrictive class.
    *
+   * An entry governs `cwd` when *any* spelling of the entry's directory
+   * equals-or-contains `cwd`: symlink-resolved as well as declared, and each of
+   * those folded (Unicode-normalized, and case-folded on a volume probed
+   * case-insensitive). So an entry declared by a symlink spelling still governs
+   * the real directory and vice versa, and an entry declared NFC still governs a
+   * `cwd` that arrives NFD. Specificity is measured on the spelling that
+   * actually matched, so nested entries still resolve nearest-governs regardless
+   * of which spelling each was declared with. Widening an entry's reach must not
+   * *loosen* the list, which is what {@link selectGoverning} guarantees.
+   *
    * @ref LLP 0071 [implements]: segment-aware equal-or-descendant list membership, second resolver source
+   * @ref LLP 0050#canonicalization [implements]: an entry governs through any spelling of its declared directory
+   * @ref LLP 0050#normalization [implements]: an entry governs through any spelling the volume folds together
    * @ref LLP 0103 [implements]: the entry's own class governs, not a hardcoded `local-only`
    * @param {string} cwd absolute, already `path.resolve`d
    * @param {number} at current clock reading (ms)
    * @returns {ResolveResult | null} `null` when nothing in the list governs `cwd`
    */
   function matchList(cwd, at) {
-    const entries = getListEntries(at)
-    const matches = entries.filter((entry) => isEqualOrDescendant(cwd, entry.dir))
-    if (matches.length === 0) return null
-    const governing = matches.reduce((best, entry) => {
-      if (entry.dir.length > best.dir.length) return entry
-      if (entry.dir.length === best.dir.length && CLASS_RANK[entry.class] > CLASS_RANK[best.class]) return entry
-      return best
-    })
+    const governing = selectGoverning(cwd, getListScopes(at), reportFold)
+    if (governing === null) return null
     return {
-      class: governing.class,
+      class: governing.entry.class,
       governedBy: /** @type {string} */ (localOnlyListPath),
-      declared: governing.class,
+      declared: governing.entry.class,
     }
   }
 
   /**
-   * @param {number} at
-   * @returns {LocalOnlyEntry[]}
+   * Structured signal for the one interesting outcome: the widened pass reached
+   * a **more restrictive** verdict than the declared spellings did, i.e. a
+   * spelling divergence that would otherwise have opened the gate. Paths are
+   * hashed, never logged raw, the same discipline as the
+   * `usage_policy.export_drop` aggregate.
+   *
+   * @param {string} cwd
+   * @param {UsageClass | null} declaredClass
+   * @param {UsageClass} foldedClass
+   * @returns {void}
    */
-  function getListEntries(at) {
-    if (listCache && listCache.expiresAt > at) return listCache.entries
-    const entries = readListEntriesSync()
-    listCache = { entries, expiresAt: at + ttlMs }
-    return entries
+  function reportFold(cwd, declaredClass, foldedClass) {
+    emit('usage_policy.fold_tightened', {
+      [Attr.COMPONENT]: 'usage-policy',
+      [Attr.OPERATION]: 'match_list',
+      [Attr.STATUS]: 'ok',
+      declared_class: declaredClass ?? 'none',
+      folded_class: foldedClass,
+      cwd_hash: hashPath(cwd),
+    })
+  }
+
+  /**
+   * The list entries paired with every spelling of each entry's declared
+   * directory (symlink-resolved, then folded) and the case verdict for the
+   * volume it lives on, computed once per TTL window along with the parse. So
+   * resolving many `cwd`s in one window costs one `realpath` and one fold per
+   * entry rather than one per entry per `cwd`.
+   *
+   * @param {number} at
+   * @returns {ListScope[]}
+   */
+  function getListScopes(at) {
+    if (listCache && listCache.expiresAt > at) return listCache.scopes
+    const scopes = readListEntriesSync().map((entry) => listScope(entry, probeVolume, { realpathSync }))
+    listCache = { scopes, expiresAt: at + ttlMs }
+    return scopes
   }
 
   /**
@@ -210,9 +291,11 @@ export function createUsagePolicyResolver({
    * version-1 `dirs` array on read as all-`local-only` entries. Missing =>
    * `[]` (the common case); present-but-unreadable/malformed => throws
    * {@link LocalOnlyListUnreadableError}, mirroring `readLocalOnlyEntries`'s
-   * async fail-safe so both paths name the same `error_kind`.
+   * async fail-safe so both paths name the same `error_kind`. Throwing rather
+   * than yielding an empty list is LLP 0080 §fail-safe's mechanic; what makes
+   * it mandatory is the invariant cited below.
    *
-   * @ref LLP 0080#fail-safe [implements]: a corrupt list fails the resolve loudly, never silently to "no exclusions"
+   * @ref LLP 0049#fail-safe [constrained-by]: an uninterpretable privacy signal must resolve to "suppress more", never silently to "no exclusions"
    * @ref LLP 0103 [implements]: migrate-on-read for the sync capture-hot-path reader
    * @returns {LocalOnlyEntry[]}
    */
@@ -270,6 +353,19 @@ export function createUsagePolicyResolver({
 }
 
 /**
+ * Default sink for the resolver's structured signals. Both of them (a fold that
+ * tightened a verdict, a case probe that could not reach an answer) are routine
+ * rather than faults, so neither is ever louder than `debug`.
+ *
+ * @param {string} name
+ * @param {Record<string, unknown>} [fields]
+ * @returns {void}
+ */
+function emitDebug(name, fields) {
+  getLogger('usage-policy').debug(name, fields)
+}
+
+/**
  * True when `cwd` equals `dir`, or is a path-segment descendant of it.
  * Segment-aware: `/a/bc` is not a descendant of `/a/b` even though it shares
  * the string prefix `/a/b` (the LLP 0049 #scope ancestor rule, per LLP 0071's
@@ -292,27 +388,321 @@ export function isEqualOrDescendant(cwd, dir) {
 }
 
 /**
- * Merge the `.hypignore` walk result with an optional list-membership result,
- * returning whichever is strictly more restrictive (`ignore` > `local-only` >
- * `full`); a tie (e.g. both `local-only`) keeps the dotfile result, which is
- * already the more specific, already-computed answer.
+ * The scope one machine-local entry occupies at the **gate**: its declared
+ * spelling, the widened set (symlink-resolved *and* folded), and the case
+ * verdict the `cwd` side has to be folded through to match it.
+ *
+ * The two widenings compose in exactly one direction, which is why the widened
+ * set is a `map` and not a second set: `realpath` produces a *set* of strings
+ * (as-given, canonical), while the fold is a *function* on a string, so the
+ * widened set is the fold's image of the canonical set. Computing it here means
+ * an entry is canonicalized and folded once per TTL window, not once per `cwd`.
+ *
+ * @ref LLP 0050#canonicalization [implements]: the entry side is a set of spellings, not one chosen string
+ * @ref LLP 0050#normalization [implements]: each of those spellings is compared through the volume's fold
+ * @param {LocalOnlyEntry} entry
+ * @param {(dir: string) => boolean} probeVolume
+ * @param {{ realpathSync?: (p: string) => string, component?: string }} deps
+ * @returns {ListScope}
+ */
+function listScope(entry, probeVolume, deps) {
+  const spellings = canonicalSpellings(entry.dir, deps)
+  const caseInsensitive = probeVolume(entry.dir)
+  return {
+    entry,
+    folded: true,
+    caseInsensitive,
+    declaredSpellings: [spellings[0]],
+    widenedSpellings: spellings.map((spelling) => foldPath(spelling, { caseInsensitive })),
+  }
+}
+
+/**
+ * The same scope for a **one-shot CLI** call site: symlink-widened, deliberately
+ * *not* folded.
+ *
+ * The asymmetry is the point, and it is a decision rather than an oversight.
+ * Unconditional NFC folding is sound at the gate only because the gate's answer
+ * is `max(declared, widened)` on the restrictiveness lattice, so a fold that
+ * merges two genuinely distinct directories (which it does on Linux, where NFC
+ * and NFD names are two inodes) can only ever over-suppress. That argument does
+ * not survive the trip to a CLI verb: `hyp purge --subtree` **deletes** through
+ * {@link scopeGoverns}, `policy unset` **removes an opt-out** through it, and
+ * `sameDirectory` decides which stored declaration to **replace**. In each of
+ * those, widening the match destroys something the user did not name. Closing
+ * that gap needs a per-volume normalization-insensitivity probe (the existing
+ * probe answers only the case question) or a darwin-only guard, which is tracked
+ * in the LLP rather than smuggled in here.
+ *
+ * @ref LLP 0050#normalization [constrained-by]: "do not reuse foldPath in a predicate where widening is not free"
+ * @param {LocalOnlyEntry} entry
+ * @param {{ realpathSync?: (p: string) => string, component?: string }} deps
+ * @returns {ListScope}
+ */
+function canonicalScope(entry, deps) {
+  const spellings = canonicalSpellings(entry.dir, deps)
+  return {
+    entry,
+    folded: false,
+    caseInsensitive: false,
+    declaredSpellings: [spellings[0]],
+    widenedSpellings: spellings,
+  }
+}
+
+/**
+ * Length of the longest spelling in `dirSpellings` that equals-or-contains
+ * `cwd`, or `null` when none does. The length stands in for specificity, the
+ * same way the `.hypignore` walk's nearest-governs rule does; measuring it on
+ * the *matched* spelling keeps nested entries ordered correctly even when they
+ * were declared with different spellings of the same tree.
+ *
+ * The longest rather than the first, deliberately. Over symlink spellings alone
+ * the two coincide, because two spellings of one directory can only both contain
+ * the same `cwd` if one is a lexical ancestor of the other, the canonical form
+ * can never be a strict lexical descendant of the as-given one (that would need
+ * a symlink pointing inside itself, which `realpath` reports as `ELOOP`), and
+ * `canonicalSpellings` puts the as-given form first. Folding breaks that: NFC is
+ * length-reducing, so the folded image of the as-given spelling is not
+ * necessarily the longer one any more. Taking the maximum makes the ordering
+ * independent of how the spellings happen to be arranged.
+ *
+ * @param {string} cwd absolute, already `path.resolve`d
+ * @param {readonly string[]} dirSpellings folded consistently with `cwd`
+ * @returns {number | null}
+ */
+function matchDepth(cwd, dirSpellings) {
+  /** @type {number | null} */
+  let depth = null
+  for (const dir of dirSpellings) {
+    if (isEqualOrDescendant(cwd, dir) && (depth === null || dir.length > depth)) depth = dir.length
+  }
+  return depth
+}
+
+/**
+ * The nearest-governs winner over `scopes`: the entry whose matched spelling is
+ * the longest, ties broken by the more restrictive class.
+ *
+ * When `widened` is false this compares `cwd` against each entry's declared
+ * spelling alone, unfolded, which is bit-for-bit the rule the matcher applied
+ * before either widening existed. When it is true it compares `cwd` against the
+ * scope's widened set, folding `cwd` through the same verdict that set was built
+ * with, so an entry reaches every spelling the filesystem treats as the same
+ * directory: a symlink always, and a Unicode or case respelling for a scope that
+ * opted into the fold ({@link listScope} does, {@link canonicalScope} does not).
+ *
+ * @param {string} cwd absolute, already `path.resolve`d
+ * @param {readonly ListScope[]} scopes
+ * @param {boolean} widened
+ * @returns {{ entry: LocalOnlyEntry, depth: number } | null}
+ */
+function deepestMatch(cwd, scopes, widened) {
+  // `foldPath(cwd, { caseInsensitive: true })` is `foldPath(cwd)` lowered, so
+  // each variant is computed at most once per call rather than once per entry,
+  // and not at all for a scope set that does not fold.
+  /** @type {string | null} */
+  let nfcCwd = null
+  /** @type {string | null} */
+  let loweredCwd = null
+  /** @type {{ entry: LocalOnlyEntry, depth: number } | null} */
+  let best = null
+  for (const scope of scopes) {
+    let target = cwd
+    let dirs = scope.declaredSpellings
+    if (widened) {
+      dirs = scope.widenedSpellings
+      if (scope.folded) {
+        nfcCwd ??= foldPath(cwd)
+        target = scope.caseInsensitive ? (loweredCwd ??= nfcCwd.toLowerCase()) : nfcCwd
+      }
+    }
+    const depth = matchDepth(target, dirs)
+    if (depth === null) continue
+    if (
+      best === null ||
+      depth > best.depth ||
+      (depth === best.depth && CLASS_RANK[scope.entry.class] > CLASS_RANK[best.entry.class])
+    ) {
+      best = { entry: scope.entry, depth }
+    }
+  }
+  return best
+}
+
+/**
+ * The machine-local entry that governs `cwd`, over precomputed spellings.
+ *
+ * Nearest-governs alone is *not* monotone in the set of spellings an entry can
+ * reach, and that is the one place widening the entry side could have made the
+ * gate **less** restrictive than the plain string matcher it replaced. An
+ * explicit `full` (or merely less restrictive) entry that gains reach through a
+ * widened spelling can become the deepest match and so displace a broader
+ * restrictive entry that already governed: a carve-out declared under one
+ * spelling would punch a hole in a private tree declared under the other, and
+ * the directory would start recording and forwarding. Nothing about "resolve
+ * over a set of spellings" prevents that on its own, because the
+ * argmax-over-depth step in the middle discards verdicts rather than merging
+ * them.
+ *
+ * This is one guard for both widenings, and it has to be, because they compose:
+ * an entry reaches `cwd` through a symlink (LLP 0050 §canonicalization), through
+ * a Unicode or case respelling (§normalization), or through both at once, and
+ * the displacement hazard is identical in each case. So the rule is run twice -
+ * once over the declared spellings alone, unfolded (exactly what the matcher
+ * decided before either widening existed) and once over the widened, folded set
+ * - and the more restrictive of the two answers wins, the declared one breaking
+ * a class tie because it is the spelling the user typed. The resolved class is
+ * therefore `max(pre_widening, widened)` on the restrictiveness lattice by
+ * construction: widening an entry's reach can only ever add restriction, never
+ * remove it, which is the fail-toward-privacy property both sections claim. The
+ * visible cost is that a nested loosening does not cross spellings, which is the
+ * direction LLP 0049 §fail-safe picks.
+ *
+ * Note the exact reach of the guard: it preserves a verdict the **declared**
+ * pass produced, so it blocks a cross-spelling loosening only when the broader
+ * restrictive entry matches `cwd` by its own declared, unfolded spelling. If
+ * that entry reaches `cwd` only through a widening, the declared pass matches
+ * nothing and plain nearest-governs picks between entries that are all in the
+ * widened namespace, so a deeper carve-out wins. That is still never a
+ * demotion: the pre-widening matcher matched neither entry in that shape either.
+ *
+ * @ref LLP 0050#canonicalization [implements]: canonicalization only ever moves the gate toward more restrictive, entry side included
+ * @ref LLP 0050#normalization [implements]: a folded spelling only ever adds restriction, entry side included
+ * @ref LLP 0049#fail-safe [constrained-by]: a widened reach must resolve to "suppress more", never to "starts forwarding"
+ * @param {string} cwd absolute, already `path.resolve`d
+ * @param {readonly ListScope[]} scopes
+ * @param {(cwd: string, declaredClass: UsageClass | null, widenedClass: UsageClass) => void} [onTightened]
+ * @returns {{ entry: LocalOnlyEntry, depth: number } | null}
+ */
+function selectGoverning(cwd, scopes, onTightened) {
+  const asDeclared = deepestMatch(cwd, scopes, false)
+  const widened = deepestMatch(cwd, scopes, true)
+  const declaredRank = asDeclared === null ? CLASS_RANK.full : CLASS_RANK[asDeclared.entry.class]
+  if (widened !== null && CLASS_RANK[widened.entry.class] > declaredRank) {
+    if (onTightened) onTightened(cwd, asDeclared === null ? null : asDeclared.entry.class, widened.entry.class)
+    return widened
+  }
+  return asDeclared ?? widened
+}
+
+/**
+ * Which stored machine-local entry governs `dir`, by the identical rule
+ * `resolve()` applies (spelling-agnostic membership, nearest-governs,
+ * most-restrictive-wins across both the declared and the widened reach, then
+ * across the spellings of `dir` itself), or `null` when none does.
+ *
+ * Exported because a CLI verb that has already been told "the machine-local
+ * store governs this" still has to name *which* entry, for display and for
+ * scoping the residual row count. Re-deriving that choice at the call site is
+ * how `--check` / `policy show` ends up naming an entry the gate did not use
+ * (R8: one shared thing, not a second copy of the selection rule).
+ *
+ * Symlink-widened but **not folded**, unlike the gate: see
+ * {@link canonicalScope} for why the fold stops at the gate.
+ *
+ * Does up to two `realpath` calls per entry plus two for `dir`, so it is for
+ * one-shot CLI use, not a per-row loop.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the governing-entry choice is shared, not re-derived per call site
+ * @ref LLP 0050#canonicalization [implements]: the CLI names the entry the gate actually used
+ * @param {string} dir
+ * @param {readonly LocalOnlyEntry[]} entries
+ * @param {{ realpathSync?: (p: string) => string, component?: string }} [deps]
+ * @returns {LocalOnlyEntry | null}
+ */
+export function governingListEntry(dir, entries, deps = {}) {
+  const scopes = entries.map((entry) => canonicalScope(entry, deps))
+  /** @type {{ entry: LocalOnlyEntry, depth: number } | null} */
+  let best = null
+  for (const spelling of canonicalSpellings(dir, deps)) {
+    const found = selectGoverning(spelling, scopes)
+    if (found === null) continue
+    if (best === null || CLASS_RANK[found.entry.class] > CLASS_RANK[best.entry.class]) best = found
+  }
+  return best === null ? null : best.entry
+}
+
+/**
+ * Canonical-aware {@link isEqualOrDescendant}: true when *any* spelling of
+ * `cwd` equals or descends *any* spelling of `dir`.
+ *
+ * This is the predicate a CLI verb wants when it asks "which stored entry
+ * governs this directory?", because the answer has to agree with what
+ * `resolve()` just decided; a lexical-only answer makes `hyp policy show` name
+ * a governor the gate did not use, and makes `policy unset` refuse to remove an
+ * entry the gate is enforcing. `isEqualOrDescendant` stays lexical and pure for
+ * callers that are comparing two already-canonical strings and must not touch
+ * the filesystem.
+ *
+ * Symlink-widened but **not folded**: see {@link canonicalScope}. This one is
+ * the sharpest case, because `hyp purge --subtree` routes its *deletion*
+ * predicate through here.
+ *
+ * Does up to two `realpath` calls, so callers on a per-row loop should memoize
+ * per distinct path (`src/core/cache/purge.js` does).
+ *
+ * @ref LLP 0069#requirements [implements]: R8, one shared equal-or-descendant test, now spelling-agnostic
+ * @ref LLP 0050#canonicalization [implements]: CLI membership answers agree with the gate's verdict
+ * @ref LLP 0050#normalization [constrained-by]: the fold stops at the gate; a deletion predicate must not widen for free
+ * @param {string} cwd
+ * @param {string} dir
+ * @param {{ realpathSync?: (p: string) => string, component?: string }} [deps]
+ * @returns {boolean}
+ */
+export function scopeGoverns(cwd, dir, deps = {}) {
+  const dirSpellings = canonicalSpellings(dir, deps)
+  return canonicalSpellings(cwd, deps).some((spelling) => matchDepth(spelling, dirSpellings) !== null)
+}
+
+/**
+ * True when two paths denote the same directory, i.e. they share a spelling.
+ * The identity a stored `local-only`/`ignore`/`full` entry is upserted on, so
+ * re-marking a directory through a different spelling updates its class rather
+ * than adding a second governor for the same directory.
+ *
+ * Symlink-widened but **not folded**: see {@link canonicalScope}. Widening this
+ * one merges two stored entries into one, which silently drops a class the user
+ * declared, so it is not free either.
+ *
+ * @ref LLP 0050#canonicalization [implements]: entry identity is the directory, not the string
+ * @ref LLP 0050#normalization [constrained-by]: the fold stops at the gate; merging two declarations is not free
+ * @param {string} a
+ * @param {string} b
+ * @param {{ realpathSync?: (p: string) => string, component?: string }} [deps]
+ * @returns {boolean}
+ */
+export function sameDirectory(a, b, deps = {}) {
+  const bSpellings = canonicalSpellings(b, deps)
+  return canonicalSpellings(a, deps).some((spelling) => bSpellings.includes(spelling))
+}
+
+/**
+ * Merge two verdicts, returning whichever is strictly more restrictive
+ * (`ignore` > `local-only` > `full`); a tie (e.g. both `local-only`) keeps
+ * `preferred`, which is the more specific, already-computed answer.
+ *
+ * Used for both merges the resolver performs: the `.hypignore` walk against the
+ * list-membership result (`preferred` = the dotfile walk), and one spelling's
+ * verdict against the next spelling's (`preferred` = the earlier, as-given
+ * spelling, so a tie reports the governor the user would recognize).
  *
  * @ref LLP 0070#resolver [implements]: most-restrictive-wins merge of the two sources
- * @param {ResolveResult} dotfileResult
- * @param {ResolveResult | null} listResult
+ * @ref LLP 0050#canonicalization [implements]: also the merge across spellings, so the union can only be more restrictive
+ * @param {ResolveResult} preferred
+ * @param {ResolveResult | null} other
  * @returns {ResolveResult}
  */
-function mostRestrictive(dotfileResult, listResult) {
-  if (!listResult) return dotfileResult
-  if (CLASS_RANK[listResult.class] > CLASS_RANK[dotfileResult.class]) return listResult
-  if (CLASS_RANK[listResult.class] < CLASS_RANK[dotfileResult.class]) return dotfileResult
-  // Tie (e.g. both `full`, or both `local-only`): the dotfile walk's result
-  // wins as the more specific, already-computed answer - UNLESS it's the
-  // unrecorded implicit default (`governedBy: null`) tying against a list
-  // entry that actually recorded an explicit answer (LLP 0103's explicit
-  // `full` marker resolves identically to "nothing governs" but must still
-  // name its governor, so the classification hook can tell "asked; syncs"
-  // apart from "never asked").
-  if (dotfileResult.governedBy === null && listResult.governedBy !== null) return listResult
-  return dotfileResult
+function mostRestrictive(preferred, other) {
+  if (!other) return preferred
+  if (CLASS_RANK[other.class] > CLASS_RANK[preferred.class]) return other
+  if (CLASS_RANK[other.class] < CLASS_RANK[preferred.class]) return preferred
+  // Tie (e.g. both `full`, or both `local-only`): `preferred` wins as the more
+  // specific, already-computed answer - UNLESS it's the unrecorded implicit
+  // default (`governedBy: null`) tying against a result that actually recorded
+  // an explicit answer (LLP 0103's explicit `full` marker resolves identically
+  // to "nothing governs" but must still name its governor, so the
+  // classification hook can tell "asked; syncs" apart from "never asked").
+  if (preferred.governedBy === null && other.governedBy !== null) return other
+  return preferred
 }

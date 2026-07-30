@@ -50,7 +50,7 @@ Stress-test domain relationships with specific scenarios that probe edge cases a
 
 When the user states how something works, check whether the code agrees. If the relevant code already carries `@ref` annotations, **follow them** to the cited LLP section and check the plan still satisfies that rationale. Surface contradictions:
 
-> "`src/sinks/driver.js` is annotated `@ref LLP 0014#export-contract [implements]`, which says sinks ack per-batch. Your plan acks per-row — that breaks the referenced contract."
+> "`src/sinks/driver.js` is annotated `@ref LLP 0014#export-contract [implements]`, which says sinks ack per-batch. Your plan acks per-row, which breaks the referenced contract."
 
 ### Capture decisions inline — into the LLP corpus
 

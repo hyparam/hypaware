@@ -53,8 +53,8 @@ import { detachClientFromDisk } from './client_detach_disk.js'
  *
  * @param {CreateAttachHandlerOptions} [opts]
  * @returns {ActionHandler}
- * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements] — createAttachHandler(opts) → ActionHandler { kind:'attach', desired/perform/reverse }, mirroring action_backfill.js
- * @ref LLP 0044 — client attach on join (the instance this realizes)
+ * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements]: createAttachHandler(opts) → ActionHandler { kind:'attach', desired/perform/reverse }, mirroring action_backfill.js
+ * @ref LLP 0044: client attach on join (the instance this realizes)
  */
 export function createAttachHandler(opts = {}) {
   /** @type {ClientDetachFromDisk} */
@@ -78,9 +78,9 @@ export function createAttachHandler(opts = {}) {
      *
      * @param {ActionContext} ctx
      * @returns {DesiredAction[]}
-     * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements] — desired() over clientDescriptors ∩ enabled plugins ∩ attach_policy, guarded on the runtime registry having the client
-     * @ref LLP 0044#consent--join-implies-consent-default-on [constrained-by] — default-on; only `attach.on_join:false` in the locked central plugin entry opts out
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
+     * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements]: desired() over clientDescriptors ∩ enabled plugins ∩ attach_policy, guarded on the runtime registry having the client
+     * @ref LLP 0044#consent--join-implies-consent-default-on [constrained-by]: default-on; only `attach.on_join:false` in the locked central plugin entry opts out
+     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: attach-eligibility requires the `attachProbe` reverse() replays; a probe-less client could attach but never be undone, orphaning its settings on a config-drop (#212)
      */
     desired(ctx) {
       const descriptors = ctx.clientDescriptors
@@ -134,7 +134,7 @@ export function createAttachHandler(opts = {}) {
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements] — perform() calls attach(json:true), parses the one-line JSON, records the marker detail (settings_path, prev_value)
+     * @ref LLP 0045#part-2--the-attach-handler-srccoreconfigaction_attachjs [implements]: perform() calls attach(json:true), parses the one-line JSON, records the marker detail (settings_path, prev_value)
      */
     async perform(action, ctx) {
       const client = attachActionClient(action)
@@ -190,7 +190,7 @@ export function createAttachHandler(opts = {}) {
       // so a rebind to a new ephemeral port is a forward gap (re-attach) rather
       // than a permanent `done` (issue #277 / LLP 0086). settings_path /
       // prev_value / port are best-effort detail from the adapter's payload.
-      // @ref LLP 0086#endpoint-aware-markers [implements] — perform() records the endpoint on the done marker so drift is representable
+      // @ref LLP 0086#endpoint-aware-markers [implements]: perform() records the endpoint on the done marker so drift is representable
       /** @type {JsonObject} */
       const detail = { endpoint }
       if (parsed) {
@@ -252,7 +252,7 @@ export function createAttachHandler(opts = {}) {
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
      * @returns {boolean}
-     * @ref LLP 0086#re-attach-on-drift [implements] — a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
+     * @ref LLP 0086#re-attach-on-drift [implements]: a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
      * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
      * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
      */
@@ -299,7 +299,7 @@ export function createAttachHandler(opts = {}) {
      * @param {ActionContext} ctx
      * @param {ActionMarker} [marker]  The undo record `perform()` wrote.
      * @returns {Promise<ActionOutcome>}
-     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
+     * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: reverse() invokes the single disk-driven core undo (detachClientFromDisk), not ctx.clients; a missing attachProbe is a failed reverse, not a no-op marker drop (#212)
      * @ref LLP 0107#reversal [implements]: org-driven asset copies reverse from the marker; unmarked (manual) ones stay
      */
     async reverse(requestKey, ctx, marker) {

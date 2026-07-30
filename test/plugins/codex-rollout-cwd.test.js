@@ -41,12 +41,54 @@ function fakeRolloutCwd(byThread) {
   return { resolve: (threadId) => byThread[threadId] }
 }
 
-// A realistic subscription-route ROOT session: the container and the root thread
-// id are the same uuid, which is the id the rollout filename embeds. The tests
-// below that state only a `session-id` header therefore exercise the
-// root-thread fallback (LLP 0083); the subagent case, where the two ids diverge,
-// is the #459 block further down.
+// A subscription-route session that states BOTH ids, and states them
+// differently: the container and the thread are distinct uuids, so a lookup
+// keyed on the wrong one resolves nothing rather than accidentally working. The
+// rollout the fallback must find is the THREAD's (LLP 0083), which is why the
+// fake resolvers below are keyed on `SUBSCRIPTION_THREAD_ID`. The case where the
+// two ids coincide (a root thread) is the `ROOT_*` block in the #459 section.
 const SUBSCRIPTION_SESSION_ID = '019e60b5-1111-4222-8333-444455556666'
+const SUBSCRIPTION_THREAD_ID = '019e60b5-9999-4aaa-8bbb-ccccddddeeee'
+
+/**
+ * The body's flat `client_metadata` map as Codex writes it on a turn that states
+ * its identity but no workspace: session and thread present, no cwd anywhere.
+ * That is the shape these tests need, because the rollout fallback only runs
+ * when the request states an id and no in-band cwd.
+ * @ref LLP 0151#body-is-authority [tests]: keyed on the surface Codex really
+ *   fills, not on a `session-id` header Codex never emits.
+ */
+function subscriptionClientMetadata() {
+  return {
+    'x-codex-installation-id': 'install-sub',
+    session_id: SUBSCRIPTION_SESSION_ID,
+    thread_id: SUBSCRIPTION_THREAD_ID,
+  }
+}
+
+/**
+ * A Codex-owned `client_metadata` map stating exactly the lineage a test means
+ * to state, and nothing more. The `x-codex-` key is what makes the map Codex's
+ * own (`readCodexClientMetadata`), so a test can state a container WITHOUT a
+ * thread id and still have the map read: the flat `session_id`/`thread_id` pair
+ * alone is not Codex-exclusive and is only honoured as a pair.
+ *
+ * The #459 cases below all go through here rather than through bare `session-id`
+ * / `thread-id` / `parent-thread-id` headers. Those three names are not ones any
+ * Codex version emits and are no longer read
+ * (@ref LLP 0151 [tests]), so a fixture that states identity through them states
+ * nothing at all, and every assertion about a REFUSED fallback would pass
+ * vacuously for want of an id rather than because the refusal fired.
+ *
+ * @param {Record<string, string>} lineage
+ */
+function codexLineageBody(lineage) {
+  return JSON.stringify({
+    model: 'gpt-5-codex',
+    input: 'secret subagent work',
+    client_metadata: { 'x-codex-installation-id': 'install-sub', ...lineage },
+  })
+}
 
 // ---------------------------------------------------------------------
 // Regression (#257): the ChatGPT-subscription route carries no in-band cwd, so
@@ -58,15 +100,19 @@ const SUBSCRIPTION_SESSION_ID = '019e60b5-1111-4222-8333-444455556666'
 test('subscription-route Codex with no in-band cwd is .hypignore-dropped via the rollout cwd', () => {
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
-    rolloutCwd: fakeRolloutCwd({ [SUBSCRIPTION_SESSION_ID]: '/work/ignored/proj' }),
+    rolloutCwd: fakeRolloutCwd({ [SUBSCRIPTION_THREAD_ID]: '/work/ignored/proj' }),
   })
   const projection = projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    // codex-tui does NOT send x-codex-turn-metadata on the subscription route;
-    // it does carry a session-id header, which the adapter already resolves.
-    request_headers: JSON.stringify({ 'session-id': SUBSCRIPTION_SESSION_ID }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret work' }),
+    // A turn that states its session but no workspace: the flat body
+    // `client_metadata` map carries the session id, nothing carries a cwd.
+    request_headers: JSON.stringify({}),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'secret work',
+      client_metadata: subscriptionClientMetadata(),
+    }),
     response_body: JSON.stringify({ output_text: 'ok' }),
   }), context())
   // The rollout cwd (`/work/ignored/proj`) is covered by `/work/ignored/.hypignore`,
@@ -77,13 +123,17 @@ test('subscription-route Codex with no in-band cwd is .hypignore-dropped via the
 test('subscription-route Codex records the rollout cwd on the row (live/backfill parity)', () => {
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
-    rolloutCwd: fakeRolloutCwd({ [SUBSCRIPTION_SESSION_ID]: '/work/clean/proj' }),
+    rolloutCwd: fakeRolloutCwd({ [SUBSCRIPTION_THREAD_ID]: '/work/clean/proj' }),
   })
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    request_headers: JSON.stringify({ 'session-id': SUBSCRIPTION_SESSION_ID }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hello' }),
+    request_headers: JSON.stringify({}),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'hello',
+      client_metadata: subscriptionClientMetadata(),
+    }),
     response_body: JSON.stringify({ output_text: 'hi' }),
   }), context()))
   assert.ok(projection && projection !== USAGE_POLICY_DROP)
@@ -106,7 +156,6 @@ test('an in-band cwd stays the fast path and short-circuits the rollout lookup',
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
     request_headers: JSON.stringify({
-      'session-id': SUBSCRIPTION_SESSION_ID,
       'x-codex-turn-metadata': JSON.stringify({
         session_id: SUBSCRIPTION_SESSION_ID,
         workspaces: { '/work/in-band': {} },
@@ -173,6 +222,65 @@ test('createRolloutCwdResolver caches per session id (bounded fs on the hot path
 test('createRolloutCwdResolver returns undefined when the sessions root is missing', () => {
   const resolver = createRolloutCwdResolver({ sessionsDir: '/no/such/sessions/root' })
   assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+// ---------------------------------------------------------------------
+// Issue #465: this resolver and `hyp session`'s id resolution read the same
+// `session_meta` line under the same rules, from one shared reader
+// (`src/core/codex/rollout_session_meta.js`). These pin the rules AT THIS
+// CALLER, so a future change cannot satisfy the other one and quietly loosen
+// this one; the reader's own union suite is
+// `test/core/codex-rollout-session-meta.test.js`.
+// ---------------------------------------------------------------------
+
+test('a rollout whose first line is a different envelope type yields no cwd, even carrying one', () => {
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'turn_context', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '/work/not-the-header' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  // Taking it would evaluate `.hypignore` against a directory the session
+  // header never claimed. No cwd is the honest answer.
+  assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+test('a blank session_meta.cwd is no cwd, not a blank path handed to the policy matcher', () => {
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '   ' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
+})
+
+test('a relative session_meta.cwd is no cwd: the matcher would resolve it against the daemon', () => {
+  // Passed on, the matcher's `path.resolve` supplies the DAEMON's process cwd as
+  // the base, so this session's `.hypignore` verdict would be governed by a file
+  // under wherever the daemon was started. Proven here by making the process cwd
+  // the thing the relative path would land in.
+  // @ref LLP 0150#usable-cwd [tests]: refuse rather than guess a base
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '../elsewhere' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  const cwd = resolver.resolve(SUBSCRIPTION_SESSION_ID)
+  assert.equal(cwd, undefined)
+
+  // And the fail-open it falls back to is the documented "no cwd" one (LLP 0083,
+  // LLP 0049 R1 as extended by LLP 0085), not a verdict about another directory:
+  // had the value been passed on, this resolver would have named a governor.
+  const wouldHaveBeen = createUsagePolicyResolver({
+    existsSync: (p) => p === path.resolve('../elsewhere', '.hypignore'),
+    readFileSync: () => 'ignore\n',
+  })
+  assert.equal(wouldHaveBeen.resolve('../elsewhere').class, 'ignore', 'the wrong-directory verdict is real, not hypothetical')
 })
 
 // ---------------------------------------------------------------------
@@ -350,11 +458,11 @@ test('the root thread of the same session still resolves its own cwd', async () 
   const projection = projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    request_headers: JSON.stringify({
-      'session-id': ROOT_SESSION_ID,
-      'thread-id': ROOT_THREAD_ID,
+    request_headers: JSON.stringify({}),
+    request_body: codexLineageBody({
+      session_id: ROOT_SESSION_ID,
+      thread_id: ROOT_THREAD_ID,
     }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'root work' }),
     response_body: JSON.stringify({ output_text: 'ok' }),
   }), context())
   assert.equal(projection, USAGE_POLICY_DROP)
@@ -424,11 +532,11 @@ test('a subagent turn that states lineage but not its own thread id resolves no 
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    request_headers: JSON.stringify({
-      'session-id': ROOT_SESSION_ID,
-      'parent-thread-id': ROOT_THREAD_ID,
+    request_headers: JSON.stringify({}),
+    request_body: codexLineageBody({
+      session_id: ROOT_SESSION_ID,
+      'x-codex-parent-thread-id': ROOT_THREAD_ID,
     }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hi' }),
     response_body: JSON.stringify({ output_text: 'ok' }),
   }), context()))
   assert.ok(projection && projection !== USAGE_POLICY_DROP)
@@ -451,7 +559,6 @@ test('a turn whose metadata states thread_source=subagent but no thread id resol
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
     request_headers: JSON.stringify({
-      'session-id': ROOT_SESSION_ID,
       'x-codex-turn-metadata': JSON.stringify({ session_id: ROOT_SESSION_ID, thread_source: 'subagent' }),
     }),
     request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hi' }),
@@ -483,10 +590,12 @@ for (const header of ['x-codex-parent-thread-id', 'x-openai-subagent']) {
       path: '/backend-api/codex/responses',
       provider: 'chatgpt',
       request_headers: JSON.stringify({
-        'session-id': ROOT_SESSION_ID,
         [header]: header === 'x-openai-subagent' ? 'collab_spawn' : ROOT_THREAD_ID,
       }),
-      request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'hi' }),
+      // The container, and deliberately no thread id: without the refusal this
+      // resolves the ROOT rollout (`/work/ignored/root`) and drops, so the
+      // assertion below fails for the right reason rather than for want of an id.
+      request_body: codexLineageBody({ session_id: ROOT_SESSION_ID }),
       response_body: JSON.stringify({ output_text: 'ok' }),
     }), context()))
     assert.ok(projection && projection !== USAGE_POLICY_DROP)
@@ -529,8 +638,14 @@ test('DOCUMENTED GAP: a turn stating a container and NO lineage at all is taken 
   // that withholds its thread id AND every lineage signal on a subagent turn, and
   // Codex withholds neither together) and deleting the fallback is worse, since
   // it returns every container-only turn, root threads included, to `cwd = NULL`
-  // and fails `.hypignore` open for that traffic class. The durable fix is the
-  // body's `client_metadata.thread_id`, which the adapter does not read yet.
+  // and fails `.hypignore` open for that traffic class.
+  //
+  // The durable fix, the body's `client_metadata.thread_id`, has since landed
+  // (LLP 0151), which is why this fixture has to work to reach the gap at all:
+  // it states a Codex-owned map carrying the container and NO thread id. A turn
+  // that states its thread, which is now every ordinary Codex turn, is answered
+  // by the thread-id key and never gets here. The gap is narrower than it was;
+  // it is asserted because it is not closed.
   const sessionsDir = await writeSubagentPair({
     rootCwd: '/work/clean/root',
     subagentCwd: '/work/ignored/sub',
@@ -542,8 +657,8 @@ test('DOCUMENTED GAP: a turn stating a container and NO lineage at all is taken 
   const projection = /** @type {any} */ (projector.project(exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    request_headers: JSON.stringify({ 'session-id': ROOT_SESSION_ID }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret subagent work' }),
+    request_headers: JSON.stringify({}),
+    request_body: codexLineageBody({ session_id: ROOT_SESSION_ID }),
     response_body: JSON.stringify({ output_text: 'ok' }),
   }), context()))
   assert.ok(projection && projection !== USAGE_POLICY_DROP, 'still recorded: the gap this asserts')
@@ -614,19 +729,20 @@ async function writeSubagentPair(opts) {
 
 /**
  * A subscription-route turn from the SUBAGENT thread of `ROOT_SESSION_ID`. Shaped
- * as codex-tui sends it: no `x-codex-turn-metadata` (so no in-band cwd), just the
- * identity headers, which name the thread and the container separately.
+ * as Codex sends it on a turn kind that carries no turn metadata: no
+ * `x-codex-turn-metadata` (so no in-band cwd), just the body's flat
+ * `client_metadata` map, which names the thread and the container separately.
  */
 function subagentTurn() {
   return exchange({
     path: '/backend-api/codex/responses',
     provider: 'chatgpt',
-    request_headers: JSON.stringify({
-      'session-id': ROOT_SESSION_ID,
-      'thread-id': SUBAGENT_THREAD_ID,
-      'parent-thread-id': ROOT_THREAD_ID,
+    request_headers: JSON.stringify({}),
+    request_body: codexLineageBody({
+      session_id: ROOT_SESSION_ID,
+      thread_id: SUBAGENT_THREAD_ID,
+      'x-codex-parent-thread-id': ROOT_THREAD_ID,
     }),
-    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'secret subagent work' }),
     response_body: JSON.stringify({ output_text: 'ok' }),
   })
 }

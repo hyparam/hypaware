@@ -41,12 +41,13 @@ test('verify: missing plist and clean residue is incomplete but not thrown', asy
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const managedPlistPath = path.join(stateDir, 'managed.plist')
 
-  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath })
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
 
   assert.equal(code, 1)
   assert.match(bufs.stdout.text(), /MISSING/)
   assert.match(bufs.stdout.text(), /dialog residue: clear/)
   assert.match(bufs.stdout.text(), /in-app check/)
+  assert.match(bufs.stdout.text(), /entrypoint 'local-agent'/)
   assert.match(bufs.stdout.text(), /claude-desktop-3p/)
 })
 
@@ -57,7 +58,7 @@ test('verify: up-to-date plist and clean residue is a green exit code', async ()
   const managedPlistPath = path.join(stateDir, 'managed.plist')
   fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
 
-  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath })
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
 
   assert.equal(code, 0, bufs.stdout.text())
   assert.match(bufs.stdout.text(), /present, up to date/)
@@ -69,7 +70,7 @@ test('verify: a present but stale plist is reported STALE and fails', async () =
   const managedPlistPath = path.join(stateDir, 'managed.plist')
   fs.writeFileSync(managedPlistPath, 'stale content')
 
-  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath })
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
 
   assert.equal(code, 1)
   assert.match(bufs.stdout.text(), /STALE/)
@@ -83,7 +84,7 @@ test('verify: leftover dialog residue fails even with a correct plist', async ()
   fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
   fs.mkdirSync(residueDirPath(cmdCtx.env), { recursive: true })
 
-  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath })
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
 
   assert.equal(code, 1)
   assert.match(bufs.stdout.text(), /dialog residue: PRESENT/)
@@ -96,10 +97,22 @@ test('verify: refuses cleanly (no throw) on an ephemeral gateway listen', async 
     hypConfig: { version: 2, plugins: [{ name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:0' } }] },
   })
 
-  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir })
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, platform: 'darwin' })
 
   assert.equal(code, 1)
   assert.match(bufs.stderr.text(), /ephemeral/)
+})
+
+test('verify: refuses on a non-macOS platform instead of reporting MISSING', async () => {
+  // @ref LLP 0139#macos-only [tests]: off-platform the checks would answer for paths that mean nothing, so verify refuses like install
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, platform: 'linux' })
+
+  assert.equal(code, 1)
+  assert.match(bufs.stderr.text(), /unsupported platform 'linux'/)
+  assert.doesNotMatch(bufs.stdout.text(), /MISSING/)
 })
 
 test('checkInstallState is a pure read: never mutates the residue directory or plist', async () => {

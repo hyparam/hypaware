@@ -57,7 +57,7 @@ export function makeRowBuilders({ sourceDataset, projector, projectorVersion }) 
       dst_id: dst,
       src_type: spec.srcType,
       dst_type: spec.dstType,
-      // @ref LLP 0078#decision [implements] — additive edge props; dispatch flags union via mergeRow, ids unaffected
+      // @ref LLP 0078#decision [implements]: additive edge props; dispatch flags union via mergeRow, ids unaffected
       props: spec.props && Object.keys(spec.props).length > 0 ? spec.props : null,
       first_seen: normalizeFirstSeen(spec.firstSeen),
       source_dataset: sourceDataset,

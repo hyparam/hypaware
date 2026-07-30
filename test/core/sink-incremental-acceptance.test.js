@@ -18,8 +18,8 @@
 // rewrites, ≈0 bytes on a no-new-rows tick, ≈N on an N-new tick, and that the
 // per-(sink, partition) watermark composes with the driver's outbox replay.
 //
-// @ref LLP 0040#exactly-once-argument [tests] — proves no skip / no dup across retention + compaction for both sinks
-// @ref LLP 0039 [tests] — acceptance: ≈0 bytes on no-new-rows, ≈N on N-new, exactly-once across prune + compaction
+// @ref LLP 0040#exactly-once-argument [tests]: proves no skip / no dup across retention + compaction for both sinks
+// @ref LLP 0039 [tests]: acceptance: ≈0 bytes on no-new-rows, ≈N on N-new, exactly-once across prune + compaction
 
 import test from 'node:test'
 import assert from 'node:assert/strict'

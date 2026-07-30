@@ -159,6 +159,24 @@ export interface PluginClientManifest {
   agent_dir?: string
   attach_probe?: PluginAttachProbeManifest
   required_upstreams?: string[]
+  /**
+   * Transcript `entrypoint` values whose sessions belong to this client.
+   *
+   * Some clients write their history into another client's transcript
+   * tree: Claude Desktop's sessions land in `~/.claude/projects` beside
+   * Claude Code's, tagged `entrypoint: "claude-desktop"`. Without this
+   * mapping the `@hypaware/claude` backfill imports them as its own,
+   * so Desktop history enters the cache with no Desktop opt-in and is
+   * attributed to the wrong client.
+   *
+   * A client may claim several values: Desktop's transcripts say
+   * `claude-desktop` while its live third-party-inference route stamps
+   * `claude-desktop-3p` (LLP 0133#attribution).
+   *
+   * Declared here rather than in a core table so adding a client gates
+   * and attributes its entrypoints automatically.
+   */
+  transcript_entrypoints?: string[]
 }
 
 export interface PluginAttachProbeManifest {
@@ -253,6 +271,17 @@ export interface PluginPickerCompose {
    * is placed before them, matching the retired switch's plugin order.
    */
   plugin?: PluginConfigInstance
+  /**
+   * Additional plugin instances added alongside `plugin` when this row is
+   * picked, in array order, under the same gateway-relative placement
+   * rule. A row needs this when its adapter cannot activate alone: the
+   * Claude Desktop row composes `@hypaware/claude-account` beside
+   * `@hypaware/claude-desktop` because the latter's manifest requires the
+   * `hypaware.anthropic-credential` capability only the former provides,
+   * and a row that composes half its dependency set writes a config whose
+   * own `configure_command` cannot resolve.
+   */
+  plugins?: PluginConfigInstance[]
   /**
    * True when picking this row implies the local AI gateway
    * (`@hypaware/ai-gateway`). The gateway plugin is included once when
@@ -1609,7 +1638,7 @@ export interface AiGatewayEndpointOptions {
  * through, so there is no per-adapter detach for the one undo to drift
  * from.
  *
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — AiGatewayClientRegistration.detach is retired; the sole undo lives in core
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
  */
 export interface AiGatewayClientRegistration {
   name: string
@@ -2247,6 +2276,34 @@ export interface BackfillPlanContext {
   retentionDays?: number
   log: PluginLogger
   signal?: AbortSignal
+  /**
+   * Transcript `entrypoint` to owning client, resolved by the runner from
+   * every installed plugin's `contributes.client.transcript_entrypoints`
+   * plus the effective plugin list.
+   *
+   * A provider that scans a shared transcript tree consults this before
+   * importing a session: an entrypoint owned by a client whose plugin is
+   * not configured must be skipped, or the import captures content the
+   * user never opted into. An owned-and-configured entrypoint attributes
+   * the rows to that client rather than to the scanning plugin.
+   *
+   * Absent or empty means "no ownership known", and every session imports
+   * under the scanning client. Providers must treat it as optional: the
+   * runner resolves it best-effort and older hosts do not supply it.
+   */
+  entrypointOwners?: Map<string, { client: string, plugin: PluginName, configured: boolean }>
+  /**
+   * Whether a plugin is in the effective config, resolved by the runner
+   * with the same sources as `entrypointOwners`. Container-root admission
+   * (a session found inside another client's private container) uses this
+   * directly, so root ownership never depends on the owning plugin
+   * declaring any `transcript_entrypoints` value.
+   *
+   * Optional like `entrypointOwners`. Absent means container roots fail
+   * CLOSED (the pre-scan behavior read nothing from a foreign container),
+   * while the shared-tree gate keeps its own fail-open rules.
+   */
+  isPluginConfigured?: (plugin: PluginName) => boolean
 }
 
 export interface BackfillRunContext extends BackfillPlanContext {

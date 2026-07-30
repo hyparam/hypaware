@@ -3,22 +3,17 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
+
 // `sessionIdFromPath` predates the thread/container distinction: what it lifts
 // out of a rollout file name is the THREAD id (`session_meta.payload.id`), which
 // is the only id a rollout name carries. Kept as the shared helper so this
 // resolver and the backfill read the same convention out of the same code.
 import { sessionIdFromPath } from './backfill.js'
-import { isPlainObject, parseMaybeJson, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { RolloutCwdResolver, RolloutCwdResolverOptions, RolloutDirent } from './types.js'
  */
-
-// Only the first `session_meta` line is read, so a bounded prefix is enough:
-// Codex writes session_meta as line 1 of the rollout at session start. Reading
-// a prefix (never the whole session) keeps the capture hot path cheap even for
-// a long, large rollout.
-const FIRST_LINE_MAX_BYTES = 64 * 1024
 
 // A negative resolution (no cwd found: the rollout is not yet written on the
 // session's first exchange, or a momentary read error) is trusted only briefly
@@ -94,6 +89,11 @@ export function createRolloutCwdResolver(opts) {
  * line that is not a `session_meta` record all yield `undefined` (fail open on
  * a genuinely absent rollout, matching the nullable `cwd` column).
  *
+ * The header read itself is `readRolloutSessionMeta`, shared with the
+ * `hyp session` id resolver: two privacy controls read this one line, and the
+ * rules for reading it drifted apart twice while each kept its own copy.
+ * @ref LLP 0150 [constrained-by]: one reader for `session_meta`, not one per caller
+ *
  * @param {string} sessionsDir
  * @param {string} threadId
  * @param {(dirPath: string, options: { withFileTypes: true }) => RolloutDirent[]} readdirSync
@@ -103,24 +103,24 @@ export function createRolloutCwdResolver(opts) {
 function readRolloutCwd(sessionsDir, threadId, readdirSync, log) {
   const rolloutPath = findRolloutFile(sessionsDir, threadId, readdirSync)
   if (!rolloutPath) return undefined
-  const firstLine = readFirstLine(rolloutPath)
-  if (!firstLine) return undefined
-  const row = parseMaybeJson(firstLine)
-  if (!isPlainObject(row) || stringValue(row.type) !== 'session_meta') return undefined
-  const payload = isPlainObject(row.payload) ? row.payload : undefined
+  // A line that is not a `session_meta` header, and an unreadable or empty
+  // file, are one answer: this file establishes nothing.
+  const meta = readRolloutSessionMeta(rolloutPath)
+  if (!meta) return undefined
   // Identity guard: the file was located by NAME, and the naming convention is
   // Codex's, not ours. Require the body to agree that this rollout records the
   // thread that was asked for, so a renamed, copied, or convention-changed file
   // yields "cwd unknown" rather than letting some OTHER thread's cwd silently
-  // decide this turn's `.hypignore` outcome and get stamped on its row. The id
-  // is read off the raw JSONL line (not a deserialized `session_meta`), so an
-  // absent `payload.id` reads as absent and refuses instead of matching.
-  // `payload.session_id` is deliberately NOT consulted: the container is not
-  // what selects a rollout, and a rollout too old to carry one still records a
-  // perfectly good cwd for its thread.
+  // decide this turn's `.hypignore` outcome and get stamped on its row. The
+  // shared reader takes the id off the RAW JSONL line rather than through
+  // Codex's `Deserialize` (LLP 0150 rule 1), which is what makes an absent
+  // `payload.id` read as absent here and refuse instead of matching.
+  // `meta.sessionId` (`payload.session_id`) is deliberately NOT consulted: the
+  // container is not what selects a rollout, and a rollout too old to carry one
+  // still records a perfectly good cwd for its thread.
   // @ref LLP 0083#decision [implements]: a filename/body disagreement is a
   // refusal, not a guess
-  const rolloutThreadId = stringValue(payload?.id)
+  const rolloutThreadId = meta.threadId
   if (rolloutThreadId !== threadId) {
     // The two refusals have different diagnoses, so they get different
     // `error_kind`s: `thread_id_absent` is the one rollout shape the backfill
@@ -139,7 +139,11 @@ function readRolloutCwd(sessionsDir, threadId, readdirSync, log) {
     })
     return undefined
   }
-  return stringValue(payload?.cwd)
+  // `meta.cwd` is already predicated: core's `sessionMetaCwd` refuses a blank or
+  // relative `session_meta.cwd`, so a value that arrives here is an absolute
+  // path the policy matcher can resolve without supplying a base of its own.
+  // @ref LLP 0150#usable-cwd [constrained-by]
+  return meta.cwd
 }
 
 /**
@@ -209,30 +213,4 @@ function defaultReaddir(dirPath, options) {
 /** @param {string} name */
 function isRolloutFileName(name) {
   return name.startsWith('rollout-') && (name.endsWith('.jsonl') || name.endsWith('.json'))
-}
-
-/**
- * Read a bounded prefix of a file and return its first line (without the
- * trailing newline). Returns `undefined` on any read error.
- *
- * @param {string} filePath
- * @returns {string | undefined}
- */
-function readFirstLine(filePath) {
-  let fd
-  try {
-    fd = fs.openSync(filePath, 'r')
-    const buffer = Buffer.alloc(FIRST_LINE_MAX_BYTES)
-    const bytesRead = fs.readSync(fd, buffer, 0, FIRST_LINE_MAX_BYTES, 0)
-    if (bytesRead === 0) return undefined
-    const text = buffer.toString('utf8', 0, bytesRead)
-    const newline = text.indexOf('\n')
-    return newline === -1 ? text : text.slice(0, newline)
-  } catch {
-    return undefined
-  } finally {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd) } catch { /* already closed */ }
-    }
-  }
 }

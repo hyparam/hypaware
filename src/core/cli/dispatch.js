@@ -17,11 +17,13 @@ import {
   ROOT_CONTEXT,
   SpanStatusCode,
 } from '../observability/index.js'
+import { resolveDependencies } from '../dep_graph.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createKernelRuntime } from '../runtime/activation.js'
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
+import { activatePlugins } from '../runtime/loader.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
@@ -29,9 +31,10 @@ import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synt
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, CommandRunContext, HypAwareV2Config, PluginName } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, CommandRunContext, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
+ * @import { LoadedManifest } from '../../../src/core/types.js'
  */
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help'])
@@ -247,19 +250,19 @@ export async function dispatch(argv, opts = {}) {
     // command is *unavailable*, not unknown: report which plugin provides it
     // and how to enable it, instead of implying the feature does not exist. A
     // genuine typo matches nothing here and still gets the generic message.
-    // @ref LLP 0098#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
+    // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
     const inactive = await findInactivePluginForCommand(helpDiscovery, argv[0])
     if (inactive) {
       stderr.write(
         `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
       )
       // The repair depends on *why* the plugin is inactive. Absent from
-      // plugins[] → add it (LLP 0098, byte-identical). Present but
+      // plugins[] → add it (LLP 0153, byte-identical). Present but
       // `enabled: false` → the entry exists, so tell the user to flip it, and
       // when the fleet (central) layer is what disabled it, say it cannot be
       // enabled locally at all rather than send them editing a local entry the
       // additive merge would drop (collides_with_central).
-      // @ref LLP 0099#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
+      // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
       if (inactive.state === 'disabled-central') {
         stderr.write(
           `  repair: ${inactive.plugin} is disabled by the fleet (central) config and cannot be enabled locally; ask your fleet admin to enable it\n`
@@ -313,8 +316,18 @@ export async function dispatch(argv, opts = {}) {
     // exit code), never the mutable command registry itself.
     // @ref LLP 0130#configure-command [implements]: the wizard's configure phase runs a picker row's configure_command in-process through this seam
     commands: {
-      run: (name, cmdArgv) =>
-        runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel }),
+      run: async (name, cmdArgv) => {
+        await activateSeamCommandPlugins({
+          name,
+          registry,
+          kernel,
+          discovery: helpDiscovery,
+          stateRoot: obsEnv.stateDir,
+          runId: devRunId ?? `cli-${process.pid}`,
+          activePlugins,
+        })
+        return runCommandByName(name, cmdArgv, { stdout, stderr, stdin, env, cwd, registry, kernel })
+      },
     },
     verbs: kernel.verbs,
     storage: kernel.storage,
@@ -642,7 +655,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)
   // Plugin-contributed commands are omitted when their plugin is inactive, so
   // this list is install-specific. Say so, and point at the miss path.
-  // @ref LLP 0098#unavailable-not-unknown: the epilogue can promise a named plugin and a repair line only because a miss on an inactive plugin's command reports "unavailable", not "unknown"
+  // @ref LLP 0153#unavailable-not-unknown: the epilogue can promise a named plugin and a repair line only because a miss on an inactive plugin's command reports "unavailable", not "unknown"
   stdout.write('This list reflects the plugins active in your config. If a command you\n')
   stdout.write('expect is missing, run it anyway: hyp names the plugin that provides it\n')
   stdout.write('and prints how to enable it.\n')
@@ -743,6 +756,141 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
 }
 
 /**
+ * Make `name` dispatchable through the in-process `ctx.commands.run` seam
+ * when its plugin was enabled by a config written AFTER this process booted.
+ *
+ * The activation set is fixed at boot, but the wizard writes its composed
+ * config mid-process: `hyp init` boots `all-available`, which by
+ * construction never activates a `V1_EXCLUDED_FROM_DEFAULT` plugin, so a
+ * picked row whose `configure_command` lives in one (Claude Desktop) missed
+ * dispatch and drop-on-failure ate the consent prompt the command exists to
+ * show. Same staleness class as the entrypoint gate's fix: only a fresh
+ * read of the config reflects a write that happened after boot.
+ *
+ * On a registry miss for `name`, re-read the effective config from disk and,
+ * when a `config`-profile boot of that fresh read would select the plugin
+ * declaring `name`'s head token, activate it into the running kernel along
+ * with its config-selected dependency closure, in dependency order. The
+ * exclusion list still governs defaults: nothing activates that the
+ * effective config does not name. Best-effort by design - on any failure the
+ * normal dispatch miss path still reports unavailable-plus-repair.
+ *
+ * @ref LLP 0139#seam-fresh-activation [implements]: the seam activates a freshly config-enabled command plugin (and its config-selected dependency closure) so the wizard's configure phase can reach the consent prompt
+ * @param {{
+ *   name: string,
+ *   registry: ReturnType<typeof createCommandRegistry>,
+ *   kernel: ReturnType<typeof createKernelRuntime>,
+ *   discovery: { workspaceDir?: string, stateRoot: string, configPath: string },
+ *   stateRoot: string,
+ *   runId: string,
+ *   activePlugins: ActivePlugin[],
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function activateSeamCommandPlugins({ name, registry, kernel, discovery, stateRoot, runId, activePlugins }) {
+  try {
+    if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
+    if (registry.match([name])) return
+    const head = name.split(' ')[0]
+
+    const selection = await computeBootSelection(discovery)
+    // A shadow collision makes real boot throw; there is no coherent
+    // plugin set to activate from, so leave the miss path to report.
+    if (selection.shadowing.length > 0) return
+    const activeNames = new Set(activePlugins.map((p) => p.name))
+    const inactive = selection.selectedManifests.filter(
+      (m) => !activeNames.has(/** @type {PluginName} */ (m.manifest.name))
+    )
+    const owner = inactive.find((entry) =>
+      (entry.manifest.contributes?.commands ?? []).some(
+        (cmd) => cmd && typeof cmd.name === 'string' && cmd.name.split(' ')[0] === head
+      )
+    )
+    if (!owner) return
+
+    // Dependency closure of the owner among the config-selected inactive
+    // plugins: requires.plugins by name, requires.capabilities through the
+    // manifest-declared provider. Providers that are already active need no
+    // activation (their capabilities are in the runtime registry).
+    const byName = new Map(inactive.map((m) => [m.manifest.name, m]))
+    /** @type {Map<string, string>} */
+    const providerByCap = new Map()
+    // First declaration wins, with active manifests listed first: three
+    // bundled capabilities have two providers, and preferring an already-
+    // active one keeps the closure from activating a second provider whose
+    // only qualification is iterating later.
+    for (const m of [...activePlugins.map((p) => p.manifest), ...inactive.map((e) => e.manifest)]) {
+      for (const cap of Object.keys(m.provides?.capabilities ?? {})) {
+        if (!providerByCap.has(cap)) providerByCap.set(cap, m.name)
+      }
+    }
+    /** @type {Set<string>} */
+    const closure = new Set()
+    const queue = [owner.manifest.name]
+    while (queue.length > 0) {
+      const current = /** @type {string} */ (queue.shift())
+      if (closure.has(current) || activeNames.has(current)) continue
+      const entry = byName.get(current)
+      if (!entry) continue
+      closure.add(current)
+      for (const dep of Object.keys(entry.manifest.requires?.plugins ?? {})) queue.push(dep)
+      for (const cap of Object.keys(entry.manifest.requires?.capabilities ?? {})) {
+        const provider = providerByCap.get(cap)
+        if (provider) queue.push(provider)
+      }
+    }
+
+    // Order the closure the same way boot would: dependency resolution over
+    // the union of active and closure manifests, so capabilities provided by
+    // already-active plugins count as satisfied. A closure plugin the
+    // resolution eliminates stays inactive; the miss path reports it.
+    const resolution = await resolveDependencies([
+      ...activePlugins.map((p) => p.manifest),
+      ...[...closure].map((n) => /** @type {LoadedManifest} */ (byName.get(n)).manifest),
+    ])
+    const orderIndex = new Map(resolution.order.map((n, i) => [n, i]))
+    if (!orderIndex.has(owner.manifest.name)) return
+    const configByName = new Map(
+      (selection.layered.effective?.plugins ?? []).map((p) => [p.name, p.config ?? {}])
+    )
+    const entries = [...closure]
+      .filter((n) => orderIndex.has(n))
+      .sort((a, b) => /** @type {number} */ (orderIndex.get(a)) - /** @type {number} */ (orderIndex.get(b)))
+      .map((n) => /** @type {LoadedManifest} */ (byName.get(n)))
+      .map((entry) => ({
+        manifest: entry.manifest,
+        rootDir: entry.rootDir,
+        config: /** @type {JsonObject} */ (configByName.get(entry.manifest.name) ?? {}),
+      }))
+    if (entries.length === 0) return
+
+    const result = await activatePlugins({ plugins: entries, stateRoot, runId, runtime: kernel })
+    for (const r of result.results) {
+      if (r.ok) activePlugins.push(r.plugin)
+    }
+    getLogger('cmd-dispatch').info('dispatch.seam_activate', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      owner_plugin: owner.manifest.name,
+      plugins_activated: result.results.filter((r) => r.ok).length,
+      plugins_failed: result.results.filter((r) => !r.ok).length,
+    })
+  } catch (err) {
+    // Best-effort: the dispatch miss path reports unavailable + repair. But
+    // say the attempt happened: without this line a throwing activation
+    // leaves the user at "unknown command" with no record that the seam ran.
+    getLogger('cmd-dispatch').warn('dispatch.seam_activate_failed', {
+      [Attr.COMPONENT]: 'cmd-dispatch',
+      [Attr.OPERATION]: 'dispatch.seam_activate',
+      command_name: name,
+      [Attr.ERROR_KIND]: 'seam_activation_failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
  * On a top-level dispatch miss, resolve whether `token` exactly names the
  * leading command word declared by a plugin that is bundled or installed but
  * NOT active in the effective config. Returns the owning plugin so the caller
@@ -793,7 +941,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * Classify *why* an in-pool plugin is inactive, so the dispatch-miss repair
  * line can advise the right fix. A plugin lands in the pool-but-not-selected
  * set for two config reasons: it is simply absent from the effective
- * `plugins[]` (LLP 0098's case - add it), or it is present with
+ * `plugins[]` (LLP 0153's case - add it), or it is present with
  * `enabled: false` (the entry exists - flip it). For the disabled case the
  * layer matters: the additive merge model (@ref LLP 0031#merge-model
  * [constrained-by]) drops a local `plugins[]` entry whose name the central
@@ -801,7 +949,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * the local file - the effective disabled entry belongs to central iff central
  * declares that name.
  *
- * @ref LLP 0099#decision [implements]: absent vs disabled, and local vs central for the disabled case
+ * @ref LLP 0154#decision [implements]: absent vs disabled, and local vs central for the disabled case
  * @param {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>>} layered
  * @param {PluginName} name
  * @returns {'absent' | 'disabled-local' | 'disabled-central'}

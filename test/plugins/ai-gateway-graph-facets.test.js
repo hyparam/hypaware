@@ -207,7 +207,7 @@ test('skillFromMarker fails closed on an un-gateable basename', () => {
   assert.equal(skillFromMarker(`Base directory for this skill: /x/skills/${'a'.repeat(80)}`), null, 'over-long name fails SKILL_NAME_RE')
 })
 
-// @ref LLP 0073#boundedness-contract [tests]: MAJOR 1 regression — a base
+// @ref LLP 0073#boundedness-contract [tests]: MAJOR 1 regression, a base
 // directory containing a space must not truncate the capture at the space
 // (which previously mis-keyed on a path segment instead of the trailing
 // skill-directory basename).
@@ -314,7 +314,7 @@ test('skillFromCodexRead fails closed on an un-gateable captured name and non-st
 // segment between `skills/` and `/SKILL.md`, so a nested/system Codex skill
 // dir layout mints nothing. We have no evidence such layouts exist in this
 // fleet, and fail-closed (miss) is safer than widening into false-positives,
-// so this is an accepted exclusion — @ref LLP 0075#decision: only
+// so this is an accepted exclusion. @ref LLP 0075#decision: only
 // single-segment `~/.codex/skills/<name>/SKILL.md` is in scope for surface 4.
 test('skillFromCodexRead fails closed on nested/system skill directory layouts (accepted exclusion, not widened)', () => {
   assert.equal(

@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0066, LLP 0067, LLP 0150, LLP 0151
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -28,10 +28,15 @@ failing **open**.
 That was a latent assumption. The **API-key** route (Responses API) happens to
 carry `cwd` in-band in `metadata`, so no enrichment was ever built. The
 **ChatGPT-subscription** route (`provider='chatgpt'`, `/backend-api/codex/*`)
-has no such field, and `codex-tui` does not send the `x-codex-turn-metadata`
-header on it (that is Codex Desktop behavior). So "cwd is always available at
-projection time" was really "cwd is available when the client volunteers it",
-and for an entire first-class traffic class, it never did:
+has no such field, and a turn whose request kind carries no turn metadata sends
+no `x-codex-turn-metadata` and therefore no `workspaces`. (This paragraph
+previously said `codex-tui` never sends that header and that it is Codex Desktop
+behavior. That is false: Codex's `compatibility_headers` emits it for every turn
+regardless of client. See
+[LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#context).)
+So "cwd is always available at projection time" was really "cwd is available when
+the client volunteers it" - and for an entire first-class traffic class, it
+often did not:
 
 - `.hypignore` was a silent **no-op** for subscription-mode Codex, the same gap
   class as raw-proxy/OTEL ([LLP 0049 §non-goals](./0049-hypignore-usage-policy.spec.md#non-goals)),
@@ -60,6 +65,26 @@ has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
+- **An unusable in-band `cwd` is a miss, not a path.** A relative or blank
+  in-band value is refused before the gate sees it: the matcher would resolve it
+  against the **daemon's** own process cwd and return a confident verdict for an
+  unrelated directory (#471). The rollout fallback then still gets its turn, and
+  when nothing usable is found the row records `cwd = NULL` exactly as before, so
+  refusing does not make this path fail closed. The rollout-stated `cwd` is held
+  to the same two checks, by a different owner: core's `sessionMetaCwd` refuses a
+  blank or relative `session_meta.cwd`
+  ([LLP 0150 §usable-cwd](./0150-one-reader-for-codex-session-meta.decision.md#usable-cwd)),
+  and `rollout-cwd.js` reads through it, so a refused in-band value falls through
+  to an already-predicated source. That predicate is **not** borrowed for the
+  in-band value, and this bullet is not a consequence of LLP 0150: 0150 scopes the
+  in-band path out of its own mandate, because in-band is a separate source with
+  its own trust story whose value is also stamped on the row for workspace/git
+  enrichment. So the two checks are restated locally, in `usableInBandCwd`. One
+  limit of the rule, stated rather than implied: on the Codex route the value the
+  predicate sees is usually not the request's `cwd` but the workspace key
+  `selectCodexWorkspace` selected for it, which substitutes the first workspace
+  when none matches, so an absolute-but-unrelated directory can still reach the
+  gate (#476).
 - **Keyed on the codex thread id, and the rollout must confirm it.** A rollout is
   one **thread's** file: its name embeds `session_meta.payload.id` (the thread),
   matched via the `sessionIdFromPath` helper shared with the backfill (a helper
@@ -67,18 +92,25 @@ has the symmetric fallback.
   container `payload.session_id`, which is the row's partition key and the session
   opt-out's key ([LLP 0030](./0030-session-id-partition-key.decision.md#decision)),
   so the container is not what selects a rollout. The live path resolves the
-  thread from the turn metadata's `thread_id` or the `thread-id` header. Only a
-  real Codex thread has a rollout, so non-codex traffic never scans. The name is a
+  thread from the body's `client_metadata.thread_id`, else the turn-metadata blob
+  ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);
+  it was never a `thread-id` header, a name Codex does not emit). Only a real
+  Codex thread has a rollout, so non-codex traffic never scans. The name is a
   cheap prefilter, not the answer: the located file's `payload.id` is re-checked
-  against the id asked for, read off the **raw** JSONL line so an absent field
-  reads as absent, and a disagreement is a **refusal** (cwd unknown) rather than
-  another thread's cwd deciding this turn. `payload.session_id` is deliberately
-  not consulted here: a rollout too old to carry a container still records a
-  perfectly good cwd for its thread.
+  against the id asked for, and a disagreement is a **refusal** (cwd unknown)
+  rather than another thread's cwd deciding this turn. The re-check reads through
+  core's one `session_meta` reader, which takes the id off the **raw** JSONL line
+  rather than through Codex's own `Deserialize`
+  ([LLP 0150](./0150-one-reader-for-codex-session-meta.decision.md)), so an absent
+  `payload.id` reads as absent and refuses instead of being back-filled from the
+  container and matching. `payload.session_id` is deliberately not consulted here:
+  a rollout too old to carry a container still records a perfectly good cwd for
+  its thread.
 - **When no thread is stated, the container is usable only for a root thread.**
-  The common subscription-route request carries a `session-id` header and nothing
-  else, and for a root thread that value *is* the thread id, so the fallback still
-  works. It is abandoned the moment the turn announces subagent lineage
+  A turn can still state a container and no thread of its own (see the
+  reachability note in the next bullet), and for a root thread the container's
+  value *is* the thread id, so the fallback still works there. It is abandoned the
+  moment the turn announces subagent lineage
   (`thread_source = subagent`, or a `parent_thread_id`) without naming its own
   thread: that turn's rollout is not identifiable from the wire, and an unknown
   cwd (fails open per [LLP 0049](./0049-hypignore-usage-policy.spec.md), row
@@ -95,13 +127,25 @@ has the symmetric fallback.
   (`CodexResponsesMetadata::compatibility_headers`):
   `x-codex-parent-thread-id`, and `x-openai-subagent` (`review`, `compact`,
   `collab_spawn`, `memory_consolidation`). Both are therefore consulted, which is
-  what makes the refusal reachable at all. The same source shows the two flat
-  identity keys, `session_id` and `thread_id`, are also always present in the
-  request **body** under `client_metadata`, which the adapter does not read
-  today: reading them would replace this fallback with the turn's own thread id
-  outright, and is the better long-term answer. It is not taken here because it
-  would newly populate `thread_id`, hence `conversation_id`, on rows that record
-  null for it today, which is a recorded-shape change needing its own decision.
+  what makes the refusal reachable at all.
+
+  **Narrowed by LLP 0151, not retired by it.** When this bullet was first written
+  the adapter did not read the request body, and the note here recorded the body's
+  flat `client_metadata` map (which carries `session_id` and `thread_id` on
+  *every* request) as the better long-term answer, declined only because it would
+  newly populate `thread_id` and hence `conversation_id` on rows. That read has
+  since landed on its own terms
+  ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority)),
+  which settles the recorded-shape question there rather than here. The
+  consequence for this document: a turn now reaches the container fallback at all
+  only when it carries **neither** a Codex-owned `client_metadata` map **nor** a
+  turn-metadata blob, because either one states the thread id and the thread-id
+  key answers first. The refusal below is therefore much harder to reach than it
+  was, but it is not dead, and nothing about the trade it encodes changed. The
+  guard is deliberately value-blind (any `x-openai-subagent` value refuses, not
+  only the ones that name a different workspace); whether that is the right grain
+  is an open question on the PR that introduced it, recorded there rather than
+  settled here.
 - **What remains after that is bounded, and removing the fallback is worse.** A
   turn stating a container, no thread id, and no lineage of any kind is taken as
   the root thread it claims to be. That can only mis-resolve for a client that
@@ -119,14 +163,15 @@ has the symmetric fallback.
   open rather than taken.
 - **A note on the header names, which are not all Codex's.** `codex-rs` defines
   `x-codex-turn-metadata`, `x-codex-window-id`, `x-codex-parent-thread-id` and
-  `x-openai-subagent`; the bare `thread-id`, `session-id` and `parent-thread-id`
-  the adapter also reads appear nowhere in it. Those reads are older than this
-  document and are kept (they cost nothing and some traffic shape motivated them),
-  but nothing should be *guarded* by them alone. The same reading says the premise
-  in Context below, that `codex-tui` does not send `x-codex-turn-metadata`, is at
-  best version-specific: the header is emitted from core for every ordinary turn
-  (`request_kind = Turn`), not from Desktop specifically. Confirming the live
-  header set against a real client is the open acceptance check, and it is
+  `x-openai-subagent`, and nothing else. The bare `thread-id`, `session-id` and
+  `parent-thread-id` this document once relied on appear nowhere in it; the
+  audit and the removal of those reads belong to
+  [LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md), and the
+  rule they leave behind is the one this bullet always wanted: nothing may be
+  *guarded* by a header name Codex does not emit. The same reading corrected the
+  premise in Context above, that `codex-tui` does not send
+  `x-codex-turn-metadata`. Confirming the live header set against a real client
+  remains the open acceptance check, and it is
   [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)'s point
   that no hermetic smoke can supply it.
 - **First line only, cached per thread id.** The rollout is written at session
@@ -137,6 +182,45 @@ has the symmetric fallback.
 - **One resolved `cwd`, used twice.** The same value feeds the `.hypignore` drop
   and the row's stamped `cwd`, so live rows now carry the cwd the backfill reads
   and the two halves of the policy agree (closes the live/backfill inconsistency).
+- **A substituted workspace key never decides the verdict** (amended, #476). The
+  Codex projector picks a `workspaces` turn-metadata key for enrichment, falling
+  back to the *first* key when none matches the request's `cwd`. That substituted
+  key is a guess about a directory the session may never have run in, so it does
+  not supply the one resolved `cwd`: an explicit in-band `cwd` outranks it for
+  both the gate and the stamp, and the refusal is reported as
+  `plugin.codex.usage_policy_workspace_cwd_refused`
+  (`error_kind: workspace_cwd_mismatch`, paths hashed). The key keeps its
+  enrichment role (`attributes.codex.workspace`, `git_remote`, `git_commit`,
+  `has_changes`) and still supplies the `cwd` on the subscription route, where
+  the request states none and the key is the only in-band source there is.
+  Consequence: for a session running in a *subdirectory* of its workspace the
+  row now stamps the subdirectory rather than the workspace root, which is the
+  directory the policy is actually scoped to.
+  Three limits, stated rather than implied, and each one filed so it does not
+  live only here. The key still outranks the **rollout** fallback (it resolves
+  before the `??`), so a subscription-route session that declares a `workspaces`
+  map never consults `session_meta.cwd` and a first-key guess can still decide
+  its verdict (#480). That one is pre-existing, verified byte-identical before
+  and after this amendment; ranking the guess below the rollout is a separate
+  call, not taken in the lines PRs #467/#474 rewrite. Because the key keeps
+  enriching, a row recorded where it used to drop (clean in-band `cwd`, ignored
+  declared workspace) carries that workspace's identity even though the
+  directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
+  ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), not by enrichment
+  source (#481). And the gate does not canonicalize paths, so *which spelling*
+  reaches it decides the verdict: a symlinked spelling of an ignored directory
+  escapes its `.hypignore`, because the ancestor walk climbs the symlink's own
+  parents and never meets the governing file. That is a property of the shared
+  matcher rather than of this amendment (#479, and it is also why `pathsEqual`
+  misses symlinked spellings here). What this amendment changes is which of two
+  symmetric spellings trips it, by taking the client's honest `cwd` over the
+  key's: it closes the case where the *key* held the non-canonical spelling and
+  opens the case where the *request* does. The widest case is untouched, a
+  declared symlinked key on a subscription-route request that states no `cwd` at
+  all, which leaks the same before and after. Canonicalizing belongs in the
+  shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)),
+  where it must also canonicalize the `local-only` list entries or it un-governs
+  an entry a user marked by its symlink spelling.
 
 ## Why not the alternatives
 
@@ -203,11 +287,16 @@ confirmed as unresolvable.
   `thread_id_absent` (the divergence recorded below, which the backfill still
   accepts).
 - `codex/src/rollout-cwd.js` and `ai-gateway/src/session_command.js`'s
-  `readRolloutMeta` remain **two readers of the same first line** with different
+  `readRolloutMeta` were **two readers of the same first line** with different
   needs (a hot-path cwd lookup per thread versus a one-shot CLI scan that must
-  report the container). They now agree on the discipline (raw line, `session_meta`
-  type guard, absent means refuse). Folding them into one shared reader is a
-  worthwhile follow-up, not a requirement of this correction.
+  report the container), agreeing on the discipline (raw line, `session_meta`
+  type guard, absent means refuse) but each keeping its own copy of it. That fold
+  has since happened and is no longer this document's follow-up: both now read
+  through core's single `readRolloutSessionMeta`
+  ([LLP 0150](./0150-one-reader-for-codex-session-meta.decision.md)), so the
+  discipline is enforced in one place rather than agreed in two. What stays local
+  to this resolver is the part that is not a read: the thread-identity guard
+  below, which compares the reader's answer against the id the lookup asked for.
 - **One narrow live/backfill divergence the identity guard introduces.** A
   `session_meta` payload carrying a `cwd` but **no** `id` is tolerated by the
   backfill (`buildSession` falls back to the id on the filename) and now refused

@@ -25,8 +25,8 @@ confirmation hook mechanism, the marker filename), that choice is called out.
 
 Coverage anchors (these resolve the two uncovered decisions):
 
-`@ref LLP 0036 — central-config-driven client action seam`
-`@ref LLP 0037 — backfill-on-join instance`
+`@ref LLP 0036: central-config-driven client action seam`
+`@ref LLP 0037: backfill-on-join instance`
 
 ## What the code already gives us
 

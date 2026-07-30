@@ -41,9 +41,9 @@ import { dispatch } from '../../../src/core/cli/dispatch.js'
  * `runDaemon` whenever `handle.done` resolves with the restart exit code.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [tests] — the daemon threads clientDescriptors/clients/endpoint onto the reconcile context; a confirm-edge pass reaches the attach handler
- * @ref LLP 0045#part-5--reverse-triggers-config-drop-not-hyp-leave [tests] — a central config drop reverses the attach post-restart via the disk-driven undo
- * @ref LLP 0044#consent--join-implies-consent-default-on [tests] — a joined host confirming a config that names @hypaware/claude auto-attaches (default-on)
+ * @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [tests]: the daemon threads clientDescriptors/clients/endpoint onto the reconcile context; a confirm-edge pass reaches the attach handler
+ * @ref LLP 0045#part-5--reverse-triggers-config-drop-not-hyp-leave [tests]: a central config drop reverses the attach post-restart via the disk-driven undo
+ * @ref LLP 0044#consent--join-implies-consent-default-on [tests]: a joined host confirming a config that names @hypaware/claude auto-attaches (default-on)
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

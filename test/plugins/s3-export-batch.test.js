@@ -297,7 +297,7 @@ test('exportBatch all-success: no retryPartitions field', async (t) => {
 })
 
 test('exportBatch skips a partition with no new rows: no PUT, no blob', async (t) => {
-  // @ref LLP 0040 §5 acceptance 1 — empty new-row set writes ≈0 bytes.
+  // @ref LLP 0040 §5 acceptance 1: empty new-row set writes ≈0 bytes.
   const stateDir = await tmpStateDir()
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
   // Registered table, but readRowsSince yields nothing.
@@ -319,7 +319,7 @@ test('exportBatch skips a partition with no new rows: no PUT, no blob', async (t
 })
 
 test('exportBatch embeds the [sinceSeq,lastSeq] range in the object key and advances the watermark', async (t) => {
-  // @ref LLP 0040 §4 — [sinceSeq,lastSeq] filename + watermark advance.
+  // @ref LLP 0040 §4: [sinceSeq,lastSeq] filename + watermark advance.
   const stateDir = await tmpStateDir()
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
   const tablePath = `${CACHE_ROOT}/datasets/p1/source=x`
@@ -371,7 +371,7 @@ test('exportBatch embeds the [sinceSeq,lastSeq] range in the object key and adva
 })
 
 test('exportBatch re-PUTs the same object key when the watermark is lost (idempotent crash retry)', async (t) => {
-  // @ref LLP 0040 §5 acceptance 4 — a crash before the watermark write re-PUTs
+  // @ref LLP 0040 §5 acceptance 4: a crash before the watermark write re-PUTs
   // the same key (same since ⇒ same rows ⇒ same [sinceSeq,lastSeq] filename).
   const stateDir = await tmpStateDir()
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }))
