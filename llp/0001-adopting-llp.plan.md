@@ -60,8 +60,12 @@ Note: the `grill-with-docs` / `improve-codebase-architecture` skills assume a
 - **`@ref` syntax:** `// @ref LLP NNNN#anchor: gloss` (≤80-char gloss).
   Relation types (`[implements]`, `[constrained-by]`, `[tests]`, `[explains]`)
   used where they sharpen agent retrieval, not mechanically. A colon opens the
-  gloss: no other separator, and no em dash anywhere in the annotation (house
-  style, `CLAUDE.md`).
+  gloss, and no em dash appears anywhere in the annotation (house style,
+  `CLAUDE.md`). Only the em dash is gated today. The colon is convention the
+  checker does not yet enforce, so 27 older annotations still open a gloss with a
+  plain hyphen; widening the gate means sweeping those first, and one of them sits
+  in the slice a held pull request already owns, so it is deliberately a later
+  pass and not a silent exemption.
 - **Illustrative annotations are marked, not repointed** {#illustrative-refs}:
   documentation about the syntax has to spell out targets that do not exist
   (`ref-check`/`ref-story` cite `LLP 0042#token-strategy`, `docs/vendor/spec.md`).
@@ -69,12 +73,16 @@ Note: the `grill-with-docs` / `improve-codebase-architecture` skills assume a
   `ref-check:ignore-end` region around the example, suppresses extraction, so
   those examples stay correct as prose without keeping the checker permanently
   non-zero. Both citation forms are covered because the marker is keyed on the
-  line, not on the target. A marker only counts written as a comment and outside
-  an inline code span, so naming it in prose (as this bullet does) does not
-  activate it. Keep the regions tight: a suppressed annotation is checked
-  nowhere, which is why the gate rejects an unclosed region and rejects a marker
-  in any file outside the enumerated syntax documentation, making every new
-  suppression a visible edit rather than one quiet line.
+  line, not on the target. A marker only counts as a comment in the language of
+  the file it sits in and outside any code sample (inline span, fenced block, or
+  four-space indent), so naming it in prose (as this bullet does), listing it in a
+  bullet, or showing it in an example does not activate it. Markdown's only
+  comment is `<!-- -->`, because there a leading `*` is a bullet and a leading `#`
+  is a heading. Keep the regions tight: a suppressed annotation is checked
+  nowhere, which is why the gate rejects any region that does not pair (unclosed,
+  unopened, or opened inside another) and rejects a marker in any file outside the
+  enumerated syntax documentation, making every new suppression a visible edit
+  rather than one quiet line.
 - **Living-doc rule:** update in place; `Superseded` or `tombstones/` +
   `Tombstoned` when retired; delete when worthless (git holds history).
 - **Co-evolution:** `@ref` annotations land in the same commit as the code they

@@ -37,31 +37,69 @@ const REF_PATTERN = /@ref\s+(?:LLP\s+(\d{1,4})|([\w./-]+\.md))(#[A-Za-z0-9_-]+)?
 // deliberately fictional targets: correct as documentation, wrong as data, which
 // is why they are marked rather than repointed at a real section or deleted.
 //
-// A marker counts only when it is written as a comment (`<!-- ... -->` in
-// Markdown, `//` / `/*` / a JSDoc `*` continuation, `#` elsewhere) and not
-// inside an inline code span. Without both conditions the prose that documents
-// the markers activates them: the `ref-check` skill's own explanation of
-// `ignore-start` would open a region and leave the rest of that section
-// unpoliced, which is the exact failure the marker is warned against. The gap is
-// bounded rather than `*`-quantified so that this pattern does not match its own
-// source line.
-const MARKER_PATTERN = /(?:<!--|\/\/|\/\*|\*|#)[ \t]{0,8}ref-check:ignore(-start|-end)?\b/g
+// A marker counts only when it is a comment in the language of the file it sits
+// in, and only outside a code sample. Without both conditions the documentation
+// that explains the markers activates them, which is the exact failure the marker
+// is warned against: a skill whose subject is the annotation syntax has to be
+// able to show that syntax. Markdown's only comment is `<!-- -->`; a leading `*`
+// is a bullet and a leading `#` is a heading, so a prose list explaining
+// `ignore-start` would otherwise open a real region. The gap before the marker
+// text is bounded rather than `*`-quantified so that these patterns do not match
+// their own source lines.
+//
+// @ref LLP 0001#illustrative-refs [implements]: a marker is a comment in its file's language, never a code sample, so documenting it cannot arm it
+const MARKDOWN_MARKER = /<!--[ \t]{0,8}ref-check:ignore(-start|-end)?\b/g
+const CODE_MARKER = /(?:<!--|\/\/|\/\*|\*|#)[ \t]{0,8}ref-check:ignore(-start|-end)?\b/g
+
+/** A fenced code block's opening or closing line, per CommonMark. */
+const FENCE_PATTERN = /^ {0,3}(?:`{3,}|~{3,})/
+
+/** Four spaces or a tab opens a CommonMark indented code block. */
+const INDENTED_CODE_PATTERN = /^(?: {4,}|\t)/
 
 /**
  * Which suppression marker, if any, a line carries.
  *
  * @param {string} line
+ * @param {boolean} markdown whether the file's comment syntax is Markdown's
  * @returns {'start' | 'end' | 'line' | null}
  */
-function markerOn(line) {
+function markerOn(line, markdown) {
+  if (markdown && INDENTED_CODE_PATTERN.test(line)) return null
   /** @type {'start' | 'end' | 'line' | null} */
   let found = null
-  for (const m of line.replace(/`[^`]*`/g, '').matchAll(MARKER_PATTERN)) {
+  for (const m of line.replace(/`[^`]*`/g, '').matchAll(markdown ? MARKDOWN_MARKER : CODE_MARKER)) {
     if (m[1] === '-start') return 'start'
     if (m[1] === '-end') return 'end'
     found = 'line'
   }
   return found
+}
+
+/**
+ * Resolve every line's marker in one pass, carrying the fenced-code state across
+ * lines: a marker inside a fence is a sample of the syntax, the multi-line form
+ * of the inline code span that `markerOn` already excludes. Fences are tracked
+ * only in Markdown, where they are the documented way to show a code sample, so a
+ * stray triple backtick in a source comment cannot silence a real marker.
+ *
+ * Both the extractor and the suppression gate read markers through here, so what
+ * the gate polices is exactly what the extractor obeys.
+ *
+ * @param {string} relPath
+ * @param {string[]} lines
+ * @returns {('start' | 'end' | 'line' | null)[]}
+ */
+function markersFor(relPath, lines) {
+  const markdown = path.extname(relPath) === '.md'
+  let fenced = false
+  return lines.map(line => {
+    if (markdown && FENCE_PATTERN.test(line)) {
+      fenced = !fenced
+      return null
+    }
+    return fenced ? null : markerOn(line, markdown)
+  })
 }
 
 /**
@@ -82,25 +120,54 @@ const MARKED_FILES = new Set([
  * and rewraps the LLP 0135 line that split `#interactive-walkthrough` across a
  * line break. Entries are tolerated, never required, so pruning them once #461
  * lands is a cleanup and not a failure.
+ *
+ * Keyed on the file and what the annotation cites, with how many of them are
+ * known, rather than on `file:line`: a line number is not a property of the
+ * defect, so an unrelated edit anywhere above one of these sites used to turn a
+ * tolerated reference into a suite failure, and `clients.js` and `policy.js` are
+ * both edited routinely. The count is what keeps that from being a loosening. It
+ * is a ceiling, so a seventh broken `LLP 0103#cli` in `clients.js` is new
+ * breakage and still fails.
  */
-const TOLERATED_BROKEN = new Set([
-  'llp/0111-hyp-policy-verb.design.md:21',
-  'llp/0111-hyp-policy-verb.design.md:247',
-  'llp/0112-hyp-policy-verb.plan.md:42',
-  'llp/0112-hyp-policy-verb.plan.md:43',
-  'llp/0135-install-experience-overhaul.design.md:959',
-  'src/core/commands/clients.js:710',
-  'src/core/commands/clients.js:755',
-  'src/core/commands/clients.js:891',
-  'src/core/commands/clients.js:938',
-  'src/core/commands/clients.js:1008',
-  'src/core/commands/clients.js:1074',
-  'src/core/commands/policy.js:33',
-  'src/core/commands/policy.js:218',
-  'src/core/commands/policy.js:254',
-  'src/core/commands/policy.js:291',
-  'src/core/commands/policy.js:338',
+const TOLERATED_BROKEN = new Map([
+  ['llp/0111-hyp-policy-verb.design.md  LLP 0103#cli', 2],
+  ['llp/0112-hyp-policy-verb.plan.md  LLP 0103#cli', 2],
+  ['llp/0135-install-experience-overhaul.design.md  LLP 0011#interactive-', 1],
+  ['src/core/commands/clients.js  LLP 0103#cli', 6],
+  ['src/core/commands/policy.js  LLP 0103#cli', 5],
 ])
+
+/**
+ * The line-independent identity of an annotation: the file it sits in and the
+ * target it cites.
+ *
+ * @param {{ file: string, llp: string | null, docPath: string | null, anchor: string | null }} ref
+ * @returns {string}
+ */
+function refIdentity(ref) {
+  const target = ref.llp === null ? String(ref.docPath) : `LLP ${ref.llp.padStart(4, '0')}`
+  return `${ref.file}  ${target}${ref.anchor === null ? '' : `#${ref.anchor}`}`
+}
+
+/**
+ * A predicate that spends a tolerance budget: the first `n` broken annotations
+ * with a given identity are tolerated and every later one is not, so a new
+ * occurrence cannot hide behind the known ones.
+ *
+ * @param {Map<string, number>} budgets
+ * @returns {(ref: { file: string, llp: string | null, docPath: string | null, anchor: string | null }) => boolean}
+ */
+function toleranceSpender(budgets) {
+  /** @type {Map<string, number>} */
+  const spent = new Map()
+  return ref => {
+    const id = refIdentity(ref)
+    const used = spent.get(id) ?? 0
+    if (used >= (budgets.get(id) ?? 0)) return false
+    spent.set(id, used + 1)
+    return true
+  }
+}
 
 /**
  * The slug a Markdown renderer gives a heading: lowercase, inline anchor tags
@@ -162,8 +229,10 @@ function extractRefs(relPath, text) {
   /** @type {{ file: string, line: number, text: string, llp: string | null, docPath: string | null, anchor: string | null }[]} */
   const refs = []
   let ignoring = false
-  text.split('\n').forEach((line, index) => {
-    const marker = markerOn(line)
+  const lines = text.split('\n')
+  const markers = markersFor(relPath, lines)
+  lines.forEach((line, index) => {
+    const marker = markers[index]
     if (marker === 'start') ignoring = true
     else if (marker === 'end') ignoring = false
     else if (!ignoring && marker === null) {
@@ -230,11 +299,12 @@ test('the scan finds the corpus and its annotations', () => {
 test('every @ref resolves to a live LLP document and one of its anchors', () => {
   /** @type {string[]} */
   const broken = []
+  const tolerated = toleranceSpender(TOLERATED_BROKEN)
   for (const ref of REFS) {
     const site = `${ref.file}:${ref.line}`
     /** @param {string} why */
     const fail = why => {
-      if (!TOLERATED_BROKEN.has(site)) broken.push(`${site}  ${why}\n      ${ref.text}`)
+      if (!tolerated(ref)) broken.push(`${site}  ${why}\n      ${ref.text}`)
     }
     if (ref.llp !== null) {
       // A number claimed by two documents resolves against either claimant: that
@@ -256,6 +326,20 @@ test('every @ref resolves to a live LLP document and one of its anchors', () => 
     if (!candidates.some(c => fs.existsSync(c))) fail(`no such file ${ref.docPath}`)
   }
   assert.deepEqual(broken, [], `${broken.length} broken @ref annotations:\n  ${broken.join('\n  ')}`)
+})
+
+test('a tolerated reference is tolerated only as often as it is listed', () => {
+  const tolerated = toleranceSpender(new Map([['a.js  LLP 0103#cli', 2]]))
+  /** @param {string | null} anchor */
+  const ref = anchor => ({ file: 'a.js', llp: '103', docPath: null, anchor })
+  assert.equal(tolerated(ref('cli')), true)
+  assert.equal(tolerated(ref('cli')), true)
+  // The third is new breakage even though the first two are known.
+  assert.equal(tolerated(ref('cli')), false)
+  // A different anchor, a different target and a different file are all unlisted.
+  assert.equal(tolerated(ref('reporting')), false)
+  assert.equal(tolerated(ref(null)), false)
+  assert.equal(tolerated({ file: 'b.js', llp: '103', docPath: null, anchor: 'cli' }), false)
 })
 
 test('no @ref annotation separates its gloss with an em dash', () => {
@@ -304,22 +388,60 @@ test('documenting a marker does not activate it', () => {
   )
 })
 
+// Every form below is a way documentation naturally shows the marker, and every
+// one of them opened a real suppressed region while the only test was that the
+// text sat behind some comment opener: a Markdown bullet and heading start with
+// the `*` and `#` that mean "comment" in a source file, and a code sample is
+// still a comment as far as a regex is concerned. The marker text is spelled in
+// pieces so that these fixtures, several of which deliberately leave a region
+// unbalanced, are not markers in this file.
+test('a marker shown as documentation or as a code sample does not activate it', () => {
+  const marker = 'ref-check:' + 'ignore'
+  const live = '// @ref LLP 0001#tooling: still checked'
+  /** @param {string[]} lines */
+  const kept = lines => extractRefs('doc.md', lines.join('\n')).map(r => `${r.llp}#${r.anchor}`)
+  // In Markdown a leading `*` is a bullet and a leading `#` is a heading.
+  assert.deepEqual(kept([`* ${marker}-start opens a region`, live]), ['1#tooling'])
+  assert.deepEqual(kept([`- ${marker}-start opens a region`, live]), ['1#tooling'])
+  assert.deepEqual(kept([`# ${marker}-start`, live]), ['1#tooling'])
+  assert.deepEqual(kept([`* ${marker} suppresses one line`, live]), ['1#tooling'])
+  // A code sample of the syntax is a sample, fenced or indented.
+  assert.deepEqual(kept(['```', `<!-- ${marker}-start -->`, '```', live]), ['1#tooling'])
+  assert.deepEqual(kept(['~~~', `<!-- ${marker}-start -->`, '~~~', live]), ['1#tooling'])
+  assert.deepEqual(kept([`    <!-- ${marker}-start -->`, live]), ['1#tooling'])
+  assert.deepEqual(kept([`\t<!-- ${marker}-start -->`, live]), ['1#tooling'])
+  // The intended forms still suppress: an HTML comment in Markdown, a `//`
+  // comment in a source file, and a fence sitting inside a region.
+  assert.deepEqual(kept([`<!-- ${marker}-start -->`, live, `<!-- ${marker}-end -->`]), [])
+  assert.deepEqual(kept([`<!-- ${marker}-start -->`, '```', live, '```', `<!-- ${marker}-end -->`]), [])
+  assert.deepEqual(kept([`${live} <!-- ${marker} -->`]), [])
+  assert.deepEqual(extractRefs('x.js', [`// ${marker}-start`, live, `// ${marker}-end`].join('\n')), [])
+  assert.deepEqual(extractRefs('x.js', [` * ${marker}-start`, live, ` * ${marker}-end`].join('\n')), [])
+})
+
 // A suppressed annotation is checked nowhere, so the suppression itself has to
 // be as reviewable as the annotation would have been: an unclosed region silently
 // unpolices every line after it, and a marker in a file that is not the syntax
 // documentation is a broken ref someone gave up on rather than an illustration.
+// Every marker has to pair, too: an unbalanced region means the author and the
+// extractor disagree about which lines are suppressed, and that disagreement is
+// the thing nobody notices.
 test('suppression is confined to the syntax documentation and every region closes', () => {
   /** @type {string[]} */
   const offenders = []
   for (const file of trackedFiles()) {
     const lines = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').split('\n')
     let openedAt = 0
-    lines.forEach((line, index) => {
-      const marker = markerOn(line)
+    markersFor(file, lines).forEach((marker, index) => {
       if (marker === null) return
       if (!MARKED_FILES.has(file)) offenders.push(`${file}:${index + 1}  suppression outside the syntax documentation`)
-      if (marker === 'start') openedAt = index + 1
-      else if (marker === 'end') openedAt = 0
+      if (marker === 'start') {
+        if (openedAt !== 0) offenders.push(`${file}:${index + 1}  region opened while the one at ${openedAt} is still open`)
+        openedAt = index + 1
+      } else if (marker === 'end') {
+        if (openedAt === 0) offenders.push(`${file}:${index + 1}  region closed without being opened`)
+        openedAt = 0
+      }
     })
     if (openedAt !== 0) offenders.push(`${file}:${openedAt}  region opened and never closed`)
   }

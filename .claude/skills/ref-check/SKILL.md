@@ -77,13 +77,15 @@ Capture for each:
 **Skip the annotations that are illustrations rather than data.** Documentation about the annotation syntax (this file, `ref-story`, an LLP that shows the form it is minting) has to spell out `@ref` targets that are deliberately fictional. Extracting them makes the checker permanently non-zero on a clean corpus, which is worse than not checking at all, so two markers suppress extraction:
 
 - `ref-check:ignore` on the line suppresses that one line.
-- `ref-check:ignore-start` opens a suppressed region and `ref-check:ignore-end` closes it. Put the markers outside the fence when the region is a fenced block, so they do not render as part of the example.
+- `ref-check:ignore-start` opens a suppressed region and `ref-check:ignore-end` closes it. The markers go outside the fence when the region is a fenced block, both so they do not render as part of the example and because a marker inside a fence does not count.
 
-A marker counts only when it is **written as a comment** and **not inside an inline code span**: an HTML comment in Markdown (invisible in a rendered view), `//` or `/*` in code. That is what lets this section name the markers in prose without activating them, so documenting the mechanism cannot silently unpolice the paragraphs that document it.
+A marker counts only when it is **a comment in the language of the file it sits in** and **not inside a code sample**. In Markdown that means an HTML comment, `<!-- ... -->`, invisible in a rendered view; in a source file it means `//`, `/*` or a JSDoc `*` continuation, or `#` where that is the comment. A marker does not count inside an inline code span, inside a fenced block, or on a line indented four spaces or more, all of which are how a document shows a sample rather than makes a statement.
+
+Those conditions are the whole reason this section can explain the mechanism without arming it. Markdown has no comment character other than `<!--`: a leading `*` is a bullet and a leading `#` is a heading, so a prose list that names `ref-check:ignore-start` would otherwise open a real region and quietly unpolice everything down to the next `ignore-end`, which is exactly the failure this marker is warned against.
 
 The markers suppress *extraction*, so a suppressed annotation is reported nowhere and counted nowhere: keep the regions as tight as the examples they cover, or a live annotation will go unchecked. Both citation forms are covered, `LLP NNNN#anchor` and `path/to/doc.md#anchor` alike, because the suppression is keyed on the line and not on the target.
 
-Suppression is itself reviewable: the `llp-ref-hygiene` test fails on a region that is opened and never closed, and on a marker in any file outside the enumerated syntax documentation. A new suppression therefore has to appear in a diff as an edit to that list, not as one quiet line.
+Suppression is itself reviewable: the `llp-ref-hygiene` test fails on a marker in any file outside the enumerated syntax documentation, and on any region that does not pair, whether it is opened and never closed, closed without being opened, or opened while another is still open. A new suppression therefore has to appear in a diff as an edit to that list, not as one quiet line, and the lines a region covers are the same lines its author can see it covering.
 
 ### 3. Build the LLP index
 
