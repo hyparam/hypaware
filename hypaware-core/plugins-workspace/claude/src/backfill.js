@@ -3,6 +3,7 @@
 import {
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
+  DESKTOP_3P_CONTAINER_OWNER,
   findDesktop3pProjectsDirs,
   loadAgentMeta,
   loadTranscriptFile,
@@ -21,6 +22,7 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import {
+  classifyContainerSession,
   classifyTranscriptEntrypoint,
   sessionEntrypoint,
 } from '../../../../src/core/backfill/entrypoint_owner.js'
@@ -183,7 +185,7 @@ async function* runClaudeBackfill(args) {
   /** @type {Map<string, number>} */
   const unclaimedEntrypoints = new Map()
 
-  for (const filePath of walkTranscriptRoots([projectsDir, ...(extraProjectsDirs ?? [])])) {
+  for (const { filePath, inContainer } of walkRootsWithOrigin(projectsDir, extraProjectsDirs)) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
     /** @type {TranscriptEntry[]} */
@@ -235,9 +237,15 @@ async function* runClaudeBackfill(args) {
       // have opted into, and files it under the wrong client. Read the
       // entrypoint from the whole session, not `windowed`: the field rides
       // most lines but the window could clip the ones that carry it.
+      // A session from the 3p container is Desktop's by ROOT, whatever its
+      // tag says: the value classifier fails open on an absent or drifted
+      // value, which over a foreign container is the wrong direction.
       // @ref LLP 0140#gate-before-projection [implements]: a session owned by an unconfigured client is skipped before projection, like the usage-policy drop above
       const entrypoint = sessionEntrypoint(sessionEntries)
-      const owned = classifyTranscriptEntrypoint(entrypoint, ctx.entrypointOwners ?? new Map(), clientName)
+      const owners = ctx.entrypointOwners ?? new Map()
+      const owned = inContainer
+        ? classifyContainerSession(owners, DESKTOP_3P_CONTAINER_OWNER)
+        : classifyTranscriptEntrypoint(entrypoint, owners, clientName)
       if (!owned.import) {
         sessionsGated += 1
         log.info('claude.backfill.entrypoint_not_configured', {
@@ -307,6 +315,22 @@ async function* runClaudeBackfill(args) {
       : {}),
     status: 'ok',
   })
+}
+
+/**
+ * Walk the shared projects tree, then the Desktop 3p sandbox trees, tagging
+ * each file with which kind of root it came from. The tag is what lets the
+ * gate key admission on the root for container sessions
+ * (`classifyContainerSession`) instead of on the entrypoint value inside
+ * them, which fails open when absent or drifted.
+ *
+ * @param {string} projectsDir
+ * @param {string[] | undefined} extraProjectsDirs
+ * @returns {Generator<{ filePath: string, inContainer: boolean }>}
+ */
+function* walkRootsWithOrigin(projectsDir, extraProjectsDirs) {
+  for (const filePath of walkTranscriptRoots([projectsDir])) yield { filePath, inContainer: false }
+  for (const filePath of walkTranscriptRoots(extraProjectsDirs ?? [])) yield { filePath, inContainer: true }
 }
 
 /**

@@ -28,7 +28,7 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBloc
  */
 
 /**
- * @import { JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { JsonObject, PluginName } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { TranscriptEntry } from './types.js'
  */
 
@@ -62,6 +62,22 @@ export function claudeDesktop3pSessionRoots(homeDir) {
     path.join(homeDir, 'Library', 'Application Support', 'Claude', 'Claude-3p', 'local-agent-mode-sessions'),
   ]
 }
+
+/**
+ * The client whose container {@link claudeDesktop3pSessionRoots} names.
+ * Sessions found under those roots belong to Claude Desktop whatever
+ * entrypoint value they carry: the value has already drifted between
+ * Desktop builds, so admission keys on this owner, not on the tag
+ * (`classifyContainerSession`). Lives beside the root list because the
+ * two facts are one piece of knowledge: where Desktop's container is,
+ * and that it is Desktop's.
+ *
+ * @ref LLP 0140#container-root-owns [implements]: the 3p container's owner is fixed at the site that hardcodes its paths
+ */
+export const DESKTOP_3P_CONTAINER_OWNER = Object.freeze({
+  client: 'claude-desktop',
+  plugin: /** @type {PluginName} */ ('@hypaware/claude-desktop'),
+})
 
 /**
  * Sandbox homes nest a few levels below the session root

@@ -80,13 +80,31 @@ and `init.js`'s `--source` enum. A fourth would rot the same way, and this
 one would rot silently in the direction of over-capture.
 
 A client may claim several values: un-attached Desktop's transcripts in
-the shared tree say `claude-desktop`, an earlier attached build stamped
-`claude-desktop-3p`, and the current attached build writes `local-agent`
-into transcripts under sandboxed per-session homes inside the `Claude-3p`
-container, outside `~/.claude/projects` entirely
-(LLP 0133#attribution documents the drift; the claude adapter scans those
-sandbox trees so the gate and enrichment see attached-Desktop sessions at
-all).
+the shared tree say `claude-desktop`, and an earlier attached build stamped
+`claude-desktop-3p`. Desktop does NOT claim `local-agent`, the value the
+current attached build writes into its container transcripts: that string
+names a CLI mode, not a client (it drifted to `local-agent-v2` within a
+week, LLP 0133#attribution), and container sessions are owned by their
+root instead ([#container-root-owns](#container-root-owns)), so the claim
+would only misfile a shared-tree session from some future CLI mode.
+
+<a id="container-root-owns"></a>**A session found inside another client's
+container is owned by that client, whatever its entrypoint says.** The
+current attached Desktop build writes transcripts under sandboxed
+per-session homes inside the `Claude-3p` container, outside
+`~/.claude/projects` entirely, and the claude adapter scans those trees so
+the gate and enrichment see attached-Desktop sessions at all
+(LLP 0133#attribution). For those roots, admission derives from the root,
+not from the value found inside it: the value has already drifted between
+Desktop builds, `attachment` and summary records omit the field, and a
+value test over a foreign container therefore fails open exactly where
+consent is at stake. The container's owner is fixed beside the code that
+hardcodes its paths (`DESKTOP_3P_CONTAINER_OWNER`); `configured` is looked
+up in the same owners map by plugin. When the owning plugin is
+unconfigured, or not installed at all, the gate closes: unlike the scanning
+client's own tree, failing closed here drops no history the user opted
+into, it declines to read another client's private directory, which
+`master` never read either.
 
 <a id="gate-before-projection"></a>**A session whose entrypoint is owned by
 an unconfigured client is skipped before projection**, beside the
@@ -96,16 +114,20 @@ configured, the session imports and is attributed to the **owner**, not to
 the plugin whose transcript tree it happened to live in. One map, both
 uses.
 
-<a id="fail-open-on-unknown"></a>**Unknown entrypoints fail open.** A value
-no installed plugin claims is imported and attributed to the scanning
-client. Failing closed would silently drop real history the first time a
-client ships a new entrypoint value, or on a transcript predating the
-field, and a backfill that quietly imports less than it should is worse
-than one that files a row under a slightly wrong client. The gate
-therefore closes only on the case that actually breaks consent: an
-entrypoint some installed plugin explicitly claims while not being
-configured. The gate strengthens as clients declare, rather than depending
-on any list being exhaustive.
+<a id="fail-open-on-unknown"></a>**Unknown entrypoints fail open, in the
+scanning client's own tree only.** A value no installed plugin claims is
+imported and attributed to the scanning client. Failing closed would
+silently drop real history the first time a client ships a new entrypoint
+value, or on a transcript predating the field, and a backfill that quietly
+imports less than it should is worse than one that files a row under a
+slightly wrong client. The gate therefore closes only on the case that
+actually breaks consent: an entrypoint some installed plugin explicitly
+claims while not being configured. The gate strengthens as clients
+declare, rather than depending on any list being exhaustive. None of this
+applies to sessions found under another client's container, where the same
+fail-open direction would open exactly the door the gate exists to close:
+those are owned by the root ([#container-root-owns](#container-root-owns))
+and their entrypoint value decides nothing.
 
 Unclaimed values are counted per distinct value and reported once in
 `scan_complete` (`unclaimed_entrypoints`), not per session: a value nobody
@@ -120,10 +142,16 @@ logging buried the two real gate decisions under 388 lines.
 - Attaching Desktop makes its history importable, and it lands as
   `client_name: "claude-desktop"`. Existing rows imported before this
   change keep `client_name: "claude"`; nothing rewrites them.
-- Providers must treat `entrypointOwners` as optional. Absent or empty
-  means import everything under the scanning client, which is exactly the
-  behavior that shipped before this decision, so a catalog failure
-  degrades toward the old behavior rather than toward dropping history.
+- Providers must treat `entrypointOwners` as optional. For the scanning
+  client's own tree, absent or empty means import everything under the
+  scanning client, which is exactly the behavior that shipped before this
+  decision, so a catalog failure degrades toward the old behavior rather
+  than toward dropping history. Container roots degrade the same way, and
+  for them the old behavior is the opposite: `master` never read the
+  `Claude-3p` container, so an absent map closes that gate.
+- Sessions under the 3p container gate on Desktop's config membership
+  whatever their entrypoint value: absent, drifted, or unclaimed values
+  change the attribution log line, never the admission decision.
 - `hyp backfill plan` resolves the same map as the run and passes it on
   `BackfillPlanContext`. A plan that estimated over sessions the run then
   gates out would be wrong in the one direction the gate exists to fix.

@@ -46,8 +46,10 @@ export function resolveEntrypointOwners(descriptors, isConfigured) {
 }
 
 /**
- * Decide whether a transcript session may be imported, and which client it
- * should be attributed to.
+ * Decide whether a transcript session found in the scanning client's OWN
+ * tree may be imported, and which client it should be attributed to.
+ * Sessions found under another client's container are classified by
+ * {@link classifyContainerSession} instead, where the root decides.
  *
  * Unknown entrypoints fail OPEN: they are imported and attributed to the
  * scanning client. Failing closed would silently drop legitimate history
@@ -58,7 +60,7 @@ export function resolveEntrypointOwners(descriptors, isConfigured) {
  * plugin explicitly claims while not being configured, which is the case
  * that actually breaks consent.
  *
- * @ref LLP 0140#fail-open-on-unknown [implements]: only a claimed-but-unconfigured entrypoint is skipped; unknown values import and are logged
+ * @ref LLP 0140#fail-open-on-unknown [implements]: in the scanning client's own tree, only a claimed-but-unconfigured entrypoint is skipped; unknown values import and are logged
  * @param {string | undefined} entrypoint
  * @param {EntrypointOwners} owners
  * @param {string} scanningClient
@@ -74,6 +76,36 @@ export function classifyTranscriptEntrypoint(entrypoint, owners, scanningClient)
   // rows land under `client_name: "claude"` and are queryable only by
   // entrypoint.
   return { import: true, clientName: owner.client, owner }
+}
+
+/**
+ * Decide admission for a session found inside another client's private
+ * container (Desktop's `Claude-3p` sandbox trees are the motivating case).
+ *
+ * Ownership comes from the ROOT the session was found under, not from the
+ * entrypoint value inside it. The value cannot carry consent for a foreign
+ * container: it has already drifted between Desktop builds within a week,
+ * and attachment and summary records omit the field entirely, so a value
+ * test here fails open exactly where consent is at stake. The gate closes
+ * whenever the container's owning plugin is not configured, including when
+ * it is not installed and the owners map has no entry for it: unlike the
+ * scanning client's own tree, failing closed drops no history the user
+ * opted into, it declines to read another client's private directory.
+ *
+ * @ref LLP 0140#container-root-owns [implements]: a foreign container's sessions belong to the container's client whatever their entrypoint says
+ * @param {EntrypointOwners} owners
+ * @param {{ client: string, plugin: PluginName }} containerOwner
+ * @returns {{ import: boolean, clientName: string, owner: EntrypointOwner }}
+ */
+export function classifyContainerSession(owners, containerOwner) {
+  for (const owner of owners.values()) {
+    if (owner.plugin !== containerOwner.plugin) continue
+    return { import: owner.configured, clientName: owner.client, owner }
+  }
+  // The owning plugin declared nothing (or is not installed): synthesize an
+  // unconfigured owner so the gate log still names who the sessions belong to.
+  const owner = { client: containerOwner.client, plugin: containerOwner.plugin, configured: false }
+  return { import: false, clientName: owner.client, owner }
 }
 
 /**

@@ -8,6 +8,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  classifyContainerSession,
   classifyTranscriptEntrypoint,
   resolveEntrypointOwners,
   sessionEntrypoint,
@@ -114,6 +115,30 @@ test('classifyTranscriptEntrypoint with an empty owner map imports everything (p
   assert.equal(verdict.clientName, 'claude')
 })
 
+// A foreign container's sessions are admitted by ROOT, never by the value
+// found inside them: the value classifier's fail-open direction is exactly
+// wrong over another client's private directory.
+// @ref LLP 0140#container-root-owns [tests]: container admission keys on the owning plugin's config membership, not the entrypoint value
+test('classifyContainerSession imports as the owner when its plugin is configured', () => {
+  const owners = resolveEntrypointOwners([client('desk', '@hypaware/desk', ['dk'])], () => true)
+  const verdict = classifyContainerSession(owners, { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') })
+  assert.equal(verdict.import, true)
+  assert.equal(verdict.clientName, 'desk')
+})
+
+test('classifyContainerSession gates when the owning plugin is unconfigured', () => {
+  const owners = resolveEntrypointOwners([client('desk', '@hypaware/desk', ['dk'])], () => false)
+  const verdict = classifyContainerSession(owners, { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') })
+  assert.equal(verdict.import, false)
+  assert.equal(verdict.owner.client, 'desk')
+})
+
+test('classifyContainerSession gates on an empty owners map, unlike the value classifier', () => {
+  const verdict = classifyContainerSession(new Map(), { client: 'desk', plugin: /** @type {any} */ ('@hypaware/desk') })
+  assert.equal(verdict.import, false)
+  assert.equal(verdict.owner.configured, false, 'owner is synthesized for the gate log')
+})
+
 test('sessionEntrypoint takes the first non-empty value across a session', () => {
   assert.equal(sessionEntrypoint([{}, { entrypoint: '' }, { entrypoint: 'cli' }]), 'cli')
   assert.equal(sessionEntrypoint([{}, {}]), undefined)
@@ -131,9 +156,11 @@ test('the real claude-desktop manifest claims every observed entrypoint value', 
   const desktop = descriptors.get('claude-desktop')
   assert.ok(desktop, 'claude-desktop client descriptor exists')
   // 'claude-desktop' = un-attached Desktop in the shared tree;
-  // 'claude-desktop-3p' = attached, earlier build; 'local-agent' =
-  // attached, current build (LLP 0133#attribution documents the drift).
-  assert.deepEqual(desktop.transcriptEntrypoints, ['claude-desktop', 'claude-desktop-3p', 'local-agent'])
+  // 'claude-desktop-3p' = attached, earlier build. The current attached
+  // build's 'local-agent' is deliberately NOT claimed: it names a CLI mode,
+  // not a client, and its sessions live in the 3p container, which is owned
+  // by root (LLP 0140#container-root-owns), not by value.
+  assert.deepEqual(desktop.transcriptEntrypoints, ['claude-desktop', 'claude-desktop-3p'])
 })
 
 // `cli` must be claimed too, else every ordinary Claude Code session takes
@@ -149,7 +176,7 @@ test('real manifests: Desktop entrypoints gate off when only @hypaware/claude is
   const descriptors = await realClientDescriptors()
   const owners = resolveEntrypointOwners(descriptors.values(), (p) => p === '@hypaware/claude')
 
-  for (const ep of ['claude-desktop', 'claude-desktop-3p', 'local-agent']) {
+  for (const ep of ['claude-desktop', 'claude-desktop-3p']) {
     assert.equal(classifyTranscriptEntrypoint(ep, owners, 'claude').import, false, `${ep} skipped`)
   }
   for (const ep of ['cli', 'sdk-cli']) {
@@ -164,20 +191,36 @@ test('real manifests: Desktop entrypoints import as claude-desktop once it is co
   const configured = new Set(['@hypaware/claude', '@hypaware/claude-desktop'])
   const owners = resolveEntrypointOwners(descriptors.values(), (p) => configured.has(p))
 
-  for (const ep of ['claude-desktop', 'claude-desktop-3p', 'local-agent']) {
+  for (const ep of ['claude-desktop', 'claude-desktop-3p']) {
     const verdict = classifyTranscriptEntrypoint(ep, owners, 'claude')
     assert.equal(verdict.import, true, `${ep} imported`)
     assert.equal(verdict.clientName, 'claude-desktop', `${ep} attributed to claude-desktop`)
   }
 })
 
-// Every entrypoint value observed in real transcripts should be claimed by
-// some bundled client, so the fail-open path stays an exception rather than
-// the norm. Update this list when a new entrypoint is observed in the wild.
-test('every known real-world entrypoint value is claimed by a bundled client', async () => {
+test('real manifests: the 3p container gates off until claude-desktop is configured, whatever the tag', async () => {
+  const descriptors = await realClientDescriptors()
+  const containerOwner = { client: 'claude-desktop', plugin: /** @type {any} */ ('@hypaware/claude-desktop') }
+
+  const cliOnly = resolveEntrypointOwners(descriptors.values(), (p) => p === '@hypaware/claude')
+  assert.equal(classifyContainerSession(cliOnly, containerOwner).import, false)
+
+  const both = new Set(['@hypaware/claude', '@hypaware/claude-desktop'])
+  const configured = resolveEntrypointOwners(descriptors.values(), (p) => both.has(p))
+  const verdict = classifyContainerSession(configured, containerOwner)
+  assert.equal(verdict.import, true)
+  assert.equal(verdict.clientName, 'claude-desktop')
+})
+
+// Every entrypoint value observed in real SHARED-TREE transcripts should be
+// claimed by some bundled client, so the fail-open path stays an exception
+// rather than the norm. Container-only values ('local-agent') are excluded
+// on purpose: their sessions are owned by root, not by claim. Update this
+// list when a new entrypoint is observed in the wild.
+test('every known real-world shared-tree entrypoint value is claimed by a bundled client', async () => {
   const descriptors = await realClientDescriptors()
   const owners = resolveEntrypointOwners(descriptors.values(), () => true)
-  for (const ep of ['cli', 'sdk-cli', 'claude-desktop', 'local-agent']) {
+  for (const ep of ['cli', 'sdk-cli', 'claude-desktop', 'claude-desktop-3p']) {
     assert.ok(owners.has(ep), `entrypoint '${ep}' is claimed by a bundled client manifest`)
   }
 })

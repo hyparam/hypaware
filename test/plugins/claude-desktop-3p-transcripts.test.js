@@ -206,7 +206,7 @@ test('backfill imports a 3p sandbox session and attributes it to the configured 
       stateFile: path.join(homeDir, 'sc.jsonl'),
     })
     const owners = new Map([
-      ['local-agent', { client: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: true }],
+      ['claude-desktop', { client: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: true }],
     ])
     const { ctx } = runContext({ entrypointOwners: owners })
 
@@ -221,6 +221,67 @@ test('backfill imports a 3p sandbox session and attributes it to the configured 
   }
 })
 
+// The blocking review finding on c01ef0e: admission was decided on the
+// entrypoint VALUE, which fails open when absent or unclaimed, so a machine
+// that never configured Desktop imported Desktop's private container as
+// Claude Code. Ownership now derives from the root, so the tag decides
+// nothing.
+// @ref LLP 0140#container-root-owns [tests]: 3p sessions with absent or drifted entrypoints gate off while Desktop is unconfigured
+test('backfill gates 3p sessions with absent or unclaimed entrypoints when Desktop is unconfigured', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-failopen-'))
+  try {
+    // One session whose lines never carry the field, one tagged with a value
+    // no plugin claims (the observed drift, 'local-agent' to 'local-agent-v2').
+    const noEntrypoint = desktop3pRows('sess-noep').map(({ entrypoint, ...rest }) => rest)
+    const drifted = desktop3pRows('sess-drift').map((r) => ({ ...r, entrypoint: 'local-agent-v2' }))
+    await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-noep', noEntrypoint)
+    await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-drift', drifted)
+    const provider = createClaudeBackfillProvider({
+      homeDir,
+      stateFile: path.join(homeDir, 'sc.jsonl'),
+    })
+    // The owners map a default install builds: claude configured, Desktop
+    // installed but not configured. Neither claims 'local-agent-v2'.
+    const owners = new Map([
+      ['cli', { client: 'claude', plugin: '@hypaware/claude', configured: true }],
+      ['claude-desktop', { client: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: false }],
+    ])
+    const { ctx, entries } = runContext({ entrypointOwners: owners })
+
+    const items = await collectItems(provider.run(ctx))
+
+    assert.equal(items.length, 0, 'nothing from the container is imported')
+    const gated = entries.filter((e) => e.message === 'claude.backfill.entrypoint_not_configured')
+    assert.equal(gated.length, 2, 'both sessions are gated, whatever their tag')
+    assert.ok(gated.every((e) => e.owner_plugin === '@hypaware/claude-desktop'))
+    const complete = entries.find((e) => e.message === 'claude.backfill.scan_complete')
+    assert.equal(complete?.sessions_gated, 2)
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+// An absent owners map degrades toward master for each root kind: import
+// everything in the scanning client's own tree, and read nothing from the
+// container master never read.
+test('backfill gates 3p sessions when no owners map is supplied at all', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-nomap-'))
+  try {
+    await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-3p', desktop3pRows('sess-3p'))
+    const provider = createClaudeBackfillProvider({
+      homeDir,
+      stateFile: path.join(homeDir, 'sc.jsonl'),
+    })
+    const { ctx } = runContext()
+
+    const items = await collectItems(provider.run(ctx))
+
+    assert.equal(items.length, 0)
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
 test('backfill gates a 3p sandbox session when its owner is not configured', async () => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-gated-'))
   try {
@@ -230,7 +291,7 @@ test('backfill gates a 3p sandbox session when its owner is not configured', asy
       stateFile: path.join(homeDir, 'sc.jsonl'),
     })
     const owners = new Map([
-      ['local-agent', { client: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: false }],
+      ['claude-desktop', { client: 'claude-desktop', plugin: '@hypaware/claude-desktop', configured: false }],
     ])
     const { ctx, entries } = runContext({ entrypointOwners: owners })
 
