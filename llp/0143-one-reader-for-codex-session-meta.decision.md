@@ -5,7 +5,7 @@
 **Systems:** Core, Plugins, Gateway, Sources, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-29
-**Related:** LLP 0003, LLP 0049, LLP 0066, LLP 0067, LLP 0083
+**Related:** LLP 0003, LLP 0045, LLP 0049, LLP 0066, LLP 0067, LLP 0083, LLP 0085
 
 > A Codex rollout's first line, its `session_meta` header, is read by exactly
 > one module: `src/core/codex/rollout_session_meta.js`. Two plugins ask it the
@@ -65,7 +65,8 @@ states it as a non-blank string, and enforce three rules:
    `undefined`; a caller that needs the field refuses rather than substituting.
    In particular `sessionId` is never derived from `threadId`: the two are the
    same uuid for a root thread and different for a subagent thread, which is
-   precisely how #453 and #459 went wrong.
+   precisely how #453 and #459 went wrong. For `cwd`, "unconfirmable" also
+   covers a relative path ([below](#usable-cwd)).
 
 `sessionId` has no consumer yet on purpose. The verb still resolves the thread
 id, matching `CODEX_THREAD_ID` and what the gateway stamps today; moving the
@@ -99,6 +100,60 @@ normally push into the adapter. That is the narrower cost: one bounded,
 read-only parse of one line, versus a privacy invariant that provably will not
 stay in step when it is stated twice.
 
+### A relative `cwd` is not a usable container {#usable-cwd}
+
+Rule 3 for `cwd` is stricter than "a non-blank string": the value must be an
+**absolute** path, or it reads as absent. `sessionMetaCwd` is that predicate,
+and it is exported because the codex backfill folds `turn_context.cwd` as a
+fallback for the same field into the same gate, and so must answer the question
+identically instead of keeping a looser copy.
+
+The reason is that a `cwd` is not consumed as a string, it is consumed as a
+directory that has to be found. The matcher's first act is `path.resolve(cwd)`
+([LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope) walks upward
+from there), and for a relative value `path.resolve` silently supplies the
+**daemon's** process cwd as the base. A session whose header said
+`../elsewhere` therefore gets a confident `.hypignore` verdict governed by a
+file under wherever the daemon happens to have been started. Nothing on the line
+says what the value is relative to, and the rollout's own location cannot stand
+in for the missing base either: rollouts live under
+`<CODEX_HOME>/sessions/YYYY/MM/DD/`, which has no relationship to where the
+session ran. The base would have to be guessed, and rule 3 exists to forbid
+exactly that.
+
+Refusing is not a symmetric trade against accepting, which is why this is a
+rule and not a judgement call:
+
+- **Refusing** costs the ordinary "no cwd" fail-open: the row records
+  `cwd = NULL`, the projector's `if (cwd)` skips the check, and that is a state
+  the system already models and compensates for
+  ([LLP 0049 R1](./0049-hypignore-usage-policy.spec.md#requirements) as extended by
+  [LLP 0085](./0085-settlement-may-drop-late-ignore.decision.md)). It is also
+  already the documented answer for an absent or unreadable rollout
+  ([LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)).
+- **Accepting** is wrong in *both* directions at once. It can drop a session no
+  `.hypignore` covers (data lost), and - the failure this control exists to
+  prevent - it can record a session whose real directory **is** ignored, because
+  the verdict was computed for a different directory entirely. Worse than
+  `cwd = NULL`, it also stamps a non-null bogus `cwd` on the row, so the value
+  looks like a real answer to everything downstream that keys on cwd.
+
+That is the same defect shape as [#459](https://github.com/hyparam/hypaware/issues/459)
+(a verdict about a directory the session never named), reached through a
+different field. The repo already applies this rule to the sibling case: a
+client `settings_file` that resolves relative is refused rather than returned,
+because handing it back "would return something re-resolved against
+`process.cwd()` at read time instead of the value validated at call time"
+([LLP 0045](./0045-client-attach.design.md)).
+
+No legitimate rollout loses its `cwd`: Codex writes `session_meta.cwd` from the
+process's own working directory, which is always absolute. And the `hyp session`
+caller is unaffected either way, because it compares `meta.cwd` against an
+absolute invocation cwd, so a relative value never matched; refusing only makes
+that refusal explicit and earlier. Only `cwd` is path-tested - `threadId` and
+`sessionId` are opaque provider tokens with no path semantics
+([LLP 0066 R5](./0066-session-opt-out.spec.md)).
+
 ### Bounded, and part of the same contract {#bounded}
 
 The bounded prefix read moves into the reader with the parse, rather than
@@ -117,12 +172,23 @@ resolving on half a record.
   over-long or unreadable first line), with each guard mutation-checked to
   redden its own named test. Both callers keep a short test pinning the rules at
   their own seam, so a change cannot satisfy one caller and loosen the other.
-- Blank now means blank-after-trim at both callers. The previous codex-side
-  `stringValue` check accepted a whitespace-only `cwd` and handed it to the
-  policy matcher as a path; the gateway side had the same latitude on its ids.
-  The value that survives the test is still returned byte-identical, because
-  these ids are opaque provider tokens
+- Blank now means blank-after-trim at every site that feeds the gate, not only
+  at the two callers of the reader. The previous codex-side `stringValue` check
+  accepted a whitespace-only `cwd` and handed it to the policy matcher as a
+  path; the gateway side had the same latitude on its ids; and the backfill,
+  which reads whole rollout files and so cannot delegate to a first-line reader,
+  had it on `session_meta.cwd` and on its `turn_context.cwd` fallback. The
+  backfill now shares the one `cwd` predicate (`sessionMetaCwd`) even though it
+  keeps its own file walk, so the three sites cannot disagree about what "no
+  cwd" means. The value that survives the test is still returned
+  byte-identical, because these ids are opaque provider tokens
   ([LLP 0066 R5](./0066-session-opt-out.spec.md)) and a `cwd` is a path.
+- **Still outstanding:** the live projector's *in-band* cwd
+  (`x-codex-turn-metadata` / body `metadata.cwd`, LLP 0083's fast path) reaches
+  the same `resolver.resolve` with no such predicate. It is a different source
+  with a different trust story, and its value is also stamped on the row for
+  workspace/git enrichment rather than only consulted for the gate, so tightening
+  it is its own decision rather than a consequence of this one.
 - Code that lands this carries `@ref LLP 0143` on the reader and on both
   callers' seams.
 - Nothing about which id either caller *uses* changes here. This is the

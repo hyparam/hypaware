@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import {
   AI_GATEWAY_MESSAGES_DATASET,
@@ -527,7 +528,17 @@ function buildSession(args) {
   return {
     sessionId: stringValue(metaPayload.id) ?? fallbackId,
     startedAtMs: timestampToMs(metaPayload.timestamp),
-    cwd: firstString(stringValue(metaPayload.cwd), firstTurnString(turnPayloads, 'cwd')),
+    // `session.cwd` gates the same `.hypignore` drop the live path gates (see
+    // `runCodexBackfill`'s `resolver.resolve(session.cwd)`), so it uses the
+    // shared reader's `cwd` predicate rather than the plain `stringValue` the
+    // rest of these fields use. `stringValue` accepts `'   '` and any relative
+    // path, both of which reach `path.resolve` in the matcher and produce a
+    // verdict about whatever directory `hyp backfill` was invoked from. This
+    // provider cannot delegate to `readRolloutSessionMeta` (it reads the whole
+    // file and folds `turn_context`), but it can share the one predicate.
+    // @ref LLP 0143#usable-cwd [constrained-by]: blank-and-relative means "no
+    // cwd" at every site that feeds the gate, not just the first-line reader
+    cwd: firstString(sessionMetaCwd(metaPayload.cwd), firstTurnCwd(turnPayloads)),
     gitOriginUrl: git ? redactRemoteUserinfo(firstString(stringValue(git.repository_url), stringValue(git.origin_url))) : undefined,
     gitCommit: git ? firstString(stringValue(git.commit_hash), stringValue(git.commit)) : undefined,
     gitBranch: git ? stringValue(git.branch) : undefined,
@@ -792,6 +803,24 @@ function firstTurnString(turns, key) {
   for (const turn of turns) {
     const value = stringValue(turn[key])
     if (value) return value
+  }
+  return undefined
+}
+
+/**
+ * The first `turn_context.cwd` that is a usable container. Separate from
+ * `firstTurnString` because it applies the shared `cwd` predicate: a turn whose
+ * `cwd` is blank or relative is skipped rather than accepted as the session's
+ * directory, so the fallback cannot smuggle in what the `session_meta` branch
+ * refuses.
+ *
+ * @param {Record<string, unknown>[]} turns
+ * @returns {string | undefined}
+ */
+function firstTurnCwd(turns) {
+  for (const turn of turns) {
+    const cwd = sessionMetaCwd(turn.cwd)
+    if (cwd) return cwd
   }
   return undefined
 }

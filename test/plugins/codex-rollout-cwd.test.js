@@ -204,6 +204,32 @@ test('a blank session_meta.cwd is no cwd, not a blank path handed to the policy 
   assert.equal(resolver.resolve(SUBSCRIPTION_SESSION_ID), undefined)
 })
 
+test('a relative session_meta.cwd is no cwd: the matcher would resolve it against the daemon', () => {
+  // Passed on, the matcher's `path.resolve` supplies the DAEMON's process cwd as
+  // the base, so this session's `.hypignore` verdict would be governed by a file
+  // under wherever the daemon was started. Proven here by making the process cwd
+  // the thing the relative path would land in.
+  // @ref LLP 0143#usable-cwd [tests]: refuse rather than guess a base
+  const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
+  fsSync.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),
+    JSON.stringify({ type: 'session_meta', payload: { id: SUBSCRIPTION_SESSION_ID, cwd: '../elsewhere' } }) + '\n',
+    'utf8'
+  )
+  const resolver = createRolloutCwdResolver({ sessionsDir })
+  const cwd = resolver.resolve(SUBSCRIPTION_SESSION_ID)
+  assert.equal(cwd, undefined)
+
+  // And the fail-open it falls back to is the documented "no cwd" one (LLP 0083,
+  // LLP 0049 R1 as extended by LLP 0085), not a verdict about another directory:
+  // had the value been passed on, this resolver would have named a governor.
+  const wouldHaveBeen = createUsagePolicyResolver({
+    existsSync: (p) => p === path.resolve('../elsewhere', '.hypignore'),
+    readFileSync: () => 'ignore\n',
+  })
+  assert.equal(wouldHaveBeen.resolve('../elsewhere').class, 'ignore', 'the wrong-directory verdict is real, not hypothetical')
+})
+
 // ---------------------------------------------------------------------
 // Review round 1, Major 1: a miss (not-yet-written rollout on a session's
 // first exchange, or a transient read error) must NOT be cached as a permanent

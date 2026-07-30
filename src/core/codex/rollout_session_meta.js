@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs'
+import path from 'node:path'
 
 import { isPlainObject, parseMaybeJson } from '../util/index.js'
 
@@ -54,7 +55,9 @@ export const ROLLOUT_META_PREFIX_BYTES = 64 * 1024
  *    string. A caller that needs it must refuse; none of them may guess. In
  *    particular `sessionId` is never derived from `threadId` (see rule 1): the
  *    two are the same uuid for a root thread and different for a subagent
- *    thread, which is exactly how #459 read the wrong session's cwd.
+ *    thread, which is exactly how #459 read the wrong session's cwd. For `cwd`
+ *    that also means a relative path is unconfirmable, because nothing on the
+ *    line says what it is relative *to* (see {@link sessionMetaCwd}).
  *
  * A present-but-blank field is treated as absent. The trim is only the
  * emptiness test: a field that survives it is returned byte-identical, because
@@ -78,7 +81,7 @@ export function parseRolloutSessionMeta(line) {
   return {
     threadId: metaField(payload?.id),
     sessionId: metaField(payload?.session_id),
-    cwd: metaField(payload?.cwd),
+    cwd: sessionMetaCwd(payload?.cwd),
   }
 }
 
@@ -134,4 +137,43 @@ function readRolloutFirstLine(filePath) {
  */
 function metaField(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+/**
+ * The one predicate for a rollout-stated `cwd`: a non-blank **absolute** path,
+ * byte-identical, else `undefined`. Exported because the codex backfill folds
+ * `turn_context.cwd` as a fallback for the same field and feeds it to the same
+ * `.hypignore` gate, so it must answer "is this a usable container?" the same
+ * way rather than keeping a looser copy.
+ *
+ * `metaField`'s blank test is not enough here, because a `cwd` is not just a
+ * non-empty string, it is a directory that has to be *found*. The matcher's
+ * first act is `path.resolve(cwd)` (`src/core/usage-policy/matcher.js`), which
+ * for a relative value silently supplies the **daemon's** process cwd as the
+ * base: a session that stated `../elsewhere` gets a confident `.hypignore`
+ * verdict governed by a file under wherever the daemon happens to run. Nothing
+ * on the line says what the value is relative to, and the rollout's own
+ * location cannot stand in either (rollouts live under
+ * `<CODEX_HOME>/sessions/YYYY/MM/DD/`, which is unrelated to where the session
+ * ran), so the base would have to be guessed. Rule 3 forbids guessing.
+ *
+ * Refusing costs the usual "no cwd" fail-open (the row records `cwd = NULL`,
+ * LLP 0049 R1 as extended by LLP 0085), which is a state the system already
+ * models. Accepting is wrong in both directions at once: it can drop a session
+ * no `.hypignore` covers, and - the failure this control exists to prevent - it
+ * can record a session whose real directory *is* ignored, because the verdict
+ * was computed for some other directory entirely. That asymmetry is the whole
+ * argument; it is the same defect shape as #459.
+ *
+ * Only `cwd` is path-tested. `threadId` / `sessionId` are opaque provider
+ * tokens with no path semantics (LLP 0066 R5).
+ *
+ * @ref LLP 0143#usable-cwd [implements]: a relative cwd is not a usable
+ * container, because resolving it means guessing a base
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+export function sessionMetaCwd(value) {
+  const cwd = metaField(value)
+  return cwd !== undefined && path.isAbsolute(cwd) ? cwd : undefined
 }

@@ -385,6 +385,48 @@ test('backfill is unaffected when a different cwd is ignored', async () => {
   }
 })
 
+test('a blank or relative rollout cwd never reaches the usage-policy gate', async () => {
+  // The backfill reads whole rollout files and folds `turn_context`, so it cannot
+  // delegate to the first-line reader - but it feeds `session.cwd` to the same
+  // `.hypignore` gate, so it shares the reader's one `cwd` predicate. A plain
+  // non-empty-string test would hand '   ' or '../elsewhere' to the matcher,
+  // whose `path.resolve` then answers about whatever directory `hyp backfill`
+  // was invoked from. "No usable cwd" must reach the gate as no cwd at all.
+  // @ref LLP 0143#usable-cwd [tests]: blank-and-relative means no cwd at the
+  // third site too, the one that cannot delegate
+  for (const unusable of ['   ', '../elsewhere', 'repo/sub']) {
+    const env = await stageEnv()
+    try {
+      const doc = modernConversation('sess-unusable')
+      doc.meta.cwd = unusable
+      // The `turn_context.cwd` fallback must not smuggle it back in either.
+      doc.turns[0].cwd = unusable
+      await writeModernRollout(env, '2026/05/25/rollout-1.jsonl', doc)
+
+      /** @type {unknown[]} */
+      const asked = []
+      const provider = createCodexBackfillProvider({
+        homeDir: env.homeDir,
+        resolver: {
+          resolve: (cwd) => {
+            asked.push(cwd)
+            return { class: 'full', governedBy: null, declared: null }
+          },
+          isIgnored: () => false,
+        },
+      })
+      const { ctx } = runContext()
+      const { items } = await collect(provider.run(ctx))
+
+      assert.deepEqual(asked, [], `cwd ${JSON.stringify(unusable)} must never be resolved as a path`)
+      assert.equal(items.length, 1, 'the session still backfills; only its cwd is unknown')
+      assert.ok(!value(items[0]).cwd, 'the row records no cwd, not a bogus one')
+    } finally {
+      await env.cleanup()
+    }
+  }
+})
+
 test('token_count event folds per-turn usage (net of cache) onto the turn assistant message', async () => {
   const env = await stageEnv()
   try {

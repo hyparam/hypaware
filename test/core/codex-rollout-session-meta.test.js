@@ -10,6 +10,7 @@ import {
   ROLLOUT_META_PREFIX_BYTES,
   parseRolloutSessionMeta,
   readRolloutSessionMeta,
+  sessionMetaCwd,
 } from '../../src/core/codex/rollout_session_meta.js'
 
 // The single enforcement point for the Codex `session_meta` header, which two
@@ -132,6 +133,50 @@ test('a field that survives the blank test is returned byte-identical', () => {
   assert.equal(meta.threadId, ' thread-abc ')
   assert.equal(meta.sessionId, 'Session-ABC ')
   assert.equal(meta.cwd, '/repo/with space/')
+})
+
+/* ------------------------------------------------------------------ */
+/* Rule 3 for cwd: a relative path has no base, so it is no container  */
+/* ------------------------------------------------------------------ */
+
+test('a relative session_meta.cwd is no cwd, not a path resolved against the daemon', () => {
+  // The matcher's first act is `path.resolve(cwd)`, which for a relative value
+  // silently supplies the *daemon's* process cwd as the base, so the header's
+  // `../elsewhere` would yield a confident `.hypignore` verdict governed by a
+  // file under wherever the daemon was started - the #459 shape through a
+  // different field. Nothing on the line names the base, so there is none.
+  // @ref LLP 0143#usable-cwd [tests]: a relative cwd is refused, not guessed at
+  for (const relative of ['../elsewhere', './repo', 'repo', 'repo/sub', '   /repo']) {
+    const meta = parseRolloutSessionMeta(metaLine({ id: 'thread-abc', cwd: relative }))
+    assert.ok(meta, 'the envelope is still a session_meta header')
+    assert.equal(meta.cwd, undefined, `cwd ${JSON.stringify(relative)} must not resolve`)
+    assert.equal(meta.threadId, 'thread-abc', 'the id on the same line is unaffected')
+  }
+})
+
+test('an absolute cwd still resolves, and the ids are never path-tested', () => {
+  // The absoluteness test applies to `cwd` alone: `threadId` / `sessionId` are
+  // opaque provider tokens (LLP 0066 R5) and a uuid is not an absolute path, so
+  // path-testing them would refuse every real header.
+  const meta = parseRolloutSessionMeta(metaLine({
+    id: '019e60b5-1111-4222-8333-444455556666',
+    session_id: '019e60b5-9999-4222-8333-444455556666',
+    cwd: '/work/repo',
+  }))
+  assert.ok(meta)
+  assert.equal(meta.cwd, '/work/repo')
+  assert.equal(meta.threadId, '019e60b5-1111-4222-8333-444455556666')
+  assert.equal(meta.sessionId, '019e60b5-9999-4222-8333-444455556666')
+})
+
+test('sessionMetaCwd is the one cwd predicate, usable by a caller that cannot delegate', () => {
+  // Exported for the codex backfill, which reads whole rollout files and folds
+  // `turn_context`, so it cannot call the first-line reader but must still
+  // answer "is this a usable container?" the same way.
+  assert.equal(sessionMetaCwd('/work/repo'), '/work/repo')
+  for (const bad of ['../elsewhere', 'repo', '', '   ', '\t\n', 42, null, undefined, {}, []]) {
+    assert.equal(sessionMetaCwd(bad), undefined, `${JSON.stringify(bad)} is not a usable cwd`)
+  }
 })
 
 /* ------------------------------------------------------------------ */
