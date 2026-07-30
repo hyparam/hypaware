@@ -16,6 +16,15 @@ import { getLogger } from '../observability/logger.js'
 export const PATH_CASE_PROBE_ERROR_KIND = 'path_case_probe_failed'
 
 /**
+ * `error_kind` for an alias identity check ({@link sameDirectoryOnDisk}) that
+ * could not reach a definite answer, because one of the two spellings could not
+ * be `stat`ed. Never fatal: an unproven alias is treated as "two different
+ * directories", which is the pre-fold behaviour, so a failed check can only
+ * lose reach the fold would have added and never widen a deletion.
+ */
+export const PATH_ALIAS_PROBE_ERROR_KIND = 'path_alias_probe_failed'
+
+/**
  * Short one-way digest of a path, so a fold decision or a skipped probe is
  * diagnosable (which path, how often, which errno) without dev telemetry ever
  * carrying a raw local path. Same discipline as the `usage_policy.export_drop`
@@ -79,6 +88,64 @@ function errnoOf(err) {
 export function foldPath(p, { caseInsensitive = false } = {}) {
   const nfc = p.normalize('NFC')
   return caseInsensitive ? nfc.toLowerCase() : nfc
+}
+
+/**
+ * True when `a` and `b` are the **same directory**, proven by `dev`/`ino`
+ * identity rather than asserted by any rule about strings.
+ *
+ * This is the same identity test {@link createVolumeCaseProbe} uses, applied to
+ * the actual pair of spellings in question instead of to a synthesized one. The
+ * difference matters wherever widening a match is **not** free. A per-volume
+ * verdict says "this volume folds case", from which a caller still has to
+ * *infer* that two particular spellings name one directory; that inference is
+ * sound only as far as the probe's assumptions reach (the probed volume is the
+ * one both spellings live on, the volume's rule is the one the fold models).
+ * Comparing the two spellings directly needs no inference: equal `dev`/`ino` is
+ * the filesystem stating that they are one directory, on whatever volume and by
+ * whatever mechanism, so a caller that widens only on a `true` here cannot
+ * widen onto a directory the user did not name. `hyp purge` is that caller
+ * (LLP 0104 §spellings): in a deletion predicate a wrong widening destroys data,
+ * so the fold may only ever *propose* a spelling and the filesystem decides.
+ *
+ * Never throws. A spelling that cannot be `stat`ed (the usual reason: the
+ * directory no longer exists, which is routine for a recorded `cwd`) is not the
+ * same directory as anything, which is the conservative answer in both
+ * directions of a deletion.
+ *
+ * `statSync` follows symlinks, so this also answers `true` for a symlink
+ * spelling; that overlaps `canonicalSpellings` and costs nothing.
+ *
+ * @ref LLP 0050#normalization [implements]: the fold proposes an alias, `dev`/`ino` identity disposes, so widening a deletion is not a guess
+ * @param {string} a absolute path
+ * @param {string} b absolute path
+ * @param {{ statSync?: (p: string) => { dev: number, ino: number }, logSkip?: (name: string, fields?: Record<string, unknown>) => void }} [deps]
+ * @returns {boolean}
+ */
+export function sameDirectoryOnDisk(a, b, { statSync = nodeFs.statSync, logSkip } = {}) {
+  if (a === b) return true
+  /** @type {{ dev: number, ino: number }} */
+  let statA
+  /** @type {{ dev: number, ino: number }} */
+  let statB
+  try {
+    statA = statSync(a)
+    statB = statSync(b)
+  } catch (err) {
+    const emit = logSkip ?? defaultLogSkip
+    emit('usage_policy.alias_probe_skipped', {
+      [Attr.COMPONENT]: 'usage-policy',
+      [Attr.OPERATION]: 'alias_probe',
+      [Attr.STATUS]: 'skipped',
+      [Attr.ERROR_KIND]: PATH_ALIAS_PROBE_ERROR_KIND,
+      reason: 'stat_failed',
+      errno: errnoOf(err),
+      path_hash: hashPath(a),
+      other_path_hash: hashPath(b),
+    })
+    return false
+  }
+  return statA.dev === statB.dev && statA.ino === statB.ino
 }
 
 /**
