@@ -69,7 +69,7 @@ export async function runAttach(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach routes through the one core undo via the clientDescriptor, not a per-adapter detach()
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach routes through the one core undo via the clientDescriptor, not a per-adapter detach()
  */
 export async function runDetach(argv, ctx) {
   return runClientLifecycle('detach', argv, ctx)
@@ -215,7 +215,7 @@ async function runClientLifecycle(action, argv, ctx) {
             // it - guarded by a daemon-liveness check - instead of guessing or
             // reporting the internal endpoint error.
             // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context: manual attach without a configured listen defers to the daemon; probe disk, don't guess a port
-            // @ref LLP 0086#manual-attach-reads-the-live-port [implements] — hyp attach falls back to status.json sources[].details.port before giving up
+            // @ref LLP 0086#manual-attach-reads-the-live-port [implements]: hyp attach falls back to status.json sources[].details.port before giving up
             const stateRoot = readObservabilityEnv(ctx.env).stateDir
             const liveEndpoint = resolveLiveGatewayEndpointFromStatus({ stateRoot })
             descriptorMap ??= await buildClientDescriptorMap(ctx)
@@ -230,7 +230,7 @@ async function runClientLifecycle(action, argv, ctx) {
             // existence (#277). When no live endpoint is discoverable (daemon
             // not running) keep the pre-#277 behavior - a present marker is a
             // no-op success, an absent one the actionable error.
-            // @ref LLP 0086#already-attached-validates-the-live-port [implements] — the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
+            // @ref LLP 0086#already-attached-validates-the-live-port [implements]: the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
             const livePort = portFromEndpoint(liveEndpoint)
             const alreadyCurrent =
               probe.attached === true &&
@@ -398,7 +398,7 @@ async function materializeAttachAssets({ name, descriptorMap, ctx, dryRun, json 
  *   ctx: CommandRunContext,
  * }} args
  * @returns {Promise<void>}
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach is the disk-driven core undo, resolved via the clientDescriptor; one undo, shared with the reconciler reverse()
  */
 export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx }) {
   if (!descriptor) {
@@ -470,7 +470,7 @@ export async function detachClientViaCore({ name, descriptor, dryRun, json, ctx 
         // `hyp join`'s forward gap short-circuits on it and never re-attaches the
         // client (#217). Best-effort: a marker we cannot retract is a status
         // blemish, not a detach failure (the settings undo already landed).
-        // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
+        // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker via the one core undo's store (probe-less keeps it, like reverse()), so CLI and reconciler reverse cannot drift (#212/#217)
         //
         // The skills and subagents an org-driven attach installed come off its
         // marker, and the retraction below clears that marker, so they have to

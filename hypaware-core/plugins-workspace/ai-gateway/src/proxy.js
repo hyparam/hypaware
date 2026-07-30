@@ -108,7 +108,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   const requestUrl = req.url ?? '/'
   const parsedUrl = new URL(requestUrl, 'http://placeholder')
 
-  // @ref LLP 0066#control-path [implements] — the reserved `/_hypaware/`
+  // @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`
   // prefix is a LOCAL control surface: handled in-process, never matched
   // against upstreams, never proxied, and it starts NO exchange (no
   // `startExchange`, no row). Checked BEFORE matchUpstream so a catch-all

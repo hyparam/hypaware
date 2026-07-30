@@ -1609,7 +1609,7 @@ export interface AiGatewayEndpointOptions {
  * through, so there is no per-adapter detach for the one undo to drift
  * from.
  *
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by] — AiGatewayClientRegistration.detach is retired; the sole undo lives in core
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
  */
 export interface AiGatewayClientRegistration {
   name: string

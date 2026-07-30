@@ -165,7 +165,7 @@ export function createUsagePolicyResolver({
    * re-reading and re-parsing the list file at most once per `ttlMs` window
    * (independent of how many distinct `cwd`s are resolved in that window). A
    * missing file is "no exclusions" (`[]`); a present-but-unparseable file
-   * throws — the same fail-safe the store (`local_only.js`) applies, so a
+   * throws, matching the fail-safe the store (`local_only.js`) applies, so a
    * corrupt list fails the caller loudly rather than silently resolving to
    * "nothing excluded" (LLP 0080 #fail-safe). When more than one entry
    * governs `cwd` (nested entries), the most specific (longest `dir`) wins,

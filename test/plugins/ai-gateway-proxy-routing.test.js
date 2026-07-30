@@ -178,7 +178,7 @@ test('pathMatchesPrefix: catch-all root, exact, segment, and non-match', () => {
 })
 
 test('a /_hypaware/* control request is handled locally: not forwarded to a catch-all upstream and starts no exchange (R2)', async () => {
-  // @ref LLP 0066#control-path [tests] — the control short-circuit runs BEFORE
+  // @ref LLP 0066#control-path [tests]: the control short-circuit runs BEFORE
   // matchUpstream, so even a catch-all (`/`) upstream cannot leak a control
   // request to a provider, and no exchange is recorded for it.
   let upstreamHit = false
@@ -247,7 +247,7 @@ test('a /_hypaware/* control request is handled locally: not forwarded to a catc
 })
 
 test('R2 proxy edge cases: query string and trailing slash stay local; a look-alike path is proxied', async () => {
-  // @ref LLP 0066#control-path [tests] — R2 edge cases end-to-end through
+  // @ref LLP 0066#control-path [tests]: R2 edge cases end-to-end through
   // startProxy with a catch-all (`/`) upstream registered, asserting via
   // which side actually served the request (the control router vs the
   // upstream stub), not just status codes.

@@ -498,7 +498,7 @@ test('session_id is the partition key; conversation_id is null for Claude, the t
 })
 
 test('dispatcher threads a working isSessionIgnored predicate into the projector ctx', async () => {
-  // @ref LLP 0066#enforcement [tests] — the gateway hands the adapter a
+  // @ref LLP 0066#enforcement [tests]: the gateway hands the adapter a
   // read-only membership test against its ignored-session set; the adapter
   // (not the gateway) does the drop. Here we only assert the predicate reaches
   // the projector ctx and answers correctly.

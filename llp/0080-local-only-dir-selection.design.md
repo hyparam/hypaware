@@ -10,14 +10,14 @@
 
 > Buildable design for the interactive `local-only` directory selection at
 > enrollment.
-> `@ref LLP 0069 [implements]` — realizes the spec (picker, machine-local list,
+> `@ref LLP 0069 [implements]`: realizes the spec (picker, machine-local list,
 > export-seam withholding; R1–R9).
-> `@ref LLP 0070 [constrained-by]` — `local-only` is enforced at the shared export
+> `@ref LLP 0070 [constrained-by]`: `local-only` is enforced at the shared export
 > read (`storage.readRowsSince`), derived from each row's `cwd`; no cache-schema
 > change; the cursor advances across dropped rows.
-> `@ref LLP 0071 [constrained-by]` — the list is one machine-local file under
+> `@ref LLP 0071 [constrained-by]`: the list is one machine-local file under
 > `HYP_HOME` state, never a repo dotfile and never layered/central config.
-> `@ref LLP 0072 [constrained-by]` — the picker is a skippable, TTY-gated,
+> `@ref LLP 0072 [constrained-by]`: the picker is a skippable, TTY-gated,
 > post-enrollment refinement that defaults to excluding nothing; never a consent
 > gate.
 >
@@ -96,8 +96,8 @@ Per [LLP 0070 §resolver](./0070-local-only-export-seam.decision.md#resolver),
 not duplicated:
 
 ```js
-// @ref LLP 0070#resolver [implements] — one shared resolver, two sources, most-restrictive class wins
-// @ref LLP 0071 [implements] — the machine-local list is the second source
+// @ref LLP 0070#resolver [implements]: one shared resolver, two sources, most-restrictive class wins
+// @ref LLP 0071 [implements]: the machine-local list is the second source
 createUsagePolicyResolver({ readFileSync, existsSync, now, ttlMs, localOnlyListPath })
 ```
 
@@ -136,7 +136,7 @@ so every kernel boot enforces the policy without per-caller opt-in. Inside
 `readRowsSince`:
 
 ```js
-// @ref LLP 0070#enforce [implements] — per-row export filter, derived from the row's cwd at export time
+// @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's cwd at export time
 // @ref LLP 0069#enforce [implements]
 const cwd = row.cwd
 if (typeof cwd === 'string' && cwd !== '' && resolver.resolve(cwd).class !== 'full') {
@@ -191,7 +191,7 @@ load-bearing).
 `forwardPartition` (`hypaware-core/plugins-workspace/central/src/sink.js:306`):
 
 ```js
-// @ref LLP 0070#incremental [constrained-by] — the cursor advances across dropped rows
+// @ref LLP 0070#incremental [constrained-by]: the cursor advances across dropped rows
 for await (const entry of storage.readRowsSince(tablePath, { since, includeLegacy })) {
   lastAfter = entry.after
   if (entry.dropped) { droppedRowCount += 1; continue }
@@ -249,7 +249,7 @@ New module `src/core/commands/local_only.js` (sibling of
 pattern):
 
 ```js
-// @ref LLP 0069#enumerate [implements] — distinct captured cwds, local cache only
+// @ref LLP 0069#enumerate [implements]: distinct captured cwds, local cache only
 export async function listCapturedDirectories({ query, storage, config })
 ```
 
@@ -314,8 +314,8 @@ Running before the fork also covers the already-enrolled re-login (R1: "or
 already targets a central sink"), where it acts as a convenient list editor.
 
 ```js
-// @ref LLP 0069#trigger [implements] — picker after credential, before enrollCentralSink
-// @ref LLP 0072 [implements] — skippable post-enrollment refinement, never a consent gate
+// @ref LLP 0069#trigger [implements]: picker after credential, before enrollCentralSink
+// @ref LLP 0072 [implements]: skippable post-enrollment refinement, never a consent gate
 await runLocalOnlyPicker({ ctx, stateDir })
 ```
 

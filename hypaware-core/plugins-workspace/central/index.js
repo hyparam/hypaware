@@ -68,7 +68,7 @@ export async function activate(ctx) {
       // `createInstanceWatermarkStore` namespaces by the instance name, matching
       // local-fs/s3. Each forward instance then reads only rows added since its
       // own last successful export.
-      // @ref LLP 0040#watermark-contract [implements] — one watermark per (sink instance, partition), scoped by instance name
+      // @ref LLP 0040#watermark-contract [implements]: one watermark per (sink instance, partition), scoped by instance name
       const watermarks = createInstanceWatermarkStore({ paths: sinkCtx.paths, instanceName: sinkCtx.name })
 
       const sink = createForwardSink({

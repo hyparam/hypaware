@@ -789,7 +789,7 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   // status can never disagree with `action_attach.js` about what a block means.
   // The default-on case is gated on `hasCentral` for the same V1-surface reason
   // as backfill: a bare local claude/codex install shows nothing.
-  // @ref LLP 0044#status-surface [implements] — per-client done/failed/pending/n-a; `on_join:false` or non-joined → n/a, never degrading
+  // @ref LLP 0044#status-surface [implements]: per-client done/failed/pending/n-a; `on_join:false` or non-joined → n/a, never degrading
   /** @type {Map<string, PluginConfigInstance>} */
   const enabledByPlugin = new Map()
   for (const entry of config?.plugins ?? []) {

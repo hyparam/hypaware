@@ -142,7 +142,7 @@ export async function attach(opts) {
   // over it. A first attach backs up whatever was live. Presence again:
   // attach only ever writes the field when there was something to record, so
   // the field being there is the fact, and `null` is a value we must give back.
-  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by] — the marker IS the backup restored on leave
+  // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
   const prevBaseUrl = priorMarker
     ? (Object.hasOwn(priorMarker, 'prev_base_url') ? priorMarker.prev_base_url : undefined)
     : liveBaseUrl
@@ -167,7 +167,7 @@ export async function attach(opts) {
   // to restore-or-remove `env.ANTHROPIC_BASE_URL`, remove the managed env keys
   // we added, strip the managed hook entries, and delete the marker without
   // loading this plugin, leaving no orphaned `hyp claude-hook` entries.
-  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — claude marker records prev_base_url + managed env/hook entries
+  // @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: claude marker records prev_base_url + managed env/hook entries
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,

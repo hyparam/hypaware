@@ -514,7 +514,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // the enrollment notice would be noise. Enrolled to a *different* server (and
   // not this one) means reject before the browser opens so no auth is wasted:
   // switching is 'hyp leave' then log in again, never one command.
-  // @ref LLP 0063#d4 [implements]: pre-auth exclusivity gate — reject a login to a new server while enrolled elsewhere
+  // @ref LLP 0063#d4 [implements]: pre-auth exclusivity gate, rejecting a login to a new server while enrolled elsewhere
   const targetOrigin = originOf(entry.url)
   const connectedOrigins = await readCentralSinkOrigins({ stateDir, configPath: localConfigPath(ctx) })
   const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
