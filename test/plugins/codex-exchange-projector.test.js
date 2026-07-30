@@ -234,7 +234,7 @@ test('project() emits a usage_policy_drop log with policy_source: session_opt_ou
 })
 
 test('the session opt-out drop is also visible through the gateway message-projector dispatcher (parity with Claude)', async () => {
-  // @ref LLP 0066#requirements [tests] — R8/parity: the Claude adapter proves
+  // @ref LLP 0066#requirements [tests]: R8/parity: the Claude adapter proves
   // its ignored-session drop through createAiGatewayMessageProjector /
   // projectViaGateway returning `[]` (claude-usage-policy-drop.test.js). This
   // proves the same shape for Codex: the drop must be visible at the seam

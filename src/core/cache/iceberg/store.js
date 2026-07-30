@@ -481,7 +481,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * filter as the fallback; a future null-aware icebird filter can layer the
  * file-skip optimization on top without changing this contract.
  *
- * @ref LLP 0040#storage-api-extension [implements] — since-filtered incremental scan; null-seq new on first export, then excluded
+ * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
  * @param {{ since?: bigint, includeLegacy?: boolean }} [opts]

@@ -8,9 +8,9 @@
 **Related:** LLP 0066, LLP 0049, LLP 0050, LLP 0051, LLP 0052
 
 > Buildable design for the ephemeral per-session opt-out.
-> @ref LLP 0066 [implements] — realizes the session-opt-out spec (control route + session_id drop).
-> @ref LLP 0050 [constrained-by] — the drop lives in the client adapters; the gateway stays provider-agnostic.
-> @ref LLP 0051 [constrained-by] — promotes the deferred session-opt-out sketch into a built design.
+> @ref LLP 0066 [implements]: realizes the session-opt-out spec (control route + session_id drop).
+> @ref LLP 0050 [constrained-by]: the drop lives in the client adapters; the gateway stays provider-agnostic.
+> @ref LLP 0051 [constrained-by]: promotes the deferred session-opt-out sketch into a built design.
 >
 > Satisfies [issue #220](https://github.com/hyparam/hypaware/issues/220): the
 > `hypaware-ignore` skill's endpoint is finally served. The skill
@@ -43,7 +43,7 @@ provider. So the control check must run **before** upstream matching (R2).
 `proxy.js handleRequest` gains a short-circuit at the top:
 
 ```js
-// @ref LLP 0066#control-path [implements] — the reserved /_hypaware/ prefix is
+// @ref LLP 0066#control-path [implements]: the reserved /_hypaware/ prefix is
 // a LOCAL control surface: handled in-process, never matched against upstreams,
 // never proxied. Checked BEFORE matchUpstream so a catch-all upstream cannot
 // leak a control request to a provider.
@@ -109,7 +109,7 @@ transitions (restart, changed session id) from silent into detectable.
 
 ```js
 // api.js createGatewayState() — one per plugin activation (index.js activate())
-// @ref LLP 0066#ephemeral — in-memory only: no file, no cache column; dies with
+// @ref LLP 0066#ephemeral: in-memory only: no file, no cache column; dies with
 // the daemon process. Lives on GatewayState (NOT per-listener) so a config
 // reload() — which tears down and relaunches the listener (source.js) — does
 // not silently re-enable recording mid-session.
@@ -167,12 +167,12 @@ exchange does no fs work:
 
 ```js
 const sessionId = resolveClaudeSessionId(reqBody, headers)
-// @ref LLP 0066#enforcement [implements] — session opt-out drop, keyed on the
+// @ref LLP 0066#enforcement [implements]: session opt-out drop, keyed on the
 // SAME resolved session_id the row is stamped with (R5): when present,
 // resolveAnthropicConversationId returns exactly this value as the session_id
 // column, and the hash fallback it uses otherwise can never be in the set (the
 // skill only ever submits a real CLAUDE_CODE_SESSION_ID).
-// @ref LLP 0050 — second match key, same adapter seam as the .hypignore drop.
+// @ref LLP 0050: second match key, same adapter seam as the .hypignore drop.
 if (sessionId && ctx.isSessionIgnored?.(sessionId)) {
   ctx.log.info('plugin.claude.usage_policy_drop', {
     component: 'claude',
@@ -199,7 +199,7 @@ so the `conversationId` / `sessionId` resolution **hoists above**
 stamped with (R5), next to the existing cwd check:
 
 ```js
-// @ref LLP 0066#enforcement [implements] — session opt-out drop. Keyed on the
+// @ref LLP 0066#enforcement [implements]: session opt-out drop. Keyed on the
 // stamped session_id (metadata.session_id ?? thread id). NOTE the documented
 // over-drop (LLP 0066#scope): one Codex session_id contains multiple
 // conversation_id threads, so an ignored session suppresses ALL of them.

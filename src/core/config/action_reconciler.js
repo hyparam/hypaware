@@ -84,7 +84,7 @@ export function createActionReconciler(opts) {
     // ("knows nothing about Claude vs Codex"); only a client handler
     // (`action_attach`) reads `clientDescriptors`/`clients`/`endpoint`. Absent
     // on a plain CLI boot, so any client handler stays inert.
-    // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements] — clientDescriptors/clients/endpoint live on the context, not a handler closure
+    // @ref LLP 0045#part-1--the-client-seam-in-the-reconcile-context [implements]: clientDescriptors/clients/endpoint live on the context, not a handler closure
     /** @type {ActionContext} */
     const ctx = {
       config: input.config,
@@ -133,7 +133,7 @@ export function createActionReconciler(opts) {
       // the gateway rebinds to a new ephemeral port: the marker is `done` but no
       // longer current (issue #277 / LLP 0086). Handlers without `isCurrent`
       // (backfill) keep the pure level-triggered short-circuit.
-      // @ref LLP 0086#re-attach-on-drift [implements] — a done marker the handler reports stale is a forward gap, not a permanent skip
+      // @ref LLP 0086#re-attach-on-drift [implements]: a done marker the handler reports stale is a forward gap, not a permanent skip
       for (const action of desired) {
         const existing = markers[action.requestKey]
         if (existing && existing.status === 'done' && markerIsCurrent(handler, existing, action, ctx)) {
@@ -450,7 +450,7 @@ export function readClientActionStatus({ stateRoot }) {
  *
  * @param {{ stateRoot: string, kind: string, requestKey: string, now?: () => number }} args
  * @returns {boolean} whether a marker was found and the store rewritten
- * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements] — manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
+ * @ref LLP 0045#part-3--reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [implements]: manual detach retracts its attach marker so the single core undo's two call sites (CLI + reconciler reverse) cannot drift; the marker never outlives its own effect being reversed (#217)
  */
 export function clearClientActionMarker({ stateRoot, kind, requestKey, now = Date.now }) {
   const controlDir = path.join(stateRoot, CONTROL_DIRNAME)

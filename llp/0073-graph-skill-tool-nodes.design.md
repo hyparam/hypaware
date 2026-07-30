@@ -20,26 +20,26 @@
 > tool nodes stop at the tool name: a `Program` node keyed on
 > `basename(argv[0])`, reached by an `invoked` edge.
 >
-> @ref LLP 0023#contract-contribution [constrained-by] — the new node/edge
+> @ref LLP 0023#contract-contribution [constrained-by]: the new node/edge
 > types arrive as contract rules in the `@hypaware/ai-gateway-graph` connector;
 > the engine and kit stay central and node-type-agnostic (one additive kit
 > widening, see §edge-props-kit).
-> @ref LLP 0030#decision [constrained-by] — both new edges root on the
+> @ref LLP 0030#decision [constrained-by]: both new edges root on the
 > `Session` node keyed on `session_id` (the always-present session container).
-> @ref LLP 0032#repo-commit-nodes — the additive node-type pattern these
+> @ref LLP 0032#repo-commit-nodes: the additive node-type pattern these
 > mirror: purely new rows, no migration; and the same fall-back-rather-than-
 > mis-key discipline (a value that can't be derived cleanly mints nothing).
-> @ref LLP 0074 [constrained-by] — Claude skill-activation signal: strict
+> @ref LLP 0074 [constrained-by]: Claude skill-activation signal: strict
 > three-surface union (marker + Skill tool + slash) with a built-in exclusion
 > list; loose matching rejected.
-> @ref LLP 0075 [constrained-by] — Codex skill activation: path-pattern match
+> @ref LLP 0075 [constrained-by]: Codex skill activation: path-pattern match
 > on the `exec_command` SKILL.md read; cannot share the Claude rule.
-> @ref LLP 0076 [constrained-by] — derive at projection time now; a
+> @ref LLP 0076 [constrained-by]: derive at projection time now; a
 > capture-side `skill_activated` event is the recorded future fix.
-> @ref LLP 0077 [constrained-by] — Program facet: validity-gated
+> @ref LLP 0077 [constrained-by]: Program facet: validity-gated
 > `basename(argv[0])` of the first command; subcommands and pipeline tails
 > deferred.
-> @ref LLP 0078 [constrained-by] — `dispatch_source` as per-surface boolean
+> @ref LLP 0078 [constrained-by]: `dispatch_source` as per-surface boolean
 > edge props, unioned deterministically by `mergeRow`.
 
 ## Overview
@@ -328,19 +328,19 @@ headline queries**, not new surface.
 ## @ref annotations the code will carry {#code-refs}
 
 - `graph_contract.js`, above the Claude skill rules:
-  `// @ref LLP 0073#claude-skill-derivation [implements] — three-surface union; strict role/part_type/offset-0 filters (LLP 0074)`
+  `// @ref LLP 0073#claude-skill-derivation [implements]: three-surface union; strict role/part_type/offset-0 filters (LLP 0074)`
 - `graph_contract.js`, above the Codex skill rule:
-  `// @ref LLP 0073#codex-skill-derivation [implements] — path-pattern on the exec_command SKILL.md read; Codex shares no Claude signal (LLP 0075)`
+  `// @ref LLP 0073#codex-skill-derivation [implements]: path-pattern on the exec_command SKILL.md read; Codex shares no Claude signal (LLP 0075)`
 - `graph_contract.js`, above the Program rules:
-  `// @ref LLP 0077#decision [implements] — Program = validity-gated basename(argv[0]) of the first command; fail-closed`
+  `// @ref LLP 0077#decision [implements]: Program = validity-gated basename(argv[0]) of the first command; fail-closed`
 - `tool_facets.js`, above `programFrom`:
-  `// @ref LLP 0073#program-derivation [implements] — first-segment argv[0] extraction; quote-blind split is safe because only the segment head is consumed`
+  `// @ref LLP 0073#program-derivation [implements]: first-segment argv[0] extraction; quote-blind split is safe because only the segment head is consumed`
 - `tool_facets.js`, above the validity gates:
-  `// @ref LLP 0073#boundedness-contract [constrained-by] — a tool_args facet may key a node only if deterministically bounded; fail closed`
+  `// @ref LLP 0073#boundedness-contract [constrained-by]: a tool_args facet may key a node only if deterministically bounded; fail closed`
 - `tool_facets.js`, above `CLAUDE_BUILTIN_COMMANDS`:
-  `// @ref LLP 0074#builtin-exclusion [constrained-by] — <command-name> conflates built-ins with skills; static list, drift accepted until the capture-side signal (LLP 0076)`
+  `// @ref LLP 0074#builtin-exclusion [constrained-by]: <command-name> conflates built-ins with skills; static list, drift accepted until the capture-side signal (LLP 0076)`
 - `contract-kit.js`, above the `buildEdge` props handling:
-  `// @ref LLP 0078#decision [implements] — additive edge props; dispatch flags union via mergeRow, ids unaffected`
+  `// @ref LLP 0078#decision [implements]: additive edge props; dispatch flags union via mergeRow, ids unaffected`
 
 ## Test plan {#test-plan}
 

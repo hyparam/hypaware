@@ -166,7 +166,7 @@ export function createAiGatewayGraphContract(kit) {
     // the two busy shell tools. The raw command string is unbounded (~1,433
     // distinct for 1,568 Codex calls) and stays in ai_gateway_messages; only the
     // bounded program facet (~29 distinct) becomes a node.
-    // @ref LLP 0077#decision [implements] — Program = validity-gated
+    // @ref LLP 0077#decision [implements]: Program = validity-gated
     // basename(argv[0]) of the first command; fail-closed (mint nothing rather
     // than mis-key). Extraction lives in `tool_facets.js`.
     {
@@ -241,7 +241,7 @@ export function createAiGatewayGraphContract(kit) {
     // `Skill` tool, no `<command-name>` tag), so its activation trace is a
     // plain shell read of the SKILL.md — an `exec_command` whose command
     // string matches `.codex/skills/<name>/SKILL.md`.
-    // @ref LLP 0073#codex-skill-derivation [implements] — path-pattern on the
+    // @ref LLP 0073#codex-skill-derivation [implements]: path-pattern on the
     // exec_command SKILL.md read; Codex shares no Claude signal (LLP 0075).
     {
       kind: 'node',
@@ -360,7 +360,7 @@ export function createAiGatewayGraphContract(kit) {
     // distinct from the skills' `ran` (issue #230 vs #229). The Program endpoint
     // is keyed identically to the Program node rule, so the edge always lands on
     // a node that rule mints. No props (unlike `ran`).
-    // @ref LLP 0077#decision [implements] — validity-gated basename(argv[0]); fail-closed.
+    // @ref LLP 0077#decision [implements]: validity-gated basename(argv[0]); fail-closed.
     {
       kind: 'edge',
       type: 'invoked',

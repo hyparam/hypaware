@@ -37,7 +37,7 @@ const NEGATIVE_CACHE_TTL_MS = 5_000
  * session start, for both auth modes — the same value the codex backfill reads.
  * This resolver gives the live projector that fallback, so folder coverage is
  * client-independent and live rows carry the cwd backfill already sees.
- * @ref LLP 0083 [implements] — rollout is the live cwd fallback for Codex
+ * @ref LLP 0083 [implements]: rollout is the live cwd fallback for Codex
  *
  * A resolved cwd is cached per session id for the session's life; a miss is
  * cached only briefly (`NEGATIVE_CACHE_TTL_MS`) so a not-yet-written or
@@ -65,7 +65,7 @@ export function createRolloutCwdResolver(opts) {
       // A resolved cwd is trusted for the session's life (Infinity); a miss is
       // trusted only for the TTL, so a transient miss is re-resolved instead of
       // becoming a permanent NULL cwd (which fails `.hypignore` open).
-      // @ref LLP 0083 [constrained-by] — a transient miss must not fix the cwd at NULL for the session's life
+      // @ref LLP 0083 [constrained-by]: a transient miss must not fix the cwd at NULL for the session's life
       cache.set(sessionId, { cwd, expiresAt: cwd === undefined ? now() + ttlMs : Infinity })
       return cwd
     },

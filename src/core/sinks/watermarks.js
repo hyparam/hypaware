@@ -60,7 +60,7 @@ function sanitizeSegment(value, field) {
  * deterministically. A partition with no segments below the dataset falls back
  * to the `_partition` sentinel so it still gets a single stable file.
  *
- * @ref LLP 0040#watermark-contract [implements] — key by stable logical partition path, never tableDir
+ * @ref LLP 0040#watermark-contract [implements]: key by stable logical partition path, never tableDir
  * @param {string} cacheRoot
  * @param {string} tablePath logical partition path (`partition.tablePath`)
  * @returns {SinkWatermarkKey}
@@ -159,7 +159,7 @@ function parseRecord(raw) {
  * **ship/PUT first, advance watermark second** invariant lives in the sink
  * wiring (T4/T5), where a crash between the two re-exports a bounded suffix.
  *
- * @ref LLP 0040#watermark-contract [implements] — persisted per-(sink, partition) watermark, atomic write-rename
+ * @ref LLP 0040#watermark-contract [implements]: persisted per-(sink, partition) watermark, atomic write-rename
  * @param {{ stateDir: string }} opts
  * @returns {SinkWatermarkStore}
  */

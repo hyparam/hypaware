@@ -207,7 +207,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const tablePath = partition.tablePath
   await flushPartition(storage, tablePath, 'sink_export')
 
-  // @ref LLP 0040#watermark-contract [implements] — load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip.
+  // @ref LLP 0040#watermark-contract [implements]: load the per-(sink instance, partition) watermark so this tick reads only rows added since the last durable export; a missing/unreadable watermark reads from the start (at-least-once + server dedup), never a silent skip.
   /** @type {SinkContinuation | undefined} */
   let since
   /** @type {SinkWatermarkKey | undefined} */
@@ -258,7 +258,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   const flushChunk = async () => {
     if (lines.length === 0) return
     const body = lines.join('\n') + '\n'
-    // @ref LLP 0040#applying-it-to-both-sinks [implements] — stable per-chunk batch id keyed by the chunk's start seq, so a post-watermark-advance respool reproduces the same id and the server ledger dedupes.
+    // @ref LLP 0040#applying-it-to-both-sinks [implements]: stable per-chunk batch id keyed by the chunk's start seq, so a post-watermark-advance respool reproduces the same id and the server ledger dedupes.
     const batchId = batchIdForChunk(signal, tablePath, chunkStartSeq, body)
     const bytes = Buffer.byteLength(body, 'utf8')
     const rows = lines.length
@@ -298,7 +298,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     pendingBytes = 0
   }
 
-  // @ref LLP 0040#storage-api-extension [implements] — pre-upgrade null-seq rows
+  // @ref LLP 0040#storage-api-extension [implements]: pre-upgrade null-seq rows
   // are "new" only on a sink with no durable watermark (export the backlog once);
   // once a watermark exists they are already shipped, so exclude them and the
   // legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
@@ -308,7 +308,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // across them.
   let droppedRowCount = 0
   for await (const entry of storage.readRowsSince(tablePath, { since, includeLegacy })) {
-    // @ref LLP 0070#incremental [constrained-by] — advance the cursor across every
+    // @ref LLP 0070#incremental [constrained-by]: advance the cursor across every
     // entry, including a dropped (withheld) row, so a partition tail of
     // local-only rows checkpoints once and is durably passed (not re-scanned, not
     // re-sent on un-exclusion). Ship-first/advance-second is unchanged: a dropped
@@ -329,7 +329,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   }
   await flushChunk()
 
-  // @ref LLP 0040#watermark-contract [implements] — ship first, advance second,
+  // @ref LLP 0040#watermark-contract [implements]: ship first, advance second,
   // but advance ONLY at end-of-partition (like the blob sink). Every chunk is
   // acked by the time we reach here (a failed POST throws out of flushChunk
   // before this), so persisting the partition's high-water `after` can never
@@ -338,7 +338,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // server ledger dedupes the already-acked prefix. Advancing per chunk to the
   // running-max `after` would skip lower-seq rows in a later un-acked chunk
   // whenever the scan is not seq-ordered (LLP 0040 §4 risk #3).
-  // @ref LLP 0070#incremental [constrained-by] — widen the gate so a tick that
+  // @ref LLP 0070#incremental [constrained-by]: widen the gate so a tick that
   // only dropped rows (shipped nothing) still checkpoints: otherwise a partition
   // ending in a run of local-only rows would never advance past them and every
   // tick would re-scan-and-re-drop the same tail forever. `exportedRowCount`

@@ -17,12 +17,16 @@ Invoke as:
 
 Per LLP 0000, the reference syntax is:
 
+<!-- ref-check:ignore-start illustrative syntax, not live annotations -->
+
 ```
 @ref LLP NNNN#anchor: gloss
 @ref LLP NNNN#anchor [relation]: gloss
 @ref LLP NNNN: gloss
 @ref path/to/doc.md#anchor: gloss
 ```
+
+<!-- ref-check:ignore-end -->
 
 Where:
 
@@ -70,6 +74,19 @@ Capture for each:
 - Relation: `implements`, `constrained-by`, etc., if any
 - Gloss: the human-readable summary, if any
 
+**Skip the annotations that are illustrations rather than data.** Documentation about the annotation syntax (this file, `ref-story`, an LLP that shows the form it is minting) has to spell out `@ref` targets that are deliberately fictional. Extracting them makes the checker permanently non-zero on a clean corpus, which is worse than not checking at all, so two markers suppress extraction:
+
+- `ref-check:ignore` on the line suppresses that one line.
+- `ref-check:ignore-start` opens a suppressed region and `ref-check:ignore-end` closes it. The markers go outside the fence when the region is a fenced block, both so they do not render as part of the example and because a marker inside a fence does not count.
+
+A marker counts only when it is **a comment in the language of the file it sits in** and **not inside a code sample**. In Markdown that means an HTML comment, `<!-- ... -->`, invisible in a rendered view; in a source file it means `//`, `/*` or a JSDoc `*` continuation, or `#` where that is the comment. A marker does not count inside an inline code span, inside a fenced block, or on a line indented four spaces or more, all of which are how a document shows a sample rather than makes a statement.
+
+Those conditions are the whole reason this section can explain the mechanism without arming it. Markdown has no comment character other than `<!--`: a leading `*` is a bullet and a leading `#` is a heading, so a prose list that names `ref-check:ignore-start` would otherwise open a real region and quietly unpolice everything down to the next `ignore-end`, which is exactly the failure this marker is warned against.
+
+The markers suppress *extraction*, so a suppressed annotation is reported nowhere and counted nowhere: keep the regions as tight as the examples they cover, or a live annotation will go unchecked. Both citation forms are covered, `LLP NNNN#anchor` and `path/to/doc.md#anchor` alike, because the suppression is keyed on the line and not on the target.
+
+Suppression is itself reviewable: the `llp-ref-hygiene` test fails on a marker in any file outside the enumerated syntax documentation, and on any region that does not pair, whether it is opened and never closed, closed without being opened, or opened while another is still open. A new suppression therefore has to appear in a diff as an edit to that list, not as one quiet line, and the lines a region covers are the same lines its author can see it covering.
+
 ### 3. Build the LLP index
 
 Scan `llp/` (and any other configured LLP trees) for all documents. For each, extract:
@@ -85,7 +102,7 @@ Build a map from `(LLP number) → (file path, title, {anchor: heading text})`.
 
 For each reference:
 
-**LLP reference (`@ref LLP 0042#anchor`):**
+**LLP reference (`@ref LLP 0042#anchor`):** <!-- ref-check:ignore -->
 
 - **Does LLP 0042 exist?** If not, report the reference as `BROKEN: LLP 0042 does not exist`.
 - **If an anchor is specified, does the anchor exist in LLP 0042?** If not, report as `BROKEN: LLP 0042 has no section "anchor"`. Include the list of sections that do exist in the error output so the user can pick a replacement.
@@ -93,7 +110,7 @@ For each reference:
 - **Is the LLP superseded?** If yes, report as `WARNING: references superseded LLP 0042 (superseded by LLP NNNN if the header says so)`.
 - **Does the gloss match the LLP's actual content?** This is a soft check. If the LLP's section anchor text doesn't resemble the gloss at all, report as `HINT: gloss may be out of date`. Don't block on this; just inform.
 
-**Path reference (`@ref docs/vendor/spec.md#tokens`):**
+**Path reference (`@ref docs/vendor/spec.md#tokens`):** <!-- ref-check:ignore -->
 
 - **Does the file exist?** If not, report as `BROKEN: file docs/vendor/spec.md does not exist`.
 - **If an anchor is specified, does the heading exist?** Same check as LLP references.
@@ -105,6 +122,8 @@ For each reference:
 ### 5. Report findings
 
 Group the output by severity:
+
+<!-- ref-check:ignore-start illustrative report, not live annotations -->
 
 ```
 ref-check found 47 references in 23 files.
@@ -129,6 +148,8 @@ Summary:
   Hints: 5
   Clean: 37
 ```
+
+<!-- ref-check:ignore-end -->
 
 ### 6. Optional: fix mode
 
