@@ -36,9 +36,45 @@ const REF_PATTERN = /@ref\s+(?:LLP\s+(\d{1,4})|([\w./-]+\.md))(#[A-Za-z0-9_-]+)?
 // Illustrative annotations inside the LLP tooling's own documentation cite
 // deliberately fictional targets: correct as documentation, wrong as data, which
 // is why they are marked rather than repointed at a real section or deleted.
-const IGNORE_LINE = 'ref-check:ignore'
-const IGNORE_START = 'ref-check:ignore-start'
-const IGNORE_END = 'ref-check:ignore-end'
+//
+// A marker counts only when it is written as a comment (`<!-- ... -->` in
+// Markdown, `//` / `/*` / a JSDoc `*` continuation, `#` elsewhere) and not
+// inside an inline code span. Without both conditions the prose that documents
+// the markers activates them: the `ref-check` skill's own explanation of
+// `ignore-start` would open a region and leave the rest of that section
+// unpoliced, which is the exact failure the marker is warned against. The gap is
+// bounded rather than `*`-quantified so that this pattern does not match its own
+// source line.
+const MARKER_PATTERN = /(?:<!--|\/\/|\/\*|\*|#)[ \t]{0,8}ref-check:ignore(-start|-end)?\b/g
+
+/**
+ * Which suppression marker, if any, a line carries.
+ *
+ * @param {string} line
+ * @returns {'start' | 'end' | 'line' | null}
+ */
+function markerOn(line) {
+  /** @type {'start' | 'end' | 'line' | null} */
+  let found = null
+  for (const m of line.replace(/`[^`]*`/g, '').matchAll(MARKER_PATTERN)) {
+    if (m[1] === '-start') return 'start'
+    if (m[1] === '-end') return 'end'
+    found = 'line'
+  }
+  return found
+}
+
+/**
+ * The only files allowed to suppress extraction: the two skills that document
+ * the annotation syntax, and this test's own fixture. Enumerated rather than
+ * inferred so that a new suppression anywhere else fails until it is added here,
+ * which is what makes it visible in a diff instead of silently unchecked.
+ */
+const MARKED_FILES = new Set([
+  '.claude/skills/ref-check/SKILL.md',
+  '.claude/skills/ref-story/SKILL.md',
+  'test/core/llp-ref-hygiene.test.js',
+])
 
 /**
  * Broken references this test tolerates because a held pull request already owns
@@ -127,9 +163,10 @@ function extractRefs(relPath, text) {
   const refs = []
   let ignoring = false
   text.split('\n').forEach((line, index) => {
-    if (line.includes(IGNORE_START)) ignoring = true
-    else if (line.includes(IGNORE_END)) ignoring = false
-    else if (!ignoring && !line.includes(IGNORE_LINE)) {
+    const marker = markerOn(line)
+    if (marker === 'start') ignoring = true
+    else if (marker === 'end') ignoring = false
+    else if (!ignoring && marker === null) {
       for (const m of line.matchAll(REF_PATTERN)) {
         refs.push({
           file: relPath,
@@ -253,4 +290,38 @@ test('the ignore markers hide illustrative annotations without hiding live ones'
     extractRefs('fixture.md', marked).map(r => `${r.llp}#${r.anchor}`),
     ['1#tooling', '2#decisions'],
   )
+})
+
+test('documenting a marker does not activate it', () => {
+  const prose = [
+    'Write `ref-check:ignore-start` to open a region and `ref-check:ignore-end` to close it.',
+    'A ref-check:ignore in bare prose is not a marker either.',
+    '// @ref LLP 0001#tooling: still checked',
+  ].join('\n')
+  assert.deepEqual(
+    extractRefs('doc.md', prose).map(r => `${r.llp}#${r.anchor}`),
+    ['1#tooling'],
+  )
+})
+
+// A suppressed annotation is checked nowhere, so the suppression itself has to
+// be as reviewable as the annotation would have been: an unclosed region silently
+// unpolices every line after it, and a marker in a file that is not the syntax
+// documentation is a broken ref someone gave up on rather than an illustration.
+test('suppression is confined to the syntax documentation and every region closes', () => {
+  /** @type {string[]} */
+  const offenders = []
+  for (const file of trackedFiles()) {
+    const lines = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').split('\n')
+    let openedAt = 0
+    lines.forEach((line, index) => {
+      const marker = markerOn(line)
+      if (marker === null) return
+      if (!MARKED_FILES.has(file)) offenders.push(`${file}:${index + 1}  suppression outside the syntax documentation`)
+      if (marker === 'start') openedAt = index + 1
+      else if (marker === 'end') openedAt = 0
+    })
+    if (openedAt !== 0) offenders.push(`${file}:${openedAt}  region opened and never closed`)
+  }
+  assert.deepEqual(offenders, [], `${offenders.length} suppression defects:\n  ${offenders.join('\n  ')}`)
 })

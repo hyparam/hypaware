@@ -76,10 +76,14 @@ Capture for each:
 
 **Skip the annotations that are illustrations rather than data.** Documentation about the annotation syntax (this file, `ref-story`, an LLP that shows the form it is minting) has to spell out `@ref` targets that are deliberately fictional. Extracting them makes the checker permanently non-zero on a clean corpus, which is worse than not checking at all, so two markers suppress extraction:
 
-- `ref-check:ignore` anywhere on the line suppresses that one line.
+- `ref-check:ignore` on the line suppresses that one line.
 - `ref-check:ignore-start` opens a suppressed region and `ref-check:ignore-end` closes it. Put the markers outside the fence when the region is a fenced block, so they do not render as part of the example.
 
-In Markdown, write either marker as an HTML comment (`<!-- ref-check:ignore -->`), which is invisible in a rendered view. The markers suppress *extraction*, so a suppressed annotation is reported nowhere and counted nowhere: keep the regions as tight as the examples they cover, or a live annotation will go unchecked. Both citation forms are covered, `LLP NNNN#anchor` and `path/to/doc.md#anchor` alike, because the suppression is keyed on the line and not on the target.
+A marker counts only when it is **written as a comment** and **not inside an inline code span**: an HTML comment in Markdown (invisible in a rendered view), `//` or `/*` in code. That is what lets this section name the markers in prose without activating them, so documenting the mechanism cannot silently unpolice the paragraphs that document it.
+
+The markers suppress *extraction*, so a suppressed annotation is reported nowhere and counted nowhere: keep the regions as tight as the examples they cover, or a live annotation will go unchecked. Both citation forms are covered, `LLP NNNN#anchor` and `path/to/doc.md#anchor` alike, because the suppression is keyed on the line and not on the target.
+
+Suppression is itself reviewable: the `llp-ref-hygiene` test fails on a region that is opened and never closed, and on a marker in any file outside the enumerated syntax documentation. A new suppression therefore has to appear in a diff as an edit to that list, not as one quiet line.
 
 ### 3. Build the LLP index
 

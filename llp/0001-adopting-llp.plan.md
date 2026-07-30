@@ -69,8 +69,12 @@ Note: the `grill-with-docs` / `improve-codebase-architecture` skills assume a
   `ref-check:ignore-end` region around the example, suppresses extraction, so
   those examples stay correct as prose without keeping the checker permanently
   non-zero. Both citation forms are covered because the marker is keyed on the
-  line, not on the target. Keep the regions tight: a suppressed annotation is
-  checked nowhere.
+  line, not on the target. A marker only counts written as a comment and outside
+  an inline code span, so naming it in prose (as this bullet does) does not
+  activate it. Keep the regions tight: a suppressed annotation is checked
+  nowhere, which is why the gate rejects an unclosed region and rejects a marker
+  in any file outside the enumerated syntax documentation, making every new
+  suppression a visible edit rather than one quiet line.
 - **Living-doc rule:** update in place; `Superseded` or `tombstones/` +
   `Tombstoned` when retired; delete when worthless (git holds history).
 - **Co-evolution:** `@ref` annotations land in the same commit as the code they
