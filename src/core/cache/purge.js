@@ -38,8 +38,10 @@ import { resolveIcebergDir } from './storage.js'
  * caller can resolve each and emit the resurrection warning for any that
  * still resolves `full` (the next backfill would re-import it, LLP 0104
  * §resurrection), and (for `subtree`) the rows deliberately *not* purged
- * because they sit under a lookalike spelling this filesystem says is a
- * different directory (LLP 0104 §spellings).
+ * because this filesystem did not confirm their lookalike spelling is the
+ * directory named: either it really is a different directory, or it could not
+ * be `stat`ed at all, and only the first of those is a verdict the filesystem
+ * actually gave (LLP 0104 §spellings).
  *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
  * @param {{ cacheRoot: string, target: PurgeTarget, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
@@ -89,7 +91,9 @@ export async function purgeCache({ cacheRoot, target, deps }) {
  * @param {Set<string>} purgedCwds
  * @param {{ rows: number, cwds: Set<string> }} retainedAliases sink for the
  *   `subtree` near-misses: rows whose `cwd` is spelled as if it were inside the
- *   target but which this filesystem says is a different directory
+ *   target without this filesystem confirming the two spellings are one
+ *   directory, whether because they are two directories with two inodes or
+ *   because a spelling could not be `stat`ed at all
  * @param {{ realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } }} [deps]
  * @returns {{ predicate: (row: Record<string, unknown>) => boolean, columns: string[] }}
  */
