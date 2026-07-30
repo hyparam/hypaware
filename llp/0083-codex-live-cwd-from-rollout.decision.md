@@ -84,6 +84,22 @@ Codex now has the symmetric fallback.
   Consequence: for a session running in a *subdirectory* of its workspace the
   row now stamps the subdirectory rather than the workspace root, which is the
   directory the policy is actually scoped to.
+  Two limits, stated rather than implied. The key still outranks the **rollout**
+  fallback (it resolves before the `??`), so a subscription-route session that
+  declares a `workspaces` map never consults `session_meta.cwd` and a first-key
+  guess can still decide its verdict; ranking the guess below the rollout is a
+  separate call, not taken in the lines PRs #467/#474 rewrite. And because the
+  key keeps enriching, a row recorded where it used to drop (clean in-band `cwd`,
+  ignored declared workspace) carries that workspace's identity even though the
+  directory it names is `.hypignore`-ignored: the gate is scoped by `cwd`
+  ([LLP 0049](./0049-hypignore-usage-policy.spec.md#scope)), not by enrichment
+  source. A third limit, and a trade rather than a strict gain: the gate does not
+  canonicalize paths, so when the client states a *non-canonical* spelling (a
+  symlink) of an ignored directory while the key holds the canonical one, the
+  honest spelling now reaches the gate, its ancestor walk misses the `.hypignore`,
+  and the exchange is recorded where the key's spelling used to drop it by luck.
+  Canonicalizing belongs in the shared matcher
+  ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)), not here.
 
 ## Why not the alternatives
 
