@@ -1,11 +1,15 @@
 // @ts-check
 
-import { createHash } from 'node:crypto'
 import nodeFs from 'node:fs'
 import path from 'node:path'
 
 import { Attr } from '../observability/attrs.js'
 import { getLogger } from '../observability/logger.js'
+
+// One path digest for the whole usage-policy seam, so a hash in a
+// `canonicalize_failed` line and a hash in a `case_probe_skipped` line name the
+// same path when they name the same path.
+import { hashPath } from './fold.js'
 
 /**
  * `error_kind` for a `realpath(2)` that could not fully canonicalize a path.
@@ -13,19 +17,6 @@ import { getLogger } from '../observability/logger.js'
  * least as restrictive as it was (see {@link canonicalSpellings}).
  */
 export const PATH_CANONICALIZE_ERROR_KIND = 'path_canonicalize_failed'
-
-/**
- * Short one-way digest of a path, so a canonicalization failure is diagnosable
- * (which path, how often, which errno) without dev telemetry ever carrying a
- * raw local path. Same discipline as the `usage_policy.export_drop` aggregate
- * in `src/core/cache/storage.js`.
- *
- * @param {string} p
- * @returns {string}
- */
-function hashPath(p) {
-  return createHash('sha256').update(p).digest('hex').slice(0, 16)
-}
 
 /**
  * The `errno` code of a filesystem error, as a lowercase token suitable for a

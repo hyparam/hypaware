@@ -68,6 +68,16 @@ matched over the set of spellings that denote it (as-given plus
 symlink-resolved), and the most restrictive verdict any spelling produces wins,
 so a `.hypignore` cannot be escaped by reaching its subtree through a symlink.
 
+**Extended-by:
+[LLP 0050 §normalization](./0050-ignore-enforced-in-adapters.decision.md#normalization)**:
+symlinks are not the only way a filesystem spells one directory several ways.
+The ancestor walk is unaffected by the rest (it `stat`s each candidate rather
+than comparing two strings), but the machine-local list's membership test
+compares a `cwd` a client reported against a `dir` a CLI declared, so each of
+the spellings above is compared in a **folded** form (Unicode-normalized, and
+case-folded on a volume probed case-insensitive). Like canonicalization, the
+fold can only ever make the verdict more restrictive.
+
 ## Classes {#classes}
 
 | Class | V1 | Meaning |
