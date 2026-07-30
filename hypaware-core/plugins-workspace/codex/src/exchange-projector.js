@@ -1214,9 +1214,12 @@ function resolveRequestId(input) {
  * is not monotone down the chain (see `selectGoverning`'s "a nested loosening"),
  * so an `ignore` at the key with a `local-only` or explicit `full` beneath it
  * resolves the `cwd` LESS restrictively, and this predicate stays silent on
- * that. Accepted: there the loosening is the user's own nested declaration, so
- * the `cwd`'s verdict is the intended one. A real verdict-change detector would
- * have to compare `resolve(key)` with `resolve(cwd)`; this is not that.
+ * that. Accepted because the warn carries no class field and fires identically
+ * on a subdirectory turn that loosens nothing: it could never have told the two
+ * apart, so narrowing it removes a constant, not information (LLP 0160#decision
+ * records which nested declarations are the user's own and which need not be).
+ * A real verdict-change detector would have to compare `resolve(key)` with
+ * `resolve(cwd)`; this is not that.
  *
  * Trailing slashes are trimmed on both sides, the one normalization the old
  * byte comparison did; a path is not otherwise ours to normalize, and the

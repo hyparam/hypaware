@@ -141,7 +141,9 @@ Codex now has the symmetric fallback.
 **Extended-by:
 [LLP 0160](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#decision)** -
 which cases count as "refused" is narrowed to keys off the in-band `cwd`'s
-ancestor chain, because an ancestor key cannot have changed the verdict. That
+ancestor chain, because an ancestor key was never a guess about where the session
+ran (**not** because it could not have changed the verdict - it can, and 0160
+§decision discloses when). That
 document also records what is now stale in the "an unusable in-band `cwd` is a
 miss" bullet's closing #476 sentence
 ([§corrections](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#corrections-0083)),

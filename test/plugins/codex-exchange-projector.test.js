@@ -1317,10 +1317,13 @@ test('no workspace-cwd refusal is logged when the key matches or the request sta
 // (#481)
 //
 // @ref LLP 0160#decision [tests]: a session running in a subdirectory of its
-// declared workspace is the commonest Codex shape there is, and taking its own
-// `cwd` over an ancestor key can only tighten the verdict, so nothing was
-// refused and nothing is reported. A key off the ancestor chain is still a
-// guess about a directory the session never ran in, and still warns.
+// declared workspace is the commonest Codex shape there is, and an ancestor key
+// is a less specific name for the same tree rather than a guess about where the
+// session ran, so the location inference is not in doubt and nothing is
+// reported. NOT because taking the `cwd` can only tighten - it cannot only
+// tighten, and the third test below pins the case where it loosens. A key off
+// the ancestor chain is still a guess about a directory the session never ran
+// in, and still warns.
 // ---------------------------------------------------------------------
 
 test('an ordinary subdirectory-of-workspace session logs no workspace-cwd refusal (#481)', () => {
@@ -1411,6 +1414,14 @@ test('a workspace key off the session cwd ancestry is still a refusal (#481)', (
     for (const refusal of refusals) {
       assert.equal(refusal.fields?.error_kind, 'workspace_cwd_mismatch')
       assert.ok(!JSON.stringify(refusal.fields).includes(root), 'paths stay hashed')
+      // @ref LLP 0160#decision [tests]: this signal reports a location
+      // inference, never a verdict. It carries no usage class, which is why
+      // narrowing it away on the ancestor chain removes a constant rather than
+      // privacy information - a reader could not have told a nested loosening
+      // from an ordinary subdirectory turn by it either way.
+      assert.equal(refusal.fields?.class, undefined, 'the refusal warn carries no usage class')
+      assert.equal(refusal.fields?.declared, undefined, 'nor a declared token')
+      assert.equal(refusal.fields?.governed_by, undefined, 'nor a governing declaration')
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -1423,9 +1434,10 @@ test('an ancestor key that resolves MORE restrictively than the cwd is silent (d
   // chain: `ignore` at the key with `local-only` beneath it resolves the cwd
   // LESS restrictively than the key would have. The substitution is refused,
   // the verdict genuinely loosens, and no refusal is reported - because the
-  // loosening is the user's own nested declaration and the cwd's verdict is
-  // the intended one. If this ever needs reporting it is a different signal,
-  // comparing resolve(key) against resolve(cwd) (LLP 0160#decision).
+  // warn carries no class field and fired identically on subdirectory turns
+  // that loosen nothing, so it could never have reported this anyway. If this
+  // ever needs reporting it is a different signal, comparing resolve(key)
+  // against resolve(cwd) (LLP 0160#decision).
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481c-'))
   const workspace = path.join(root, 'private')
   const subdir = path.join(workspace, 'scratch')

@@ -10,8 +10,10 @@
 > The Codex live projector reports
 > `plugin.codex.usage_policy_workspace_cwd_refused` only when the substituted
 > `workspaces` key lies **outside the in-band `cwd`'s ancestor chain**, not
-> whenever the two strings differ. An ancestor key cannot have changed the
-> `.hypignore` verdict, so refusing it is not a refusal worth a `warn`. The test
+> whenever the two strings differ. An ancestor key was never a *guess about where
+> the session ran*, so declining to substitute it is not a refusal worth a `warn`.
+> It is **not** that an ancestor key could not have changed the verdict: it can
+> (see [§decision](#decision)), and that is disclosed, not claimed away. The test
 > is the shared `isEqualOrDescendant`
 > ([LLP 0069 R8](./0069-local-only-dir-selection.spec.md#requirements)), not a
 > second copy of the path rule.
@@ -75,17 +77,59 @@ This was measured, not assumed: sweeping `.hypignore` bodies and list classes at
 four depths along one ancestor chain against the real
 `createUsagePolicyResolver`, **131 of 576** arrangements resolve the `cwd` less
 restrictively than the key, spanning `ignore`->`local-only`, `local-only`->`full`
-and `ignore`->`full`.
+and `ignore`->`full`. The two source-pure slices are the stable part and
+reproduce exactly (50 from `.hypignore` alone, 75 from the list alone, 256 cases
+each); the remainder depends on how the mixed slice is enumerated, so treat 131
+as "on the order of a fifth of the space", not as a constant of the resolver.
 
-That is accepted rather than overlooked. In every such arrangement the loosening
-is the user's **own nested declaration**, which nearest-governs exists to honour
-(`selectGoverning` calls this "a nested loosening"), so the `cwd`'s verdict is
-the intended one and no restriction the user asked for was lost. What is lost is
-this signal's ability to double as a verdict-change detector, which it was never
-reliable at: it fired on string difference, not on verdict difference. A detector
-for "the substitution changed the verdict" would have to compare
+That is accepted rather than overlooked, and the ground is that **the warn being
+removed never carried the information in the first place**. It has no class
+field: on `master` the same `plugin.codex.usage_policy_workspace_cwd_refused`,
+with an identical field set, fires on a subdirectory session with no `.hypignore`
+anywhere, on one where key and `cwd` both resolve `ignore`, and on the loosening
+arrangement above. All three were run through the real projector. A reader could
+never have told a loosening from an ordinary subdirectory turn by this signal, so
+silencing it on the ancestor chain removes no privacy information: it removes a
+constant. What is lost is only this signal's *appearance* of doubling as a
+verdict-change detector, which it never was, because it fired on string
+difference, not on verdict difference. A real detector would have to compare
 `resolve(key)` with `resolve(cwd)` directly; that is a different signal, it costs
 a second (TTL-cached) resolver lookup, and it is deliberately **not** taken here.
+
+**On whose declaration does the loosening.** In every measured arrangement the
+declaration that governs the `cwd` sits *strictly below* the key, so it is always
+a nested declaration, which is exactly what nearest-governs exists to honour
+(`selectGoverning` calls it "a nested loosening"). Whether that nested
+declaration is always the **user's own** is narrower than it looks, and worth
+saying rather than assuming:
+
+- A machine-local list entry, which is the only source that can reach an explicit
+  `full` and so the only one behind the `local-only->full` and `ignore->full`
+  transitions, has exactly two writers in the tree, both `runMarkMachineLocal`
+  and `runUnmarkMachineLocal` behind the `hyp ignore` / `hyp unignore` /
+  `hyp policy set|unset` verbs. Nothing central, layered or org-pushed can write
+  one, which [LLP 0071 §not-central](./0071-machine-local-exclusion-list.decision.md#not-central)
+  makes doctrine. So those transitions really are the user's own answer. (The one
+  indirection: on the LLP 0106 classification path an agent runs `hyp policy set`
+  on the user's behalf, and nothing verifies the human was actually asked.)
+- A `.hypignore` is by design a **committable** file
+  ([LLP 0071 §not-dotfiles](./0071-machine-local-exclusion-list.decision.md#not-dotfiles)), and
+  the ancestor walk has no vendored-tree exclusion. So the `ignore->local-only`
+  transition can be driven by a `.hypignore` that arrived inside a dependency, a
+  submodule or any other cloned tree, authored by someone other than the user.
+
+The second case is bounded twice over: the walk only ever goes *up*, so a
+vendored file governs only sessions at or under it and can never reach the parent
+project, and `.hypignore` cannot express `full`
+([`format.js` `IMPLEMENTED`](../src/core/usage-policy/format.js)), so the worst a
+third party can do is downgrade a subtree from `ignore` to `local-only`, never
+re-enable forwarding. It is also a property of nearest-governs that predates this
+document and is unchanged by it: the row records as `local-only` either way, on
+`master` and here alike. Only the constant `warn` differs, and per the paragraph
+above that `warn` could not have told anyone about it. Whether a third-party
+`.hypignore` should be able to loosen a tree the user marked `ignore` is a
+resolver question, not a reporting one, and belongs in LLP 0049/0070 rather than
+here.
 
 **Demoting to `info` was the alternative** and is rejected: it would have made
 the genuinely interesting case quiet too, to fix a frequency problem that is
