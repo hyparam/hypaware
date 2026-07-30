@@ -71,7 +71,10 @@ test('Step 1 sends the session container, never a thread id', () => {
   )
 
   // CODEX_THREAD_ID is a thread id, so it is not an answer this step can use.
-  // Issue #453 puts it to work as a selector; until then it must not be sent.
+  // `hyp session ignore` already puts it to work as a *selector* (#453, landed
+  // as #458): it looks the rollout up by `payload.id`, then reads the container
+  // out of `payload.session_id` and reports `codex_env_rollout`. Selecting on
+  // the variable is the verb's job; sending it is what this step must not do.
   assert.doesNotMatch(
     step1,
     /SESSION_ID="\$\{CODEX_THREAD_ID/,

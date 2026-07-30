@@ -107,7 +107,7 @@ Scan `llp/` (and any other configured LLP trees) for all documents. For each, ex
 
   Measured on this corpus (1355 references), indexing only heading slugs reports **632** resolvable references as BROKEN: 366 target a `{#...}` marker, 266 an inline `<a id>`. Getting the whitespace rule wrong on top of that adds 30 more. All of it matters, but the anchor *forms* are by far the larger share, and restricting `{#...}` to heading lines is worth 47 of them on its own. With all three forms indexed as described, **22** references were genuinely broken (issue #457).
 
-  **Every count on this page is a snapshot, taken at commit `79d147c` over 132 files and 129 LLP numbers.** The corpus grows, so a later run's totals will differ and are not evidence of a regression: what a run must reproduce is the *rule*, not the number. The failure this section exists to catch is a reference that the three forms above resolve being reported BROKEN. Re-measure before quoting any figure here as current.
+  **Every corpus measurement in this section is a snapshot, taken at commit `79d147c` over 132 files and 129 LLP numbers.** (The counts in the sample report under *Report findings* are illustrative and were never measured at all.) The corpus grows, so a later run's totals will differ and are not evidence of a regression: what a run must reproduce is the *rule*, not the number. The failure this section exists to catch is a reference that the three forms above resolve being reported BROKEN. Re-measure before quoting any figure here as current.
 
 Build a map from `(LLP number) → (file path, title, {anchor: heading text})`.
 
