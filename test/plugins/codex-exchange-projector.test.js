@@ -141,6 +141,88 @@ test('project() escalates a fail-safe clamp to a warn-level drop with the declar
   assert.match(String(drop.fields?.warn), /some-future-class/)
 })
 
+// @ref LLP 0083#decision [tests]: an in-band cwd that names no findable
+// directory counts as a miss, not as a path for the matcher to resolve against
+// whatever directory the daemon happens to run in (#471).
+test('project() computes no .hypignore verdict from a RELATIVE in-band cwd', () => {
+  // The matcher's first act is `path.resolve(cwd)`, so a relative value is
+  // measured against the DAEMON's process cwd. Putting the only governing
+  // `.hypignore` at exactly that mistaken base makes the wrong verdict visible:
+  // if `sub` reaches the matcher this exchange drops, though nothing here says
+  // the session ran anywhere near the daemon.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver(path.resolve('sub')),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: 'sub',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+  }), context()))
+  assert.notEqual(projection, USAGE_POLICY_DROP, 'a relative cwd must not yield a verdict computed against the daemon cwd')
+  assert.equal(projection.cwd, undefined, 'and it is not stamped on the row as if it were the session container')
+})
+
+test('project() computes no .hypignore verdict from a BLANK in-band cwd', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver(path.resolve('   ')),
+  })
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '   ',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+    response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+  }), { log }))
+  assert.notEqual(projection, USAGE_POLICY_DROP, 'a whitespace-only cwd is no directory to match')
+  assert.equal(projection.cwd, undefined, 'a blank cwd is absent, not a blank path stamped on the row')
+  const refused = warns.find((e) => e.message === 'plugin.codex.usage_policy_cwd_unusable')
+  assert.equal(refused?.fields?.error_kind, 'cwd_blank', 'blank is reported as blank, not as a relative path')
+})
+
+test('project() logs an unusable in-band cwd rather than skipping the gate silently', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  projector.project(exchange({
+    path: '/v1/chat/completions',
+    request_body: JSON.stringify({
+      cwd: '../elsewhere',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  }), { log })
+  const refused = warns.find((e) => e.message === 'plugin.codex.usage_policy_cwd_unusable')
+  assert.ok(refused, 'a refused cwd is observable: the row records cwd = NULL and no verdict was computed')
+  assert.equal(refused.fields?.operation, 'usage_policy_cwd')
+  assert.equal(refused.fields?.status, 'refused')
+  assert.equal(refused.fields?.error_kind, 'cwd_not_absolute')
+  assert.ok(
+    !JSON.stringify(refused.fields).includes('elsewhere'),
+    'the refused value is hashed, never logged raw',
+  )
+})
+
 // ---------------------------------------------------------------------
 // Session opt-out (LLP 0066): a second, independent match key at the same
 // USAGE_POLICY_DROP seam, keyed on the STAMPED session_id

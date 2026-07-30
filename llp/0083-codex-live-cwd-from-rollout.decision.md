@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0151
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0150, LLP 0151
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -63,6 +63,26 @@ Codex now has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
+- **An unusable in-band `cwd` is a miss, not a path.** A relative or blank
+  in-band value is refused before the gate sees it: the matcher would resolve it
+  against the **daemon's** own process cwd and return a confident verdict for an
+  unrelated directory (#471). The rollout fallback then still gets its turn, and
+  when nothing usable is found the row records `cwd = NULL` exactly as before, so
+  refusing does not make this path fail closed. The rollout-stated `cwd` is held
+  to the same two checks, by a different owner: core's `sessionMetaCwd` refuses a
+  blank or relative `session_meta.cwd`
+  ([LLP 0150 §usable-cwd](./0150-one-reader-for-codex-session-meta.decision.md#usable-cwd)),
+  and `rollout-cwd.js` reads through it, so a refused in-band value falls through
+  to an already-predicated source. That predicate is **not** borrowed for the
+  in-band value, and this bullet is not a consequence of LLP 0150: 0150 scopes the
+  in-band path out of its own mandate, because in-band is a separate source with
+  its own trust story whose value is also stamped on the row for workspace/git
+  enrichment. So the two checks are restated locally, in `usableInBandCwd`. One
+  limit of the rule, stated rather than implied: on the Codex route the value the
+  predicate sees is usually not the request's `cwd` but the workspace key
+  `selectCodexWorkspace` selected for it, which substitutes the first workspace
+  when none matches, so an absolute-but-unrelated directory can still reach the
+  gate (#476).
 - **Keyed on the codex session id.** The live path already resolves it: the
   body's `client_metadata.session_id`, else the turn-metadata blob
   ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);

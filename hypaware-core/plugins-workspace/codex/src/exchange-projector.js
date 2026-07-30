@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isAbsolute } from 'node:path'
+
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
@@ -127,7 +129,7 @@ export function createCodexExchangeProjector(opts = {}) {
       // rollout lookup LAZY (a fresh in-band cwd never scans), and it is keyed on
       // the codex session id — only a real Codex session has a rollout — so
       // non-codex traffic never scans.
-      const cwd = firstString(codexContext?.cwd, readRecordedCwd(reqBody))
+      const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
       if (cwd) {
         const policy = resolver.resolve(cwd)
@@ -1061,6 +1063,87 @@ function readRecordedCwd(reqBody) {
     readStringKey(meta, 'cwd'),
     readStringKey(userIdMeta, 'cwd'),
   )
+}
+
+/**
+ * The in-band cwd, or `undefined` when what the client sent is not a directory
+ * this process can find. A `cwd` is not merely a non-empty string here: it is
+ * the input to the `.hypignore` gate, whose first act is `path.resolve(cwd)`
+ * (`src/core/usage-policy/matcher.js`). For a relative value that silently
+ * supplies the **daemon's** process cwd as the base, so a session that said
+ * `sub` gets a confident verdict governed by whatever sits under wherever the
+ * daemon was started. Nothing in the request says what the value is relative to,
+ * so the base would have to be guessed, and guessing is wrong in both directions
+ * at once: it can drop a session no `.hypignore` covers, and it can record a
+ * session whose real directory *is* ignored, because the verdict was computed
+ * for some other directory entirely. It also stamps that bogus value on the row.
+ *
+ * Refusing costs the ordinary "no cwd" fail-open: the caller's `if (cwd)` skips
+ * the check and the row records `cwd = NULL` (LLP 0049 R1 as extended by
+ * LLP 0085), a state the system already models. It does NOT make this path fail
+ * closed; whether an unconfirmable cwd should drop is a separate, larger call.
+ *
+ * That fail-open is not free, so state the one case it costs: when the daemon's
+ * own process cwd sits under an ignoring `.hypignore` (a foreground start from a
+ * project dir, or a `--user` unit that renders no `WorkingDirectory=` and so
+ * inherits `$HOME`), guessing happened to reach the right verdict, and refusing
+ * now records where accepting dropped. It was still a guess - the same base also
+ * produced false drops for every session that ran elsewhere - so refusing is the
+ * right call, but it is a real narrowing of coverage, not a strict improvement.
+ * A drop that only holds while the daemon runs from the right directory is what
+ * fail-closed would have to replace, and that is the larger call above.
+ *
+ * The same two checks guard the rollout-stated cwd as `sessionMetaCwd`
+ * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`). They are
+ * restated here rather than borrowed from there: LLP 0150 scopes the in-band path
+ * out of its own mandate (in-band is a separate source, and its value is also
+ * stamped on the row), and the `error_kind` split below needs the two conjuncts
+ * apart, which that predicate's single answer does not give.
+ *
+ * One thing this does NOT reach, so nobody reads it as the whole gate: on the
+ * Codex route the value passed in is usually not the request's `cwd` but the
+ * workspace key `selectCodexWorkspace` picked for it, and that falls back to the
+ * first workspace when none matches, which is absolute and so accepted here even
+ * when the session ran elsewhere (#476). The rollout fallback at the call site
+ * sits outside this call, but it is not unguarded: `rollout-cwd.js` reads it
+ * through `readRolloutSessionMeta`, which applies `sessionMetaCwd`.
+ *
+ * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
+ * so the rollout fallback still gets its turn
+ * @param {string | undefined} cwd
+ * @param {{
+ *   log?: {
+ *     info?: (m: string, f?: Record<string, unknown>) => void,
+ *     warn?: (m: string, f?: Record<string, unknown>) => void,
+ *   },
+ * }} [ctx]
+ * @returns {string | undefined}
+ */
+function usableInBandCwd(cwd, ctx) {
+  if (cwd === undefined) return undefined
+  // Byte-identical when it passes: the trim is only the emptiness test, and a
+  // path is not ours to normalize. The trim gates nothing on its own - a blank
+  // string is never absolute on either platform, so `isAbsolute` already refuses
+  // it - it is here to split `error_kind` below, which is the only thing that
+  // tells blank apart from relative. Keep both conjuncts or that split dies.
+  if (cwd.trim().length > 0 && isAbsolute(cwd)) return cwd
+  // Never silently: a refused cwd means this exchange reached the gate with
+  // nothing to match, which is indistinguishable from "no cwd at all" in the
+  // row. Hash it - a cwd is user data (LLP 0049), and the drop log above uses
+  // the same digest so the two are correlatable.
+  // One gap, deliberate: a `cwd` of exactly `''` never arrives, because
+  // `readStringKey` and `firstString` both require a non-empty string, so it is
+  // refused upstream with no log. Same outcome (absent cwd, NULL column, and it
+  // was already absent before this predicate existed), no diagnostic. Closing it
+  // means loosening a helper with 16 other callers here, which is not worth it.
+  ctx?.log?.warn?.('plugin.codex.usage_policy_cwd_unusable', {
+    component: 'codex',
+    operation: 'usage_policy_cwd',
+    status: 'refused',
+    error_kind: cwd.trim().length === 0 ? 'cwd_blank' : 'cwd_not_absolute',
+    cwd_sha256: sha256Hex(cwd).slice(0, 16),
+  })
+  return undefined
 }
 
 /** @param {AiGatewayExchangeInput} input */
