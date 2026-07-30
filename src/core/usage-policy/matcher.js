@@ -663,9 +663,11 @@ export function scopeGoverns(cwd, dir, deps = {}) {
 /**
  * The full verdict {@link scopeGoverns} collapses into a boolean: does `dir`
  * govern `cwd` (`governs`), is `cwd` unrelated to it (`outside`), or is `cwd`
- * spelled as if it were inside `dir` on a volume that folds spellings, while
- * *this* filesystem says the two spellings are different directories
- * (`aliased`)?
+ * spelled as if it were inside `dir` on a volume that folds spellings, without
+ * *this* filesystem confirming the two spellings are one directory (`aliased`)?
+ * `aliased` is the absence of a proof, not a proof of difference: it covers
+ * both a live pair with two inodes and a spelling that could not be `stat`ed at
+ * all, so a caller rendering it must not report a verdict the second never gave.
  *
  * The third answer is the point, and it exists because `hyp purge` deletes. At
  * the gate, folding two spellings together is free: the resolved class is

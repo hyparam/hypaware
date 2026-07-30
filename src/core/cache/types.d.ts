@@ -41,11 +41,14 @@ export type PurgeTarget =
 // `retainedAliasRows` / `retainedAliasCwds` are the other half of the honest
 // answer, and are only ever non-empty for a `subtree` target: rows whose `cwd`
 // is spelled as though it were inside the target (a Unicode or case respelling
-// of it) which this filesystem reports is a *different* directory, so they were
-// correctly left in place. Purge widens onto a respelling only when `dev`/`ino`
-// proves the two spellings are one directory; when it cannot, retaining is the
-// safe direction and saying so is what keeps the run distinguishable from "that
-// directory had nothing cached" (LLP 0104 #spellings).
+// of it) which this filesystem does *not* report as the target directory, so
+// they were correctly left in place. Purge widens onto a respelling only when
+// `dev`/`ino` proves the two spellings are one directory; when it cannot -
+// because they really are two directories, or because the respelling is no
+// longer on disk to be `stat`ed at all - retaining is the safe direction, and
+// saying so is what keeps the run distinguishable from "that directory had
+// nothing cached" (LLP 0104 #spellings). A caller rendering these must not
+// claim the filesystem adjudicated: only the first reason is a verdict.
 export interface PurgeSummary {
   rowsDeleted: number
   partitionsAffected: number

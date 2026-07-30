@@ -708,3 +708,61 @@ test('scopeGovernance stays unwidened for callers that do not opt in', () => {
   assert.equal(scopeGoverns(`/vol/${NFD}/sub`, `/vol/${NFC}`), false)
   assert.equal(scopeGovernance(`/vol/${NFC}/sub`, `/vol/${NFC}`), 'governs')
 })
+
+// The near-miss note has to be true of *this* run, not only of the run the
+// report was designed around. `aliased` has two causes and only one of them is
+// the filesystem adjudicating; the other is an `ENOENT`, which is the ordinary
+// case when the user purges a project directory they already deleted. Both
+// tests below use spellings that exist on no host, so neither depends on
+// whether the test volume folds.
+// @ref LLP 0104#spellings [tests]: the retention note claims only what the run established
+
+test('the near-miss note does not claim a verdict an ENOENT never gave', async () => {
+  const cacheRoot = await makeTmpDir('cli-alias-gone')
+  const hypHome = await makeTmpDir('cli-alias-gone-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-gone-'))
+  try {
+    const root = await fs.realpath(projects)
+    // Neither spelling is on disk, so no volume can prove or disprove them.
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+    ])
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge([path.join(root, NFC), '--yes'], ctx)
+    assert.equal(code, 0)
+    assert.match(stdout.text, /purged 0 rows /)
+    assert.match(stderr.text, /1 cached row under a similarly spelled directory was left in place/)
+    assert.match(stderr.text, /does not report it as the directory you named/)
+    assert.doesNotMatch(
+      stderr.text,
+      /filesystem reports it is a different directory/,
+      'nothing was stat-able here, so the filesystem reported no such thing'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
+
+test('the near-miss note agrees in number with the rows it is counting', async () => {
+  const cacheRoot = await makeTmpDir('cli-alias-plural')
+  const hypHome = await makeTmpDir('cli-alias-plural-home')
+  const projects = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-purge-plural-'))
+  try {
+    const root = await fs.realpath(projects)
+    // Two rows, one retained directory: the verb agrees with the row count, the
+    // noun with the directory count.
+    await seed(cacheRoot, [
+      { session_id: 's1', cwd: path.join(root, NFD, 'sub'), part_id: 'm1#0', timestamp: '2026-07-01T00:00:00Z' },
+      { session_id: 's2', cwd: path.join(root, NFD, 'sub'), part_id: 'm2#0', timestamp: '2026-07-01T00:00:01Z' },
+    ])
+    const { ctx, stderr } = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([path.join(root, NFC), '--yes'], ctx), 0)
+    assert.match(stderr.text, /2 cached rows under a similarly spelled directory were left in place/)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(projects, { recursive: true, force: true })
+  }
+})
