@@ -135,10 +135,13 @@ export function createCodexExchangeProjector(opts = {}) {
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
       // @ref LLP 0083#decision [implements]: a refused workspace substitution is
-      // observable, not silent - it means the gate is measuring a directory
-      // whose verdict does not imply the discarded key's.
+      // observable, not silent - it means the key named a tree the session did
+      // not run in, so the location inference behind it is in doubt.
       // @ref LLP 0160#decision [constrained-by]: which is narrower than "a
       // different directory", so this stays rare enough to be worth a `warn`.
+      // Note this reports the location inference, NOT "the verdict changed":
+      // nearest-governs is not monotone down the chain, so an ancestor key can
+      // still resolve more restrictively than the cwd and that stays silent.
       // Paths are hashed: this seam sees LLM traffic.
       if (codexContext?.refused_workspace_cwd) {
         ctx?.log?.warn?.('plugin.codex.usage_policy_workspace_cwd_refused', {
@@ -1190,28 +1193,39 @@ function resolveRequestId(input) {
 
 /**
  * Whether the selected `workspaces` key is the directory the session ran in or
- * an ancestor of it, i.e. whether refusing the substitution can have changed the
- * `.hypignore` verdict at all.
+ * an ancestor of it, i.e. whether the key was ever a *guess about where the
+ * session ran* rather than a less specific name for the same tree.
  *
  * This is the predicate behind `refused_workspace_cwd`, and it is deliberately
- * not byte-equality. When the key is an ancestor of the in-band `cwd`, the
- * `cwd`'s ancestor walk passes through the key and every machine-local entry
- * that governs the key also governs the `cwd`, so resolving the `cwd` is
- * *at least as restrictive* as resolving the key would have been: the refusal
- * can only tighten, never loosen, and there is nothing to report. A session
- * running in a subdirectory of its declared workspace is exactly that shape, and
- * it is the commonest Codex shape there is, so reporting it warned once per turn
- * on the common case and devalued the privacy warns beside it (#481). Off the
- * ancestor chain the two walks are incomparable - a sibling tree, or a key
- * *below* the `cwd`, whose own walk covers strictly more - and that is the guess
- * about a directory the session never ran in that the signal exists for.
+ * not byte-equality. When the key is an ancestor of the in-band `cwd` it names
+ * the same tree, less specifically, and the `cwd` is strictly the better answer
+ * to the question the key stood in for; under the resolver's nearest-governs
+ * rule the most specific declaration is authoritative for the `cwd`, so the key
+ * never held authority over it and there is nothing about the location to
+ * report. A session running in a subdirectory of its declared workspace is
+ * exactly that shape, and it is the commonest Codex shape there is, so reporting
+ * it warned once per turn on the common case and devalued the privacy warns
+ * beside it (#481). Off the ancestor chain the key names a tree the session
+ * never ran in - a sibling, or a key *below* the `cwd` - and that doubt is what
+ * the signal exists for.
+ *
+ * What this does NOT mean, because the obvious reading is wrong: it is not that
+ * an ancestor key would have resolved the same or more loosely. Nearest-governs
+ * is not monotone down the chain (see `selectGoverning`'s "a nested loosening"),
+ * so an `ignore` at the key with a `local-only` or explicit `full` beneath it
+ * resolves the `cwd` LESS restrictively, and this predicate stays silent on
+ * that. Accepted: there the loosening is the user's own nested declaration, so
+ * the `cwd`'s verdict is the intended one. A real verdict-change detector would
+ * have to compare `resolve(key)` with `resolve(cwd)`; this is not that.
  *
  * Trailing slashes are trimmed on both sides, the one normalization the old
  * byte comparison did; a path is not otherwise ours to normalize, and the
  * spelling-agnostic predicates next door (`scopeGoverns`) buy their extra reach
  * with `realpath` syscalls this per-exchange seam must not spend (LLP 0049 R6).
- * The cost is that a symlinked spelling of the same tree still reads as a
- * refusal, which is the status quo and errs toward reporting.
+ * So this compares paths, not directories, in both directions: a symlinked
+ * spelling of one tree reads as a refusal, and a lexical descendant that is
+ * really a symlink out of the key's tree reads as covered. Reporting-only, and
+ * the gate itself still resolves over every spelling.
  *
  * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
  * test, never a second copy of the path rule

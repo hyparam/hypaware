@@ -1417,6 +1417,57 @@ test('a workspace key off the session cwd ancestry is still a refusal (#481)', (
   }
 })
 
+test('an ancestor key that resolves MORE restrictively than the cwd is silent (documents the residue, #481)', () => {
+  // The disclosed cost of the ancestor test, pinned so it stays a decision
+  // rather than becoming a surprise. Nearest-governs is NOT monotone down the
+  // chain: `ignore` at the key with `local-only` beneath it resolves the cwd
+  // LESS restrictively than the key would have. The substitution is refused,
+  // the verdict genuinely loosens, and no refusal is reported - because the
+  // loosening is the user's own nested declaration and the cwd's verdict is
+  // the intended one. If this ever needs reporting it is a different signal,
+  // comparing resolve(key) against resolve(cwd) (LLP 0160#decision).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-481c-'))
+  const workspace = path.join(root, 'private')
+  const subdir = path.join(workspace, 'scratch')
+  fs.mkdirSync(subdir, { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.hypignore'), 'ignore\n')
+  fs.writeFileSync(path.join(subdir, '.hypignore'), 'local-only\n')
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  try {
+    const resolver = createUsagePolicyResolver({})
+    assert.equal(resolver.resolve(workspace).class, 'ignore', 'the key alone would have dropped')
+    assert.equal(resolver.resolve(subdir).class, 'local-only', 'the cwd records, withheld from forwarding')
+    const projection = /** @type {any} */ (createCodexExchangeProjector().project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({
+        'x-codex-turn-metadata': JSON.stringify({
+          thread_id: 'thread-481c',
+          workspaces: { [workspace]: {} },
+        }),
+      }),
+      request_body: JSON.stringify({ cwd: subdir, input: 'go' }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), { log }))
+    assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the carve-out records')
+    assert.deepEqual(
+      warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+      [],
+      'the ancestor test reports the location inference, not a verdict change',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({

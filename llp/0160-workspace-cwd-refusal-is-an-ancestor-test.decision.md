@@ -45,22 +45,16 @@ as noise with it.
 
 **The key is refused only when it lies off the in-band `cwd`'s ancestor chain.**
 
-The justification is not "a subdirectory is close enough". It is that in the
-ancestor case the two verdicts are **ordered**, so the refusal is provably
-harmless:
+The justification is not "a subdirectory is close enough", and it is **not** that
+the two verdicts are ordered. It is that in the ancestor case the key is not a
+*guess about where the session ran*: it names the same tree, less specifically,
+and the `cwd` is strictly the better answer to the question the key was standing
+in for. Under the resolver's nearest-governs rule the most specific declaration
+is authoritative for the `cwd`, so the key never held authority over it. There is
+no doubt about the location inference to report.
 
-- The `.hypignore` walk from the `cwd` passes through the key and continues
-  above it, so every governing file the key would have found, the `cwd` finds
-  ([LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope)).
-- Every machine-local entry that governs the key also governs the `cwd`, because
-  membership is equal-or-descendant and the `cwd` is a descendant of the key
-  ([LLP 0071](./0071-machine-local-exclusion-list.decision.md)).
-
-So `resolve(cwd)` is at least as restrictive as `resolve(key)` would have been:
-taking the `cwd` can only tighten. Nothing was lost, so nothing is reported.
-
-Off the ancestor chain the two walks are **incomparable**, and both directions
-matter:
+Off the ancestor chain the key names a tree the session **did not run in**, the
+location inference is genuinely in doubt, and that is what the signal reports:
 
 - a **sibling** tree, the original #476 shape: a guess about a directory the
   session never ran in;
@@ -68,6 +62,30 @@ matter:
   the `cwd` there can genuinely loosen the verdict.
 
 Those still warn, at `warn`, which is now a level the signal earns.
+
+**What this narrowing gives up, stated plainly.** The signal now answers "is the
+location inference in doubt", not "could the verdict have differed". Those are
+not the same question, because the resolver is **not** monotone down the ancestor
+chain: nearest-governs means a declaration *between* the key and the `cwd`
+overrides the key's, and it may be **less** restrictive. A `.hypignore` reading
+`ignore` at the key with `local-only` at the `cwd`, or a machine-local entry
+(LLP 0103) marking the key `ignore` and the `cwd` an explicit `full`, both
+resolve the `cwd` *less* restrictively than the key - and both are now silent.
+This was measured, not assumed: sweeping `.hypignore` bodies and list classes at
+four depths along one ancestor chain against the real
+`createUsagePolicyResolver`, **131 of 576** arrangements resolve the `cwd` less
+restrictively than the key, spanning `ignore`->`local-only`, `local-only`->`full`
+and `ignore`->`full`.
+
+That is accepted rather than overlooked. In every such arrangement the loosening
+is the user's **own nested declaration**, which nearest-governs exists to honour
+(`selectGoverning` calls this "a nested loosening"), so the `cwd`'s verdict is
+the intended one and no restriction the user asked for was lost. What is lost is
+this signal's ability to double as a verdict-change detector, which it was never
+reliable at: it fired on string difference, not on verdict difference. A detector
+for "the substitution changed the verdict" would have to compare
+`resolve(key)` with `resolve(cwd)` directly; that is a different signal, it costs
+a second (TTL-cached) resolver lookup, and it is deliberately **not** taken here.
 
 **Demoting to `info` was the alternative** and is rejected: it would have made
 the genuinely interesting case quiet too, to fix a frequency problem that is
@@ -82,11 +100,16 @@ The spelling-agnostic predicates next door - `scopeGoverns`, `sameDirectory`
 - buy their extra reach with `realpath` syscalls, and this runs once per
 exchange on the capture hot path, which
 [LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements) keeps free of
-unbounded fs work. The residue is that a symlinked spelling of the same tree
-still reads as a refusal. That is the status quo, it errs toward reporting rather
-than toward silence, and it is the same gap
-[LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md#decision) already files
-as #479.
+unbounded fs work. The residue is that this predicate reads paths, not
+directories: a symlinked spelling of the same tree still reads as a refusal (a
+spurious `warn`), and the converse also holds - a lexical descendant that is
+really a symlink out of the key's tree reads as covered, so it stays silent. Both
+were checked against the real projector. This is the gap
+[LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md#decision) filed as
+#479 for the **gate**, which #482/#484 have since closed there; it is knowingly
+retained *here*, at this reporting-only predicate, for the hot-path reason above.
+Nothing about the gate's own verdict depends on it: the resolver still resolves
+over every spelling and still takes the most restrictive.
 
 ## What this does not decide {#not-decided}
 
@@ -98,8 +121,8 @@ leaks, never content, and the ignored directory's own sessions still drop. Wheth
 to suppress enrichment sourced from a key that resolves to `ignore`, at the cost
 of a second resolver lookup and of graph-bridge identity for genuinely multi-root
 sessions ([LLP 0032 §capture](./0032-github-llm-graph-bridge.decision.md#capture)),
-is a privacy-relevant default that this document does not take. It stays open
-under #481.
+is a privacy-relevant default that this document does not take. It is split out
+of #481 (which this PR closes) and stays open under **#492**.
 
 ## Corrections to LLP 0083 {#corrections-0083}
 

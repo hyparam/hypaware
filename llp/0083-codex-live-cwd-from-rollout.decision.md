@@ -145,7 +145,7 @@ ancestor chain, because an ancestor key cannot have changed the verdict. That
 document also records what is now stale in the "an unusable in-band `cwd` is a
 miss" bullet's closing #476 sentence
 ([§corrections](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#corrections-0083)),
-and leaves the enrichment question (#481) open.
+and leaves the enrichment question open under #492.
 
 ## Why not the alternatives
 
