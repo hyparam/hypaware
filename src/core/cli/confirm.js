@@ -36,7 +36,7 @@ export async function askYesNo(ctx, question) {
 
 /**
  * The confirmation posture `hyp purge` established and every irreversible
- * verb has followed since (LLP 0104, LLP 0111#delete-confirm): prompt on an
+ * verb has followed since (LLP 0104, LLP 0155#delete-confirm): prompt on an
  * interactive TTY, require an explicit `--yes` anywhere else. A command that
  * cannot ask must not assume.
  *

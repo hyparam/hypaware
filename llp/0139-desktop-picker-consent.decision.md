@@ -5,7 +5,7 @@
 **Systems:** Plugins, Onboarding, Config
 **Author:** Brendan / Claude
 **Date:** 2026-07-27
-**Related:** LLP 0016, LLP 0024, LLP 0041, LLP 0098, LLP 0116, LLP 0117, LLP 0130, LLP 0131, LLP 0133
+**Related:** LLP 0016, LLP 0024, LLP 0041, LLP 0153, LLP 0116, LLP 0117, LLP 0130, LLP 0131, LLP 0133
 
 > [LLP 0133](./0133-desktop-solo-sudo-plist.decision.md) shipped
 > `hyp claude-desktop install` and gave the plugin a `needs_setup` picker
@@ -39,7 +39,7 @@ Two adjacent surfaces made the state harder to diagnose than it should
 have been:
 
 - Following the dispatch repair hint literally (adding only
-  `@hypaware/claude-desktop`, [LLP 0098](./0098-inactive-not-unknown-dispatch-miss.decision.md))
+  `@hypaware/claude-desktop`, [LLP 0153](./0153-inactive-not-unknown-dispatch-miss.decision.md))
   produced a worse error, not a better one. The plugin fails its
   `requireCapability('hypaware.anthropic-credential')` call, so its
   commands never register and the dispatcher reports
@@ -190,7 +190,7 @@ effective config does not name, and the config names Desktop's plugins only
 because the row was ticked. Activation is not the gate; the prompt is, and
 it still defaults to no. On any failure the seam stays silent and the
 dispatch miss path reports unavailable-plus-repair exactly as before
-([LLP 0098](./0098-inactive-not-unknown-dispatch-miss.decision.md)).
+([LLP 0153](./0153-inactive-not-unknown-dispatch-miss.decision.md)).
 
 <a id="print-commands-applies-nothing"></a>**`--print-commands` applies
 nothing, including the non-privileged steps.** It previously honored the

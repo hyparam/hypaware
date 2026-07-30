@@ -349,12 +349,8 @@ test('no @ref annotation separates its gloss with an em dash', () => {
   assert.deepEqual(offenders, [], `${offenders.length} annotations carry an em dash:\n  ${offenders.join('\n  ')}`)
 })
 
-// The three colliding numbers (0098, 0099, 0111) make `@ref LLP 0111#surface`
-// formally ambiguous. Fixing it is a corpus-level choice between renumbering the
-// later claimant and adopting a filename-qualified citation form, which issue
-// #463 asks to have decided deliberately rather than by whoever touches it
-// first. Unskip this once that decision lands.
-test('no LLP number is claimed by two documents', { skip: 'issue #463 item 1: renumber vs qualified-citation is an open corpus decision' }, () => {
+// @ref LLP 0156#renumber [tests]: a collision is repaired by renumbering the later claimant, so every number has exactly one document
+test('no LLP number is claimed by two documents', () => {
   const duplicates = [...INDEX.entries()]
     .filter(([, claimants]) => claimants.length > 1)
     .map(([number, claimants]) => `LLP ${number}: ${claimants.map(c => c.file).join(', ')}`)
