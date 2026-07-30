@@ -1,7 +1,7 @@
 # LLP 0157: OpenClaw full capture
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Sources, Gateway, Observability
 **Author:** Phil / Claude
 **Date:** 2026-07-30

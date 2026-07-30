@@ -1,7 +1,7 @@
 # LLP 0159: OpenClaw backfill route agreement rides native-identity settlement
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Gateway, Cache, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-30

@@ -1,7 +1,7 @@
 # LLP 0158: one reader for the OpenClaw session JSONL
 
 **Type:** Decision
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Plugins, Sources, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-30
