@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0151
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -28,10 +28,15 @@ failing **open**.
 That was a latent assumption. The **API-key** route (Responses API) happens to
 carry `cwd` in-band in `metadata`, so no enrichment was ever built. The
 **ChatGPT-subscription** route (`provider='chatgpt'`, `/backend-api/codex/*`)
-has no such field, and `codex-tui` does not send the `x-codex-turn-metadata`
-header on it (that is Codex Desktop behavior). So "cwd is always available at
-projection time" was really "cwd is available when the client volunteers it" —
-and for an entire first-class traffic class, it never did:
+has no such field, and a turn whose request kind carries no turn metadata sends
+no `x-codex-turn-metadata` and therefore no `workspaces`. (This paragraph
+previously said `codex-tui` never sends that header and that it is Codex Desktop
+behavior. That is false: Codex's `compatibility_headers` emits it for every turn
+regardless of client. See
+[LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#context).)
+So "cwd is always available at projection time" was really "cwd is available when
+the client volunteers it" - and for an entire first-class traffic class, it
+often did not:
 
 - `.hypignore` was a silent **no-op** for subscription-mode Codex — the same gap
   class as raw-proxy/OTEL ([LLP 0049 §non-goals](./0049-hypignore-usage-policy.spec.md#non-goals)),
@@ -58,10 +63,13 @@ Codex now has the symmetric fallback.
 
 - **In-band stays the fast path.** A fresh in-band `cwd` short-circuits before any
   filesystem work; the rollout is consulted **only** on a miss.
-- **Keyed on the codex session id.** The live path already resolves it
-  (`session-id` header / turn metadata); the rollout filename embeds it, matched
-  via the `sessionIdFromPath` helper shared with the backfill. Only a real Codex
-  session has a rollout, so non-codex traffic never scans.
+- **Keyed on the codex session id.** The live path already resolves it: the
+  body's `client_metadata.session_id`, else the turn-metadata blob
+  ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);
+  it was never a `session-id` header, a name Codex does not emit). The rollout
+  filename embeds it, matched via the `sessionIdFromPath` helper shared with the
+  backfill. Only a real Codex session has a rollout, so non-codex traffic never
+  scans.
 - **First line only, cached per session id.** The rollout is written at session
   start, so it exists before the first exchange projects (earlier and more
   reliably than Claude's sidecar, which has a known session-start race). Reading a

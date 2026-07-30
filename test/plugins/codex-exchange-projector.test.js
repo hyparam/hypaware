@@ -1110,6 +1110,405 @@ test('conversation_id falls back to a stable hash when no codex metadata or sess
 })
 
 // ---------------------------------------------------------------------
+// Lineage surfaces (LLP 0151)
+// ---------------------------------------------------------------------
+
+// @ref LLP 0151#body-is-authority [tests]: the flat body `client_metadata` map
+// is the only lineage surface Codex fills for every request kind, so a turn
+// that carries no Codex header at all must still resolve its thread, session,
+// turn and parent thread.
+test('Codex lineage resolves from the durable body client_metadata when no lineage header is sent', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({}),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: {
+        'x-codex-installation-id': 'install-body',
+        session_id: 'session-body',
+        thread_id: 'thread-body',
+        turn_id: 'turn-body',
+        'x-codex-window-id': 'window-body',
+        'x-codex-parent-thread-id': 'thread-body-parent',
+      },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-body')
+  assert.equal(projection.session_id, 'session-body')
+  assert.equal(projection.parent_thread_id, 'thread-body-parent')
+  assert.equal(projection.prompt_id, 'turn-body')
+  assert.equal(projection.attributes.codex.thread_id, 'thread-body')
+  assert.equal(projection.attributes.codex.session_id, 'session-body')
+  assert.equal(projection.attributes.codex.window_id, 'window-body')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+})
+
+// @ref LLP 0151#body-is-a-codex-signal [tests]: the API-key route posts to a
+// generic `/v1/responses` with no Codex-namespaced header, so the body map is
+// also what identifies the exchange as Codex at all.
+test('body client_metadata alone identifies a Codex exchange on a generic responses path', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_headers: JSON.stringify({}),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: {
+        'x-codex-installation-id': 'install-api',
+        session_id: 'session-api',
+        thread_id: 'thread-api',
+        'x-codex-window-id': 'window-api',
+        'x-codex-turn-metadata': JSON.stringify({
+          session_id: 'session-api',
+          thread_id: 'thread-api',
+          thread_source: 'subagent',
+          parent_thread_id: 'thread-api-parent',
+          sandbox: 'workspace-write',
+          workspaces: { '/work/api': {} },
+        }),
+      },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.client_name, 'codex')
+  assert.equal(projection.conversation_id, 'thread-api')
+  assert.equal(projection.session_id, 'session-api')
+  // The turn-metadata blob also rides in the body map, so everything it
+  // carries (thread_source, sandbox, workspaces) resolves without a header.
+  assert.equal(projection.user_type, 'subagent')
+  assert.equal(projection.is_sidechain, true)
+  assert.equal(projection.parent_thread_id, 'thread-api-parent')
+  assert.equal(projection.permission_mode, 'workspace-write')
+  assert.equal(projection.cwd, '/work/api')
+})
+
+// @ref LLP 0151#real-header-names [tests]: the compatibility headers Codex
+// really emits keep working, including `x-codex-parent-thread-id` (the name the
+// projector previously got wrong).
+test('Codex lineage resolves from the compatibility headers Codex actually sends', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-window-id': 'window-hdr',
+      'x-codex-parent-thread-id': 'thread-hdr-parent',
+      'x-openai-subagent': 'collab_spawn',
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-hdr',
+        thread_id: 'thread-hdr',
+        turn_id: 'turn-hdr',
+        thread_source: 'subagent',
+        workspaces: { '/work/hdr': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-hdr')
+  assert.equal(projection.session_id, 'session-hdr')
+  assert.equal(projection.prompt_id, 'turn-hdr')
+  assert.equal(projection.is_sidechain, true)
+  assert.equal(projection.parent_thread_id, 'thread-hdr-parent')
+  assert.equal(projection.attributes.codex.window_id, 'window-hdr')
+  assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
+})
+
+// @ref LLP 0151#real-header-names [tests]: `thread-id`, `session-id` and
+// `parent-thread-id` are names Codex never emits. Reading them let an
+// unrelated proxy hop or a hand-rolled client dictate `conversation_id`, which
+// is the partition-adjacent row identity, so they must resolve to nothing.
+test('a bare lineage header name Codex never sends resolves to nothing, not a wrong value', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'thread-id': 'phantom-thread',
+      'session-id': 'phantom-session',
+      'parent-thread-id': 'phantom-parent',
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.attributes.codex.thread_id, undefined)
+  assert.equal(projection.attributes.codex.session_id, undefined)
+  assert.equal(projection.parent_thread_id, undefined)
+  assert.equal(projection.attributes.codex.lineage_source, undefined)
+  // No lineage was stated, so the row keeps the content-hash fallback identity
+  // rather than adopting an id nothing in Codex produced.
+  assert.equal(projection.conversation_id.length, 16)
+  assert.notEqual(projection.conversation_id, 'phantom-thread')
+  assert.equal(projection.session_id, projection.conversation_id)
+})
+
+// @ref LLP 0151#body-is-authority [tests]: body and blob are two projections of
+// one Codex snapshot and cannot disagree in real traffic; pin which one wins so
+// the tie-break is a decision rather than an accident of argument order.
+test('body client_metadata wins over the turn-metadata blob when the two disagree', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-blob',
+        thread_id: 'thread-blob',
+        workspaces: { '/work/blob': {} },
+      }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: { session_id: 'session-body', thread_id: 'thread-body' },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-body')
+  assert.equal(projection.session_id, 'session-body')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+  // @ref LLP 0151#lineage-conflict [tests]: the tie-break leaves evidence, so
+  // the disagreement the body silently won is on the row and countable.
+  assert.equal(projection.attributes.codex.lineage_conflict, 'thread_id,session_id')
+})
+
+// @ref LLP 0151#lineage-conflict [tests]: the signal must be absent, not merely
+// falsy, for the agreeing traffic that is every turn Codex is known to send, or
+// a nonzero conflict count stops being evidence of anything.
+test('agreeing lineage surfaces record no lineage_conflict', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-agree',
+        thread_id: 'thread-agree',
+        turn_id: 'turn-agree',
+        parent_thread_id: 'parent-agree',
+      }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: {
+        session_id: 'session-agree',
+        thread_id: 'thread-agree',
+        turn_id: 'turn-agree',
+        'x-codex-parent-thread-id': 'parent-agree',
+      },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-agree')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+  assert.ok(!('lineage_conflict' in projection.attributes.codex))
+})
+
+// @ref LLP 0151#lineage-conflict [tests]: only a real disagreement counts. A
+// field one surface omits is the normal per-request-kind shape, not a conflict.
+test('a lineage field only one surface states is not a conflict', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ thread_source: 'user' }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: { session_id: 'session-solo', thread_id: 'thread-solo' },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-solo')
+  assert.ok(!('lineage_conflict' in projection.attributes.codex))
+})
+
+// @ref LLP 0151#lineage-source [tests]: the recorded name is the surface the
+// identity came from. Here the body states only `session_id`, so `thread_id`,
+// which is what `conversation_id` keys on, comes from the blob.
+test('lineage_source names the surface the thread actually came from', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ thread_id: 'thread-from-blob' }),
+    }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: {
+        'x-codex-installation-id': 'install-mixed',
+        session_id: 'session-from-body',
+      },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.conversation_id, 'thread-from-blob')
+  assert.equal(projection.attributes.codex.session_id, 'session-from-body')
+  assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
+  assert.ok(!('lineage_conflict' in projection.attributes.codex))
+})
+
+// @ref LLP 0151#body-is-a-codex-signal [tests]: a flat `session_id` +
+// `thread_id` pair is not a Codex-exclusive shape, and `/v1/responses` and
+// `/v1/chat/completions` are generic matched paths that any OpenAI-compatible
+// client posts to. Honouring the pair as evidence of Codex would reopen through
+// the body exactly what removing the `thread-id` header closed: an unrelated
+// client stamped `client_name: 'codex'` and dictating this row's
+// `conversation_id` and `session_id` (the partition key, LLP 0030). So the row
+// must come out exactly as if the map had not been sent at all.
+test('a non-Codex client sending only a flat client_metadata identity pair is not treated as Codex', () => {
+  const projector = createCodexExchangeProjector()
+  const flatPair = { session_id: 'foreign-session', thread_id: 'foreign-thread' }
+  const shapes = [
+    {
+      path: '/v1/responses',
+      body: { model: 'gpt-5', input: 'go' },
+      response_body: JSON.stringify({ output_text: 'done' }),
+    },
+    {
+      path: '/v1/chat/completions',
+      body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+      response_body: JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    },
+  ]
+  for (const shape of shapes) {
+    /** @param {Record<string, unknown>} body */
+    const project = (body) => /** @type {any} */ (projector.project(exchange({
+      path: shape.path,
+      // A user-agent no Codex build produces, and no Codex-namespaced header.
+      request_headers: JSON.stringify({ 'user-agent': 'some-agent-framework/2.1' }),
+      request_body: JSON.stringify(body),
+      response_body: shape.response_body,
+    }), context()))
+
+    const projection = project({ ...shape.body, client_metadata: flatPair })
+    assert.equal(projection.client_name, undefined, `${shape.path}: must not be stamped codex`)
+    assert.notEqual(projection.conversation_id, 'foreign-thread')
+    assert.notEqual(projection.session_id, 'foreign-session')
+    // `identity_source` is stamped for every row; no lineage attribute is.
+    assert.equal(projection.attributes.codex.thread_id, undefined)
+    assert.equal(projection.attributes.codex.session_id, undefined)
+    assert.equal(projection.attributes.codex.lineage_source, undefined)
+    // Strongest form: the ambiguous map contributes nothing, so the row is
+    // byte-identical to the same request without it.
+    const control = project(shape.body)
+    assert.equal(projection.conversation_id, control.conversation_id)
+    assert.equal(projection.session_id, control.session_id)
+  }
+})
+
+// @ref LLP 0151#body-is-a-codex-signal [tests]: corroboration is what makes the
+// flat pair readable, not the pair itself, so the guard above must narrow only
+// WHO may be called Codex and not WHAT a known Codex client's map carries. A
+// Codex user-agent is corroboration on its own, so a Codex turn whose map states
+// only the flat pair still resolves its lineage from the body.
+test('a transport-corroborated Codex request still resolves lineage from a flat-only client_metadata', () => {
+  const projector = createCodexExchangeProjector()
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/v1/responses',
+    request_headers: JSON.stringify({ 'user-agent': 'codex_cli_rs/0.55.0' }),
+    request_body: JSON.stringify({
+      model: 'gpt-5-codex',
+      input: 'go',
+      client_metadata: { session_id: 'session-ua', thread_id: 'thread-ua' },
+    }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+
+  assert.equal(projection.client_name, 'codex')
+  assert.equal(projection.conversation_id, 'thread-ua')
+  assert.equal(projection.session_id, 'session-ua')
+  assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
+})
+
+// @ref LLP 0151#body-is-a-codex-signal [tests]: `match` gates on the path (plus
+// the turn-metadata header) and never reads the body, while codex-context
+// resolution accepts a Codex-owned body map on its own. The two only stay
+// consistent because the matched path set covers every route Codex posts to: a
+// body-only Codex request on an unmatched path would be rejected at the gate
+// before the body was read. Pin that covering assumption rather than widen
+// `match` on a hypothetical, so a Codex route the set does not cover fails here
+// instead of silently going unrecorded.
+test('every route Codex posts to is matched, so a body-only Codex request is never dropped at the gate', () => {
+  const projector = createCodexExchangeProjector()
+  // The ChatGPT-subscription namespace and the API-key Responses path.
+  for (const path of ['/backend-api/codex/responses', '/v1/responses']) {
+    const input = exchange({
+      path,
+      request_headers: JSON.stringify({}),
+      request_body: JSON.stringify({
+        model: 'gpt-5-codex',
+        input: 'go',
+        client_metadata: {
+          'x-codex-installation-id': 'install-gate',
+          session_id: 'session-gate',
+          thread_id: 'thread-gate',
+        },
+      }),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    })
+    assert.equal(projector.match(input), true, `${path} must pass the match gate`)
+    const projection = /** @type {any} */ (projector.project(input, context()))
+    assert.equal(projection.client_name, 'codex', `${path} must resolve a codex context`)
+    assert.equal(projection.conversation_id, 'thread-gate')
+  }
+})
+
+// @ref LLP 0151#row-identity [tests]: already-recorded shapes must not re-key.
+// These literals were captured from the pre-change projector, so a drift in
+// `conversation_id` resolution for a shape HypAware already recorded shows up
+// here as a changed `message_id` / `part_id`.
+test('part_id and message_id stay byte-identical for the turn-metadata shape already recorded', async () => {
+  const projector = createCodexExchangeProjector()
+  const dispatcher = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [{ ...projector, _seq: 0 }],
+  })
+  const rows = /** @type {any[]} */ (await dispatcher.projectExchange(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-window-id': 'window-identity',
+      'x-codex-turn-metadata': JSON.stringify({
+        session_id: 'session-identity',
+        thread_id: 'thread-identity',
+        turn_id: 'turn-identity',
+        thread_source: 'user',
+        workspaces: { '/w': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  })))
+
+  assert.deepEqual(
+    rows.map((r) => ({ role: r.role, session_id: r.session_id, conversation_id: r.conversation_id, message_id: r.message_id, part_id: r.part_id })),
+    [
+      { role: 'user', session_id: 'session-identity', conversation_id: 'thread-identity', message_id: 'e1a2ff876074693f', part_id: 'e1a2ff876074693f#0' },
+      { role: 'assistant', session_id: 'session-identity', conversation_id: 'thread-identity', message_id: '179fd16763044acd', part_id: '179fd16763044acd#0' },
+    ]
+  )
+})
+
+// ---------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------
 
