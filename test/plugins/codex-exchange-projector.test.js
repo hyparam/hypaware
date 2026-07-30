@@ -1110,10 +1110,10 @@ test('conversation_id falls back to a stable hash when no codex metadata or sess
 })
 
 // ---------------------------------------------------------------------
-// Lineage surfaces (LLP 0143)
+// Lineage surfaces (LLP 0144)
 // ---------------------------------------------------------------------
 
-// @ref LLP 0143#body-is-authority [tests]: the flat body `client_metadata` map
+// @ref LLP 0144#body-is-authority [tests]: the flat body `client_metadata` map
 // is the only lineage surface Codex fills for every request kind, so a turn
 // that carries no Codex header at all must still resolve its thread, session,
 // turn and parent thread.
@@ -1148,7 +1148,7 @@ test('Codex lineage resolves from the durable body client_metadata when no linea
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 
-// @ref LLP 0143#body-is-a-codex-signal [tests]: the API-key route posts to a
+// @ref LLP 0144#body-is-a-codex-signal [tests]: the API-key route posts to a
 // generic `/v1/responses` with no Codex-namespaced header, so the body map is
 // also what identifies the exchange as Codex at all.
 test('body client_metadata alone identifies a Codex exchange on a generic responses path', () => {
@@ -1189,7 +1189,7 @@ test('body client_metadata alone identifies a Codex exchange on a generic respon
   assert.equal(projection.cwd, '/work/api')
 })
 
-// @ref LLP 0143#real-header-names [tests]: the compatibility headers Codex
+// @ref LLP 0144#real-header-names [tests]: the compatibility headers Codex
 // really emits keep working, including `x-codex-parent-thread-id` (the name the
 // projector previously got wrong).
 test('Codex lineage resolves from the compatibility headers Codex actually sends', () => {
@@ -1222,7 +1222,7 @@ test('Codex lineage resolves from the compatibility headers Codex actually sends
   assert.equal(projection.attributes.codex.lineage_source, 'turn_metadata')
 })
 
-// @ref LLP 0143#real-header-names [tests]: `thread-id`, `session-id` and
+// @ref LLP 0144#real-header-names [tests]: `thread-id`, `session-id` and
 // `parent-thread-id` are names Codex never emits. Reading them let an
 // unrelated proxy hop or a hand-rolled client dictate `conversation_id`, which
 // is the partition-adjacent row identity, so they must resolve to nothing.
@@ -1251,7 +1251,7 @@ test('a bare lineage header name Codex never sends resolves to nothing, not a wr
   assert.equal(projection.session_id, projection.conversation_id)
 })
 
-// @ref LLP 0143#body-is-authority [tests]: body and blob are two projections of
+// @ref LLP 0144#body-is-authority [tests]: body and blob are two projections of
 // one Codex snapshot and cannot disagree in real traffic; pin which one wins so
 // the tie-break is a decision rather than an accident of argument order.
 test('body client_metadata wins over the turn-metadata blob when the two disagree', () => {
@@ -1279,7 +1279,7 @@ test('body client_metadata wins over the turn-metadata blob when the two disagre
   assert.equal(projection.attributes.codex.lineage_source, 'body_client_metadata')
 })
 
-// @ref LLP 0143#row-identity [tests]: already-recorded shapes must not re-key.
+// @ref LLP 0144#row-identity [tests]: already-recorded shapes must not re-key.
 // These literals were captured from the pre-change projector, so a drift in
 // `conversation_id` resolution for a shape HypAware already recorded shows up
 // here as a changed `message_id` / `part_id`.

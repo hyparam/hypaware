@@ -1,4 +1,4 @@
-# LLP 0143: Codex lineage reads the body's `client_metadata`, not header names
+# LLP 0144: Codex lineage reads the body's `client_metadata`, not header names
 
 **Type:** Decision
 **Status:** Active
