@@ -6,6 +6,7 @@ import https from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
 
+import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
 import { configuredGatewayEndpoint } from '../../../../src/core/config/gateway_endpoint.js'
 import { resolveLiveGatewayEndpointFromStatus } from '../../../../src/core/daemon/status.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -512,7 +513,7 @@ export function resolveGatewayEndpointForCli(ctx) {
  * age, and point at the explicit-id escape hatch.
  *
  * **Refuses on a legacy rollout** that carries no `session_id` field at all,
- * rather than falling back to its thread id: see `readRolloutMeta`.
+ * rather than falling back to its thread id: see `legacyRolloutError`.
  *
  * @param {{ env: NodeJS.ProcessEnv, cwd: string, maxScan?: number, maxAgeMs?: number, now?: number }} args
  * @returns {SessionIdResolution}
@@ -558,7 +559,7 @@ export function resolveSessionIdForCli(args) {
     }
   }
 
-  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string, file: string }[]} */
+  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
   const candidates = []
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
@@ -643,7 +644,7 @@ export function resolveSessionIdForCli(args) {
  * @returns {SessionIdResolution}
  */
 function resolveFromStatedThread(scan, sessionsDir, threadId, maxScan) {
-  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string, file: string }[]} */
+  /** @type {{ threadId: string, sessionId: string | undefined, cwd: string | undefined, file: string }[]} */
   const matches = []
   for (const file of scan.files) {
     const meta = readRolloutMeta(file)
@@ -782,72 +783,46 @@ function describeAge(ms) {
 }
 
 /**
- * Read `payload.id` (the thread), `payload.session_id` (the session container
- * the drop keys on) and `payload.cwd` off a rollout's first line. Only a
- * bounded prefix is read: a rollout grows without limit, but its `session_meta`
- * header is the first record.
+ * The thread id, session container and cwd a rollout's `session_meta` header
+ * states, or `undefined` when the file states no thread at all.
  *
- * **The raw JSON line is what is parsed, deliberately.** Codex's
- * `SessionMetaLine` has a hand-written `Deserialize` that BACK-FILLS
- * `session_id` from `id` when the field is absent, so anything reading a
- * deserialized `session_meta` gets the *thread* id handed back under the name
- * `session_id` on every legacy rollout - the wrong key, silently, exactly the
- * defect this resolution exists to remove. Reading the line means an absent
- * field is visible as absent, and `sessionId: undefined` is then a refusal at
- * the call site rather than a guess.
+ * The read itself is `readRolloutSessionMeta`, shared with `@hypaware/codex`'s
+ * live cwd resolver, which asks this exact line the same question for the
+ * `.hypignore` match. Both answers gate a privacy control and a wrong one is
+ * silent, and the rules for reading the line drifted apart twice while each
+ * caller kept its own copy (#453, #459). So the rules live in the reader and
+ * this function is only the caller's shape: what a resolution here needs and
+ * what it may refuse on.
+ * @ref LLP 0150 [constrained-by]: one reader for `session_meta`, not one per caller
  *
- * Two shape guards keep "read the raw line" from becoming "trust whatever the
- * line says". The record must be the `session_meta` header (the only record type
- * that states the container; `codex/src/rollout-cwd.js` type-checks the same
- * line for the same reason), and a **blank** `session_id` counts as absent, like
- * a blank environment variable in `statedEnv`. Both mean the container is not
- * readable from this file, and unreadable is a refusal: a present-but-unusable
- * key would otherwise be reported as the answer and then match nothing at the
- * drop, which is the failure mode this whole resolution exists to remove.
+ * Three of the reader's guarantees are what the resolvers above rest on, and
+ * none of them is restated here:
+ *
+ * - **The raw JSON line is what is parsed.** Codex's `SessionMetaLine` has a
+ *   hand-written `Deserialize` that BACK-FILLS `session_id` from `id` when the
+ *   field is absent, so anything reading a deserialized `session_meta` gets
+ *   the *thread* id handed back under the name `session_id` on every legacy
+ *   rollout: the wrong key, silently, exactly the defect #458 removed.
+ * - **The record must be the `session_meta` header.** Other rollout records
+ *   carry `payload.id` and `payload.cwd` too (a `turn_context` does), and read
+ *   as the header they yield a confident id belonging to no session.
+ * - **A blank field is an absent one**, so `sessionId: undefined` is a refusal
+ *   at the call site rather than a key that matches nothing at the drop.
+ *
+ * `cwd` is passed through as the reader gives it, `undefined` included: only the
+ * cwd path consults it, and there an absent value simply matches no invocation
+ * cwd. The stated-thread path answers about a thread the client named, so a
+ * rollout whose header records no usable `cwd` still answers it.
  *
  * @param {string} file
- * @returns {{ threadId: string, sessionId: string | undefined, cwd: string } | undefined}
+ * @returns {{ threadId: string, sessionId: string | undefined, cwd: string | undefined } | undefined}
  * @ref LLP 0067#cli-session-id [implements]: an absent or unusable session_id is
  * unresolvable, never the back-filled thread id
  */
 function readRolloutMeta(file) {
-  /** @type {number | undefined} */
-  let fd
-  try {
-    fd = fs.openSync(file, 'r')
-    const buf = Buffer.alloc(64 * 1024)
-    const read = fs.readSync(fd, buf, 0, buf.length, 0)
-    const text = buf.subarray(0, read).toString('utf8')
-    const newline = text.indexOf('\n')
-    const line = newline === -1 ? text : text.slice(0, newline)
-    const parsed = JSON.parse(line)
-    if (!parsed || typeof parsed !== 'object' || parsed.type !== 'session_meta') return undefined
-    const payload = parsed.payload
-    if (!payload || typeof payload !== 'object') return undefined
-    const fields = /** @type {Record<string, unknown>} */ (payload)
-    const id = fields.id
-    const cwd = fields.cwd
-    const sessionId = fields.session_id
-    if (typeof id !== 'string' || id.length === 0) return undefined
-    if (typeof cwd !== 'string' || cwd.length === 0) return undefined
-    return {
-      threadId: id,
-      // Returned byte-identical (an opaque provider token, LLP 0066 R5): only
-      // the usability test trims.
-      sessionId: typeof sessionId === 'string' && sessionId.trim().length > 0 ? sessionId : undefined,
-      cwd,
-    }
-  } catch {
-    return undefined
-  } finally {
-    if (fd !== undefined) {
-      try {
-        fs.closeSync(fd)
-      } catch {
-        /* already closed */
-      }
-    }
-  }
+  const meta = readRolloutSessionMeta(file)
+  if (meta?.threadId === undefined) return undefined
+  return { threadId: meta.threadId, sessionId: meta.sessionId, cwd: meta.cwd }
 }
 
 /**

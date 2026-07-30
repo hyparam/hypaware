@@ -295,6 +295,28 @@ test('resolves a Codex session id from the rollout whose payload.cwd matches the
   assert.equal(out.ok && out.source, 'codex_rollout')
 })
 
+test('a first line that is not a session_meta record resolves nothing, however much it looks like one', () => {
+  // Issue #465. The envelope-type guard is one of the three rules the shared
+  // reader states: another rollout record can carry `payload.id` and
+  // `payload.cwd` (a `turn_context` does), and reading it as the header hands
+  // `hyp session ignore` an id that is not the session's. The privacy verb then
+  // reports success for a drop that drops nothing.
+  //
+  // #458 added the same guard as a local predicate here while #465 was open;
+  // this pins it at the seam that now delegates, so collapsing the two readers
+  // into one cannot quietly drop it again.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'not-the-session-id', cwd: '/repo/here', type: 'turn_context' },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(out.ok, false, 'a non-session_meta first line is not evidence of a session id')
+  assert.equal(
+    (out.ok ? '' : out.error).includes('not-the-session-id'),
+    false,
+    'the id off the wrong envelope must not be resolved, nor offered as a candidate'
+  )
+})
+
 test('refuses (never guesses newest) when several Codex rollouts match the cwd', () => {
   const home = tempCodexHome([
     { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-aaa', cwd: '/repo/here' },
@@ -660,6 +682,33 @@ test('rollouts that disagree about which session contains a thread refuse, namin
   assert.equal(ok.ok && ok.sessionId, 'session-same')
 })
 
+test('a stated thread still resolves from a rollout whose cwd is unusable: that path never reads cwd', () => {
+  // #465's merge with #458. The shared reader refuses a blank or relative `cwd`
+  // (LLP 0150 #usable-cwd), and the cwd-matching path wants that: a relative
+  // value would be resolved against the daemon's process cwd. The stated-thread
+  // path asks a different question, and answers it out of `session_id`, so an
+  // unusable `cwd` must not cost it the rollout. Refusing here would turn a
+  // field-level predicate into a file-level one and lose the container that IS
+  // on disk.
+  for (const cwd of ['   ', '../elsewhere', '']) {
+    const home = tempCodexHome([
+      { file: 'rollout-2026-01-12-a.jsonl', id: 'thread-nocwd', sessionId: 'session-nocwd', cwd, ageMs: 30 * 1000 },
+    ])
+    const out = resolveSessionIdForCli({
+      env: { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-nocwd' },
+      cwd: '/repo/here',
+    })
+    assert.equal(out.ok, true, `an unusable cwd (${JSON.stringify(cwd)}) must not hide the session container`)
+    assert.equal(out.ok && out.sessionId, 'session-nocwd')
+    assert.equal(out.ok && out.source, 'codex_env_rollout')
+
+    // The cwd path is the one the predicate governs: with nothing stated, that
+    // same rollout matches no invocation cwd and the verb refuses.
+    const noEnv = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+    assert.equal(noEnv.ok, false, 'an unusable cwd matches no invocation cwd')
+  }
+})
+
 test('two clients each stating a session refuse rather than picking one', () => {
   // Environments nest (Codex runs `claude`, or the reverse) and the child
   // inherits the parent's variable while setting its own, so both can be set
@@ -933,8 +982,8 @@ function dropContext(ignored) {
  * `ageMs` backdates the file's mtime, which is how the resolver tells a running
  * session (appended to on every turn) from a finished one.
  *
- * `type` overrides the first record's envelope type, for the case where the
- * fields are present on a record that does not state the container.
+ * `type` overrides the first line's envelope type, so a test can present a
+ * record that carries `id`/`session_id`/`cwd` but is not the session header.
  *
  * @param {{ file: string, id: string, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
