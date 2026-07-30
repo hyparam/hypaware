@@ -922,6 +922,13 @@ function readRecordedCwd(reqBody) {
  * The two checks are stated in both places for now because that module is not on
  * `master` yet; unify them once it lands.
  *
+ * Two things this does NOT reach, so nobody reads it as the whole gate. On the
+ * Codex route the value passed in is usually not the request's `cwd` but the
+ * workspace key `selectCodexWorkspace` picked for it, and that falls back to the
+ * first workspace when none matches, which is absolute and so accepted here even
+ * when the session ran elsewhere (#476). And the rollout fallback at the call site
+ * sits outside this call, unpredicated until #466 lands.
+ *
  * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
  * so the rollout fallback still gets its turn
  * @param {string | undefined} cwd
@@ -945,6 +952,11 @@ function usableInBandCwd(cwd, ctx) {
   // nothing to match, which is indistinguishable from "no cwd at all" in the
   // row. Hash it - a cwd is user data (LLP 0049), and the drop log above uses
   // the same digest so the two are correlatable.
+  // One gap, deliberate: a `cwd` of exactly `''` never arrives, because
+  // `readStringKey` and `firstString` both require a non-empty string, so it is
+  // refused upstream with no log. Same outcome (absent cwd, NULL column, and it
+  // was already absent before this predicate existed), no diagnostic. Closing it
+  // means loosening a helper with 16 other callers here, which is not worth it.
   ctx?.log?.warn?.('plugin.codex.usage_policy_cwd_unusable', {
     component: 'codex',
     operation: 'usage_policy_cwd',

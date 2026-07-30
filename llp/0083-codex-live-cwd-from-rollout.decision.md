@@ -63,8 +63,15 @@ Codex now has the symmetric fallback.
   against the **daemon's** own process cwd and return a confident verdict for an
   unrelated directory (#471). The rollout fallback then still gets its turn, and
   when nothing usable is found the row records `cwd = NULL` exactly as before, so
-  refusing does not make this path fail closed. The rollout-stated `cwd` is held
-  to the same rule.
+  refusing does not make this path fail closed. Two limits of that rule, stated
+  rather than implied. The rollout-stated `cwd` is **not yet** held to it:
+  `rollout-cwd.js` returns `session_meta.cwd` as written, so a refused in-band
+  value falls through to a source that is still unpredicated (PR #466's
+  `sessionMetaCwd` closes that half). And on the Codex route the value the
+  predicate sees is usually not the request's `cwd` but the workspace key
+  `selectCodexWorkspace` selected for it, which substitutes the first workspace
+  when none matches, so an absolute-but-unrelated directory can still reach the
+  gate (#476).
 - **Keyed on the codex session id.** The live path already resolves it
   (`session-id` header / turn metadata); the rollout filename embeds it, matched
   via the `sessionIdFromPath` helper shared with the backfill. Only a real Codex
