@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -10,7 +10,12 @@ import { asyncRow } from 'squirreling'
 
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
-import { localOnlyListPath, readLocalOnlyDirs, writeLocalOnlyDirs } from '../../src/core/usage-policy/local_only.js'
+import {
+  localOnlyListPath,
+  readLocalOnlyDirs,
+  readLocalOnlyEntries,
+  writeLocalOnlyDirs,
+} from '../../src/core/usage-policy/local_only.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
@@ -239,6 +244,51 @@ test('hyp unignore --local-only does not remove a sibling that merely shares a s
   })
 })
 
+// The CLI's view of the machine-local store has to agree with the resolver's,
+// or a user can be told a directory is unmarked while the gate is enforcing a
+// mark on it (or end up with two entries governing one directory at different
+// classes). Real `symlink(2)`, because the defect these guard is that
+// `path.resolve` is lexical.
+//
+// @ref LLP 0050#canonicalization [tests]: marking and unmarking identify a directory, not a spelling
+
+test('hyp ignore --private on the real path upgrades an entry declared by its symlink spelling, not duplicating it', async () => {
+  await withSandbox(async ({ root: sandbox, hypHome }) => {
+    const root = realpathSync(sandbox)
+    const real = path.join(root, 'real', 'proj')
+    mkdirSync(real, { recursive: true })
+    const link = path.join(root, 'link')
+    symlinkSync(real, link)
+    await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link] })
+
+    const res = await run('ignore', ['--private', real], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
+    assert.deepEqual(entries, [{ dir: real, class: 'ignore' }], 'the one entry for that directory now says ignore')
+  })
+})
+
+test('hyp unignore --local-only by symlink spelling removes an entry declared canonically', async () => {
+  await withSandbox(async ({ root: sandbox, hypHome }) => {
+    const root = realpathSync(sandbox)
+    const real = path.join(root, 'real', 'proj')
+    mkdirSync(real, { recursive: true })
+    const link = path.join(root, 'link')
+    symlinkSync(real, link)
+    const unrelated = path.join(root, 'other')
+    mkdirSync(unrelated)
+    await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [real, unrelated] })
+
+    const res = await run('unignore', ['--local-only', link], { cwd: root, hypHome })
+    assert.equal(res.code, 0)
+    assert.deepEqual(
+      await readLocalOnlyDirs({ stateDir: stateDirOf(hypHome) }),
+      [unrelated],
+      'the entry governing that directory is gone; the unrelated one survives'
+    )
+  })
+})
+
 /* ------------------------------ ignore --check ------------------------------ */
 
 test('hyp ignore --check reports the local-only class and the list file as the governor', async () => {
@@ -313,6 +363,34 @@ test('hyp ignore --check on a clean path with a populated-but-non-matching list 
     assert.match(res.stdout, /class: full/)
     assert.match(res.stdout, /governed-by: \(none\)/)
     assert.match(res.stdout, /residual-cached-rows: 0/)
+  })
+})
+
+test('hyp ignore --check scopes the residual count to the entry the gate used, not the longest declared string', async () => {
+  await withSandbox(async ({ root: sandbox, hypHome }) => {
+    const root = realpathSync(sandbox)
+    const scope = path.join(root, 'r')
+    const deep = path.join(scope, 'p', 'deep')
+    mkdirSync(deep, { recursive: true })
+    // The link's *declared* spelling is the longest string in the store, but
+    // the entry the resolver's verdict came from is `<root>/r`. Scoping the
+    // residual count by "longest declared string" counts rows under the link
+    // path, which nothing was ever recorded under, and reports 0.
+    const link = path.join(root, 'a-very-long-link-name')
+    symlinkSync(path.join(scope, 'p'), link)
+    await writeLocalOnlyDirs({ stateDir: stateDirOf(hypHome), dirs: [link, scope] })
+
+    const { query, storage } = makeAiGatewayCache([
+      { cwd: deep, repo_root: scope },
+      { cwd: path.join(scope, 'src'), repo_root: scope },
+      { cwd: '/elsewhere', repo_root: '/elsewhere' },
+    ])
+
+    const res = await run('ignore', ['--check', '--json'], { cwd: deep, hypHome, query, storage })
+    assert.equal(res.code, 0)
+    const parsed = JSON.parse(res.stdout)
+    assert.equal(parsed.class, 'local-only')
+    assert.equal(parsed.residualCachedRows, 2, 'both rows under the governing entry are counted')
   })
 })
 

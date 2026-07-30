@@ -79,6 +79,121 @@ imported by both adapters exactly as they already import
 concept and does not inspect rows (only the adapter knows which field is the
 `cwd`).
 
+## What "the same directory" means to the shared matcher {#canonicalization}
+
+The matcher compares directory *paths*, and a directory has more than one path.
+Until this section existed, the matcher used `path.resolve` on both sides, which
+is purely **lexical**: it normalizes `.`/`..` and makes a path absolute but
+follows no symlinks. So the ancestor walk from a symlinked `cwd` climbed the
+*link's* parents and never met the `.hypignore` governing the real directory: a
+user's `.hypignore` was silently not in force for a project reached through a
+symlink, which on macOS is ordinary (`/tmp` to `/private/tmp`, Homebrew
+prefixes, iCloud-backed `~/Documents`). Because this is the *single shared*
+matcher, every consumer inherited the hole: all four adapter capture seams,
+`hyp purge`, the query-seam visibility filter (LLP 0105), `hyp ignore --check` /
+`policy show`, and the machine-local list membership test.
+
+**Decision: a directory is matched over the *set* of path spellings that denote
+it, and the most restrictive verdict any spelling produces wins.** The set is
+the as-given (lexical) spelling plus the canonical, symlink-resolved spelling
+when it differs, computed by `src/core/usage-policy/canonical.js`. Both sides of
+every comparison get this treatment: the incoming `cwd`, and every stored
+machine-local entry's `dir`.
+
+Resolving over the *set* rather than switching to the canonical form alone is
+the load-bearing part, and it is a privacy argument rather than a tidiness one.
+Canonicalizing only the incoming `cwd` does close the capture leak, but the
+machine-local store keeps whatever path the user supplied (LLP 0071, LLP 0103),
+so an entry the user marked by its symlink spelling stops governing: the class
+drops from `local-only` to `full` and that directory **starts forwarding**. That
+trades a capture leak for a forwarding leak. Taking the most restrictive verdict
+across both spellings closes the first without opening the second, and makes the
+fail-safe structural rather than a special case: a `realpath` that fails removes
+a *candidate* spelling, never a verdict some other spelling already produced.
+
+**The invariant is that canonicalization only ever moves the gate toward more
+restrictive, never toward `full`**, and one step needs explicit care to hold it.
+Merging verdicts across spellings is monotone, but the machine-local list's
+*nearest-governs* step is an argmax over match depth, and an argmax discards
+verdicts instead of merging them. A less restrictive entry (an explicit `sync`
+carve-out, say) that gains reach through its canonical spelling can therefore
+become the deepest match and displace a broader restrictive entry that already
+governed - which would punch a hole in a private tree declared under the other
+spelling and start that directory recording and forwarding. So the
+nearest-governs rule is evaluated **twice**, once over the declared spellings
+alone (what the lexical matcher decided) and once over the widened set, and the
+more restrictive of the two answers wins, the declared one breaking a class tie
+because it is the spelling the user typed. Widening an entry's reach can then
+only add restriction.
+
+The visible cost is that a nested loosening does not cross spellings *when the
+broader restrictive entry is one the declared pass already found*: an explicit
+`sync`/`full` carve-out declared under one spelling does not loosen a broader
+restrictive entry that matches the `cwd` by its own declared spelling, and a
+user who wants that carve-out has to declare it under the same spelling as the
+entry it carves out of (`hyp policy show` on the path reports the class actually
+in force, so the situation is diagnosable). That is the privacy-safe direction
+of the trade, and it is the same direction the `cwd` side already takes.
+
+That condition is load-bearing and the rule should not be read without it,
+because the two-pass guard can only preserve a verdict the declared pass
+actually produced. When the broader restrictive entry reaches the `cwd` *only*
+through canonicalization, the declared pass matches nothing, there is no lexical
+verdict to preserve, and ordinary nearest-governs decides among entries that are
+all in the canonical namespace: a deeper carve-out does then win. That is not a
+hole in the invariant above. The lexical matcher matched neither entry in that
+shape, so `full` is exactly what it returned as well, and the outcome is the one
+the user would have got by declaring both entries canonically in the first
+place. Pinned by `resolve: between two entries that both reach only by
+canonicalization, the deeper carve-out governs`.
+
+Three consequences worth stating outright, because they are what a reader of the
+privacy gate will ask:
+
+- **A declaration stays authoritative as written.** Stored entries keep their
+  as-declared `dir` on disk; nothing is rewritten. An entry governs both its
+  declared spelling and, when resolvable, the canonical spelling of what it
+  points at. If the declared path's target changes or disappears, the
+  declaration still governs the declared spelling, so **no stored entry ever
+  silently loses its class**; it merely stops governing the canonical form of a
+  target it no longer names. A filesystem change never revokes a user's
+  declaration.
+- **Migration is canonicalize-on-read, additively.** There is no on-disk
+  migration and no version bump: entries written before this decision gain
+  canonical reach the moment it ships. Writes still store the caller-resolved
+  path, so `policy show` and `--check` echo the spelling the user typed. The one
+  write-side change is *upsert identity*: re-marking a directory through a
+  different spelling replaces the existing entry rather than appending a second
+  governor for the same directory (which would let the nearest-governs
+  tie-break, not the user, decide the class).
+- **`realpath` is not free, so it rides the existing cache.** The per-`cwd`
+  memoization is keyed on the lexical path and consulted *before*
+  canonicalization, so the cost is one `realpath` per distinct `cwd` per TTL
+  window - the identical bound [LLP 0049](./0049-hypignore-usage-policy.spec.md#requirements)
+  R6 already sets for the ancestor walk - and **zero** syscalls on a cache hit,
+  which is the per-exchange hot path. Entry spellings are computed once per list
+  parse, inside the same TTL. `hyp purge`'s subtree predicate runs per row, so it
+  memoizes the verdict per distinct row `cwd` for the life of one purge run.
+
+A canonicalization that does not fully resolve is reported as a structured
+`usage_policy.canonicalize_failed` event carrying `error_kind:
+path_canonicalize_failed`, the `errno`, how far it got, and a **hashed** path -
+never a raw local path, the same discipline the `usage_policy.export_drop`
+aggregate uses. `ENOENT` is routine (a deleted `cwd`, a not-yet-created
+directory), so it logs at `debug`; only a wholly unresolvable path escalates to
+`warn`. `realpath` is all-or-nothing, so rather than discard a failure entirely
+the canonicalizer resolves the deepest existing ancestor and rejoins the
+unresolved tail: with `/tmp` a symlink, `/tmp/proj/not-created-yet` still
+canonicalizes usefully, which matters because the symlink is almost always an
+*ancestor*, not the leaf.
+
+`isEqualOrDescendant` stays lexical and pure, for callers comparing two strings
+that are already canonical and must not touch the filesystem. The
+spelling-agnostic predicate a CLI verb wants when it asks "which stored entry
+governs this directory?" is `scopeGoverns`, which has to be the same predicate
+`resolve` used, or `policy show` names a governor the gate did not use and
+`policy unset` refuses to remove an entry the gate is enforcing.
+
 ## Why not the gateway
 
 - The gateway is the **provider-agnostic** proxy ([LLP 0016](./0016-ai-gateway.decision.md)).
@@ -101,6 +216,10 @@ worse coupling than both importing core.
 
 - Code that lands this carries `@ref LLP 0050 [implements]` on the adapter
   projector/backfill drop sites and on the `src/core/usage-policy/` matcher.
+- Every consumer of the shared matcher inherits
+  [§canonicalization](#canonicalization) for free; no adapter, `hyp purge`, or
+  query-seam change is needed to gain it, which is the same argument that put the
+  matcher in core in the first place.
 - The gateway source and recorder are not modified.
 - A future caller-supplied `cwd` for raw-proxy traffic would add a *new* call
   site that reuses the same core matcher — no change to this decision.

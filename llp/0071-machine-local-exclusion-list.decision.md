@@ -47,7 +47,12 @@ absolute directory paths:
   already defines: a `cwd` is `local-only` when it equals, or is a path-segment
   descendant of, any listed directory. This is a second source into the one
   shared resolver ([LLP 0070 §resolver](./0070-local-only-export-seam.decision.md#resolver)),
-  not a second matcher.
+  not a second matcher. **Extended-by:
+  [LLP 0050 §canonicalization](./0050-ignore-enforced-in-adapters.decision.md#canonicalization)**:
+  membership is over **real** paths: an entry governs through any spelling of its
+  declared directory, so an entry the user marked by a symlink spelling still
+  covers the real directory (and vice versa) and never silently drops to `full`.
+  The stored `dir` is left exactly as declared; canonicalization happens on read.
 - The file is **read locally by the export driver and the CLI**, written by the
   login picker and the durable authoring command
   ([LLP 0072 §cli](./0072-enrollment-dir-picker.decision.md#cli)), under the same

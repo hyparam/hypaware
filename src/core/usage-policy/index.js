@@ -4,7 +4,19 @@
 // The shared, cwd-agnostic matcher lives in core; the Claude/Codex adapters
 // import it exactly as they import `src/core/observability`.
 export { parseHypignore } from './format.js'
-export { CLASS_RANK, createUsagePolicyResolver, isEqualOrDescendant } from './matcher.js'
+export {
+  CLASS_RANK,
+  createUsagePolicyResolver,
+  governingListEntry,
+  isEqualOrDescendant,
+  sameDirectory,
+  scopeGoverns,
+} from './matcher.js'
+// Symlink canonicalization for the gate (LLP 0050 #canonicalization): a
+// directory is matched over the set of spellings that denote it, so a
+// `.hypignore` or a machine-local entry cannot be escaped (or lost) by reaching
+// the same directory through a symlink.
+export { canonicalizeDirSync, canonicalSpellings, PATH_CANONICALIZE_ERROR_KIND } from './canonical.js'
 // The terminal capture-seam drop sentinel (LLP 0050): an adapter projector
 // returns it for an `.hypignore`-ignored exchange, and the gateway dispatcher
 // stops on it (never falls through to a later projector) and logs it as a drop.
