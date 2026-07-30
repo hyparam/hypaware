@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-07
-**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0150, LLP 0151
+**Related:** LLP 0030, LLP 0032, LLP 0049, LLP 0050, LLP 0150, LLP 0151, LLP 0160
 
 > The `@hypaware/codex` **live** exchange projector resolves an exchange's `cwd`
 > from the session's local rollout (`session_meta.cwd`) when the request carries
@@ -137,6 +137,15 @@ Codex now has the symmetric fallback.
   shared matcher ([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)),
   where it must also canonicalize the `local-only` list entries or it un-governs
   an entry a user marked by its symlink spelling.
+
+**Extended-by:
+[LLP 0160](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#decision)** -
+which cases count as "refused" is narrowed to keys off the in-band `cwd`'s
+ancestor chain, because an ancestor key cannot have changed the verdict. That
+document also records what is now stale in the "an unusable in-band `cwd` is a
+miss" bullet's closing #476 sentence
+([§corrections](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#corrections-0083)),
+and leaves the enrichment question (#481) open.
 
 ## Why not the alternatives
 

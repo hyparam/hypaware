@@ -2,7 +2,7 @@
 
 import { isAbsolute } from 'node:path'
 
-import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
+import { createUsagePolicyResolver, isEqualOrDescendant, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
   copyNumberAlias,
@@ -135,8 +135,11 @@ export function createCodexExchangeProjector(opts = {}) {
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
       // @ref LLP 0083#decision [implements]: a refused workspace substitution is
-      // observable, not silent - it means the gate is measuring a different
-      // directory than it would have. Paths are hashed: this seam sees LLM traffic.
+      // observable, not silent - it means the gate is measuring a directory
+      // whose verdict does not imply the discarded key's.
+      // @ref LLP 0160#decision [constrained-by]: which is narrower than "a
+      // different directory", so this stays rare enough to be worth a `warn`.
+      // Paths are hashed: this seam sees LLM traffic.
       if (codexContext?.refused_workspace_cwd) {
         ctx?.log?.warn?.('plugin.codex.usage_policy_workspace_cwd_refused', {
           component: 'codex',
@@ -788,8 +791,10 @@ function resolveCodexContext(input, provider, path, reqBody) {
     // request states none and the key is the only in-band source there is.
     cwd: firstString(inBandCwd, workspace?.path),
     // Set only when the substitution was refused, so the caller can log it
-    // rather than let a discarded guess vanish.
-    refused_workspace_cwd: workspace && inBandCwd && !pathsEqual(workspace.path, inBandCwd)
+    // rather than let a discarded guess vanish. Refused is narrower than
+    // "different bytes": see `workspaceCoversCwd`.
+    // @ref LLP 0160#decision [implements]: an ancestor key was never a guess.
+    refused_workspace_cwd: workspace && inBandCwd && !workspaceCoversCwd(workspace.path, inBandCwd)
       ? workspace.path
       : undefined,
     client_version: client.version,
@@ -1126,13 +1131,18 @@ function readRecordedCwd(reqBody) {
  * stamped on the row), and the `error_kind` split below needs the two conjuncts
  * apart, which that predicate's single answer does not give.
  *
- * One thing this does NOT reach, so nobody reads it as the whole gate: on the
- * Codex route the value passed in is usually not the request's `cwd` but the
- * workspace key `selectCodexWorkspace` picked for it, and that falls back to the
- * first workspace when none matches, which is absolute and so accepted here even
- * when the session ran elsewhere (#476). The rollout fallback at the call site
- * sits outside this call, but it is not unguarded: `rollout-cwd.js` reads it
- * through `readRolloutSessionMeta`, which applies `sessionMetaCwd`.
+ * One thing this does NOT reach, so nobody reads it as the whole gate: when the
+ * request states no `cwd` at all, the value passed in is the workspace key
+ * `selectCodexWorkspace` picked for it, and that falls back to the first
+ * workspace when none matches, which is absolute and so accepted here even when
+ * the session ran elsewhere. A request that DOES state one no longer reaches
+ * here through the key (#476, closed), so the residue is the narrower ranking
+ * question: the key still outranks the rollout fallback (#480). The rollout
+ * fallback at the call site sits outside this call, but it is not unguarded:
+ * `rollout-cwd.js` reads it through `readRolloutSessionMeta`, which applies
+ * `sessionMetaCwd`.
+ * @ref LLP 0160#corrections-0083 [constrained-by]: LLP 0083's own statement of
+ * this limit predates its amendment landing, so read that correction with it.
  *
  * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
  * so the rollout fallback still gets its turn
@@ -1176,6 +1186,43 @@ function usableInBandCwd(cwd, ctx) {
 function resolveRequestId(input) {
   return readHeader(input.response_headers, 'x-oai-request-id')
     ?? readHeader(input.request_headers, 'x-client-request-id')
+}
+
+/**
+ * Whether the selected `workspaces` key is the directory the session ran in or
+ * an ancestor of it, i.e. whether refusing the substitution can have changed the
+ * `.hypignore` verdict at all.
+ *
+ * This is the predicate behind `refused_workspace_cwd`, and it is deliberately
+ * not byte-equality. When the key is an ancestor of the in-band `cwd`, the
+ * `cwd`'s ancestor walk passes through the key and every machine-local entry
+ * that governs the key also governs the `cwd`, so resolving the `cwd` is
+ * *at least as restrictive* as resolving the key would have been: the refusal
+ * can only tighten, never loosen, and there is nothing to report. A session
+ * running in a subdirectory of its declared workspace is exactly that shape, and
+ * it is the commonest Codex shape there is, so reporting it warned once per turn
+ * on the common case and devalued the privacy warns beside it (#481). Off the
+ * ancestor chain the two walks are incomparable - a sibling tree, or a key
+ * *below* the `cwd`, whose own walk covers strictly more - and that is the guess
+ * about a directory the session never ran in that the signal exists for.
+ *
+ * Trailing slashes are trimmed on both sides, the one normalization the old
+ * byte comparison did; a path is not otherwise ours to normalize, and the
+ * spelling-agnostic predicates next door (`scopeGoverns`) buy their extra reach
+ * with `realpath` syscalls this per-exchange seam must not spend (LLP 0049 R6).
+ * The cost is that a symlinked spelling of the same tree still reads as a
+ * refusal, which is the status quo and errs toward reporting.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
+ * test, never a second copy of the path rule
+ * @ref LLP 0160#decision [implements]: the refusal signal reports a discarded
+ * guess, not a spelling difference
+ * @param {string} workspacePath
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function workspaceCoversCwd(workspacePath, cwd) {
+  return isEqualOrDescendant(trimTrailingSlash(cwd), trimTrailingSlash(workspacePath))
 }
 
 /**
