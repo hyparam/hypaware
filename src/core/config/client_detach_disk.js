@@ -36,6 +36,13 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
  * @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker is the backup; reverse restores it (or removes the managed value) on leave
  */
 
+// Dotted-path segments {@link restoreAtDottedPath} refuses to walk or create.
+// Every other dotted path in this file is an in-tree literal or a path an
+// adapter's own attach recorded; the `prev_malformed` keys are the one set that
+// a hand-edited settings file can name freely, and the restore helper creates
+// the parents it walks.
+const UNWRITABLE_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype'])
+
 const TOML_MANAGED_BEGIN = '# BEGIN hypaware'
 const TOML_MANAGED_END = '# END hypaware'
 const TOML_PREVIOUS_KEY = 'previous_model_provider'
@@ -219,18 +226,32 @@ async function detachJsonMarker({ settingsPath, markerKey, fs }) {
   // which is exactly the case where everything attach put there has just been
   // stripped. Anything still sitting at the path arrived after we attached, so
   // it is left alone and reported instead.
+  //
+  // Both failure notices say the backup is *discarded*, not merely skipped. The
+  // marker is deleted a few lines up and it held the only copy, so a detach that
+  // cannot restore is the moment the value stops existing. "Leaving it in place"
+  // on its own reads as though the record survives to be retried, and it does
+  // not; the user who reads this line is the last person who can act on it.
   // @ref LLP 0163#detach-restores-the-backup [implements]: replay prev_malformed shallowest-first, restoring only into a slot the strip emptied
   /** @type {Record<string, unknown>} */
   const prevMalformed = isPlainObject(marker.prev_malformed) ? marker.prev_malformed : {}
-  // Shallowest first: a restored `hooks` root has to exist as an object before
-  // a `hooks.<event>` backup can be written into it.
+  // Shallowest first, so a `hooks` backup is considered before any
+  // `hooks.<event>` backup nested inside it. Not because the parent has to exist
+  // first - `restoreAtDottedPath` recreates a missing parent either way - but
+  // because when both are recorded they cannot both go back, and the order is
+  // what picks the winner. See LLP 0163.
   for (const dotted of Object.keys(prevMalformed).sort((a, b) => pathDepth(a) - pathDepth(b))) {
     if (getAtDottedPath(value, dotted) !== undefined) {
-      warnings.push(`${dotted} is in use again; leaving it in place rather than restoring the backed-up value`)
+      warnings.push(
+        `${dotted} is in use again; leaving it in place, and the backed-up value is discarded with the marker`
+      )
       continue
     }
     if (!restoreAtDottedPath(value, dotted, prevMalformed[dotted])) {
-      warnings.push(`${dotted} could not be restored; a parent on its path is no longer a JSON object`)
+      warnings.push(
+        `${dotted} could not be restored; ` +
+        'its path is not one this undo may write, so the backed-up value is discarded with the marker'
+      )
     }
   }
 
@@ -635,6 +656,15 @@ function setAtDottedPath(root, dottedPath, newValue) {
  * and overwriting it would repeat the destruction the backup exists to undo.
  * The caller reports it rather than forcing the write.
  *
+ * It also returns false for a path with an `__proto__` / `constructor` /
+ * `prototype` segment. Unlike every other dotted path in this file those come
+ * from a marker sitting in a settings file a hand-edit (or anything else with
+ * write access to the user's home) can reach, and this helper *creates* the
+ * parents it walks, so `__proto__.x` would leave the settings object entirely
+ * and assign onto `Object.prototype` for the rest of the process. Attach never
+ * records such a path, so refusing costs nothing real and the caller reports it
+ * like any other path it could not write.
+ *
  * @ref LLP 0163#detach-restores-the-backup [implements]: recreate emptied parents, refuse to overwrite a parent someone else owns
  * @param {Record<string, unknown>} root
  * @param {string} dottedPath
@@ -643,6 +673,7 @@ function setAtDottedPath(root, dottedPath, newValue) {
  */
 function restoreAtDottedPath(root, dottedPath, newValue) {
   const segments = dottedPath.split('.')
+  if (segments.some((segment) => UNWRITABLE_PATH_SEGMENTS.has(segment))) return false
   const leaf = segments.pop()
   if (leaf === undefined) return false
   /** @type {Record<string, unknown>} */

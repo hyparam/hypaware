@@ -129,6 +129,19 @@ anything found at the same path this run: the earliest backup is the one
 holding the user's content. This is the identical rule `prev_base_url` follows
 for the same reason.
 
+**A displacement the prior backup outranks is reported as lost.** The rule above
+has a second half. If the user breaks the same block again *between* two
+attaches, the second attach displaces a real value that there is no room to
+record - one path, one slot, and the earlier occupant is the one worth keeping.
+That value is destroyed, so the warning for it says so
+(`... already holds an earlier backup for that path, so this value was
+discarded and hyp detach will not restore it`) rather than reusing the ordinary
+"backed up, `hyp detach` restores it" line. A reassuring sentence over a
+destroyed value is the failure this document exists to end, not a mitigation of
+it. Neither notice ever echoes the displaced value: a malformed `env` is exactly
+where an API key ends up, and these strings are printed to the terminal and
+logged.
+
 **`warnings` is a list, not a joined string.** The attach result reports only
 what *this* run displaced (a re-attach that merely carries a backup forward has
 nothing new to say). It is rendered by its callers - the human path prints a
@@ -143,8 +156,7 @@ a new field, and this is one.
 The core undo (`detachJsonMarker` in
 [`src/core/config/client_detach_disk.js`](../src/core/config/client_detach_disk.js))
 replays `prev_malformed` after it has stripped the managed env keys and hook
-entries, shallowest path first so a restored `hooks` root exists as a parent
-before a `hooks.<event>` backup is written into it.
+entries.
 
 Restoring obeys the **never-clobber-a-user-edit** rule of LLP 0045 Part 3,
 expressed as a presence test: the backup goes back only into a path that is now
@@ -155,13 +167,42 @@ same treatment a managed env key that was re-pointed externally gets.
 
 Restoring may have to **recreate** an object parent the strip just deleted (the
 `hooks` root is deleted once its last managed event array is emptied), so the
-restore helper creates missing parents. It refuses only when a parent is
-present as a non-object: something else owns that path, and forcing the write
-would repeat the destruction the backup exists to undo. That case is reported,
-not forced.
+restore helper creates missing parents. It refuses when a parent is present as a
+non-object (something else owns that path, and forcing the write would repeat
+the destruction the backup exists to undo), and when a segment is `__proto__`,
+`constructor` or `prototype`. Those last three matter because `prev_malformed`
+keys are the only dotted paths in the undo that a *settings file* names freely,
+and a helper that creates the parents it walks would otherwise leave the
+document and assign onto `Object.prototype`. Attach never records such a path.
+
+**A backup that cannot go back is destroyed, and the notice says so.** The
+marker is deleted in the same write, and it held the only copy, so "left in
+place" and "could not be restored" are not deferrals: they are the moment the
+value stops existing. Both notices end `... is discarded with the marker` so the
+person reading the line knows they are the last one who can act on it. This is
+not a rare path - `env is in use again` fires for anyone who added an ordinary
+env key after attaching. Giving the value somewhere else to go (a sidecar backup
+file next to `settings.json`, say) is a real option and deliberately **not**
+taken here: it is new on-disk surface with its own lifecycle, and the decision
+on #454 scoped this change to the marker. Recorded as an open question rather
+than smuggled in.
+
+**Order between nested paths is a choice, not a mechanism.** `hooks` and
+`hooks.<event>` can both be recorded (an earlier run repaired the event, a later
+hand-edit broke the whole root). They are mutually exclusive on the way back - a
+string root has no room for an event key - so whichever the replay reaches first
+wins and the other is reported as discarded. The replay sorts **shallowest
+first**, which restores the later whole-root breakage and drops the earlier
+event value. Note that this is *not* forced by the restore helper, which
+recreates missing parents in either direction; a deepest-first replay would keep
+the earlier value, which is arguably what "the earliest backup is the one
+holding the user's content" argues for one level up. The current order is pinned
+by a test so that flipping it is a visible decision.
 
 Legacy pre-record markers never wrote `prev_malformed`, so the legacy branch is
-untouched.
+untouched. A marker that reaches that branch *with* the field (only possible by
+hand-editing `managed` out of an otherwise current marker) drops it silently;
+that is accepted as corrupt-input behaviour, not designed for.
 
 ## Consequences
 
@@ -173,8 +214,27 @@ untouched.
   records it too and the repair is not invisible on the daemon path.
 - The `_hypaware` marker schema grows `prev_malformed`. Markers written before
   this change simply lack it; the undo treats a missing field as an empty map.
+- The backup is not an unconditional promise. It survives until the first
+  detach, and that detach discards it if the path has been re-occupied, if a
+  nested backup outranks it, or if a second displacement collided with it at
+  attach time. Every one of those is reported in the words "discarded", never
+  as a deferral.
 - OpenClaw is unchanged and still refuses (LLP 0143, LLP 0109). The
   divergence is now documented rather than accidental.
+
+## Open questions
+
+- **Should an unrestorable backup have somewhere else to go?** Today it is
+  discarded with the marker and reported. A sidecar file
+  (`settings.json.hypaware-backup-<timestamp>`) would make the promise
+  unconditional at the cost of new on-disk surface nobody cleans up. Out of
+  scope for #454; worth deciding before anyone leans harder on the promise.
+- **Shallowest-first or deepest-first between nested paths?** See above. The
+  current order keeps the later, shallower breakage. Deepest-first would keep
+  the earlier, deeper original.
+- **Does OpenClaw converge?** Argued above that it does not, on the ground that
+  its own loader rejects the malformed config. That asymmetry deserves its own
+  look; OpenClaw is untouched here per the decision on #454.
 
 ## References
 

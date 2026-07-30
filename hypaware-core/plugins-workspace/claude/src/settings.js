@@ -125,6 +125,18 @@ export async function attach(opts) {
   const { value, mtimeMs } = await readSettings(settingsPath)
   const priorMarker = isPlainObject(value[MARKER_KEY]) ? value[MARKER_KEY] : undefined
 
+  // A backup an earlier run already recorded at some path. Read before anything
+  // is displaced, because it decides what this run is allowed to claim: a prior
+  // entry wins (see below), so a value displaced *this* run at an
+  // already-recorded path is dropped rather than backed up, and the warning has
+  // to say that instead of promising a restore that will not happen.
+  // `Object.hasOwn`, not `in`: these keys come off disk.
+  // @ref LLP 0163#prev_malformed-is-path-keyed-not-one-field-per-block [constrained-by]: the earliest backup wins, so a later displacement at the same path is discarded, not recorded
+  /** @type {Record<string, unknown>} */
+  const priorMalformed = priorMarker && isPlainObject(priorMarker.prev_malformed)
+    ? priorMarker.prev_malformed
+    : {}
+
   // The backup half of back-up-then-repair. Every block attach has to rebuild
   // because what was on disk was present but the wrong JSON type lands here,
   // keyed by its dotted path: the value goes into the marker (which is already
@@ -138,6 +150,21 @@ export async function attach(opts) {
   const warnings = []
   /** @type {(dottedPath: string, prior: unknown, expected: 'object' | 'array') => void} */
   const recordDisplaced = (dottedPath, prior, expected) => {
+    if (Object.hasOwn(priorMalformed, dottedPath)) {
+      // Nowhere to put it. The path already holds the earlier backup, and that
+      // one is the user's content from before hypaware first repaired the
+      // block, so it is the one worth keeping. This value is genuinely gone;
+      // saying "backed up, detach restores it" here would be the same silent
+      // destruction the record exists to end, just with a reassuring sentence
+      // on top. The value itself is not echoed: a malformed `env` is exactly
+      // where an API key ends up, and this string is printed and logged.
+      warnings.push(
+        `${dottedPath} was not a JSON ${expected}; ` +
+        `${MARKER_KEY}.prev_malformed already holds an earlier backup for that path, ` +
+        `so this value was discarded and hyp detach will not restore it`
+      )
+      return
+    }
     displaced[dottedPath] = prior
     warnings.push(
       `${dottedPath} was not a JSON ${expected}; ` +
@@ -195,11 +222,9 @@ export async function attach(opts) {
   // value is *ours*, so the second attach finds nothing malformed and must not
   // let the record of what the first one displaced fall off the marker. A prior
   // entry wins over anything found this run at the same path - the earliest
-  // backup is the one holding the user's own content.
+  // backup is the one holding the user's own content. `recordDisplaced` already
+  // refuses to collect a colliding path, so the spread order is belt and braces.
   // @ref LLP 0044#conflict--back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, so it must survive re-attach
-  const priorMalformed = priorMarker && isPlainObject(priorMarker.prev_malformed)
-    ? priorMarker.prev_malformed
-    : undefined
   const prevMalformed = { ...displaced, ...priorMalformed }
 
   // Self-describing undo record: enough for the format-aware core undo

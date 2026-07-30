@@ -151,6 +151,95 @@ test('a re-attach keeps the first attach backup and stops warning about it', asy
   }
 })
 
+test('a second displacement at an already-backed-up path is reported as discarded, not as backed up', async () => {
+  // The re-attach test above only covers the case where the second attach finds
+  // nothing malformed, so it cannot see which value wins a collision. Break the
+  // same block again by hand between attaches and the two rules meet: the first
+  // backup is kept (it holds the pre-hypaware content) and the second value is
+  // genuinely gone. Warning it as "backed up ... hyp detach restores it" would
+  // be the silent destruction this whole change exists to end, dressed up.
+  const { home, settingsPath } = await stageHome({ env: 'FIRST-ORIGINAL' })
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    const between = await readSettings(settingsPath)
+    between.env = 'SECOND-HANDEDIT'
+    await fs.writeFile(settingsPath, JSON.stringify(between, null, 2) + '\n')
+
+    const second = await attach({ ...ATTACH, settingsPath })
+    const attached = await readSettings(settingsPath)
+    assert.deepEqual(attached._hypaware.prev_malformed, { env: 'FIRST-ORIGINAL' })
+
+    const warnings = second.changed ? second.warnings ?? [] : []
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /already holds an earlier backup/)
+    assert.match(warnings[0], /discarded and hyp detach will not restore it/)
+    assert.doesNotMatch(warnings[0], /hyp detach restores it/)
+    // A malformed `env` is where an API key ends up; the notice names the path,
+    // never the value, because it is printed and logged.
+    assert.doesNotMatch(warnings[0], /SECOND-HANDEDIT/)
+
+    // ...and the round trip gives back the first one, not the second.
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.deepEqual(await readSettings(settingsPath), { env: 'FIRST-ORIGINAL' })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a hooks root and a hooks.<event> backup cannot both go back; the shallower one wins and the other is reported', async () => {
+  // The only way to record nested paths: one attach repairs the event, a hand
+  // edit then breaks the whole root, and a second attach records that too. They
+  // are mutually exclusive on the way back (a string root has no room for an
+  // event key), so the replay order decides. Pinned because the order is a
+  // choice, not a consequence: `restoreAtDottedPath` recreates a missing parent
+  // either way, so a deepest-first replay would keep `echo mine` and report the
+  // root instead. Change the order and this test tells you what you traded.
+  const { home, settingsPath } = await stageHome({ hooks: { SessionStart: 'echo mine' } })
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    const between = await readSettings(settingsPath)
+    between.hooks = 'broken-by-hand'
+    await fs.writeFile(settingsPath, JSON.stringify(between, null, 2) + '\n')
+    await attach({ ...ATTACH, settingsPath })
+
+    const attached = await readSettings(settingsPath)
+    assert.deepEqual(attached._hypaware.prev_malformed, {
+      hooks: 'broken-by-hand',
+      'hooks.SessionStart': 'echo mine',
+    })
+
+    const detached = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.deepEqual(await readSettings(settingsPath), { hooks: 'broken-by-hand' })
+    // The one that could not go back is named, and says so: the marker held the
+    // only copy and it has just been deleted.
+    assert.match(String(detached.warning), /^hooks\.SessionStart could not be restored;/)
+    assert.match(String(detached.warning), /discarded with the marker/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a hand-edited prev_malformed path cannot escape the settings object', async () => {
+  // `prev_malformed` keys are the one set of dotted paths in the undo that a
+  // settings file names freely, and the restore helper creates the parents it
+  // walks - so `__proto__.<key>` would walk out of the document and assign onto
+  // Object.prototype for the rest of the process.
+  const { home, settingsPath } = await stageHome({ env: 'ANTHROPIC_API_KEY=sk-x' })
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    const tampered = await readSettings(settingsPath)
+    tampered._hypaware.prev_malformed = { '__proto__.hyp_polluted': 'PWNED' }
+    await fs.writeFile(settingsPath, JSON.stringify(tampered, null, 2) + '\n')
+
+    const detached = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(/** @type {any} */ ({}).hyp_polluted, undefined)
+    assert.match(String(detached.warning), /^__proto__\.hyp_polluted could not be restored;/)
+  } finally {
+    delete (/** @type {any} */ (Object.prototype).hyp_polluted)
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 /* ---------------- well-formed and absent: no repair, no noise --------------- */
 
 test('an absent env/hooks block attaches normally, with no backup and no warning', async () => {
@@ -242,6 +331,10 @@ test('detach leaves a backed-up path alone, and reports it, when something else 
     const after = await readSettings(settingsPath)
     assert.deepEqual(after.env, { MY_KEY: 'mine' })
     assert.match(String(detached.warning), /^env is in use again;/)
+    // The marker went out with this same write, and it held the only copy, so
+    // the notice has to say the backup is gone rather than merely not applied.
+    assert.match(String(detached.warning), /discarded with the marker/)
+    assert.equal(await fs.readFile(settingsPath, 'utf8').then((s) => s.includes('sk-x')), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
