@@ -89,10 +89,6 @@ export interface DepGraphResolution {
   registry: CapabilityRegistryHandle
 }
 
-export interface ResolveDependenciesOptions {
-  registry?: CapabilityRegistryHandle
-}
-
 // --- manifest ---
 
 export type ManifestErrorKind = 'manifest_invalid'
@@ -111,5 +107,3 @@ export interface FailedManifest {
   manifestPath: string
   rootDir: string
 }
-
-export type ManifestLoadResult = LoadedManifest | FailedManifest

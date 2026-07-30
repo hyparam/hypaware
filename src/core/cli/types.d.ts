@@ -86,16 +86,6 @@ export interface WalkthroughOptions {
   prompt?: AsyncPickPrompt
 }
 
-export interface WalkthroughResult {
-  exitCode: number
-  configPath: string
-  config: HypAwareV2Config
-  sourcesPicked: string[]
-  sinksPicked: string[]
-  clientsPicked: string[]
-  retentionDays: number
-}
-
 export interface PickerPicks {
   sources: PickerSource[]
   exportChoice: PickerExport
