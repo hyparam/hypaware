@@ -61,6 +61,19 @@ export interface LocalOnlyEntry {
   class: UsageClass
 }
 
+// A machine-local list entry paired with the precomputed folded spelling of
+// its declared `dir` and the case-sensitivity verdict for the volume that
+// directory lives on (LLP 0050 §normalization). Computed once per list parse
+// per TTL window, so resolving many `cwd`s in one window folds each entry once
+// rather than once per `cwd`. `foldedDir` is `foldPath(entry.dir, {
+// caseInsensitive })`; `caseInsensitive` is false on every non-darwin host and
+// on any volume whose probe was undetermined.
+export interface ListScope {
+  entry: LocalOnlyEntry
+  caseInsensitive: boolean
+  foldedDir: string
+}
+
 // Version-2 on-disk shape of the machine-local list (LLP 0103): the
 // class-per-entry store that replaces the version-1 bare `dirs` array.
 export interface LocalOnlyListFileV2 {

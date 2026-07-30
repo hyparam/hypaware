@@ -62,6 +62,14 @@ governs. Because V1 has only `ignore` and no "un-ignore" directive
 mechanism is not repo-bound: a `.hypignore` anywhere in the ancestor chain
 (including outside any git repo) governs its subtree.
 
+**Extended-by:
+[LLP 0050 §normalization](./0050-ignore-enforced-in-adapters.decision.md#normalization)**
+the ancestor walk itself is unaffected (it `stat`s each candidate rather than
+comparing two strings), but the machine-local list's membership test compares a
+`cwd` a client reported against a `dir` a CLI declared. A filesystem can spell
+one directory several ways, so that comparison is over a **folded** spelling of
+both sides, and the fold can only ever make the verdict more restrictive.
+
 ## Classes {#classes}
 
 | Class | V1 | Meaning |
