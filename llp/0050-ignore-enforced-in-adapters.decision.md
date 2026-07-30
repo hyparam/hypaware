@@ -106,7 +106,7 @@ not of the path and not of the platform:
 | mechanism | folded by | volume-dependent? |
 |---|---|---|
 | symlinked components | `realpath(2)` | no |
-| Unicode normalization (NFC vs NFD) | nothing in `node:fs` | yes, but folding to NFC is safe everywhere |
+| Unicode normalization (NFC vs NFD) | nothing in `node:fs` | yes, and folding is **unsafe** where it does not apply, but harmless *at the gate* (see below) |
 | case | nothing in `node:fs` | yes, and folding is **unsafe** where it does not apply |
 
 `realpath(2)` resolves symlinks and does nothing else. On a default macOS
@@ -123,11 +123,34 @@ versus a client reporting a `cwd`).
 **Decision: list membership compares a folded spelling of both sides.** The fold
 is `src/core/usage-policy/fold.js`:
 
-1. **NFC unconditionally.** It is a total function of the string, needs no
-   filesystem access, cannot fail, and is the identity on a path that is already
-   composed. There is no volume on which folding NFC and NFD together is wrong,
-   because no filesystem this codebase targets lets two paths that differ only
-   by normalization name two different directories.
+1. **NFC unconditionally, and only because this is the gate.** It is a total
+   function of the string, needs no filesystem access, cannot fail, and is the
+   identity on a path that is already composed. What makes it safe here is
+   **not** that NFC and NFD always name one directory. They do not: on every
+   Linux volume this codebase targets, `caf` + U+00E9 and `cafe` + U+0301 are
+   two directories with two inodes, and both can exist in one parent
+   (demonstrated on an ext4-backed overlay host: distinct `ino`, distinct
+   contents, both listed by `readdir`). Folding them together therefore *can*
+   merge two genuinely different directories, exactly as unconditional case
+   folding would.
+
+   It is safe at the gate anyway, for a reason specific to the gate: the
+   resolved class is `max(declared, folded)` (`selectGoverning`, and the argmax
+   discussion below), so a fold that merges two distinct directories can only
+   ever **over-restrict**, i.e. decline to record a directory that was in fact
+   permitted. That is a usability cost
+   and never a privacy or data-loss one. Case is put behind a probe rather than
+   given the same treatment because case aliasing is far more likely to collide
+   with a real, deliberately-distinct sibling (`Makefile` vs `makefile`) than a
+   normalization difference is, not because NFC folding is universally sound.
+
+   **Do not reuse `foldPath` in a predicate where widening is not free.** In a
+   *deletion* predicate (`hyp purge`) or a *disclosure* predicate, widening
+   removes or reveals rows for a directory the user did not name, and the
+   `max()` argument above does not apply. Closing the purge seam below needs
+   either a per-volume normalization-insensitivity probe (no such probe exists;
+   the current one answers only the case question) or a darwin-only guard.
+   See "Not covered".
 2. **Case only behind a per-volume probe.** Case-sensitivity is a property of
    the mounted volume: an APFS volume can be formatted case-sensitive and every
    ext4 volume is. Folding it unconditionally would merge two genuinely
@@ -231,12 +254,45 @@ difference matters enough to name each site:
 - **`policy unset` / `unignore --local-only` can refuse to remove an entry the
   gate is enforcing**, when the user spells the path the other way. It reports
   "not governed" and exits 0. That fails toward privacy: the opt-out stays on.
-- **`hyp purge --subtree` can fail to purge rows it reports as purged**, when the
-  rows were recorded under a different spelling of the target. This is the one
-  site that fails **away** from privacy: the user asked for data to be deleted,
-  the command succeeds, and the rows remain. It is unchanged from the pre-fold
-  behaviour rather than introduced here, but it is the reason this seam should
-  not stay open for long.
+- **`hyp purge <path>` (the subtree target) silently retains rows it was asked
+  to delete**, when the rows were recorded under a different spelling of the
+  target. This is the one site that fails **away** from privacy: the user asked
+  for data to be deleted, the command reports success, and the rows remain.
+  Observed end to end (rows recorded NFD, purge argument NFC, and the reverse;
+  also a case alias):
+
+  ```
+  # the argument is typed NFC; the rows were recorded under the NFD spelling.
+  # the two render identically, which is the whole problem.
+  $ hyp purge ~/café/proj --yes
+  purged 0 rows from 0 partitions
+  $ echo $?
+  0
+  ```
+
+  Nothing is written to stderr and the exit status is 0, so the outcome is
+  indistinguishable from "that directory had nothing cached". Note the
+  inversion: a purge that *succeeds* prints the resurrection warning on stderr,
+  so the failing case is the **quieter** of the two. It is unchanged from the
+  pre-fold behaviour rather than introduced here, and it is tracked separately;
+  it is the reason this seam should not stay open for long.
+
+- **`hyp purge --ignored` is already covered by this change**, because that
+  target classifies each row through `resolver.resolve(row.cwd)` rather than
+  through a lexical prefix test, so it inherits the fold. Verified against
+  `master`: with an `ignore` entry declared NFC and rows recorded NFD, `master`
+  purges 0 rows and leaves the row, and this branch purges it. So marking the
+  directory and running `hyp purge --ignored` is the durable workaround for the
+  subtree gap above until that gap is closed.
+
+Whoever closes the subtree gap should note that it is **not** a matter of
+dropping `foldPath` into the predicate. Purge deletes, so widening the match is
+not free the way it is at the gate (see "NFC unconditionally, and only because
+this is the gate"): on a Linux volume, folding would delete cached rows for a
+genuinely different sibling directory that differs only by normalization. The
+fix needs the fold gated on the volume actually being normalization-insensitive,
+and the shared predicate PR #482 introduces (`scopeGoverns`, which reroutes this
+same purge call site for the symlink class) is the right place to put it.
 
 ## Consequences
 
