@@ -250,19 +250,19 @@ export async function dispatch(argv, opts = {}) {
     // command is *unavailable*, not unknown: report which plugin provides it
     // and how to enable it, instead of implying the feature does not exist. A
     // genuine typo matches nothing here and still gets the generic message.
-    // @ref LLP 0098#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
+    // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
     const inactive = await findInactivePluginForCommand(helpDiscovery, argv[0])
     if (inactive) {
       stderr.write(
         `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
       )
       // The repair depends on *why* the plugin is inactive. Absent from
-      // plugins[] → add it (LLP 0098, byte-identical). Present but
+      // plugins[] → add it (LLP 0153, byte-identical). Present but
       // `enabled: false` → the entry exists, so tell the user to flip it, and
       // when the fleet (central) layer is what disabled it, say it cannot be
       // enabled locally at all rather than send them editing a local entry the
       // additive merge would drop (collides_with_central).
-      // @ref LLP 0099#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
+      // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
       if (inactive.state === 'disabled-central') {
         stderr.write(
           `  repair: ${inactive.plugin} is disabled by the fleet (central) config and cannot be enabled locally; ask your fleet admin to enable it\n`
@@ -655,7 +655,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)
   // Plugin-contributed commands are omitted when their plugin is inactive, so
   // this list is install-specific. Say so, and point at the miss path.
-  // @ref LLP 0098#unavailable-not-unknown: the epilogue can promise a named plugin and a repair line only because a miss on an inactive plugin's command reports "unavailable", not "unknown"
+  // @ref LLP 0153#unavailable-not-unknown: the epilogue can promise a named plugin and a repair line only because a miss on an inactive plugin's command reports "unavailable", not "unknown"
   stdout.write('This list reflects the plugins active in your config. If a command you\n')
   stdout.write('expect is missing, run it anyway: hyp names the plugin that provides it\n')
   stdout.write('and prints how to enable it.\n')
@@ -941,7 +941,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * Classify *why* an in-pool plugin is inactive, so the dispatch-miss repair
  * line can advise the right fix. A plugin lands in the pool-but-not-selected
  * set for two config reasons: it is simply absent from the effective
- * `plugins[]` (LLP 0098's case - add it), or it is present with
+ * `plugins[]` (LLP 0153's case - add it), or it is present with
  * `enabled: false` (the entry exists - flip it). For the disabled case the
  * layer matters: the additive merge model (@ref LLP 0031#merge-model
  * [constrained-by]) drops a local `plugins[]` entry whose name the central
@@ -949,7 +949,7 @@ async function findInactivePluginForCommand(discovery, token) {
  * the local file - the effective disabled entry belongs to central iff central
  * declares that name.
  *
- * @ref LLP 0099#decision [implements]: absent vs disabled, and local vs central for the disabled case
+ * @ref LLP 0154#decision [implements]: absent vs disabled, and local vs central for the disabled case
  * @param {Awaited<ReturnType<typeof resolveLayeredConfigFromDisk>>} layered
  * @param {PluginName} name
  * @returns {'absent' | 'disabled-local' | 'disabled-central'}

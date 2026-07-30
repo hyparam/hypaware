@@ -37,11 +37,11 @@ const execFileAsync = promisify(execFile)
  * server-specific, so there is no local mode: `--remote` selects a server, it
  * never switches one on.
  *
- * @ref LLP 0111#core-group [implements]: report commands are core and ride the remote credential machinery verbatim
+ * @ref LLP 0155#core-group [implements]: report commands are core and ride the remote credential machinery verbatim
  */
 
 /** Server grammar for `kind` and `period`, copied for fail-fast UX only. */
-// @ref LLP 0111#fail-fast [implements]: client-side copies reject a typo before bytes move; the server stays authoritative
+// @ref LLP 0155#fail-fast [implements]: client-side copies reject a typo before bytes move; the server stays authoritative
 const KIND_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 const PERIOD_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/
 
@@ -61,7 +61,7 @@ export async function runReportPublish(argv, ctx) {
   const source = positionals(argv, VALUE_FLAGS)[0]
   const kind = valueFlag(argv, '--kind').value
   const period = valueFlag(argv, '--period').value
-  // @ref LLP 0111#period-explicit [constrained-by]: period is the coverage window only the generator knows; never default it from the current date
+  // @ref LLP 0155#period-explicit [constrained-by]: period is the coverage window only the generator knows; never default it from the current date
   if (!source || !kind || !period) {
     ctx.stderr.write('usage: hyp report publish <file-or-dir> --kind <kind> --period <period> [--title <title>] [--org <org>] [--remote <target>]\n')
     return 2
@@ -277,7 +277,7 @@ export async function runReportGet(argv, ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
- * @ref LLP 0111#delete-confirm [implements]: org-wide destructive verb confirms like purge, not like remote remove
+ * @ref LLP 0155#delete-confirm [implements]: org-wide destructive verb confirms like purge, not like remote remove
  */
 export async function runReportDelete(argv, ctx) {
   const [kind, period, id] = positionals(argv, VALUE_FLAGS)
@@ -336,7 +336,7 @@ export async function runReportDelete(argv, ctx) {
  * @param {CommandRunContext} ctx
  * @param {string} cmd for error prefixes, e.g. `report list`
  * @returns {{ target: string, endpoint: string, identityBase: string | undefined } | { error: string }}
- * @ref LLP 0111#target [implements]: target defaults like bare --remote; the endpoint derives from the one registered URL
+ * @ref LLP 0155#target [implements]: target defaults like bare --remote; the endpoint derives from the one registered URL
  */
 function resolveReportsTarget(argv, ctx, cmd) {
   const remoteArg = valueFlag(argv, '--remote')
@@ -382,7 +382,7 @@ function applyOrgParam(argv, url) {
  * @param {{ ctx: CommandRunContext, target: string, identityBase: string | undefined, write: boolean, cmd: string }} args
  * @param {(token: string) => Promise<Response>} send
  * @returns {Promise<{ ok: true, response: Response } | { ok: false, error: string, exitCode: number }>}
- * @ref LLP 0111#write-401 [implements]: a write 401 that survives the retry is ambiguous - say both expiry and missing scope
+ * @ref LLP 0155#write-401 [implements]: a write 401 that survives the retry is ambiguous - say both expiry and missing scope
  */
 async function reportsRequest({ ctx, target, identityBase, write, cmd }, send) {
   if (typeof (/** @type {unknown} */ (globalThis.fetch)) !== 'function') {
@@ -480,7 +480,7 @@ async function describeErrorResponse(response) {
  *
  * @param {string} dir
  * @returns {Promise<Buffer>}
- * @ref LLP 0111#bundle [implements]: the publish CLI owns bundle creation and pins tar --format=ustar
+ * @ref LLP 0155#bundle [implements]: the publish CLI owns bundle creation and pins tar --format=ustar
  */
 async function packUstarBundle(dir) {
   const { stdout } = await execFileAsync('tar', ['--format=ustar', '-cz', '-C', dir, '.'], {

@@ -26,6 +26,12 @@ actually shipped in V1.
 - **Living docs.** Update the LLP when the design changes: land the doc edit in
   the same commit as the code. Mark retired docs `Superseded` or move them to
   `llp/tombstones/` with `Status: Tombstoned`; don't leave stale guidance.
+- **Accepted docs are settled.** Once an LLP is `Accepted` or `Active`, do not
+  edit what it settled. Change the design by extending it (a new LLP, noted on
+  the old doc's `Extended-by:` line) or by replacing it with a new LLP and
+  marking the old one `Superseded`. Mechanical edits are still fine: typos,
+  broken links, status changes, and renumbering that does not change meaning
+  (LLP 0156).
 - **Tooling lives in-repo** under `.claude/skills/` (so every clone has it):
   `/ref-check [path]` validates `@ref`s; `/ref-story <file>` shows a file's
   rationale-order view; `/llp-create <title>` scaffolds a new doc; `/llp-list`
