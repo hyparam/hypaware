@@ -5,7 +5,7 @@
 **Systems:** Plugins, Gateway, Cache, Sources
 **Author:** Phil / Claude
 **Date:** 2026-07-30
-**Related:** LLP 0026, LLP 0027, LLP 0037, LLP 0144, LLP 0157, LLP 0158
+**Related:** LLP 0026, LLP 0027, LLP 0030, LLP 0037, LLP 0049, LLP 0085, LLP 0144, LLP 0157, LLP 0158
 
 > Codex proved both capture routes agree by construction: live and backfill
 > rows carry the same native ids, so the `part_id` dedupe collapses the
@@ -62,11 +62,19 @@ arriving by a different door.
 - The `@hypaware/openclaw` plugin contributes a settlement enricher
   (`registerSettlementEnricher`, the LLP 0027 dispatch seam). At flush it
   reads the session JSONL through the LLP 0158 reader and upgrades a
-  matched row's identity to native: the message id, and the session and
-  conversation ids from the header. Flush-time settlement runs before
-  partition grouping, so the conversation-id upgrade does not move a
-  committed row (LLP 0027's no-partition-move invariant is about committed
+  matched row's identity to native: the message id, and the session
+  container id (`session_id`, the partition key per LLP 0030) from the
+  header. `conversation_id` stays null, matching Claude's convention.
+  Flush-time settlement runs before partition grouping, so the upgrade
+  changes which partition the row lands in but never rewrites a committed
+  row (LLP 0027's no-partition-move invariant is about committed
   rewrites, which this is not).
+- The enricher also resolves the header `cwd` (through the LLP 0158
+  absolute-path predicate), stamps it on settled rows, and applies the
+  flush-time usage-policy drop of LLP 0085 when that cwd resolves to
+  ignore. This is not an optimization: live OpenClaw proxy rows capture
+  no cwd at all, so without this seam `.hypignore` would fail open for
+  the entire client, permanently (LLP 0049 R1 as extended by LLP 0085).
 - The backfill provider emits whole-session projected exchanges under the
   same native identity, through the same row expansion the live recorder
   uses (the `projectedExchangeItem` path), so identity construction cannot
@@ -101,16 +109,35 @@ arriving by a different door.
 - The re-run trap documented for `hyp backfill` generally still holds:
   `part_id` dedupe drops refreshed rows, so re-running backfill never
   updates already-imported rows.
+- Restart churn, verified and accepted: the live projector's replay
+  dedupe seeds `seenMessages` by `session_id`
+  (`message_projector.js seedSeenMessagesForSession`). After settlement
+  renames a session, a post-restart replay of it misses the seed and
+  re-emits rows; the re-emits settle to the same native ids and the
+  flush-time committed-`part_id` dedupe drops them. Self-healing, at the
+  cost of transient duplicate work in the flush batch, not corruption.
 
 ## Open questions
 
 - The cross-partition twin: a live row that never settles keeps the hash
-  conversation id, so it lives in a different partition from its native
-  backfill twin, where the re-settle sweep (single-partition rewrite,
-  never moves rows) cannot collapse it. Options if the residue proves
-  non-negligible: teach the sweep a message-grain identity upgrade that
-  leaves partition keys alone, or accept and report. Measure before
-  building.
+  `session_id` and a null `cwd`, both partition keys (LLP 0030), so it
+  lives in a different partition from its native backfill twin and the
+  re-settle sweep (single-partition rewrite, never moves rows) cannot
+  collapse the pair. A message-grain-only sweep upgrade (message id and
+  `part_id`, partition keys untouched) would still prevent actual
+  duplication: run before backfill, it puts the native `part_id` in the
+  backfill seen-set so the twin import is skipped, even though the live
+  row itself stays hash-keyed and cwd-null. Measure the residue before
+  building that.
+- Match-key normalization: for Claude, the transcript stores the same
+  wire-shaped messages the proxy saw, so one content key matches both
+  sides. OpenClaw's session file stores its own normalized message shape
+  (for example `toolCall` blocks where the Anthropic wire has
+  `tool_use`), so the match key must normalize across two formats. The
+  enricher's match rate is therefore an implementation risk, not a given;
+  measure it during implementation and revisit this decision if content
+  matching proves unreliable (timestamp-and-order matching is the
+  fallback shape).
 - Should backfill refuse to import a session whose JSONL predates the
   earliest settlement-capable HypAware version on the machine, to bound
   the twin residue from history captured by older builds? Likely
@@ -118,7 +145,7 @@ arriving by a different door.
 
 ## References
 
-- LLP 0026, 0027, 0037, 0144, 0157, 0158
+- LLP 0026, 0027, 0030, 0037, 0049, 0085, 0144, 0157, 0158
 - `hypaware-core/plugins-workspace/ai-gateway/src/dataset.js`
   (`createBackfillDedupe`, `scanExistingPartIds`, `scanSpooledPartIds`,
   `dedupeByPartId`)

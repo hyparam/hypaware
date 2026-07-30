@@ -5,7 +5,7 @@
 **Systems:** Plugins, Sources, Gateway, Observability
 **Author:** Phil / Claude
 **Date:** 2026-07-30
-**Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0049, LLP 0103, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148, LLP 0149, LLP 0152, LLP 0158, LLP 0159
+**Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0049, LLP 0085, LLP 0103, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148, LLP 0149, LLP 0152, LLP 0158, LLP 0159
 
 > Requirements for implementing the Accepted OpenClaw full-capture decision
 > set (LLP 0143 through 0149 and 0152), plus the backfill route those
@@ -94,6 +94,11 @@ per-account-URL gateways (LLP 0146 [constrained-by]).
 - The projector stamps a content match key on every row emitted under
   fallback identity, so settlement is a lookup (LLP 0159 [constrained-by],
   following LLP 0027#decision).
+- The settlement enricher resolves the session's cwd from the session
+  file header and applies the flush-time usage-policy drop when it
+  resolves to ignore (LLP 0159 [constrained-by], LLP 0085's seam). Live
+  OpenClaw proxy rows carry no cwd, so this seam is what makes
+  `.hypignore` govern OpenClaw capture at all.
 
 ## Core removals {#core-removals}
 
@@ -122,7 +127,7 @@ assistant message the model, provider, api, stop reason, and usage with
 token counts (verified on live files, 2026-07-30).
 
 - The backfill provider and the settlement enricher read the file through
-  the one core reader (LLP 0158 [constrained-by]).
+  the one shared reader (LLP 0158 [constrained-by]).
 - Route agreement with live capture is by native-identity settlement plus
   the existing `part_id` dedupe layers (LLP 0159 [constrained-by]);
   backfilled rows carry the same `client_name` and `conversation_source`
@@ -232,7 +237,7 @@ Named by the decisions as verify-before-relying-on:
   header gate and MUST stamp the LLP 0159 match key on every
   fallback-identity row.
 - **R9.** The settlement enricher and the backfill provider MUST consume
-  the LLP 0158 core reader; neither may hold its own parse of the
+  the LLP 0158 shared reader; neither may hold its own parse of the
   session file.
 - **R10.** Backfill MUST resolve usage policy per session before
   projecting any row (LLP 0049 R1, LLP 0103), and MUST exclude
@@ -246,6 +251,10 @@ Named by the decisions as verify-before-relying-on:
 - **R13.** Coverage reporting MUST distinguish deferrals, sibling-adapter
   territory, and documented side channels from gaps, deriving from the
   warning ledger ({#coverage}).
+- **R14.** The settlement enricher MUST resolve the session's cwd through
+  the LLP 0158 reader, stamp it on settled rows, and drop a row whose
+  resolved cwd is policy-ignored before it is committed
+  (LLP 0049 R1 as extended by LLP 0085).
 
 ## References
 

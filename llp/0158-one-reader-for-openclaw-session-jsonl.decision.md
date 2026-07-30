@@ -2,7 +2,7 @@
 
 **Type:** Decision
 **Status:** Draft
-**Systems:** Core, Plugins, Sources, Usage-Policy
+**Systems:** Plugins, Sources, Usage-Policy
 **Author:** Phil / Claude
 **Date:** 2026-07-30
 **Related:** LLP 0003, LLP 0027, LLP 0144, LLP 0150, LLP 0157, LLP 0159
@@ -14,7 +14,7 @@
 > provider (LLP 0157). LLP 0150 already showed what happens when two callers
 > hold their own copy of non-obvious read rules for a session header: the
 > copies drift and privacy controls answer wrong, silently. State the rules
-> once, in one core reader, before the second caller exists.
+> once, in one shared reader, before the second caller exists.
 
 ## Context
 
@@ -54,32 +54,44 @@ answers wrong:
 
 LLP 0150 documented two shipped bugs (#453, #459) caused by exactly this
 shape: two modules holding copies of the same session-header rules for the
-Codex rollout. The placement argument there
-(LLP 0150#placement, resting on LLP 0003#principle) also transfers: the
-enricher lives in the `@hypaware/openclaw` plugin, the backfill provider in
-the same plugin but on a different seam, and `hyp session` or other core
-surfaces may join later; none of them owns the format for the others.
+Codex rollout. One difference matters for placement, though: 0150's two
+callers lived in two different plugins, so the shared statement had to
+cross a plugin boundary and core was the only legal home
+(LLP 0150#placement, LLP 0003#principle). Here both callers live in the
+same `@hypaware/openclaw` package, and the corpus precedent for that case
+is plugin-local: Claude's full transcript reader
+(`claude/src/transcripts.js`) and Codex's full rollout reader
+(`codex/src/backfill.js`) are plugin modules; only the minimal first-line
+slice two plugins needed was promoted to `src/core/codex/`.
 
 ## Options considered
 
 1. **Each caller parses the file itself.** Rejected: this is the
    pre-LLP-0150 state for Codex, which demonstrably drifted and shipped
    wrong answers to privacy questions twice.
-2. **The plugin owns the reader and lends it out.** Rejected for the
-   reasons LLP 0150#placement rejected it: a private plugin module is not
-   a boundary other plugins or core can import across (LLP 0005), and
-   single-caller ownership is what makes drift cheap.
-3. **One reader in core, every rule stated in it, both callers consume
-   it.** Chosen. `src/core/openclaw/` mirrors `src/core/codex/`.
+2. **One reader in core now (`src/core/openclaw/`).** Rejected while no
+   consumer crosses a plugin boundary: it puts a client format in core
+   without the cross-plugin justification LLP 0003 asks for, and deviates
+   from the Claude/Codex precedent of plugin-owned format readers.
+3. **One shared module inside `@hypaware/openclaw`, every rule stated in
+   it, both callers consume it; promote the minimal shared slice to core
+   if a second plugin ever needs it.** Chosen.
 
 ## Decision
 
-- One core module (`src/core/openclaw/`, sibling of `src/core/codex/`)
-  owns parsing of the OpenClaw session file. It exposes a bounded
-  header read returning `{ sessionId, cwd, startedAt }`, each field present
-  only when the header states it as a non-blank string, with the absolute
-  path predicate applied to `cwd`, and a full-transcript iteration for the
-  consumers that need the message stream.
+- One module in `@hypaware/openclaw` owns parsing of the OpenClaw session
+  file. It exposes a bounded header read returning
+  `{ sessionId, cwd, startedAt }`, each field present only when the header
+  states it as a non-blank string, with the absolute path predicate
+  applied to `cwd`, and a full-transcript iteration for the consumers that
+  need the message stream.
+- The promotion trigger is named now so it is not relitigated later: the
+  day a consumer outside `@hypaware/openclaw` needs any of these reads
+  (the obvious candidate is `hyp session` in `@hypaware/ai-gateway`
+  learning to resolve OpenClaw sessions for per-session opt-out), the
+  needed slice moves to `src/core/openclaw/`, following the
+  `src/core/codex/` precedent, rather than being lent across the plugin
+  boundary (LLP 0150#placement).
 - The `cwd` predicate is shared with (or identical in behavior to) the
   Codex one, so "no usable cwd" means the same thing at every site that
   feeds the `.hypignore` gate.
@@ -92,9 +104,9 @@ surfaces may join later; none of them owns the format for the others.
 
 ## Consequences
 
-- A client's on-disk format lands in core again. As with LLP 0150, the
-  narrower cost is accepted: one bounded, read-only parse of one product's
-  session file, versus a privacy invariant stated twice.
+- No client format lands in core this time; the plugin owns its own file
+  format, and the anti-drift goal is met by there being exactly one copy
+  in one package.
 - The reader is the natural home for format-version handling. The header
   carries `version` (3 at time of writing); the reader is where a future
   version bump is detected and refused or adapted, once, for all callers.
