@@ -22,7 +22,7 @@ import { isPlainObject, parseMaybeJson } from '../util/index.js'
  * twice from two copies of the rule (#453, #459), so the rule lives here once
  * and neither plugin owns it.
  *
- * @ref LLP 0143 [implements]: one reader, in core, because neither plugin may
+ * @ref LLP 0150 [implements]: one reader, in core, because neither plugin may
  * reach into the other's internals and both must agree byte-for-byte.
  */
 
@@ -168,7 +168,7 @@ function metaField(value) {
  * Only `cwd` is path-tested. `threadId` / `sessionId` are opaque provider
  * tokens with no path semantics (LLP 0066 R5).
  *
- * @ref LLP 0143#usable-cwd [implements]: a relative cwd is not a usable
+ * @ref LLP 0150#usable-cwd [implements]: a relative cwd is not a usable
  * container, because resolving it means guessing a base
  * @param {unknown} value
  * @returns {string | undefined}

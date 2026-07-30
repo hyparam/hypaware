@@ -105,6 +105,14 @@ the upgrade story.
 - `session_id` is non-null everywhere, so it is a safe `GROUP BY` / join key
   and a safe required partition field; `conversation_id` consumers must handle
   null (Claude).
+- Codex **backfill** reads the container from `session_meta.session_id` and
+  keeps the rollout id (the thread) in `conversation_id`, so decision 1 holds on
+  both ingestion paths. A rollout too old to record `session_id` falls back to
+  the thread, the only container such a file can support. This matters beyond
+  tidiness: the session opt-out names one identifier
+  ([LLP 0066 R13](./0066-session-opt-out.spec.md#requirements)), and a
+  path-dependent `session_id` would make that name right for live rows and wrong
+  for backfilled ones.
 - Backfilled and live rows still converge: both paths stamp `session_id` and
   leave Claude `conversation_id` null, and the fallback-id scope is unchanged,
   so the existing dedup layers (`seenMessages`, the `part_id` scan, compaction)

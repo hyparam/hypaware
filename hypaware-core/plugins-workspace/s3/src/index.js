@@ -279,7 +279,7 @@ function buildSink({ config, client, encoder, sinkCtx, query, storage, watermark
           const prev = wmKey ? await watermarks.read(wmKey) : null
           const reader = await openIncrementalRows(storage, partition, prev?.continuation)
           if (reader.empty) {
-            // @ref LLP 0070#incremental [constrained-by] — a drop-only tick PUTs no
+            // @ref LLP 0070#incremental [constrained-by]: a drop-only tick PUTs no
             // object but MUST advance the watermark past the withheld rows, or the
             // local-only tail re-scans forever (and would re-send on un-exclusion).
             if (wmKey && reader.droppedRowCount > 0) {

@@ -209,7 +209,7 @@ test('a relative session_meta.cwd is no cwd: the matcher would resolve it agains
   // the base, so this session's `.hypignore` verdict would be governed by a file
   // under wherever the daemon was started. Proven here by making the process cwd
   // the thing the relative path would land in.
-  // @ref LLP 0143#usable-cwd [tests]: refuse rather than guess a base
+  // @ref LLP 0150#usable-cwd [tests]: refuse rather than guess a base
   const sessionsDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'codex-rollout-cwd-'))
   fsSync.writeFileSync(
     path.join(sessionsDir, `rollout-2026-07-07T10-00-00-${SUBSCRIPTION_SESSION_ID}.jsonl`),

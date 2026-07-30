@@ -55,7 +55,7 @@ const COLUMNS = [
  * deterministic acceptance suite in `test/core/sink-incremental-acceptance.test.js`.
  *
  * @param {{ harness: any, expect: any }} args
- * @ref LLP 0040#exactly-once-argument [tests] — blob sink reads straight through a compaction generation swap; ≈0 on no-new-rows, ≈N on N-new
+ * @ref LLP 0040#exactly-once-argument [tests]: blob sink reads straight through a compaction generation swap; ≈0 on no-new-rows, ≈N on N-new
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()

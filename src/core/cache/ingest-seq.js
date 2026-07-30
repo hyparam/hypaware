@@ -87,7 +87,7 @@ async function writeNextSeq(statePath, nextSeq) {
  * not a supported scenario — the daemon owns the cache, matching the existing
  * single-writer write-rename idiom.
  *
- * @ref LLP 0040#seq-allocator [implements] — cache-global never-regressing reserve-before-stamp allocator
+ * @ref LLP 0040#seq-allocator [implements]: cache-global never-regressing reserve-before-stamp allocator
  * @param {{ cacheRoot: string, blockSize?: number }} opts
  * @returns {IngestSeqAllocator}
  */

@@ -24,7 +24,7 @@ export const BATCH_ROW_LIMIT = 100_000
  * Nullable so it rides existing tables as an additive schema change — rows
  * written before the column existed read back as `null`.
  *
- * @ref LLP 0040#ingest-seq-column [implements] — row-resident monotonic int64 watermark column
+ * @ref LLP 0040#ingest-seq-column [implements]: row-resident monotonic int64 watermark column
  * @type {ColumnSpec}
  */
 export const INGEST_SEQ_COLUMN = { name: '_hyp_ingest_seq', type: 'INT64', nullable: true }
@@ -291,6 +291,6 @@ function progressPath(spoolFilePath) {
  * is included so the sink-read watermark column never leaks to the wire payload
  * or query results — `readRowsSince` (T2) re-exposes it as an opaque token only.
  *
- * @ref LLP 0040#storage-api-extension [constrained-by] — internal, stripped on read
+ * @ref LLP 0040#storage-api-extension [constrained-by]: internal, stripped on read
  */
 export const INTERNAL_FIELDS = ['_hyp_cache_row_id', '_hyp_cache_batch_id', INGEST_SEQ_COLUMN.name]

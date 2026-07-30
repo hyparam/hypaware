@@ -8,6 +8,8 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
+import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import {
   resolveSessionIdForCli,
   runSessionIgnore,
@@ -299,6 +301,10 @@ test('a first line that is not a session_meta record resolves nothing, however m
   // `payload.cwd` (a `turn_context` does), and reading it as the header hands
   // `hyp session ignore` an id that is not the session's. The privacy verb then
   // reports success for a drop that drops nothing.
+  //
+  // #458 added the same guard as a local predicate here while #465 was open;
+  // this pins it at the seam that now delegates, so collapsing the two readers
+  // into one cannot quietly drop it again.
   const home = tempCodexHome([
     { file: 'rollout-2026-01-01-aaa.jsonl', id: 'not-the-session-id', cwd: '/repo/here', type: 'turn_context' },
   ])
@@ -340,114 +346,6 @@ test('CLAUDE_CODE_SESSION_ID wins over any Codex rollout scan', () => {
   })
   assert.equal(out.ok && out.sessionId, 'claude-1')
   assert.equal(out.ok && out.source, 'claude_env')
-})
-
-test('CODEX_THREAD_ID beats the disk scan: a stated id is not an inference', () => {
-  // Issue #442 item A. The rollout scan resolves `session_meta.payload.id`,
-  // which is the Codex thread id - the same value Codex now states directly in
-  // `CODEX_THREAD_ID` for every tool subprocess it spawns. Same identifier,
-  // but stated by the running client instead of inferred from a file's mtime.
-  const home = tempCodexHome([
-    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-from-disk', cwd: '/repo/here', ageMs: 30 * 1000 },
-  ])
-  const out = resolveSessionIdForCli({
-    env: { CODEX_HOME: home, CODEX_THREAD_ID: 'codex-stated' },
-    cwd: '/repo/here',
-  })
-  assert.equal(out.ok && out.sessionId, 'codex-stated')
-  assert.equal(out.ok && out.source, 'codex_env')
-  assert.equal(out.ok && out.evidence, undefined, 'a stated id has no disk evidence to name')
-})
-
-test('the 30-minute stale-rollout window cannot hand out a DEAD id when Codex states the live one', () => {
-  // The exact residual issue #442 item A recorded. A Codex session that ended
-  // moments ago still has a rollout inside the staleness bound, so the disk
-  // path resolves it confidently: `hyp session ignore` would then opt out the
-  // finished session, print "the gateway will drop this session", and leave the
-  // session the user is actually in recording. mtime is a liveness PROXY.
-  //
-  // `CODEX_THREAD_ID` is not a proxy: Codex injects it into the environment of
-  // the process it spawns for a tool call, so a session that has ended cannot
-  // have set it. Taking it first closes the window for this path outright.
-  const home = tempCodexHome([
-    { file: 'rollout-2026-01-01-dead.jsonl', id: 'codex-just-ended', cwd: '/repo/here', ageMs: 60 * 1000 },
-  ])
-  const withoutEnv = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
-  assert.equal(
-    withoutEnv.ok && withoutEnv.sessionId,
-    'codex-just-ended',
-    'the recently-written rollout is inside the bound, so the disk path still resolves it'
-  )
-
-  const withEnv = resolveSessionIdForCli({
-    env: { CODEX_HOME: home, CODEX_THREAD_ID: 'codex-actually-live' },
-    cwd: '/repo/here',
-  })
-  assert.equal(withEnv.ok && withEnv.sessionId, 'codex-actually-live', 'the live session, not the one that just ended')
-  assert.equal(withEnv.ok && withEnv.source, 'codex_env')
-})
-
-test('two clients each stating a session id is ambiguity, and ambiguity refuses', () => {
-  // Environments nest: Codex runs `claude`, or Claude runs `codex`, and the
-  // child inherits the parent's variable while setting its own. Whichever is
-  // preferred is wrong half the time, and being wrong here means opting out a
-  // session the user is not in and reporting it done. Refuse and name both.
-  const out = resolveSessionIdForCli({
-    env: { CLAUDE_CODE_SESSION_ID: 'claude-outer', CODEX_THREAD_ID: 'codex-inner' },
-    cwd: '/repo/here',
-  })
-  assert.equal(out.ok, false, 'neither variable is more authoritative than the other')
-  assert.match(out.ok ? '' : out.error, /claude-outer/, 'name both candidates')
-  assert.match(out.ok ? '' : out.error, /codex-inner/)
-  assert.match(out.ok ? '' : out.error, /explicitly/, 'point at the escape hatch')
-})
-
-test('an empty CODEX_THREAD_ID is not a stated id: it falls through rather than resolving to nothing', () => {
-  const home = tempCodexHome([
-    { file: 'rollout-2026-01-01-aaa.jsonl', id: 'codex-aaa', cwd: '/repo/here', ageMs: 30 * 1000 },
-  ])
-  const out = resolveSessionIdForCli({
-    env: { CODEX_HOME: home, CODEX_THREAD_ID: '   ' },
-    cwd: '/repo/here',
-  })
-  assert.equal(out.ok && out.sessionId, 'codex-aaa')
-  assert.equal(out.ok && out.source, 'codex_rollout')
-
-  // A blank Claude variable alongside a real Codex one is not ambiguity either.
-  const one = resolveSessionIdForCli({
-    env: { CLAUDE_CODE_SESSION_ID: '', CODEX_THREAD_ID: 'codex-live' },
-    cwd: '/repo/here',
-  })
-  assert.equal(one.ok && one.sessionId, 'codex-live')
-})
-
-test('an explicit session id argument still beats a Codex-stated one', async () => {
-  const set = /** @type {Set<string>} */ (new Set())
-  await withControlServer(set, async (base) => {
-    const ctx = fakeCtx({ endpoint: base, env: { CODEX_THREAD_ID: 'codex-stated' } })
-    assert.equal(await runSessionIgnore(['explicit-id', '--json'], ctx.ctx), 0)
-    assert.ok(set.has('explicit-id'))
-    assert.equal(set.has('codex-stated'), false)
-  })
-})
-
-test('a Codex-stated id is reported as stated, not as INFERRED from disk', async () => {
-  // The provenance line exists to qualify an inference. Attaching it to an id
-  // the client stated would train the reader to ignore it on the one path
-  // where it is load-bearing.
-  const set = /** @type {Set<string>} */ (new Set(['codex-stated']))
-  await withControlServer(set, async (base) => {
-    const human = fakeCtx({ endpoint: base, env: { CODEX_THREAD_ID: 'codex-stated' } })
-    assert.equal(await runSessionStatus([], human.ctx), 0)
-    assert.doesNotMatch(human.stdout(), /INFERRED/)
-
-    const json = fakeCtx({ endpoint: base, env: { CODEX_THREAD_ID: 'codex-stated' } })
-    assert.equal(await runSessionStatus(['--json'], json.ctx), 0)
-    const out = JSON.parse(json.stdout())
-    assert.equal(out.session_id, 'codex-stated')
-    assert.equal(out.session_id_source, 'codex_env')
-    assert.equal(out.session_id_evidence, null)
-  })
 })
 
 test('a truncated rollout scan refuses rather than claiming a unique cwd match', () => {
@@ -532,6 +430,337 @@ test('a disk-inferred id is never presented as if the client had stated it', asy
     const mut = fakeCtx({ endpoint: base, env: { CODEX_HOME: home } })
     assert.equal(await runSessionIgnore([], mut.ctx), 0)
     assert.match(mut.stdout(), /INFERRED from rollout-2026-01-02-bbb\.jsonl/)
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* 5. The id the verb states is the id the gateway drops (issue #453)   */
+/* ------------------------------------------------------------------ */
+
+// @ref LLP 0067#cli-session-id [tests]: the resolved id MUST be the session
+//   container the adapter drop matches, never a Codex thread id, and a rollout
+//   with no container on disk MUST refuse rather than substitute the thread.
+
+test('a Codex SUBAGENT thread resolves the session container, and that is the id the gateway actually drops', () => {
+  // Issue #453. A root Codex thread takes `session_id = SessionId::from(thread_id)`,
+  // so the two ids are the same uuid and nothing is visibly wrong. A SUBAGENT
+  // thread inherits the root's session_id and mints its own thread_id, and its
+  // shell tool calls set CODEX_THREAD_ID to the subagent thread. The drop keys
+  // on session_id (exchange-projector.js), so a verb that states the thread id
+  // reported an opt-out the gateway could never match: success printed over
+  // continued recording.
+  const home = tempCodexHome([
+    {
+      file: 'rollout-2026-01-05-sub.jsonl',
+      id: 'thread-subagent',
+      sessionId: 'session-root',
+      cwd: '/repo/here',
+      ageMs: 30 * 1000,
+    },
+  ])
+
+  // Both resolution paths must agree on the key: the stated-thread path (a
+  // `hyp` run from inside a subagent tool call) and the cwd fallback.
+  const stated = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-subagent' },
+    cwd: '/repo/here',
+  })
+  assert.equal(stated.ok && stated.sessionId, 'session-root', 'the drop key, not the thread id')
+  assert.equal(stated.ok && stated.source, 'codex_env_rollout')
+  assert.equal(stated.ok && stated.threadId, 'thread-subagent', 'the thread is kept for provenance')
+
+  const viaCwd = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+  assert.equal(viaCwd.ok && viaCwd.sessionId, 'session-root')
+  assert.equal(viaCwd.ok && viaCwd.threadId, 'thread-subagent')
+
+  // Now prove it against the code that performs the drop, rather than asserting
+  // a string: the resolved id suppresses the subagent's traffic, and the thread
+  // id the verb used to state suppresses nothing at all.
+  const projector = createCodexExchangeProjector()
+  const subagentTurn = () => codexExchange({ sessionId: 'session-root', threadId: 'thread-subagent' })
+
+  const resolvedKey = new Set([stated.ok ? stated.sessionId : ''])
+  assert.equal(
+    projector.project(subagentTurn(), dropContext(resolvedKey)),
+    USAGE_POLICY_DROP,
+    'the id the verb states must be the id the projector drops on'
+  )
+
+  const threadKey = new Set(['thread-subagent'])
+  const notDropped = /** @type {any} */ (projector.project(subagentTurn(), dropContext(threadKey)))
+  assert.ok(
+    notDropped && notDropped !== USAGE_POLICY_DROP,
+    'the silent no-op being fixed: an opt-out on the thread id records anyway'
+  )
+  assert.equal(notDropped.session_id, 'session-root', 'because the row is stamped with the container')
+})
+
+test('a legacy rollout with no session_id field REFUSES: the back-filled thread id is not the key', () => {
+  // The implementation trap. Codex's `SessionMetaLine` has a hand-written
+  // Deserialize that BACK-FILLS `session_id` from `id` when the field is
+  // absent, so a resolver reading a deserialized session_meta gets the thread
+  // id back under the name `session_id` on every pre-upgrade rollout - the
+  // exact defect of #453, reintroduced invisibly through its own fix. Reading
+  // the raw JSONL line makes the absence visible, and an absent container is
+  // unresolvable, NOT an excuse to fall back to the thread.
+  const legacy = tempCodexHome([
+    { file: 'rollout-2026-01-06-old.jsonl', id: 'thread-legacy', legacy: true, cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+
+  for (const env of [
+    { CODEX_HOME: legacy, CODEX_THREAD_ID: 'thread-legacy' },
+    { CODEX_HOME: legacy },
+  ]) {
+    const out = resolveSessionIdForCli({ env, cwd: '/repo/here' })
+    assert.equal(out.ok, false, 'an absent session_id is unresolvable on both paths')
+    assert.match(out.ok ? '' : out.error, /no session_id field/, 'name what is missing')
+    assert.match(out.ok ? '' : out.error, /thread id is NOT that container/, 'say why the thread will not do')
+    assert.match(out.ok ? '' : out.error, /explicitly/, 'point at the escape hatch')
+  }
+
+  // The refusal is provably about the absent field: the same thread, in a
+  // rollout that records its container, resolves.
+  const modern = tempCodexHome([
+    {
+      file: 'rollout-2026-01-06-old.jsonl',
+      id: 'thread-legacy',
+      sessionId: 'session-root',
+      cwd: '/repo/here',
+      ageMs: 30 * 1000,
+    },
+  ])
+  const ok = resolveSessionIdForCli({ env: { CODEX_HOME: modern, CODEX_THREAD_ID: 'thread-legacy' }, cwd: '/repo/here' })
+  assert.equal(ok.ok && ok.sessionId, 'session-root')
+})
+
+test('`hyp session ignore` on a legacy rollout reports no success and exits unknown', async () => {
+  // Fail-closed at the verb, not just in the resolver (R10): a privacy control
+  // that cannot name the right key must say so, never print "ignored".
+  const legacy = tempCodexHome([
+    { file: 'rollout-2026-01-06-old.jsonl', id: 'thread-legacy', legacy: true, cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  const set = /** @type {Set<string>} */ (new Set())
+  await withControlServer(set, async (base) => {
+    const mut = fakeCtx({ endpoint: base, env: { CODEX_HOME: legacy, CODEX_THREAD_ID: 'thread-legacy' } })
+    assert.equal(await runSessionIgnore([], mut.ctx), SESSION_EXIT_UNKNOWN)
+    assert.equal(mut.stdout(), '', 'nothing that reads as a completed opt-out')
+    assert.match(mut.stderr(), /no session_id field/)
+    assert.equal(set.size, 0, 'and nothing was added to the ignored set')
+
+    const status = fakeCtx({ endpoint: base, env: { CODEX_HOME: legacy, CODEX_THREAD_ID: 'thread-legacy' } })
+    assert.equal(await runSessionStatus(['--json'], status.ctx), SESSION_EXIT_UNKNOWN)
+    const out = JSON.parse(status.stdout())
+    assert.equal(out.status, 'unknown')
+    assert.equal(out.ignored, null)
+    assert.equal(out.session_id, null, 'no id is reported, because none could be established')
+  })
+})
+
+test('CODEX_THREAD_ID selects the live rollout without the mtime proxy, then the container is read from it', () => {
+  // The liveness half of the trade-off. A Codex session that ended moments ago
+  // is still inside the 30-minute staleness bound, so the cwd path resolves it
+  // confidently and `hyp session ignore` would opt out a DEAD session. The
+  // stated thread id is not a proxy: Codex sets it on the process it spawns for
+  // a tool call, so it names the thread running now. It is a SELECTOR though -
+  // the answer is still the container read out of that thread's rollout.
+  const home = tempCodexHome([
+    { file: 'rollout-dead.jsonl', id: 'thread-dead', sessionId: 'session-dead', cwd: '/repo/here', ageMs: 60 * 1000 },
+    { file: 'rollout-live.jsonl', id: 'thread-live', sessionId: 'session-live', cwd: '/repo/other', ageMs: 5 * 1000 },
+  ])
+  const stated = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-live' },
+    cwd: '/repo/here',
+  })
+  assert.equal(stated.ok && stated.sessionId, 'session-live', 'the stated thread wins over the cwd match')
+  assert.equal(stated.ok && stated.evidence, 'rollout-live.jsonl')
+
+  // A stated thread with no rollout refuses rather than falling back to the cwd
+  // scan: the scan would answer about a thread nothing tied to this invocation.
+  const orphan = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-unknown' },
+    cwd: '/repo/here',
+  })
+  assert.equal(orphan.ok, false)
+  assert.match(orphan.ok ? '' : orphan.error, /no rollout under .* records that thread/)
+
+  // A blank variable is not a statement: it falls through to the cwd path.
+  const blank = resolveSessionIdForCli({ env: { CODEX_HOME: home, CODEX_THREAD_ID: '  ' }, cwd: '/repo/here' })
+  assert.equal(blank.ok && blank.sessionId, 'session-dead')
+
+  // Nor is a blank Claude variable beside a real Codex thread AMBIGUITY: the
+  // two-stated-clients refusal must key on what was actually stated, or an
+  // exported-but-empty variable would refuse every Codex invocation.
+  const oneStated = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CLAUDE_CODE_SESSION_ID: '', CODEX_THREAD_ID: 'thread-live' },
+    cwd: '/repo/here',
+  })
+  assert.equal(oneStated.ok && oneStated.sessionId, 'session-live')
+  assert.equal(oneStated.ok && oneStated.source, 'codex_env_rollout')
+})
+
+test('a BLANK session_id is as unusable as an absent one, and refuses the same way', () => {
+  // A present field is not the same as a readable key. `statedEnv` already
+  // treats a blank environment value as unstated; a blank `session_id` on disk
+  // is the same situation one layer down, and resolving it would hand the verb a
+  // key the adapter can never stamp - "ignored" printed over a drop that matches
+  // nothing, which is the defect class of #453 rather than a cosmetic nit.
+  const blank = tempCodexHome([
+    { file: 'rollout-2026-01-09-blank.jsonl', id: 'thread-blank', sessionId: '   ', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  for (const env of [
+    { CODEX_HOME: blank, CODEX_THREAD_ID: 'thread-blank' },
+    { CODEX_HOME: blank },
+  ]) {
+    const out = resolveSessionIdForCli({ env, cwd: '/repo/here' })
+    assert.equal(out.ok, false, 'a blank container is unresolvable on both paths')
+    assert.match(out.ok ? '' : out.error, /no session_id field \(or a blank one\)/)
+    assert.match(out.ok ? '' : out.error, /thread id is NOT that container/, 'and never the thread id instead')
+  }
+
+  // Non-string shapes are the same story: nothing usable, so nothing claimed.
+  for (const sessionId of [/** @type {any} */ (12345), /** @type {any} */ (null), /** @type {any} */ ({})]) {
+    const odd = tempCodexHome([
+      { file: 'rollout-2026-01-09-odd.jsonl', id: 'thread-odd', sessionId, cwd: '/repo/here', ageMs: 30 * 1000 },
+    ])
+    const out = resolveSessionIdForCli({ env: { CODEX_HOME: odd, CODEX_THREAD_ID: 'thread-odd' }, cwd: '/repo/here' })
+    assert.equal(out.ok, false, `a ${typeof sessionId} session_id is not a session id`)
+  }
+})
+
+test('the container is read from the session_meta header, not from any first line that carries the fields', () => {
+  // The raw-line read is what makes an absent `session_id` visible, but reading
+  // the line must not become trusting whatever the line says: only the
+  // `session_meta` header states the container, so a differently-typed first
+  // record is not evidence about it. `codex/src/rollout-cwd.js` type-checks the
+  // same line for the same reason.
+  const wrongType = tempCodexHome([
+    {
+      file: 'rollout-2026-01-10-ctx.jsonl',
+      id: 'thread-ctx',
+      sessionId: 'session-ctx',
+      cwd: '/repo/here',
+      type: 'turn_context',
+      ageMs: 30 * 1000,
+    },
+  ])
+  for (const env of [
+    { CODEX_HOME: wrongType, CODEX_THREAD_ID: 'thread-ctx' },
+    { CODEX_HOME: wrongType },
+  ]) {
+    assert.equal(resolveSessionIdForCli({ env, cwd: '/repo/here' }).ok, false)
+  }
+
+  // And the header itself still resolves, so the guard is about the record type.
+  const header = tempCodexHome([
+    { file: 'rollout-2026-01-10-ctx.jsonl', id: 'thread-ctx', sessionId: 'session-ctx', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  const ok = resolveSessionIdForCli({ env: { CODEX_HOME: header, CODEX_THREAD_ID: 'thread-ctx' }, cwd: '/repo/here' })
+  assert.equal(ok.ok && ok.sessionId, 'session-ctx')
+})
+
+test('rollouts that disagree about which session contains a thread refuse, naming both', () => {
+  // The stated-thread match is an identity test, so it can hit more than one
+  // file (a resumed thread, a copied history). Agreeing files are one answer;
+  // disagreeing ones are two candidate keys, and picking either would opt out a
+  // session the user may not be in while reporting success.
+  const disagree = tempCodexHome([
+    { file: 'rollout-2026-01-11-a.jsonl', id: 'thread-dup', sessionId: 'session-a', cwd: '/repo/a', ageMs: 30 * 1000 },
+    { file: 'rollout-2026-01-11-b.jsonl', id: 'thread-dup', sessionId: 'session-b', cwd: '/repo/b', ageMs: 30 * 1000 },
+  ])
+  const out = resolveSessionIdForCli({ env: { CODEX_HOME: disagree, CODEX_THREAD_ID: 'thread-dup' }, cwd: '/repo/a' })
+  assert.equal(out.ok, false)
+  assert.match(out.ok ? '' : out.error, /disagree about which session contains it/)
+  assert.match(out.ok ? '' : out.error, /session-a/)
+  assert.match(out.ok ? '' : out.error, /session-b/)
+
+  // Agreement is not ambiguity: two files recording the same container resolve.
+  const agree = tempCodexHome([
+    { file: 'rollout-2026-01-11-a.jsonl', id: 'thread-dup', sessionId: 'session-same', cwd: '/repo/a', ageMs: 30 * 1000 },
+    { file: 'rollout-2026-01-11-b.jsonl', id: 'thread-dup', sessionId: 'session-same', cwd: '/repo/b', ageMs: 30 * 1000 },
+  ])
+  const ok = resolveSessionIdForCli({ env: { CODEX_HOME: agree, CODEX_THREAD_ID: 'thread-dup' }, cwd: '/repo/a' })
+  assert.equal(ok.ok && ok.sessionId, 'session-same')
+})
+
+test('a stated thread still resolves from a rollout whose cwd is unusable: that path never reads cwd', () => {
+  // #465's merge with #458. The shared reader refuses a blank or relative `cwd`
+  // (LLP 0150 #usable-cwd), and the cwd-matching path wants that: a relative
+  // value would be resolved against the daemon's process cwd. The stated-thread
+  // path asks a different question, and answers it out of `session_id`, so an
+  // unusable `cwd` must not cost it the rollout. Refusing here would turn a
+  // field-level predicate into a file-level one and lose the container that IS
+  // on disk.
+  for (const cwd of ['   ', '../elsewhere', '']) {
+    const home = tempCodexHome([
+      { file: 'rollout-2026-01-12-a.jsonl', id: 'thread-nocwd', sessionId: 'session-nocwd', cwd, ageMs: 30 * 1000 },
+    ])
+    const out = resolveSessionIdForCli({
+      env: { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-nocwd' },
+      cwd: '/repo/here',
+    })
+    assert.equal(out.ok, true, `an unusable cwd (${JSON.stringify(cwd)}) must not hide the session container`)
+    assert.equal(out.ok && out.sessionId, 'session-nocwd')
+    assert.equal(out.ok && out.source, 'codex_env_rollout')
+
+    // The cwd path is the one the predicate governs: with nothing stated, that
+    // same rollout matches no invocation cwd and the verb refuses.
+    const noEnv = resolveSessionIdForCli({ env: { CODEX_HOME: home }, cwd: '/repo/here' })
+    assert.equal(noEnv.ok, false, 'an unusable cwd matches no invocation cwd')
+  }
+})
+
+test('two clients each stating a session refuse rather than picking one', () => {
+  // Environments nest (Codex runs `claude`, or the reverse) and the child
+  // inherits the parent's variable while setting its own, so both can be set
+  // and only one names the session this invocation is in.
+  const home = tempCodexHome([
+    { file: 'rollout-2026-01-07-x.jsonl', id: 'thread-x', sessionId: 'session-x', cwd: '/repo/here', ageMs: 30 * 1000 },
+  ])
+  const out = resolveSessionIdForCli({
+    env: { CODEX_HOME: home, CLAUDE_CODE_SESSION_ID: 'claude-1', CODEX_THREAD_ID: 'thread-x' },
+    cwd: '/repo/here',
+  })
+  assert.equal(out.ok, false)
+  assert.match(out.ok ? '' : out.error, /claude-1/)
+  assert.match(out.ok ? '' : out.error, /thread-x/)
+})
+
+test('a Codex answer discloses the grain it acts at, and names the thread beside the container', async () => {
+  // R12 turned on the key itself rather than on its evidence: the user asked to
+  // stop recording "this conversation" and the drop covers the whole session,
+  // sibling subagent threads included. That is the documented over-drop
+  // (LLP 0066 §scope), and it must be visible in the output rather than
+  // inferred later from a gap in the cache.
+  const home = tempCodexHome([
+    {
+      file: 'rollout-2026-01-08-sub.jsonl',
+      id: 'thread-subagent',
+      sessionId: 'session-root',
+      cwd: '/repo/here',
+      ageMs: 30 * 1000,
+    },
+  ])
+  const set = /** @type {Set<string>} */ (new Set(['session-root']))
+  await withControlServer(set, async (base) => {
+    const env = { CODEX_HOME: home, CODEX_THREAD_ID: 'thread-subagent' }
+    const human = fakeCtx({ endpoint: base, env })
+    assert.equal(await runSessionStatus([], human.ctx), 0)
+    assert.match(human.stdout(), /session session-root: ignored/)
+    assert.match(human.stdout(), /every Codex thread in this session is covered/)
+    assert.match(human.stdout(), /thread thread-subagent/)
+
+    const json = fakeCtx({ endpoint: base, env })
+    assert.equal(await runSessionStatus(['--json'], json.ctx), 0)
+    const out = JSON.parse(json.stdout())
+    assert.equal(out.session_id, 'session-root')
+    assert.equal(out.thread_id, 'thread-subagent')
+    assert.equal(out.session_id_source, 'codex_env_rollout')
+    assert.equal(out.session_id_evidence, 'rollout-2026-01-08-sub.jsonl')
+
+    // `ignore` carries it too, where "ignored" reads as done.
+    const mut = fakeCtx({ endpoint: base, env })
+    assert.equal(await runSessionIgnore(['--json'], mut.ctx), 0)
+    assert.equal(JSON.parse(mut.stdout()).thread_id, 'thread-subagent')
   })
 })
 
@@ -698,23 +927,77 @@ function fakeCtx(args) {
 }
 
 /**
+ * One live Codex ChatGPT-route exchange, tagged with the turn metadata a
+ * subagent turn carries: its own `thread_id`, and the `session_id` of the
+ * session containing it. This is the input the drop actually sees, so the tests
+ * above can assert the CLI's key against the real projector rather than against
+ * a restatement of it.
+ *
+ * @param {{ sessionId: string, threadId: string }} ids
+ */
+function codexExchange(ids) {
+  return /** @type {any} */ ({
+    exchange_id: 'ex-subagent',
+    ts_start: '2026-05-20T10:00:00.000Z',
+    ts_end: '2026-05-20T10:00:00.250Z',
+    provider: 'chatgpt',
+    method: 'POST',
+    path: '/backend-api/codex/responses',
+    status_code: 200,
+    is_sse: false,
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({ session_id: ids.sessionId, thread_id: ids.threadId }),
+    }),
+    request_body: JSON.stringify({ model: 'gpt-5-codex', input: 'go' }),
+    response_headers: JSON.stringify({}),
+    response_body: JSON.stringify({ output_text: 'done' }),
+    stream_events: [],
+  })
+}
+
+/**
+ * The projector context the gateway dispatcher supplies, with the ignored-session
+ * predicate backed by `ignored`.
+ *
+ * @param {Set<string>} ignored
+ */
+function dropContext(ignored) {
+  return {
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    isSessionIgnored: (/** @type {string} */ id) => ignored.has(id),
+  }
+}
+
+/**
  * Build a throwaway `CODEX_HOME` holding `sessions/**\/rollout-*.jsonl` files
  * whose first line is a `session_meta` record.
+ *
+ * `id` is the **thread** id (`payload.id`, the value the filename embeds).
+ * `sessionId` is the session CONTAINER (`payload.session_id`), which is what
+ * the gateway drops on; it defaults to `id`, the root-thread shape Codex writes
+ * via `SessionId::from(thread_id)`. Pass a different value for a subagent
+ * rollout, or `legacy: true` for a rollout written before Codex recorded the
+ * container at all.
  *
  * `ageMs` backdates the file's mtime, which is how the resolver tells a running
  * session (appended to on every turn) from a finished one.
  *
  * `type` overrides the first line's envelope type, so a test can present a
- * record that carries `id`/`cwd` but is not the session header.
+ * record that carries `id`/`session_id`/`cwd` but is not the session header.
  *
- * @param {{ file: string, id: string, cwd: string, ageMs?: number, type?: string }[]} rollouts
+ * @param {{ file: string, id: string, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
   const dir = path.join(home, 'sessions', '2026', '01')
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {
-    const meta = JSON.stringify({ type: r.type ?? 'session_meta', payload: { id: r.id, cwd: r.cwd } })
+    /** @type {Record<string, unknown>} */
+    const payload = { id: r.id, cwd: r.cwd }
+    // `in` rather than `??` so an explicit null survives as a null: a field
+    // present with an unusable value is a distinct case from an absent one.
+    if (!r.legacy) payload.session_id = 'sessionId' in r ? r.sessionId : r.id
+    const meta = JSON.stringify({ type: r.type ?? 'session_meta', payload })
     const full = path.join(dir, r.file)
     fs.writeFileSync(full, `${meta}\n{"type":"event"}\n`)
     if (r.ageMs) {

@@ -956,8 +956,9 @@ with `skip_reason` when it did not run). `hyp query overview` emits its own
 counts). The
 existing `walkthrough.start`/`write_config`/`finish` spans rename to their
 `wizard.*` equivalents in the same change that moves the code, per CLAUDE.md's
-"update or remove the `@ref` if not" rule for the `@ref LLP 0011#interactive-
-walkthrough` annotation currently on `runPickerWalkthrough`.
+"update or remove the `@ref` if not" rule for the
+`@ref LLP 0011#interactive-walkthrough` annotation currently on
+`runPickerWalkthrough`.
 
 ## Open questions {#open-questions}
 

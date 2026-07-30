@@ -218,7 +218,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       return icebergTableUrl(resolveIcebergDir(tablePath))
     },
 
-    // @ref LLP 0040#storage-api-extension [implements] — back-compatible
+    // @ref LLP 0040#storage-api-extension [implements]: back-compatible
     // `opts.since`: absent ⇒ byte-for-byte the pre-existing full scan, so every
     // current caller is untouched until it opts in. When set, the scan yields
     // only rows newer than the watermark (null-seq legacy rows always yielded).
@@ -232,7 +232,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       }
     },
 
-    // @ref LLP 0040#storage-api-extension [implements] — cursor-aware sibling
+    // @ref LLP 0040#storage-api-extension [implements]: cursor-aware sibling
     // for sinks that advance a per-(sink, partition) watermark. `_hyp_ingest_seq`
     // is an INTERNAL_FIELD stripped from the row, so a sink reading `readRows`
     // can't learn the high-water seq; `readRowsSince` reads it to derive the
@@ -286,7 +286,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         for (const f of INTERNAL_FIELDS) delete row[f]
         /** @type {SinkContinuation} */
         const after = { v: 1, seq: high.toString() }
-        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time — no cache-schema marker, retroactive over already-cached rows; `cwd` is forced into the scan above so a caller's `columns` projection can't bypass this filter
+        // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan above so a caller's `columns` projection can't bypass this filter
         // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
         // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
         // A corrupt/unreadable list makes `resolve` throw; we let it propagate

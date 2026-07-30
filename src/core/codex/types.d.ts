@@ -3,7 +3,7 @@
 /**
  * The three identifiers a Codex rollout's `session_meta` header carries, each
  * present only when the header itself carries it as a non-blank string, and
- * `cwd` only when that string is also an absolute path (LLP 0143 #usable-cwd:
+ * `cwd` only when that string is also an absolute path (LLP 0150 #usable-cwd:
  * a relative one has no stated base, and the policy matcher would supply the
  * daemon's process cwd as one).
  *

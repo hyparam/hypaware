@@ -1,4 +1,4 @@
-# LLP 0143: one reader for the Codex `session_meta` header
+# LLP 0150: one reader for the Codex `session_meta` header
 
 **Type:** Decision
 **Status:** Active
@@ -23,9 +23,10 @@ of decision:
   and `.hypignore` would otherwise fail open for the whole traffic class
   ([LLP 0083](./0083-codex-live-cwd-from-rollout.decision.md)).
 - `@hypaware/ai-gateway`'s `hyp session` verb
-  (`ai-gateway/src/session_command.js`) wants an id, because a hand invocation
-  or a pre-`CODEX_THREAD_ID` Codex leaves the rollout as the only local record
-  of which session this invocation is in
+  (`ai-gateway/src/session_command.js`) wants an id, because the rollout is the
+  only local record of which session an invocation is in: `CODEX_THREAD_ID`
+  names a **thread**, not the session container the drop keys on, and a hand
+  invocation or a pre-`CODEX_THREAD_ID` Codex states nothing at all
   ([LLP 0067 §cli-session-id](./0067-session-opt-out.design.md#cli-session-id)).
 
 Both answers gate a privacy control, so a wrong one is **silent**: the verb
@@ -62,17 +63,28 @@ states it as a non-blank string, and enforce three rules:
    rollout whose first line is one of them yields a plausible id that belongs
    to no session and a cwd that governs nothing.
 3. **Unconfirmable is unresolvable.** Absent, non-string, and blank all read as
-   `undefined`; a caller that needs the field refuses rather than substituting.
-   In particular `sessionId` is never derived from `threadId`: the two are the
-   same uuid for a root thread and different for a subagent thread, which is
-   precisely how #453 and #459 went wrong. For `cwd`, "unconfirmable" also
-   covers a relative path ([below](#usable-cwd)).
+   `undefined`, and **the reader never substitutes one field for another**: in
+   particular `sessionId` is never derived from `threadId`, because the two are
+   the same uuid for a root thread and different for a subagent thread, which is
+   precisely how #453 and #459 went wrong. A caller then decides what an
+   `undefined` means for its own question, and for both privacy-control callers
+   that is a refusal (the backfill's different answer is
+   [below](#consequences)). For `cwd`, "unconfirmable" also covers a relative
+   path ([below](#usable-cwd)).
 
-`sessionId` has no consumer yet on purpose. The verb still resolves the thread
-id, matching `CODEX_THREAD_ID` and what the gateway stamps today; moving the
-drop onto the session container is #453's job. The field is on the reader
-because rule 1 exists **for** it: without it the "never back-filled" property
-is unstated and untestable, which is the state that let it drift.
+`sessionId` is the field rule 1 exists **for**: without it, "never back-filled"
+is an unstated and untestable property, which is the state that let the two
+copies drift. It went onto the reader with no consumer and gained one
+immediately, because [#458](https://github.com/hyparam/hypaware/pull/458) landed
+while this was in review and moved `hyp session` onto the session container. The
+verb now reads `sessionId` and refuses on a rollout that records none.
+
+That change adds a second **resolution** path (`CODEX_THREAD_ID` selects a
+rollout by `threadId`, and the container is read out of it) but no second
+**reader**: both of its paths go through this module, so the three rules are
+still stated once. A resolution path that re-derived the fields for itself would
+be the same defect in a new place, which is why the rules are not the caller's to
+restate.
 
 ### Why core, and not one plugin lending it to the other {#placement}
 
@@ -148,9 +160,13 @@ because handing it back "would return something re-resolved against
 
 No legitimate rollout loses its `cwd`: Codex writes `session_meta.cwd` from the
 process's own working directory, which is always absolute. And the `hyp session`
-caller is unaffected either way, because it compares `meta.cwd` against an
-absolute invocation cwd, so a relative value never matched; refusing only makes
-that refusal explicit and earlier. Only `cwd` is path-tested - `threadId` and
+caller is unaffected either way. Its cwd-matching path compares `meta.cwd`
+against an absolute invocation cwd, so a relative value never matched there and
+refusing only makes that refusal explicit and earlier. Its `CODEX_THREAD_ID` path
+never consults `cwd` at all, so it must not refuse on one either: the caller's
+`readRolloutMeta` passes an absent `cwd` straight through rather than discarding
+a rollout that does state the ids that path asked for. The predicate governs the
+field, not the file. Only `cwd` is path-tested - `threadId` and
 `sessionId` are opaque provider tokens with no path semantics
 ([LLP 0066 R5](./0066-session-opt-out.spec.md)).
 
@@ -183,14 +199,31 @@ resolving on half a record.
   cwd" means. The value that survives the test is still returned
   byte-identical, because these ids are opaque provider tokens
   ([LLP 0066 R5](./0066-session-opt-out.spec.md)) and a `cwd` is a path.
+- **The backfill shares the `cwd` predicate but not rule 3's id refusal, and
+  that is deliberate.** `buildSession` falls back `sessionId` to the thread id on
+  a pre-field rollout, where the `hyp session` verb refuses. The two are not the
+  same question: the verb is asked "which session is the user in", and a wrong
+  answer there silently defeats a privacy control, so unconfirmable has to mean
+  refuse. The backfill is asked "which partition does this historical row belong
+  to", and it has no refusal available - a row must land somewhere, and the
+  thread is the only container a pre-field rollout describes
+  ([LLP 0030](./0030-session-id-partition-key.decision.md)). What must not
+  diverge is the *test* for whether the field is there, which is why the raw-line
+  read and the blank rule are the same on both sides even though the fallback
+  differs.
 - **Still outstanding:** the live projector's *in-band* cwd
   (`x-codex-turn-metadata` / body `metadata.cwd`, LLP 0083's fast path) reaches
   the same `resolver.resolve` with no such predicate. It is a different source
   with a different trust story, and its value is also stamped on the row for
   workspace/git enrichment rather than only consulted for the gate, so tightening
   it is its own decision rather than a consequence of this one.
-- Code that lands this carries `@ref LLP 0143` on the reader and on both
+- Code that lands this carries `@ref LLP 0150` on the reader and on both
   callers' seams.
 - Nothing about which id either caller *uses* changes here. This is the
-  unification #462's review recommended and deferred; the id-grain questions
-  stay with #453 and #459.
+  unification #462's review recommended and deferred, and the id-grain questions
+  are separately owned:
+  [#453](https://github.com/hyparam/hypaware/issues/453) is closed (#458 moved
+  `hyp session` onto the session container; this reader is where that path reads
+  the container from), and
+  [#459](https://github.com/hyparam/hypaware/issues/459) is still open for the
+  live subscription route.

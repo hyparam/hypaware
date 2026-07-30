@@ -9,11 +9,11 @@
 **Related:** LLP 0049, LLP 0050, LLP 0051, LLP 0009, LLP 0012
 
 > Buildable design for the `.hypignore` folder-scoped usage policy.
-> `@ref LLP 0049 [implements]` — realizes the hypignore-usage-policy spec (scope→class,
+> `@ref LLP 0049 [implements]`: realizes the hypignore-usage-policy spec (scope→class,
 > the `ignore` class, the `hyp ignore`/`unignore` CLI).
-> `@ref LLP 0050 [constrained-by]` — enforcement lives in the client adapters; the
+> `@ref LLP 0050 [constrained-by]`: enforcement lives in the client adapters; the
 > shared matcher lives in `src/core/usage-policy/`; the gateway stays `cwd`-blind.
-> `@ref LLP 0051 [constrained-by]` — `local-only` and the session opt-out are deferred;
+> `@ref LLP 0051 [constrained-by]`: `local-only` and the session opt-out are deferred;
 > the file format and matcher stay forward-compatible with them.
 
 ## Overview
@@ -62,7 +62,7 @@ fail-safe ([LLP 0049](./0049-hypignore-usage-policy.spec.md#file-format), [#fail
 
 ```js
 // `@ref LLP 0049#file-format [implements]`
-// `@ref LLP 0049#fail-safe [implements]` — unknown/unimplemented class => 'ignore'
+// `@ref LLP 0049#fail-safe [implements]`: unknown/unimplemented class => 'ignore'
 const IMPLEMENTED = new Set(['ignore']) // V1; grows additively when local-only ships
 
 /** @returns {{ class: UsageClass, declared: string|null, warn?: string }} */
@@ -77,8 +77,8 @@ caller logs it). Reserved in-file path patterns are parsed-but-ignored in V1.
 ### `matcher.js` — `resolveUsageClass` {#matcher}
 
 ```js
-// `@ref LLP 0050 [implements]` — the single shared matcher; no per-adapter copies.
-// `@ref LLP 0049#scope [implements]` — gitignore-style ancestor walk, nearest wins.
+// `@ref LLP 0050 [implements]`: the single shared matcher; no per-adapter copies.
+// `@ref LLP 0049#scope [implements]`: gitignore-style ancestor walk, nearest wins.
 export function createUsagePolicyResolver({ readFileSync, existsSync } = nodeFs) { /* ... */ }
 ```
 
@@ -125,7 +125,7 @@ untouched ([LLP 0049](./0049-hypignore-usage-policy.spec.md#requirements) R2).
 
 ```js
 // in createClaudeExchangeProjector, once cwd is resolved for the exchange:
-// @ref LLP 0050 [implements] — capture-seam drop, projector returns no rows
+// @ref LLP 0050 [implements]: capture-seam drop, projector returns no rows
 if (resolver.isIgnored(cwd)) { logIgnored({ component: 'claude', cwd, governedBy }); return [] }
 ```
 

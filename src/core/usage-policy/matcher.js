@@ -165,7 +165,7 @@ export function createUsagePolicyResolver({
    * re-reading and re-parsing the list file at most once per `ttlMs` window
    * (independent of how many distinct `cwd`s are resolved in that window). A
    * missing file is "no exclusions" (`[]`); a present-but-unparseable file
-   * throws — the same fail-safe the store (`local_only.js`) applies, so a
+   * throws, matching the fail-safe the store (`local_only.js`) applies, so a
    * corrupt list fails the caller loudly rather than silently resolving to
    * "nothing excluded" (LLP 0080 #fail-safe). When more than one entry
    * governs `cwd` (nested entries), the most specific (longest `dir`) wins,
@@ -210,9 +210,11 @@ export function createUsagePolicyResolver({
    * version-1 `dirs` array on read as all-`local-only` entries. Missing =>
    * `[]` (the common case); present-but-unreadable/malformed => throws
    * {@link LocalOnlyListUnreadableError}, mirroring `readLocalOnlyEntries`'s
-   * async fail-safe so both paths name the same `error_kind`.
+   * async fail-safe so both paths name the same `error_kind`. Throwing rather
+   * than yielding an empty list is LLP 0080 §fail-safe's mechanic; what makes
+   * it mandatory is the invariant cited below.
    *
-   * @ref LLP 0080#fail-safe [implements]: a corrupt list fails the resolve loudly, never silently to "no exclusions"
+   * @ref LLP 0049#fail-safe [constrained-by]: an uninterpretable privacy signal must resolve to "suppress more", never silently to "no exclusions"
    * @ref LLP 0103 [implements]: migrate-on-read for the sync capture-hot-path reader
    * @returns {LocalOnlyEntry[]}
    */

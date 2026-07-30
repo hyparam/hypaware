@@ -20,7 +20,7 @@ import {
 // as a silent wrong id or wrong directory in a privacy control. This is the
 // union of both callers' failure paths, so the invariant is tested once.
 //
-// @ref LLP 0143 [tests]: the three rules of the shared reader
+// @ref LLP 0150 [tests]: the three rules of the shared reader
 
 /**
  * A rollout header line whose `payload` is `fields`.
@@ -145,7 +145,7 @@ test('a relative session_meta.cwd is no cwd, not a path resolved against the dae
   // `../elsewhere` would yield a confident `.hypignore` verdict governed by a
   // file under wherever the daemon was started - the #459 shape through a
   // different field. Nothing on the line names the base, so there is none.
-  // @ref LLP 0143#usable-cwd [tests]: a relative cwd is refused, not guessed at
+  // @ref LLP 0150#usable-cwd [tests]: a relative cwd is refused, not guessed at
   for (const relative of ['../elsewhere', './repo', 'repo', 'repo/sub', '   /repo']) {
     const meta = parseRolloutSessionMeta(metaLine({ id: 'thread-abc', cwd: relative }))
     assert.ok(meta, 'the envelope is still a session_meta header')

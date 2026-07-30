@@ -11,7 +11,7 @@ import { isControlPath } from '../../hypaware-core/plugins-workspace/ai-gateway/
  * @import { IncomingMessage, ServerResponse } from 'node:http'
  */
 
-// @ref LLP 0066#control-path [tests] / LLP 0066#requirements — the reserved
+// @ref LLP 0066#control-path [tests] / LLP 0066#requirements: the reserved
 // `/_hypaware/` control surface: POST/DELETE /_hypaware/ignore/session over
 // the in-memory ignored-session set, idempotent, returning `.total`; the
 // error grid (400/404/405/413).
@@ -54,7 +54,7 @@ test('both verbs are idempotent and .total tracks the set across a sequence', as
 })
 
 test('session_id whitespace only gates non-emptiness; the STORED token is the raw value verbatim (R5)', async () => {
-  // @ref LLP 0066#requirements — R5: the match key MUST be the session_id the
+  // @ref LLP 0066#requirements: R5: the match key MUST be the session_id the
   // adapter resolves and stamps. The adapters (Claude's resolveClaudeSessionId,
   // Codex's metadata/header readers) never trim, so this route must not either:
   // trimming is used ONLY to validate non-emptiness, never to transform the

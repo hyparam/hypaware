@@ -246,7 +246,7 @@ async function* runCodexBackfill(args) {
         log[sessionPolicy.warn ? 'warn' : 'info']('codex.backfill.usage_policy_drop', {
           component: COMPONENT,
           operation: 'usage_policy_drop',
-          conversation_id: session.sessionId,
+          conversation_id: session.threadId,
           class: 'ignore',
           declared: sessionPolicy.declared,
           governed_by: sessionPolicy.governedBy,
@@ -268,7 +268,7 @@ async function* runCodexBackfill(args) {
       log.info('codex.backfill.session_projected', {
         component: COMPONENT,
         operation: 'backfill.project',
-        conversation_id: session.sessionId,
+        conversation_id: session.threadId,
         message_count: exchange.messages.length,
         identity_source: readCodexIdentitySource(exchange),
         status: 'ok',
@@ -277,7 +277,9 @@ async function* runCodexBackfill(args) {
       yield projectedExchangeItem(exchange, {
         client_name: clientName,
         source_path: filePath,
-        native_id: session.sessionId,
+        // The rollout's own native identity is the thread it records, not the
+        // session container it may belong to.
+        native_id: session.threadId,
       })
     }
   }
@@ -525,8 +527,24 @@ function buildSession(args) {
   const git = isPlainObject(metaPayload.git) ? metaPayload.git : undefined
   const sandboxPolicy = firstTurnObject(turnPayloads, 'sandbox_policy')
 
+  const threadId = stringValue(metaPayload.id) ?? fallbackId
+
   return {
-    sessionId: stringValue(metaPayload.id) ?? fallbackId,
+    // @ref LLP 0030#decision [implements]: `session_id` is the session
+    // CONTAINER, and current Codex writes it beside the thread id as
+    // `session_meta.session_id`, so it is read rather than assumed absent. The
+    // two coincide on a root thread (`SessionId::from(thread_id)`) and diverge
+    // on a subagent one, so reading it is what makes a backfilled subagent row
+    // partition with its siblings the way the live projector already does
+    // (`metadata.session_id`) - and what makes `hyp session ignore` name the
+    // same identifier on both paths.
+    //
+    // An absent field falls back to the thread, which is all a pre-field
+    // rollout can support. Note this reads the raw JSONL: Codex's own
+    // `SessionMetaLine` deserializer back-fills `session_id` from `id`, so a
+    // struct-shaped read could never tell "legacy" from "root" apart.
+    sessionId: stringValue(metaPayload.session_id) ?? threadId,
+    threadId,
     startedAtMs: timestampToMs(metaPayload.timestamp),
     // `session.cwd` gates the same `.hypignore` drop the live path gates (see
     // `runCodexBackfill`'s `resolver.resolve(session.cwd)`), so it uses the
@@ -536,7 +554,7 @@ function buildSession(args) {
     // verdict about whatever directory `hyp backfill` was invoked from. This
     // provider cannot delegate to `readRolloutSessionMeta` (it reads the whole
     // file and folds `turn_context`), but it can share the one predicate.
-    // @ref LLP 0143#usable-cwd [constrained-by]: blank-and-relative means "no
+    // @ref LLP 0150#usable-cwd [constrained-by]: blank-and-relative means "no
     // cwd" at every site that feeds the gate, not just the first-line reader
     cwd: firstString(sessionMetaCwd(metaPayload.cwd), firstTurnCwd(turnPayloads)),
     gitOriginUrl: git ? redactRemoteUserinfo(firstString(stringValue(git.repository_url), stringValue(git.origin_url))) : undefined,
@@ -606,12 +624,15 @@ function projectedExchangeFromSession(args) {
   /** @type {AiGatewayProjectedExchange} */
   const exchange = {
     provider: PROVIDER,
-    // @ref LLP 0030#decision: the rollout id is the thread; the rollout
-    // carries no distinct session id, so session_id (the non-null
-    // partition key) and conversation_id (the thread) are both the
-    // rollout id here.
+    // @ref LLP 0030#decision: the rollout id is the thread, and
+    // `session_meta.session_id` is the session container when the rollout
+    // carries one, so session_id (the non-null partition key) is the container
+    // and conversation_id is the thread. They are the same uuid for a root
+    // thread and for a rollout too old to record a container. Both columns
+    // therefore mean the same thing here as on the live path, which is what
+    // lets one opt-out key cover both (LLP 0066 §scope).
     session_id: session.sessionId,
-    conversation_id: session.sessionId,
+    conversation_id: session.threadId,
     conversation_source: CONVERSATION_SOURCE,
     client_name: clientName,
     attributes: { codex: codexAttributes(session, identitySource) },
@@ -651,6 +672,11 @@ function codexAttributes(session, identitySource) {
   /** @type {JsonObject} */
   const attrs = { identity_source: identitySource }
   setIfString(attrs, 'session_id', session.sessionId)
+  // Mirrors the live projector's `attributes.codex.thread_id`. Only emitted
+  // when it is distinct information: on a root (or pre-field) rollout the
+  // thread id IS the session id, and repeating it would suggest a divergence
+  // the file does not record.
+  if (session.threadId !== session.sessionId) setIfString(attrs, 'thread_id', session.threadId)
   setIfString(attrs, 'workspace', session.cwd)
   setIfString(attrs, 'git_origin_url', session.gitOriginUrl)
   setIfString(attrs, 'git_commit', session.gitCommit)
