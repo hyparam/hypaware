@@ -78,6 +78,11 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           if (Array.isArray(client.required_upstreams)) {
             descriptor.requiredUpstreams = client.required_upstreams
           }
+          if (Array.isArray(client.transcript_entrypoints)) {
+            descriptor.transcriptEntrypoints = client.transcript_entrypoints.filter(
+              (v) => typeof v === 'string' && v.length > 0
+            )
+          }
           clientDescriptors.set(client.name, descriptor)
         }
       }

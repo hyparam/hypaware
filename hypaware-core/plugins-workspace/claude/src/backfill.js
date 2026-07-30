@@ -3,9 +3,11 @@
 import {
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
+  DESKTOP_3P_CONTAINER_OWNER,
+  findDesktop3pProjectsDirs,
   loadAgentMeta,
   loadTranscriptFile,
-  walkTranscriptFiles,
+  walkTranscriptRoots,
   withToolUseResult,
 } from './transcripts.js'
 import { createSessionContextReader, pickLatestMatching } from './session_context.js'
@@ -19,6 +21,11 @@ import {
   projectedExchangeItem,
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
+import {
+  classifyContainerSession,
+  classifyTranscriptEntrypoint,
+  sessionEntrypoint,
+} from '../../../../src/core/backfill/entrypoint_owner.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -94,7 +101,12 @@ export function createClaudeBackfillProvider(opts) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Claude Code transcripts into ai_gateway_messages',
     async *run(ctx) {
-      yield* runClaudeBackfill({ ctx, projectsDir, stateFile, clientName, deriveRepo, resolver })
+      // Resolved per run, not at activation: attached-Desktop sessions
+      // accumulate new sandbox homes under the 3p container between runs
+      // (see findDesktop3pProjectsDirs), and each holds its own nested
+      // `.claude/projects` tree outside the primary projectsDir.
+      const desktop3pDirs = findDesktop3pProjectsDirs(opts.homeDir)
+      yield* runClaudeBackfill({ ctx, projectsDir, extraProjectsDirs: desktop3pDirs, stateFile, clientName, deriveRepo, resolver })
     },
   }
 }
@@ -109,6 +121,7 @@ export function createClaudeBackfillProvider(opts) {
  * @param {{
  *   ctx: BackfillRunContext,
  *   projectsDir: string,
+ *   extraProjectsDirs?: string[],
  *   stateFile: string,
  *   clientName: string,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
@@ -117,7 +130,7 @@ export function createClaudeBackfillProvider(opts) {
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, stateFile, clientName, deriveRepo, resolver } = args
+  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and
@@ -140,6 +153,7 @@ async function* runClaudeBackfill(args) {
     component: 'plugin.claude.backfill',
     operation: 'backfill.scan',
     projects_dir: projectsDir,
+    desktop_3p_dirs: extraProjectsDirs?.length ?? 0,
     ...(window.sinceMs !== undefined ? { since: new Date(window.sinceMs).toISOString() } : {}),
     ...(window.untilMs !== undefined ? { until: new Date(window.untilMs).toISOString() } : {}),
     status: 'ok',
@@ -158,17 +172,29 @@ async function* runClaudeBackfill(args) {
       error: errMessage(err),
     })
   })()
-  // Subagent → spawning tool call: one scan of the projects tree builds
+  // Subagent → spawning tool call: one scan per transcript root builds
   // the agent-id → toolUseId map from the `agent-<id>.meta.json` sidecars,
   // so backfilled subagent rows carry the same `spawned_by_tool_use_id`
-  // provenance live capture stamps.
+  // provenance live capture stamps. The Desktop 3p sandbox trees are
+  // scanned too: their sidecars live beside their transcripts, and a
+  // container session's subagent rows deserve the same provenance as any
+  // other backfilled session. Agent ids are unique, so a plain merge is
+  // safe; the primary tree wins a collision.
   const agentMeta = loadAgentMeta({ projectsDir })
+  for (const extraDir of extraProjectsDirs ?? []) {
+    for (const [agentId, meta] of loadAgentMeta({ projectsDir: extraDir })) {
+      if (!agentMeta.has(agentId)) agentMeta.set(agentId, meta)
+    }
+  }
 
   let filesSeen = 0
   let sessionsProjected = 0
   let messagesProjected = 0
+  let sessionsGated = 0
+  /** @type {Map<string, number>} */
+  const unclaimedEntrypoints = new Map()
 
-  for (const filePath of walkTranscriptFiles(projectsDir)) {
+  for (const { filePath, inContainer } of walkRootsWithOrigin(projectsDir, extraProjectsDirs)) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
     /** @type {TranscriptEntry[]} */
@@ -214,10 +240,50 @@ async function* runClaudeBackfill(args) {
         continue
       }
 
+      // Claude Desktop writes its sessions into THIS transcript tree, tagged
+      // `entrypoint: "claude-desktop"`. Importing them because they happen to
+      // live under `~/.claude/projects` captures a client the user may never
+      // have opted into, and files it under the wrong client. Read the
+      // entrypoint from the whole session, not `windowed`: the field rides
+      // most lines but the window could clip the ones that carry it.
+      // A session from the 3p container is Desktop's by ROOT, whatever its
+      // tag says: the value classifier fails open on an absent or drifted
+      // value, which over a foreign container is the wrong direction.
+      // Container admission takes the runner's plugin-list predicate, not
+      // the owners map, so it works whether or not Desktop declares any
+      // entrypoint value.
+      // @ref LLP 0140#gate-before-projection [implements]: a session owned by an unconfigured client is skipped before projection, like the usage-policy drop above
+      const entrypoint = sessionEntrypoint(sessionEntries)
+      const owners = ctx.entrypointOwners ?? new Map()
+      const owned = inContainer
+        ? classifyContainerSession(DESKTOP_3P_CONTAINER_OWNER, ctx.isPluginConfigured)
+        : classifyTranscriptEntrypoint(entrypoint, owners, clientName)
+      if (!owned.import) {
+        sessionsGated += 1
+        log.info('claude.backfill.entrypoint_not_configured', {
+          component: 'plugin.claude.backfill',
+          operation: 'entrypoint_gate',
+          session_id: sessionId,
+          entrypoint,
+          owner_client: owned.owner?.client,
+          owner_plugin: owned.owner?.plugin,
+          status: 'ok',
+        })
+        continue
+      }
+      // Unknown entrypoints fail open (see `classifyTranscriptEntrypoint`).
+      // Collected per distinct value and reported once at scan_complete rather
+      // than per session: a value no plugin claims is a property of the install,
+      // not of each conversation, and per-session logging buried the two real
+      // gate decisions under one line per transcript.
+      if (entrypoint && !owned.owner) {
+        unclaimedEntrypoints.set(entrypoint, (unclaimedEntrypoints.get(entrypoint) ?? 0) + 1)
+      }
+
       const exchange = await projectedExchangeFromEntries({
         sessionId,
         entries: windowed,
-        clientName,
+        clientName: owned.clientName,
         record,
         agentMeta,
         deriveRepo: deriveRepoCached,
@@ -235,7 +301,7 @@ async function* runClaudeBackfill(args) {
       })
 
       yield projectedExchangeItem(exchange, {
-        client_name: clientName,
+        client_name: owned.clientName,
         source_path: filePath,
         native_id: sessionId,
       })
@@ -248,8 +314,35 @@ async function* runClaudeBackfill(args) {
     files_seen: filesSeen,
     sessions_projected: sessionsProjected,
     messages_projected: messagesProjected,
+    // How many sessions the entrypoint gate held back, so a run that imports
+    // less than expected says why in its own summary line rather than
+    // requiring a log trawl.
+    sessions_gated: sessionsGated,
+    ...(unclaimedEntrypoints.size > 0
+      ? {
+        unclaimed_entrypoints: [...unclaimedEntrypoints]
+          .map(([value, count]) => `${value}=${count}`)
+          .join(','),
+      }
+      : {}),
     status: 'ok',
   })
+}
+
+/**
+ * Walk the shared projects tree, then the Desktop 3p sandbox trees, tagging
+ * each file with which kind of root it came from. The tag is what lets the
+ * gate key admission on the root for container sessions
+ * (`classifyContainerSession`) instead of on the entrypoint value inside
+ * them, which fails open when absent or drifted.
+ *
+ * @param {string} projectsDir
+ * @param {string[] | undefined} extraProjectsDirs
+ * @returns {Generator<{ filePath: string, inContainer: boolean }>}
+ */
+function* walkRootsWithOrigin(projectsDir, extraProjectsDirs) {
+  for (const filePath of walkTranscriptRoots([projectsDir])) yield { filePath, inContainer: false }
+  for (const filePath of walkTranscriptRoots(extraProjectsDirs ?? [])) yield { filePath, inContainer: true }
 }
 
 /**

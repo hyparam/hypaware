@@ -29,7 +29,8 @@
         "settings_file": ".claude/settings.json",
         "marker_key": "_hypaware"
       },
-      "required_upstreams": ["anthropic"]
+      "required_upstreams": ["anthropic"],
+      "transcript_entrypoints": ["cli", "sdk-cli"]
     },
     "picker": [
       {

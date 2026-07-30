@@ -1,6 +1,9 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
@@ -9,6 +12,7 @@ import {
   parseRunArgv,
   resolveRetentionDays,
   runBackfill,
+  runBackfillPlan,
   runBackfillProvider,
   selectProviders,
 } from '../../src/core/commands/backfill.js'
@@ -127,6 +131,9 @@ test('resolveRetentionDays prefers the flag, then config, then the default', () 
  *   materializerDataset?: string,
  *   materializeRows?: Record<string, unknown>[],
  *   registeredDatasets?: string[],
+ *   env?: NodeJS.ProcessEnv,
+ *   config?: Record<string, unknown>,
+ *   plugins?: { name: string }[],
  * }} [options]
  */
 function makeCtx(options = {}) {
@@ -137,11 +144,20 @@ function makeCtx(options = {}) {
   const registeredDatasets = new Set(options.registeredDatasets ?? ['ds'])
 
   const backfills = createBackfillRegistry()
+  /** @type {any[]} */
+  const runContexts = []
+  /** @type {any[]} */
+  const planContexts = []
   backfills.register({
     name: 'tester',
     plugin: '@test/plugin',
     datasets: [item.dataset],
-    async *run() {
+    async plan(planCtx) {
+      planContexts.push(planCtx)
+      return undefined
+    },
+    async *run(runCtx) {
+      runContexts.push(runCtx)
       yield item
     },
   })
@@ -188,8 +204,9 @@ function makeCtx(options = {}) {
   /** @type {string[]} */
   const err = []
   const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
-    env: {},
-    config: {},
+    env: options.env ?? {},
+    config: options.config ?? {},
+    ...(options.plugins ? { plugins: options.plugins } : {}),
     stdout: { write: (/** @type {string} */ s) => { out.push(s); return true } },
     stderr: { write: (/** @type {string} */ s) => { err.push(s); return true } },
     backfills,
@@ -197,7 +214,7 @@ function makeCtx(options = {}) {
     query,
     storage,
   }))
-  return { ctx, appended, flushed, out, err }
+  return { ctx, appended, flushed, out, err, runContexts, planContexts }
 }
 
 test('runBackfill materializes rows, appends to the dataset path, and flushes', async () => {
@@ -314,4 +331,94 @@ test('runBackfillProvider reports a failed result for an unknown provider', asyn
   const result = await runBackfillProvider({ ctx, provider: 'ghost', dryRun: false })
   assert.deepEqual(result, { ok: false, scanned: 0, rowsWritten: 0, skipped: 0 })
   assert.equal(appended.length, 0)
+})
+
+/* --------------------- entrypoint ownership: "configured" ------------------ */
+
+/**
+ * Write a local config document and return an env that points the runner
+ * at it. `HYP_HOME` is set too so the state dir the catalog is discovered
+ * from is a scratch dir rather than the developer's real one.
+ *
+ * @param {string[]} pluginNames
+ * @returns {NodeJS.ProcessEnv}
+ */
+function envWithConfig(pluginNames) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-owners-'))
+  const configPath = path.join(home, 'hypaware-config.json')
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({ version: 2, plugins: pluginNames.map((name) => ({ name })) }),
+    'utf8'
+  )
+  return { HYP_HOME: home, HYP_CONFIG: configPath }
+}
+
+// The regression this pins: `hyp init` boots the `all-available` profile,
+// which by construction never activates a `V1_EXCLUDED_FROM_DEFAULT` plugin
+// like `@hypaware/claude-desktop`, and the picker cannot change an
+// activation set fixed at process start. Deriving "configured" from the
+// activation set therefore gated Desktop history out of the finale's own
+// backfill for a user who had just ticked the row and accepted the consent
+// prompt, contradicting LLP 0139 and LLP 0140 on that very path.
+// @ref LLP 0140#manifest-declares-ownership [tests]: "configured" is membership of the effective config, not of the boot profile's activation set
+test('the entrypoint gate counts a config-listed plugin as configured even when this process never activated it', async () => {
+  const { ctx, runContexts } = makeCtx({
+    env: envWithConfig(['@hypaware/claude', '@hypaware/claude-account', '@hypaware/claude-desktop']),
+    plugins: [{ name: '@hypaware/claude' }],
+  })
+  const result = await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })
+  assert.equal(result.ok, true)
+
+  const owners = runContexts[0]?.entrypointOwners
+  assert.ok(owners instanceof Map, 'the runner hands the provider a resolved owner map')
+  assert.equal(owners.get('claude-desktop')?.plugin, '@hypaware/claude-desktop')
+  assert.equal(
+    owners.get('claude-desktop')?.configured,
+    true,
+    'ticking the picker row wrote the plugin into the config, so its history may import'
+  )
+})
+
+test('the entrypoint gate stays closed for a plugin in neither the config nor the activation set', async () => {
+  const { ctx, runContexts } = makeCtx({
+    env: envWithConfig(['@hypaware/claude']),
+    plugins: [{ name: '@hypaware/claude' }],
+  })
+  await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })
+
+  const owners = runContexts[0]?.entrypointOwners
+  assert.equal(owners.get('claude-desktop')?.configured, false, 'no opt-in: Desktop sessions are gated')
+  assert.equal(owners.get('cli')?.configured, true, 'the scanning client itself is configured')
+})
+
+test('a plugin listed with enabled:false is not configured', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-owners-'))
+  const configPath = path.join(home, 'hypaware-config.json')
+  fs.writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/claude' }, { name: '@hypaware/claude-desktop', enabled: false }],
+  }), 'utf8')
+  const { ctx, runContexts } = makeCtx({
+    env: { HYP_HOME: home, HYP_CONFIG: configPath },
+    plugins: [{ name: '@hypaware/claude' }],
+  })
+  await runBackfillProvider({ ctx, provider: 'tester', dryRun: true })
+  assert.equal(runContexts[0]?.entrypointOwners.get('claude-desktop')?.configured, false)
+})
+
+// `entrypointOwners` is declared on `BackfillPlanContext`, so a provider
+// that consults it while planning has to see the same answer the run will,
+// or `hyp backfill plan` estimates over sessions the run then gates out.
+test('hyp backfill plan hands providers the same entrypoint owner map the run gets', async () => {
+  const { ctx, planContexts } = makeCtx({
+    env: envWithConfig(['@hypaware/claude']),
+    plugins: [{ name: '@hypaware/claude' }],
+    config: { version: 2, plugins: [{ name: '@test/plugin' }] },
+  })
+  const code = await runBackfillPlan(['tester'], ctx)
+  assert.equal(code, 0)
+  const owners = planContexts[0]?.entrypointOwners
+  assert.ok(owners instanceof Map, 'the plan context carries the resolved owner map')
+  assert.equal(owners.get('claude-desktop')?.configured, false)
 })
