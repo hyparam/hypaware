@@ -234,3 +234,16 @@ hypaware daemon uninstall
 If the release touched a client adapter, run the matching procedure in
 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
 release notes.
+
+<!-- neutral:llp-conventions -->
+## LLP conventions
+
+Design rationale lives in numbered **LLP** documents under `llp/`, driven by neutral.
+
+- **Immutable docs; change is a new request.** An Accepted/Active LLP is a
+  *record*, not a worksheet — do not edit what it decided or required. To change
+  intent, mint a **new request** (`rfc`/`spec`/`issue`) that `@ref`s what it
+  supersedes, and append a `Superseded-by:`/`Extended-by: LLP NNNN` forward-ref to
+  the applicable parts of the old doc. Trivial editorial fixes (typos, links,
+  forward-refs) are fine; Drafts are still editable.
+<!-- /neutral:llp-conventions -->
