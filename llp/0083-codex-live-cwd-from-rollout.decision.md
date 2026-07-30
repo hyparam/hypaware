@@ -70,6 +70,20 @@ Codex now has the symmetric fallback.
 - **One resolved `cwd`, used twice.** The same value feeds the `.hypignore` drop
   and the row's stamped `cwd`, so live rows now carry the cwd the backfill reads
   and the two halves of the policy agree (closes the live/backfill inconsistency).
+- **A substituted workspace key never decides the verdict** (amended, #476). The
+  Codex projector picks a `workspaces` turn-metadata key for enrichment, falling
+  back to the *first* key when none matches the request's `cwd`. That substituted
+  key is a guess about a directory the session may never have run in, so it does
+  not supply the one resolved `cwd`: an explicit in-band `cwd` outranks it for
+  both the gate and the stamp, and the refusal is reported as
+  `plugin.codex.usage_policy_workspace_cwd_refused`
+  (`error_kind: workspace_cwd_mismatch`, paths hashed). The key keeps its
+  enrichment role (`attributes.codex.workspace`, `git_remote`, `git_commit`,
+  `has_changes`) and still supplies the `cwd` on the subscription route, where
+  the request states none and the key is the only in-band source there is.
+  Consequence: for a session running in a *subdirectory* of its workspace the
+  row now stamps the subdirectory rather than the workspace root, which is the
+  directory the policy is actually scoped to.
 
 ## Why not the alternatives
 

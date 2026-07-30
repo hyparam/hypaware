@@ -1051,6 +1051,183 @@ test('Codex workspace selection prefers recorded cwd over first metadata key', (
   assert.equal(projection.attributes.codex.git_origin_url, 'git@github.com:acme/actual.git')
 })
 
+// ---------------------------------------------------------------------
+// A substituted workspace key must not decide a privacy verdict (#476)
+//
+// @ref LLP 0083#decision [tests]: `selectCodexWorkspace` falls back to the
+// first `workspaces` key when none matches the request's cwd. That fallback is
+// load-bearing on the subscription route (no in-band cwd at all), but when the
+// request DOES state a cwd the substituted key is a guess about a directory the
+// session never ran in, and it used to be the `.hypignore` gate's input.
+// ---------------------------------------------------------------------
+
+test('the .hypignore gate uses the request cwd, not a substituted workspace key (#476 case a)', () => {
+  // The leak: the session really ran in an IGNORED tree, but the only declared
+  // workspace is a clean one, so the verdict used to be computed for the clean
+  // tree and the opted-out exchange was recorded.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-476a',
+        workspaces: { '/work/clean/proj': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/ignored/real', input: 'secret' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the request cwd is ignored, so the exchange must drop')
+})
+
+test('an unrelated ignored workspace key does not drop a session it never covered (#476 case b)', () => {
+  // The mirror failure: the session ran in a clean tree, the only declared
+  // workspace is an ignored one, and the substitution used to force a drop.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-476b',
+        workspaces: { '/work/ignored/proj': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/clean/real', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'no .hypignore covers this session')
+  assert.equal(projection.cwd, '/work/clean/real', 'the row records where the session actually ran')
+})
+
+test('a refused workspace substitution is logged with hashed paths, not silently applied (#476 case c)', () => {
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  // A relative cwd cannot equal any absolute workspace key, so the
+  // substitution used to run AHEAD of any in-band cwd check and drop on the
+  // unrelated ignored key without a word in the log.
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-476c',
+        workspaces: { '/work/ignored/proj': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: 'sub', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), { log })
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the guessed workspace must not decide the verdict')
+  const refused = warns.find((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused')
+  assert.ok(refused, 'expected a usage_policy_workspace_cwd_refused warn')
+  assert.equal(refused.fields?.error_kind, 'workspace_cwd_mismatch')
+  assert.equal(refused.fields?.component, 'codex')
+  // This repo captures LLM traffic: the signal carries hashes, never raw paths.
+  assert.ok(
+    !JSON.stringify(refused.fields).includes('/work/ignored/proj'),
+    'the refused workspace path is hashed, never logged raw',
+  )
+})
+
+test('a refused workspace substitution still enriches the row from the workspace key (#476)', () => {
+  // The substitution keeps its ENRICHMENT role: only the gate/stamp cwd is
+  // taken back from it. Losing `workspace` / git identity would be a separate
+  // regression (LLP 0032#capture).
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-476d',
+        workspaces: {
+          '/work/clean/proj': {
+            associated_remote_urls: { origin: 'git@github.com:acme/clean.git' },
+            latest_git_commit_hash: 'deadbeef',
+          },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/clean/elsewhere', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.equal(projection.cwd, '/work/clean/elsewhere')
+  assert.equal(projection.attributes.codex.workspace, '/work/clean/proj')
+  assert.equal(projection.git_remote, 'git@github.com:acme/clean.git')
+  assert.equal(projection.head_sha, 'deadbeef')
+})
+
+test('the workspace key still supplies the gate cwd when the request states none (#476)', () => {
+  // The subscription route often carries no cwd at all, and then the workspace
+  // key is the ONLY in-band source of one. Refusing it outright would REMOVE
+  // real `.hypignore` coverage, so the fallback must survive this fix.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-476e',
+        workspaces: { '/work/ignored/proj': {} },
+      }),
+    }),
+    request_body: JSON.stringify({ input: 'secret' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the workspace key is the only cwd there is, so it still gates')
+})
+
+test('no workspace-cwd refusal is logged when the key matches or the request states no cwd (#476)', () => {
+  // Guards the refusal predicate from the other side: nothing was substituted
+  // away, so nothing must be reported. Both negative branches at once - the
+  // key matching the request cwd, and no in-band cwd to contradict it.
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const projector = createCodexExchangeProjector()
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  const turnMetadata = { thread_id: 'thread-476f', workspaces: { '/work/clean/proj': {} } }
+  for (const body of [{ cwd: '/work/clean/proj', input: 'go' }, { input: 'go' }]) {
+    projector.project(exchange({
+      path: '/backend-api/codex/responses',
+      provider: 'chatgpt',
+      request_headers: JSON.stringify({ 'x-codex-turn-metadata': JSON.stringify(turnMetadata) }),
+      request_body: JSON.stringify(body),
+      response_body: JSON.stringify({ output_text: 'done' }),
+    }), { log })
+  }
+  assert.deepEqual(
+    warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+    [],
+    'an uncontradicted workspace key is not a refusal',
+  )
+})
+
 test('non-codex provider has no codex turn metadata but still stamps identity_source for symmetry', () => {
   const projector = createCodexExchangeProjector()
   const projection = /** @type {any} */ (projector.project(exchange({
