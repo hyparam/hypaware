@@ -907,6 +907,16 @@ function readRecordedCwd(reqBody) {
  * LLP 0085), a state the system already models. It does NOT make this path fail
  * closed; whether an unconfirmable cwd should drop is a separate, larger call.
  *
+ * That fail-open is not free, so state the one case it costs: when the daemon's
+ * own process cwd sits under an ignoring `.hypignore` (a foreground start from a
+ * project dir, or a `--user` unit that renders no `WorkingDirectory=` and so
+ * inherits `$HOME`), guessing happened to reach the right verdict, and refusing
+ * now records where accepting dropped. It was still a guess - the same base also
+ * produced false drops for every session that ran elsewhere - so refusing is the
+ * right call, but it is a real narrowing of coverage, not a strict improvement.
+ * A drop that only holds while the daemon runs from the right directory is what
+ * fail-closed would have to replace, and that is the larger call above.
+ *
  * The same rule guards the rollout-stated cwd as `sessionMetaCwd`
  * (`src/core/codex/rollout_session_meta.js`, LLP 0143 `#usable-cwd`, PR #466).
  * The two checks are stated in both places for now because that module is not on
@@ -926,7 +936,10 @@ function readRecordedCwd(reqBody) {
 function usableInBandCwd(cwd, ctx) {
   if (cwd === undefined) return undefined
   // Byte-identical when it passes: the trim is only the emptiness test, and a
-  // path is not ours to normalize.
+  // path is not ours to normalize. The trim gates nothing on its own - a blank
+  // string is never absolute on either platform, so `isAbsolute` already refuses
+  // it - it is here to split `error_kind` below, which is the only thing that
+  // tells blank apart from relative. Keep both conjuncts or that split dies.
   if (cwd.trim().length > 0 && isAbsolute(cwd)) return cwd
   // Never silently: a refused cwd means this exchange reached the gate with
   // nothing to match, which is indistinguishable from "no cwd at all" in the
