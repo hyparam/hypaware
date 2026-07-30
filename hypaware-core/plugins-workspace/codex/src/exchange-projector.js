@@ -86,7 +86,10 @@ export function createCodexExchangeProjector(opts = {}) {
     /**
      * @param {AiGatewayExchangeInput} input
      * @param {{
-     *   log?: { info?: (m: string, f?: Record<string, unknown>) => void },
+     *   log?: {
+     *     info?: (m: string, f?: Record<string, unknown>) => void,
+     *     warn?: (m: string, f?: Record<string, unknown>) => void,
+     *   },
      *   isSessionIgnored?: (sessionId: string) => boolean,
      * }} [ctx]
      */
@@ -131,6 +134,19 @@ export function createCodexExchangeProjector(opts = {}) {
       // non-codex traffic never scans.
       const cwd = usableInBandCwd(firstString(codexContext?.cwd, readRecordedCwd(reqBody)), ctx)
         ?? (codexContext?.session_id ? rolloutCwd?.resolve(codexContext.session_id) : undefined)
+      // @ref LLP 0083#decision [implements]: a refused workspace substitution is
+      // observable, not silent - it means the gate is measuring a different
+      // directory than it would have. Paths are hashed: this seam sees LLM traffic.
+      if (codexContext?.refused_workspace_cwd) {
+        ctx?.log?.warn?.('plugin.codex.usage_policy_workspace_cwd_refused', {
+          component: 'codex',
+          operation: 'usage_policy_workspace_cwd_refused',
+          error_kind: 'workspace_cwd_mismatch',
+          workspace_sha256: sha256Hex(codexContext.refused_workspace_cwd).slice(0, 16),
+          cwd_sha256: cwd ? sha256Hex(cwd).slice(0, 16) : undefined,
+          exchange_id: input.exchange_id,
+        })
+      }
       if (cwd) {
         const policy = resolver.resolve(cwd)
         if (policy.class === 'ignore') {
@@ -683,10 +699,8 @@ function resolveCodexContext(input, provider, path, reqBody) {
   const metadata = readCodexTurnMetadata(input, clientMetadata)
   const userAgent = readHeader(input.request_headers, 'user-agent')
   const client = codexClientFromUserAgent(userAgent)
-  const workspace = selectCodexWorkspace(
-    metadata,
-    firstString(readRecordedCwd(reqBody), readStringKey(metadata, 'cwd'))
-  )
+  const inBandCwd = firstString(readRecordedCwd(reqBody), readStringKey(metadata, 'cwd'))
+  const workspace = selectCodexWorkspace(metadata, inBandCwd)
   const workspaceInfo = workspace?.info
   const remoteUrls = isPlainObject(workspaceInfo?.associated_remote_urls)
     ? workspaceInfo.associated_remote_urls
@@ -765,7 +779,19 @@ function resolveCodexContext(input, provider, path, reqBody) {
     parent_thread_id,
     turn_id,
     thread_source,
-    cwd: workspace?.path,
+    // @ref LLP 0083#decision [implements]: an explicit in-band cwd outranks the
+    // workspace key for the ONE resolved cwd (gate + stamp). `selectCodexWorkspace`
+    // substitutes the first `workspaces` key when none matches, which is a guess
+    // about a directory the session may never have run in, so it must not decide
+    // a `.hypignore` verdict. The key still enriches (`attributes.codex.workspace`,
+    // git_*) and still supplies the cwd on the subscription route, where the
+    // request states none and the key is the only in-band source there is.
+    cwd: firstString(inBandCwd, workspace?.path),
+    // Set only when the substitution was refused, so the caller can log it
+    // rather than let a discarded guess vanish.
+    refused_workspace_cwd: workspace && inBandCwd && !pathsEqual(workspace.path, inBandCwd)
+      ? workspace.path
+      : undefined,
     client_version: client.version,
     entrypoint: originator,
     sandbox,
