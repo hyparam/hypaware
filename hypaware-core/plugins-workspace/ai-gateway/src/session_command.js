@@ -39,6 +39,38 @@ const EPHEMERAL_NOTE =
   'this opt-out is in-memory only: a gateway restart drops it, and a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
 
 /**
+ * The control plane's authenticity contract, printed beside every **confirmed**
+ * answer, by the writer and the reader alike.
+ *
+ * `validateControlResponse` proves the responder saw our token; nothing proves
+ * the responder IS the gateway. A local process that binds the resolved port and
+ * echoes the token back yields a confident `ignored: true` for a session nothing
+ * is dropping (issue #451). Authenticating it would need peer-process identity,
+ * which has no portable form, and a gateway-written secret defends nothing
+ * because whoever can bind that port runs as the same uid and can read the same
+ * file ([LLP 0067 §cli-response-check](../../../../llp/0067-session-opt-out.design.md)).
+ *
+ * So the guarantee is stated rather than proved, and the statement is
+ * **unconditional**: the verb cannot tell the gateway from the impostor, so a
+ * note printed only "when spoofed" would be a claim it cannot make, and its
+ * absence would read as proof of authenticity.
+ *
+ * The endpoint is named in the note rather than left as "that port": on the
+ * `daemon_status` path this is the only line about the endpoint at all, and a
+ * reader pasting the output into a support thread should not have to reconstruct
+ * which address was trusted.
+ *
+ * @ref LLP 0164#stated-not-proved [implements]: the responder is never
+ * authenticated, and every confirmed answer says so.
+ *
+ * @param {string} endpoint
+ * @returns {string}
+ */
+function responderTrustNote(endpoint) {
+  return `trust:   nothing proves the responder at ${endpoint} is the HypAware gateway - any process on this machine could bind that port and answer. This answer is only as trustworthy as this machine.`
+}
+
+/**
  * `hyp session status` exit code for a **confirmed** "this session is NOT
  * being dropped" read. Distinct from `SESSION_EXIT_UNKNOWN` on purpose: the
  * whole point of the verb is that "recording, confirmed" and "could not
@@ -276,6 +308,9 @@ async function runMutation(argv, ctx, method, usage) {
         total,
         endpoint: endpoint.endpoint,
         endpoint_source: endpoint.source,
+        // Same field, same constant, on the verbs whose output reads as done.
+        // @ref LLP 0164#stated-not-proved [implements]
+        endpoint_authenticated: false,
       }) + '\n'
     )
     return 0
@@ -295,6 +330,7 @@ async function runMutation(argv, ctx, method, usage) {
     idSource: resolvedId.source,
     idEvidence: resolvedId.evidence ?? null,
     threadId: resolvedId.threadId ?? null,
+    endpoint: endpoint.endpoint,
     endpointSource: endpoint.source,
   })) {
     ctx.stdout.write(`${note}\n`)
@@ -313,7 +349,19 @@ async function runMutation(argv, ctx, method, usage) {
  */
 function writeStatus(ctx, json, report) {
   if (json) {
-    ctx.stdout.write(JSON.stringify({ ...report, folder_policy: 'hyp policy show' }) + '\n')
+    ctx.stdout.write(
+      JSON.stringify({
+        ...report,
+        // The human note's machine-readable twin, so a JSON consumer does not
+        // have to parse prose (or, worse, infer authenticity from silence).
+        // Constant by contract, `unknown` reports included: it is `false`
+        // because no answer this verb can obtain is authenticated, not because
+        // this particular one failed a check.
+        // @ref LLP 0164#stated-not-proved [implements]
+        endpoint_authenticated: false,
+        folder_policy: 'hyp policy show',
+      }) + '\n'
+    )
   } else if (report.status === 'unknown') {
     const who = report.session_id ?? '(unresolved)'
     ctx.stdout.write(`session ${who}: UNKNOWN - cannot confirm the opt-out is in effect\n`)
@@ -327,6 +375,7 @@ function writeStatus(ctx, json, report) {
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
+      endpoint: report.endpoint,
       endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
@@ -339,6 +388,7 @@ function writeStatus(ctx, json, report) {
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,
       threadId: report.thread_id,
+      endpoint: report.endpoint,
       endpointSource: report.endpoint_source,
     })) {
       ctx.stdout.write(`${note}\n`)
@@ -368,9 +418,12 @@ function writeStatus(ctx, json, report) {
  * bound, and qualifying it too would train the reader to skip the caveat on the
  * paths where it is load-bearing.
  *
- * A live daemon's `status.json` proves the second; a
- * pinned `listen` only asserts it, and `validateControlResponse` can prove the
- * responder saw our token but not that it is the gateway. Naming the weaker
+ * The second claim is never proved, only graded. A live daemon's `status.json`
+ * says the gateway bound that port; a pinned `listen` says only that it was
+ * asked to, so the weaker source gets its own note. Neither says who answers
+ * there NOW, and `validateControlResponse` can prove the responder saw our
+ * token but not that it is the gateway, so `responderTrustNote` rides every
+ * confirmed answer under both sources (issue #451, LLP 0164). Naming the
  * evidence in the output is the only remedy available at this layer, and it is
  * this change's own thesis: a control that can be wrong must at least say so.
  *
@@ -388,12 +441,13 @@ function writeStatus(ctx, json, report) {
  *   idSource: SessionStatusReport['session_id_source'],
  *   idEvidence: string | null,
  *   threadId: string | null,
+ *   endpoint: string | null,
  *   endpointSource: SessionStatusReport['endpoint_source'],
  * }} args
  * @returns {string[]}
  */
 function provenanceNotes(args) {
-  const { idSource, idEvidence, threadId, endpointSource } = args
+  const { idSource, idEvidence, threadId, endpoint, endpointSource } = args
   /** @type {string[]} */
   const notes = []
   if (idSource === 'codex_rollout') {
@@ -416,6 +470,10 @@ function provenanceNotes(args) {
       'endpoint:  from the pinned `listen`, not a live daemon - nothing proved the gateway still owns that port.'
     )
   }
+  // Last, and on every confirmed answer: the weaker of the two endpoint
+  // sources gets the extra note above, but neither of them authenticates the
+  // responder, so the contract is stated whichever one produced the port.
+  if (endpoint) notes.push(responderTrustNote(endpoint))
   return notes
 }
 
