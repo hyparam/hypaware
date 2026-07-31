@@ -314,10 +314,32 @@ with an honest no-op `attach()` instead.
 `anthropicUpstreamPreset()` (`name: 'anthropic'`, unchanged, registered iff
 absent, mirroring Codex/Claude's shared-preset convention) and gains
 `openaiUpstreamPreset()`: `name: 'openai'`, `base_url: 'https://api.openai.com'`,
-`path_prefix: '/v1'`, `priority: 100`, byte-identical in shape to
+`path_prefix: '/v1'`, and **no `priority`**, byte-identical in shape to
 `@hypaware/codex`'s existing `openai` preset registration (same preset name
 means whichever plugin activates first wins the `Map.set`, which is correct:
 both plugins agree on the same real endpoint for the same shape).
+
+The `openai` preset deliberately compiles at the default priority 0, the same
+rung `compileUpstreams` gives a TOML-config upstream. An earlier revision of
+this section specified `priority: 100`, which was a misrouting hazard: the
+preset's `match()` falls through to `isOpenaiPath`, the whole `/v1` tree, so
+it also answers `/v1/messages`. On an ordinary install with a configured
+`anthropic` (priority 0) and no configured `openai`, the preset sorted first
+and swallowed Claude traffic, forwarding the prompts and their `x-api-key` /
+`Bearer sk-ant-` credentials to `api.openai.com`. At priority 0 the
+prefix-length tiebreak puts the narrower `/v1/messages` ahead of `/v1`, and
+the `x-hypaware-upstream` rung below still reaches the preset on the
+bare-origin `/chat/completions` path the steering plugin actually produces,
+so the priority bought nothing it was needed for.
+
+One seam this does not close, recorded so it is known rather than surprising:
+an operator-configured `openai` upstream wins the name outright (config beats
+presets) and its merged entry carries no `match()`, so a steered
+`/chat/completions` in that shape routes nowhere. That is a property of
+config-wins merging and is identical at either priority, since the preset
+never reaches the compiled table at all. Letting a preset contribute
+`match()` to a same-named config upstream would change the operator-owns-config
+rule and is out of scope for this design.
 
 Both presets' `match(input)` gain one precedence rung above their existing
 path/header checks: if `input.headers['x-hypaware-upstream']` is present and

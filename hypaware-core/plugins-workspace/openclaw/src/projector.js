@@ -227,16 +227,25 @@ export function anthropicUpstreamPreset() {
  * match `@hypaware/codex`'s existing `openai` registration, so it points
  * at the same real endpoint.
  *
- * KNOWN DIVERGENCE, and the load-bearing one: Codex's registration
- * declares no `priority` and no `match()`, so this copy is NOT
- * interchangeable with it, and `registerUpstreamPreset`'s name-keyed
- * last-write-wins `Map.set` makes which one survives an activation-order
- * accident. When Codex's wins, both the `x-hypaware-upstream` rung and
- * `priority: 100` are gone, and a steered `openai-completions` turn
- * (whose shadow `baseUrl` is the bare gateway origin, so its path is
- * `/chat/completions`, not `/v1/chat/completions`) matches no upstream at
- * all. Closing this needs the rung on Codex's registration too, which is
- * a change to Codex's routing and so is not made here.
+ * NO `priority`. It deliberately compiles at the default 0, the same
+ * rung as a TOML-config upstream. `match()` falls through to
+ * {@link isOpenaiPath}, which is the whole `/v1` tree, so it also
+ * answers `/v1/messages`; at `priority: 100` it sorted above a
+ * configured `anthropic` and swallowed Claude traffic, sending the
+ * prompts and their `x-api-key` / `Bearer sk-ant-` credentials to
+ * `api.openai.com`. At 0 the prefix-length tiebreak puts the narrower
+ * `/v1/messages` first and the steering header still reaches this
+ * preset on the bare-origin `/chat/completions` path.
+ *
+ * KNOWN DIVERGENCE: Codex's registration declares no `match()`, so this
+ * copy is NOT interchangeable with it, and `registerUpstreamPreset`'s
+ * name-keyed last-write-wins `Map.set` makes which one survives an
+ * activation-order accident. When Codex's wins, the
+ * `x-hypaware-upstream` rung is gone and a steered `openai-completions`
+ * turn (whose shadow `baseUrl` is the bare gateway origin, so its path
+ * is `/chat/completions`, not `/v1/chat/completions`) matches no
+ * upstream at all. Closing that needs the rung on Codex's registration
+ * too, a change to Codex's routing that is not made here.
  *
  * @ref LLP 0161#upstream-presets [implements]: openai preset registration, byte-identical in shape to @hypaware/codex's, plus the x-hypaware-upstream precedence rung
  * @returns {AiGatewayUpstreamPreset}
@@ -247,7 +256,6 @@ export function openaiUpstreamPreset() {
     base_url: 'https://api.openai.com',
     provider: 'openai',
     path_prefix: '/v1',
-    priority: 100,
     match(input) {
       if (steersTo(input.headers, 'openai')) return true
       return isOpenaiPath(input.path)

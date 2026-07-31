@@ -105,9 +105,10 @@ export async function activate(ctx) {
     throw new Error(`@hypaware/openclaw: unexpected upstream preset name ${openaiPreset.name}`)
   }
   // NOT the same reasoning as the anthropic preset above: Codex's `openai`
-  // registration declares no `priority` and no `match()`, so the two copies
-  // are not interchangeable and whichever registers last DOES change
-  // routing. See `openaiUpstreamPreset`'s "KNOWN DIVERGENCE" note.
+  // registration declares no `match()`, so the two copies are not
+  // interchangeable and whichever registers last DOES change routing. Both
+  // now sit at the default priority 0, so only the steering rung differs.
+  // See `openaiUpstreamPreset`'s "KNOWN DIVERGENCE" note.
   // @ref LLP 0161#upstream-presets [implements]: registers the openai upstream preset itself iff not already present, so an OpenClaw-only install still routes steered OpenAI-shaped traffic
   gateway.registerUpstreamPreset(openaiPreset)
 
