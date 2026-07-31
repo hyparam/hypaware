@@ -533,6 +533,18 @@ within `resolveWindow(ctx)`'s bounds via `filterByWindow`, both from
    `provider` is `'anthropic'` or `'openai'`) rather than a denylist, so an
    unrecognized future `provider` value fails closed (excluded, not
    silently mis-attributed) instead of failing open.
+
+   *Refined at implementation time (T9):* the allowlist reads a record's
+   **effective** provider, not only its own field. Only an assistant record
+   carries `provider` (LLP 0158 Context); a user prompt and a tool result do
+   not, so read against the record's own field the allowlist would exclude
+   every user prompt in every session, the captured turns included. A record
+   that states no provider therefore takes the nearest one that does,
+   preferring the record that follows it, which is the assistant record of
+   the turn it belongs to. This excludes a CLI-backend turn whole (its
+   prompt goes with it, since the Claude transcript already holds that whole
+   turn) and keeps the fail-closed direction: a file where no record ever
+   states a provider projects nothing.
 3. For a message record that passes both filters, build an
    `AiGatewayProjectedExchange` directly from the session file's own fields
    (native `message_id` from the record's own id, `previous_message_id`
@@ -550,9 +562,18 @@ within `resolveWindow(ctx)`'s bounds via `filterByWindow`, both from
    true by construction rather than by coincidence: both routes converge on
    the same native `message_id`, so `part_id` dedupe (`dedupeByPartId` /
    `createBackfillDedupe`) collapses the overlap to zero writes.
-4. Wrap each projection with `projectedExchangeItem(exchange, { client_name:
-   'openclaw', source_path: sessionFilePath, native_id: record.id })` and
-   yield it (`src/core/backfill/scan_util.js`).
+4. Wrap the projection with `projectedExchangeItem(exchange, { client_name:
+   'openclaw', source_path: sessionFilePath, native_id: sessionId })` and
+   yield it (`src/core/backfill/scan_util.js`). One item per **session**,
+   not one per record: the materializer allocates a fresh conversation state
+   per `materialize()` call, so a per-record item would restart the
+   `previous_message_id` chain and the tool_use to tool_result lookup at
+   every record. That is the same reason Codex yields per session, and it is
+   why the provenance `native_id` is the session's own id rather than a
+   per-record one. `previous_message_id` is correspondingly left unset on
+   each projected message, so the gateway's own chaining (the live route's
+   one implementation) supplies it for both routes rather than backfill
+   carrying a second copy of it.
 
 @ref LLP 0157#backfill [implements]: backfilled rows carry the same
 `client_name` and `conversation_source` as live rows and no route marker,

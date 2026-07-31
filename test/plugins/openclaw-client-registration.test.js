@@ -39,6 +39,8 @@ function makeBuf() {
 test('activate() registers the openclaw client with an honest no-op attach()', async () => {
   /** @type {any} */
   let registeredClient
+  /** @type {any} */
+  let registeredBackfill
   const gateway = /** @type {any} */ ({
     registerUpstreamPreset() {},
     registerExchangeProjector() {},
@@ -50,6 +52,7 @@ test('activate() registers the openclaw client with an honest no-op attach()', a
     env: {},
     plugin: { version: '0.0.0-test' },
     configRegistry: { registerSection() {} },
+    backfills: { register(contribution) { registeredBackfill = contribution } },
     requireCapability: () => gateway,
   })
 
@@ -58,6 +61,14 @@ test('activate() registers the openclaw client with an honest no-op attach()', a
   assert.ok(registeredClient, 'activate() registered a client')
   assert.equal(registeredClient.name, 'openclaw')
   assert.equal(registeredClient.defaultUpstream, 'anthropic')
+
+  // The session-transcript backfill provider rides the same activation, the
+  // imperative `ctx.backfills.register(...)` house pattern @hypaware/codex
+  // already follows. @ref LLP 0161#backfill-provider [tests]
+  assert.ok(registeredBackfill, 'activate() registered a backfill provider')
+  assert.equal(registeredBackfill.name, 'openclaw')
+  assert.equal(registeredBackfill.plugin, '@hypaware/openclaw')
+  assert.deepEqual(registeredBackfill.datasets, ['ai_gateway_messages'])
 
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -83,6 +94,7 @@ test('activate() attach() emits the same report under --json, still writing noth
     env: {},
     plugin: { version: '0.0.0-test' },
     configRegistry: { registerSection() {} },
+    backfills: { register() {} },
     requireCapability: () => gateway,
   })
   await activate(ctx)
