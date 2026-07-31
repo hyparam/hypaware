@@ -60,7 +60,7 @@ const EPHEMERAL_NOTE =
  * reader pasting the output into a support thread should not have to reconstruct
  * which address was trusted.
  *
- * @ref LLP 0164#stated-not-proved [implements]: the responder is never
+ * @ref LLP 0166#stated-not-proved [implements]: the responder is never
  * authenticated, and every confirmed answer says so.
  *
  * @param {string} endpoint
@@ -309,7 +309,7 @@ async function runMutation(argv, ctx, method, usage) {
         endpoint: endpoint.endpoint,
         endpoint_source: endpoint.source,
         // Same field, same constant, on the verbs whose output reads as done.
-        // @ref LLP 0164#stated-not-proved [implements]
+        // @ref LLP 0166#stated-not-proved [implements]
         endpoint_authenticated: false,
       }) + '\n'
     )
@@ -357,7 +357,7 @@ function writeStatus(ctx, json, report) {
         // Constant by contract, `unknown` reports included: it is `false`
         // because no answer this verb can obtain is authenticated, not because
         // this particular one failed a check.
-        // @ref LLP 0164#stated-not-proved [implements]
+        // @ref LLP 0166#stated-not-proved [implements]
         endpoint_authenticated: false,
         folder_policy: 'hyp policy show',
       }) + '\n'
@@ -423,7 +423,7 @@ function writeStatus(ctx, json, report) {
  * asked to, so the weaker source gets its own note. Neither says who answers
  * there NOW, and `validateControlResponse` can prove the responder saw our
  * token but not that it is the gateway, so `responderTrustNote` rides every
- * confirmed answer under both sources (issue #451, LLP 0164). Naming the
+ * confirmed answer under both sources (issue #451, LLP 0166). Naming the
  * evidence in the output is the only remedy available at this layer, and it is
  * this change's own thesis: a control that can be wrong must at least say so.
  *

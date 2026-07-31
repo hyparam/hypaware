@@ -33,7 +33,7 @@ import {
 // responder was never authenticated, in human output and in `--json`, on both
 // endpoint-discovery paths.
 //
-// @ref LLP 0164#stated-not-proved [tests]: an unauthenticated responder is
+// @ref LLP 0166#stated-not-proved [tests]: an unauthenticated responder is
 //   disclosed, on every confirmed answer, rather than silently trusted.
 
 /* ------------------------------------------------------------------ */

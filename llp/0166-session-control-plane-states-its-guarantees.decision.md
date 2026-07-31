@@ -1,4 +1,4 @@
-# LLP 0164: the session control plane states its guarantees rather than proving them
+# LLP 0166: the session control plane states its guarantees rather than proving them
 
 **Type:** Decision
 **Status:** Accepted

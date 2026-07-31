@@ -293,7 +293,7 @@ dependency for one check makes it a separate design decision rather than a
 hardening tweak. Recorded, not adopted; the residual stays mitigated by the
 `endpoint_source` disclosure ([§cli-provenance](#cli-provenance)).
 
-> **Extended-by: [LLP 0164 §stated-not-proved](./0164-session-control-plane-states-its-guarantees.decision.md#stated-not-proved).**
+> **Extended-by: [LLP 0166 §stated-not-proved](./0166-session-control-plane-states-its-guarantees.decision.md#stated-not-proved).**
 > Issue #451 settled the deferred question as **accept and document**: the
 > residual is not closed, and every confirmed answer now states that the
 > responder was never authenticated (`trust:` in the human output,
