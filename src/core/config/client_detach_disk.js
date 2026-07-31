@@ -9,7 +9,7 @@ import { errCode, getAtDottedPath, isPlainObject } from '../util/json_util.js'
 
 /**
  * @import { ClientDescriptor } from '../../../src/core/types.js'
- * @import { DetachFromDiskResult } from './types.d.ts'
+ * @import { DetachFromDiskResult } from '../../../src/core/config/types.js'
  */
 
 /**

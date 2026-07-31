@@ -1079,3 +1079,34 @@ test('#500 finding 3: `hyp detach` prints the restored block, and never its cont
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+test('#500 finding 3: `hyp detach --json` echoes restored_paths, and never the contents', async () => {
+  // The machine-readable half of the same report. `restored_paths` is a declared
+  // field of the `hyp detach --json` payload (`ClientResult`), so a scripted
+  // caller can see that a block went back - and the same paths-never-values rule
+  // holds here, where the payload is the thing most likely to be logged.
+  const home = await stageHome()
+  try {
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify({ env: 'ANTHROPIC_API_KEY=sk-x' }) + '\n')
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    let out = ''
+    let err = ''
+    const ctx = /** @type {any} */ ({
+      stdout: { write(/** @type {unknown} */ chunk) { out += String(chunk); return true } },
+      stderr: { write(/** @type {unknown} */ chunk) { err += String(chunk); return true } },
+      env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+      config: { version: 2 },
+    })
+    const code = await runDetach(['claude', '--json'], ctx)
+    assert.equal(code, 0, err)
+    const payload = JSON.parse(out.trim().split('\n').at(-1) ?? '{}')
+    assert.equal(payload.changed, true)
+    assert.deepEqual(payload.restored_paths, ['env'])
+    // Same leak check as the prose assertion above, and the same reason for
+    // stripping `settings_path` first.
+    assert.equal(out.replaceAll(settingsPath, '').includes('sk-x'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
