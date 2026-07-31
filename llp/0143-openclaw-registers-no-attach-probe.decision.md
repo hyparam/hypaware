@@ -1,7 +1,7 @@
 # LLP 0143: OpenClaw registers no attach_probe, and json_path retires
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Config, CLI
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -12,6 +12,12 @@
 > already set for Claude Desktop: register no `attach_probe`, let
 > `detachClientFromDisk` be an honest no-op. The `json_path` probe format
 > LLP 0109 added to core then has zero consumers and is removed with it.
+
+> **Superseded-by [LLP 0169](./0169-openclaw-attach-surface-returns.decision.md):**
+> LLP 0168 writes real config entries again, so the premise (nothing on
+> disk to reverse) no longer holds. The attach surface and the `json_path`
+> format return. The reasoning here stays the correct record for why they
+> left. See LLP 0167.
 
 ## Context
 
