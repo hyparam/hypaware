@@ -22,9 +22,12 @@ export interface OpenclawSessionHeader {
  * non-string (for the string fields), or blank, following the same
  * "unconfirmable is unresolvable" rule the header applies. `content` is
  * whatever the envelope wrote (a string or a block array), passed through
- * unnormalized. `record` is the full raw record line, for a caller that
- * needs a field this reader does not normalize (`parentId`, `toolCallId`);
- * it is an untyped bag rather than `JsonObject` on purpose, the same choice
+ * unnormalized. `record` is the full raw record LINE, for a caller that
+ * needs a field this reader does not normalize: `parentId` is on the line
+ * itself, while a message-level field (`idempotencyKey`, `toolCallId`) is
+ * at `record.message`, one level down, and reading it off the line is the
+ * same mistake as #543. It is an untyped bag rather than `JsonObject` on
+ * purpose, the same choice
  * `CodexRolloutItem.payload` makes for the same reason (an arbitrary parsed
  * line, not a value this reader constructs and can vouch for the shape of).
  * Reaching into `record` for `role`/`content` is the #543 defect: those live

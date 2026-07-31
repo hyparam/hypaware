@@ -38,9 +38,9 @@ import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
  * the record line, and its role, content and (for an assistant message) the
  * model, provider, api, stop reason and usage in the nested `message`
  * envelope the LLP 0158 reader normalizes. So this module builds an
- * `AiGatewayProjectedExchange` straight off those fields. It deliberately does NOT route through
- * `anthropicMessages()` (projector.js): those parse a wire request/response
- * pair, and there is no wire pair here to reconstruct.
+ * `AiGatewayProjectedExchange` straight off those fields. It deliberately
+ * does NOT route through `anthropicMessages()` (projector.js): those parse a
+ * wire request/response pair, and there is no wire pair here to reconstruct.
  *
  * That directness is what makes R11 true by construction rather than by
  * coincidence. A backfilled row carries the record's own `message_id`, so it
@@ -567,11 +567,12 @@ function messageAttributes(message) {
  *
  * Each name is read through a small alias list rather than one spelling: the
  * session file's `usage` block is OpenClaw's own normalization of whatever its
- * provider returned, and which spelling it settles on could not be verified at
- * implementation time (no live OpenClaw install was reachable). Accepting the
- * Anthropic wire spelling, the OpenAI wire spelling, and the camelCase
- * normalized spelling costs a lookup and means an unverified guess cannot
- * silently zero out a session's tokens.
+ * provider returned. A live install has since confirmed the camelCase
+ * spelling (`input`/`output`/`cacheRead`/`cacheWrite`, LLP 0158 Context), so
+ * the alias list is no longer a hedge against an unverified guess; it is kept
+ * because the block is still the client's normalization of a provider payload
+ * and a version that passed a wire spelling through would otherwise silently
+ * zero out a session's tokens.
  *
  * @ref LLP 0035#one-carrier [implements]: usage rides the assistant record
  * only, so it lands once per response

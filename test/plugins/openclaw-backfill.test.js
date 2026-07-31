@@ -206,6 +206,7 @@ const ASSISTANT_RECORD = {
   provider: 'anthropic',
   api: 'anthropic-messages',
   stopReason: 'end_turn',
+  idempotencyKey: 'idem-asst-1',
   usage: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2 },
 }
 
@@ -233,7 +234,7 @@ test('the fixture writes the record shape OpenClaw actually appends', async () =
     assert.deepEqual(Object.keys(record).sort(), ['id', 'message', 'parentId', 'timestamp', 'type'])
     assert.deepEqual(
       Object.keys(record.message).sort(),
-      ['api', 'content', 'model', 'provider', 'role', 'stopReason', 'timestamp', 'usage']
+      ['api', 'content', 'idempotencyKey', 'model', 'provider', 'role', 'stopReason', 'timestamp', 'usage']
     )
     assert.equal(record.provider, undefined, 'a real record states no provider at the top level')
     assert.equal(record.message.provider, 'anthropic')
@@ -679,7 +680,7 @@ test('a relocated install is found through OPENCLAW_HOME, the same way settlemen
       path.join(dir, 'sess-relocated.jsonl'),
       [
         JSON.stringify({ type: 'session', id: 'sess-relocated', cwd: '/work/repo', timestamp: '2026-07-30T10:00:00.000Z' }),
-        JSON.stringify({ type: 'message', ...ASSISTANT_RECORD }),
+        JSON.stringify(messageLine(ASSISTANT_RECORD)),
       ].join('\n') + '\n',
       'utf8'
     )

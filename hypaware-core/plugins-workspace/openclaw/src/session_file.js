@@ -247,13 +247,16 @@ export async function readOpenclawSessionMessages(filePath) {
  * Parse one JSONL line into an {@link OpenclawSessionMessage}, or
  * `undefined` when the line is not a `type: "message"` record. Guards the
  * same way the header parse does (rules 1-3 above), applied to the fields
- * LLP 0158's Context names as present on a message envelope: `id` and a
- * timestamp on every message, `role` and `content` on every message,
+ * LLP 0158's Context names, at the level it names them at: `id` on the
+ * record line, a timestamp, `role` and `content` on every message, and
  * `model`/`provider`/`api`/`stopReason`/`usage` on an assistant one. Every
- * field this function does not normalize (`parentId`, `idempotencyKey`,
- * `toolCallId`, and anything else OpenClaw writes) is still reachable
- * through `record`, the untouched record line, so a caller that needs one is
- * not blocked on this reader growing a field for it.
+ * field this function does not normalize is still reachable through
+ * `record`, the untouched record line, so a caller that needs one is not
+ * blocked on this reader growing a field for it. `record` is the LINE,
+ * though, not the message: `parentId` is on it, but a message-level field
+ * this reader does not normalize (`idempotencyKey`, `toolCallId`) is at
+ * `record.message`. Naming the level is the whole point here, since reading
+ * a message field off the line is exactly #543.
  *
  * `role` and `content` are normalized here rather than left to `record`
  * precisely because their location is the non-obvious part
@@ -272,24 +275,33 @@ function parseOpenclawSessionMessage(line) {
   const envelope = openclawMessageEnvelope(row)
   /** @type {OpenclawSessionMessage} */
   const message = { record: row }
-  const id = nonBlankString(messageField(envelope, row, 'id'))
+  // `id` is the one field read the other way round, and deliberately so.
+  // LLP 0158's verified shape puts message IDENTITY on the record line; the
+  // nested envelope is OpenClaw's normalization of a provider response, and
+  // the day a version starts copying the provider's own `msg_...` id into it,
+  // envelope-first would silently repoint every `message_id` (and so every
+  // `part_id`) that backfill and settlement agree on. Already-committed rows
+  // would stop deduping against the new ones and the history would double,
+  // with nothing raised anywhere. The envelope stays the fallback, so a record
+  // that states identity only there is still read.
+  const id = nonBlankString(row.id) ?? nonBlankString(envelope.id)
   if (id !== undefined) message.id = id
-  const timestampMs = parseTimestampMs(messageField(envelope, row, 'timestamp'))
+  const timestampMs = messageField(envelope, row, 'timestamp', parseTimestampMs)
   if (timestampMs !== undefined) message.timestampMs = timestampMs
-  const role = nonBlankString(messageField(envelope, row, 'role'))
+  const role = messageField(envelope, row, 'role', nonBlankString)
   if (role !== undefined) message.role = role
-  const content = messageField(envelope, row, 'content')
+  const content = messageField(envelope, row, 'content', statedValue)
   if (content !== undefined) message.content = content
-  const model = nonBlankString(messageField(envelope, row, 'model'))
+  const model = messageField(envelope, row, 'model', nonBlankString)
   if (model !== undefined) message.model = model
-  const provider = nonBlankString(messageField(envelope, row, 'provider'))
+  const provider = messageField(envelope, row, 'provider', nonBlankString)
   if (provider !== undefined) message.provider = provider
-  const api = nonBlankString(messageField(envelope, row, 'api'))
+  const api = messageField(envelope, row, 'api', nonBlankString)
   if (api !== undefined) message.api = api
-  const stopReason = nonBlankString(messageField(envelope, row, 'stopReason'))
+  const stopReason = messageField(envelope, row, 'stopReason', nonBlankString)
   if (stopReason !== undefined) message.stopReason = stopReason
-  const usage = messageField(envelope, row, 'usage')
-  if (isPlainObject(usage)) message.usage = usage
+  const usage = messageField(envelope, row, 'usage', plainObject)
+  if (usage !== undefined) message.usage = usage
   return message
 }
 
@@ -311,7 +323,12 @@ function parseOpenclawSessionMessage(line) {
  * that nests no `message` object states its fields on the line itself, and
  * reading them there is better than reading a message with no role and no
  * content. A field the envelope does state is never overridden by a
- * same-named field on the line.
+ * same-named field on the line. The fallback is per FIELD, not per record
+ * ({@link messageField}), so a record that nests a partial envelope still
+ * recovers the rest of its fields from the line rather than reading as a
+ * message that is missing them. `id` is the single documented exception,
+ * read line-first because it is identity rather than content
+ * ({@link parseOpenclawSessionMessage}).
  *
  * @ref LLP 0158#decision [implements]: where a message's fields live is part
  * of the one reader's knowledge, not something each consumer re-derives
@@ -327,14 +344,50 @@ function openclawMessageEnvelope(row) {
  * second. Not a substitution across fields (rule 1): it is the same field
  * name, looked for at the two levels one record can state it at.
  *
+ * `stated` is the field's own present-value test, and it runs at BOTH
+ * levels before the fallback decides. Running it only on the result would
+ * let a blank or wrong-typed envelope value shadow a usable one on the
+ * line, which would make that value absent (rule 3) and load-bearing at the
+ * same time: a nested `provider: "  "` beside a line-level
+ * `provider: "anthropic"` would resolve the record to `unknown` and the
+ * backfill allowlist would exclude it fail-closed, the same silent drop
+ * #543 was. If a level does not state the field, it does not get a vote.
+ *
+ * @template T
  * @param {Record<string, unknown>} envelope
  * @param {Record<string, unknown>} row
  * @param {string} key
+ * @param {(value: unknown) => T | undefined} stated
+ * @returns {T | undefined}
+ */
+function messageField(envelope, row, key, stated) {
+  const fromEnvelope = stated(envelope[key])
+  return fromEnvelope !== undefined ? fromEnvelope : stated(row[key])
+}
+
+/**
+ * `content`'s present-value test. Unlike every other normalized field it has
+ * no single shape to check: OpenClaw writes a string on some turns and a
+ * block array on others, and both consumers already accept either, so the
+ * value passes through as written. Only `null` is refused, so a nulled-out
+ * envelope field counts as unstated and the record line still gets its turn.
+ *
+ * @param {unknown} value
  * @returns {unknown}
  */
-function messageField(envelope, row, key) {
-  const value = envelope[key]
-  return value === undefined ? row[key] : value
+function statedValue(value) {
+  return value === null ? undefined : value
+}
+
+/**
+ * A plain object, else `undefined`: `usage`'s present-value test, so a
+ * non-object `usage` reads as absent at whichever level wrote it.
+ *
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | undefined}
+ */
+function plainObject(value) {
+  return isPlainObject(value) ? value : undefined
 }
 
 /**
