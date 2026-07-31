@@ -16,11 +16,13 @@ export {
 } from './fs_atomic.js'
 export { copyDir } from './fs_copy.js'
 export {
+  MAX_LABEL_CHARS,
   VOLATILE_BLOCK_FIELDS,
   canonicalJson,
   errCode,
   isPlainObject,
   parseMaybeJson,
+  sanitizeLabel,
   sha256Hex,
   sortKeys,
   stringValue,

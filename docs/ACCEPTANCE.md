@@ -26,7 +26,8 @@ forwarding, or anything on a machine other than the one you ran it on.
 **Requires:** macOS with Codex Desktop installed and signed in, HypAware
 installed from the package under test, and a working `~/.codex`.
 
-**Related:** [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md).
+**Related:** [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md),
+[LLP 0164](../llp/0164-status-names-recent-clients-from-gateway-entrypoints.decision.md).
 
 ### Steps
 
@@ -72,6 +73,23 @@ installed from the package under test, and a working `~/.codex`.
    the last few minutes and a row count that grew against step 2. Write the
    `entrypoint` value you observed into the release notes: that string is the
    one every "is Desktop landing?" query keys off.
+
+   Then confirm the same answer without a query, which is the check a user
+   who has not learned SQL will actually run:
+
+   ```sh
+   hyp status
+   hyp status --json | grep -A 6 recent_entrypoints
+   ```
+
+   Pass condition: a `recent clients:` line naming the same `entrypoint`
+   string you just observed, with an age of a few minutes. This is read from
+   the running daemon's `status.json`, not from the cache
+   ([LLP 0164](../llp/0164-status-names-recent-clients-from-gateway-entrypoints.decision.md)),
+   so two things follow and both are expected, not failures: a daemon that
+   has been restarted since the conversation shows nothing here (the rows are
+   still in the cache - step 4 is the durable check), and the list is bounded
+   to what this daemon process has seen.
 
 5. Confirm the backfill route independently. The rollout tree is shared by
    Codex CLI and Codex Desktop, so the session from step 3 must also be
@@ -137,7 +155,14 @@ installed from the package under test, and a working `~/.codex`.
 - Rows arrive but `entrypoint` is null: Codex sent no `originator` header on
   that route. Capture still worked; attribution did not. File that as its own
   issue with the observed request path, and do not paper over it by matching
-  on `client_name` alone.
+  on `client_name` alone. `hyp status`'s `recent clients:` line will also be
+  missing the Desktop entry, for the same one reason: it counts `entrypoint`
+  values and invents nothing for a row that has none.
+- The query in step 4 finds Desktop rows but `hyp status` names no recent
+  client: the daemon that captured them has since restarted (the tracker is
+  in-memory and daemon-scoped by design), or the gateway wrote no status
+  refresh before it exited. Re-run step 3 against the current daemon before
+  filing anything.
 - Step 5 finds no rollout for the session: Desktop wrote its history
   somewhere other than `$CODEX_HOME/sessions`. That would invalidate
   [LLP 0141](../llp/0141-codex-desktop-rides-the-codex-adapter.decision.md)'s
