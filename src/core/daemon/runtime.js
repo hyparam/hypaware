@@ -471,6 +471,30 @@ export async function runDaemon(opts = {}) {
   }
 
   // ----- Tick loop -----
+  /**
+   * Re-read every started source's `status()` details into the snapshot
+   * list. Boot writes the details once (`startConfiguredSources`), which
+   * was enough while every detail was fixed at bind time (host, port,
+   * fallback marker). It is not enough for details that accrue as traffic
+   * flows: the gateway's `recent_entrypoints` would be frozen at "nothing
+   * seen yet" for the daemon's whole life, and `hyp status` reads exactly
+   * this file. Name, plugin, and state are left alone - liveness is the
+   * lifecycle's business, not a status probe's.
+   *
+   * Best-effort per source, like `safeStatus` itself: a source whose
+   * probe throws or returns nothing keeps the details it already had
+   * rather than losing them.
+   *
+   * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source details so accruing details reach status.json
+   */
+  async function refreshSourceDetails() {
+    for (const snap of status.sources) {
+      if (snap.state !== 'started') continue
+      const details = await safeStatus(boot.runtime, snap.name)
+      if (details !== undefined) snap.details = details
+    }
+  }
+
   async function runTick() {
     const now = new Date()
     await withSpan(
@@ -502,6 +526,7 @@ export async function runDaemon(opts = {}) {
       fileLog.error('daemon.tick_failed', { message })
     })
     status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
+    await refreshSourceDetails()
     persist()
   }
 
@@ -579,6 +604,11 @@ export async function runDaemon(opts = {}) {
     // mid-import. Abandoning a pass would orphan the spawned `hyp backfill`
     // child and interrupt the marker write.
     await reconcileScheduler.settle()
+    // Last chance to capture accruing source details: the sources are still
+    // running here, and after `stopAllSources` below their probes are gone.
+    // A daemon that never reached a tick (or stopped between ticks) would
+    // otherwise leave a status file claiming no client was ever seen.
+    await refreshSourceDetails()
     persist({ state: 'stopping' })
     fileLog.info('daemon.stopping', { reason })
 

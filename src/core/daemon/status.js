@@ -40,7 +40,7 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, HypAwareStatusReport, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, HypAwareStatusReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  */
@@ -122,6 +122,52 @@ export function gatewaySourceDetails(sources) {
       ? details.listen_fallback_from
       : undefined
   return { host, port, listenFallback, ...(listenFallbackFrom ? { listenFallbackFrom } : {}) }
+}
+
+/**
+ * Lift the gateway source's `recent_entrypoints` detail out of a status-file
+ * source-snapshot list, most recently seen first.
+ *
+ * This is the whole of core's knowledge about client surfaces: it validates
+ * shape and orders by time, and never interprets an `entrypoint` string. Which
+ * value means "Codex Desktop" stays Codex's business, exactly as
+ * [LLP 0130]'s "rendering needs no plugin code" and LLP 0003's core/plugin
+ * split require. Malformed or partial entries are dropped rather than repaired:
+ * a name in `hyp status` that no query could reproduce would be worse than a
+ * short list.
+ *
+ * @param {SourceSnapshot[] | undefined} sources
+ * @returns {RecentEntrypoint[]}
+ * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: hyp status answers from status.json, with no dataset registry and no cache read
+ */
+export function recentEntrypointsFromSources(sources) {
+  const list = Array.isArray(sources) ? sources : []
+  const source =
+    list.find((s) => s && s.plugin === GATEWAY_PLUGIN_NAME) ??
+    list.find((s) => s && s.name === 'ai-gateway')
+  const rawDetails = source && typeof source.details === 'object' ? source.details : undefined
+  if (!rawDetails) return []
+  const raw = /** @type {Record<string, unknown>} */ (rawDetails).recent_entrypoints
+  if (!Array.isArray(raw)) return []
+  /** @type {RecentEntrypoint[]} */
+  const out = []
+  for (const item of raw) {
+    if (!isPlainObject(item)) continue
+    const entrypoint = item.entrypoint
+    const lastSeen = item.last_seen
+    if (typeof entrypoint !== 'string' || entrypoint.length === 0) continue
+    if (typeof lastSeen !== 'string' || Number.isNaN(Date.parse(lastSeen))) continue
+    out.push({
+      entrypoint,
+      clientName: typeof item.client_name === 'string' && item.client_name.length > 0
+        ? item.client_name
+        : null,
+      lastSeen,
+      rows: typeof item.rows === 'number' && Number.isFinite(item.rows) ? item.rows : 0,
+    })
+  }
+  out.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : 0))
+  return out
 }
 
 /**
@@ -450,6 +496,18 @@ export async function collectHypAwareStatus(opts = {}) {
     sources.push(...inferConfiguredSources(activePlugins))
   }
 
+  // ----- recent client surfaces (LLP 0164) -----
+  // Read from the status file specifically, never from `sources` above: the
+  // daemon is the only process traffic flows through, so an in-process
+  // gateway source booted by this very CLI call has by definition seen
+  // nothing. It is deliberately NOT gated on daemon liveness the way
+  // `resolveLiveGatewayEndpointFromStatus` is - a bound port is a claim
+  // about now and goes stale the moment the daemon dies, whereas "last seen
+  // at T" stays true afterwards, and the rendered age makes staleness
+  // self-evident.
+  // @ref LLP 0164#not-liveness-gated [implements]: a last-seen timestamp survives its daemon; the rendered age carries the staleness
+  const recentEntrypoints = recentEntrypointsFromSources(daemonStatusFile?.sources)
+
   // Sinks are derived from the loaded config (so the count reflects
   // "how many sinks does the user have configured?", the same number
   // a fresh kernel boot or a running daemon would surface). When
@@ -720,6 +778,7 @@ export async function collectHypAwareStatus(opts = {}) {
     clientActions,
     usagePolicy,
     firstSyncHoldDeadline,
+    recentEntrypoints,
   }
 }
 
