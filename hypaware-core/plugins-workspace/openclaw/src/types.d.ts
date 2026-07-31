@@ -1,3 +1,32 @@
+import type fsp from 'node:fs/promises'
+
+/**
+ * Construction options for `createOpenclawAttach`. Every field has a
+ * process-wide default so a production caller passes only what it has:
+ * `index.js` threads the kernel's `ctx.env`/`HOME`, while a test injects a
+ * temp `homeDir` (or an `OPENCLAW_HOME` in `env`) and reads the file back.
+ */
+export interface OpenclawAttachOptions {
+  /** `$HOME` the `.openclaw/openclaw.json` path is resolved against. */
+  homeDir?: string
+  /** Env the `$OPENCLAW_HOME` relocation is read from. */
+  env?: NodeJS.ProcessEnv
+  /** Injectable `node:fs/promises`, for the read and the atomic write. */
+  fs?: typeof fsp
+  /** Injectable logger; defaults to the `plugin.openclaw` logger. */
+  logger?: { info(event: string, fields: Record<string, unknown>): void, warn(event: string, fields: Record<string, unknown>): void }
+}
+
+/**
+ * What `attach()` reports back. Deliberately the `ActionOutcome` shape the
+ * generic client-action reconciler already understands (LLP 0169): a refusal
+ * is a returned `failed`, never a throw, so attach-on-join records it, warns,
+ * retries next pass, and does not fail the join.
+ */
+export type OpenclawAttachOutcome =
+  | { status: 'done' }
+  | { status: 'failed', reason: string }
+
 /**
  * The `type: "session"` header line of an OpenClaw session JSONL file
  * (`~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`). Each field is
