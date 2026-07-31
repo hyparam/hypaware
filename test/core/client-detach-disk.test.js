@@ -912,7 +912,11 @@ test('#500 finding 3: a restored malformed-block backup is reported by path, not
     assert.equal('warning' in result, false)
     // The path, never the value: a malformed `env` is exactly where an API key
     // ends up, and this is printed to the terminal and echoed into `--json`.
-    assert.equal(JSON.stringify(result).includes('sk-x'), false)
+    // `settingsPath` is stripped first: it is `stageHome()`'s own mkdtemp path,
+    // always present and never sensitive, and its random suffix can coincidentally
+    // start with 'x' right after the fixed "...disk-" prefix, spelling "sk-x" with
+    // no secret involved.
+    assert.equal(JSON.stringify(result).replaceAll(settingsPath, '').includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -989,7 +993,10 @@ test('#500 finding 1: the legacy branch reports a prev_malformed backup it canno
     assert.match(String(result.warning), /env is in use again/)
     assert.match(String(result.warning), /discarded with the marker/)
     assert.equal('restoredPaths' in result, false)
-    assert.equal(JSON.stringify(result).includes('sk-x'), false)
+    // See the sibling assertion above: `settingsPath` is stripped before the
+    // leak check because its random mkdtemp suffix can coincidentally spell
+    // "sk-x" against the fixed "...disk-" prefix.
+    assert.equal(JSON.stringify(result).replaceAll(settingsPath, '').includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -1063,7 +1070,11 @@ test('#500 finding 3: `hyp detach` prints the restored block, and never its cont
     const code = await runDetach(['claude'], ctx)
     assert.equal(code, 0, err)
     assert.match(out, /Restored env from the marker's malformed-block backup/)
-    assert.equal(out.includes('sk-x'), false)
+    // `out` legitimately echoes `settingsPath` (the "✓ Detached claude (<path>)"
+    // line), so strip it before the leak check for the same reason as the
+    // `result`-based assertions above: its random mkdtemp suffix can
+    // coincidentally spell "sk-x" against the fixed "...disk-" prefix.
+    assert.equal(out.replaceAll(settingsPath, '').includes('sk-x'), false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
