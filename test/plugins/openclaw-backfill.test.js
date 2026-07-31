@@ -181,11 +181,36 @@ const ASSISTANT_RECORD = {
 }
 
 /**
+ * `config.backfill.quiesce_ms: 0` by default: every test below writes a
+ * session file and runs the provider against it moments later, well inside
+ * the real 180000ms default quiesce window (LLP 0172#45-the-quiesce-window). Without this
+ * override every test in this file would scan to zero files, for a reason
+ * that has nothing to do with what each test actually checks. Tests that
+ * exercise the quiesce window itself pass their own `config` (or none, to
+ * exercise the real default), which fully replaces this one rather than
+ * merging with it.
+ *
  * @param {{ homeDir: string }} env
- * @param {{ resolver?: any, env?: NodeJS.ProcessEnv }} [opts]
+ * @param {{ resolver?: any, env?: NodeJS.ProcessEnv, config?: any }} [opts]
  */
 function provider(env, opts = {}) {
-  return createOpenclawBackfillProvider({ homeDir: env.homeDir, ...opts })
+  return createOpenclawBackfillProvider({
+    homeDir: env.homeDir,
+    config: { backfill: { quiesce_ms: 0 } },
+    ...opts,
+  })
+}
+
+/**
+ * Back-date `filePath`'s mtime by `msAgo` milliseconds, so a quiesce-window
+ * test can control file recency without waiting on the wall clock.
+ *
+ * @param {string} filePath
+ * @param {number} msAgo
+ */
+async function ageFile(filePath, msAgo) {
+  const past = new Date(Date.now() - msAgo)
+  await fs.utimes(filePath, past, past)
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +655,116 @@ test('reruns are deterministic: the same session yields byte-identical row ident
     const firstRows = await materialize(first.items[0])
     const secondRows = await materialize(second.items[0])
     assert.deepEqual(firstRows.map((r) => r.part_id), secondRows.map((r) => r.part_id))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// LLP 0172#45-the-quiesce-window / LLP 0170#decision: the quiesce window
+// ---------------------------------------------------------------------------
+
+// @ref LLP 0170#decision [tests]: a sweep (or any run) must not import a
+// session file still inside the quiesce window, so it never races a file
+// OpenClaw is still mid-write on.
+test('a session file with mtime inside the quiesce window is excluded from the run', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    await ageFile(filePath, 1_000) // 1s old, well inside a 5s window
+    const { items } = await collect(
+      provider(env, { config: { backfill: { quiesce_ms: 5_000 } } }).run(runContext().ctx)
+    )
+    assert.equal(items.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session file with mtime outside the quiesce window is included', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, { header: { cwd: '/work/repo' }, records: [USER_RECORD, ASSISTANT_RECORD] })
+    await ageFile(filePath, 60_000) // 60s old, outside a 5s window
+    const { items } = await collect(
+      provider(env, { config: { backfill: { quiesce_ms: 5_000 } } }).run(runContext().ctx)
+    )
+    assert.equal(items.length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0172#45-the-quiesce-window [tests]: the default is the cited constant
+// (QUERY_FLUSH_DEBOUNCE_MS + one minute margin), not a re-guessed number.
+test('the quiesce window defaults to exactly 180000ms when config.backfill.quiesce_ms is absent', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { header: { cwd: '/work/repo' }, records: [ASSISTANT_RECORD] })
+    const { ctx, entries } = runContext()
+    // No config at all: exercises the real default, not the harness's
+    // quiesce-disabling override.
+    await collect(createOpenclawBackfillProvider({ homeDir: env.homeDir }).run(ctx))
+    const started = entries.find((e) => e.message === 'openclaw.backfill.scan_started')
+    assert.ok(started, 'scan_started must be logged')
+    assert.equal(started.fields.quiesce_ms, 180_000)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The same default, proven behaviorally rather than through the log field: a
+// freshly-written file (mtime "now") is inside the real default window and a
+// file backdated well past 180s is outside it.
+test('the default quiesce window excludes a fresh file and includes one older than three minutes', async () => {
+  const env = await stageEnv()
+  try {
+    await writeSession(env, { agentId: 'fresh', header: { cwd: '/work/repo' }, records: [ASSISTANT_RECORD] })
+    const oldFilePath = await writeSession(env, {
+      agentId: 'old',
+      sessionId: 'sess-old',
+      header: { cwd: '/work/repo' },
+      records: [ASSISTANT_RECORD],
+    })
+    await ageFile(oldFilePath, 4 * 60 * 1000) // 4 minutes old, outside 180000ms
+    const { items } = await collect(createOpenclawBackfillProvider({ homeDir: env.homeDir }).run(runContext().ctx))
+    assert.deepEqual(items.map((item) => value(item).session_id), ['sess-old'])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// R10 composition: the quiesce filter operates on file recency only, and
+// must not disturb the existing CLI-backend forward/backward-fill logic once
+// a file clears the window.
+test('a file outside the quiesce window still goes through the CLI-backend allowlist unchanged', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeSession(env, {
+      header: { cwd: '/work/repo' },
+      records: [
+        USER_RECORD,
+        ASSISTANT_RECORD,
+        {
+          id: 'msg-asst-2',
+          timestamp: '2026-07-30T10:01:05.000Z',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          model: 'claude-cli/sonnet',
+          provider: 'claude-cli',
+          api: 'anthropic-messages',
+        },
+      ],
+    })
+    await ageFile(filePath, 60_000)
+    const { items, events } = await collect(
+      provider(env, { config: { backfill: { quiesce_ms: 5_000 } } }).run(runContext().ctx)
+    )
+    const exchange = value(items[0])
+    assert.deepEqual(exchange.messages.map((/** @type {any} */ m) => m.message_id), ['msg-user-1', 'msg-asst-1'])
+    const excluded = events.filter((e) => e.event === 'excluded_backend')
+    assert.equal(excluded.length, 1)
+    assert.equal(excluded[0].attributes?.provider, 'claude-cli')
   } finally {
     await env.cleanup()
   }
