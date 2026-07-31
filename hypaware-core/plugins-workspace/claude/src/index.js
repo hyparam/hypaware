@@ -193,15 +193,30 @@ export async function activate(ctx) {
               settingsPath,
               binPath: resolveHookBinPath(ctx.env),
             })
+            // Malformed `env` / `hooks` blocks attach rebuilt after backing the
+            // displaced value up into the marker (LLP 0163). Reported on the
+            // span, in the log, and to the user - the whole point of the
+            // decision is that the repair stops being silent.
+            const warnings = result.changed && result.warnings !== undefined ? result.warnings : []
             span.setAttribute('status', 'ok')
             span.setAttribute('restored', false)
+            span.setAttribute('malformed_blocks_repaired', warnings.length)
             logger.info('client.attach.write', {
               hyp_plugin: PLUGIN_NAME,
               hyp_client: CLIENT_NAME,
               settings_path: settingsPath,
               port,
               changed: result.changed === true,
+              malformed_blocks_repaired: warnings.length,
             })
+            for (const warning of warnings) {
+              logger.warn('client.attach.malformed_block', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                settings_path: settingsPath,
+                detail: warning,
+              })
+            }
             writeAttachOutput(attachCtx, {
               status: 'ok',
               client: CLIENT_NAME,
@@ -212,6 +227,7 @@ export async function activate(ctx) {
               prevValue: result.changed && result.prevValue !== undefined
                 ? result.prevValue
                 : undefined,
+              warnings,
             })
           } catch (err) {
             span.setAttribute('status', 'failed')
@@ -454,6 +470,7 @@ function safeEndpointPort(endpoint) {
  *   port: number | undefined,
  *   changed: boolean,
  *   prevValue?: string,
+ *   warnings?: string[],
  * }} fields
  */
 function writeAttachOutput(attachCtx, fields) {
@@ -469,6 +486,9 @@ function writeAttachOutput(attachCtx, fields) {
     }
     if (fields.port !== undefined) payload.port = fields.port
     if (fields.prevValue !== undefined) payload.prev_value = fields.prevValue
+    // Echoed as an array, not folded into a string: the field exists so a
+    // scripted caller can see *which* blocks were moved aside.
+    if (fields.warnings !== undefined && fields.warnings.length > 0) payload.warnings = fields.warnings
     attachCtx.stdout.write(JSON.stringify(payload) + '\n')
     return
   }
@@ -483,6 +503,9 @@ function writeAttachOutput(attachCtx, fields) {
   }
   if (fields.prevValue !== undefined) {
     attachCtx.stdout.write(`  (previous ANTHROPIC_BASE_URL was ${fields.prevValue})\n`)
+  }
+  for (const warning of fields.warnings ?? []) {
+    attachCtx.stdout.write(`  ! ${warning}\n`)
   }
 }
 

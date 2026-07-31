@@ -229,7 +229,13 @@ plugin-agnostic core routine to fully reverse:
   entries, and delete the marker — leaving **no orphaned hooks** still pointing at
   `hyp claude-hook`. The backup is preserved idempotently across a re-attach:
   once we own the URL the current value is *our* gateway URL, so a re-attach keeps
-  the marker's recorded original rather than overwriting it.
+  the marker's recorded original rather than overwriting it. The same record
+  also carries `prev_malformed`: any `env` / `hooks` block that was present on
+  disk with the wrong JSON type and had to be rebuilt before attach could write
+  into it, keyed by dotted path. Attach repairs rather than refuses, and the
+  marker is what makes that repair reversible and reportable instead of
+  destructive; the undo replays it under the never-clobber rule below. See
+  [LLP 0163](./0163-attach-backs-up-a-malformed-block.decision.md).
 - **Codex (`toml`):** the marked block is already self-delimiting
   (`# BEGIN/END hypaware …`) and records the prior `model_provider`, so core
   strips the block(s) and restores the recorded pointer.
