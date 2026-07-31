@@ -235,7 +235,11 @@ format):
    didn't write.
 5. Write the modified config back if any key changed or was backed up.
 6. **Cache purge (R3, independent of step 3-5's outcome):** glob
-   `homeDir/.openclaw/<cacheGlob>` (`agents/*/agent/models.json`). For
+   `homeDir/.openclaw/<cacheGlob>` (`agents/*/agent/models.json`), where
+   the `.openclaw` half is the client's *config home*, derived back out of
+   the already-resolved `settingsPath` rather than re-joined onto
+   `homeDir`, so a `$OPENCLAW_HOME` relocation cannot leave the purge
+   working in a different home than the settings write did. For
    each matched file, best-effort parse it and delete `providerKeys`
    entries if present, then write it back. A file that fails to parse is
    logged and skipped, not fatal: LLP 0169 notes these caches "do not
@@ -263,6 +267,30 @@ Step 5 (write back after step 3/4) and step 6 (cache purge) both end with
 the same restart-instruction print as attach (R4). `detachClientViaCore`
 already has an output-writing seam (`writeCoreDetachOutput`); the
 instruction rides that, not a new print call scattered in the core routine.
+
+**An unknown `expectedBaseUrl` refuses rather than defaults (added in T2).**
+Steps 3 and 4 are one branch on ownership, so an absent gateway base URL
+does not leave the routine with a safe default: treating every entry as
+ours deletes values HypAware never wrote, and treating none as ours reports
+a finished detach while the client stays routed at a port the daemon no
+longer serves. There is no third answer available from disk, because this
+format's undo record *is* the entry. So when at least one `providerKeys`
+entry is present and no base URL was threaded in, `detachJsonPathProviders`
+throws `ClientDetachError` (`code: 'EXPECTED_BASE_URL_UNKNOWN'`) instead of
+picking one of the two wrong answers. Both callers already degrade
+correctly: `reverse()` catches it into `{status:'failed'}` and keeps the
+marker (which is the #212-safe outcome, not the orphaning one), and
+`hyp detach` prints the reason and exits nonzero. An absent settings file
+and a file with neither key present are unaffected: they reverse nothing,
+so they need no base URL and stay `{changed:false}`.
+
+**Where the backup key sits.** "Sibling" is meant literally: the backup
+lands at `<containerPath>._hypaware_detach_backup.<key>`, inside the same
+container the undo already navigates, not at the file's top level. LLP 0163
+ruled a *top-level* HypAware key out for this client (its config schema
+rejects one), and that ruling is the entire reason this format refused where
+`json`/`toml` backed up; reintroducing the backup as a top-level key would
+walk straight back into it.
 
 ### 2.3 `daemon/status.js`'s `json_path` read branch
 
