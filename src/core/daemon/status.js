@@ -613,17 +613,20 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
     if (configured && attachable && !probe.attached) {
-      // The repair is `hyp attach` only for a client whose plugin registers a
-      // runtime adapter the generic reconciler can drive. A client that
-      // declares `contributes.client` for probe/status plumbing but no adapter
-      // has to name its own setup command instead, or the repair we print is
-      // one that answers `unknown client`. The command comes from the same
-      // plugin's picker row, which already declares it as `configure_command`.
-      // The `attachable` guard above already excludes the probe-less clients
+      // The repair has to be a command that runs: `hyp attach` only answers for
+      // a client whose plugin registers a runtime adapter the generic
+      // reconciler can drive, so a client that needs its own setup command
+      // names it here instead, from the same plugin's picker row that already
+      // declares it as `configure_command`.
+      // The `attachable` guard above excludes every probe-less client
       // (claude-desktop, openclaw) whose repair could never clear the warning
       // it was printed under, so what reaches here is a probed client whose
-      // marker is genuinely absent.
-      // @ref LLP 0139#repair-must-be-runnable [implements]: an adapterless client's attach-missing repair names its configure_command, not the inert generic attach
+      // marker is genuinely absent. That is also why no plugin shipping today
+      // takes the `configureCommand` branch: claude-desktop was the only picker
+      // row declaring one and it is probe-less. The lookup stays as the
+      // contract for a probed client that still owns its own setup command -
+      // dropping it would reinstate the `unknown client` repair for that case.
+      // @ref LLP 0139#repair-must-be-runnable [implements]: the repair is the client's own picker `configure_command` when it declares one, never a generic attach that would answer `unknown client`
       const configureCommand = catalog?.pickerDescriptors.get(clientName)?.configureCommand
       const repair = configureCommand ? `hyp ${configureCommand}` : `hyp attach --client ${clientName}`
       diagnostics.push({

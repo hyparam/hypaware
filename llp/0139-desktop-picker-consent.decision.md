@@ -215,8 +215,11 @@ adapter has to name its own setup command, or the repair we print answers
 > `attach_probe`, Claude Desktop included. A runnable repair is necessary and
 > not sufficient: the warning also has to be one the repair can clear, and
 > with no probe to read back this one fired identically before the consent
-> prompt, after a decline, and after a successful install. The fallback below
-> is now reached only by a probed client.
+> prompt, after a decline, and after a successful install. The lookup below
+> is now reached only by a probed client, and since Claude Desktop was the
+> only picker row declaring a `configure_command`, no plugin shipping today
+> takes its first branch; it stays as the contract for a probed client that
+> still owns its own setup command.
 
 ## Consequences
 
