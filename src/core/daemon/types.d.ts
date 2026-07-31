@@ -31,6 +31,25 @@ export interface SourceSnapshot {
   details?: object
 }
 
+/**
+ * One client surface the running gateway has produced rows for, lifted
+ * out of the gateway source's `status()` details in `status.json`.
+ *
+ * `entrypoint` is verbatim whatever the projector wrote into the row's
+ * `entrypoint` column (Codex owns `codex-tui` and whatever Codex Desktop
+ * reports; Claude Desktop's 3p route reports `local-agent`). Core never
+ * interprets it, which is what keeps this surface client-agnostic.
+ */
+export interface RecentEntrypoint {
+  entrypoint: string
+  /** `client_name` last seen with this entrypoint, or null when unset. */
+  clientName: string | null
+  /** ISO timestamp of the most recent row projected under it. */
+  lastSeen: string
+  /** Rows projected under it since the daemon booted. */
+  rows: number
+}
+
 export interface SinkSnapshot {
   instance: string
   plugin: string
@@ -250,6 +269,14 @@ export interface HypAwareStatusReport {
    * holding ticks. A held machine must never be a silent state (LLP 0100 R9).
    */
   firstSyncHoldDeadline: number | null
+  /**
+   * Client surfaces the running (or last-run) daemon's gateway produced rows
+   * for, most recent first, read from `status.json` (LLP 0164). Empty when no
+   * daemon has run for this state root, when the gateway recorded nothing, or
+   * when the daemon predates the tracker - `hyp status` activates no plugins
+   * and reads no cache, so this is the only place the answer can come from.
+   */
+  recentEntrypoints: RecentEntrypoint[]
 }
 
 export interface CollectStatusOptions {

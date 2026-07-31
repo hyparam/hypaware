@@ -171,6 +171,28 @@ export async function run({ harness, expect }) {
   await sleep(120)
   await handle.stop()
   await handle.done
+
+  // ----- The gateway's last-seen entrypoints reached status.json -----
+  // This is the half of `hyp status` that answers "did Desktop traffic
+  // arrive?" with no dataset registry and no cache read (LLP 0164). The
+  // originator above is synthetic, as the header block says, so what this
+  // proves is the plumbing: an entrypoint the projector wrote into a row it
+  // committed is readable from the status file after the daemon exits.
+  // @ref LLP 0164#status-reads-it-from-the-status-file [tests]:
+  const { readStatusFile, recentEntrypointsFromSources } = await import('../../../src/core/daemon/status.js')
+  const finalStatus = readStatusFile(path.join(harness.hypHome, 'hypaware'))
+  const recent = recentEntrypointsFromSources(finalStatus?.sources)
+  expect.that(
+    'status.json: recent_entrypoints names the Desktop originator the rows carry',
+    recent,
+    (v) => Array.isArray(v) && v.some((e) => e.entrypoint === 'Codex Desktop' && e.rows > 0),
+  )
+  expect.that(
+    'status.json: the recent-entrypoint entry carries the projected client_name',
+    recent.find((e) => e.entrypoint === 'Codex Desktop')?.clientName,
+    (v) => typeof v === 'string' && v.length > 0,
+  )
+
   await obs.shutdown()
   await openai.close()
 
