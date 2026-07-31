@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { renderDaemonInstall } from '../../src/core/daemon/install.js'
+import { renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
 import {
   probeClientAttachFromDescriptor,
@@ -24,7 +24,7 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 /**
  * @import { ClientDescriptor } from '../../src/core/types.js'
- * @import { DaemonStatus } from '../../src/core/daemon/types.js'
+ * @import { DaemonStatus, SystemctlAdapter } from '../../src/core/daemon/types.js'
  */
 
 test('writeStatusFile writes an atomic readable status snapshot', async () => {
@@ -335,6 +335,46 @@ test('installers default to relaunch-on-exit (staged restart requirement, LLP 00
     nodePath: '/usr/local/bin/node',
   })
   assert.match(systemd.content, /^Restart=always$/m)
+})
+
+test('serviceDaemonStatus reports "not installed" without probing the service manager', async () => {
+  // No unit file on disk means the service manager has nothing to report on,
+  // so it must not be spawned at all. Probing anyway is what made this query
+  // throw `spawn systemctl ENOENT` on hosts with no systemd (#512), aborting
+  // `hyp leave` mid-teardown.
+  const unitDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-'))
+  /** @type {SystemctlAdapter} */
+  const systemctl = new Proxy(/** @type {any} */ ({}), {
+    get(_target, prop) {
+      return () => assert.fail(`systemctl.${String(prop)} must not run when nothing is installed`)
+    },
+  })
+
+  const status = await serviceDaemonStatus({ platform: 'linux', unitDir, systemctl })
+  assert.deepEqual(
+    { installed: status.installed, loaded: status.loaded, platform: status.platform },
+    { installed: false, loaded: false, platform: 'linux' }
+  )
+})
+
+test('serviceDaemonStatus degrades to "not loaded" when the service manager cannot run', async () => {
+  // An installed unit on a host whose `systemctl` cannot be spawned: a status
+  // query reports what it can observe rather than raising, so leave's
+  // best-effort daemon step stays best-effort (LLP 0063 prerequisites).
+  const unitDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-svc-status-'))
+  await fs.writeFile(path.join(unitDir, 'hypaware.service'), '[Unit]\n')
+  const enoent = Object.assign(new Error('spawn systemctl ENOENT'), { code: 'ENOENT' })
+  /** @type {SystemctlAdapter} */
+  const systemctl = new Proxy(/** @type {any} */ ({}), {
+    get() {
+      return () => Promise.reject(enoent)
+    },
+  })
+
+  const status = await serviceDaemonStatus({ platform: 'linux', unitDir, systemctl })
+  assert.equal(status.installed, true)
+  assert.equal(status.loaded, false)
+  assert.equal(status.pid, undefined)
 })
 
 test('the staged-restart exit code is distinct from success and error exits', async () => {
