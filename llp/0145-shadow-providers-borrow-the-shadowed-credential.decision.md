@@ -1,7 +1,7 @@
 # LLP 0145: Shadow providers borrow the shadowed provider's credential
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Gateway, Config
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -12,6 +12,12 @@
 > people toward: Claude CLI reuse and `claude setup-token` subscription
 > auth. Resolve the shadowed provider's own credential instead of demanding
 > an environment variable.
+
+> **Superseded-by [LLP 0168](./0168-config-override-replaces-plugin-steering.decision.md):**
+> with the config override there is no shadow provider and nothing to
+> borrow; the real provider's own credential applies natively (verified
+> with a live setup-token turn, LLP 0167#verify-results). The goal, no
+> vendor env var required for capture, is met by construction.
 
 ## Context
 

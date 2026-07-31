@@ -1,7 +1,7 @@
 # LLP 0149: Uncapturable turns pass through and warn
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Observability
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -11,6 +11,14 @@
 > vendor, uncaptured, with a warning that makes the gap visible. One rule
 > for every cause. This was previously an open question duplicated across
 > LLP 0152 and LLP 0145; both now cite this decision.
+
+> **Superseded-by [LLP 0170](./0170-openclaw-scheduled-transcript-sweep.decision.md):**
+> the pass-through-and-warn behavior was steering-plugin code, and the
+> plugin is deleted (LLP 0168). The never-fail principle is met
+> structurally (nothing runs in OpenClaw's request path), and the
+> coverage question the warning ledger answered is dissolved by the
+> transcript sweep: uncaptured-by-the-live-lane turns are captured by
+> the sweep instead of warned about.
 
 ## Context
 

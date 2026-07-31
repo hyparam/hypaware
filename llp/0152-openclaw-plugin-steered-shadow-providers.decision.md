@@ -1,7 +1,7 @@
 # LLP 0152: OpenClaw capture is steered by a plugin, not a settings edit
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Gateway, Config
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -13,6 +13,12 @@
 > silently skipped. What changes is how OpenClaw traffic is steered into
 > it: an OpenClaw-side plugin instead of an edit to the user's
 > `openclaw.json`.
+
+> **Superseded-by [LLP 0168](./0168-config-override-replaces-plugin-steering.decision.md):**
+> steering moved to a per-provider `models.providers` baseUrl override
+> written by `hyp attach`, an option this decision never considered (its
+> rejected settings edit was the per-model-ref rewrite). The goal stands;
+> the plugin mechanism and package are retired. See LLP 0167.
 
 ## Context
 

@@ -1,7 +1,7 @@
 # LLP 0148: Wire parity is enforced in the plugin; the gateway stays a recorder
 
 **Type:** Decision
-**Status:** Accepted
+**Status:** Superseded
 **Systems:** Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-07-29
@@ -13,6 +13,13 @@
 > shadow provider loses it — and some of what it loses breaks auth and
 > correctness, not just speed. Parity is a requirement, and it lives in the
 > OpenClaw-side plugin, not the gateway.
+
+> **Superseded-by [LLP 0168](./0168-config-override-replaces-plugin-steering.decision.md):**
+> with the config override the turn stays on the provider *named*
+> `anthropic`, so OpenClaw's own request shaping applies natively and
+> there is no parity to enforce anywhere (verified live: OAuth betas rode
+> a steered turn untouched, LLP 0167#verify-results). The gateway remains
+> a recorder, as this decision required.
 
 ## Context
 

@@ -4,6 +4,7 @@
 **Status:** Active
 **Related:** LLP 0161
 **Generated-by:** neutral
+**Extended-by:** LLP 0167 (two-lane capture: the steering-plugin tasks' output is deleted by LLP 0171 R9; the remainder stands as the record of what #510 shipped)
 
 > [LLP 0161](./0161-openclaw-full-capture.design.md) is the technical design for
 > the two deliverables and one removal [LLP 0157](./0157-openclaw-full-capture.spec.md)

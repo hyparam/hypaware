@@ -2,6 +2,7 @@
 
 **Type:** design
 **Status:** Active
+**Extended-by:** LLP 0167 (two-lane capture: the steering-plugin sections are retired with LLP 0168/0169/0170; the projector, settlement, and backfill sections remain the record of what shipped)
 **Systems:** Plugins, Sources, Gateway, Observability
 **Generated-by:** neutral
 **Author:** neutral (Designer)

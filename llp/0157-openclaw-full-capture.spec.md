@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-30
 **Related:** LLP 0016, LLP 0027, LLP 0037, LLP 0049, LLP 0085, LLP 0103, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0147, LLP 0148, LLP 0149, LLP 0152, LLP 0158, LLP 0159
+**Extended-by:** LLP 0167 / LLP 0171 (two-lane capture: R1-R6 void, R7 reversed, R12 replaced, R13 retired; R8, R9, R10, R11, R14 remain binding, disposition in LLP 0171#carried-over)
 
 > Requirements for implementing the Accepted OpenClaw full-capture decision
 > set (LLP 0143 through 0149 and 0152), plus the backfill route those
