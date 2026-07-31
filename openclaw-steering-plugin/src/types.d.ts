@@ -15,6 +15,77 @@ export interface ProviderCatalogRunResult {
   providers: Record<string, ProviderCatalogEntry>
 }
 
+/**
+ * The model descriptor `pi-ai` hands a `StreamFn`. Only the two fields the
+ * wire-parity mirror branches on are typed here.
+ */
+export interface WireModel {
+  id?: string
+  api?: string
+  provider?: string
+  baseUrl?: string
+}
+
+/**
+ * The slice of `pi-ai`'s `StreamOptions` the mirror reads or replaces.
+ * `headers` is documented there as "merged with provider defaults; can
+ * override default headers", and `onPayload` as the hook for "inspecting or
+ * replacing provider payloads before sending".
+ */
+export interface StreamOptions {
+  apiKey?: string
+  headers?: Record<string, string>
+  onPayload?: (payload: unknown, model: WireModel) => unknown
+  [key: string]: unknown
+}
+
+export type StreamFn = (model: WireModel, context: unknown, options?: StreamOptions) => unknown
+
+/** `ProviderWrapStreamFnContext`, narrowed to what the mirror reads. */
+export interface ProviderWrapStreamFnContext {
+  provider: string
+  modelId?: string
+  model?: WireModel
+  extraParams?: Record<string, unknown>
+  streamFn?: StreamFn
+}
+
+/** OpenClaw's `ResolvedProviderAuth`, the return of `resolveApiKeyForProvider`. */
+export interface ResolvedProviderAuth {
+  apiKey?: string
+  profileId?: string
+  source?: string
+  mode?: 'api-key' | 'oauth' | 'token' | 'aws-sdk' | string
+}
+
+/** OpenClaw's `ProviderPrepareRuntimeAuthContext`. */
+export interface ProviderPrepareRuntimeAuthContext {
+  provider: string
+  modelId?: string
+  model?: WireModel
+  apiKey?: string
+  authMode?: string
+  profileId?: string
+  agentDir?: string
+  workspaceDir?: string
+  config?: unknown
+  env?: NodeJS.ProcessEnv
+}
+
+/** OpenClaw's `ProviderPreparedRuntimeAuth`. */
+export interface ProviderPreparedRuntimeAuth {
+  apiKey: string
+  baseUrl?: string
+  expiresAt?: number
+}
+
+/** OpenClaw's `ProviderSyntheticAuthResult`. */
+export interface ProviderSyntheticAuthResult {
+  apiKey: string
+  source: string
+  mode: 'api-key' | 'oauth' | 'token'
+}
+
 export interface RegisterProviderOptions {
   id: string
   label?: string
@@ -22,6 +93,11 @@ export interface RegisterProviderOptions {
     order?: string
     run(): Promise<ProviderCatalogRunResult>
   }
+  prepareRuntimeAuth?: (
+    ctx: ProviderPrepareRuntimeAuthContext,
+  ) => Promise<ProviderPreparedRuntimeAuth | undefined> | ProviderPreparedRuntimeAuth | undefined
+  resolveSyntheticAuth?: (ctx: { provider: string }) => ProviderSyntheticAuthResult | undefined
+  wrapStreamFn?: (ctx: ProviderWrapStreamFnContext) => StreamFn | undefined
 }
 
 export interface BeforeModelResolveEvent {
@@ -32,6 +108,8 @@ export interface BeforeModelResolveEvent {
 export interface BeforeModelResolveCtx {
   sessionKey?: string
   agentId?: string
+  agentDir?: string
+  workspaceDir?: string
 }
 
 export interface BeforeModelResolveResult {

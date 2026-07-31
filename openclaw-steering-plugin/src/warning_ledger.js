@@ -12,7 +12,13 @@
 const DEFAULT_WINDOW_MS = 5 * 60 * 1000
 
 /**
- * @typedef {{ provider: string, cause: string, session?: string }} UncapturedTurn
+ * `operation`, `status`, and `detail` default to the pass-through ledger LLP
+ * 0149 describes. They are per-record rather than per-ledger so the credential
+ * and wire-parity hooks (LLP 0161#credentials-and-wire), which are degraded
+ * capture rather than an uncaptured turn, can share this one rate limiter
+ * instead of growing a second copy of it.
+ *
+ * @typedef {{ provider: string, cause: string, session?: string, operation?: string, status?: string, detail?: string }} UncapturedTurn
  */
 
 /**
@@ -44,11 +50,12 @@ export function createWarningLedger(opts = {}) {
       lastEmittedAt.set(key, at)
       emit({
         component: 'openclaw-steering-plugin',
-        operation: 'before_model_resolve',
-        status: 'uncaptured',
+        operation: record.operation ?? 'before_model_resolve',
+        status: record.status ?? 'uncaptured',
         provider: record.provider,
         cause: record.cause,
         session: record.session,
+        ...(record.detail === undefined ? {} : { detail: record.detail }),
       })
       return true
     },

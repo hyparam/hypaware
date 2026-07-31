@@ -169,6 +169,50 @@ audit only covers the Anthropic wrapper; Section 10 names auditing the
 OpenAI side as an implementation-time check if OpenClaw's own OpenAI request
 path turns out to add headers this repo has not seen yet.
 
+**Amended at implementation (LLP 0162 T2)**, from reading the shipped
+OpenClaw bundle and `pi-ai@0.73.1` rather than the source snapshot LLP 0157
+cited. Four corrections, none of which change the decision, all of which
+change the code:
+
+- **The mirror is conditional, and `context-1m` is legacy.** See Section 10's
+  resolved first item: pi-ai already emits the default and OAuth betas, so the
+  mirror installs only where OpenClaw's own beta wrapper installs, and
+  `context-1m-2025-08-07` is stripped rather than emitted.
+- **`service_tier` is a payload field, not a header**, applied through
+  pi-ai's public `onPayload` hook. OpenClaw gates it on
+  `provider === 'anthropic'` *and* a public Anthropic endpoint class; both
+  halves fail for a shadow provider pointed at a loopback gateway, which is
+  precisely the "refuses to act unless the base URL is public" loss LLP 0148
+  names. The mirror therefore keeps the conditions it can still evaluate
+  honestly (the `anthropic-messages` shape, and OpenClaw's OAuth and Sonnet 5
+  carve-outs) and treats the endpoint as public, which it effectively is: the
+  gateway's `anthropic` preset forwards to a static
+  `https://api.anthropic.com`. `fastMode` is read the same way and resolves to
+  the same two tiers.
+- **The prefill wrapper is part of the mirror.** OpenClaw installs
+  `createAnthropicThinkingPrefillWrapper` unconditionally for `anthropic`;
+  without it, a steered turn that ends on an assistant prefill under extended
+  thinking is a hard API error rather than a degraded response. It is not a
+  header, but it is a parity gap, and LLP 0148 admits no acceptable ones.
+- **`resolveSyntheticAuth` is a precondition, not an extra.** OpenClaw's
+  embedded runner throws `MissingProviderAuthError` for a provider with no
+  resolvable credential *before* `prepareRuntimeAuth` runs, so a shadow
+  provider with no credential of its own never reaches the borrow. The plugin
+  returns a non-secret placeholder (declared in its manifest's
+  `nonSecretAuthMarkers`, mirroring LM Studio's `custom-local` precedent)
+  that `prepareRuntimeAuth` then replaces with the real borrowed credential.
+  The placeholder never reaches the wire.
+
+One residue this design did not anticipate: `resolveApiKeyForProvider`
+returns `{ apiKey?, profileId?, source, mode }` and no expiry, while OpenClaw
+schedules background re-preparation only when the prepared auth carries an
+`expiresAt`. The plugin therefore returns an `expiresAt` for OAuth-mode
+borrows only, as a *re-resolution deadline* rather than a claim about the
+token's real life: it brings OpenClaw back to ask again, at which point
+`resolveApiKeyForProvider`'s own OAuth branch refreshes under lock if needed.
+It must stay clear of OpenClaw's 5-minute refresh margin or the
+re-preparation busy-loops.
+
 ## 3. The `@hypaware/openclaw` adapter rework {#adapter-rework}
 
 ### 3.1 Manifest {#manifest}
@@ -579,9 +623,28 @@ Named so a plan does not silently skip them (LLP 0157 Implementation-time
 checks already names the first two; this design adds two of its own from
 Sections 5 and 7):
 
-- Whether `pi-ai` adds the default betas itself absent a wrapper, and
-  whether OpenClaw appends session JSONL lines in real time (both already
-  named by LLP 0157, carried forward unchanged).
+- ~~Whether `pi-ai` adds the default betas itself absent a wrapper~~
+  **Resolved at implementation (LLP 0162 T2).** It does. `pi-ai@0.73.1`'s
+  `dist/providers/anthropic.js` `createClient` pushes
+  `fine-grained-tool-streaming-2025-05-14` and
+  `interleaved-thinking-2025-05-14` from its own flags, and prepends
+  `claude-code-20250219` / `oauth-2025-04-20` whenever the key matches
+  `sk-ant-oat`, which is the same OAuth predicate OpenClaw uses. The mirror
+  shrinks accordingly: Section 2.2's merge now also mirrors OpenClaw's
+  *installation* condition (`needsAnthropicBetaWrapper`: a configured
+  `anthropicBeta`, or `context1m` on a 1M-capable model), because pi-ai
+  deliberately omits the interleaved beta on adaptive-thinking models and an
+  unconditional merge would put it back on the wire for a turn that would
+  not have carried it unsteered. Two further facts from the same reading:
+  pi-ai merges `options.headers` over its own defaults with `Object.assign`,
+  so a mirrored `anthropic-beta` replaces rather than extends pi-ai's value
+  and must therefore carry the full set; and the shipped OpenClaw now treats
+  `context-1m-2025-08-07` as `ANTHROPIC_CONTEXT_1M_BETA_LEGACY` and strips it
+  from every emitted set, so the mirror strips it too (the `context1m` opt-in
+  still decides whether the mirror runs, exactly as it does for OpenClaw's own
+  wrapper).
+- Whether OpenClaw appends session JSONL lines in real time (already named
+  by LLP 0157, carried forward unchanged).
 - The `toolCall`/`tool_use`-style synonym table `sessionMatchKey` (Section 5)
   needs against live OpenClaw session files: this design states the one
   divergence LLP 0159 already names and the mechanism for handling more,
