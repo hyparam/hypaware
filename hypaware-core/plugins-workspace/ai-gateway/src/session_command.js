@@ -39,6 +39,45 @@ const EPHEMERAL_NOTE =
   'this opt-out is in-memory only: a gateway restart drops it, and a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
 
 /**
+ * What a confirmed `ignored` establishes, printed next to it by the writer and
+ * the reader alike, for the same no-drift reason as `EPHEMERAL_NOTE`.
+ *
+ * The control route is a `Set` over opaque tokens: `POST` adds whatever it was
+ * handed and answers `ignored: true`, `GET` is the same `Set.has`. Neither verb
+ * sees a single exchange, so neither can establish that the id is one live
+ * traffic carries - the drop happens later, in the client adapter, keyed on the
+ * `session_id` it stamps on the row (LLP 0066 R5). "the gateway will drop this
+ * session" was therefore a promise the receipt could not support: an id no
+ * exchange will ever carry (a Codex thread id, a finished session's id, a typo)
+ * prints exactly the same line and suppresses nothing.
+ *
+ * Naming the caller's own responsibility is the other half. The gap is closed
+ * by resolving the right key BEFORE the call (`resolveSessionIdForCli`), not by
+ * anything the route can answer afterwards, so the receipt says which of the
+ * two claims it is making.
+ *
+ * @ref LLP 0066#receipt-is-membership [implements]: R14 - the receipt states
+ * set membership and names who owns the key, rather than reporting a drop
+ * nothing verified.
+ */
+const MEMBERSHIP_NOTE =
+  'what this proves: the gateway holds this exact id in its drop set, and nothing more. It never inspects traffic, so an exchange is dropped only where the client adapter stamps it with this same session_id - an id this session does not carry prints this same line and suppresses nothing. Naming the right id is on the caller, which is why this verb resolves it (or takes it explicitly) rather than asking the gateway to confirm it afterwards.'
+
+/**
+ * The machine-readable form of `MEMBERSHIP_NOTE`, carried by the write verbs'
+ * `--json` receipt. `status: 'ok'` on its own reads as "done" to the skills
+ * that parse it, which is the same overclaim in the shape an agent actually
+ * consumes.
+ *
+ * The reader's `--json` needs no equivalent: it already reports `status` as
+ * `ignored` / `not_ignored` / `unknown` beside a tri-state `ignored`, which is
+ * a membership answer on its face.
+ *
+ * @ref LLP 0066#receipt-is-membership [implements]: R14
+ */
+const MEMBERSHIP_GUARANTEE = 'set_membership'
+
+/**
  * `hyp session status` exit code for a **confirmed** "this session is NOT
  * being dropped" read. Distinct from `SESSION_EXIT_UNKNOWN` on purpose: the
  * whole point of the verb is that "recording, confirmed" and "could not
@@ -268,6 +307,8 @@ async function runMutation(argv, ctx, method, usage) {
     ctx.stdout.write(
       JSON.stringify({
         status: 'ok',
+        // What the `ok` above is an `ok` about, for the agent parsing this.
+        guarantee: MEMBERSHIP_GUARANTEE,
         session_id: resolvedId.sessionId,
         session_id_source: resolvedId.source,
         session_id_evidence: resolvedId.evidence ?? null,
@@ -280,13 +321,16 @@ async function runMutation(argv, ctx, method, usage) {
     )
     return 0
   }
+  // The headline states the write that happened, not a drop nobody verified:
+  // the route added an opaque token to a set (LLP 0066#receipt-is-membership).
   ctx.stdout.write(
     ignored
-      ? `session ${resolvedId.sessionId}: ignored - the gateway will drop this session (${total} ignored)\n`
-      : `session ${resolvedId.sessionId}: not ignored - recording resumed (${total} ignored)\n`
+      ? `session ${resolvedId.sessionId}: ignored - this id is in the gateway drop set (${total} ignored)\n`
+      : `session ${resolvedId.sessionId}: not ignored - this id is out of the gateway drop set, so recording resumed (${total} ignored)\n`
   )
   if (ignored) {
     ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
+    ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
   }
   // The write verbs carry the same provenance caveats as the read: "ignored"
   // printed off an inferred id is a claim about a session the user may not be
@@ -323,6 +367,7 @@ function writeStatus(ctx, json, report) {
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
     ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
+    ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
     for (const note of provenanceNotes({
       idSource: report.session_id_source,
       idEvidence: report.session_id_evidence,

@@ -253,6 +253,44 @@ must never render as `false`
 mode also names `hyp policy show` as the folder governor this verb does not
 cover (R11 / R7).
 
+### The write verbs report a write, not a drop {#cli-receipt}
+
+`hyp session ignore` used to print "ignored - the gateway will drop this
+session". The gateway cannot know that
+([LLP 0066 §receipt-is-membership](./0066-session-opt-out.spec.md#receipt-is-membership),
+issue #460): it added an opaque token to a set, and whether any exchange carries
+that token is settled later, in the adapter. The claim was load-bearing in the
+wrong direction, because the surfaces most likely to be handed the wrong key
+(a Codex thread id, a dead session) are exactly the ones that read the line as
+proof they got it right.
+
+So the receipt states the write and names where the guarantee comes from:
+
+```
+session <id>: ignored - this id is in the gateway drop set (N ignored)
+<ephemeral note>
+what this proves: the gateway holds this exact id in its drop set, and nothing
+more. It never inspects traffic, so an exchange is dropped only where the client
+adapter stamps it with this same session_id ...
+```
+
+`--json` carries `guarantee: "set_membership"` beside its `status: "ok"`, since
+an agent parsing the receipt reads a bare `ok` as "done" (the skills are the
+consumer here). The reader prints the same qualifier next to a confirmed
+`ignored`, for the reason `EPHEMERAL_NOTE` is shared: two statements of one
+contract drift, one constant does not. Its `--json` needs no new field - it
+already reports `status` as `ignored` / `not_ignored` / `unknown` beside a
+tri-state `ignored`, which is a membership answer on its face.
+
+**This is accept-and-document, deliberately.** The alternative considered was
+having the route resolve and echo the *grain* it recorded (which container, which
+threads), so a caller could compare it against what it meant. That is the most
+informative answer and it is the one thing this route may not do: it would put
+client-grain knowledge in a deliberately provider-agnostic control surface
+([LLP 0050](./0050-ignore-enforced-in-adapters.decision.md)). Correctness stays
+where [§cli-session-id](#cli-session-id) puts it - the caller resolves the
+container before it calls - and the receipt's job is to not obscure that.
+
 ### The answer is validated before it is believed {#cli-response-check}
 
 Reaching *something* on the resolved endpoint is not the same as reaching the
@@ -329,8 +367,10 @@ drop matches the `session_id` the adapter stamps
 the session container. A thread id is the same uuid on a **root** thread and a
 different one on a **subagent** thread, so resolving to a thread id is a control
 that works everywhere it is casually tested and silently does nothing where it
-matters: `hyp session ignore` from inside a subagent tool call printed "the
-gateway will drop this session" for an id the gateway never sees.
+matters: `hyp session ignore` from inside a subagent tool call printed a
+confirmed opt-out for an id the gateway never sees. (The wording it printed then,
+"the gateway will drop this session", was the second half of the same defect and
+is gone: [§cli-receipt](#cli-receipt).)
 
 **Liveness versus the correct key.** `CODEX_THREAD_ID` is the better *liveness*
 signal (Codex sets it on the process it spawns for a tool call, so a finished
@@ -467,9 +507,9 @@ now. The ambiguity rule only fires at two or
 more matches, so a cwd where Codex ran exactly once, days ago, has exactly one
 match and would otherwise resolve confidently to a **dead** session id. That is
 the wrong-session failure of [§cli-response-check](#cli-response-check) arriving
-through the other input: `hyp session ignore` would opt out the dead id, print
-"the gateway will drop this session", and the session the user is actually in
-would keep being recorded. A rollout is therefore only usable as "the session I
+through the other input: `hyp session ignore` would opt out the dead id, print a
+confirmed opt-out, and the session the user is actually in would keep being
+recorded. A rollout is therefore only usable as "the session I
 am in" when it was written to recently (30 minutes): a running Codex session
 appends on every turn, and the tool call invoking `hyp` is itself preceded by
 rollout writes, so the legitimate case is seconds-to-minutes old. A stale-only
@@ -563,6 +603,18 @@ against live rows.
 
 Traditional tests (root `test/`, alongside the existing suites):
 
+- `test/plugins/ai-gateway-session-ignore-receipt.test.js` (new, R14, issue
+  #460): the false-confidence case end to end rather than a string in
+  isolation - `hyp session ignore <thread-id>` succeeds, the id genuinely lands
+  in the set, and `codex/src/exchange-projector.js` is then shown RECORDING the
+  session's traffic anyway (the row is stamped with the container), so the
+  receipt printed over that outcome is required not to have promised a drop. It
+  must state the membership it does establish, `--json` must carry
+  `guarantee: "set_membership"`, and the reader must print the same qualifier so
+  the two cannot drift. The skills that call the route directly are pinned on
+  the echo check ([§cli-response-check](#cli-response-check)): each compares the
+  returned `session_id` against the one it posted rather than printing whatever
+  came back.
 - `test/plugins/ai-gateway-control-route.test.js` (new): POST adds +
   idempotent re-POST, DELETE removes + idempotent, `.total` correct across a
   sequence; 400 malformed/missing `session_id`; 405 wrong method (`allow:

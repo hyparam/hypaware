@@ -40,17 +40,30 @@ response="$(curl --fail-with-body --silent --show-error \
   -H 'content-type: application/json' \
   --data "$(printf '{"session_id":"%s"}' "$CLAUDE_CODE_SESSION_ID")")"
 
-# Verify the gateway reports this session as ignored. `ignored` must be true.
+# Verify the gateway accepted the opt-out, and that the reply is about THIS
+# session. Same three checks `hyp session ignore` applies (validateControlResponse
+# in ai-gateway/src/session_command.js): `ignored` a real boolean true, `total` a
+# real number, and `session_id` echoed back byte-for-byte. The route echoes the
+# token verbatim, so a reply naming a different session establishes nothing about
+# this one, and reaching *something* on the port is not reaching the gateway.
 printf '%s' "$response" | python3 -c '
 import json, sys
-r = json.load(sys.stdin)
-if r.get("ignored") is not True:
+expected = sys.argv[1]
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    sys.exit("opt-out NOT confirmed: the reply was not JSON, so it is not the control route")
+if not isinstance(r, dict) or r.get("ignored") is not True or not isinstance(r.get("total"), int):
     sys.exit("opt-out NOT confirmed: " + json.dumps(r))
-print("opt-out confirmed for session %s (total ignored: %s)" % (r.get("session_id"), r.get("total")))
-'
+if r.get("session_id") != expected:
+    sys.exit("opt-out NOT confirmed: the reply is about session %s, not %s" % (json.dumps(r.get("session_id")), json.dumps(expected)))
+print("opt-out confirmed for session %s (total ignored: %s)" % (expected, r["total"]))
+' "$CLAUDE_CODE_SESSION_ID"
 ```
 
 If the `curl` fails (gateway not running, wrong port) or the verification line does not print `opt-out confirmed`, **stop and tell the user the review session is still being recorded**. Only proceed if they explicitly accept that risk.
+
+**What `opt-out confirmed` proves, exactly.** The gateway holds the id as an opaque token: `ignored: true` means the id is in its drop set, and nothing more. It never inspects traffic, so it cannot tell you the id is one your exchanges carry - that match happens later, in the client adapter, against the `session_id` it stamps on the row. For Claude the session *is* the conversation and `CLAUDE_CODE_SESSION_ID` is that same id, so sending it is what makes the opt-out real; the reply is a receipt for the write, not a verified drop. Do not report it to the user as more than that, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question.
 
 The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`claude --fork-session`; a plain `--resume` / `--continue` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point. Reverse later with `/hypaware-unignore`.
 
