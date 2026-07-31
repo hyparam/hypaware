@@ -1,7 +1,6 @@
 // @ts-check
 
-import { isAbsolute } from 'node:path'
-
+import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver, USAGE_POLICY_DROP } from '../../../../src/core/usage-policy/index.js'
 import { redactRemoteUserinfo } from './git-remote.js'
 import {
@@ -1206,12 +1205,21 @@ function readRecordedCwd(reqBody) {
  * A drop that only holds while the daemon runs from the right directory is what
  * fail-closed would have to replace, and that is the larger call above.
  *
- * The same two checks guard the rollout-stated cwd as `sessionMetaCwd`
- * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`). They are
- * restated here rather than borrowed from there: LLP 0150 scopes the in-band path
- * out of its own mandate (in-band is a separate source, and its value is also
- * stamped on the row), and the `error_kind` split below needs the two conjuncts
- * apart, which that predicate's single answer does not give.
+ * The answer itself is not computed here. It comes from `sessionMetaCwd`
+ * (`src/core/codex/rollout_session_meta.js`, LLP 0150 `#usable-cwd`), the one
+ * predicate that also guards the rollout-stated cwd, so the two sources that
+ * feed this gate cannot answer "is this a usable container?" differently. What
+ * stays local is only the refusal *diagnosis*: `error_kind` needs blank told
+ * apart from relative, and a single `undefined` does not carry that. Splitting
+ * the conjuncts for the log is safe because they are not the verdict; the
+ * verdict is whatever the shared predicate returned.
+ *
+ * LLP 0150 scoped the in-band path out of its own mandate (in-band is a separate
+ * source with its own trust story, and its value is also stamped on the row), so
+ * this reuse is a de-duplication rather than an invariant it imposed (#478). It
+ * changes no behavior: only a non-empty string reaches here (`readStringKey` and
+ * `firstString` refuse the rest upstream), and over that whole domain the two
+ * former copies agreed.
  *
  * One thing this does NOT reach, so nobody reads it as the whole gate: on the
  * Codex route the value passed in is usually not the request's `cwd` but the
@@ -1223,6 +1231,8 @@ function readRecordedCwd(reqBody) {
  *
  * @ref LLP 0083#decision [implements]: an unusable in-band cwd counts as a miss,
  * so the rollout fallback still gets its turn
+ * @ref LLP 0150#usable-cwd [implements]: both cwd sources for this gate share
+ * the one predicate; this wrapper adds only the refusal diagnosis
  * @param {string | undefined} cwd
  * @param {{
  *   log?: {
@@ -1234,12 +1244,11 @@ function readRecordedCwd(reqBody) {
  */
 function usableInBandCwd(cwd, ctx) {
   if (cwd === undefined) return undefined
-  // Byte-identical when it passes: the trim is only the emptiness test, and a
-  // path is not ours to normalize. The trim gates nothing on its own - a blank
-  // string is never absolute on either platform, so `isAbsolute` already refuses
-  // it - it is here to split `error_kind` below, which is the only thing that
-  // tells blank apart from relative. Keep both conjuncts or that split dies.
-  if (cwd.trim().length > 0 && isAbsolute(cwd)) return cwd
+  // Byte-identical when it passes: `sessionMetaCwd` trims only to test
+  // emptiness and returns the value unchanged, because a path is not ours to
+  // normalize.
+  const usable = sessionMetaCwd(cwd)
+  if (usable !== undefined) return usable
   // Never silently: a refused cwd means this exchange reached the gate with
   // nothing to match, which is indistinguishable from "no cwd at all" in the
   // row. Hash it - a cwd is user data (LLP 0049), and the drop log above uses
@@ -1249,6 +1258,9 @@ function usableInBandCwd(cwd, ctx) {
   // refused upstream with no log. Same outcome (absent cwd, NULL column, and it
   // was already absent before this predicate existed), no diagnostic. Closing it
   // means loosening a helper with 16 other callers here, which is not worth it.
+  // The trim below re-tests a conjunct the shared predicate already weighed, but
+  // it decides nothing: the refusal is settled above. It only says WHICH way the
+  // value was unusable, which is the one thing a single `undefined` cannot carry.
   ctx?.log?.warn?.('plugin.codex.usage_policy_cwd_unusable', {
     component: 'codex',
     operation: 'usage_policy_cwd',
