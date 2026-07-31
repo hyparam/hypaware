@@ -209,6 +209,15 @@ back to `hyp attach --client <name>` otherwise. A client that declares
 adapter has to name its own setup command, or the repair we print answers
 `unknown client`.
 
+> **Amended by [LLP 0143 #status-derives-by-the-same-gate](./0143-openclaw-registers-no-attach-probe.decision.md#status-derives-by-the-same-gate)
+> (#544).** The rule stands, and the `configure_command` lookup stays, but
+> `client_attach_missing` no longer fires at all for a client with no
+> `attach_probe`, Claude Desktop included. A runnable repair is necessary and
+> not sufficient: the warning also has to be one the repair can clear, and
+> with no probe to read back this one fired identically before the consent
+> prompt, after a decline, and after a successful install. The fallback below
+> is now reached only by a probed client.
+
 ## Consequences
 
 - Ticking Claude Desktop in `hyp init` now works end to end: compose,
@@ -216,8 +225,10 @@ adapter has to name its own setup command, or the repair we print answers
 - Declining leaves `@hypaware/claude-account` and
   `@hypaware/claude-desktop` in the written config with no credential and
   no plist. That is the converging state, not a broken one: the re-run
-  repair works precisely because the plugins are present, and `hyp status`
-  now names that re-run as the repair.
+  repair works precisely because the plugins are present. `hyp status` named
+  that re-run as the repair until LLP 0143 #status-derives-by-the-same-gate
+  withdrew the warning it hung off, which could not tell a decline from a
+  success; `hyp claude-desktop verify` is the check that can.
 - `V1_EXCLUDED_FROM_DEFAULT` still excludes both plugins from default
   activation. Nothing enables them without either a picker tick or an
   explicit `plugins[]` edit; the exclusion governs defaults, and the picker
